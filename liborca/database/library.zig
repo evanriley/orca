@@ -16,6 +16,7 @@ pub const LibraryDatabase = struct {
     analysis_cache: repository.AnalysisCacheRepository,
     health_issues: repository.HealthIssueRepository,
     provider_cache: repository.ProviderCacheRepository,
+    scrobbles: repository.ScrobbleQueueRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -39,6 +40,7 @@ pub const LibraryDatabase = struct {
             .analysis_cache = .{ .db = database, .write_lane = write_lane },
             .health_issues = .{ .db = database, .write_lane = write_lane },
             .provider_cache = .{ .db = database, .write_lane = write_lane },
+            .scrobbles = .{ .db = database, .write_lane = write_lane },
         };
     }
 

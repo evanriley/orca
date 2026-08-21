@@ -24,6 +24,8 @@ pub const HealthIssuePage = repository.HealthIssuePage;
 pub const HealthIssueRepository = repository.HealthIssueRepository;
 pub const ProviderCacheEntry = repository.ProviderCacheEntry;
 pub const ProviderCacheRepository = repository.ProviderCacheRepository;
+pub const ScrobbleQueueEntry = repository.ScrobbleQueueEntry;
+pub const ScrobbleQueueRepository = repository.ScrobbleQueueRepository;
 
 test {
     _ = @import("library.zig");

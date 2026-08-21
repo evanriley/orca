@@ -164,6 +164,21 @@ pub const ProviderCacheEntry = struct {
     }
 };
 
+pub const ScrobbleQueueEntry = struct {
+    allocator: std.mem.Allocator,
+    id: i64,
+    service: []u8,
+    event_key: []u8,
+    payload: []u8,
+    attempt_count: u32,
+
+    pub fn deinit(self: ScrobbleQueueEntry) void {
+        self.allocator.free(self.service);
+        self.allocator.free(self.event_key);
+        self.allocator.free(self.payload);
+    }
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -799,6 +814,114 @@ pub const ProviderCacheRepository = struct {
         try statement.bindBlob(4, body);
         try statement.bindInt64(5, expires_at);
         if (try statement.step() != .done) return error.SqlFailed;
+    }
+};
+
+pub const ScrobbleQueueRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn enqueue(
+        self: *ScrobbleQueueRepository,
+        service: []const u8,
+        event_key: []const u8,
+        payload: []const u8,
+    ) !void {
+        if (service.len == 0 or event_key.len == 0 or payload.len == 0)
+            return error.InvalidScrobbleEvent;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO scrobble_queue(service, event_key, payload)
+            \\VALUES (?1, ?2, ?3) ON CONFLICT(service, event_key) DO NOTHING;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, service);
+        try statement.bindText(2, event_key);
+        try statement.bindBlob(3, payload);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn ready(
+        self: *const ScrobbleQueueRepository,
+        allocator: std.mem.Allocator,
+        service: []const u8,
+        now: i64,
+        limit: u32,
+    ) ![]ScrobbleQueueEntry {
+        var statement = try self.db.prepare(
+            \\SELECT id, service, event_key, payload, attempt_count FROM scrobble_queue
+            \\WHERE service=?1 AND state=0 AND next_attempt_at<=?2 ORDER BY id LIMIT ?3;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, service);
+        try statement.bindInt64(2, now);
+        try statement.bindInt64(3, limit);
+        var entries: std.ArrayList(ScrobbleQueueEntry) = .empty;
+        errdefer {
+            for (entries.items) |entry| entry.deinit();
+            entries.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const owned_service = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(owned_service);
+            const event_key = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(event_key);
+            const payload = try allocator.dupe(u8, statement.columnBlob(3));
+            errdefer allocator.free(payload);
+            try entries.append(allocator, .{
+                .allocator = allocator,
+                .id = statement.columnInt64(0),
+                .service = owned_service,
+                .event_key = event_key,
+                .payload = payload,
+                .attempt_count = @intCast(statement.columnInt64(4)),
+            });
+        }
+        return entries.toOwnedSlice(allocator);
+    }
+
+    pub fn markSucceeded(self: *ScrobbleQueueRepository, id: i64) !void {
+        try self.setResult(id, 2, 0, "");
+    }
+
+    pub fn markRetry(
+        self: *ScrobbleQueueRepository,
+        id: i64,
+        next_attempt_at: i64,
+        details: []const u8,
+    ) !void {
+        try self.setResult(id, 0, next_attempt_at, details);
+    }
+
+    pub fn pendingCount(self: *const ScrobbleQueueRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM scrobble_queue WHERE state=0;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    fn setResult(
+        self: *ScrobbleQueueRepository,
+        id: i64,
+        state: u8,
+        next_attempt_at: i64,
+        details: []const u8,
+    ) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE scrobble_queue SET state=?1, attempt_count=attempt_count+1,
+            \\    next_attempt_at=?2, last_error=?3, updated_at=unixepoch()
+            \\WHERE id=?4 AND state=0;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, state);
+        try statement.bindInt64(2, next_attempt_at);
+        try statement.bindText(3, details);
+        try statement.bindInt64(4, id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleScrobbleEvent;
     }
 };
 
