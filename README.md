@@ -21,6 +21,7 @@ zig build run -- --version
 zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
 zig build run -- play /path/to/audio
+ORCA_LIBRARY=/path/to/library.db zig build run-linux
 zig build bench
 zig build -Doptimize=ReleaseFast dsp-bench
 ```
@@ -39,6 +40,9 @@ zig build bench -- 500000 /tmp/orca-500k.db
 Linux. `zig build pipewire-live-smoke` discovers the current user's output
 devices and opens a short silent native stream. PipeWire C headers and foreign
 types remain contained in the Linux adapter.
+
+Linux builds also install the GTK4 frontend, static/shared `liborca`, and the
+foreign-client header at `include/orca/orca.h`.
 
 ## Repository layout
 
