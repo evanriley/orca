@@ -46,3 +46,9 @@ Orca `Decoder` interface (canonical format, optional frame count, read, seek,
 and lifetime); WAV parser state and conversion scratch remain private to its
 adapter. `SourceSession` therefore owns any registered Decoder and primes the
 same pool/queue path without codec-specific types.
+
+Player owns the active `SourceQueue`: one current SourceSession and one prepared
+successor. When decoding reaches the current source's end, it appends compatible
+next-source blocks behind current blocks already in the render queue, then
+releases the exhausted decoder. This primes transitions before audible end and
+requires no callback-side source switch or queue mutation.

@@ -72,6 +72,62 @@ pub const SourceSession = struct {
     }
 };
 
+/// Owns the currently decoding source and one prepared successor. Once the
+/// current decoder reaches EOF, successor blocks are appended to the same SPSC
+/// stream before already-queued current audio is exhausted.
+pub const SourceQueue = struct {
+    current: SourceSession,
+    next: ?SourceSession = null,
+    transitions_queued: u64 = 0,
+
+    pub fn init(current: SourceSession) SourceQueue {
+        return .{ .current = current };
+    }
+
+    pub fn deinit(self: *SourceQueue) void {
+        self.current.deinit();
+        if (self.next) |*next| next.deinit();
+        self.* = undefined;
+    }
+
+    pub fn primeNext(self: *SourceQueue, next: SourceSession) !void {
+        if (self.next != null) return error.NextSourceAlreadyPrimed;
+        if (!formatsMatch(self.current.decoder.format, next.decoder.format))
+            return error.GaplessFormatMismatch;
+        self.next = next;
+    }
+
+    pub fn prime(
+        self: *SourceQueue,
+        comptime queue_capacity: usize,
+        pipe: *render.RenderPipe(queue_capacity),
+        pool: *buffer.BlockPool,
+        generation: u64,
+    ) !usize {
+        var prepared = try self.current.prime(queue_capacity, pipe, pool, generation);
+        if (self.current.eof and self.next != null) {
+            self.current.deinit();
+            self.current = self.next.?;
+            self.next = null;
+            self.transitions_queued += 1;
+            prepared += try self.current.prime(queue_capacity, pipe, pool, generation);
+        }
+        return prepared;
+    }
+
+    pub fn finishedDecoding(self: *const SourceQueue) bool {
+        return self.current.eof and self.next == null;
+    }
+};
+
+fn formatsMatch(a: @import("pcm.zig").Format, b: @import("pcm.zig").Format) bool {
+    return a.sample_format == b.sample_format and
+        a.channels == b.channels and
+        a.sample_rate == b.sample_rate and
+        a.bits_per_sample == b.bits_per_sample and
+        a.bytes_per_frame == b.bytes_per_frame;
+}
+
 test "WAV source session primes bounded canonical blocks" {
     const data = "RIFF" ++ "\x2c\x00\x00\x00" ++ "WAVE" ++
         "fmt " ++ "\x10\x00\x00\x00" ++
@@ -108,4 +164,63 @@ test "WAV source session primes bounded canonical blocks" {
     try std.testing.expectEqualSlices(f32, &.{ -1, 0, 32767.0 / 32768.0, 0.5 }, &output);
     pipe.reclaim(&pool);
     try std.testing.expectEqual(@as(usize, 2), pool.free_len);
+}
+
+test "next source is queued before current prepared audio is consumed" {
+    const first_data = "RIFF" ++ "\x28\x00\x00\x00" ++ "WAVE" ++
+        "fmt " ++ "\x10\x00\x00\x00" ++
+        "\x01\x00\x01\x00" ++ "\x80\xbb\x00\x00" ++
+        "\x00\x77\x01\x00" ++ "\x02\x00\x10\x00" ++
+        "data" ++ "\x04\x00\x00\x00" ++ "\x00\x20\x00\x40";
+    const next_data = "RIFF" ++ "\x28\x00\x00\x00" ++ "WAVE" ++
+        "fmt " ++ "\x10\x00\x00\x00" ++
+        "\x01\x00\x01\x00" ++ "\x80\xbb\x00\x00" ++
+        "\x00\x77\x01\x00" ++ "\x02\x00\x10\x00" ++
+        "data" ++ "\x04\x00\x00\x00" ++ "\x00\x60\xff\x7f";
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "first.wav", .data = first_data });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "next.wav", .data = next_data });
+    const first_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/first.wav",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(first_path);
+    const next_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/next.wav",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(next_path);
+    const storage = @import("../storage/source.zig");
+    var first_file = try storage.LocalFileSource.open(std.testing.io, first_path);
+    defer first_file.close();
+    var next_file = try storage.LocalFileSource.open(std.testing.io, next_path);
+    defer next_file.close();
+    const codecs = @import("../codec/registry.zig").CodecRegistry.builtins();
+    var sources = SourceQueue.init(SourceSession.init(try codecs.openDetected(
+        std.testing.allocator,
+        first_file.readable(),
+    )));
+    defer sources.deinit();
+    try sources.primeNext(SourceSession.init(try codecs.openDetected(
+        std.testing.allocator,
+        next_file.readable(),
+    )));
+
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 4, 2, 1);
+    defer pool.deinit();
+    var pipe: render.RenderPipe(4) = .{};
+    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 1));
+    try std.testing.expectEqual(@as(u64, 1), sources.transitions_queued);
+    try std.testing.expect(sources.finishedDecoding());
+
+    var output: [4]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), pipe.render(&pool, 1, 1, &output));
+    try std.testing.expectEqualSlices(
+        f32,
+        &.{ 0.25, 0.5, 0.75, 32767.0 / 32768.0 },
+        &output,
+    );
 }

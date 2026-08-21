@@ -80,7 +80,10 @@ pub const OrcaRuntime = struct {
         }
         self.zones.discardAll();
         for (self.players.slots.items) |*slot| {
-            if (slot.value) |player| self.allocator.destroy(player.player);
+            if (slot.value) |player| {
+                player.player.deinit();
+                self.allocator.destroy(player.player);
+            }
         }
         self.players.discardAll();
         for (self.libraries.slots.items) |*slot| {
@@ -130,6 +133,7 @@ pub const OrcaRuntime = struct {
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
         const removed = try self.players.remove(player);
+        removed.player.deinit();
         self.allocator.destroy(removed.player);
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |*zone| {

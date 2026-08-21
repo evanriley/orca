@@ -1,4 +1,7 @@
 const std = @import("std");
+const buffer = @import("buffer.zig");
+const render = @import("render.zig");
+const source_session = @import("source_session.zig");
 
 pub const TransportState = enum(u8) { stopped, playing, paused };
 
@@ -12,6 +15,43 @@ pub const Player = struct {
     state: std.atomic.Value(TransportState) = .init(.stopped),
     generation: std.atomic.Value(u64) = .init(1),
     position_frames: std.atomic.Value(u64) = .init(0),
+    sources: ?source_session.SourceQueue = null,
+
+    pub fn deinit(self: *Player) void {
+        if (self.sources) |*sources| sources.deinit();
+        self.* = undefined;
+    }
+
+    pub fn loadSource(self: *Player, source: source_session.SourceSession) !void {
+        if (self.sources != null) return error.PlayerSourceAlreadyLoaded;
+        self.sources = source_session.SourceQueue.init(source);
+    }
+
+    pub fn primeNextSource(self: *Player, source: source_session.SourceSession) !void {
+        if (self.sources) |*sources| return sources.primeNext(source);
+        return error.PlayerHasNoSource;
+    }
+
+    pub fn prime(
+        self: *Player,
+        comptime queue_capacity: usize,
+        pipe: *render.RenderPipe(queue_capacity),
+        pool: *buffer.BlockPool,
+    ) !usize {
+        if (self.sources) |*sources| {
+            return sources.prime(
+                queue_capacity,
+                pipe,
+                pool,
+                self.generation.load(.acquire),
+            );
+        }
+        return error.PlayerHasNoSource;
+    }
+
+    pub fn finishedDecoding(self: *const Player) bool {
+        return if (self.sources) |*sources| sources.finishedDecoding() else true;
+    }
 
     pub fn play(self: *Player) void {
         self.state.store(.playing, .release);

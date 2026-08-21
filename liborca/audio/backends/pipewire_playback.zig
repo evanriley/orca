@@ -37,8 +37,13 @@ pub fn playWavBlocking(
         decoder.deinit();
         return error.UnknownTrackLength;
     };
-    var source = source_session.SourceSession.init(decoder);
-    defer source.deinit();
+    var transport: player.Player = .{};
+    var initial_source = source_session.SourceSession.init(decoder);
+    transport.loadSource(initial_source) catch |err| {
+        initial_source.deinit();
+        return err;
+    };
+    defer transport.deinit();
 
     var pool = try buffer.BlockPool.init(
         allocator,
@@ -48,13 +53,11 @@ pub fn playWavBlocking(
     );
     defer pool.deinit();
     var pipe: render.RenderPipe(block_count) = .{};
-    var transport: player.Player = .{};
 
-    _ = try source.prime(
+    _ = try transport.prime(
         block_count,
         &pipe,
         &pool,
-        transport.generation.load(.acquire),
     );
 
     var backend: pipewire.Backend = .{};
@@ -88,13 +91,12 @@ pub fn playWavBlocking(
     const iteration_limit = (track_ms + 5000) / 10 + 1;
     var iterations: u64 = 0;
     while (true) {
-        _ = try source.prime(
+        _ = try transport.prime(
             block_count,
             &pipe,
             &pool,
-            transport.generation.load(.acquire),
         );
-        if (source.eof and pool.free_len == block_count) break;
+        if (transport.finishedDecoding() and pool.free_len == block_count) break;
         if (iterations >= iteration_limit) return error.PlaybackStalled;
         iterations += 1;
         sleepMilliseconds(10);
