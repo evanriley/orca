@@ -10,6 +10,18 @@ pub const RenderStrategy = union(enum) {
     direct_rt,
     /// Producer processing may run ahead by this bounded number of frames.
     buffered: struct { target_frames: u32 },
+
+    pub fn blockBudget(self: RenderStrategy, frames_per_block: u32, capacity: usize) usize {
+        if (frames_per_block == 0 or capacity == 0) return 0;
+        return switch (self) {
+            .direct_rt => 1,
+            .buffered => |buffered| @min(
+                capacity,
+                @max(1, (@as(usize, buffered.target_frames) + frames_per_block - 1) /
+                    frames_per_block),
+            ),
+        };
+    }
 };
 
 pub fn strategyForPolicy(policy: RenderPolicy) RenderStrategy {
@@ -118,4 +130,6 @@ test "latency policies select strategies within the same Zone abstraction" {
         @as(u32, 384),
         strategyForPolicy(.{ .custom = .{ .target_frames = 384 } }).buffered.target_frames,
     );
+    try testing.expectEqual(@as(usize, 1), strategyForPolicy(.interactive).blockBudget(256, 8));
+    try testing.expectEqual(@as(usize, 4), strategyForPolicy(.robust).blockBudget(256, 8));
 }

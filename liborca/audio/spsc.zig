@@ -25,6 +25,11 @@ pub fn Queue(comptime T: type, comptime capacity: usize) type {
             self.head.store(head +% 1, .release);
             return item;
         }
+
+        pub fn len(self: *const Self) usize {
+            const tail = self.tail.load(.acquire);
+            return tail -% self.head.load(.acquire);
+        }
     };
 }
 
@@ -36,4 +41,5 @@ test "SPSC queue is bounded and ordered" {
     try std.testing.expectEqual(@as(?u8, 1), queue.pop());
     try std.testing.expectEqual(@as(?u8, 2), queue.pop());
     try std.testing.expect(queue.pop() == null);
+    try std.testing.expectEqual(@as(usize, 0), queue.len());
 }

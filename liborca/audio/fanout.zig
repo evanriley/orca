@@ -1,6 +1,7 @@
 const buffer = @import("buffer.zig");
 const processing = @import("processing.zig");
 const render = @import("render.zig");
+const zone = @import("zone.zig");
 
 /// Producer-side destination for one independently buffered Zone. A Player's
 /// canonical PCM is copied so every Zone owns its callback lifetime and
@@ -11,8 +12,24 @@ pub fn ZoneSink(comptime capacity: usize) type {
         pipe: *render.RenderPipe(capacity),
         channels: u16,
         zone_processor: ?processing.Processor = null,
+        max_queued_blocks: usize = capacity,
 
         const Self = @This();
+
+        pub fn init(
+            pool: *buffer.BlockPool,
+            pipe: *render.RenderPipe(capacity),
+            channels: u16,
+            strategy: zone.RenderStrategy,
+        ) Self {
+            const frames_per_block: u32 = @intCast(pool.samples_per_block / channels);
+            return .{
+                .pool = pool,
+                .pipe = pipe,
+                .channels = channels,
+                .max_queued_blocks = strategy.blockBudget(frames_per_block, capacity),
+            };
+        }
 
         pub fn submitCopy(
             self: Self,
@@ -21,6 +38,7 @@ pub fn ZoneSink(comptime capacity: usize) type {
             generation: u64,
         ) bool {
             self.pipe.reclaim(self.pool);
+            if (self.pipe.ready.len() >= self.max_queued_blocks) return false;
             const sample_count = @as(usize, frames) * self.channels;
             if (sample_count != samples.len or sample_count > self.pool.samples_per_block)
                 return false;
@@ -74,4 +92,16 @@ test "full Zone does not prevent fanout to another Zone" {
     var output: [2]f32 = undefined;
     try std.testing.expectEqual(@as(usize, 2), healthy_pipe.render(&healthy_pool, 1, 4, &output));
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.75 }, &output);
+}
+
+test "Zone strategy bounds independent render-ahead depth" {
+    const std = @import("std");
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 4, 2, 1);
+    defer pool.deinit();
+    var pipe: render.RenderPipe(4) = .{};
+    const Sink = ZoneSink(4);
+    const sink = Sink.init(&pool, &pipe, 1, .direct_rt);
+    try std.testing.expect(sink.submitCopy(&.{ 0, 0 }, 2, 1));
+    try std.testing.expect(!sink.submitCopy(&.{ 1, 1 }, 2, 1));
+    try std.testing.expectEqual(@as(usize, 1), pipe.ready.len());
 }
