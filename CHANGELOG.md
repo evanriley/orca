@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 - 2026-08-21
+
+Cached analysis and Library Health milestone.
+
+- Streaming EBU-style gated loudness, ReplayGain adjustment, peak, RMS,
+  clipping, silence, and fixed-size waveform summaries over native decoders.
+- Portable, versioned analysis identities and result encodings with selective
+  parameter, algorithm, and source-identity invalidation.
+- Temporal fingerprints, decoded-audio and exact-file hashes, plus exact and
+  likely duplicate classification.
+- Cooperative cancellation, bounded progress, source revalidation, and
+  scheduler yields that keep background work subordinate to playback.
+- Indexed Library Health evaluation and bounded query APIs exposed through the
+  CLI, stable C ABI, and virtualized GTK frontend.
+
 ## 0.8.0 - 2026-08-21
 
 Native frontend and desktop-media integration milestone.
