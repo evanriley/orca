@@ -8,6 +8,7 @@ pub const processing = @import("processing.zig");
 pub const render = @import("render.zig");
 pub const source_session = @import("source_session.zig");
 pub const spsc = @import("spsc.zig");
+pub const transition = @import("transition.zig");
 pub const zone = @import("zone.zig");
 
 test {
@@ -20,5 +21,6 @@ test {
     _ = @import("render.zig");
     _ = @import("source_session.zig");
     _ = @import("spsc.zig");
+    _ = @import("transition.zig");
     _ = @import("zone.zig");
 }
