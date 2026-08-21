@@ -158,6 +158,7 @@ pub fn RenderContext(comptime capacity: usize) type {
         pipe: *render_pipe.RenderPipe(capacity),
         generation: *const std.atomic.Value(u64),
         channels: u16,
+        rendered_position: ?*std.atomic.Value(u64) = null,
         format_mismatches: std.atomic.Value(u64) = .init(0),
 
         const Self = @This();
@@ -175,12 +176,14 @@ pub fn RenderContext(comptime capacity: usize) type {
                 _ = self.format_mismatches.fetchAdd(1, .monotonic);
                 return;
             }
-            self.pipe.render(
+            const rendered = self.pipe.render(
                 self.pool,
                 self.channels,
                 self.generation.load(.monotonic),
                 output,
             );
+            if (self.rendered_position) |position|
+                _ = position.fetchAdd(rendered, .monotonic);
         }
 
         pub fn userdata(self: *Self) *anyopaque {
@@ -225,16 +228,19 @@ test "PipeWire callback consumes Orca prepared blocks without allocation" {
     @memset(pool.samples(index), 0.75);
     try std.testing.expect(pipe.submit(.{ .index = index, .frames = 3, .generation = 7 }));
     var generation: std.atomic.Value(u64) = .init(7);
+    var position: std.atomic.Value(u64) = .init(0);
     var context: RenderContext(1) = .{
         .pool = &pool,
         .pipe = &pipe,
         .generation = &generation,
         .channels = 2,
+        .rendered_position = &position,
     };
 
     var samples: [6]f32 = undefined;
     orca_pw_fill(RenderContext(1).callback, context.userdata(), &samples, 3, 2);
     for (samples) |sample| try std.testing.expectEqual(@as(f32, 0.75), sample);
+    try std.testing.expectEqual(@as(u64, 3), position.load(.monotonic));
     pipe.reclaim(&pool);
 }
 

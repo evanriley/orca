@@ -32,3 +32,11 @@ Timing snapshots report sample time, monotonic host time, callback quantum,
 queued and converted frames, and non-negative graph/device delay. These values
 remain distinct in Zone latency reporting rather than being collapsed into a
 zero-latency claim.
+
+The first vertical playback path uses a WAV `SourceSession` to perform bounded
+positional reads and conversion of supported integer/float samples on the
+producer lane. It primes eight preallocated blocks ahead for robust playback;
+the callback advances Player position only for frames actually rendered. The
+CLI exposes this architecture as `orca-cli play WAV [DEVICE_ID]`. The command
+uses server-default output when no ID is supplied and reports played frames,
+underruns, backend quantum, and device/graph delay after completion.

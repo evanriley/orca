@@ -13,6 +13,20 @@ pub const Player = struct {
     generation: std.atomic.Value(u64) = .init(1),
     position_frames: std.atomic.Value(u64) = .init(0),
 
+    pub fn play(self: *Player) void {
+        self.state.store(.playing, .release);
+    }
+
+    pub fn pause(self: *Player) void {
+        self.state.store(.paused, .release);
+    }
+
+    pub fn stop(self: *Player) void {
+        self.state.store(.stopped, .release);
+        self.position_frames.store(0, .release);
+        _ = self.generation.fetchAdd(1, .acq_rel);
+    }
+
     pub fn seek(self: *Player, frame: u64) u64 {
         self.position_frames.store(frame, .release);
         return self.generation.fetchAdd(1, .acq_rel) +% 1;

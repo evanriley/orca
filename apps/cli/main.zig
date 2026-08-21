@@ -49,9 +49,30 @@ pub fn main(init: std.process.Init) !void {
                 result.batches_committed,
             },
         );
+    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "play")) {
+        const device_id = if (args.len == 4)
+            try std.fmt.parseInt(u64, args[3], 10)
+        else
+            0;
+        const report = try liborca.audio.backends.playback.playWavBlocking(
+            allocator,
+            init.io,
+            args[2],
+            device_id,
+            .robust,
+        );
+        try stdout.print(
+            "played={d} underruns={d} quantum={d} delay={?d}\n",
+            .{
+                report.frames_played,
+                report.underruns,
+                report.timing.backend_quantum_frames,
+                report.timing.device_delay_frames,
+            },
+        );
     } else {
         try stdout.writeAll(
-            \\Usage: orca-cli [--version | demo | scan DATABASE ROOT]
+            \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | play WAV [DEVICE_ID]]
             \\
             \\The host-independent Orca control client.
             \\

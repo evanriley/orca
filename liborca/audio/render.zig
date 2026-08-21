@@ -35,9 +35,9 @@ pub fn RenderPipe(comptime capacity: usize) type {
             channels: u16,
             generation: u64,
             output: []f32,
-        ) void {
+        ) usize {
             @memset(output, 0);
-            if (channels == 0 or output.len % channels != 0) return;
+            if (channels == 0 or output.len % channels != 0) return 0;
             var output_frame: usize = 0;
             const requested_frames = output.len / channels;
             while (output_frame < requested_frames) {
@@ -75,6 +75,7 @@ pub fn RenderPipe(comptime capacity: usize) type {
                 }
             }
             if (output_frame < requested_frames) _ = self.underruns.fetchAdd(1, .monotonic);
+            return output_frame;
         }
 
         fn returnBlock(self: *Self, index: u32) void {
@@ -92,12 +93,12 @@ test "render callback copies prepared PCM and underruns to silence" {
     try std.testing.expect(pipe.submit(.{ .index = index, .frames = 4, .generation = 1 }));
 
     var output: [8]f32 = undefined;
-    pipe.render(&pool, 2, 1, &output);
+    try std.testing.expectEqual(@as(usize, 4), pipe.render(&pool, 2, 1, &output));
     for (output) |sample| try std.testing.expectEqual(@as(f32, 0.5), sample);
     pipe.reclaim(&pool);
     try std.testing.expectEqual(@as(usize, 2), pool.free_len);
 
-    pipe.render(&pool, 2, 1, &output);
+    try std.testing.expectEqual(@as(usize, 0), pipe.render(&pool, 2, 1, &output));
     for (output) |sample| try std.testing.expectEqual(@as(f32, 0), sample);
     try std.testing.expectEqual(@as(u64, 1), pipe.underruns.load(.monotonic));
 }
@@ -110,7 +111,7 @@ test "generation changes discard stale prepared audio" {
     @memset(pool.samples(index), 1);
     try std.testing.expect(pipe.submit(.{ .index = index, .frames = 2, .generation = 4 }));
     var output: [2]f32 = undefined;
-    pipe.render(&pool, 1, 5, &output);
+    try std.testing.expectEqual(@as(usize, 0), pipe.render(&pool, 1, 5, &output));
     try std.testing.expectEqualSlices(f32, &.{ 0, 0 }, &output);
     pipe.reclaim(&pool);
     try std.testing.expectEqual(@as(usize, 1), pool.free_len);

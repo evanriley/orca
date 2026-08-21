@@ -38,8 +38,12 @@ pub const Reader = struct {
                 const block_align = little16(fmt[12..14]);
                 const bits = little16(fmt[14..16]);
                 if (channels == 0 or sample_rate == 0 or block_align == 0) return error.InvalidWav;
+                const decoded_format = try sampleFormat(encoding, bits);
+                const expected_align = std.math.mul(u16, channels, bits / 8) catch
+                    return error.InvalidWav;
+                if (block_align != expected_align) return error.InvalidWav;
                 parsed_format = .{
-                    .sample_format = try sampleFormat(encoding, bits),
+                    .sample_format = decoded_format,
                     .channels = channels,
                     .sample_rate = sample_rate,
                     .bits_per_sample = bits,
@@ -74,7 +78,54 @@ pub const Reader = struct {
         const read = try self.source.readAt(self.data_offset + byte_offset, output[0..available]);
         return read / self.format.bytes_per_frame;
     }
+
+    /// Decode interleaved WAV samples into Orca's canonical float32 form.
+    /// Callers own scratch storage so steady-state source preparation allocates
+    /// nothing. Returns whole frames and never reads past the data chunk.
+    pub fn readFramesF32(
+        self: Reader,
+        frame_offset: u64,
+        output: []f32,
+        scratch: []u8,
+    ) !usize {
+        if (output.len % self.format.channels != 0) return error.UnalignedPcmBuffer;
+        const output_frames = output.len / self.format.channels;
+        const scratch_frames = scratch.len / self.format.bytes_per_frame;
+        const requested_frames = @min(output_frames, scratch_frames);
+        if (requested_frames == 0) return 0;
+        const byte_count = requested_frames * self.format.bytes_per_frame;
+        const frames = try self.readFrames(frame_offset, scratch[0..byte_count]);
+        const sample_bytes = self.format.bits_per_sample / 8;
+        const sample_count = frames * self.format.channels;
+        for (output[0..sample_count], 0..) |*sample, index| {
+            const start = index * sample_bytes;
+            sample.* = decodeSample(self.format.sample_format, scratch[start .. start + sample_bytes]);
+        }
+        return frames;
+    }
 };
+
+fn decodeSample(format: SampleFormat, bytes: []const u8) f32 {
+    return switch (format) {
+        .unsigned_8 => (@as(f32, @floatFromInt(bytes[0])) - 128.0) / 128.0,
+        .signed_16 => @as(f32, @floatFromInt(@as(i16, @bitCast(little16(bytes[0..2]))))) /
+            32_768.0,
+        .signed_24 => blk: {
+            const raw = @as(u32, bytes[0]) |
+                (@as(u32, bytes[1]) << 8) |
+                (@as(u32, bytes[2]) << 16);
+            const signed: i32 = if (raw & 0x800000 != 0)
+                @bitCast(raw | 0xff000000)
+            else
+                @intCast(raw);
+            break :blk @as(f32, @floatFromInt(signed)) / 8_388_608.0;
+        },
+        .signed_32 => @as(f32, @floatFromInt(@as(i32, @bitCast(little32(bytes[0..4]))))) /
+            2_147_483_648.0,
+        .float_32 => @bitCast(little32(bytes[0..4])),
+        .float_64 => @floatCast(@as(f64, @bitCast(little64(bytes[0..8])))),
+    };
+}
 
 fn sampleFormat(encoding: u16, bits: u16) !SampleFormat {
     return switch (encoding) {
@@ -105,6 +156,11 @@ fn little32(bytes: *const [4]u8) u32 {
         (@as(u32, bytes[3]) << 24);
 }
 
+fn little64(bytes: *const [8]u8) u64 {
+    return @as(u64, little32(bytes[0..4])) |
+        (@as(u64, little32(bytes[4..8])) << 32);
+}
+
 test "reads bounded PCM frames from a generated WAV" {
     const wav = "RIFF" ++ "\x28\x00\x00\x00" ++ "WAVE" ++
         "fmt " ++ "\x10\x00\x00\x00" ++
@@ -129,4 +185,26 @@ test "reads bounded PCM frames from a generated WAV" {
     var pcm: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 2), try reader.readFrames(0, &pcm));
     try std.testing.expectEqualSlices(u8, "\x01\x00\xff\x7f", &pcm);
+
+    var decoded: [2]f32 = undefined;
+    var scratch: [4]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        try reader.readFramesF32(0, &decoded, &scratch),
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 32768.0), decoded[0], 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 32767.0 / 32768.0), decoded[1], 0.000001);
+}
+
+test "canonical conversion covers integer and floating WAV sample forms" {
+    try std.testing.expectEqual(@as(f32, -1), decodeSample(.unsigned_8, "\x00"));
+    try std.testing.expectEqual(@as(f32, 0), decodeSample(.unsigned_8, "\x80"));
+    try std.testing.expectEqual(@as(f32, -1), decodeSample(.signed_16, "\x00\x80"));
+    try std.testing.expectEqual(@as(f32, -1), decodeSample(.signed_24, "\x00\x00\x80"));
+    try std.testing.expectEqual(@as(f32, -1), decodeSample(.signed_32, "\x00\x00\x00\x80"));
+    try std.testing.expectEqual(@as(f32, 0.5), decodeSample(.float_32, "\x00\x00\x00\x3f"));
+    try std.testing.expectEqual(
+        @as(f32, 0.5),
+        decodeSample(.float_64, "\x00\x00\x00\x00\x00\x00\xe0\x3f"),
+    );
 }
