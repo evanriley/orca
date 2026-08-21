@@ -38,6 +38,9 @@ pub const Service = struct {
     cache: ?*database.AnalysisCacheRepository = null,
     cancellation: ?*const scanner.CancellationToken = null,
     progress: ?ProgressCallback = null,
+    /// Analysis is background work: yield after each bounded I/O/decode chunk
+    /// so transport and render threads remain schedulable on constrained hosts.
+    yield_between_chunks: bool = true,
 
     pub fn analyzeFile(self: Service, path: []const u8, parameters: diagnostics.Parameters) !Analysis {
         if (self.cancelled()) return error.Cancelled;
@@ -113,6 +116,7 @@ pub const Service = struct {
                 .completed_frames = completed_frames,
                 .total_frames = decoder.frame_count,
             });
+            if (self.yield_between_chunks) std.Thread.yield() catch {};
         }
         if (self.cancelled()) return error.Cancelled;
         const result = try analyzer.finish();
@@ -158,6 +162,7 @@ pub const Service = struct {
             if (read == 0) return error.UnexpectedEndOfSource;
             hasher.update(buffer[0..read]);
             offset += read;
+            if (self.yield_between_chunks) std.Thread.yield() catch {};
         }
         var digest: [32]u8 = undefined;
         hasher.final(&digest);

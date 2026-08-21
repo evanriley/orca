@@ -149,3 +149,19 @@ test "health evaluation persists metadata and audio diagnostics" {
     try library.health_issues.replacePath("track.flac", evaluation.issues.items);
     try std.testing.expectEqual(@as(u64, 7), try library.health_issues.count());
 }
+
+test "decoder failures become health diagnostics" {
+    var evaluation = try evaluate(std.testing.allocator, .{
+        .title = "Damaged track",
+        .artist = "Orca",
+        .album = "Generated",
+        .album_artist = "Orca",
+        .track_number = 1,
+        .artwork_present = true,
+        .corrupt_details = "decoder rejected the frame checksum",
+    });
+    defer evaluation.deinit();
+    try std.testing.expectEqual(@as(usize, 1), evaluation.issues.items.len);
+    try std.testing.expectEqual(database.HealthIssueKind.corrupt_audio, evaluation.issues.items[0].kind);
+    try std.testing.expectEqual(database.HealthSeverity.error_severity, evaluation.issues.items[0].severity);
+}

@@ -197,6 +197,44 @@ pub fn classifyDuplicate(first: Result, second: Result, likely_threshold: f32) D
     return .none;
 }
 
+pub const Candidate = struct {
+    path: []const u8,
+    fingerprint: *const Result,
+};
+
+pub const Match = struct {
+    first_index: usize,
+    second_index: usize,
+    kind: DuplicateKind,
+    similarity_score: f32,
+};
+
+pub fn findDuplicates(
+    allocator: std.mem.Allocator,
+    candidates: []const Candidate,
+    likely_threshold: f32,
+) ![]Match {
+    if (likely_threshold < 0 or likely_threshold > 1) return error.InvalidSimilarityThreshold;
+    var matches: std.ArrayList(Match) = .empty;
+    errdefer matches.deinit(allocator);
+    for (candidates, 0..) |first, first_index| {
+        for (candidates[first_index + 1 ..], first_index + 1..) |second, second_index| {
+            const kind = classifyDuplicate(first.fingerprint.*, second.fingerprint.*, likely_threshold);
+            if (kind == .none) continue;
+            try matches.append(allocator, .{
+                .first_index = first_index,
+                .second_index = second_index,
+                .kind = kind,
+                .similarity_score = similarity(
+                    first.fingerprint.signatures,
+                    second.fingerprint.signatures,
+                ),
+            });
+        }
+    }
+    return matches.toOwnedSlice(allocator);
+}
+
 fn quantize(value: f64) u4 {
     return @intFromFloat(std.math.clamp(@round(value), 0, 15));
 }
@@ -236,4 +274,11 @@ test "temporal fingerprints are streaming-stable and rank nearby audio" {
     const nearby_result = try nearby.finish();
     defer nearby_result.deinit();
     try std.testing.expect(similarity(first_result.signatures, nearby_result.signatures) > 0.95);
+    const matches = try findDuplicates(allocator, &.{
+        .{ .path = "first.flac", .fingerprint = &first_result },
+        .{ .path = "nearby.qoa", .fingerprint = &nearby_result },
+    }, 0.95);
+    defer allocator.free(matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqual(DuplicateKind.likely_recording, matches[0].kind);
 }
