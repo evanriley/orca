@@ -15,6 +15,7 @@ pub const LibraryDatabase = struct {
     mutation_journal: repository.MutationJournalRepository,
     analysis_cache: repository.AnalysisCacheRepository,
     health_issues: repository.HealthIssueRepository,
+    provider_cache: repository.ProviderCacheRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -37,6 +38,7 @@ pub const LibraryDatabase = struct {
             .mutation_journal = .{ .db = database, .write_lane = write_lane },
             .analysis_cache = .{ .db = database, .write_lane = write_lane },
             .health_issues = .{ .db = database, .write_lane = write_lane },
+            .provider_cache = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -53,6 +55,39 @@ pub const LibraryDatabase = struct {
         return sqlite.Database.openReadOnly(self.path);
     }
 };
+
+test "provider cache distinguishes fresh and stale responses" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        "file:orca-provider-cache?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.provider_cache.put("musicbrainz", "recording:orca", 200, "candidate", 200);
+    const fresh = (try library.provider_cache.get(
+        std.testing.allocator,
+        "musicbrainz",
+        "recording:orca",
+        100,
+        false,
+    )).?;
+    defer fresh.deinit();
+    try std.testing.expectEqualStrings("candidate", fresh.body);
+    try std.testing.expect((try library.provider_cache.get(
+        std.testing.allocator,
+        "musicbrainz",
+        "recording:orca",
+        300,
+        false,
+    )) == null);
+    const stale = (try library.provider_cache.get(
+        std.testing.allocator,
+        "musicbrainz",
+        "recording:orca",
+        300,
+        true,
+    )).?;
+    defer stale.deinit();
+}
 
 test "library health state is atomically replaced and paged" {
     var library = try LibraryDatabase.open(

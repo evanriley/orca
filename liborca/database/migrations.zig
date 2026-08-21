@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 6;
+pub const current_version = 7;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -173,6 +173,48 @@ const migration_6 =
     \\    ON library_health_issues(kind, severity, path);
 ;
 
+const migration_7 =
+    \\CREATE TABLE provider_cache (
+    \\    provider TEXT NOT NULL,
+    \\    request_key TEXT NOT NULL,
+    \\    status INTEGER NOT NULL,
+    \\    body BLOB NOT NULL,
+    \\    expires_at INTEGER NOT NULL,
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    PRIMARY KEY(provider, request_key)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX provider_cache_expiry ON provider_cache(expires_at);
+    \\CREATE TABLE identification_proposals (
+    \\    id INTEGER PRIMARY KEY,
+    \\    path TEXT NOT NULL,
+    \\    provider TEXT NOT NULL,
+    \\    provider_id TEXT NOT NULL,
+    \\    confidence REAL NOT NULL,
+    \\    payload BLOB NOT NULL,
+    \\    state INTEGER NOT NULL DEFAULT 0,
+    \\    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    UNIQUE(path, provider, provider_id)
+    \\);
+    \\CREATE INDEX identification_proposals_path
+    \\    ON identification_proposals(path, state, confidence DESC);
+    \\CREATE TABLE scrobble_queue (
+    \\    id INTEGER PRIMARY KEY,
+    \\    service TEXT NOT NULL,
+    \\    event_key TEXT NOT NULL,
+    \\    payload BLOB NOT NULL,
+    \\    state INTEGER NOT NULL DEFAULT 0,
+    \\    attempt_count INTEGER NOT NULL DEFAULT 0,
+    \\    next_attempt_at INTEGER NOT NULL DEFAULT 0,
+    \\    last_error TEXT NOT NULL DEFAULT '',
+    \\    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    UNIQUE(service, event_key)
+    \\);
+    \\CREATE INDEX scrobble_queue_ready
+    \\    ON scrobble_queue(state, next_attempt_at, id);
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -191,5 +233,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     if (version < 4) try db.exec(migration_4);
     if (version < 5) try db.exec(migration_5);
     if (version < 6) try db.exec(migration_6);
-    try db.exec("PRAGMA user_version=6; COMMIT;");
+    if (version < 7) try db.exec(migration_7);
+    try db.exec("PRAGMA user_version=7; COMMIT;");
 }
