@@ -112,6 +112,11 @@ pub const Statement = struct {
         }
     }
 
+    pub fn bindDouble(self: Statement, index: c_int, value: f64) Error!void {
+        if (c.sqlite3_bind_double(self.handle, index, value) != c.SQLITE_OK)
+            return error.BindFailed;
+    }
+
     pub fn bindOptionalInt64(self: Statement, index: c_int, value: ?i64) Error!void {
         const result = if (value) |number|
             c.sqlite3_bind_int64(self.handle, index, number)
@@ -135,6 +140,10 @@ pub const Statement = struct {
 
     pub fn columnInt64(self: Statement, index: c_int) i64 {
         return c.sqlite3_column_int64(self.handle, index);
+    }
+
+    pub fn columnDouble(self: Statement, index: c_int) f64 {
+        return c.sqlite3_column_double(self.handle, index);
     }
 
     pub fn columnText(self: Statement, index: c_int) []const u8 {

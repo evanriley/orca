@@ -26,6 +26,10 @@ pub const ProviderCacheEntry = repository.ProviderCacheEntry;
 pub const ProviderCacheRepository = repository.ProviderCacheRepository;
 pub const ScrobbleQueueEntry = repository.ScrobbleQueueEntry;
 pub const ScrobbleQueueRepository = repository.ScrobbleQueueRepository;
+pub const ProposalState = repository.ProposalState;
+pub const IdentificationProposalInput = repository.IdentificationProposalInput;
+pub const IdentificationProposal = repository.IdentificationProposal;
+pub const IdentificationProposalRepository = repository.IdentificationProposalRepository;
 
 test {
     _ = @import("library.zig");

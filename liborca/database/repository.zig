@@ -179,6 +179,31 @@ pub const ScrobbleQueueEntry = struct {
     }
 };
 
+pub const ProposalState = enum(u8) { pending, accepted, dismissed };
+
+pub const IdentificationProposalInput = struct {
+    path: []const u8,
+    provider: []const u8,
+    provider_id: []const u8,
+    confidence: f32,
+    payload: []const u8,
+};
+
+pub const IdentificationProposal = struct {
+    allocator: std.mem.Allocator,
+    id: i64,
+    provider: []u8,
+    provider_id: []u8,
+    confidence: f32,
+    payload: []u8,
+
+    pub fn deinit(self: IdentificationProposal) void {
+        self.allocator.free(self.provider);
+        self.allocator.free(self.provider_id);
+        self.allocator.free(self.payload);
+    }
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -922,6 +947,116 @@ pub const ScrobbleQueueRepository = struct {
         try statement.bindInt64(4, id);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleScrobbleEvent;
+    }
+};
+
+pub const IdentificationProposalRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn put(self: *IdentificationProposalRepository, input: IdentificationProposalInput) !void {
+        if (input.path.len == 0 or input.provider.len == 0 or input.provider_id.len == 0 or
+            input.payload.len == 0 or !std.math.isFinite(input.confidence) or
+            input.confidence < 0 or input.confidence > 1) return error.InvalidIdentificationProposal;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO identification_proposals(
+            \\    path, provider, provider_id, confidence, payload, state, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())
+            \\ON CONFLICT(path, provider, provider_id) DO UPDATE SET
+            \\    confidence=excluded.confidence, payload=excluded.payload,
+            \\    updated_at=excluded.updated_at;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.path);
+        try statement.bindText(2, input.provider);
+        try statement.bindText(3, input.provider_id);
+        try statement.bindDouble(4, input.confidence);
+        try statement.bindBlob(5, input.payload);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn pending(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        limit: u32,
+    ) ![]IdentificationProposal {
+        var statement = try self.db.prepare(
+            \\SELECT id, provider, provider_id, confidence, payload
+            \\FROM identification_proposals WHERE path=?1 AND state=0
+            \\ORDER BY confidence DESC, id LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, path);
+        try statement.bindInt64(2, limit);
+        var proposals: std.ArrayList(IdentificationProposal) = .empty;
+        errdefer {
+            for (proposals.items) |proposal| proposal.deinit();
+            proposals.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const provider = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(provider);
+            const provider_id = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(provider_id);
+            const payload = try allocator.dupe(u8, statement.columnBlob(4));
+            errdefer allocator.free(payload);
+            try proposals.append(allocator, .{
+                .allocator = allocator,
+                .id = statement.columnInt64(0),
+                .provider = provider,
+                .provider_id = provider_id,
+                .confidence = @floatCast(statement.columnDouble(3)),
+                .payload = payload,
+            });
+        }
+        return proposals.toOwnedSlice(allocator);
+    }
+
+    /// Accepts a proposal into Orca metadata only. Locked values survive, and
+    /// writing those values back to a media file remains a separate mutation.
+    pub fn accept(
+        self: *IdentificationProposalRepository,
+        proposal_id: i64,
+        path: []const u8,
+        values: []const OrcaMetadataInput,
+    ) !void {
+        for (values) |value| {
+            if (!std.mem.eql(u8, value.path, path) or value.provenance != .provider or
+                value.value.len == 0) return error.InvalidProviderMetadata;
+        }
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var update = try self.db.prepare(
+            \\UPDATE identification_proposals SET state=1, updated_at=unixepoch()
+            \\WHERE id=?1 AND path=?2 AND state=0;
+        );
+        defer update.deinit();
+        try update.bindInt64(1, proposal_id);
+        try update.bindText(2, path);
+        if (try update.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleIdentificationProposal;
+        var metadata_statement = try self.db.prepare(
+            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, 0, unixepoch())
+            \\ON CONFLICT(path, field) DO UPDATE SET value=excluded.value,
+            \\    provenance=excluded.provenance, updated_at=excluded.updated_at
+            \\WHERE orca_metadata_values.locked=0;
+        );
+        defer metadata_statement.deinit();
+        for (values) |value| {
+            try metadata_statement.bindText(1, path);
+            try metadata_statement.bindInt64(2, @backingInt(value.field));
+            try metadata_statement.bindText(3, value.value);
+            try metadata_statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
+            if (try metadata_statement.step() != .done) return error.SqlFailed;
+            try metadata_statement.reset();
+        }
+        try self.db.exec("COMMIT;");
     }
 };
 
