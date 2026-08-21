@@ -6,6 +6,13 @@ pub const Provenance = enum {
     analysis,
 };
 
+pub const Field = enum {
+    title,
+    artist,
+    album,
+    track_number,
+};
+
 pub const Value = struct {
     text: []const u8,
     provenance: Provenance,

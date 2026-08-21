@@ -1,5 +1,6 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const metadata = @import("../metadata/model.zig");
 
 pub const WriteLane = struct {
     lock: std.atomic.Mutex = .unlocked,
@@ -32,6 +33,24 @@ pub const ObservedFileInput = struct {
     artist: ?[]const u8 = null,
     album: ?[]const u8 = null,
     track_number: ?i64 = null,
+};
+
+pub const OrcaMetadataInput = struct {
+    path: []const u8,
+    field: metadata.Field,
+    value: []const u8,
+    provenance: metadata.Provenance,
+    locked: bool = false,
+};
+
+pub const StoredMetadataValue = struct {
+    text: []u8,
+    provenance: metadata.Provenance,
+    locked: bool,
+
+    pub fn deinit(self: StoredMetadataValue, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+    }
 };
 
 pub const TrackSummary = struct {
@@ -248,5 +267,59 @@ pub const ObservedFileRepository = struct {
         try statement.bindInt64(2, input.inode);
         try statement.bindInt64(3, input.size_bytes);
         try statement.bindInt64(4, input.modified_ns);
+    }
+};
+
+pub const OrcaMetadataRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn upsert(self: *OrcaMetadataRepository, input: OrcaMetadataInput) !void {
+        if (input.path.len == 0 or input.value.len == 0 or input.provenance == .observed_file)
+            return error.InvalidOrcaMetadata;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+            \\ON CONFLICT(path, field) DO UPDATE SET
+            \\    value=excluded.value,
+            \\    provenance=excluded.provenance,
+            \\    locked=excluded.locked,
+            \\    updated_at=excluded.updated_at
+            \\WHERE orca_metadata_values.locked=0 OR excluded.provenance=?6;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.path);
+        try statement.bindInt64(2, @backingInt(input.field));
+        try statement.bindText(3, input.value);
+        try statement.bindInt64(4, @backingInt(input.provenance));
+        try statement.bindInt64(5, @intFromBool(input.locked));
+        try statement.bindInt64(6, @backingInt(metadata.Provenance.user));
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn get(
+        self: *const OrcaMetadataRepository,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        field: metadata.Field,
+    ) !?StoredMetadataValue {
+        var statement = try self.db.prepare(
+            "SELECT value, provenance, locked FROM orca_metadata_values WHERE path=?1 AND field=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, path);
+        try statement.bindInt64(2, @backingInt(field));
+        if (try statement.step() != .row) return null;
+        const provenance = std.enums.fromInt(
+            metadata.Provenance,
+            statement.columnInt64(1),
+        ) orelse return error.InvalidStoredProvenance;
+        return .{
+            .text = try allocator.dupe(u8, statement.columnText(0)),
+            .provenance = provenance,
+            .locked = statement.columnInt64(2) != 0,
+        };
     }
 };

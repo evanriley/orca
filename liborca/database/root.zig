@@ -9,6 +9,8 @@ pub const TrackPage = repository.TrackPage;
 pub const TrackRepository = repository.TrackRepository;
 pub const ObservedFileInput = repository.ObservedFileInput;
 pub const ObservedFileRepository = repository.ObservedFileRepository;
+pub const OrcaMetadataInput = repository.OrcaMetadataInput;
+pub const OrcaMetadataRepository = repository.OrcaMetadataRepository;
 
 test {
     _ = @import("library.zig");

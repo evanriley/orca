@@ -1,16 +1,12 @@
 const std = @import("std");
+const model = @import("model.zig");
 
 pub const FileIdentity = struct {
     size_bytes: u64,
     modified_ns: i64,
 };
 
-pub const Field = enum {
-    title,
-    artist,
-    album,
-    track_number,
-};
+pub const Field = model.Field;
 
 pub const Change = struct {
     field: Field,

@@ -11,6 +11,7 @@ pub const LibraryDatabase = struct {
     write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
     observed_files: repository.ObservedFileRepository,
+    orca_metadata: repository.OrcaMetadataRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -29,6 +30,7 @@ pub const LibraryDatabase = struct {
             .write_lane = write_lane,
             .tracks = .{ .db = database, .write_lane = write_lane },
             .observed_files = .{ .db = database, .write_lane = write_lane },
+            .orca_metadata = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -142,4 +144,48 @@ test "WAL readers remain available while write submissions serialize" {
 
     try std.testing.expect(!failed.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1000), try read_repository.count());
+}
+
+test "Orca metadata persists provenance and user locks separately from observations" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        "file:orca-test-metadata?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.observed_files.upsertBatch(&.{.{
+        .path = "/music/example.flac",
+        .inode = 1,
+        .size_bytes = 100,
+        .modified_ns = 200,
+        .audio_format = 2,
+        .title = "Observed title",
+    }});
+    try library.orca_metadata.upsert(.{
+        .path = "/music/example.flac",
+        .field = .title,
+        .value = "Curated title",
+        .provenance = .user,
+        .locked = true,
+    });
+    try library.orca_metadata.upsert(.{
+        .path = "/music/example.flac",
+        .field = .title,
+        .value = "Provider refresh",
+        .provenance = .provider,
+    });
+    const value = (try library.orca_metadata.get(
+        std.testing.allocator,
+        "/music/example.flac",
+        .title,
+    )).?;
+    defer value.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Curated title", value.text);
+    try std.testing.expectEqual(@import("../metadata/model.zig").Provenance.user, value.provenance);
+    try std.testing.expect(value.locked);
+    const observed = (try library.observed_files.title(
+        std.testing.allocator,
+        "/music/example.flac",
+    )).?;
+    defer std.testing.allocator.free(observed);
+    try std.testing.expectEqualStrings("Observed title", observed);
 }

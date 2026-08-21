@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 3;
+pub const current_version = 4;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -102,6 +102,20 @@ const migration_3 =
     \\) WITHOUT ROWID;
 ;
 
+const migration_4 =
+    \\CREATE TABLE orca_metadata_values (
+    \\    path TEXT NOT NULL REFERENCES observed_files(path) ON DELETE CASCADE,
+    \\    field INTEGER NOT NULL,
+    \\    value TEXT NOT NULL,
+    \\    provenance INTEGER NOT NULL,
+    \\    locked INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    PRIMARY KEY(path, field)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX orca_metadata_values_provenance
+    \\    ON orca_metadata_values(provenance, locked);
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -117,5 +131,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     if (version < 1) try db.exec(migration_1);
     if (version < 2) try db.exec(migration_2);
     if (version < 3) try db.exec(migration_3);
-    try db.exec("PRAGMA user_version=3; COMMIT;");
+    if (version < 4) try db.exec(migration_4);
+    try db.exec("PRAGMA user_version=4; COMMIT;");
 }
