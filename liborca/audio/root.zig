@@ -3,6 +3,7 @@ pub const backends = @import("backends/root.zig");
 pub const buffer = @import("buffer.zig");
 pub const equalizer = @import("equalizer.zig");
 pub const fanout = @import("fanout.zig");
+pub const graph = @import("graph.zig");
 pub const kernels = @import("kernels.zig");
 pub const nodes = @import("nodes.zig");
 pub const pcm = @import("pcm.zig");
@@ -22,6 +23,7 @@ test {
     _ = @import("buffer.zig");
     _ = @import("equalizer.zig");
     _ = @import("fanout.zig");
+    _ = @import("graph.zig");
     _ = @import("kernels.zig");
     _ = @import("nodes.zig");
     _ = @import("player.zig");
