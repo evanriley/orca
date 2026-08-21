@@ -1,6 +1,7 @@
 const pcm = @import("pcm.zig");
 const processing = @import("processing.zig");
 const resampler_api = @import("resampler.zig");
+const zone = @import("zone.zig");
 
 pub const Scope = enum { player, zone };
 
@@ -22,6 +23,8 @@ pub const Reason = enum {
 pub fn Report(comptime capacity: usize) type {
     return struct {
         bit_perfect_eligible: bool = true,
+        direct_rt_eligible: bool = true,
+        nodes_truncated: bool = false,
         nodes: [capacity]Node = undefined,
         node_count: usize = 0,
         reasons: [4]Reason = undefined,
@@ -41,13 +44,14 @@ pub fn Report(comptime capacity: usize) type {
                         .algorithmic_latency_frames = processor.metadata.algorithmic_latency_frames,
                     };
                     self.node_count += 1;
-                }
+                } else self.nodes_truncated = true;
                 self.algorithmic_latency_frames +|= processor.metadata.algorithmic_latency_frames;
                 if (processor.metadata.changes_samples) self.addReason(.sample_processing);
                 if (processor.metadata.changes_sample_rate)
                     self.addReason(.sample_rate_conversion);
                 if (processor.metadata.changes_channel_layout)
                     self.addReason(.channel_layout_conversion);
+                self.direct_rt_eligible = self.direct_rt_eligible and processor.metadata.realtime_safe;
             }
         }
 
@@ -58,6 +62,10 @@ pub fn Report(comptime capacity: usize) type {
             self.reasons[self.reason_count] = reason;
             self.reason_count += 1;
             self.bit_perfect_eligible = false;
+        }
+
+        pub fn applyAlgorithmicLatency(self: *const Self, latency: *zone.Latency) void {
+            latency.dsp_frames = self.algorithmic_latency_frames;
         }
     };
 }
@@ -93,8 +101,9 @@ pub fn inspectWithResampler(
                 .algorithmic_latency_frames = metadata.algorithmic_latency_frames,
             };
             report.node_count += 1;
-        }
+        } else report.nodes_truncated = true;
         report.algorithmic_latency_frames +|= metadata.algorithmic_latency_frames;
+        report.direct_rt_eligible = report.direct_rt_eligible and metadata.realtime_safe;
         report.addReason(.sample_rate_conversion);
     }
     if (source.sample_rate != output.sample_rate) report.addReason(.sample_rate_conversion);
@@ -143,4 +152,14 @@ test "signal path explains bit-perfect eligibility" {
     );
     try std.testing.expectEqual(@as(u32, 1), resampled.algorithmic_latency_frames);
     try std.testing.expectEqual(@as(usize, 1), resampled.reason_count);
+    var latency: zone.Latency = .{
+        .requested_frames = 128,
+        .backend_quantum_frames = 128,
+        .render_ahead_frames = 128,
+        .dsp_frames = 0,
+        .hardware_frames = 64,
+    };
+    resampled.applyAlgorithmicLatency(&latency);
+    try std.testing.expectEqual(@as(u32, 1), latency.dsp_frames);
+    try std.testing.expectEqual(@as(u64, 193), latency.knownTotalFrames());
 }
