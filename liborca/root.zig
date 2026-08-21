@@ -10,6 +10,7 @@ pub const core = @import("core/root.zig");
 pub const database = @import("database/root.zig");
 pub const library = @import("library/root.zig");
 pub const metadata = @import("metadata/root.zig");
+pub const network = @import("network/root.zig");
 pub const platform = @import("platform.zig");
 pub const storage = @import("storage/root.zig");
 
