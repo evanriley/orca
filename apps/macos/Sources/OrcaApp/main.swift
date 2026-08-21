@@ -2,6 +2,8 @@ import AppKit
 import COrca
 import MediaPlayer
 import SwiftUI
+import UniformTypeIdentifiers
+import UserNotifications
 
 struct TrackRow: Identifiable {
     let id: Int64
@@ -79,6 +81,21 @@ final class RuntimeController: ObservableObject {
         }
     }
 
+    func openLibrary(_ url: URL) {
+        var next = orca_handle(index: 0, generation: 0)
+        guard orca_library_open(runtime, url.path, &next) == ORCA_STATUS_OK else { return }
+        if let library { _ = orca_library_close(runtime, library) }
+        library = next
+        offset = 0
+        loadPage()
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { _, _ in }
+        let content = UNMutableNotificationContent()
+        content.title = "Library opened"
+        content.body = url.lastPathComponent
+        center.add(UNNotificationRequest(identifier: "library-opened", content: content, trigger: nil))
+    }
+
     func search() { offset = 0; loadPage() }
     func previousPage() { offset = offset >= 256 ? offset - 256 : 0; loadPage() }
     func nextPage() { offset += 256; loadPage() }
@@ -129,6 +146,7 @@ final class RuntimeController: ObservableObject {
 
 struct ContentView: View {
     @ObservedObject var controller: RuntimeController
+    @State private var choosingLibrary = false
 
     var body: some View {
         VStack {
@@ -146,6 +164,7 @@ struct ContentView: View {
                 }
             }
             HStack {
+                Button("Open Library…") { choosingLibrary = true }
                 Button("Previous") { controller.previousPage() }
                 Button("Next") { controller.nextPage() }
                 Spacer()
@@ -155,6 +174,14 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 800, minHeight: 560)
+        .fileImporter(isPresented: $choosingLibrary, allowedContentTypes: [.data]) { result in
+            if case let .success(url) = result { controller.openLibrary(url) }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let first = urls.first else { return false }
+            controller.openLibrary(first)
+            return true
+        }
     }
 }
 

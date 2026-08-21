@@ -28,6 +28,9 @@ used by the CLI/control plane. GTK owns presentation only.
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS Play/Pause/PlayPause/Stop methods invoke the same Player handle,
 and `PlaybackStatus` is read from and signaled from authoritative snapshots.
+Library selection uses a GTK file dialog or native file drop, successful opens
+raise a desktop notification, and the application action exposes a Space media
+shortcut. Standard GTK controls retain their native accessibility semantics.
 
 ## macOS SwiftUI
 
@@ -36,3 +39,5 @@ same bounded 256-row paging contract in a native SwiftUI `List`, exposes AppKit
 menus and shortcuts, and mirrors authoritative Player snapshots through
 `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`. It links against
 `zig-out/lib/liborca` and does not import Zig, SQLite, codec, or audio layouts.
+SwiftUI file import, URL drop handling, notifications, accessibility labels,
+menus, and keyboard shortcuts remain presentation-only platform concerns.
