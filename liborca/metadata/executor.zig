@@ -10,16 +10,17 @@ pub const Executor = struct {
 
     /// Execute every tag action as one logical group. Each path is staged
     /// before replacement and each original remains as a journaled backup.
-    pub fn executeId3v1Plan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
+    pub fn executePlan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
         for (plan.actions) |action| switch (action) {
             .write_tags => |write| if (!hasMp3Extension(write.path))
                 return error.UnsupportedTagWriter,
-            .move => return error.UnsupportedMutationAction,
+            .move => {},
         };
-        try plan.beginExecution();
         var completed: std.ArrayList(i64) = .empty;
         defer completed.deinit(self.allocator);
+        try completed.ensureTotalCapacity(self.allocator, plan.actions.len);
+        try plan.beginExecution();
         errdefer {
             var index = completed.items.len;
             while (index > 0) {
@@ -75,7 +76,7 @@ pub const Executor = struct {
                     self.journal.transition(operation, .staged, .failed, @errorName(err)) catch {};
                     return err;
                 };
-                try completed.append(self.allocator, operation);
+                completed.appendAssumeCapacity(operation);
                 const committed = try file_mutation.identity(self.io, write.path);
                 try self.journal.commit(
                     operation,
@@ -83,9 +84,62 @@ pub const Executor = struct {
                     committed.modified_ns,
                 );
             },
-            .move => unreachable,
+            .move => |move| {
+                const current = try file_mutation.identity(self.io, move.source_path);
+                if (!std.meta.eql(current, move.expected) and
+                    !try self.groupProducedIdentity(completed.items, move.source_path, current))
+                    return error.FileIdentityChanged;
+                if (try pathExists(self.io, move.destination_path)) return error.DestinationExists;
+                const operation = try self.journal.prepare(.{
+                    .plan_id = plan.id,
+                    .group_id = group_id,
+                    .action_index = @intCast(action_index),
+                    .kind = .move,
+                    .source_path = move.source_path,
+                    .destination_path = move.destination_path,
+                    .expected_size = move.expected.size_bytes,
+                    .expected_modified_ns = move.expected.modified_ns,
+                });
+                try self.journal.transition(operation, .planned, .staged, null);
+                std.Io.Dir.cwd().renamePreserve(
+                    move.source_path,
+                    std.Io.Dir.cwd(),
+                    move.destination_path,
+                    self.io,
+                ) catch |err| {
+                    self.journal.transition(operation, .staged, .failed, @errorName(err)) catch {};
+                    return err;
+                };
+                completed.appendAssumeCapacity(operation);
+                const committed = try file_mutation.identity(self.io, move.destination_path);
+                try self.journal.commit(
+                    operation,
+                    committed.size_bytes,
+                    committed.modified_ns,
+                );
+            },
         };
         try plan.finish(true);
+    }
+
+    fn groupProducedIdentity(
+        self: *Executor,
+        operation_ids: []const i64,
+        path: []const u8,
+        current: mutation.FileIdentity,
+    ) !bool {
+        var index = operation_ids.len;
+        while (index > 0) {
+            index -= 1;
+            var operation = try self.journal.get(self.allocator, operation_ids[index]);
+            defer operation.deinit();
+            if (operation.kind == .write_tags and
+                std.mem.eql(u8, operation.source_path, path) and
+                operation.committed_size == current.size_bytes and
+                operation.committed_modified_ns == current.modified_ns)
+                return true;
+        }
+        return false;
     }
 
     /// Undo refuses to replace a file that changed after the journaled commit.
@@ -98,7 +152,11 @@ pub const Executor = struct {
             .modified_ns = operation.committed_modified_ns orelse
                 return error.MissingCommittedIdentity,
         };
-        const current = try file_mutation.identity(self.io, operation.source_path);
+        const current_path = switch (operation.kind) {
+            .write_tags => operation.source_path,
+            .move => operation.destination_path orelse return error.MissingMutationDestination,
+        };
+        const current = try file_mutation.identity(self.io, current_path);
         if (!std.meta.eql(expected, current)) return error.FileIdentityChanged;
         try self.rollbackOperation(operation_id);
     }
@@ -109,6 +167,21 @@ pub const Executor = struct {
         var operation = try self.journal.get(self.allocator, operation_id);
         defer operation.deinit();
         if (operation.state == .committed or operation.state == .rolled_back) return;
+        if (operation.kind == .move) {
+            const destination = operation.destination_path orelse
+                return error.MissingMutationDestination;
+            if (try pathExists(self.io, destination)) {
+                if (try pathExists(self.io, operation.source_path))
+                    return error.MutationRecoveryConflict;
+                try std.Io.Dir.cwd().renamePreserve(
+                    destination,
+                    std.Io.Dir.cwd(),
+                    operation.source_path,
+                    self.io,
+                );
+            }
+            return self.finishRecoveryState(operation_id, operation.state);
+        }
         const stage_path = operation.stage_path orelse return error.MissingMutationStagePath;
         const backup_path = operation.backup_path orelse return error.MissingMutationBackupPath;
         if (try pathExists(self.io, backup_path)) {
@@ -129,7 +202,15 @@ pub const Executor = struct {
             error.FileNotFound => {},
             else => return err,
         };
-        switch (operation.state) {
+        try self.finishRecoveryState(operation_id, operation.state);
+    }
+
+    fn finishRecoveryState(
+        self: *Executor,
+        operation_id: i64,
+        state: database.MutationState,
+    ) !void {
+        switch (state) {
             .planned => {
                 try self.journal.transition(operation_id, .planned, .failed, "recovered");
                 try self.journal.transition(operation_id, .failed, .rolled_back, "recovered");
@@ -155,6 +236,19 @@ pub const Executor = struct {
         defer operation.deinit();
         if (operation.state != .committed and operation.state != .staged)
             return error.MutationOperationNotRecoverable;
+        if (operation.kind == .move) {
+            const destination = operation.destination_path orelse
+                return error.MissingMutationDestination;
+            if (try pathExists(self.io, operation.source_path)) return error.UndoDestinationExists;
+            try std.Io.Dir.cwd().renamePreserve(
+                destination,
+                std.Io.Dir.cwd(),
+                operation.source_path,
+                self.io,
+            );
+            try self.journal.transition(operation_id, operation.state, .rolled_back, null);
+            return;
+        }
         const stage_path = operation.stage_path orelse return error.MissingMutationStagePath;
         const backup_path = operation.backup_path orelse return error.MissingMutationBackupPath;
         try file_mutation.rollbackReplacement(
@@ -227,9 +321,9 @@ test "approved plan commits through journal and undo detects external edits" {
         .io = std.testing.io,
         .journal = &library.mutation_journal,
     };
-    try std.testing.expectError(error.MutationPlanNotApproved, executor.executeId3v1Plan(&plan, 8));
+    try std.testing.expectError(error.MutationPlanNotApproved, executor.executePlan(&plan, 8));
     try plan.approve(44);
-    try executor.executeId3v1Plan(&plan, 8);
+    try executor.executePlan(&plan, 8);
     try std.testing.expectEqual(mutation.State.completed, plan.state);
     try std.testing.expectEqual(database.MutationState.committed, try library.mutation_journal.state(1));
     try executor.undoOperation(1);
@@ -244,7 +338,7 @@ test "approved plan commits through journal and undo detects external edits" {
     } }};
     var second_plan = try mutation.Plan.init(45, &second_actions);
     try second_plan.approve(45);
-    try executor.executeId3v1Plan(&second_plan, 9);
+    try executor.executePlan(&second_plan, 9);
 
     const changed = try std.Io.Dir.cwd().openFile(std.testing.io, source_path, .{ .mode = .read_write });
     defer changed.close(std.testing.io);
@@ -333,4 +427,228 @@ test "recovery restores original after replacement before journal commit" {
         database.MutationState.rolled_back,
         try library.mutation_journal.state(operation),
     );
+}
+
+test "approved move supports undo and rejects an externally edited destination" {
+    const id3v1 = @import("id3v1.zig");
+    const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const prefix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(prefix);
+    const source = try std.fmt.allocPrint(std.testing.allocator, "{s}/source.mp3", .{prefix});
+    defer std.testing.allocator.free(source);
+    const destination = try std.fmt.allocPrint(std.testing.allocator, "{s}/destination.mp3", .{prefix});
+    defer std.testing.allocator.free(destination);
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "{s}/moves.db",
+        .{prefix},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+    const tag = try id3v1.encode(.{
+        .title = "Before move",
+        .artist = "Generated",
+        .album = "Generated",
+        .year = "2026",
+        .comment = "Generated",
+        .track_number = 1,
+        .genre = 13,
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.mp3",
+        .data = "generated payload" ++ tag,
+    });
+    var library = try LibraryDatabase.open(std.testing.allocator, database_path);
+    defer library.close();
+    var executor: Executor = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .journal = &library.mutation_journal,
+    };
+
+    const expected = try file_mutation.identity(std.testing.io, source);
+    const actions = [_]mutation.Action{
+        .{ .write_tags = .{
+            .path = source,
+            .expected = expected,
+            .changes = &.{.{
+                .field = .title,
+                .before = "Before move",
+                .after = "After move",
+            }},
+        } },
+        .{ .move = .{
+            .source_path = source,
+            .destination_path = destination,
+            .expected = expected,
+        } },
+    };
+    var plan = try mutation.Plan.init(100, &actions);
+    try plan.approve(100);
+    try executor.executePlan(&plan, 100);
+    try std.testing.expect(!(try pathExists(std.testing.io, source)));
+    try std.testing.expect(try pathExists(std.testing.io, destination));
+    try expectTitle(destination, "After move");
+    try executor.undoOperation(2);
+    try executor.undoOperation(1);
+    try std.testing.expect(try pathExists(std.testing.io, source));
+    try std.testing.expect(!(try pathExists(std.testing.io, destination)));
+    try expectTitle(source, "Before move");
+
+    const second_expected = try file_mutation.identity(std.testing.io, source);
+    const second_actions = [_]mutation.Action{.{ .move = .{
+        .source_path = source,
+        .destination_path = destination,
+        .expected = second_expected,
+    } }};
+    var second_plan = try mutation.Plan.init(101, &second_actions);
+    try second_plan.approve(101);
+    try executor.executePlan(&second_plan, 101);
+    const changed = try std.Io.Dir.cwd().openFile(
+        std.testing.io,
+        destination,
+        .{ .mode = .read_write },
+    );
+    defer changed.close(std.testing.io);
+    const stat = try changed.stat(std.testing.io);
+    try changed.writePositionalAll(std.testing.io, "external", stat.size);
+    try std.testing.expectError(error.FileIdentityChanged, executor.undoOperation(3));
+}
+
+test "move recovery restores a rename interrupted before journal commit" {
+    const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const prefix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(prefix);
+    const source = try std.fmt.allocPrint(std.testing.allocator, "{s}/source.bin", .{prefix});
+    defer std.testing.allocator.free(source);
+    const destination = try std.fmt.allocPrint(std.testing.allocator, "{s}/destination.bin", .{prefix});
+    defer std.testing.allocator.free(destination);
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "{s}/recovery.db",
+        .{prefix},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.bin",
+        .data = "generated source",
+    });
+    const expected = try file_mutation.identity(std.testing.io, source);
+    var library = try LibraryDatabase.open(std.testing.allocator, database_path);
+    defer library.close();
+    const operation = try library.mutation_journal.prepare(.{
+        .plan_id = 102,
+        .group_id = 102,
+        .action_index = 0,
+        .kind = .move,
+        .source_path = source,
+        .destination_path = destination,
+        .expected_size = expected.size_bytes,
+        .expected_modified_ns = expected.modified_ns,
+    });
+    try library.mutation_journal.transition(operation, .planned, .staged, null);
+    try std.Io.Dir.cwd().renamePreserve(source, std.Io.Dir.cwd(), destination, std.testing.io);
+    var executor: Executor = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .journal = &library.mutation_journal,
+    };
+    try executor.recoverOperation(operation);
+    try std.testing.expect(try pathExists(std.testing.io, source));
+    try std.testing.expect(!(try pathExists(std.testing.io, destination)));
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try library.mutation_journal.state(operation),
+    );
+}
+
+test "failed move rolls back an earlier tag write in the same group" {
+    const id3v1 = @import("id3v1.zig");
+    const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const prefix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(prefix);
+    const source = try std.fmt.allocPrint(std.testing.allocator, "{s}/source.mp3", .{prefix});
+    defer std.testing.allocator.free(source);
+    const move_source = try std.fmt.allocPrint(std.testing.allocator, "{s}/move-source.bin", .{prefix});
+    defer std.testing.allocator.free(move_source);
+    const destination = try std.fmt.allocPrint(std.testing.allocator, "{s}/collision.mp3", .{prefix});
+    defer std.testing.allocator.free(destination);
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "{s}/group.db",
+        .{prefix},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+    const tag = try id3v1.encode(.{
+        .title = "Before group",
+        .artist = "Generated",
+        .album = "Generated",
+        .year = "2026",
+        .comment = "Generated",
+        .track_number = 1,
+        .genre = 13,
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.mp3",
+        .data = "generated payload" ++ tag,
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "collision.mp3",
+        .data = "do not replace",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "move-source.bin",
+        .data = "generated move source",
+    });
+    const expected = try file_mutation.identity(std.testing.io, source);
+    const move_expected = try file_mutation.identity(std.testing.io, move_source);
+    const actions = [_]mutation.Action{
+        .{ .write_tags = .{
+            .path = source,
+            .expected = expected,
+            .changes = &.{.{
+                .field = .title,
+                .before = "Before group",
+                .after = "During group",
+            }},
+        } },
+        .{ .move = .{
+            .source_path = move_source,
+            .destination_path = destination,
+            .expected = move_expected,
+        } },
+    };
+    var plan = try mutation.Plan.init(103, &actions);
+    try plan.approve(103);
+    var library = try LibraryDatabase.open(std.testing.allocator, database_path);
+    defer library.close();
+    var executor: Executor = .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .journal = &library.mutation_journal,
+    };
+    try std.testing.expectError(error.DestinationExists, executor.executePlan(&plan, 103));
+    try std.testing.expectEqual(mutation.State.failed, plan.state);
+    try std.testing.expectEqual(database.MutationState.rolled_back, try library.mutation_journal.state(1));
+    try expectTitle(source, "Before group");
 }

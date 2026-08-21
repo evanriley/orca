@@ -79,6 +79,7 @@ pub const MutationOperationInput = struct {
 pub const MutationOperation = struct {
     allocator: std.mem.Allocator,
     id: i64,
+    kind: MutationKind,
     source_path: []u8,
     destination_path: ?[]u8,
     stage_path: ?[]u8,
@@ -463,7 +464,7 @@ pub const MutationJournalRepository = struct {
         operation_id: i64,
     ) !MutationOperation {
         var statement = try self.db.prepare(
-            \\SELECT source_path, destination_path, stage_path, backup_path,
+            \\SELECT kind, source_path, destination_path, stage_path, backup_path,
             \\       expected_size, expected_modified_ns,
             \\       committed_size, committed_modified_ns, state
             \\FROM mutation_operations WHERE id=?1;
@@ -471,27 +472,30 @@ pub const MutationJournalRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, operation_id);
         if (try statement.step() != .row) return error.MutationOperationNotFound;
-        const source_path = try allocator.dupe(u8, statement.columnText(0));
+        const kind = std.enums.fromInt(MutationKind, statement.columnInt64(0)) orelse
+            return error.InvalidStoredMutationKind;
+        const source_path = try allocator.dupe(u8, statement.columnText(1));
         errdefer allocator.free(source_path);
-        const destination_path = try duplicateNullableColumn(allocator, statement, 1);
+        const destination_path = try duplicateNullableColumn(allocator, statement, 2);
         errdefer if (destination_path) |value| allocator.free(value);
-        const stage_path = try duplicateNullableColumn(allocator, statement, 2);
+        const stage_path = try duplicateNullableColumn(allocator, statement, 3);
         errdefer if (stage_path) |value| allocator.free(value);
-        const backup_path = try duplicateNullableColumn(allocator, statement, 3);
+        const backup_path = try duplicateNullableColumn(allocator, statement, 4);
         errdefer if (backup_path) |value| allocator.free(value);
-        const state_value = std.enums.fromInt(MutationState, statement.columnInt64(8)) orelse
+        const state_value = std.enums.fromInt(MutationState, statement.columnInt64(9)) orelse
             return error.InvalidStoredMutationState;
         return .{
             .allocator = allocator,
             .id = operation_id,
+            .kind = kind,
             .source_path = source_path,
             .destination_path = destination_path,
             .stage_path = stage_path,
             .backup_path = backup_path,
-            .expected_size = @intCast(statement.columnInt64(4)),
-            .expected_modified_ns = statement.columnInt64(5),
-            .committed_size = if (statement.columnIsNull(6)) null else @intCast(statement.columnInt64(6)),
-            .committed_modified_ns = if (statement.columnIsNull(7)) null else statement.columnInt64(7),
+            .expected_size = @intCast(statement.columnInt64(5)),
+            .expected_modified_ns = statement.columnInt64(6),
+            .committed_size = if (statement.columnIsNull(7)) null else @intCast(statement.columnInt64(7)),
+            .committed_modified_ns = if (statement.columnIsNull(8)) null else statement.columnInt64(8),
             .state = state_value,
         };
     }
