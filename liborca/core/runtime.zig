@@ -215,6 +215,21 @@ pub const OrcaRuntime = struct {
         return try (try self.players.get(player)).player.seek(frame);
     }
 
+    pub fn playPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
+        try self.requireRunning();
+        (try self.players.get(player)).player.play();
+    }
+
+    pub fn pausePlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
+        try self.requireRunning();
+        (try self.players.get(player)).player.pause();
+    }
+
+    pub fn stopPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
+        try self.requireRunning();
+        (try self.players.get(player)).player.stop();
+    }
+
     pub fn playerSnapshot(self: *OrcaRuntime, player: PlayerHandle) !audio.player.Snapshot {
         try self.requireRunning();
         return (try self.players.get(player)).player.snapshot();

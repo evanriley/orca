@@ -44,7 +44,15 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .root_module = liborca_module,
     });
+    liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     b.installArtifact(liborca);
+
+    const liborca_shared = b.addLibrary(.{
+        .name = "orca",
+        .linkage = .dynamic,
+        .root_module = liborca_module,
+    });
+    b.installArtifact(liborca_shared);
 
     const cli = b.addExecutable(.{
         .name = "orca-cli",
@@ -76,9 +84,27 @@ pub fn build(b: *std.Build) void {
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
+    const c_abi_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    c_abi_module.addCSourceFile(.{
+        .file = b.path("tests/c_abi_smoke.c"),
+        .flags = &.{"-std=c11"},
+    });
+    c_abi_module.addIncludePath(b.path("liborca"));
+    const c_abi_smoke = b.addExecutable(.{
+        .name = "c-abi-smoke",
+        .root_module = c_abi_module,
+    });
+    c_abi_module.linkLibrary(liborca);
+    const run_c_abi_smoke = b.addRunArtifact(c_abi_smoke);
+
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_c_abi_smoke.step);
 
     if (target.result.os.tag == .linux) {
         const dependency_test_module = b.createModule(.{
