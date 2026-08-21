@@ -1,5 +1,6 @@
 const pcm = @import("pcm.zig");
 const processing = @import("processing.zig");
+const resampler_api = @import("resampler.zig");
 
 pub const Scope = enum { player, zone };
 
@@ -68,9 +69,34 @@ pub fn inspect(
     player_nodes: []const processing.Processor,
     zone_nodes: []const processing.Processor,
 ) Report(capacity) {
+    return inspectWithResampler(capacity, source, output, player_nodes, zone_nodes, null);
+}
+
+pub fn inspectWithResampler(
+    comptime capacity: usize,
+    source: pcm.Format,
+    output: pcm.Format,
+    player_nodes: []const processing.Processor,
+    zone_nodes: []const processing.Processor,
+    resampler: ?resampler_api.Metadata,
+) Report(capacity) {
     var report: Report(capacity) = .{};
     report.addNodes(.player, player_nodes);
     report.addNodes(.zone, zone_nodes);
+    if (resampler) |metadata| {
+        if (report.node_count < capacity) {
+            report.nodes[report.node_count] = .{
+                .scope = .zone,
+                .name = metadata.name,
+                .changes_samples = true,
+                .realtime_safe = metadata.realtime_safe,
+                .algorithmic_latency_frames = metadata.algorithmic_latency_frames,
+            };
+            report.node_count += 1;
+        }
+        report.algorithmic_latency_frames +|= metadata.algorithmic_latency_frames;
+        report.addReason(.sample_rate_conversion);
+    }
     if (source.sample_rate != output.sample_rate) report.addReason(.sample_rate_conversion);
     if (source.channels != output.channels) report.addReason(.channel_layout_conversion);
     if (source.sample_format != output.sample_format or
@@ -99,4 +125,22 @@ test "signal path explains bit-perfect eligibility" {
     const processed = inspect(2, format, format, &gain_nodes, &.{});
     try std.testing.expect(!processed.bit_perfect_eligible);
     try std.testing.expectEqualSlices(Reason, &.{.sample_processing}, processed.reasons[0..1]);
+
+    var linear = try resampler_api.Linear.init(48_000, 96_000, 2);
+    const resampled = inspectWithResampler(
+        2,
+        format,
+        .{
+            .sample_format = .float_32,
+            .channels = 2,
+            .sample_rate = 96_000,
+            .bits_per_sample = 32,
+            .bytes_per_frame = 8,
+        },
+        &.{},
+        &.{},
+        linear.resampler().metadata,
+    );
+    try std.testing.expectEqual(@as(u32, 1), resampled.algorithmic_latency_frames);
+    try std.testing.expectEqual(@as(usize, 1), resampled.reason_count);
 }
