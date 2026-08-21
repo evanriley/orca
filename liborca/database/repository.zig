@@ -187,27 +187,23 @@ pub const TrackRepository = struct {
         try statement.bindText(1, query);
         try statement.bindInt64(2, limit);
         try statement.bindInt64(3, offset);
+        return collectTrackPage(allocator, statement);
+    }
 
-        var results: std.ArrayList(TrackSummary) = .empty;
-        errdefer {
-            for (results.items) |item| item.deinit(allocator);
-            results.deinit(allocator);
-        }
-        while (try statement.step() == .row) {
-            const title = try allocator.dupe(u8, statement.columnText(1));
-            errdefer allocator.free(title);
-            const album = try allocator.dupe(u8, statement.columnText(2));
-            errdefer allocator.free(album);
-            const album_artist = try allocator.dupe(u8, statement.columnText(3));
-            errdefer allocator.free(album_artist);
-            try results.append(allocator, .{
-                .id = statement.columnInt64(0),
-                .title = title,
-                .album = album,
-                .album_artist = album_artist,
-            });
-        }
-        return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
+    pub fn page(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !TrackPage {
+        var statement = try self.db.prepare(
+            \\SELECT id, title, album, album_artist FROM tracks
+            \\ORDER BY id LIMIT ?1 OFFSET ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
+        return collectTrackPage(allocator, statement);
     }
 
     pub fn count(self: *const TrackRepository) !u64 {
@@ -225,6 +221,29 @@ pub const TrackRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 };
+
+fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !TrackPage {
+    var results: std.ArrayList(TrackSummary) = .empty;
+    errdefer {
+        for (results.items) |item| item.deinit(allocator);
+        results.deinit(allocator);
+    }
+    while (try statement.step() == .row) {
+        const title = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(title);
+        const album = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(album);
+        const album_artist = try allocator.dupe(u8, statement.columnText(3));
+        errdefer allocator.free(album_artist);
+        try results.append(allocator, .{
+            .id = statement.columnInt64(0),
+            .title = title,
+            .album = album,
+            .album_artist = album_artist,
+        });
+    }
+    return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
+}
 
 pub const ObservedFileRepository = struct {
     db: sqlite.Database,

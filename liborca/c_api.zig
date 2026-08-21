@@ -26,6 +26,20 @@ pub const PlayerSnapshot = extern struct {
     position_frames: u64,
 };
 
+pub const StringView = extern struct {
+    pointer: [*]const u8,
+    length: usize,
+};
+
+pub const TrackView = extern struct {
+    id: i64,
+    title: StringView,
+    album: StringView,
+    album_artist: StringView,
+};
+
+pub const TrackCallback = *const fn (?*anyopaque, *const TrackView) callconv(.c) void;
+
 const RuntimeBox = struct {
     runtime: core.OrcaRuntime,
 };
@@ -40,6 +54,76 @@ pub export fn orca_runtime_destroy(runtime: ?*Runtime) callconv(.c) void {
     const box = runtimeBox(runtime) orelse return;
     box.runtime.deinit();
     std.heap.c_allocator.destroy(box);
+}
+
+pub export fn orca_library_open(
+    runtime: ?*Runtime,
+    path: ?[*:0]const u8,
+    output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    const path_pointer = path orelse return .invalid_argument;
+    const destination = output orelse return .invalid_argument;
+    const library = box.runtime.openLibrary(std.mem.span(path_pointer)) catch |err|
+        return mapError(err);
+    destination.* = exportLibraryHandle(library);
+    return .ok;
+}
+
+pub export fn orca_library_close(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    box.runtime.destroyLibrary(importLibrary(library)) catch |err| return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_library_track_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.libraryTrackCount(importLibrary(library)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_library_query_tracks(
+    runtime: ?*Runtime,
+    library: Handle,
+    query_pointer: ?[*]const u8,
+    query_length: usize,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?TrackCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    const visit = callback orelse return .invalid_argument;
+    if (limit == 0 or limit > 512) return .invalid_argument;
+    const query = if (query_pointer) |pointer|
+        pointer[0..query_length]
+    else if (query_length == 0)
+        ""
+    else
+        return .invalid_argument;
+    var page = box.runtime.libraryTrackPage(
+        importLibrary(library),
+        query,
+        limit,
+        offset,
+    ) catch |err| return mapError(err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: TrackView = .{
+            .id = item.id,
+            .title = stringView(item.title),
+            .album = stringView(item.album),
+            .album_artist = stringView(item.album_artist),
+        };
+        visit(context, &view);
+    }
+    return .ok;
 }
 
 pub export fn orca_player_create(
@@ -115,8 +199,20 @@ fn exportHandle(handle: core.PlayerHandle) Handle {
     return .{ .index = handle.index, .generation = handle.generation };
 }
 
+fn exportLibraryHandle(handle: core.LibraryHandle) Handle {
+    return .{ .index = handle.index, .generation = handle.generation };
+}
+
 fn importPlayer(handle: Handle) core.PlayerHandle {
     return .{ .index = handle.index, .generation = handle.generation };
+}
+
+fn importLibrary(handle: Handle) core.LibraryHandle {
+    return .{ .index = handle.index, .generation = handle.generation };
+}
+
+fn stringView(value: []const u8) StringView {
+    return .{ .pointer = value.ptr, .length = value.len };
 }
 
 fn mapError(err: anyerror) Status {
@@ -142,4 +238,42 @@ test "C ABI exposes opaque runtime and POD player snapshots" {
     try std.testing.expect(generation > 1);
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
     try std.testing.expectEqual(Status.stale_handle, orca_player_snapshot(runtime, player, &snapshot));
+}
+
+test "C ABI library query is bounded and callback-scoped" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api?mode=memory&cache=shared",
+        &library,
+    ));
+    const box = runtimeBox(runtime).?;
+    try (try box.runtime.libraryDatabase(importLibrary(library))).tracks.insertBatch(&.{
+        .{ .title = "First", .album = "Generated", .album_artist = "Orca" },
+        .{ .title = "Second", .album = "Generated", .album_artist = "Orca" },
+    });
+    var count: u64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_track_count(runtime, library, &count));
+    try std.testing.expectEqual(@as(u64, 2), count);
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_query_tracks(
+        runtime,
+        library,
+        null,
+        0,
+        1,
+        1,
+        &visited,
+        countTrack,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(track.title.length != 0);
 }

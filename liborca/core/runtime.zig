@@ -122,6 +122,24 @@ pub const OrcaRuntime = struct {
         return (try self.libraries.get(library)).database orelse error.LibraryHasNoDatabase;
     }
 
+    pub fn libraryTrackCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).tracks.count();
+    }
+
+    pub fn libraryTrackPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: []const u8,
+        limit: u32,
+        offset: u32,
+    ) !database.TrackPage {
+        const tracks = &(try self.libraryDatabase(library)).tracks;
+        return if (query.len == 0)
+            tracks.page(self.allocator, limit, offset)
+        else
+            tracks.search(self.allocator, query, limit, offset);
+    }
+
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {
         try self.requireRunning();
         const player = try self.allocator.create(audio.player.Player);
