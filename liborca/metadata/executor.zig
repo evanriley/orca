@@ -13,7 +13,7 @@ pub const Executor = struct {
     pub fn executePlan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
         for (plan.actions) |action| switch (action) {
-            .write_tags => |write| if (!hasMp3Extension(write.path))
+            .write_tags => |write| _ = tagFormat(write.path) orelse
                 return error.UnsupportedTagWriter,
             .move => {},
         };
@@ -55,16 +55,34 @@ pub const Executor = struct {
                     .expected_size = write.expected.size_bytes,
                     .expected_modified_ns = write.expected.modified_ns,
                 });
-                file_mutation.stageId3v1(
-                    self.io,
-                    write.path,
-                    stage_path,
-                    write.expected,
-                    write.changes,
-                ) catch |err| {
+                const format = tagFormat(write.path).?;
+                (switch (format) {
+                    .id3v1 => file_mutation.stageId3v1(
+                        self.io,
+                        write.path,
+                        stage_path,
+                        write.expected,
+                        write.changes,
+                    ),
+                    .flac => file_mutation.stageFlac(
+                        self.allocator,
+                        self.io,
+                        write.path,
+                        stage_path,
+                        write.expected,
+                        write.changes,
+                    ),
+                }) catch |err| {
                     self.journal.transition(operation, .planned, .failed, @errorName(err)) catch {};
                     return err;
                 };
+                const staged_identity = try file_mutation.identity(self.io, stage_path);
+                try self.journal.recordResultIdentity(
+                    operation,
+                    .planned,
+                    staged_identity.size_bytes,
+                    staged_identity.modified_ns,
+                );
                 try self.journal.transition(operation, .planned, .staged, null);
                 file_mutation.commitReplacement(
                     self.io,
@@ -100,6 +118,12 @@ pub const Executor = struct {
                     .expected_size = move.expected.size_bytes,
                     .expected_modified_ns = move.expected.modified_ns,
                 });
+                try self.journal.recordResultIdentity(
+                    operation,
+                    .planned,
+                    current.size_bytes,
+                    current.modified_ns,
+                );
                 try self.journal.transition(operation, .planned, .staged, null);
                 std.Io.Dir.cwd().renamePreserve(
                     move.source_path,
@@ -157,8 +181,67 @@ pub const Executor = struct {
             .move => operation.destination_path orelse return error.MissingMutationDestination,
         };
         const current = try file_mutation.identity(self.io, current_path);
-        if (!std.meta.eql(expected, current)) return error.FileIdentityChanged;
+        if (!std.meta.eql(expected, current)) {
+            try self.journal.transition(
+                operation_id,
+                .committed,
+                .needs_reconciliation,
+                "undo target changed externally",
+            );
+            return error.MutationNeedsReconciliation;
+        }
         try self.rollbackOperation(operation_id);
+    }
+
+    /// Undo a logical group only after every current after-state has been
+    /// validated. Operations then reverse in action order so write-then-move
+    /// plans restore the path before restoring the original tagged bytes.
+    pub fn undoGroup(self: *Executor, group_id: u64) !void {
+        if (group_id == 0) return error.InvalidMutationGroup;
+        const ids = try self.journal.groupOperationIds(self.allocator, group_id);
+        defer self.allocator.free(ids);
+        if (ids.len == 0) return error.MutationGroupNotFound;
+        var operations: std.ArrayList(database.MutationOperation) = .empty;
+        defer {
+            for (operations.items) |operation| operation.deinit();
+            operations.deinit(self.allocator);
+        }
+        try operations.ensureTotalCapacity(self.allocator, ids.len);
+        for (ids) |id| operations.appendAssumeCapacity(
+            try self.journal.get(self.allocator, id),
+        );
+
+        for (operations.items, 0..) |operation, index| {
+            if (operation.state != .committed)
+                return error.MutationGroupNotCommitted;
+            var current_path = switch (operation.kind) {
+                .write_tags => operation.source_path,
+                .move => operation.destination_path orelse
+                    return error.MissingMutationDestination,
+            };
+            var later_index = index;
+            while (later_index > 0) {
+                later_index -= 1;
+                const later = operations.items[later_index];
+                if (later.kind == .move and std.mem.eql(u8, later.source_path, current_path))
+                    current_path = later.destination_path orelse
+                        return error.MissingMutationDestination;
+            }
+            if (!try pathExists(self.io, current_path)) {
+                try self.reconcile(operation.id, operation.state, "group undo target is missing");
+                return error.MutationNeedsReconciliation;
+            }
+            const current = try file_mutation.identity(self.io, current_path);
+            if (!std.meta.eql(try resultIdentity(operation), current)) {
+                try self.reconcile(operation.id, operation.state, "group undo target changed externally");
+                return error.MutationNeedsReconciliation;
+            }
+            if (operation.kind == .move and try pathExists(self.io, operation.source_path)) {
+                try self.reconcile(operation.id, operation.state, "group undo destination exists");
+                return error.MutationNeedsReconciliation;
+            }
+        }
+        for (ids) |id| try self.rollbackOperation(id);
     }
 
     /// Resolve a nonterminal journal entry after interruption. Recovery always
@@ -166,13 +249,21 @@ pub const Executor = struct {
     pub fn recoverOperation(self: *Executor, operation_id: i64) !void {
         var operation = try self.journal.get(self.allocator, operation_id);
         defer operation.deinit();
-        if (operation.state == .committed or operation.state == .rolled_back) return;
+        if (operation.state == .committed or operation.state == .rolled_back or
+            operation.state == .needs_reconciliation) return;
         if (operation.kind == .move) {
             const destination = operation.destination_path orelse
                 return error.MissingMutationDestination;
             if (try pathExists(self.io, destination)) {
-                if (try pathExists(self.io, operation.source_path))
-                    return error.MutationRecoveryConflict;
+                if (try pathExists(self.io, operation.source_path)) {
+                    try self.reconcile(operation_id, operation.state, "move source and destination both exist");
+                    return error.MutationNeedsReconciliation;
+                }
+                const current = try file_mutation.identity(self.io, destination);
+                if (!std.meta.eql(try resultIdentity(operation), current)) {
+                    try self.reconcile(operation_id, operation.state, "move destination changed externally");
+                    return error.MutationNeedsReconciliation;
+                }
                 try std.Io.Dir.cwd().renamePreserve(
                     destination,
                     std.Io.Dir.cwd(),
@@ -185,6 +276,13 @@ pub const Executor = struct {
         const stage_path = operation.stage_path orelse return error.MissingMutationStagePath;
         const backup_path = operation.backup_path orelse return error.MissingMutationBackupPath;
         if (try pathExists(self.io, backup_path)) {
+            if (try pathExists(self.io, operation.source_path)) {
+                const current = try file_mutation.identity(self.io, operation.source_path);
+                if (!std.meta.eql(try resultIdentity(operation), current)) {
+                    try self.reconcile(operation_id, operation.state, "tag target changed externally");
+                    return error.MutationNeedsReconciliation;
+                }
+            }
             const displaced_path = try std.fmt.allocPrint(
                 self.allocator,
                 "{s}.recovery-displaced",
@@ -227,8 +325,17 @@ pub const Executor = struct {
                 .rolled_back,
                 "recovered",
             ),
-            .committed, .rolled_back => unreachable,
+            .committed, .rolled_back, .needs_reconciliation => unreachable,
         }
+    }
+
+    fn reconcile(
+        self: *Executor,
+        operation_id: i64,
+        state: database.MutationState,
+        message: []const u8,
+    ) !void {
+        try self.journal.transition(operation_id, state, .needs_reconciliation, message);
     }
 
     fn rollbackOperation(self: *Executor, operation_id: i64) !void {
@@ -239,7 +346,10 @@ pub const Executor = struct {
         if (operation.kind == .move) {
             const destination = operation.destination_path orelse
                 return error.MissingMutationDestination;
-            if (try pathExists(self.io, operation.source_path)) return error.UndoDestinationExists;
+            if (try pathExists(self.io, operation.source_path)) {
+                try self.reconcile(operation_id, operation.state, "move source already exists");
+                return error.MutationNeedsReconciliation;
+            }
             try std.Io.Dir.cwd().renamePreserve(
                 destination,
                 std.Io.Dir.cwd(),
@@ -261,8 +371,25 @@ pub const Executor = struct {
     }
 };
 
-fn hasMp3Extension(path: []const u8) bool {
-    return path.len >= 4 and std.ascii.eqlIgnoreCase(path[path.len - 4 ..], ".mp3");
+fn resultIdentity(operation: database.MutationOperation) !mutation.FileIdentity {
+    return .{
+        .size_bytes = operation.committed_size orelse return error.MissingCommittedIdentity,
+        .modified_ns = operation.committed_modified_ns orelse
+            return error.MissingCommittedIdentity,
+    };
+}
+
+const TagFormat = enum { id3v1, flac };
+
+fn tagFormat(path: []const u8) ?TagFormat {
+    if (hasExtension(path, ".mp3")) return .id3v1;
+    if (hasExtension(path, ".flac")) return .flac;
+    return null;
+}
+
+fn hasExtension(path: []const u8, extension: []const u8) bool {
+    return path.len >= extension.len and
+        std.ascii.eqlIgnoreCase(path[path.len - extension.len ..], extension);
 }
 
 fn pathExists(io: std.Io, path: []const u8) !bool {
@@ -344,7 +471,11 @@ test "approved plan commits through journal and undo detects external edits" {
     defer changed.close(std.testing.io);
     const stat = try changed.stat(std.testing.io);
     try changed.writePositionalAll(std.testing.io, "external", stat.size);
-    try std.testing.expectError(error.FileIdentityChanged, executor.undoOperation(2));
+    try std.testing.expectError(error.MutationNeedsReconciliation, executor.undoOperation(2));
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try library.mutation_journal.state(2),
+    );
 }
 
 fn expectTitle(path: []const u8, expected: []const u8) !void {
@@ -413,6 +544,13 @@ test "recovery restores original after replacement before journal commit" {
         .before = "Before crash",
         .after = "Interrupted",
     }});
+    const staged_identity = try file_mutation.identity(std.testing.io, stage);
+    try library.mutation_journal.recordResultIdentity(
+        operation,
+        .planned,
+        staged_identity.size_bytes,
+        staged_identity.modified_ns,
+    );
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try file_mutation.commitReplacement(std.testing.io, source, stage, backup);
 
@@ -426,6 +564,94 @@ test "recovery restores original after replacement before journal commit" {
     try std.testing.expectEqual(
         database.MutationState.rolled_back,
         try library.mutation_journal.state(operation),
+    );
+
+    const expected_again = try file_mutation.identity(std.testing.io, source);
+    const staged_only = try library.mutation_journal.prepare(.{
+        .plan_id = 91,
+        .group_id = 91,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = source,
+        .stage_path = stage,
+        .backup_path = backup,
+        .expected_size = expected_again.size_bytes,
+        .expected_modified_ns = expected_again.modified_ns,
+    });
+    try file_mutation.stageId3v1(std.testing.io, source, stage, expected_again, &.{.{
+        .field = .title,
+        .before = "Before crash",
+        .after = "Staged only",
+    }});
+    const staged_only_identity = try file_mutation.identity(std.testing.io, stage);
+    try library.mutation_journal.recordResultIdentity(
+        staged_only,
+        .planned,
+        staged_only_identity.size_bytes,
+        staged_only_identity.modified_ns,
+    );
+    try library.mutation_journal.transition(staged_only, .planned, .staged, null);
+    try executor.recoverOperation(staged_only);
+    try expectTitle(source, "Before crash");
+    try std.testing.expect(!(try pathExists(std.testing.io, stage)));
+
+    const planned_only = try library.mutation_journal.prepare(.{
+        .plan_id = 92,
+        .group_id = 92,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = source,
+        .stage_path = stage,
+        .backup_path = backup,
+        .expected_size = expected_again.size_bytes,
+        .expected_modified_ns = expected_again.modified_ns,
+    });
+    try executor.recoverOperation(planned_only);
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try library.mutation_journal.state(planned_only),
+    );
+
+    const changed_during_recovery = try library.mutation_journal.prepare(.{
+        .plan_id = 93,
+        .group_id = 93,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = source,
+        .stage_path = stage,
+        .backup_path = backup,
+        .expected_size = expected_again.size_bytes,
+        .expected_modified_ns = expected_again.modified_ns,
+    });
+    try file_mutation.stageId3v1(std.testing.io, source, stage, expected_again, &.{.{
+        .field = .title,
+        .before = "Before crash",
+        .after = "Interrupted again",
+    }});
+    const changed_stage_identity = try file_mutation.identity(std.testing.io, stage);
+    try library.mutation_journal.recordResultIdentity(
+        changed_during_recovery,
+        .planned,
+        changed_stage_identity.size_bytes,
+        changed_stage_identity.modified_ns,
+    );
+    try library.mutation_journal.transition(changed_during_recovery, .planned, .staged, null);
+    try file_mutation.commitReplacement(std.testing.io, source, stage, backup);
+    const externally_changed = try std.Io.Dir.cwd().openFile(
+        std.testing.io,
+        source,
+        .{ .mode = .read_write },
+    );
+    defer externally_changed.close(std.testing.io);
+    const changed_stat = try externally_changed.stat(std.testing.io);
+    try externally_changed.writePositionalAll(std.testing.io, "external", changed_stat.size);
+    try std.testing.expectError(
+        error.MutationNeedsReconciliation,
+        executor.recoverOperation(changed_during_recovery),
+    );
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try library.mutation_journal.state(changed_during_recovery),
     );
 }
 
@@ -495,8 +721,7 @@ test "approved move supports undo and rejects an externally edited destination" 
     try std.testing.expect(!(try pathExists(std.testing.io, source)));
     try std.testing.expect(try pathExists(std.testing.io, destination));
     try expectTitle(destination, "After move");
-    try executor.undoOperation(2);
-    try executor.undoOperation(1);
+    try executor.undoGroup(100);
     try std.testing.expect(try pathExists(std.testing.io, source));
     try std.testing.expect(!(try pathExists(std.testing.io, destination)));
     try expectTitle(source, "Before move");
@@ -518,7 +743,11 @@ test "approved move supports undo and rejects an externally edited destination" 
     defer changed.close(std.testing.io);
     const stat = try changed.stat(std.testing.io);
     try changed.writePositionalAll(std.testing.io, "external", stat.size);
-    try std.testing.expectError(error.FileIdentityChanged, executor.undoOperation(3));
+    try std.testing.expectError(error.MutationNeedsReconciliation, executor.undoOperation(3));
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try library.mutation_journal.state(3),
+    );
 }
 
 test "move recovery restores a rename interrupted before journal commit" {
@@ -559,6 +788,12 @@ test "move recovery restores a rename interrupted before journal commit" {
         .expected_size = expected.size_bytes,
         .expected_modified_ns = expected.modified_ns,
     });
+    try library.mutation_journal.recordResultIdentity(
+        operation,
+        .planned,
+        expected.size_bytes,
+        expected.modified_ns,
+    );
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try std.Io.Dir.cwd().renamePreserve(source, std.Io.Dir.cwd(), destination, std.testing.io);
     var executor: Executor = .{

@@ -61,6 +61,7 @@ pub const MutationState = enum {
     committed,
     rolled_back,
     failed,
+    needs_reconciliation,
 };
 
 pub const MutationOperationInput = struct {
@@ -458,6 +459,29 @@ pub const MutationJournalRepository = struct {
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
 
+    pub fn recordResultIdentity(
+        self: *MutationJournalRepository,
+        operation_id: i64,
+        expected_state: MutationState,
+        size: u64,
+        modified_ns: i64,
+    ) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations
+            \\SET committed_size=?1, committed_modified_ns=?2, updated_at=unixepoch()
+            \\WHERE id=?3 AND state=?4;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intCast(size));
+        try statement.bindInt64(2, modified_ns);
+        try statement.bindInt64(3, operation_id);
+        try statement.bindInt64(4, @backingInt(expected_state));
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleMutationOperation;
+    }
+
     pub fn get(
         self: *const MutationJournalRepository,
         allocator: std.mem.Allocator,
@@ -499,6 +523,24 @@ pub const MutationJournalRepository = struct {
             .state = state_value,
         };
     }
+
+    pub fn groupOperationIds(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+        group_id: u64,
+    ) ![]i64 {
+        var statement = try self.db.prepare(
+            \\SELECT id FROM mutation_operations
+            \\WHERE group_id=?1 ORDER BY action_index DESC;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intCast(group_id));
+        var ids: std.ArrayList(i64) = .empty;
+        errdefer ids.deinit(allocator);
+        while (try statement.step() == .row)
+            try ids.append(allocator, statement.columnInt64(0));
+        return ids.toOwnedSlice(allocator);
+    }
 };
 
 fn duplicateNullableColumn(
@@ -511,11 +553,13 @@ fn duplicateNullableColumn(
 }
 
 fn validMutationTransition(from: MutationState, to: MutationState) bool {
+    if (to == .needs_reconciliation) return from != .rolled_back and
+        from != .needs_reconciliation;
     return switch (from) {
         .planned => to == .staged or to == .failed,
         .staged => to == .committed or to == .rolled_back or to == .failed,
         .failed => to == .rolled_back,
         .committed => to == .rolled_back,
-        .rolled_back => false,
+        .rolled_back, .needs_reconciliation => false,
     };
 }
