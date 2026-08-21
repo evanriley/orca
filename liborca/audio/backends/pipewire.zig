@@ -1,13 +1,31 @@
 const std = @import("std");
+const contract = @import("../backend.zig");
 const buffer = @import("../buffer.zig");
+const pcm = @import("../pcm.zig");
 const render_pipe = @import("../render.zig");
+const zone = @import("../zone.zig");
 
 extern fn orca_pw_library_version() [*:0]const u8;
 extern fn orca_pw_initialize() void;
 extern fn orca_pw_deinitialize() void;
+const NativeDevice = extern struct {
+    id: u64,
+    name_len: u16,
+    name: [256]u8,
+};
+extern fn orca_pw_discover([*]NativeDevice, u32, *u32) c_int;
 pub const RenderFn = *const fn (?*anyopaque, [*]f32, u32, u32) callconv(.c) void;
-extern fn orca_pw_output_create(u32, u32, RenderFn, ?*anyopaque) ?*anyopaque;
+extern fn orca_pw_output_create(u64, u32, u32, u32, RenderFn, ?*anyopaque) ?*anyopaque;
 extern fn orca_pw_output_destroy(?*anyopaque) void;
+const NativeTiming = extern struct {
+    sample_time: u64,
+    monotonic_ns: i64,
+    device_delay_frames: i64,
+    queued_frames: u64,
+    buffered_frames: u64,
+    quantum_frames: u32,
+};
+extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
 extern fn orca_pw_fill(?RenderFn, ?*anyopaque, [*]f32, u32, u32) void;
 
 /// Process-level PipeWire client library lifetime. Server connections and
@@ -30,29 +48,107 @@ pub const Backend = struct {
     pub fn libraryVersion() []const u8 {
         return std.mem.span(orca_pw_library_version());
     }
+
+    pub fn discover(_: *Backend, devices: []contract.Device) !usize {
+        var native: [64]NativeDevice = undefined;
+        const limit = @min(devices.len, native.len);
+        var count: u32 = 0;
+        if (orca_pw_discover(&native, @intCast(limit), &count) < 0)
+            return error.PipeWireDiscoveryFailed;
+        for (native[0..count], devices[0..count]) |source, *destination| {
+            destination.* = .{
+                .id = source.id,
+                .name = source.name,
+                .name_len = source.name_len,
+            };
+        }
+        return count;
+    }
 };
 
 /// Owns one autoconnected float32 PipeWire playback stream. The render
 /// function is called directly on PipeWire's real-time process thread.
 pub const OutputSession = struct {
     native: *anyopaque,
+    format: pcm.Format,
+    requested_latency_frames: u32,
 
     pub fn open(
-        sample_rate: u32,
-        channels: u16,
+        request: contract.OpenRequest,
         render: RenderFn,
         userdata: ?*anyopaque,
     ) !OutputSession {
-        const native = orca_pw_output_create(sample_rate, channels, render, userdata) orelse
+        try request.format.validate();
+        if (request.format.sample_format != .float_32 or
+            request.format.bits_per_sample != 32 or
+            request.format.bytes_per_frame != request.format.channels * 4)
+            return error.UnsupportedOutputFormat;
+        const native = orca_pw_output_create(
+            request.device_id,
+            request.format.sample_rate,
+            request.format.channels,
+            requestedLatency(request),
+            render,
+            userdata,
+        ) orelse
             return error.PipeWireOutputUnavailable;
-        return .{ .native = native };
+        return .{
+            .native = native,
+            .format = request.format,
+            .requested_latency_frames = requestedLatency(request),
+        };
     }
 
     pub fn close(self: *OutputSession) void {
         orca_pw_output_destroy(self.native);
         self.* = undefined;
     }
+
+    pub fn timing(self: *const OutputSession) !contract.TimingSnapshot {
+        var native: NativeTiming = undefined;
+        if (orca_pw_output_timing(self.native, &native) < 0)
+            return error.PipeWireTimingUnavailable;
+        return .{
+            .sample_time = native.sample_time,
+            .monotonic_ns = native.monotonic_ns,
+            .device_delay_frames = if (native.device_delay_frames >= 0)
+                @intCast(native.device_delay_frames)
+            else
+                null,
+            .queued_frames = native.queued_frames,
+            .buffered_frames = native.buffered_frames,
+            .backend_quantum_frames = native.quantum_frames,
+        };
+    }
+
+    pub fn latency(
+        self: *const OutputSession,
+        render_ahead_frames: u32,
+        dsp_frames: u32,
+    ) !zone.Latency {
+        const current = try self.timing();
+        return .{
+            .requested_frames = self.requested_latency_frames,
+            .backend_quantum_frames = current.backend_quantum_frames,
+            .render_ahead_frames = render_ahead_frames,
+            .dsp_frames = dsp_frames,
+            .hardware_frames = if (current.device_delay_frames) |frames|
+                std.math.cast(u32, frames)
+            else
+                null,
+        };
+    }
 };
+
+fn requestedLatency(request: contract.OpenRequest) u32 {
+    if (request.requested_latency_frames != 0)
+        return request.requested_latency_frames;
+    return switch (request.policy) {
+        .robust => 1024,
+        .interactive => 128,
+        .custom => |custom| custom.target_frames,
+    };
+}
 
 /// Typed context connecting PipeWire's C callback to Orca's wait-free render
 /// pipe. It and every referenced object must outlive the OutputSession.
@@ -140,4 +236,38 @@ test "PipeWire callback consumes Orca prepared blocks without allocation" {
     orca_pw_fill(RenderContext(1).callback, context.userdata(), &samples, 3, 2);
     for (samples) |sample| try std.testing.expectEqual(@as(f32, 0.75), sample);
     pipe.reclaim(&pool);
+}
+
+test "PipeWire output policies choose explicit inspectable latency targets" {
+    const format: pcm.Format = .{
+        .sample_format = .float_32,
+        .channels = 2,
+        .sample_rate = 48_000,
+        .bits_per_sample = 32,
+        .bytes_per_frame = 8,
+    };
+    try std.testing.expectEqual(@as(u32, 1024), requestedLatency(.{
+        .device_id = 0,
+        .format = format,
+        .policy = .robust,
+        .requested_latency_frames = 0,
+    }));
+    try std.testing.expectEqual(@as(u32, 128), requestedLatency(.{
+        .device_id = 0,
+        .format = format,
+        .policy = .interactive,
+        .requested_latency_frames = 0,
+    }));
+    try std.testing.expectEqual(@as(u32, 384), requestedLatency(.{
+        .device_id = 0,
+        .format = format,
+        .policy = .{ .custom = .{ .target_frames = 384 } },
+        .requested_latency_frames = 0,
+    }));
+    try std.testing.expectEqual(@as(u32, 256), requestedLatency(.{
+        .device_id = 0,
+        .format = format,
+        .policy = .robust,
+        .requested_latency_frames = 256,
+    }));
 }

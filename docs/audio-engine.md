@@ -23,3 +23,12 @@ atomic diagnostics, and silence filling. Stream creation and destruction stay
 on the control side. Run `zig build pipewire-live-smoke` to verify a short
 silent stream against the current user's server; normal tests require no live
 audio service.
+
+Device discovery returns bounded Orca-owned snapshots and uses PipeWire object
+serials for stream targeting; device ID zero delegates selection to the server.
+Output requests validate the negotiated float32 contract and translate robust,
+interactive, custom, or explicit latency targets into PipeWire node latency.
+Timing snapshots report sample time, monotonic host time, callback quantum,
+queued and converted frames, and non-negative graph/device delay. These values
+remain distinct in Zone latency reporting rather than being collapsed into a
+zero-latency claim.

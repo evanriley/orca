@@ -8,14 +8,35 @@ typedef void (*orca_pw_render_fn)(void *userdata, float *samples,
 
 struct orca_pw_output;
 
+struct orca_pw_device {
+    uint64_t id;
+    uint16_t name_len;
+    char name[256];
+};
+
+struct orca_pw_timing {
+    uint64_t sample_time;
+    int64_t monotonic_ns;
+    int64_t device_delay_frames;
+    uint64_t queued_frames;
+    uint64_t buffered_frames;
+    uint32_t quantum_frames;
+};
+
 const char *orca_pw_library_version(void);
 void orca_pw_initialize(void);
 void orca_pw_deinitialize(void);
-struct orca_pw_output *orca_pw_output_create(uint32_t sample_rate,
+int orca_pw_discover(struct orca_pw_device *devices, uint32_t capacity,
+                     uint32_t *count);
+struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
+                                              uint32_t sample_rate,
                                               uint32_t channels,
+                                              uint32_t requested_latency_frames,
                                               orca_pw_render_fn render,
                                               void *userdata);
 void orca_pw_output_destroy(struct orca_pw_output *output);
+int orca_pw_output_timing(struct orca_pw_output *output,
+                          struct orca_pw_timing *timing);
 void orca_pw_fill(orca_pw_render_fn render, void *userdata, float *samples,
                   uint32_t frames, uint32_t channels);
 
