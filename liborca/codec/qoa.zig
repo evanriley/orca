@@ -26,6 +26,13 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &vtable,
+        .source_format = .{
+            .sample_format = .signed_16,
+            .channels = format.channels,
+            .sample_rate = format.sample_rate,
+            .bits_per_sample = 16,
+            .bytes_per_frame = try std.math.mul(u16, format.channels, 2),
+        },
         .format = .{
             .sample_format = .float_32,
             .channels = format.channels,
@@ -136,6 +143,7 @@ test "native Zig QOA adapter decodes generated lossy audio" {
     defer local.close();
     var decoder = try openDecoder(std.testing.allocator, local.readable());
     defer decoder.deinit();
+    try std.testing.expectEqual(@import("../audio/pcm.zig").SampleFormat.signed_16, decoder.source_format.?.sample_format);
     try std.testing.expectEqual(@as(u16, 1), decoder.format.channels);
     try std.testing.expectEqual(@as(u32, 48_000), decoder.format.sample_rate);
     try std.testing.expectEqual(@as(?u64, 20), decoder.frame_count);

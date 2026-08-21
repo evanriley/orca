@@ -6,6 +6,9 @@ const pcm = @import("../audio/pcm.zig");
 pub const Decoder = struct {
     context: *anyopaque,
     vtable: *const VTable,
+    /// PCM representation declared by the source before canonical conversion.
+    source_format: ?pcm.Format = null,
+    /// Interleaved working representation returned by readFrames.
     format: pcm.Format,
     frame_count: ?u64,
 

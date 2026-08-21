@@ -68,6 +68,10 @@ pub const Player = struct {
         return if (self.sources) |*sources| sources.format() else null;
     }
 
+    pub fn sourceFormat(self: *const Player) ?pcm.Format {
+        return if (self.sources) |*sources| sources.sourceFormat() else null;
+    }
+
     pub fn decodeAndFanout(
         self: *Player,
         comptime capacity: usize,

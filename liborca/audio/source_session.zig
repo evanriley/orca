@@ -101,6 +101,10 @@ pub const SourceQueue = struct {
         return self.current.decoder.format;
     }
 
+    pub fn sourceFormat(self: *const SourceQueue) @import("pcm.zig").Format {
+        return self.current.decoder.source_format orelse self.current.decoder.format;
+    }
+
     pub fn seek(self: *SourceQueue, frame: u64) !void {
         try self.current.seek(frame);
     }

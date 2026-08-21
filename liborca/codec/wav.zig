@@ -26,6 +26,7 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &decoder_vtable,
+        .source_format = reader.format,
         .format = .{
             .sample_format = .float_32,
             .channels = reader.format.channels,

@@ -35,6 +35,22 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &vtable,
+        .source_format = .{
+            .sample_format = if (format.bits_per_sample <= 16)
+                .signed_16
+            else if (format.bits_per_sample <= 24)
+                .signed_24
+            else
+                .signed_32,
+            .channels = format.channels,
+            .sample_rate = format.sample_rate,
+            .bits_per_sample = format.bits_per_sample,
+            .bytes_per_frame = try std.math.mul(
+                u16,
+                format.channels,
+                (format.bits_per_sample + 7) / 8,
+            ),
+        },
         .format = .{
             .sample_format = .float_32,
             .channels = format.channels,
@@ -46,7 +62,12 @@ pub fn openDecoder(
     };
 }
 
-const StreamFormat = struct { channels: u16, sample_rate: u32, frame_count: u64 };
+const StreamFormat = struct {
+    channels: u16,
+    sample_rate: u32,
+    bits_per_sample: u16,
+    frame_count: u64,
+};
 
 fn readFormat(source: storage.ReadableSource) !StreamFormat {
     var header: [26]u8 = undefined;
@@ -63,6 +84,7 @@ fn readFormat(source: storage.ReadableSource) !StreamFormat {
     return .{
         .channels = channels,
         .sample_rate = sample_rate,
+        .bits_per_sample = @intCast(bits_per_sample),
         .frame_count = stream_bits & 0x0000000fffffffff,
     };
 }
@@ -126,6 +148,7 @@ test "native Zig FLAC adapter decodes and seeks generated audio" {
     defer local.close();
     var decoder = try openDecoder(std.testing.allocator, local.readable());
     defer decoder.deinit();
+    try std.testing.expectEqual(@import("../audio/pcm.zig").SampleFormat.signed_16, decoder.source_format.?.sample_format);
     try std.testing.expectEqual(@as(u16, 2), decoder.format.channels);
     try std.testing.expectEqual(@as(u32, 48_000), decoder.format.sample_rate);
     try std.testing.expectEqual(@as(?u64, 480), decoder.frame_count);
