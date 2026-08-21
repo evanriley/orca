@@ -1,49 +1,35 @@
 const std = @import("std");
 const buffer = @import("buffer.zig");
+const decoder_api = @import("../codec/decoder.zig");
 const render = @import("render.zig");
-const wav = @import("../codec/wav.zig");
 
-/// Producer-side lifetime for the initial WAV vertical slice. The source
-/// capability is borrowed by Reader and must outlive this session.
-pub const WavSourceSession = struct {
-    allocator: std.mem.Allocator,
-    reader: wav.Reader,
-    scratch: []u8,
+/// Codec-neutral producer-side lifetime. Decoder-specific state remains behind
+/// Decoder's Orca-owned interface and the underlying source must outlive it.
+pub const SourceSession = struct {
+    decoder: decoder_api.Decoder,
     next_frame: u64 = 0,
     eof: bool = false,
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        reader: wav.Reader,
-        frames_per_block: u32,
-    ) !WavSourceSession {
-        if (frames_per_block == 0) return error.InvalidBlockSize;
-        const scratch_len = try std.math.mul(
-            usize,
-            frames_per_block,
-            reader.format.bytes_per_frame,
-        );
-        return .{
-            .allocator = allocator,
-            .reader = reader,
-            .scratch = try allocator.alloc(u8, scratch_len),
-        };
+    pub fn init(decoder: decoder_api.Decoder) SourceSession {
+        return .{ .decoder = decoder };
     }
 
-    pub fn deinit(self: *WavSourceSession) void {
-        self.allocator.free(self.scratch);
+    pub fn deinit(self: *SourceSession) void {
+        self.decoder.deinit();
         self.* = undefined;
     }
 
-    pub fn seek(self: *WavSourceSession, frame: u64) void {
-        self.next_frame = @min(frame, self.reader.frameCount());
-        self.eof = self.next_frame == self.reader.frameCount();
+    pub fn seek(self: *SourceSession, frame: u64) !void {
+        const target = if (self.decoder.frame_count) |count| @min(frame, count) else frame;
+        try self.decoder.seek(target);
+        self.next_frame = target;
+        self.eof = if (self.decoder.frame_count) |count| target == count else false;
     }
 
     /// Reclaim callback-consumed blocks and prepare as many future blocks as
     /// bounded pool/queue capacity permits. This is the only file-I/O lane.
     pub fn prime(
-        self: *WavSourceSession,
+        self: *SourceSession,
         comptime queue_capacity: usize,
         pipe: *render.RenderPipe(queue_capacity),
         pool: *buffer.BlockPool,
@@ -54,15 +40,14 @@ pub const WavSourceSession = struct {
         var prepared: usize = 0;
         while (pool.acquire()) |index| {
             const samples = pool.samples(index);
-            if (samples.len % self.reader.format.channels != 0) {
+            if (samples.len % self.decoder.format.channels != 0) {
                 pool.release(index);
                 return error.ChannelMismatch;
             }
-            const frames = try self.reader.readFramesF32(
-                self.next_frame,
-                samples,
-                self.scratch,
-            );
+            const frames = self.decoder.readFrames(samples) catch |err| {
+                pool.release(index);
+                return err;
+            };
             if (frames == 0) {
                 pool.release(index);
                 self.eof = true;
@@ -78,7 +63,7 @@ pub const WavSourceSession = struct {
             }
             self.next_frame += frames;
             prepared += 1;
-            if (self.next_frame == self.reader.frameCount()) {
+            if (self.decoder.frame_count != null and self.next_frame == self.decoder.frame_count.?) {
                 self.eof = true;
                 break;
             }
@@ -106,8 +91,11 @@ test "WAV source session primes bounded canonical blocks" {
     var local = try @import("../storage/source.zig").LocalFileSource.open(std.testing.io, path);
     defer local.close();
 
-    const reader = try wav.Reader.open(local.readable());
-    var session = try WavSourceSession.init(std.testing.allocator, reader, 2);
+    const registry = @import("../codec/registry.zig").CodecRegistry.builtins();
+    var session = SourceSession.init(try registry.openDetected(
+        std.testing.allocator,
+        local.readable(),
+    ));
     defer session.deinit();
     var pool = try buffer.BlockPool.init(std.testing.allocator, 2, 2, 1);
     defer pool.deinit();

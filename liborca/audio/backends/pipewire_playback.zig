@@ -6,7 +6,7 @@ const render = @import("../render.zig");
 const source_session = @import("../source_session.zig");
 const zone = @import("../zone.zig");
 const pipewire = @import("pipewire.zig");
-const wav = @import("../../codec/wav.zig");
+const registry_api = @import("../../codec/registry.zig");
 const storage = @import("../../storage/source.zig");
 
 const block_count = 8;
@@ -30,22 +30,24 @@ pub fn playWavBlocking(
 ) !Report {
     var local = try storage.LocalFileSource.open(io, path);
     defer local.close();
-    const reader = try wav.Reader.open(local.readable());
+    const registry = registry_api.CodecRegistry.builtins();
+    var decoder = try registry.openDetected(allocator, local.readable());
+    const format = decoder.format;
+    const frame_count = decoder.frame_count orelse {
+        decoder.deinit();
+        return error.UnknownTrackLength;
+    };
+    var source = source_session.SourceSession.init(decoder);
+    defer source.deinit();
 
     var pool = try buffer.BlockPool.init(
         allocator,
         block_count,
         frames_per_block,
-        reader.format.channels,
+        format.channels,
     );
     defer pool.deinit();
     var pipe: render.RenderPipe(block_count) = .{};
-    var source = try source_session.WavSourceSession.init(
-        allocator,
-        reader,
-        frames_per_block,
-    );
-    defer source.deinit();
     var transport: player.Player = .{};
 
     _ = try source.prime(
@@ -62,15 +64,15 @@ pub fn playWavBlocking(
         .pool = &pool,
         .pipe = &pipe,
         .generation = &transport.generation,
-        .channels = reader.format.channels,
+        .channels = format.channels,
         .rendered_position = &transport.position_frames,
     };
     const output_format = @import("../pcm.zig").Format{
         .sample_format = .float_32,
-        .channels = reader.format.channels,
-        .sample_rate = reader.format.sample_rate,
+        .channels = format.channels,
+        .sample_rate = format.sample_rate,
         .bits_per_sample = 32,
-        .bytes_per_frame = try std.math.mul(u16, reader.format.channels, 4),
+        .bytes_per_frame = try std.math.mul(u16, format.channels, 4),
     };
     var output = try pipewire.OutputSession.open(.{
         .device_id = device_id,
@@ -81,8 +83,8 @@ pub fn playWavBlocking(
     defer output.close();
     transport.play();
 
-    const track_ms = reader.frameCount() / reader.format.sample_rate * 1000 +
-        (reader.frameCount() % reader.format.sample_rate) * 1000 / reader.format.sample_rate;
+    const track_ms = frame_count / format.sample_rate * 1000 +
+        (frame_count % format.sample_rate) * 1000 / format.sample_rate;
     const iteration_limit = (track_ms + 5000) / 10 + 1;
     var iterations: u64 = 0;
     while (true) {

@@ -5,6 +5,63 @@ const storage = @import("../storage/root.zig");
 pub const SampleFormat = audio_pcm.SampleFormat;
 pub const Format = audio_pcm.Format;
 
+const DecoderContext = struct {
+    allocator: std.mem.Allocator,
+    reader: Reader,
+    scratch: []u8,
+    position: u64 = 0,
+};
+
+pub fn openDecoder(
+    allocator: std.mem.Allocator,
+    source: storage.ReadableSource,
+) !@import("decoder.zig").Decoder {
+    const reader = try Reader.open(source);
+    const context = try allocator.create(DecoderContext);
+    errdefer allocator.destroy(context);
+    const scratch_len = try std.math.mul(usize, 4096, reader.format.bytes_per_frame);
+    const scratch = try allocator.alloc(u8, scratch_len);
+    errdefer allocator.free(scratch);
+    context.* = .{ .allocator = allocator, .reader = reader, .scratch = scratch };
+    return .{
+        .context = context,
+        .vtable = &decoder_vtable,
+        .format = .{
+            .sample_format = .float_32,
+            .channels = reader.format.channels,
+            .sample_rate = reader.format.sample_rate,
+            .bits_per_sample = 32,
+            .bytes_per_frame = try std.math.mul(u16, reader.format.channels, 4),
+        },
+        .frame_count = reader.frameCount(),
+    };
+}
+
+fn decoderRead(context_ptr: *anyopaque, output: []f32) !usize {
+    const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
+    const frames = try context.reader.readFramesF32(context.position, output, context.scratch);
+    context.position += frames;
+    return frames;
+}
+
+fn decoderSeek(context_ptr: *anyopaque, frame: u64) !void {
+    const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
+    context.position = @min(frame, context.reader.frameCount());
+}
+
+fn decoderDeinit(context_ptr: *anyopaque) void {
+    const context: *DecoderContext = @ptrCast(@alignCast(context_ptr));
+    const allocator = context.allocator;
+    allocator.free(context.scratch);
+    allocator.destroy(context);
+}
+
+const decoder_vtable: @import("decoder.zig").Decoder.VTable = .{
+    .read_frames = decoderRead,
+    .seek = decoderSeek,
+    .deinit = decoderDeinit,
+};
+
 pub const Reader = struct {
     source: storage.ReadableSource,
     format: Format,

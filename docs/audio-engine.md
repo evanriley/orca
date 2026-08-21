@@ -40,3 +40,9 @@ the callback advances Player position only for frames actually rendered. The
 CLI exposes this architecture as `orca-cli play WAV [DEVICE_ID]`. The command
 uses server-default output when no ID is supplied and reports played frames,
 underruns, backend quantum, and device/graph delay after completion.
+
+Codec selection is owned by a bounded `CodecRegistry`. Playback sees only an
+Orca `Decoder` interface (canonical format, optional frame count, read, seek,
+and lifetime); WAV parser state and conversion scratch remain private to its
+adapter. `SourceSession` therefore owns any registered Decoder and primes the
+same pool/queue path without codec-specific types.
