@@ -62,10 +62,11 @@ pub fn main(init: std.process.Init) !void {
             .robust,
         );
         try stdout.print(
-            "played={d} underruns={d} quantum={d} delay={?d}\n",
+            "played={d} underruns={d} recoveries={d} quantum={d} delay={?d}\n",
             .{
                 report.frames_played,
                 report.underruns,
+                report.recoveries,
                 report.timing.backend_quantum_frames,
                 report.timing.device_delay_frames,
             },

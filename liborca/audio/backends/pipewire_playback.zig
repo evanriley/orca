@@ -15,6 +15,7 @@ const frames_per_block = 1024;
 pub const Report = struct {
     frames_played: u64,
     underruns: u64,
+    recoveries: u32,
     timing: backend_contract.TimingSnapshot,
     latency: zone.Latency,
 };
@@ -78,21 +79,42 @@ pub fn playFileBlocking(
         .bits_per_sample = 32,
         .bytes_per_frame = try std.math.mul(u16, format.channels, 4),
     };
-    var output = try pipewire.OutputSession.open(.{
+    const open_request: backend_contract.OpenRequest = .{
         .device_id = device_id,
         .format = output_format,
         .policy = policy,
         .requested_latency_frames = 0,
-    }, pipewire.RenderContext(block_count).callback, context.userdata());
-    defer output.close();
+    };
+    var output: ?pipewire.OutputSession = try pipewire.OutputSession.open(
+        open_request,
+        pipewire.RenderContext(block_count).callback,
+        context.userdata(),
+    );
+    defer if (output) |*active| active.close();
     transport.play();
 
     const track_ms = frame_count / format.sample_rate * 1000 +
         (frame_count % format.sample_rate) * 1000 / format.sample_rate;
     const iteration_limit = (track_ms + 5000) / 10 + 1;
     var iterations: u64 = 0;
+    var recoveries: u32 = 0;
     while (true) {
-        if (output.status() == .lost) return error.OutputDeviceLost;
+        if (output.?.status() == .lost) {
+            output.?.close();
+            output = null;
+            var attempts: u8 = 0;
+            while (output == null and attempts < 3) {
+                attempts += 1;
+                sleepMilliseconds(100);
+                output = pipewire.OutputSession.open(
+                    open_request,
+                    pipewire.RenderContext(block_count).callback,
+                    context.userdata(),
+                ) catch null;
+            }
+            if (output == null) return error.OutputRecoveryFailed;
+            recoveries += 1;
+        }
         _ = try transport.prime(
             block_count,
             &pipe,
@@ -108,8 +130,9 @@ pub fn playFileBlocking(
     return .{
         .frames_played = transport.position_frames.load(.acquire),
         .underruns = pipe.underruns.load(.acquire),
-        .timing = try output.timing(),
-        .latency = try output.latency(0, 0),
+        .recoveries = recoveries,
+        .timing = try output.?.timing(),
+        .latency = try output.?.latency(0, 0),
     };
 }
 
