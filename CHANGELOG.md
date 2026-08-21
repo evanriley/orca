@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 - 2026-08-21
+
+Provider-assisted identification and scrobbling milestone.
+
+- Central native HTTP gateway with bounded responses, service identification,
+  serialized rate limits, retry/backoff policy, and explicit offline mode.
+- Durable fresh/stale provider cache and MusicBrainz recording search with
+  offline fallback.
+- Credential-safe AcoustID lookup for externally generated
+  Chromaprint-compatible fingerprints; secrets never enter durable cache keys.
+- Multi-evidence candidate scoring and durable alternatives with explicit
+  confidence instead of silent metadata replacement.
+- Transactional proposal acceptance into Orca metadata that preserves user
+  locks and remains separate from file mutation.
+- Idempotent persistent scrobble queue with eligibility policy, retry state,
+  and secure ListenBrainz and signed Last.fm adapters.
+
 ## 0.9.0 - 2026-08-21
 
 Cached analysis and Library Health milestone.

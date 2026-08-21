@@ -46,6 +46,12 @@ types remain contained in the Linux adapter.
 Linux builds also install the GTK4 frontend, static/shared `liborca`, and the
 foreign-client header at `include/orca/orca.h`.
 
+Online identification and scrobbling are optional. Provider traffic passes
+through one rate-limited, retrying HTTP boundary; credentials are supplied by
+platform secure-storage adapters and are never stored in an Orca library.
+Provider matches remain reviewable proposals until explicitly accepted, and
+acceptance updates Orca metadata without writing media files.
+
 ## Repository layout
 
 - `liborca/` — reusable headless engine
