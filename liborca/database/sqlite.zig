@@ -96,6 +96,16 @@ pub const Statement = struct {
         if (c.sqlite3_bind_null(self.handle, index) != c.SQLITE_OK) return error.BindFailed;
     }
 
+    pub fn bindBlob(self: Statement, index: c_int, value: []const u8) Error!void {
+        if (c.sqlite3_bind_blob64(
+            self.handle,
+            index,
+            value.ptr,
+            value.len,
+            null,
+        ) != c.SQLITE_OK) return error.BindFailed;
+    }
+
     pub fn bindInt64(self: Statement, index: c_int, value: i64) Error!void {
         if (c.sqlite3_bind_int64(self.handle, index, value) != c.SQLITE_OK) {
             return error.BindFailed;
@@ -132,6 +142,13 @@ pub const Statement = struct {
         if (text == null) return "";
         const len: usize = @intCast(c.sqlite3_column_bytes(self.handle, index));
         return @as([*]const u8, @ptrCast(text))[0..len];
+    }
+
+    pub fn columnBlob(self: Statement, index: c_int) []const u8 {
+        const blob = c.sqlite3_column_blob(self.handle, index);
+        if (blob == null) return "";
+        const len: usize = @intCast(c.sqlite3_column_bytes(self.handle, index));
+        return @as([*]const u8, @ptrCast(blob))[0..len];
     }
 
     pub fn columnIsNull(self: Statement, index: c_int) bool {

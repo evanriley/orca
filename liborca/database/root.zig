@@ -14,6 +14,8 @@ pub const OrcaMetadataRepository = repository.OrcaMetadataRepository;
 pub const MutationJournalRepository = repository.MutationJournalRepository;
 pub const MutationOperationInput = repository.MutationOperationInput;
 pub const MutationState = repository.MutationState;
+pub const AnalysisCacheKey = repository.AnalysisCacheKey;
+pub const AnalysisCacheRepository = repository.AnalysisCacheRepository;
 
 test {
     _ = @import("library.zig");

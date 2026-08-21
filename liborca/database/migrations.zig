@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 5;
+pub const current_version = 6;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -143,6 +143,36 @@ const migration_5 =
     \\    ON mutation_operations(group_id, action_index);
 ;
 
+const migration_6 =
+    \\CREATE TABLE analysis_results (
+    \\    path TEXT NOT NULL,
+    \\    kind INTEGER NOT NULL,
+    \\    algorithm_id TEXT NOT NULL,
+    \\    algorithm_version INTEGER NOT NULL,
+    \\    parameter_hash BLOB NOT NULL,
+    \\    source_size INTEGER NOT NULL,
+    \\    source_modified_ns INTEGER NOT NULL,
+    \\    result BLOB NOT NULL,
+    \\    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    PRIMARY KEY(
+    \\        path, kind, algorithm_id, algorithm_version, parameter_hash,
+    \\        source_size, source_modified_ns
+    \\    )
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX analysis_results_current
+    \\    ON analysis_results(path, kind, algorithm_id, algorithm_version);
+    \\CREATE TABLE library_health_issues (
+    \\    path TEXT NOT NULL,
+    \\    kind INTEGER NOT NULL,
+    \\    severity INTEGER NOT NULL,
+    \\    details TEXT NOT NULL DEFAULT '',
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    PRIMARY KEY(path, kind)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX library_health_by_kind
+    \\    ON library_health_issues(kind, severity, path);
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -160,5 +190,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     if (version < 3) try db.exec(migration_3);
     if (version < 4) try db.exec(migration_4);
     if (version < 5) try db.exec(migration_5);
-    try db.exec("PRAGMA user_version=5; COMMIT;");
+    if (version < 6) try db.exec(migration_6);
+    try db.exec("PRAGMA user_version=6; COMMIT;");
 }

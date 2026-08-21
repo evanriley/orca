@@ -13,6 +13,7 @@ pub const LibraryDatabase = struct {
     observed_files: repository.ObservedFileRepository,
     orca_metadata: repository.OrcaMetadataRepository,
     mutation_journal: repository.MutationJournalRepository,
+    analysis_cache: repository.AnalysisCacheRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -33,6 +34,7 @@ pub const LibraryDatabase = struct {
             .observed_files = .{ .db = database, .write_lane = write_lane },
             .orca_metadata = .{ .db = database, .write_lane = write_lane },
             .mutation_journal = .{ .db = database, .write_lane = write_lane },
+            .analysis_cache = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -190,6 +192,52 @@ test "Orca metadata persists provenance and user locks separately from observati
     )).?;
     defer std.testing.allocator.free(observed);
     try std.testing.expectEqualStrings("Observed title", observed);
+}
+
+test "analysis cache reuses exact identities and invalidates selectively" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        "file:orca-test-analysis-cache?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const parameter_hash: [32]u8 = @splat(7);
+    const key: repository.AnalysisCacheKey = .{
+        .path = "/generated/reference.flac",
+        .kind = 1,
+        .algorithm_id = "orca.diagnostics",
+        .algorithm_version = 1,
+        .parameter_hash = parameter_hash,
+        .source_size = 4096,
+        .source_modified_ns = 1234,
+    };
+    try library.analysis_cache.put(key, "\x00cached\xff");
+    const cached = (try library.analysis_cache.get(std.testing.allocator, key)).?;
+    defer std.testing.allocator.free(cached);
+    try std.testing.expectEqualSlices(u8, "\x00cached\xff", cached);
+
+    var changed_version = key;
+    changed_version.algorithm_version = 2;
+    try std.testing.expect((try library.analysis_cache.get(
+        std.testing.allocator,
+        changed_version,
+    )) == null);
+    var changed_source = key;
+    changed_source.source_modified_ns += 1;
+    try std.testing.expect((try library.analysis_cache.get(
+        std.testing.allocator,
+        changed_source,
+    )) == null);
+
+    try library.analysis_cache.put(changed_version, "version two");
+    const version_two = (try library.analysis_cache.get(
+        std.testing.allocator,
+        changed_version,
+    )).?;
+    defer std.testing.allocator.free(version_two);
+    try std.testing.expectEqualStrings("version two", version_two);
+    const version_one = (try library.analysis_cache.get(std.testing.allocator, key)).?;
+    defer std.testing.allocator.free(version_one);
+    try std.testing.expectEqualSlices(u8, "\x00cached\xff", version_one);
 }
 
 test "mutation journal preserves recoverable staged state across reopen" {

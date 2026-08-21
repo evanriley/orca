@@ -99,6 +99,16 @@ pub const MutationOperation = struct {
     }
 };
 
+pub const AnalysisCacheKey = struct {
+    path: []const u8,
+    kind: u8,
+    algorithm_id: []const u8,
+    algorithm_version: u32,
+    parameter_hash: [32]u8,
+    source_size: u64,
+    source_modified_ns: i64,
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -561,6 +571,54 @@ pub const MutationJournalRepository = struct {
         return ids.toOwnedSlice(allocator);
     }
 };
+
+pub const AnalysisCacheRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn get(
+        self: *const AnalysisCacheRepository,
+        allocator: std.mem.Allocator,
+        key: AnalysisCacheKey,
+    ) !?[]u8 {
+        var statement = try self.db.prepare(
+            \\SELECT result FROM analysis_results
+            \\WHERE path=?1 AND kind=?2 AND algorithm_id=?3
+            \\  AND algorithm_version=?4 AND parameter_hash=?5
+            \\  AND source_size=?6 AND source_modified_ns=?7;
+        );
+        defer statement.deinit();
+        try bindAnalysisKey(statement, &key);
+        if (try statement.step() != .row) return null;
+        return try allocator.dupe(u8, statement.columnBlob(0));
+    }
+
+    pub fn put(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO analysis_results(
+            \\    path, kind, algorithm_id, algorithm_version, parameter_hash,
+            \\    source_size, source_modified_ns, result
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            \\ON CONFLICT DO UPDATE SET result=excluded.result, created_at=unixepoch();
+        );
+        defer statement.deinit();
+        try bindAnalysisKey(statement, &key);
+        try statement.bindBlob(8, result);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+};
+
+fn bindAnalysisKey(statement: sqlite.Statement, key: *const AnalysisCacheKey) !void {
+    try statement.bindText(1, key.path);
+    try statement.bindInt64(2, key.kind);
+    try statement.bindText(3, key.algorithm_id);
+    try statement.bindInt64(4, key.algorithm_version);
+    try statement.bindBlob(5, &key.parameter_hash);
+    try statement.bindInt64(6, @intCast(key.source_size));
+    try statement.bindInt64(7, key.source_modified_ns);
+}
 
 fn duplicateNullableColumn(
     allocator: std.mem.Allocator,
