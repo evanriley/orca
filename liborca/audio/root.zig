@@ -1,0 +1,14 @@
+pub const buffer = @import("buffer.zig");
+pub const pcm = @import("pcm.zig");
+pub const player = @import("player.zig");
+pub const render = @import("render.zig");
+pub const spsc = @import("spsc.zig");
+pub const zone = @import("zone.zig");
+
+test {
+    _ = @import("buffer.zig");
+    _ = @import("player.zig");
+    _ = @import("render.zig");
+    _ = @import("spsc.zig");
+    _ = @import("zone.zig");
+}

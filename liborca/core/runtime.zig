@@ -1,4 +1,5 @@
 const std = @import("std");
+const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
@@ -22,6 +23,11 @@ const RuntimeObject = struct {};
 const LibraryObject = struct {
     database: ?*database.LibraryDatabase = null,
 };
+const PlayerObject = struct { player: *audio.player.Player };
+const ZoneObject = struct {
+    zone: *audio.zone.Zone,
+    attached_player: ?PlayerHandle = null,
+};
 
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
@@ -29,8 +35,8 @@ pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
     state: std.atomic.Value(State) = .init(.running),
     libraries: handle.Pool(LibraryObject, object.LibraryTag),
-    players: handle.Pool(RuntimeObject, object.PlayerTag),
-    zones: handle.Pool(RuntimeObject, object.ZoneTag),
+    players: handle.Pool(PlayerObject, object.PlayerTag),
+    zones: handle.Pool(ZoneObject, object.ZoneTag),
     jobs: job.Manager,
     work_registry: work.Registry,
     commands: control.CommandQueue = .{},
@@ -69,7 +75,13 @@ pub const OrcaRuntime = struct {
         self.work_registry.requestCancellation();
         self.work_registry.drain();
         self.jobs.cancelAndDrain();
+        for (self.zones.slots.items) |*slot| {
+            if (slot.value) |zone| self.allocator.destroy(zone.zone);
+        }
         self.zones.discardAll();
+        for (self.players.slots.items) |*slot| {
+            if (slot.value) |player| self.allocator.destroy(player.player);
+        }
         self.players.discardAll();
         for (self.libraries.slots.items) |*slot| {
             if (slot.value) |*library| self.closeLibraryDatabase(library);
@@ -109,22 +121,62 @@ pub const OrcaRuntime = struct {
 
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {
         try self.requireRunning();
-        return self.players.insert(.{});
+        const player = try self.allocator.create(audio.player.Player);
+        errdefer self.allocator.destroy(player);
+        player.* = .{};
+        return self.players.insert(.{ .player = player });
     }
 
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
-        _ = try self.players.remove(player);
+        const removed = try self.players.remove(player);
+        self.allocator.destroy(removed.player);
+        for (self.zones.slots.items) |*slot| {
+            if (slot.value) |*zone| {
+                if (zone.attached_player) |attached| {
+                    if (attached.eql(player)) zone.attached_player = null;
+                }
+            }
+        }
     }
 
     pub fn createZone(self: *OrcaRuntime) !ZoneHandle {
         try self.requireRunning();
-        return self.zones.insert(.{});
+        const zone = try self.allocator.create(audio.zone.Zone);
+        errdefer self.allocator.destroy(zone);
+        zone.* = .{
+            .policy = .robust,
+            .latency = .{
+                .requested_frames = 0,
+                .backend_quantum_frames = 0,
+                .render_ahead_frames = 0,
+                .dsp_frames = 0,
+                .hardware_frames = null,
+            },
+        };
+        return self.zones.insert(.{ .zone = zone });
     }
 
     pub fn destroyZone(self: *OrcaRuntime, zone: ZoneHandle) !void {
         try self.requireRunning();
-        _ = try self.zones.remove(zone);
+        const removed = try self.zones.remove(zone);
+        self.allocator.destroy(removed.zone);
+    }
+
+    pub fn attachZone(self: *OrcaRuntime, zone: ZoneHandle, player: PlayerHandle) !void {
+        try self.requireRunning();
+        _ = try self.players.get(player);
+        (try self.zones.get(zone)).attached_player = player;
+    }
+
+    pub fn seekPlayer(self: *OrcaRuntime, player: PlayerHandle, frame: u64) !u64 {
+        try self.requireRunning();
+        return (try self.players.get(player)).player.seek(frame);
+    }
+
+    pub fn playerSnapshot(self: *OrcaRuntime, player: PlayerHandle) !audio.player.Snapshot {
+        try self.requireRunning();
+        return (try self.players.get(player)).player.snapshot();
     }
 
     pub fn startDummyWork(self: *OrcaRuntime) !WorkHandle {
@@ -289,4 +341,21 @@ test "runtime Library handles own independent databases" {
     try std.testing.expectEqual(@as(u64, 1), try library_database.tracks.count());
     try runtime.destroyLibrary(library);
     try std.testing.expectError(error.StaleHandle, runtime.libraryDatabase(library));
+}
+
+test "runtime Players and Zones retain stable state behind handles" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    const generation = try runtime.seekPlayer(player, 96_000);
+    const snapshot = try runtime.playerSnapshot(player);
+    try std.testing.expectEqual(generation, snapshot.generation);
+    try std.testing.expectEqual(@as(u64, 96_000), snapshot.position_frames);
+
+    try runtime.destroyPlayer(player);
+    try std.testing.expectError(error.StaleHandle, runtime.playerSnapshot(player));
+    try runtime.destroyZone(zone);
 }

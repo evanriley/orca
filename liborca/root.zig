@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+pub const audio = @import("audio/root.zig");
 pub const codec = @import("codec/root.zig");
 pub const core = @import("core/root.zig");
 pub const database = @import("database/root.zig");

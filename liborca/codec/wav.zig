@@ -1,22 +1,9 @@
 const std = @import("std");
+const audio_pcm = @import("../audio/pcm.zig");
 const storage = @import("../storage/root.zig");
 
-pub const SampleFormat = enum {
-    unsigned_8,
-    signed_16,
-    signed_24,
-    signed_32,
-    float_32,
-    float_64,
-};
-
-pub const Format = struct {
-    sample_format: SampleFormat,
-    channels: u16,
-    sample_rate: u32,
-    bits_per_sample: u16,
-    bytes_per_frame: u16,
-};
+pub const SampleFormat = audio_pcm.SampleFormat;
+pub const Format = audio_pcm.Format;
 
 pub const Reader = struct {
     source: storage.ReadableSource,
