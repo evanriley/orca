@@ -40,6 +40,16 @@ pub const TrackView = extern struct {
 
 pub const TrackCallback = *const fn (?*anyopaque, *const TrackView) callconv(.c) void;
 
+pub const HealthIssueView = extern struct {
+    kind: u8,
+    severity: u8,
+    _reserved: [6]u8 = @splat(0),
+    path: StringView,
+    details: StringView,
+};
+
+pub const HealthIssueCallback = *const fn (?*anyopaque, *const HealthIssueView) callconv(.c) void;
+
 const RuntimeBox = struct {
     runtime: core.OrcaRuntime,
 };
@@ -120,6 +130,47 @@ pub export fn orca_library_query_tracks(
             .title = stringView(item.title),
             .album = stringView(item.album),
             .album_artist = stringView(item.album_artist),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_health_issue_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.libraryHealthIssueCount(importLibrary(library)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_library_query_health_issues(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?HealthIssueCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    const visit = callback orelse return .invalid_argument;
+    if (limit == 0 or limit > 512) return .invalid_argument;
+    var page = box.runtime.libraryHealthIssuePage(
+        importLibrary(library),
+        limit,
+        offset,
+    ) catch |err| return mapError(err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: HealthIssueView = .{
+            .kind = @backingInt(item.kind),
+            .severity = @backingInt(item.severity),
+            .path = stringView(item.path),
+            .details = stringView(item.details),
         };
         visit(context, &view);
     }
@@ -269,6 +320,24 @@ test "C ABI library query is bounded and callback-scoped" {
         countTrack,
     ));
     try std.testing.expectEqual(@as(usize, 1), visited);
+    const database = try box.runtime.libraryDatabase(importLibrary(library));
+    try database.health_issues.replacePath("track.flac", &.{.{
+        .kind = .clipping,
+        .severity = .warning,
+        .details = "clipped",
+    }});
+    try std.testing.expectEqual(Status.ok, orca_library_health_issue_count(runtime, library, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
+    visited = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_query_health_issues(
+        runtime,
+        library,
+        10,
+        0,
+        &visited,
+        countHealthIssue,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), visited);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
@@ -276,4 +345,10 @@ fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {
     const count: *usize = @ptrCast(@alignCast(context.?));
     count.* += 1;
     std.debug.assert(track.title.length != 0);
+}
+
+fn countHealthIssue(context: ?*anyopaque, issue: *const HealthIssueView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(issue.path.length != 0);
 }

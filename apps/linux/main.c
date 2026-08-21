@@ -16,6 +16,7 @@ typedef struct app_state {
     GtkLabel *page_label;
     char *query;
     uint32_t offset;
+    gboolean showing_health;
     orca_mpris mpris;
     GtkApplication *application;
     GtkWindow *window;
@@ -32,6 +33,19 @@ static void append_track(void *context, const orca_track_view *track) {
     g_free(title);
 }
 
+static void append_health_issue(void *context, const orca_health_issue_view *issue) {
+    GtkStringList *strings = context;
+    char *path = g_strndup(issue->path.pointer, issue->path.length);
+    char *details = g_strndup(issue->details.pointer, issue->details.length);
+    const char *severity = issue->severity == 2 ? "Error" :
+        issue->severity == 1 ? "Warning" : "Info";
+    char *label = g_strdup_printf("%s: %s — %s", severity, path, details);
+    gtk_string_list_append(strings, label);
+    g_free(label);
+    g_free(details);
+    g_free(path);
+}
+
 static void reload(app_state *state) {
     while (g_list_model_get_n_items(G_LIST_MODEL(state->strings)) > 0)
         gtk_string_list_remove(state->strings, 0);
@@ -39,12 +53,18 @@ static void reload(app_state *state) {
         gtk_string_list_append(state->strings, "Set ORCA_LIBRARY to an Orca SQLite library path");
         return;
     }
-    if (orca_library_query_tracks(state->runtime, state->library,
+    orca_status status = state->showing_health ?
+        orca_library_query_health_issues(state->runtime, state->library,
+            ORCA_PAGE_SIZE, state->offset, state->strings, append_health_issue) :
+        orca_library_query_tracks(state->runtime, state->library,
             state->query, strlen(state->query), ORCA_PAGE_SIZE, state->offset,
-            state->strings, append_track) != ORCA_STATUS_OK)
+            state->strings, append_track);
+    if (status != ORCA_STATUS_OK)
         gtk_string_list_append(state->strings, "Unable to query the library");
     guint visible = g_list_model_get_n_items(G_LIST_MODEL(state->strings));
-    char *page = g_strdup_printf("Tracks %u–%u", state->offset + 1, state->offset + visible);
+    char *page = g_strdup_printf("%s %u–%u",
+        state->showing_health ? "Issues" : "Tracks",
+        state->offset + 1, state->offset + visible);
     gtk_label_set_text(state->page_label, page);
     g_free(page);
 }
@@ -148,6 +168,14 @@ static void toggle_playback(GtkButton *button, gpointer data) {
     orca_mpris_toggle(&state->mpris);
 }
 
+static void toggle_health(GtkButton *button, gpointer data) {
+    app_state *state = data;
+    state->showing_health = !state->showing_health;
+    state->offset = 0;
+    gtk_button_set_label(button, state->showing_health ? "Show Tracks" : "Library Health");
+    reload(state);
+}
+
 static void activate_play_pause(GSimpleAction *action, GVariant *parameter, gpointer data) {
     (void)action; (void)parameter;
     orca_mpris_toggle(&((app_state *)data)->mpris);
@@ -184,11 +212,13 @@ static void activate(GtkApplication *application, gpointer data) {
     GtkWidget *open = gtk_button_new_with_label("Open Library…");
     GtkWidget *previous = gtk_button_new_with_label("Previous");
     GtkWidget *next = gtk_button_new_with_label("Next");
+    GtkWidget *health = gtk_button_new_with_label("Library Health");
     GtkWidget *play = gtk_button_new_with_label("Play / Pause");
     gtk_widget_set_tooltip_text(play, "Toggle playback");
     gtk_box_append(GTK_BOX(controls), open);
     gtk_box_append(GTK_BOX(controls), previous);
     gtk_box_append(GTK_BOX(controls), next);
+    gtk_box_append(GTK_BOX(controls), health);
     state->page_label = GTK_LABEL(gtk_label_new(""));
     gtk_box_append(GTK_BOX(controls), GTK_WIDGET(state->page_label));
     gtk_box_append(GTK_BOX(controls), play);
@@ -197,6 +227,7 @@ static void activate(GtkApplication *application, gpointer data) {
     g_signal_connect(open, "clicked", G_CALLBACK(choose_library), state);
     g_signal_connect(previous, "clicked", G_CALLBACK(previous_page), state);
     g_signal_connect(next, "clicked", G_CALLBACK(next_page), state);
+    g_signal_connect(health, "clicked", G_CALLBACK(toggle_health), state);
     g_signal_connect(play, "clicked", G_CALLBACK(toggle_playback), state);
     GtkDropTarget *drop = gtk_drop_target_new(G_TYPE_FILE, GDK_ACTION_COPY);
     g_signal_connect(drop, "drop", G_CALLBACK(library_dropped), state);

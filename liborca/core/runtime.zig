@@ -140,6 +140,23 @@ pub const OrcaRuntime = struct {
             tracks.search(self.allocator, query, limit, offset);
     }
 
+    pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).health_issues.count();
+    }
+
+    pub fn libraryHealthIssuePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        limit: u32,
+        offset: u32,
+    ) !database.HealthIssuePage {
+        return (try self.libraryDatabase(library)).health_issues.page(
+            self.allocator,
+            limit,
+            offset,
+        );
+    }
+
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {
         try self.requireRunning();
         const player = try self.allocator.create(audio.player.Player);

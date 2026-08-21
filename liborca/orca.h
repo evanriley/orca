@@ -52,6 +52,20 @@ typedef struct orca_track_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_track_callback)(void *context, const orca_track_view *track);
 
+typedef struct orca_health_issue_view {
+    uint8_t kind;
+    uint8_t severity;
+    uint8_t reserved[6];
+    orca_string_view path;
+    orca_string_view details;
+} orca_health_issue_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_health_issue_callback)(
+    void *context,
+    const orca_health_issue_view *issue
+);
+
 /* The caller owns the returned runtime and must destroy it exactly once. */
 orca_runtime *orca_runtime_create(void);
 void orca_runtime_destroy(orca_runtime *runtime);
@@ -77,6 +91,19 @@ orca_status orca_library_query_tracks(
     uint32_t offset,
     void *context,
     orca_track_callback callback
+);
+orca_status orca_library_health_issue_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+orca_status orca_library_query_health_issues(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_health_issue_callback callback
 );
 
 orca_status orca_player_create(orca_runtime *runtime, orca_handle *output);
