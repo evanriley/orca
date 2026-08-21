@@ -19,6 +19,19 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "sqlite", .module = sqlite_module }},
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+    if (target.result.os.tag == .linux) {
+        liborca_module.addCSourceFile(.{
+            .file = b.path("liborca/audio/backends/pipewire_shim.c"),
+            .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-D_REENTRANT" },
+        });
+        liborca_module.addSystemIncludePath(
+            b.graph.cwdRelativePath("/usr/include/pipewire-0.3"),
+        );
+        liborca_module.addSystemIncludePath(
+            b.graph.cwdRelativePath("/usr/include/spa-0.2"),
+        );
+        liborca_module.linkSystemLibrary("pipewire-0.3", .{ .use_pkg_config = .no });
+    }
 
     const liborca = b.addLibrary(.{
         .name = "orca",
@@ -83,6 +96,22 @@ pub fn build(b: *std.Build) void {
             "Verify the Linux foreign-library linking pattern",
         );
         dependency_step.dependOn(&run_dependency_tests.step);
+
+        const pipewire_live_smoke = b.addExecutable(.{
+            .name = "pipewire-live-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/platform/pipewire_live_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+            }),
+        });
+        const run_pipewire_live_smoke = b.addRunArtifact(pipewire_live_smoke);
+        const pipewire_live_step = b.step(
+            "pipewire-live-smoke",
+            "Open a short silent stream against the current PipeWire server",
+        );
+        pipewire_live_step.dependOn(&run_pipewire_live_smoke.step);
     }
 
     const benchmark = b.addExecutable(.{
