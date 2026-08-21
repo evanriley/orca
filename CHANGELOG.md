@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0 - 2026-08-21
+
+Native frontend and desktop-media integration milestone.
+
+- Installed static/shared liborca with an opaque, C-compatible runtime,
+  generational handles, POD Player snapshots, and callback-scoped query views.
+- Bounded 256-row library pages shared by foreign clients without exposing
+  SQLite rows or internal Zig layouts.
+- Native GTK4 frontend with paged search, transport controls, file dialogs,
+  drag/drop, notifications, accessibility-native widgets, and shortcuts.
+- Verified MPRIS service whose controls and `PlaybackStatus` mirror the
+  authoritative liborca Player.
+- SwiftUI/AppKit client source over the same ABI with virtualized views, native
+  interactions, Now Playing, and remote-command integration.
+
 ## 0.7.0 - 2026-08-21
 
 Canonical metadata and safe file-mutation milestone.
