@@ -1,0 +1,17 @@
+.{
+    .name = .orca,
+    .version = "0.1.0-dev",
+    .minimum_zig_version = "0.17.0-dev.1770+5d7cf3f34",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "liborca",
+        "apps",
+        "benchmarks",
+        "tests",
+        "fixtures",
+        "docs",
+        "README.md",
+    },
+    .fingerprint = 0x6111eddd391f5ccd,
+}

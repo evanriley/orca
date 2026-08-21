@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+
+# Local editor and OS state
+.DS_Store
+*.swp
+*.swo
