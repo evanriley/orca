@@ -92,6 +92,7 @@ pub fn playFileBlocking(
     const iteration_limit = (track_ms + 5000) / 10 + 1;
     var iterations: u64 = 0;
     while (true) {
+        if (output.status() == .lost) return error.OutputDeviceLost;
         _ = try transport.prime(
             block_count,
             &pipe,

@@ -173,6 +173,43 @@ pub const OrcaRuntime = struct {
         (try self.zones.get(zone)).attached_player = player;
     }
 
+    pub fn setZonePolicy(
+        self: *OrcaRuntime,
+        zone: ZoneHandle,
+        policy: audio.zone.RenderPolicy,
+    ) !void {
+        try self.requireRunning();
+        (try self.zones.get(zone)).zone.policy = policy;
+    }
+
+    pub fn zoneRenderStrategy(
+        self: *OrcaRuntime,
+        zone: ZoneHandle,
+    ) !audio.zone.RenderStrategy {
+        try self.requireRunning();
+        return (try self.zones.get(zone)).zone.renderStrategy();
+    }
+
+    pub fn zoneOutputState(self: *OrcaRuntime, zone: ZoneHandle) !audio.zone.OutputState {
+        try self.requireRunning();
+        return (try self.zones.get(zone)).zone.output_state;
+    }
+
+    pub fn markZoneOutputLost(self: *OrcaRuntime, zone: ZoneHandle) !void {
+        try self.requireRunning();
+        (try self.zones.get(zone)).zone.deviceLost();
+    }
+
+    pub fn beginZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
+        try self.requireRunning();
+        (try self.zones.get(zone)).zone.beginRecovery();
+    }
+
+    pub fn failZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
+        try self.requireRunning();
+        (try self.zones.get(zone)).zone.recoveryFailed();
+    }
+
     pub fn seekPlayer(self: *OrcaRuntime, player: PlayerHandle, frame: u64) !u64 {
         try self.requireRunning();
         return try (try self.players.get(player)).player.seek(frame);
@@ -362,4 +399,29 @@ test "runtime Players and Zones retain stable state behind handles" {
     try runtime.destroyPlayer(player);
     try std.testing.expectError(error.StaleHandle, runtime.playerSnapshot(player));
     try runtime.destroyZone(zone);
+}
+
+test "runtime Zone policies and failures remain independent" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const robust = try runtime.createZone();
+    const interactive = try runtime.createZone();
+    try runtime.setZonePolicy(interactive, .interactive);
+    try std.testing.expectEqual(
+        audio.zone.RenderStrategy.direct_rt,
+        try runtime.zoneRenderStrategy(interactive),
+    );
+    (try runtime.zones.get(robust)).zone.beginOpen(1);
+    (try runtime.zones.get(interactive)).zone.beginOpen(2);
+    try runtime.markZoneOutputLost(robust);
+    try runtime.beginZoneRecovery(robust);
+    try runtime.failZoneRecovery(robust);
+    try std.testing.expectEqual(
+        audio.zone.OutputState.failed,
+        try runtime.zoneOutputState(robust),
+    );
+    try std.testing.expectEqual(
+        audio.zone.OutputState.opening,
+        try runtime.zoneOutputState(interactive),
+    );
 }
