@@ -1,4 +1,5 @@
 #include "orca.h"
+#include "mpris.h"
 
 #include <gtk/gtk.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@ typedef struct app_state {
     GtkLabel *page_label;
     char *query;
     uint32_t offset;
+    orca_mpris mpris;
 } app_state;
 
 static void append_track(void *context, const orca_track_view *track) {
@@ -87,13 +89,7 @@ static void next_page(GtkButton *button, gpointer data) {
 static void toggle_playback(GtkButton *button, gpointer data) {
     (void)button;
     app_state *state = data;
-    orca_player_state_snapshot snapshot;
-    if (orca_player_snapshot(state->runtime, state->player, &snapshot) != ORCA_STATUS_OK)
-        return;
-    if (snapshot.state == ORCA_TRANSPORT_PLAYING)
-        (void)orca_player_pause(state->runtime, state->player);
-    else
-        (void)orca_player_play(state->runtime, state->player);
+    orca_mpris_toggle(&state->mpris);
 }
 
 static void activate(GtkApplication *application, gpointer data) {
@@ -156,8 +152,10 @@ int main(int argc, char **argv) {
         orca_library_open(state.runtime, library_path, &state.library) == ORCA_STATUS_OK;
     GtkApplication *application = gtk_application_new(
         "org.orca_music.Orca", G_APPLICATION_DEFAULT_FLAGS);
+    orca_mpris_init(&state.mpris, state.runtime, state.player, G_APPLICATION(application));
     g_signal_connect(application, "activate", G_CALLBACK(activate), &state);
     int status = g_application_run(G_APPLICATION(application), argc, argv);
+    orca_mpris_deinit(&state.mpris);
     g_object_unref(application);
     if (state.has_library) (void)orca_library_close(state.runtime, state.library);
     (void)orca_player_destroy(state.runtime, state.player);

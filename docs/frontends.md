@@ -24,3 +24,7 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux
 
 Transport buttons invoke the same authoritative Player operations and snapshots
 used by the CLI/control plane. GTK owns presentation only.
+
+The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
+available. MPRIS Play/Pause/PlayPause/Stop methods invoke the same Player handle,
+and `PlaybackStatus` is read from and signaled from authoritative snapshots.

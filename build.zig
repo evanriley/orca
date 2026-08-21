@@ -116,6 +116,10 @@ pub fn build(b: *std.Build) void {
             .file = b.path("apps/linux/main.c"),
             .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
         });
+        linux_app_module.addCSourceFile(.{
+            .file = b.path("apps/linux/mpris.c"),
+            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
+        });
         linux_app_module.addIncludePath(b.path("liborca"));
         for ([_][]const u8{
             "/usr/include/gtk-4.0",
