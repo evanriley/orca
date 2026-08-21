@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const audio = @import("audio/root.zig");
+pub const analysis = @import("analysis/root.zig");
 pub const c_api = @import("c_api.zig");
 pub const codec = @import("codec/root.zig");
 pub const core = @import("core/root.zig");
