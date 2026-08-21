@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const flac_dependency = b.dependency("flac", .{ .target = target, .optimize = optimize });
+    const qoa_dependency = b.dependency("qoa", .{ .target = target, .optimize = optimize });
 
     const sqlite_translate = b.addTranslateC(.{
         .root_source_file = b.path("liborca/database/sqlite_import.h"),
@@ -16,7 +18,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "sqlite", .module = sqlite_module }},
+        .imports = &.{
+            .{ .name = "sqlite", .module = sqlite_module },
+            .{ .name = "flac", .module = flac_dependency.module("flac") },
+            .{ .name = "qoa", .module = qoa_dependency.module("qoa") },
+        },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
     if (target.result.os.tag == .linux) {

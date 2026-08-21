@@ -37,7 +37,7 @@ The first vertical playback path uses a WAV `SourceSession` to perform bounded
 positional reads and conversion of supported integer/float samples on the
 producer lane. It primes eight preallocated blocks ahead for robust playback;
 the callback advances Player position only for frames actually rendered. The
-CLI exposes this architecture as `orca-cli play WAV [DEVICE_ID]`. The command
+CLI exposes this architecture as `orca-cli play AUDIO [DEVICE_ID]`. The command
 uses server-default output when no ID is supplied and reports played frames,
 underruns, backend quantum, and device/graph delay after completion.
 
@@ -46,6 +46,12 @@ Orca `Decoder` interface (canonical format, optional frame count, read, seek,
 and lifetime); WAV parser state and conversion scratch remain private to its
 adapter. `SourceSession` therefore owns any registered Decoder and primes the
 same pool/queue path without codec-specific types.
+
+The built-in registry prioritizes pure Zig adapters: Orca pins
+`audiophile/flac` 1.0.2 for lossless decoding and `audiophile/qoa` 1.0.0 for
+the first lossy decoder. Both receive an Orca `ReadableSource` through a stable
+buffered-reader bridge. FLAC keeps checksum validation enabled; QOA receives a
+bounded whole-stream structural pass before its native decoder is entered.
 
 Player owns the active `SourceQueue`: one current SourceSession and one prepared
 successor. When decoding reaches the current source's end, it appends compatible

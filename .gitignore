@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 
 # Local editor and OS state
 .DS_Store

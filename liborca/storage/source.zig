@@ -31,6 +31,78 @@ pub const ReadableSource = struct {
     }
 };
 
+/// Bridges Orca's positional source capability to Zig's buffered Reader API.
+/// Codec adapters own this object so the interface and backing buffer remain at
+/// stable addresses for the decoder lifetime.
+pub const BufferedSourceReader = struct {
+    source: ReadableSource,
+    interface: std.Io.Reader,
+    physical_position: u64 = 0,
+
+    pub fn init(source: ReadableSource, buffer: []u8) BufferedSourceReader {
+        return .{
+            .source = source,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    pub fn seekTo(self: *BufferedSourceReader, offset: u64) !void {
+        if (offset > self.source.size()) return error.OutOfBounds;
+        self.physical_position = offset;
+        self.interface.seek = 0;
+        self.interface.end = 0;
+    }
+
+    pub fn logicalPosition(self: *const BufferedSourceReader) u64 {
+        return self.physical_position - (self.interface.end - self.interface.seek);
+    }
+
+    fn stream(
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+        limit: std.Io.Limit,
+    ) std.Io.Reader.StreamError!usize {
+        const self: *BufferedSourceReader = @fieldParentPtr("interface", reader);
+        var temporary: [4096]u8 = undefined;
+        const destination = limit.slice(&temporary);
+        if (destination.len == 0) return 0;
+        const read = self.source.readAt(self.physical_position, destination) catch
+            return error.ReadFailed;
+        if (read == 0) return error.EndOfStream;
+        const written = writer.write(destination[0..read]) catch return error.WriteFailed;
+        self.physical_position += written;
+        return written;
+    }
+
+    fn readVec(reader: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const self: *BufferedSourceReader = @fieldParentPtr("interface", reader);
+        if (data[0].len > 0) {
+            const read = self.source.readAt(self.physical_position, data[0]) catch
+                return error.ReadFailed;
+            if (read == 0) return error.EndOfStream;
+            self.physical_position += read;
+            return read;
+        }
+        const destination = reader.buffer[reader.end..];
+        const read = self.source.readAt(self.physical_position, destination) catch
+            return error.ReadFailed;
+        if (read == 0) return error.EndOfStream;
+        reader.end += read;
+        self.physical_position += read;
+        return 0;
+    }
+
+    const vtable: std.Io.Reader.VTable = .{
+        .stream = stream,
+        .readVec = readVec,
+    };
+};
+
 pub const LocalFileSource = struct {
     io: std.Io,
     file: std.Io.File,

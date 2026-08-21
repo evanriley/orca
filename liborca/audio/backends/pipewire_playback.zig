@@ -19,9 +19,10 @@ pub const Report = struct {
     latency: zone.Latency,
 };
 
-/// Initial end-to-end WAV path. File reads and conversion remain on this
-/// producer/control lane; PipeWire's callback only consumes prepared blocks.
-pub fn playWavBlocking(
+/// Initial end-to-end registered-codec path. File reads and conversion remain
+/// on this producer/control lane; PipeWire's callback only consumes prepared
+/// blocks.
+pub fn playFileBlocking(
     allocator: std.mem.Allocator,
     io: std.Io,
     path: []const u8,

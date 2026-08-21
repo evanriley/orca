@@ -1,7 +1,17 @@
 .{
     .name = .orca,
-    .version = "0.3.0-dev",
+    .version = "0.4.0-dev",
     .minimum_zig_version = "0.17.0-dev.1770+5d7cf3f34",
+    .dependencies = .{
+        .flac = .{
+            .url = "git+https://codeberg.org/audiophile/flac#v1.0.2",
+            .hash = "flac-1.0.2-7jA7CZA9AgBAXSOAymtmXJ5xNLYRK0XWkhMPBIOQN4r5",
+        },
+        .qoa = .{
+            .url = "git+https://codeberg.org/audiophile/qoa#v1.0.0",
+            .hash = "qoa-0.0.0-EMWmDEE9AAD24gzKmkmgueh_4ov-JByKTwgtNXnrYZYL",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

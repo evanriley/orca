@@ -9,6 +9,7 @@ pub const AudioFormat = enum(u8) {
     opus,
     vorbis,
     wavpack,
+    qoa,
 };
 
 pub fn sniff(readable: source.ReadableSource) !?AudioFormat {
@@ -20,6 +21,7 @@ pub fn sniff(readable: source.ReadableSource) !?AudioFormat {
 pub fn sniffBytes(bytes: []const u8) ?AudioFormat {
     if (starts(bytes, "fLaC")) return .flac;
     if (starts(bytes, "wvpk")) return .wavpack;
+    if (starts(bytes, "qoaf")) return .qoa;
     if (starts(bytes, "ID3")) return .mp3;
     if (bytes.len >= 2 and bytes[0] == 0xff and (bytes[1] & 0xe0) == 0xe0) return .mp3;
     if (bytes.len >= 12 and starts(bytes, "RIFF") and equalAt(bytes, 8, "WAVE")) return .wav;
@@ -50,5 +52,6 @@ test "sniffs prioritized audio containers from magic bytes" {
     try @import("std").testing.expectEqual(AudioFormat.flac, sniffBytes("fLaCpayload").?);
     try @import("std").testing.expectEqual(AudioFormat.wav, sniffBytes("RIFFxxxxWAVEfmt ").?);
     try @import("std").testing.expectEqual(AudioFormat.opus, sniffBytes("OggSxxxxOpusHead").?);
+    try @import("std").testing.expectEqual(AudioFormat.qoa, sniffBytes("qoaf\x00\x00\x00\x10").?);
     try @import("std").testing.expect(sniffBytes("not audio") == null);
 }

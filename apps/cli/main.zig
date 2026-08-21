@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
             try std.fmt.parseInt(u64, args[3], 10)
         else
             0;
-        const report = try liborca.audio.backends.playback.playWavBlocking(
+        const report = try liborca.audio.backends.playback.playFileBlocking(
             allocator,
             init.io,
             args[2],
@@ -72,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
         );
     } else {
         try stdout.writeAll(
-            \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | play WAV [DEVICE_ID]]
+            \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | play AUDIO [DEVICE_ID]]
             \\
             \\The host-independent Orca control client.
             \\

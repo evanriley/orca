@@ -20,7 +20,7 @@ zig build test
 zig build run -- --version
 zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
-zig build run -- play /path/to/file.wav
+zig build run -- play /path/to/audio
 zig build bench
 ```
 

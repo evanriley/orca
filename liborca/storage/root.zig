@@ -2,6 +2,7 @@ pub const format = @import("format.zig");
 pub const source = @import("source.zig");
 
 pub const AudioFormat = format.AudioFormat;
+pub const BufferedSourceReader = source.BufferedSourceReader;
 pub const LocalFileSource = source.LocalFileSource;
 pub const ReadableSource = source.ReadableSource;
 pub const StorageIdentity = source.StorageIdentity;

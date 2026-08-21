@@ -52,12 +52,22 @@ pub const CodecRegistry = struct {
             .format = .wav,
             .open = @import("wav.zig").openDecoder,
         }) catch unreachable;
+        registry.register(.{
+            .name = "FLAC",
+            .format = .flac,
+            .open = @import("flac.zig").openDecoder,
+        }) catch unreachable;
+        registry.register(.{
+            .name = "Quite OK Audio",
+            .format = .qoa,
+            .open = @import("qoa.zig").openDecoder,
+        }) catch unreachable;
         return registry;
     }
 };
 
 test "builtin registry rejects duplicate codec ownership" {
     var codecs = CodecRegistry.builtins();
-    try std.testing.expectEqual(@as(usize, 1), codecs.count);
+    try std.testing.expectEqual(@as(usize, 3), codecs.count);
     try std.testing.expectError(error.CodecAlreadyRegistered, codecs.register(codecs.entries[0]));
 }
