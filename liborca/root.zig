@@ -12,6 +12,7 @@ pub const library = @import("library/root.zig");
 pub const metadata = @import("metadata/root.zig");
 pub const network = @import("network/root.zig");
 pub const platform = @import("platform.zig");
+pub const providers = @import("providers/root.zig");
 pub const storage = @import("storage/root.zig");
 
 pub const OrcaRuntime = core.OrcaRuntime;
