@@ -3,6 +3,7 @@ pub const file_mutation = @import("file_mutation.zig");
 pub const executor = @import("executor.zig");
 pub const model = @import("model.zig");
 pub const mutation = @import("mutation.zig");
+pub const vorbis_comment = @import("vorbis_comment.zig");
 
 pub const EffectiveMetadata = model.EffectiveMetadata;
 pub const ObservedFileMetadata = model.ObservedFileMetadata;
@@ -15,4 +16,5 @@ test {
     _ = @import("executor.zig");
     _ = @import("model.zig");
     _ = @import("mutation.zig");
+    _ = @import("vorbis_comment.zig");
 }
