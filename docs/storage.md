@@ -31,3 +31,8 @@ Platform watcher adapters submit root-scoped hints through a bounded channel.
 Unread storms coalesce to one hint per root, including explicit overflow hints;
 consumers respond with normal scanner reconciliation. No watcher event directly
 inserts, removes, or mutates observed state.
+
+The Linux adapter uses nonblocking inotify and translates native changes,
+queue overflow, and root move/delete events into those hints. Watcher coverage
+is an acceleration only; startup/manual reconciliation remains responsible for
+discovering anything not represented by a delivered native event.
