@@ -28,3 +28,11 @@ used by the CLI/control plane. GTK owns presentation only.
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS Play/Pause/PlayPause/Stop methods invoke the same Player handle,
 and `PlaybackStatus` is read from and signaled from authoritative snapshots.
+
+## macOS SwiftUI
+
+`apps/macos` is a Swift Package client of the installed C module. It keeps the
+same bounded 256-row paging contract in a native SwiftUI `List`, exposes AppKit
+menus and shortcuts, and mirrors authoritative Player snapshots through
+`MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`. It links against
+`zig-out/lib/liborca` and does not import Zig, SQLite, codec, or audio layouts.

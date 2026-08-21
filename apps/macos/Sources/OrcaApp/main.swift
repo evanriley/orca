@@ -1,0 +1,174 @@
+import AppKit
+import COrca
+import MediaPlayer
+import SwiftUI
+
+struct TrackRow: Identifiable {
+    let id: Int64
+    let title: String
+    let album: String
+    let artist: String
+}
+
+private func copyString(_ view: orca_string_view) -> String {
+    let bytes = UnsafeRawPointer(view.pointer).assumingMemoryBound(to: UInt8.self)
+    return String(decoding: UnsafeBufferPointer(start: bytes, count: view.length), as: UTF8.self)
+}
+
+private let receiveTrack: orca_track_callback = { context, track in
+    guard let context, let track else { return }
+    let controller = Unmanaged<RuntimeController>.fromOpaque(context).takeUnretainedValue()
+    controller.tracks.append(TrackRow(
+        id: track.pointee.id,
+        title: copyString(track.pointee.title),
+        album: copyString(track.pointee.album),
+        artist: copyString(track.pointee.album_artist)
+    ))
+}
+
+@MainActor
+final class RuntimeController: ObservableObject {
+    @Published var tracks: [TrackRow] = []
+    @Published var query = ""
+    @Published var offset: UInt32 = 0
+    @Published var playbackState: UInt8 = UInt8(ORCA_TRANSPORT_STOPPED.rawValue)
+
+    private let runtime: OpaquePointer
+    private var player = orca_handle(index: 0, generation: 0)
+    private var library: orca_handle?
+    private var timer: Timer?
+
+    init() {
+        guard let runtime = orca_runtime_create() else { fatalError("Unable to create liborca") }
+        self.runtime = runtime
+        guard orca_player_create(runtime, &player) == ORCA_STATUS_OK else {
+            fatalError("Unable to create Player")
+        }
+        if let path = ProcessInfo.processInfo.environment["ORCA_LIBRARY"] {
+            var handle = orca_handle(index: 0, generation: 0)
+            if orca_library_open(runtime, path, &handle) == ORCA_STATUS_OK { library = handle }
+        }
+        configureRemoteCommands()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshSnapshot() }
+        }
+        loadPage()
+    }
+
+    deinit {
+        timer?.invalidate()
+        if let library { _ = orca_library_close(runtime, library) }
+        _ = orca_player_destroy(runtime, player)
+        orca_runtime_destroy(runtime)
+    }
+
+    func loadPage() {
+        tracks.removeAll(keepingCapacity: true)
+        guard let library else { return }
+        query.withCString { pointer in
+            _ = orca_library_query_tracks(
+                runtime,
+                library,
+                pointer,
+                query.utf8.count,
+                256,
+                offset,
+                Unmanaged.passUnretained(self).toOpaque(),
+                receiveTrack
+            )
+        }
+    }
+
+    func search() { offset = 0; loadPage() }
+    func previousPage() { offset = offset >= 256 ? offset - 256 : 0; loadPage() }
+    func nextPage() { offset += 256; loadPage() }
+
+    func togglePlayback() {
+        refreshSnapshot()
+        if playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue) {
+            _ = orca_player_pause(runtime, player)
+        } else {
+            _ = orca_player_play(runtime, player)
+        }
+        refreshSnapshot()
+    }
+
+    private func refreshSnapshot() {
+        var snapshot = orca_player_state_snapshot()
+        guard orca_player_snapshot(runtime, player, &snapshot) == ORCA_STATUS_OK else { return }
+        playbackState = snapshot.state
+        MPNowPlayingInfoCenter.default().playbackState =
+            playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue) ? .playing : .paused
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "Orca",
+            MPNowPlayingInfoPropertyPlaybackRate:
+                playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue) ? 1.0 : 0.0,
+        ]
+    }
+
+    private func configureRemoteCommands() {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            _ = orca_player_play(self.runtime, self.player)
+            self.refreshSnapshot()
+            return .success
+        }
+        commands.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            _ = orca_player_pause(self.runtime, self.player)
+            self.refreshSnapshot()
+            return .success
+        }
+        commands.togglePlayPauseCommand.addTarget { [weak self] _ in
+            self?.togglePlayback()
+            return self == nil ? .commandFailed : .success
+        }
+    }
+}
+
+struct ContentView: View {
+    @ObservedObject var controller: RuntimeController
+
+    var body: some View {
+        VStack {
+            HStack {
+                TextField("Search tracks", text: $controller.query)
+                    .onSubmit { controller.search() }
+                    .accessibilityLabel("Search tracks")
+                Button("Search") { controller.search() }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
+            List(controller.tracks) { track in
+                VStack(alignment: .leading) {
+                    Text(track.title)
+                    Text("\(track.artist) — \(track.album)").font(.secondary)
+                }
+            }
+            HStack {
+                Button("Previous") { controller.previousPage() }
+                Button("Next") { controller.nextPage() }
+                Spacer()
+                Button("Play / Pause") { controller.togglePlayback() }
+                    .keyboardShortcut(.space, modifiers: [])
+            }
+        }
+        .padding()
+        .frame(minWidth: 800, minHeight: 560)
+    }
+}
+
+@main
+struct OrcaApp: App {
+    @StateObject private var controller = RuntimeController()
+
+    var body: some Scene {
+        WindowGroup("Orca") { ContentView(controller: controller) }
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Play / Pause") { controller.togglePlayback() }
+                    .keyboardShortcut(.space, modifiers: [])
+            }
+        }
+    }
+}

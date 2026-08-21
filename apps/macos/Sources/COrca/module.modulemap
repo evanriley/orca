@@ -1,0 +1,5 @@
+module COrca [system] {
+    header "../../../../liborca/orca.h"
+    link "orca"
+    export *
+}
