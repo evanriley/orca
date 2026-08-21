@@ -8,25 +8,33 @@ pub const LibraryDatabase = struct {
     allocator: std.mem.Allocator,
     path: [:0]u8,
     database: sqlite.Database,
+    write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
+    observed_files: repository.ObservedFileRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(owned_path);
         const database = try sqlite.Database.open(path);
         errdefer database.close();
+        const write_lane = try allocator.create(repository.WriteLane);
+        errdefer allocator.destroy(write_lane);
+        write_lane.* = .{};
         try database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
         try migrations.apply(database);
         return .{
             .allocator = allocator,
             .path = owned_path,
             .database = database,
-            .tracks = .{ .db = database },
+            .write_lane = write_lane,
+            .tracks = .{ .db = database, .write_lane = write_lane },
+            .observed_files = .{ .db = database, .write_lane = write_lane },
         };
     }
 
     pub fn close(self: *LibraryDatabase) void {
         self.database.close();
+        self.allocator.destroy(self.write_lane);
         self.allocator.free(self.path);
         self.* = undefined;
     }
@@ -125,7 +133,10 @@ test "WAL readers remain available while write submissions serialize" {
         thread.* = try std.Thread.spawn(.{}, Writer.run, .{ &library.tracks, &failed });
     }
 
-    const read_repository = repository.TrackRepository{ .db = reader };
+    const read_repository = repository.TrackRepository{
+        .db = reader,
+        .write_lane = library.write_lane,
+    };
     _ = try read_repository.count();
     for (threads) |thread| thread.join();
 

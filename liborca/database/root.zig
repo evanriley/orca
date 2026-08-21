@@ -7,6 +7,8 @@ pub const LibraryDatabase = library.LibraryDatabase;
 pub const TrackInput = repository.TrackInput;
 pub const TrackPage = repository.TrackPage;
 pub const TrackRepository = repository.TrackRepository;
+pub const ObservedFileInput = repository.ObservedFileInput;
+pub const ObservedFileRepository = repository.ObservedFileRepository;
 
 test {
     _ = @import("library.zig");

@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 1;
+pub const current_version = 2;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -74,6 +74,24 @@ const migration_1 =
     \\END;
 ;
 
+const migration_2 =
+    \\CREATE TABLE library_roots (
+    \\    id INTEGER PRIMARY KEY,
+    \\    path TEXT NOT NULL UNIQUE,
+    \\    enabled INTEGER NOT NULL DEFAULT 1
+    \\);
+    \\CREATE TABLE observed_files (
+    \\    path TEXT PRIMARY KEY,
+    \\    inode INTEGER NOT NULL,
+    \\    size_bytes INTEGER NOT NULL,
+    \\    modified_ns INTEGER NOT NULL,
+    \\    audio_format INTEGER NOT NULL,
+    \\    observed_at INTEGER NOT NULL DEFAULT (unixepoch())
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX observed_files_identity
+    \\    ON observed_files(inode, size_bytes, modified_ns);
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -87,5 +105,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
     if (version < 1) try db.exec(migration_1);
-    try db.exec("PRAGMA user_version=1; COMMIT;");
+    if (version < 2) try db.exec(migration_2);
+    try db.exec("PRAGMA user_version=2; COMMIT;");
 }

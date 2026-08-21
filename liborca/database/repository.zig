@@ -1,6 +1,18 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 
+pub const WriteLane = struct {
+    lock: std.atomic.Mutex = .unlocked,
+
+    pub fn acquire(self: *WriteLane) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn release(self: *WriteLane) void {
+        self.lock.unlock();
+    }
+};
+
 pub const TrackInput = struct {
     title: []const u8,
     album: []const u8 = "",
@@ -8,6 +20,14 @@ pub const TrackInput = struct {
     duration_ms: ?i64 = null,
     track_number: ?i64 = null,
     disc_number: ?i64 = null,
+};
+
+pub const ObservedFileInput = struct {
+    path: []const u8,
+    inode: i64,
+    size_bytes: i64,
+    modified_ns: i64,
+    audio_format: u8,
 };
 
 pub const TrackSummary = struct {
@@ -35,11 +55,11 @@ pub const TrackPage = struct {
 
 pub const TrackRepository = struct {
     db: sqlite.Database,
-    write_lock: std.atomic.Mutex = .unlocked,
+    write_lane: *WriteLane,
 
     pub fn insertBatch(self: *TrackRepository, tracks: []const TrackInput) !void {
-        self.acquireWrite();
-        defer self.write_lock.unlock();
+        self.write_lane.acquire();
+        defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
@@ -64,8 +84,8 @@ pub const TrackRepository = struct {
 
     pub fn setRatings(self: *TrackRepository, ids: []const i64, rating: u8) !void {
         if (rating > 100) return error.InvalidRating;
-        self.acquireWrite();
-        defer self.write_lock.unlock();
+        self.write_lane.acquire();
+        defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
         var statement = try self.db.prepare("UPDATE tracks SET rating=?1 WHERE id=?2;");
@@ -135,8 +155,63 @@ pub const TrackRepository = struct {
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
+};
 
-    fn acquireWrite(self: *TrackRepository) void {
-        while (!self.write_lock.tryLock()) std.atomic.spinLoopHint();
+pub const ObservedFileRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn isUnchanged(self: *const ObservedFileRepository, input: ObservedFileInput) !bool {
+        var statement = try self.db.prepare(
+            \\SELECT EXISTS(
+            \\    SELECT 1 FROM observed_files
+            \\    WHERE path=?1 AND inode=?2 AND size_bytes=?3 AND modified_ns=?4
+            \\);
+        );
+        defer statement.deinit();
+        try bindIdentity(statement, input);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0) != 0;
+    }
+
+    pub fn upsertBatch(self: *ObservedFileRepository, files: []const ObservedFileInput) !void {
+        if (files.len == 0) return;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var statement = try self.db.prepare(
+            \\INSERT INTO observed_files(
+            \\    path, inode, size_bytes, modified_ns, audio_format, observed_at
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+            \\ON CONFLICT(path) DO UPDATE SET
+            \\    inode=excluded.inode,
+            \\    size_bytes=excluded.size_bytes,
+            \\    modified_ns=excluded.modified_ns,
+            \\    audio_format=excluded.audio_format,
+            \\    observed_at=excluded.observed_at;
+        );
+        defer statement.deinit();
+        for (files) |file| {
+            try bindIdentity(statement, file);
+            try statement.bindInt64(5, file.audio_format);
+            if (try statement.step() != .done) return error.SqlFailed;
+            try statement.reset();
+        }
+        try self.db.exec("COMMIT;");
+    }
+
+    pub fn count(self: *const ObservedFileRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM observed_files;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    fn bindIdentity(statement: sqlite.Statement, input: ObservedFileInput) !void {
+        try statement.bindText(1, input.path);
+        try statement.bindInt64(2, input.inode);
+        try statement.bindInt64(3, input.size_bytes);
+        try statement.bindInt64(4, input.modified_ns);
     }
 };
