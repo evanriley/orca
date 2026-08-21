@@ -4,6 +4,22 @@ pub const RenderPolicy = union(enum) {
     custom: struct { target_frames: u32 },
 };
 
+pub const RenderStrategy = union(enum) {
+    /// Source PCM remains prepared, while player/zone processing runs as close
+    /// to the device callback as the bounded one-block handoff permits.
+    direct_rt,
+    /// Producer processing may run ahead by this bounded number of frames.
+    buffered: struct { target_frames: u32 },
+};
+
+pub fn strategyForPolicy(policy: RenderPolicy) RenderStrategy {
+    return switch (policy) {
+        .interactive => .direct_rt,
+        .robust => .{ .buffered = .{ .target_frames = 1024 } },
+        .custom => |custom| .{ .buffered = .{ .target_frames = custom.target_frames } },
+    };
+}
+
 pub const OutputState = enum(u8) {
     closed,
     opening,
@@ -33,6 +49,10 @@ pub const Zone = struct {
     device_id: u64 = 0,
     output_state: OutputState = .closed,
     recovery_attempts: u32 = 0,
+
+    pub fn renderStrategy(self: *const Zone) RenderStrategy {
+        return strategyForPolicy(self.policy);
+    }
 
     pub fn beginOpen(self: *Zone, device_id: u64) void {
         self.device_id = device_id;
@@ -85,4 +105,17 @@ test "Zone device recovery is isolated state" {
     try @import("std").testing.expectEqual(OutputState.active, healthy.output_state);
     try @import("std").testing.expectEqual(OutputState.failed, failed.output_state);
     try @import("std").testing.expectEqual(@as(u32, 1), failed.recovery_attempts);
+}
+
+test "latency policies select strategies within the same Zone abstraction" {
+    const testing = @import("std").testing;
+    try testing.expectEqual(RenderStrategy.direct_rt, strategyForPolicy(.interactive));
+    try testing.expectEqual(
+        @as(u32, 1024),
+        strategyForPolicy(.robust).buffered.target_frames,
+    );
+    try testing.expectEqual(
+        @as(u32, 384),
+        strategyForPolicy(.{ .custom = .{ .target_frames = 384 } }).buffered.target_frames,
+    );
 }
