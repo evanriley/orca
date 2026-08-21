@@ -6,6 +6,7 @@ pub const pcm = @import("pcm.zig");
 pub const player = @import("player.zig");
 pub const processing = @import("processing.zig");
 pub const render = @import("render.zig");
+pub const signal_path = @import("signal_path.zig");
 pub const source_session = @import("source_session.zig");
 pub const spsc = @import("spsc.zig");
 pub const transition = @import("transition.zig");
@@ -19,6 +20,7 @@ test {
     _ = @import("player.zig");
     _ = @import("processing.zig");
     _ = @import("render.zig");
+    _ = @import("signal_path.zig");
     _ = @import("source_session.zig");
     _ = @import("spsc.zig");
     _ = @import("transition.zig");
