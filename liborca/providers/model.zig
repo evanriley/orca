@@ -6,6 +6,8 @@ pub const Query = struct {
     album: ?[]const u8 = null,
     duration_ms: ?u64 = null,
     fingerprint: ?[]const u16 = null,
+    /// An externally generated Chromaprint string suitable for AcoustID.
+    acoustid_fingerprint: ?[]const u8 = null,
     embedded_provider_id: ?[]const u8 = null,
 };
 

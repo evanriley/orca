@@ -2,6 +2,7 @@ const std = @import("std");
 const database = @import("../database/root.zig");
 const network = @import("../network/root.zig");
 const model = @import("model.zig");
+const url_encoding = @import("url.zig");
 
 pub const MusicBrainz = struct {
     gateway: *network.Gateway,
@@ -61,16 +62,16 @@ pub const MusicBrainz = struct {
         try writer.writer.print("{s}/recording/?fmt=json&limit=25&query=", .{self.base_url});
         var separator = false;
         if (query.title) |title| if (title.len > 0) {
-            try writeEncoded(&writer.writer, "recording:\"");
-            try writeEncoded(&writer.writer, title);
-            try writeEncoded(&writer.writer, "\"");
+            try url_encoding.writeEncoded(&writer.writer, "recording:\"");
+            try url_encoding.writeEncoded(&writer.writer, title);
+            try url_encoding.writeEncoded(&writer.writer, "\"");
             separator = true;
         };
         if (query.artist) |artist| if (artist.len > 0) {
-            if (separator) try writeEncoded(&writer.writer, " AND ");
-            try writeEncoded(&writer.writer, "artist:\"");
-            try writeEncoded(&writer.writer, artist);
-            try writeEncoded(&writer.writer, "\"");
+            if (separator) try url_encoding.writeEncoded(&writer.writer, " AND ");
+            try url_encoding.writeEncoded(&writer.writer, "artist:\"");
+            try url_encoding.writeEncoded(&writer.writer, artist);
+            try url_encoding.writeEncoded(&writer.writer, "\"");
         };
         var list = writer.toArrayList();
         return list.toOwnedSlice(allocator);
@@ -85,17 +86,6 @@ pub const MusicBrainz = struct {
         return self.search(allocator, query);
     }
 };
-
-fn writeEncoded(writer: *std.Io.Writer, value: []const u8) !void {
-    const hex = "0123456789ABCDEF";
-    for (value) |byte| {
-        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~') {
-            try writer.writeByte(byte);
-        } else {
-            try writer.writeAll(&.{ '%', hex[byte >> 4], hex[byte & 0xf] });
-        }
-    }
-}
 
 fn parseCandidates(allocator: std.mem.Allocator, body: []const u8) !model.CandidateList {
     const ArtistCredit = struct { name: []const u8 = "" };
