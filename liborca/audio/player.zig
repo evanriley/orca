@@ -122,7 +122,8 @@ pub const Player = struct {
         _ = self.generation.fetchAdd(1, .acq_rel);
     }
 
-    pub fn seek(self: *Player, frame: u64) u64 {
+    pub fn seek(self: *Player, frame: u64) !u64 {
+        if (self.sources) |*sources| try sources.seek(frame);
         self.position_frames.store(frame, .release);
         return self.generation.fetchAdd(1, .acq_rel) +% 1;
     }
@@ -138,7 +139,7 @@ pub const Player = struct {
 
 test "seek advances generation instead of editing queues" {
     var player: Player = .{};
-    const generation = player.seek(48_000);
+    const generation = try player.seek(48_000);
     const current = player.snapshot();
     try std.testing.expectEqual(generation, current.generation);
     try std.testing.expectEqual(@as(u64, 48_000), current.position_frames);
@@ -228,4 +229,14 @@ test "Player decodes once into independently owned Zone pipelines" {
     );
     try std.testing.expectEqualSlices(f32, &.{ 0.125, 0.25 }, &first_output);
     try std.testing.expectEqualSlices(f32, &.{ 0.0625, 0.125 }, &second_output);
+
+    const seek_generation = try player.seek(1);
+    try std.testing.expectEqual(@as(usize, 1), test_decoder.position);
+    const after_seek = try player.decodeAndFanout(1, &scratch, &sinks);
+    try std.testing.expectEqual(@as(usize, 2), after_seek.frames);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        first_pipe.render(&first_pool, 1, seek_generation, &first_output),
+    );
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.75 }, &first_output);
 }

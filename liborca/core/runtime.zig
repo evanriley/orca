@@ -175,7 +175,7 @@ pub const OrcaRuntime = struct {
 
     pub fn seekPlayer(self: *OrcaRuntime, player: PlayerHandle, frame: u64) !u64 {
         try self.requireRunning();
-        return (try self.players.get(player)).player.seek(frame);
+        return try (try self.players.get(player)).player.seek(frame);
     }
 
     pub fn playerSnapshot(self: *OrcaRuntime, player: PlayerHandle) !audio.player.Snapshot {

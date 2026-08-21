@@ -101,6 +101,10 @@ pub const SourceQueue = struct {
         return self.current.decoder.format;
     }
 
+    pub fn seek(self: *SourceQueue, frame: u64) !void {
+        try self.current.seek(frame);
+    }
+
     pub fn primeNext(self: *SourceQueue, next: SourceSession) !void {
         if (self.next != null) return error.NextSourceAlreadyPrimed;
         if (!formatsMatch(self.current.decoder.format, next.decoder.format))
