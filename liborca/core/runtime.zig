@@ -1,17 +1,17 @@
 const std = @import("std");
+const control = @import("control.zig");
 const handle = @import("handle.zig");
+const job = @import("job.zig");
+const object = @import("object.zig");
 const work = @import("work.zig");
 
-const LibraryTag = struct {};
-const PlayerTag = struct {};
-const ZoneTag = struct {};
-
-pub const LibraryHandle = handle.Handle(LibraryTag);
-pub const PlayerHandle = handle.Handle(PlayerTag);
-pub const ZoneHandle = handle.Handle(ZoneTag);
+pub const LibraryHandle = object.LibraryHandle;
+pub const PlayerHandle = object.PlayerHandle;
+pub const ZoneHandle = object.ZoneHandle;
+pub const JobHandle = object.JobHandle;
 pub const WorkHandle = work.WorkHandle;
 
-pub const State = enum {
+pub const State = enum(u8) {
     running,
     shutting_down,
     stopped,
@@ -23,11 +23,15 @@ const RuntimeObject = struct {};
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
-    state: State = .running,
-    libraries: handle.Pool(RuntimeObject, LibraryTag),
-    players: handle.Pool(RuntimeObject, PlayerTag),
-    zones: handle.Pool(RuntimeObject, ZoneTag),
+    state: std.atomic.Value(State) = .init(.running),
+    libraries: handle.Pool(RuntimeObject, object.LibraryTag),
+    players: handle.Pool(RuntimeObject, object.PlayerTag),
+    zones: handle.Pool(RuntimeObject, object.ZoneTag),
+    jobs: job.Manager,
     work_registry: work.Registry,
+    commands: control.CommandQueue = .{},
+    events: control.EventChannel = .{},
+    telemetry: control.TelemetryChannel = .{},
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -35,6 +39,7 @@ pub const OrcaRuntime = struct {
             .libraries = .init(allocator),
             .players = .init(allocator),
             .zones = .init(allocator),
+            .jobs = .init(allocator),
             .work_registry = .init(allocator),
         };
     }
@@ -42,6 +47,7 @@ pub const OrcaRuntime = struct {
     pub fn deinit(self: *OrcaRuntime) void {
         self.shutdown();
         self.work_registry.deinit();
+        self.jobs.deinit();
         self.zones.deinit();
         self.players.deinit();
         self.libraries.deinit();
@@ -49,16 +55,21 @@ pub const OrcaRuntime = struct {
     }
 
     pub fn shutdown(self: *OrcaRuntime) void {
-        if (self.state == .stopped) return;
-        self.state = .shutting_down;
+        if (self.state.cmpxchgStrong(
+            .running,
+            .shutting_down,
+            .acq_rel,
+            .acquire,
+        ) != null) return;
 
         self.work_registry.requestCancellation();
         self.work_registry.drain();
+        self.jobs.cancelAndDrain();
         self.zones.discardAll();
         self.players.discardAll();
         self.libraries.discardAll();
 
-        self.state = .stopped;
+        self.state.store(.stopped, .release);
     }
 
     pub fn createLibrary(self: *OrcaRuntime) !LibraryHandle {
@@ -105,8 +116,72 @@ pub const OrcaRuntime = struct {
         return self.work_registry.count();
     }
 
+    pub fn submit(self: *OrcaRuntime, action: control.Action) !control.RequestId {
+        try self.requireRunning();
+        return self.commands.submit(action);
+    }
+
+    /// Executes at most one command on the runtime's serialized logical control
+    /// lane. Returns false when there is no work or event backpressure applies.
+    pub fn processNextCommand(self: *OrcaRuntime) bool {
+        if (self.state.load(.acquire) != .running or !self.events.hasCapacity()) return false;
+        const command = self.commands.pop() orelse return false;
+        const outcome = self.execute(command.action) catch |err| control.Outcome{
+            .failed = mapFailure(err),
+        };
+        self.events.publish(.{
+            .request_id = command.request_id,
+            .outcome = outcome,
+        }) catch unreachable;
+        return true;
+    }
+
+    pub fn pollEvent(self: *OrcaRuntime) ?control.Event {
+        return self.events.poll();
+    }
+
+    pub fn publishTelemetry(self: *OrcaRuntime, telemetry: control.Telemetry) !void {
+        try self.requireRunning();
+        try self.telemetry.publish(telemetry);
+    }
+
+    pub fn pollTelemetry(self: *OrcaRuntime) ?control.Telemetry {
+        return self.telemetry.poll();
+    }
+
+    pub fn jobSnapshot(self: *const OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
+        return self.jobs.snapshot(job_handle);
+    }
+
+    fn execute(self: *OrcaRuntime, action: control.Action) !control.Outcome {
+        return switch (action) {
+            .create_library => .{ .library_created = try self.createLibrary() },
+            .create_player => .{ .player_created = try self.createPlayer() },
+            .create_zone => .{ .zone_created = try self.createZone() },
+            .start_job => |options| blk: {
+                const job_handle = try self.jobs.create(options.kind, options.total_units);
+                try self.jobs.start(job_handle);
+                break :blk .{ .job_started = job_handle };
+            },
+            .cancel_job => |job_handle| blk: {
+                try self.jobs.requestCancellation(job_handle);
+                break :blk .{ .job_cancellation_requested = job_handle };
+            },
+        };
+    }
+
+    fn mapFailure(err: anyerror) control.Failure {
+        return switch (err) {
+            error.RuntimeNotRunning => .runtime_not_running,
+            error.StaleHandle => .stale_handle,
+            error.OutOfMemory => .out_of_memory,
+            error.InvalidJobTransition, error.JobAlreadyFinished => .invalid_transition,
+            else => .internal,
+        };
+    }
+
     fn requireRunning(self: *const OrcaRuntime) error{RuntimeNotRunning}!void {
-        if (self.state != .running) return error.RuntimeNotRunning;
+        if (self.state.load(.acquire) != .running) return error.RuntimeNotRunning;
     }
 };
 
@@ -119,7 +194,7 @@ test "runtime can repeatedly start and stop without leaking" {
         _ = try runtime.startDummyWork();
         runtime.shutdown();
         runtime.shutdown();
-        try std.testing.expectEqual(State.stopped, runtime.state);
+        try std.testing.expectEqual(State.stopped, runtime.state.load(.acquire));
         try std.testing.expectEqual(@as(usize, 0), runtime.inFlightWorkCount());
         runtime.deinit();
     }
@@ -136,4 +211,35 @@ test "shutdown invalidates objects and rejects new work" {
     try std.testing.expectError(error.RuntimeNotRunning, runtime.createPlayer());
     try std.testing.expectError(error.RuntimeNotRunning, runtime.destroyPlayer(player));
     try std.testing.expectError(error.RuntimeNotRunning, runtime.completeDummyWork(dummy_work));
+}
+
+test "commands complete asynchronously through bounded events" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const request_id = try runtime.submit(.create_player);
+    try std.testing.expect(runtime.pollEvent() == null);
+    try std.testing.expect(runtime.processNextCommand());
+    const event = runtime.pollEvent() orelse return error.MissingEvent;
+
+    try std.testing.expectEqual(request_id, event.request_id);
+    switch (event.outcome) {
+        .player_created => {},
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "slow completion consumers apply bounded backpressure" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    for (0..256) |_| {
+        _ = try runtime.submit(.create_player);
+        try std.testing.expect(runtime.processNextCommand());
+    }
+    _ = try runtime.submit(.create_player);
+    try std.testing.expect(!runtime.processNextCommand());
+
+    _ = runtime.pollEvent() orelse return error.MissingEvent;
+    try std.testing.expect(runtime.processNextCommand());
 }

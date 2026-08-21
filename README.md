@@ -18,6 +18,7 @@ The authoritative product and architecture specification is
 zig build
 zig build test
 zig build run -- --version
+zig build run -- demo
 zig build bench
 ```
 
