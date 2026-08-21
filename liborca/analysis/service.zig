@@ -5,10 +5,10 @@ const scanner = @import("../library/scanner.zig");
 const storage = @import("../storage/root.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoding = @import("encoding.zig");
+const fingerprint = @import("fingerprint.zig");
 
-const cache_kind: u8 = 1;
-const algorithm_id = "orca.audio-diagnostics";
-const algorithm_version: u32 = 1;
+const diagnostics_cache_kind: u8 = 1;
+const fingerprint_cache_kind: u8 = 2;
 
 pub const Progress = struct {
     completed_frames: u64,
@@ -22,10 +22,12 @@ pub const ProgressCallback = struct {
 
 pub const Analysis = struct {
     diagnostics: diagnostics.Result,
+    fingerprint: fingerprint.Result,
     cache_hit: bool,
 
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
+        self.fingerprint.deinit();
     }
 };
 
@@ -44,27 +46,43 @@ pub const Service = struct {
         const initial_identity = local.readable().identity();
         const modified_ns = std.math.cast(i64, initial_identity.modified_ns) orelse
             return error.SourceTimestampOutOfRange;
-        const key: database.AnalysisCacheKey = .{
+        const diagnostics_key: database.AnalysisCacheKey = .{
             .path = path,
-            .kind = cache_kind,
-            .algorithm_id = algorithm_id,
-            .algorithm_version = algorithm_version,
+            .kind = diagnostics_cache_kind,
+            .algorithm_id = "orca.audio-diagnostics",
+            .algorithm_version = 1,
             .parameter_hash = encoding.parameterHash(parameters),
             .source_size = initial_identity.size,
             .source_modified_ns = modified_ns,
         };
+        const fingerprint_key: database.AnalysisCacheKey = .{
+            .path = path,
+            .kind = fingerprint_cache_kind,
+            .algorithm_id = "orca.temporal-fingerprint",
+            .algorithm_version = 1,
+            .parameter_hash = @splat(0),
+            .source_size = initial_identity.size,
+            .source_modified_ns = modified_ns,
+        };
         if (self.cache) |cache| {
-            if (try cache.get(self.allocator, key)) |cached| {
-                defer self.allocator.free(cached);
-                if (encoding.decode(self.allocator, cached)) |result| {
-                    errdefer result.deinit();
-                    if (self.cancelled()) return error.Cancelled;
-                    try self.verifyIdentity(path, initial_identity);
-                    return .{ .diagnostics = result, .cache_hit = true };
-                } else |_| {}
+            const cached_diagnostics = try self.loadDiagnostics(cache, diagnostics_key);
+            const cached_fingerprint = try self.loadFingerprint(cache, fingerprint_key);
+            if (cached_diagnostics != null and cached_fingerprint != null) {
+                errdefer cached_diagnostics.?.deinit();
+                errdefer cached_fingerprint.?.deinit();
+                if (self.cancelled()) return error.Cancelled;
+                try self.verifyIdentity(path, initial_identity);
+                return .{
+                    .diagnostics = cached_diagnostics.?,
+                    .fingerprint = cached_fingerprint.?,
+                    .cache_hit = true,
+                };
             }
+            if (cached_diagnostics) |result| result.deinit();
+            if (cached_fingerprint) |result| result.deinit();
         }
 
+        const source_hash = try self.hashSource(local.readable());
         var decoder = try self.codecs.openDetected(self.allocator, local.readable());
         defer decoder.deinit();
         var analyzer = try diagnostics.Analyzer.init(
@@ -75,6 +93,12 @@ pub const Service = struct {
             parameters,
         );
         defer analyzer.deinit();
+        var fingerprinter = try fingerprint.Analyzer.init(
+            self.allocator,
+            decoder.format.sample_rate,
+            decoder.format.channels,
+        );
+        defer fingerprinter.deinit();
         const samples = try self.allocator.alloc(f32, 4096 * @as(usize, decoder.format.channels));
         defer self.allocator.free(samples);
         var completed_frames: u64 = 0;
@@ -83,6 +107,7 @@ pub const Service = struct {
             const frames = try decoder.readFrames(samples);
             if (frames == 0) break;
             try analyzer.process(samples[0 .. frames * decoder.format.channels]);
+            try fingerprinter.process(samples[0 .. frames * decoder.format.channels]);
             completed_frames += frames;
             if (self.progress) |callback| callback.update(callback.context, .{
                 .completed_frames = completed_frames,
@@ -92,14 +117,24 @@ pub const Service = struct {
         if (self.cancelled()) return error.Cancelled;
         const result = try analyzer.finish();
         errdefer result.deinit();
+        var fingerprint_result = try fingerprinter.finish();
+        errdefer fingerprint_result.deinit();
+        fingerprint_result.source_hash = source_hash;
 
         try self.verifyIdentity(path, initial_identity);
         if (self.cache) |cache| {
             const bytes = try encoding.encode(self.allocator, result);
             defer self.allocator.free(bytes);
-            try cache.put(key, bytes);
+            try cache.put(diagnostics_key, bytes);
+            const fingerprint_bytes = try fingerprint.encode(self.allocator, fingerprint_result);
+            defer self.allocator.free(fingerprint_bytes);
+            try cache.put(fingerprint_key, fingerprint_bytes);
         }
-        return .{ .diagnostics = result, .cache_hit = false };
+        return .{
+            .diagnostics = result,
+            .fingerprint = fingerprint_result,
+            .cache_hit = false,
+        };
     }
 
     fn cancelled(self: Service) bool {
@@ -111,6 +146,42 @@ pub const Service = struct {
         defer identity_check.close();
         if (!sameIdentity(expected, identity_check.readable().identity()))
             return error.SourceChangedDuringAnalysis;
+    }
+
+    fn hashSource(self: Service, source: storage.ReadableSource) ![32]u8 {
+        var hasher = std.crypto.hash.Blake3.init(.{});
+        var buffer: [64 * 1024]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < source.size()) {
+            if (self.cancelled()) return error.Cancelled;
+            const read = try source.readAt(offset, &buffer);
+            if (read == 0) return error.UnexpectedEndOfSource;
+            hasher.update(buffer[0..read]);
+            offset += read;
+        }
+        var digest: [32]u8 = undefined;
+        hasher.final(&digest);
+        return digest;
+    }
+
+    fn loadDiagnostics(
+        self: Service,
+        cache: *database.AnalysisCacheRepository,
+        key: database.AnalysisCacheKey,
+    ) !?diagnostics.Result {
+        const bytes = (try cache.get(self.allocator, key)) orelse return null;
+        defer self.allocator.free(bytes);
+        return encoding.decode(self.allocator, bytes) catch null;
+    }
+
+    fn loadFingerprint(
+        self: Service,
+        cache: *database.AnalysisCacheRepository,
+        key: database.AnalysisCacheKey,
+    ) !?fingerprint.Result {
+        const bytes = (try cache.get(self.allocator, key)) orelse return null;
+        defer self.allocator.free(bytes);
+        return fingerprint.decode(self.allocator, bytes) catch null;
     }
 };
 
@@ -145,6 +216,7 @@ test "service streams codecs into cache and cancellation publishes nothing" {
     defer second.deinit();
     try std.testing.expect(second.cache_hit);
     try std.testing.expectEqual(first.diagnostics.sample_peak, second.diagnostics.sample_peak);
+    try std.testing.expectEqual(first.fingerprint.source_hash.?, second.fingerprint.source_hash.?);
 
     var cancellation: scanner.CancellationToken = .{};
     cancellation.cancel();
