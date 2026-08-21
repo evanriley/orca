@@ -108,8 +108,30 @@ pub fn Chain(comptime capacity: usize) type {
 
 pub const Gain = struct {
     linear: std.atomic.Value(f32) = .init(1),
+    ramp_frames: std.atomic.Value(u32) = .init(0),
+    current: f32 = 1,
+    initialized: bool = false,
+    remaining_frames: u32 = 0,
+    step: f32 = 0,
+
+    pub fn setLinear(self: *Gain, linear: f32, ramp_frames: u32) void {
+        self.linear.store(linear, .release);
+        self.ramp_frames.store(ramp_frames, .release);
+    }
+
+    pub fn setReplayGain(self: *Gain, decibels: f32, peak: ?f32, ramp_frames: u32) void {
+        var linear = std.math.pow(f32, 10, decibels / 20);
+        if (peak) |value| {
+            if (value > 0) linear = @min(linear, 1 / value);
+        }
+        self.setLinear(linear, ramp_frames);
+    }
 
     pub fn processor(self: *Gain) Processor {
+        if (!self.initialized) {
+            self.current = self.linear.load(.monotonic);
+            self.initialized = true;
+        }
         return .{
             .context = self,
             .process_fn = process,
@@ -121,10 +143,66 @@ pub const Gain = struct {
         };
     }
 
-    fn process(context: *anyopaque, samples: []f32, _: u32, _: u16) void {
+    fn process(context: *anyopaque, samples: []f32, frames: u32, channels: u16) void {
         const self: *Gain = @ptrCast(@alignCast(context));
-        const linear = self.linear.load(.monotonic);
-        for (samples) |*sample| sample.* *= linear;
+        const target = self.linear.load(.acquire);
+        if (!self.initialized) {
+            self.current = target;
+            self.initialized = true;
+        }
+        const requested_ramp = self.ramp_frames.swap(0, .acq_rel);
+        if (requested_ramp > 0) {
+            self.remaining_frames = requested_ramp;
+            self.step = (target - self.current) / @as(f32, @floatFromInt(requested_ramp));
+        } else if (self.remaining_frames == 0) {
+            self.current = target;
+        }
+        for (0..frames) |frame| {
+            if (self.remaining_frames > 0) {
+                self.current += self.step;
+                self.remaining_frames -= 1;
+            } else {
+                self.current = target;
+            }
+            const start = frame * channels;
+            for (samples[start .. start + channels]) |*sample| sample.* *= self.current;
+        }
+    }
+};
+
+pub const Meter = struct {
+    peak: std.atomic.Value(f32) = .init(0),
+    rms: std.atomic.Value(f32) = .init(0),
+
+    pub const Snapshot = struct { peak: f32, rms: f32 };
+
+    pub fn processor(self: *Meter) Processor {
+        return .{
+            .context = self,
+            .process_fn = process,
+            .metadata = .{
+                .name = "peak/RMS meter",
+                .changes_samples = false,
+                .realtime_safe = true,
+            },
+        };
+    }
+
+    pub fn snapshot(self: *const Meter) Snapshot {
+        return .{ .peak = self.peak.load(.acquire), .rms = self.rms.load(.acquire) };
+    }
+
+    fn process(context: *anyopaque, samples: []f32, _: u32, _: u16) void {
+        const self: *Meter = @ptrCast(@alignCast(context));
+        var peak: f32 = 0;
+        var squares: f64 = 0;
+        for (samples) |sample| {
+            peak = @max(peak, @abs(sample));
+            squares += @as(f64, sample) * sample;
+        }
+        self.peak.store(peak, .release);
+        self.rms.store(if (samples.len == 0) 0 else @floatCast(@sqrt(squares /
+            @as(f64, @floatFromInt(samples.len)))), .release);
     }
 };
 
@@ -141,4 +219,19 @@ test "fixed processing chain runs in insertion order" {
     try std.testing.expectEqual(@as(usize, 2), summary.node_count);
     try std.testing.expect(summary.changes_samples);
     try std.testing.expect(summary.realtime_safe);
+}
+
+test "gain ramps without discontinuity and meter does not change samples" {
+    var gain: Gain = .{};
+    var meter: Meter = .{};
+    var chain: Chain(2) = .{};
+    try chain.append(gain.processor());
+    try chain.append(meter.processor());
+    gain.setLinear(0, 4);
+    var samples = [_]f32{ 1, 1, 1, 1 };
+    chain.processor().process(&samples, 4, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 0.75, 0.5, 0.25, 0 }, &samples);
+    const levels = meter.snapshot();
+    try std.testing.expectEqual(@as(f32, 0.75), levels.peak);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.467_707), levels.rms, 0.000_001);
 }
