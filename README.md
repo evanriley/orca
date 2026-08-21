@@ -20,6 +20,7 @@ zig build test
 zig build run -- --version
 zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
+zig build run -- play /path/to/file.wav
 zig build bench
 ```
 
@@ -31,8 +32,9 @@ zig build bench -- 500000 /tmp/orca-500k.db
 ```
 
 `zig build dependency-smoke` verifies the system-library integration pattern on
-Linux by linking and calling into PipeWire. C headers and foreign types remain
-contained in their eventual adapter modules.
+Linux. `zig build pipewire-live-smoke` discovers the current user's output
+devices and opens a short silent native stream. PipeWire C headers and foreign
+types remain contained in the Linux adapter.
 
 ## Repository layout
 
