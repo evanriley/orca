@@ -133,4 +133,18 @@ pub fn build(b: *std.Build) void {
     run_benchmark.addPassthruArgs();
     const benchmark_step = b.step("bench", "Run Orca benchmarks");
     benchmark_step.dependOn(&run_benchmark.step);
+
+    const dsp_benchmark = b.addExecutable(.{
+        .name = "orca-dsp-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/dsp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }),
+    });
+    const run_dsp_benchmark = b.addRunArtifact(dsp_benchmark);
+    run_dsp_benchmark.addPassthruArgs();
+    const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
+    dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
 }

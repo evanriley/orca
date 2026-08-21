@@ -1,4 +1,5 @@
 const std = @import("std");
+const kernels = @import("kernels.zig");
 
 pub const BlockConstraint = union(enum) {
     any,
@@ -109,14 +110,17 @@ pub fn Chain(comptime capacity: usize) type {
 pub const Gain = struct {
     linear: std.atomic.Value(f32) = .init(1),
     ramp_frames: std.atomic.Value(u32) = .init(0),
+    command_generation: std.atomic.Value(u64) = .init(0),
     current: f32 = 1,
     initialized: bool = false,
     remaining_frames: u32 = 0,
     step: f32 = 0,
+    seen_generation: u64 = 0,
 
     pub fn setLinear(self: *Gain, linear: f32, ramp_frames: u32) void {
         self.linear.store(linear, .release);
         self.ramp_frames.store(ramp_frames, .release);
+        _ = self.command_generation.fetchAdd(1, .release);
     }
 
     pub fn setReplayGain(self: *Gain, decibels: f32, peak: ?f32, ramp_frames: u32) void {
@@ -130,6 +134,7 @@ pub const Gain = struct {
     pub fn processor(self: *Gain) Processor {
         if (!self.initialized) {
             self.current = self.linear.load(.monotonic);
+            self.seen_generation = self.command_generation.load(.monotonic);
             self.initialized = true;
         }
         return .{
@@ -145,17 +150,26 @@ pub const Gain = struct {
 
     fn process(context: *anyopaque, samples: []f32, frames: u32, channels: u16) void {
         const self: *Gain = @ptrCast(@alignCast(context));
-        const target = self.linear.load(.acquire);
+        const generation = self.command_generation.load(.acquire);
+        const target = self.linear.load(.monotonic);
         if (!self.initialized) {
             self.current = target;
             self.initialized = true;
         }
-        const requested_ramp = self.ramp_frames.swap(0, .acq_rel);
-        if (requested_ramp > 0) {
-            self.remaining_frames = requested_ramp;
-            self.step = (target - self.current) / @as(f32, @floatFromInt(requested_ramp));
-        } else if (self.remaining_frames == 0) {
-            self.current = target;
+        if (generation != self.seen_generation) {
+            const requested_ramp = self.ramp_frames.load(.monotonic);
+            self.seen_generation = generation;
+            if (requested_ramp > 0) {
+                self.remaining_frames = requested_ramp;
+                self.step = (target - self.current) / @as(f32, @floatFromInt(requested_ramp));
+            } else {
+                self.remaining_frames = 0;
+                self.current = target;
+            }
+        }
+        if (self.remaining_frames == 0) {
+            kernels.gain(samples[0 .. @as(usize, frames) * channels], self.current);
+            return;
         }
         for (0..frames) |frame| {
             if (self.remaining_frames > 0) {
@@ -194,14 +208,9 @@ pub const Meter = struct {
 
     fn process(context: *anyopaque, samples: []f32, _: u32, _: u16) void {
         const self: *Meter = @ptrCast(@alignCast(context));
-        var peak: f32 = 0;
-        var squares: f64 = 0;
-        for (samples) |sample| {
-            peak = @max(peak, @abs(sample));
-            squares += @as(f64, sample) * sample;
-        }
-        self.peak.store(peak, .release);
-        self.rms.store(if (samples.len == 0) 0 else @floatCast(@sqrt(squares /
+        const levels = kernels.levelsVector(samples);
+        self.peak.store(levels.peak, .release);
+        self.rms.store(if (samples.len == 0) 0 else @floatCast(@sqrt(levels.square_sum /
             @as(f64, @floatFromInt(samples.len)))), .release);
     }
 };
@@ -234,4 +243,9 @@ test "gain ramps without discontinuity and meter does not change samples" {
     const levels = meter.snapshot();
     try std.testing.expectEqual(@as(f32, 0.75), levels.peak);
     try std.testing.expectApproxEqAbs(@as(f32, 0.467_707), levels.rms, 0.000_001);
+
+    gain.setLinear(1, 0);
+    var interrupted = [_]f32{1};
+    chain.processor().process(&interrupted, 1, 1);
+    try std.testing.expectEqual(@as(f32, 1), interrupted[0]);
 }
