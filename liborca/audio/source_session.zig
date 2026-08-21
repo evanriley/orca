@@ -26,6 +26,18 @@ pub const SourceSession = struct {
         self.eof = if (self.decoder.frame_count) |count| target == count else false;
     }
 
+    pub fn readFrames(self: *SourceSession, samples: []f32) !usize {
+        if (self.eof) return 0;
+        const frames = try self.decoder.readFrames(samples);
+        self.next_frame += frames;
+        if (frames == 0 or
+            (self.decoder.frame_count != null and self.next_frame == self.decoder.frame_count.?))
+        {
+            self.eof = true;
+        }
+        return frames;
+    }
+
     /// Reclaim callback-consumed blocks and prepare as many future blocks as
     /// bounded pool/queue capacity permits. This is the only file-I/O lane.
     pub fn prime(
@@ -44,13 +56,12 @@ pub const SourceSession = struct {
                 pool.release(index);
                 return error.ChannelMismatch;
             }
-            const frames = self.decoder.readFrames(samples) catch |err| {
+            const frames = self.readFrames(samples) catch |err| {
                 pool.release(index);
                 return err;
             };
             if (frames == 0) {
                 pool.release(index);
-                self.eof = true;
                 break;
             }
             if (!pipe.submit(.{
@@ -61,12 +72,8 @@ pub const SourceSession = struct {
                 pool.release(index);
                 break;
             }
-            self.next_frame += frames;
             prepared += 1;
-            if (self.decoder.frame_count != null and self.next_frame == self.decoder.frame_count.?) {
-                self.eof = true;
-                break;
-            }
+            if (self.eof) break;
         }
         return prepared;
     }
@@ -90,11 +97,32 @@ pub const SourceQueue = struct {
         self.* = undefined;
     }
 
+    pub fn format(self: *const SourceQueue) @import("pcm.zig").Format {
+        return self.current.decoder.format;
+    }
+
     pub fn primeNext(self: *SourceQueue, next: SourceSession) !void {
         if (self.next != null) return error.NextSourceAlreadyPrimed;
         if (!formatsMatch(self.current.decoder.format, next.decoder.format))
             return error.GaplessFormatMismatch;
         self.next = next;
+    }
+
+    /// Decode canonical PCM without assigning it to an output. The control
+    /// lane can process this Player-scoped block once, then copy it into each
+    /// independently owned Zone pipeline.
+    pub fn readFrames(self: *SourceQueue, samples: []f32) !usize {
+        const channels = self.current.decoder.format.channels;
+        if (samples.len % channels != 0) return error.ChannelMismatch;
+        var total_frames: usize = 0;
+        while (total_frames < samples.len / channels) {
+            const offset = total_frames * channels;
+            const frames = try self.current.readFrames(samples[offset..]);
+            total_frames += frames;
+            if (!self.current.eof) break;
+            if (!self.advance()) break;
+        }
+        return total_frames;
     }
 
     pub fn prime(
@@ -105,11 +133,7 @@ pub const SourceQueue = struct {
         generation: u64,
     ) !usize {
         var prepared = try self.current.prime(queue_capacity, pipe, pool, generation);
-        if (self.current.eof and self.next != null) {
-            self.current.deinit();
-            self.current = self.next.?;
-            self.next = null;
-            self.transitions_queued += 1;
+        if (self.current.eof and self.advance()) {
             prepared += try self.current.prime(queue_capacity, pipe, pool, generation);
         }
         return prepared;
@@ -117,6 +141,15 @@ pub const SourceQueue = struct {
 
     pub fn finishedDecoding(self: *const SourceQueue) bool {
         return self.current.eof and self.next == null;
+    }
+
+    fn advance(self: *SourceQueue) bool {
+        if (self.next == null) return false;
+        self.current.deinit();
+        self.current = self.next.?;
+        self.next = null;
+        self.transitions_queued += 1;
+        return true;
     }
 };
 
