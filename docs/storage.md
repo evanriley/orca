@@ -26,3 +26,8 @@ or interrupted scan is resumable by restarting it: already committed unchanged
 identities are skipped, so no traversal-order checkpoint is required. Filesystem
 watchers will feed the same reconciliation path as hints rather than becoming an
 authoritative source of state.
+
+Platform watcher adapters submit root-scoped hints through a bounded channel.
+Unread storms coalesce to one hint per root, including explicit overflow hints;
+consumers respond with normal scanner reconciliation. No watcher event directly
+inserts, removes, or mutates observed state.
