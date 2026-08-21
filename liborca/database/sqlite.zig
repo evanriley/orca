@@ -133,6 +133,10 @@ pub const Statement = struct {
         const len: usize = @intCast(c.sqlite3_column_bytes(self.handle, index));
         return @as([*]const u8, @ptrCast(text))[0..len];
     }
+
+    pub fn columnIsNull(self: Statement, index: c_int) bool {
+        return c.sqlite3_column_type(self.handle, index) == c.SQLITE_NULL;
+    }
 };
 
 pub const Step = enum { row, done };

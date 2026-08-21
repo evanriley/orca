@@ -70,8 +70,31 @@ pub const MutationOperationInput = struct {
     kind: MutationKind,
     source_path: []const u8,
     destination_path: ?[]const u8 = null,
+    stage_path: ?[]const u8 = null,
+    backup_path: ?[]const u8 = null,
     expected_size: u64,
     expected_modified_ns: i64,
+};
+
+pub const MutationOperation = struct {
+    allocator: std.mem.Allocator,
+    id: i64,
+    source_path: []u8,
+    destination_path: ?[]u8,
+    stage_path: ?[]u8,
+    backup_path: ?[]u8,
+    expected_size: u64,
+    expected_modified_ns: i64,
+    committed_size: ?u64,
+    committed_modified_ns: ?i64,
+    state: MutationState,
+
+    pub fn deinit(self: MutationOperation) void {
+        self.allocator.free(self.source_path);
+        if (self.destination_path) |value| self.allocator.free(value);
+        if (self.stage_path) |value| self.allocator.free(value);
+        if (self.backup_path) |value| self.allocator.free(value);
+    }
 };
 
 pub const TrackSummary = struct {
@@ -357,8 +380,8 @@ pub const MutationJournalRepository = struct {
         var statement = try self.db.prepare(
             \\INSERT INTO mutation_operations(
             \\    plan_id, group_id, action_index, kind, source_path, destination_path,
-            \\    expected_size, expected_modified_ns, state
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);
+            \\    stage_path, backup_path, expected_size, expected_modified_ns, state
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
         );
         defer statement.deinit();
         try statement.bindInt64(1, @intCast(input.plan_id));
@@ -367,9 +390,11 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(4, @backingInt(input.kind));
         try statement.bindText(5, input.source_path);
         try statement.bindOptionalText(6, input.destination_path);
-        try statement.bindInt64(7, @intCast(input.expected_size));
-        try statement.bindInt64(8, input.expected_modified_ns);
-        try statement.bindInt64(9, @backingInt(MutationState.planned));
+        try statement.bindOptionalText(7, input.stage_path);
+        try statement.bindOptionalText(8, input.backup_path);
+        try statement.bindInt64(9, @intCast(input.expected_size));
+        try statement.bindInt64(10, input.expected_modified_ns);
+        try statement.bindInt64(11, @backingInt(MutationState.planned));
         if (try statement.step() != .done) return error.SqlFailed;
         return self.db.lastInsertRowId();
     }
@@ -408,13 +433,85 @@ pub const MutationJournalRepository = struct {
         return std.enums.fromInt(MutationState, statement.columnInt64(0)) orelse
             error.InvalidStoredMutationState;
     }
+
+    pub fn commit(
+        self: *MutationJournalRepository,
+        operation_id: i64,
+        committed_size: u64,
+        committed_modified_ns: i64,
+    ) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations
+            \\SET state=?1, committed_size=?2, committed_modified_ns=?3, updated_at=unixepoch()
+            \\WHERE id=?4 AND state=?5;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @backingInt(MutationState.committed));
+        try statement.bindInt64(2, @intCast(committed_size));
+        try statement.bindInt64(3, committed_modified_ns);
+        try statement.bindInt64(4, operation_id);
+        try statement.bindInt64(5, @backingInt(MutationState.staged));
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleMutationOperation;
+    }
+
+    pub fn get(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+        operation_id: i64,
+    ) !MutationOperation {
+        var statement = try self.db.prepare(
+            \\SELECT source_path, destination_path, stage_path, backup_path,
+            \\       expected_size, expected_modified_ns,
+            \\       committed_size, committed_modified_ns, state
+            \\FROM mutation_operations WHERE id=?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, operation_id);
+        if (try statement.step() != .row) return error.MutationOperationNotFound;
+        const source_path = try allocator.dupe(u8, statement.columnText(0));
+        errdefer allocator.free(source_path);
+        const destination_path = try duplicateNullableColumn(allocator, statement, 1);
+        errdefer if (destination_path) |value| allocator.free(value);
+        const stage_path = try duplicateNullableColumn(allocator, statement, 2);
+        errdefer if (stage_path) |value| allocator.free(value);
+        const backup_path = try duplicateNullableColumn(allocator, statement, 3);
+        errdefer if (backup_path) |value| allocator.free(value);
+        const state_value = std.enums.fromInt(MutationState, statement.columnInt64(8)) orelse
+            return error.InvalidStoredMutationState;
+        return .{
+            .allocator = allocator,
+            .id = operation_id,
+            .source_path = source_path,
+            .destination_path = destination_path,
+            .stage_path = stage_path,
+            .backup_path = backup_path,
+            .expected_size = @intCast(statement.columnInt64(4)),
+            .expected_modified_ns = statement.columnInt64(5),
+            .committed_size = if (statement.columnIsNull(6)) null else @intCast(statement.columnInt64(6)),
+            .committed_modified_ns = if (statement.columnIsNull(7)) null else statement.columnInt64(7),
+            .state = state_value,
+        };
+    }
 };
+
+fn duplicateNullableColumn(
+    allocator: std.mem.Allocator,
+    statement: sqlite.Statement,
+    column: c_int,
+) !?[]u8 {
+    if (statement.columnIsNull(column)) return null;
+    return try allocator.dupe(u8, statement.columnText(column));
+}
 
 fn validMutationTransition(from: MutationState, to: MutationState) bool {
     return switch (from) {
         .planned => to == .staged or to == .failed,
         .staged => to == .committed or to == .rolled_back or to == .failed,
         .failed => to == .rolled_back,
-        .committed, .rolled_back => false,
+        .committed => to == .rolled_back,
+        .rolled_back => false,
     };
 }
