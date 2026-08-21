@@ -109,6 +109,50 @@ pub const AnalysisCacheKey = struct {
     source_modified_ns: i64,
 };
 
+pub const HealthIssueKind = enum(u8) {
+    missing_metadata,
+    missing_track_number,
+    album_artist_anomaly,
+    artwork_problem,
+    missing_analysis,
+    clipping,
+    excessive_silence,
+    technical_anomaly,
+    corrupt_audio,
+    exact_duplicate,
+    likely_duplicate,
+};
+
+pub const HealthSeverity = enum(u8) { information, warning, error_severity };
+
+pub const HealthIssueInput = struct {
+    kind: HealthIssueKind,
+    severity: HealthSeverity,
+    details: []const u8 = "",
+};
+
+pub const HealthIssue = struct {
+    path: []u8,
+    kind: HealthIssueKind,
+    severity: HealthSeverity,
+    details: []u8,
+
+    pub fn deinit(self: HealthIssue, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.details);
+    }
+};
+
+pub const HealthIssuePage = struct {
+    allocator: std.mem.Allocator,
+    items: []HealthIssue,
+
+    pub fn deinit(self: HealthIssuePage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -607,6 +651,84 @@ pub const AnalysisCacheRepository = struct {
         try bindAnalysisKey(statement, &key);
         try statement.bindBlob(8, result);
         if (try statement.step() != .done) return error.SqlFailed;
+    }
+};
+
+pub const HealthIssueRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    /// Replaces all derived health state for one path in a single transaction.
+    /// An empty issue list marks the path healthy.
+    pub fn replacePath(
+        self: *HealthIssueRepository,
+        path: []const u8,
+        issues: []const HealthIssueInput,
+    ) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var delete = try self.db.prepare("DELETE FROM library_health_issues WHERE path=?1;");
+        defer delete.deinit();
+        try delete.bindText(1, path);
+        if (try delete.step() != .done) return error.SqlFailed;
+        var insert = try self.db.prepare(
+            \\INSERT INTO library_health_issues(path, kind, severity, details, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, unixepoch());
+        );
+        defer insert.deinit();
+        for (issues) |issue| {
+            try insert.bindText(1, path);
+            try insert.bindInt64(2, @backingInt(issue.kind));
+            try insert.bindInt64(3, @backingInt(issue.severity));
+            try insert.bindText(4, issue.details);
+            if (try insert.step() != .done) return error.SqlFailed;
+            try insert.reset();
+        }
+        try self.db.exec("COMMIT;");
+    }
+
+    pub fn page(
+        self: *const HealthIssueRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !HealthIssuePage {
+        var statement = try self.db.prepare(
+            \\SELECT path, kind, severity, details FROM library_health_issues
+            \\ORDER BY severity DESC, kind, path LIMIT ?1 OFFSET ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
+        var issues: std.ArrayList(HealthIssue) = .empty;
+        errdefer {
+            for (issues.items) |issue| issue.deinit(allocator);
+            issues.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const path = try allocator.dupe(u8, statement.columnText(0));
+            errdefer allocator.free(path);
+            const details = try allocator.dupe(u8, statement.columnText(3));
+            errdefer allocator.free(details);
+            try issues.append(allocator, .{
+                .path = path,
+                .kind = std.enums.fromInt(HealthIssueKind, statement.columnInt64(1)) orelse
+                    return error.InvalidStoredHealthIssue,
+                .severity = std.enums.fromInt(HealthSeverity, statement.columnInt64(2)) orelse
+                    return error.InvalidStoredHealthSeverity,
+                .details = details,
+            });
+        }
+        return .{ .allocator = allocator, .items = try issues.toOwnedSlice(allocator) };
+    }
+
+    pub fn count(self: *const HealthIssueRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM library_health_issues;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 };
 

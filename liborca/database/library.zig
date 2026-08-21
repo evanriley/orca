@@ -14,6 +14,7 @@ pub const LibraryDatabase = struct {
     orca_metadata: repository.OrcaMetadataRepository,
     mutation_journal: repository.MutationJournalRepository,
     analysis_cache: repository.AnalysisCacheRepository,
+    health_issues: repository.HealthIssueRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -35,6 +36,7 @@ pub const LibraryDatabase = struct {
             .orca_metadata = .{ .db = database, .write_lane = write_lane },
             .mutation_journal = .{ .db = database, .write_lane = write_lane },
             .analysis_cache = .{ .db = database, .write_lane = write_lane },
+            .health_issues = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -51,6 +53,25 @@ pub const LibraryDatabase = struct {
         return sqlite.Database.openReadOnly(self.path);
     }
 };
+
+test "library health state is atomically replaced and paged" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        "file:orca-test-health?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.health_issues.replacePath("music/track.flac", &.{
+        .{ .kind = .clipping, .severity = .warning, .details = "3 clipped samples" },
+        .{ .kind = .missing_analysis, .severity = .information },
+    });
+    try std.testing.expectEqual(@as(u64, 2), try library.health_issues.count());
+    var page = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(repository.HealthIssueKind.clipping, page.items[0].kind);
+    try library.health_issues.replacePath("music/track.flac", &.{});
+    try std.testing.expectEqual(@as(u64, 0), try library.health_issues.count());
+}
 
 test "independent libraries retain separate state and FTS indexes" {
     var first = try LibraryDatabase.open(

@@ -16,6 +16,12 @@ pub const MutationOperationInput = repository.MutationOperationInput;
 pub const MutationState = repository.MutationState;
 pub const AnalysisCacheKey = repository.AnalysisCacheKey;
 pub const AnalysisCacheRepository = repository.AnalysisCacheRepository;
+pub const HealthIssueKind = repository.HealthIssueKind;
+pub const HealthSeverity = repository.HealthSeverity;
+pub const HealthIssueInput = repository.HealthIssueInput;
+pub const HealthIssue = repository.HealthIssue;
+pub const HealthIssuePage = repository.HealthIssuePage;
+pub const HealthIssueRepository = repository.HealthIssueRepository;
 
 test {
     _ = @import("library.zig");
