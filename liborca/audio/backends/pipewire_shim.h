@@ -8,6 +8,12 @@ typedef void (*orca_pw_render_fn)(void *userdata, float *samples,
 
 struct orca_pw_output;
 
+enum orca_pw_output_state {
+    ORCA_PW_OUTPUT_CONNECTING = 0,
+    ORCA_PW_OUTPUT_ACTIVE = 1,
+    ORCA_PW_OUTPUT_LOST = 2,
+};
+
 struct orca_pw_device {
     uint64_t id;
     uint16_t name_len;
@@ -37,6 +43,7 @@ struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
 void orca_pw_output_destroy(struct orca_pw_output *output);
 int orca_pw_output_timing(struct orca_pw_output *output,
                           struct orca_pw_timing *timing);
+enum orca_pw_output_state orca_pw_output_status(struct orca_pw_output *output);
 void orca_pw_fill(orca_pw_render_fn render, void *userdata, float *samples,
                   uint32_t frames, uint32_t channels);
 

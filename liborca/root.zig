@@ -15,8 +15,9 @@ pub const OrcaRuntime = core.OrcaRuntime;
 
 pub const version = std.SemanticVersion{
     .major = 0,
-    .minor = 4,
+    .minor = 5,
     .patch = 0,
+    .pre = "dev",
 };
 
 test {

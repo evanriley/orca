@@ -13,6 +13,7 @@ struct orca_pw_output {
     void *userdata;
     uint32_t channels;
     _Atomic uint32_t quantum_frames;
+    _Atomic int state;
 };
 
 struct discovery {
@@ -121,8 +122,31 @@ static void output_process(void *userdata) {
     pw_stream_queue_buffer(output->stream, pw_buffer);
 }
 
+static void output_state_changed(void *userdata, enum pw_stream_state old,
+                                 enum pw_stream_state state,
+                                 const char *error) {
+    (void)old;
+    (void)error;
+    struct orca_pw_output *output = userdata;
+    switch (state) {
+    case PW_STREAM_STATE_PAUSED:
+    case PW_STREAM_STATE_STREAMING:
+        atomic_store_explicit(&output->state, ORCA_PW_OUTPUT_ACTIVE,
+                              memory_order_release);
+        break;
+    case PW_STREAM_STATE_ERROR:
+    case PW_STREAM_STATE_UNCONNECTED:
+        atomic_store_explicit(&output->state, ORCA_PW_OUTPUT_LOST,
+                              memory_order_release);
+        break;
+    default:
+        break;
+    }
+}
+
 static const struct pw_stream_events output_events = {
     PW_VERSION_STREAM_EVENTS,
+    .state_changed = output_state_changed,
     .process = output_process,
 };
 
@@ -207,6 +231,7 @@ struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
     output->render = render;
     output->userdata = userdata;
     output->channels = channels;
+    atomic_init(&output->state, ORCA_PW_OUTPUT_CONNECTING);
 
     output->loop = pw_thread_loop_new("orca-output", NULL);
     if (output->loop == NULL)
@@ -286,4 +311,10 @@ int orca_pw_output_timing(struct orca_pw_output *output,
                                                 memory_order_relaxed),
     };
     return 0;
+}
+
+enum orca_pw_output_state orca_pw_output_status(struct orca_pw_output *output) {
+    if (output == NULL)
+        return ORCA_PW_OUTPUT_LOST;
+    return atomic_load_explicit(&output->state, memory_order_acquire);
 }

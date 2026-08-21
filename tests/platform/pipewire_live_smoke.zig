@@ -42,6 +42,7 @@ pub fn main() !void {
     const duration: std.c.timespec = .{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&duration, null);
     const timing = try output.timing();
+    if (output.status() != .active) return error.PipeWireStreamNotActive;
     if (timing.backend_quantum_frames == 0) return error.NoPipeWireQuantum;
     std.debug.print(
         "PipeWire timing: quantum={d} delay={?d} queued={d} frames\n",

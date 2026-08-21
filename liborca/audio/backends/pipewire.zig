@@ -26,6 +26,7 @@ const NativeTiming = extern struct {
     quantum_frames: u32,
 };
 extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
+extern fn orca_pw_output_status(?*anyopaque) c_int;
 extern fn orca_pw_fill(?RenderFn, ?*anyopaque, [*]f32, u32, u32) void;
 
 /// Process-level PipeWire client library lifetime. Server connections and
@@ -73,6 +74,8 @@ pub const OutputSession = struct {
     format: pcm.Format,
     requested_latency_frames: u32,
 
+    pub const Status = enum(c_int) { connecting = 0, active = 1, lost = 2 };
+
     pub fn open(
         request: contract.OpenRequest,
         render: RenderFn,
@@ -119,6 +122,10 @@ pub const OutputSession = struct {
             .buffered_frames = native.buffered_frames,
             .backend_quantum_frames = native.quantum_frames,
         };
+    }
+
+    pub fn status(self: *const OutputSession) Status {
+        return @fromBackingInt(@intCast(orca_pw_output_status(self.native)));
     }
 
     pub fn latency(
