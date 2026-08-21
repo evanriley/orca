@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0 - 2026-08-21
+
+Canonical metadata and safe file-mutation milestone.
+
+- Separate observed, preferred Orca, and policy-resolved effective metadata
+  layers with persisted provenance and user locks.
+- Immutable mutation previews that require exact explicit approval before any
+  external write.
+- Durable operation journaling with staged after-identities, reverse-order
+  grouped undo, startup recovery, and explicit reconciliation for external
+  conflicts.
+- Conservative, recoverable ID3v1 writes and Zig-native FLAC Vorbis-comment
+  writes that preserve unknown metadata and encoded audio frames.
+- Collision-safe journaled file moves with crash recovery and after-state-aware
+  undo.
+
 ## 0.2.0 - 2026-08-21
 
 Incremental local-library acquisition milestone.
