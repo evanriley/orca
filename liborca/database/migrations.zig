@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 4;
+pub const current_version = 5;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -116,6 +116,29 @@ const migration_4 =
     \\    ON orca_metadata_values(provenance, locked);
 ;
 
+const migration_5 =
+    \\CREATE TABLE mutation_operations (
+    \\    id INTEGER PRIMARY KEY,
+    \\    plan_id INTEGER NOT NULL,
+    \\    group_id INTEGER NOT NULL,
+    \\    action_index INTEGER NOT NULL,
+    \\    kind INTEGER NOT NULL,
+    \\    source_path TEXT NOT NULL,
+    \\    destination_path TEXT,
+    \\    expected_size INTEGER NOT NULL,
+    \\    expected_modified_ns INTEGER NOT NULL,
+    \\    state INTEGER NOT NULL,
+    \\    error TEXT,
+    \\    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    \\    UNIQUE(plan_id, action_index)
+    \\);
+    \\CREATE INDEX mutation_operations_recovery
+    \\    ON mutation_operations(state, updated_at);
+    \\CREATE INDEX mutation_operations_group
+    \\    ON mutation_operations(group_id, action_index);
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -132,5 +155,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     if (version < 2) try db.exec(migration_2);
     if (version < 3) try db.exec(migration_3);
     if (version < 4) try db.exec(migration_4);
-    try db.exec("PRAGMA user_version=4; COMMIT;");
+    if (version < 5) try db.exec(migration_5);
+    try db.exec("PRAGMA user_version=5; COMMIT;");
 }

@@ -12,6 +12,7 @@ pub const LibraryDatabase = struct {
     tracks: repository.TrackRepository,
     observed_files: repository.ObservedFileRepository,
     orca_metadata: repository.OrcaMetadataRepository,
+    mutation_journal: repository.MutationJournalRepository,
 
     pub fn open(allocator: std.mem.Allocator, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
@@ -31,6 +32,7 @@ pub const LibraryDatabase = struct {
             .tracks = .{ .db = database, .write_lane = write_lane },
             .observed_files = .{ .db = database, .write_lane = write_lane },
             .orca_metadata = .{ .db = database, .write_lane = write_lane },
+            .mutation_journal = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -188,4 +190,40 @@ test "Orca metadata persists provenance and user locks separately from observati
     )).?;
     defer std.testing.allocator.free(observed);
     try std.testing.expectEqualStrings("Observed title", observed);
+}
+
+test "mutation journal preserves recoverable staged state across reopen" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/mutation-journal.db",
+        .{temporary.sub_path},
+        0,
+    );
+    defer std.testing.allocator.free(path);
+    var library = try LibraryDatabase.open(std.testing.allocator, path);
+    const operation = try library.mutation_journal.prepare(.{
+        .plan_id = 9,
+        .group_id = 3,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = "/music/generated.mp3",
+        .expected_size = 1024,
+        .expected_modified_ns = 55,
+    });
+    try library.mutation_journal.transition(operation, .planned, .staged, null);
+    library.close();
+
+    library = try LibraryDatabase.open(std.testing.allocator, path);
+    defer library.close();
+    try std.testing.expectEqual(
+        repository.MutationState.staged,
+        try library.mutation_journal.state(operation),
+    );
+    try library.mutation_journal.transition(operation, .staged, .rolled_back, "recovered");
+    try std.testing.expectError(
+        error.StaleMutationOperation,
+        library.mutation_journal.transition(operation, .staged, .committed, null),
+    );
 }

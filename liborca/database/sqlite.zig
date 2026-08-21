@@ -62,6 +62,14 @@ pub const Database = struct {
     pub fn lastError(self: Database) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }
+
+    pub fn changes(self: Database) u64 {
+        return @intCast(c.sqlite3_changes64(self.handle));
+    }
+
+    pub fn lastInsertRowId(self: Database) i64 {
+        return c.sqlite3_last_insert_rowid(self.handle);
+    }
 };
 
 pub const Statement = struct {

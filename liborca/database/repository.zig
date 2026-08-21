@@ -53,6 +53,27 @@ pub const StoredMetadataValue = struct {
     }
 };
 
+pub const MutationKind = enum { write_tags, move };
+
+pub const MutationState = enum {
+    planned,
+    staged,
+    committed,
+    rolled_back,
+    failed,
+};
+
+pub const MutationOperationInput = struct {
+    plan_id: u64,
+    group_id: u64,
+    action_index: u32,
+    kind: MutationKind,
+    source_path: []const u8,
+    destination_path: ?[]const u8 = null,
+    expected_size: u64,
+    expected_modified_ns: i64,
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -323,3 +344,77 @@ pub const OrcaMetadataRepository = struct {
         };
     }
 };
+
+pub const MutationJournalRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn prepare(self: *MutationJournalRepository, input: MutationOperationInput) !i64 {
+        if (input.plan_id == 0 or input.group_id == 0 or input.source_path.len == 0)
+            return error.InvalidMutationOperation;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO mutation_operations(
+            \\    plan_id, group_id, action_index, kind, source_path, destination_path,
+            \\    expected_size, expected_modified_ns, state
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intCast(input.plan_id));
+        try statement.bindInt64(2, @intCast(input.group_id));
+        try statement.bindInt64(3, input.action_index);
+        try statement.bindInt64(4, @backingInt(input.kind));
+        try statement.bindText(5, input.source_path);
+        try statement.bindOptionalText(6, input.destination_path);
+        try statement.bindInt64(7, @intCast(input.expected_size));
+        try statement.bindInt64(8, input.expected_modified_ns);
+        try statement.bindInt64(9, @backingInt(MutationState.planned));
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.lastInsertRowId();
+    }
+
+    pub fn transition(
+        self: *MutationJournalRepository,
+        operation_id: i64,
+        expected: MutationState,
+        next: MutationState,
+        message: ?[]const u8,
+    ) !void {
+        if (!validMutationTransition(expected, next)) return error.InvalidMutationTransition;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations
+            \\SET state=?1, error=?2, updated_at=unixepoch()
+            \\WHERE id=?3 AND state=?4;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @backingInt(next));
+        try statement.bindOptionalText(2, message);
+        try statement.bindInt64(3, operation_id);
+        try statement.bindInt64(4, @backingInt(expected));
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleMutationOperation;
+    }
+
+    pub fn state(self: *const MutationJournalRepository, operation_id: i64) !MutationState {
+        var statement = try self.db.prepare(
+            "SELECT state FROM mutation_operations WHERE id=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, operation_id);
+        if (try statement.step() != .row) return error.MutationOperationNotFound;
+        return std.enums.fromInt(MutationState, statement.columnInt64(0)) orelse
+            error.InvalidStoredMutationState;
+    }
+};
+
+fn validMutationTransition(from: MutationState, to: MutationState) bool {
+    return switch (from) {
+        .planned => to == .staged or to == .failed,
+        .staged => to == .committed or to == .rolled_back or to == .failed,
+        .failed => to == .rolled_back,
+        .committed, .rolled_back => false,
+    };
+}
