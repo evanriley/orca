@@ -1,6 +1,6 @@
 .{
     .name = .orca,
-    .version = "0.1.0-dev",
+    .version = "0.1.0",
     .minimum_zig_version = "0.17.0-dev.1770+5d7cf3f34",
     .paths = .{
         "build.zig",
@@ -11,6 +11,7 @@
         "tests",
         "fixtures",
         "docs",
+        "CHANGELOG.md",
         "README.md",
     },
     .fingerprint = 0x6111eddd391f5ccd,
