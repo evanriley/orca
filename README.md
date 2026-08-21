@@ -22,7 +22,11 @@ zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
 zig build run -- play /path/to/audio
 zig build bench
+zig build -Doptimize=ReleaseFast dsp-bench
 ```
+
+The DSP benchmark checks scalar/vector output equality before reporting
+per-sample timings; use a release build for meaningful SIMD measurements.
 
 The benchmark defaults to a generated 500,000-track in-memory library. Pass a
 track count and SQLite path to exercise durable WAL storage, for example:

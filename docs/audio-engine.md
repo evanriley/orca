@@ -17,6 +17,27 @@ in one Zone cannot consume another Zone's render capacity. Player processing
 runs before fanout; Zone processing runs on each private copy afterward. Both
 scopes use fixed-capacity, allocation-free processing chains.
 
+DSP nodes expose sample/rate/layout effects, algorithmic latency, lookahead,
+tail and block constraints, reset behavior, and direct-RT safety. Prepared
+ordered chains are triple-buffered: the control lane writes an unclaimed slot
+and publishes it atomically, while the render lane adopts it only at a block
+boundary. Acknowledged generations make old node-context reclamation explicit.
+Gain and ReplayGain changes use frame ramps; metering publishes peak/RMS
+snapshots without changing samples. Built-in processing also includes peaking
+parametric EQ, stereo crossfeed, and a resettable DC blocker.
+
+The resampler interface uses caller-owned input/output buffers and reports
+partial consumption. Its current linear implementation is a streaming scalar
+reference, not a production-quality band-limited resampler. Gain and metering
+also have scalar references and tested Zig vector kernels; run
+`zig build -Doptimize=ReleaseFast dsp-bench` for host-specific evidence.
+
+Signal-path reports list Player and Zone nodes, format/rate/layout conversions,
+direct-RT eligibility, and total algorithmic latency. They distinguish source
+PCM from canonical float32 working PCM and conservatively explain why a path is
+not bit-perfect. Eligibility is not an assertion that the current backend and
+device negotiated a bit-perfect native output path.
+
 Zones hold render policy independently from Players. Interactive policy limits
 the producer to a direct one-block handoff, while robust and custom policies
 permit bounded render-ahead through the same Zone abstraction. Latency state
@@ -56,10 +77,10 @@ uses server-default output when no ID is supplied and reports played frames,
 underruns, backend quantum, and device/graph delay after completion.
 
 Codec selection is owned by a bounded `CodecRegistry`. Playback sees only an
-Orca `Decoder` interface (canonical format, optional frame count, read, seek,
-and lifetime); WAV parser state and conversion scratch remain private to its
-adapter. `SourceSession` therefore owns any registered Decoder and primes the
-same pool/queue path without codec-specific types.
+Orca `Decoder` interface (source and canonical formats, optional frame count,
+read, seek, and lifetime); WAV parser state and conversion scratch remain
+private to its adapter. `SourceSession` therefore owns any registered Decoder
+and primes the same pool/queue path without codec-specific types.
 
 The built-in registry prioritizes pure Zig adapters: Orca pins
 `audiophile/flac` 1.0.2 for lossless decoding and `audiophile/qoa` 1.0.0 for
