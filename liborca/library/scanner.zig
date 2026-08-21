@@ -1,5 +1,6 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
+const metadata = @import("../metadata/root.zig");
 const storage = @import("../storage/root.zig");
 
 pub const CancellationToken = struct {
@@ -48,6 +49,11 @@ pub const Scanner = struct {
         }
         var pending: std.ArrayList(database.ObservedFileInput) = .empty;
         defer pending.deinit(self.allocator);
+        var metadata_values: std.ArrayList([]u8) = .empty;
+        defer {
+            for (metadata_values.items) |value| self.allocator.free(value);
+            metadata_values.deinit(self.allocator);
+        }
         var result: Result = .{};
 
         while (try walker.next(self.io)) |entry| {
@@ -105,19 +111,24 @@ pub const Scanner = struct {
                 self.allocator.free(path);
                 return err;
             };
-            pending.append(self.allocator, changed) catch |err| {
-                _ = paths.pop();
-                self.allocator.free(path);
-                return err;
-            };
+            if (audio_format == .mp3) {
+                var tag_buffer: [128]u8 = undefined;
+                if (try metadata.id3v1.read(local.readable(), &tag_buffer)) |tag| {
+                    changed.title = try self.ownText(&metadata_values, tag.title);
+                    changed.artist = try self.ownText(&metadata_values, tag.artist);
+                    changed.album = try self.ownText(&metadata_values, tag.album);
+                    changed.track_number = if (tag.track_number) |number| number else null;
+                }
+            }
+            try pending.append(self.allocator, changed);
             result.changed += 1;
             if (pending.items.len >= self.batch_size) {
-                try self.flush(&paths, &pending);
+                try self.flush(&paths, &pending, &metadata_values);
                 result.batches_committed += 1;
             }
         }
         if (pending.items.len > 0) {
-            try self.flush(&paths, &pending);
+            try self.flush(&paths, &pending, &metadata_values);
             result.batches_committed += 1;
         }
         return result;
@@ -127,11 +138,26 @@ pub const Scanner = struct {
         self: *Scanner,
         paths: *std.ArrayList([]u8),
         pending: *std.ArrayList(database.ObservedFileInput),
+        metadata_values: *std.ArrayList([]u8),
     ) !void {
         try self.observed_files.upsertBatch(pending.items);
         for (paths.items) |path| self.allocator.free(path);
+        for (metadata_values.items) |value| self.allocator.free(value);
         paths.clearRetainingCapacity();
         pending.clearRetainingCapacity();
+        metadata_values.clearRetainingCapacity();
+    }
+
+    fn ownText(
+        self: *Scanner,
+        values: *std.ArrayList([]u8),
+        text: []const u8,
+    ) !?[]const u8 {
+        if (text.len == 0) return null;
+        const owned = try self.allocator.dupe(u8, text);
+        errdefer self.allocator.free(owned);
+        try values.append(self.allocator, owned);
+        return owned;
     }
 };
 
@@ -149,6 +175,14 @@ test "scanner batches audio and skips unchanged files on restart" {
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "notes.txt",
         .data = "not audio",
+    });
+    var mp3: [256]u8 = @splat(0);
+    @memcpy(mp3[0..3], "ID3");
+    @memcpy(mp3[128..131], "TAG");
+    @memcpy(mp3[131..145], "Observed title");
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "tagged.mp3",
+        .data = &mp3,
     });
     const root_path = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -170,13 +204,25 @@ test "scanner batches audio and skips unchanged files on restart" {
     };
 
     const first = try scanner.scan(root_path);
-    try std.testing.expectEqual(@as(u64, 2), first.changed);
+    try std.testing.expectEqual(@as(u64, 3), first.changed);
     try std.testing.expectEqual(@as(u64, 1), first.unsupported);
-    try std.testing.expectEqual(@as(u64, 2), first.batches_committed);
+    try std.testing.expectEqual(@as(u64, 3), first.batches_committed);
     const second = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 0), second.changed);
-    try std.testing.expectEqual(@as(u64, 2), second.unchanged);
-    try std.testing.expectEqual(@as(u64, 2), try library.observed_files.count());
+    try std.testing.expectEqual(@as(u64, 3), second.unchanged);
+    try std.testing.expectEqual(@as(u64, 3), try library.observed_files.count());
+    const mp3_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/tagged.mp3",
+        .{root_path},
+    );
+    defer std.testing.allocator.free(mp3_path);
+    const observed_title = (try library.observed_files.title(
+        std.testing.allocator,
+        mp3_path,
+    )).?;
+    defer std.testing.allocator.free(observed_title);
+    try std.testing.expectEqualStrings("Observed title", observed_title);
 }
 
 test "cancelled scans stop before filesystem work" {

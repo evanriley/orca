@@ -1,6 +1,6 @@
 const sqlite = @import("sqlite.zig");
 
-pub const current_version = 2;
+pub const current_version = 3;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -92,6 +92,16 @@ const migration_2 =
     \\    ON observed_files(inode, size_bytes, modified_ns);
 ;
 
+const migration_3 =
+    \\CREATE TABLE observed_file_metadata (
+    \\    path TEXT PRIMARY KEY REFERENCES observed_files(path) ON DELETE CASCADE,
+    \\    title TEXT,
+    \\    artist TEXT,
+    \\    album TEXT,
+    \\    track_number INTEGER
+    \\) WITHOUT ROWID;
+;
+
 pub fn apply(db: sqlite.Database) sqlite.Error!void {
     const version = blk: {
         var statement = try db.prepare("PRAGMA user_version;");
@@ -106,5 +116,6 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     errdefer db.exec("ROLLBACK;") catch {};
     if (version < 1) try db.exec(migration_1);
     if (version < 2) try db.exec(migration_2);
-    try db.exec("PRAGMA user_version=2; COMMIT;");
+    if (version < 3) try db.exec(migration_3);
+    try db.exec("PRAGMA user_version=3; COMMIT;");
 }

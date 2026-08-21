@@ -28,6 +28,10 @@ pub const ObservedFileInput = struct {
     size_bytes: i64,
     modified_ns: i64,
     audio_format: u8,
+    title: ?[]const u8 = null,
+    artist: ?[]const u8 = null,
+    album: ?[]const u8 = null,
+    track_number: ?i64 = null,
 };
 
 pub const TrackSummary = struct {
@@ -192,11 +196,28 @@ pub const ObservedFileRepository = struct {
             \\    observed_at=excluded.observed_at;
         );
         defer statement.deinit();
+        var metadata_statement = try self.db.prepare(
+            \\INSERT INTO observed_file_metadata(path, title, artist, album, track_number)
+            \\VALUES (?1, ?2, ?3, ?4, ?5)
+            \\ON CONFLICT(path) DO UPDATE SET
+            \\    title=excluded.title,
+            \\    artist=excluded.artist,
+            \\    album=excluded.album,
+            \\    track_number=excluded.track_number;
+        );
+        defer metadata_statement.deinit();
         for (files) |file| {
             try bindIdentity(statement, file);
             try statement.bindInt64(5, file.audio_format);
             if (try statement.step() != .done) return error.SqlFailed;
             try statement.reset();
+            try metadata_statement.bindText(1, file.path);
+            try metadata_statement.bindOptionalText(2, file.title);
+            try metadata_statement.bindOptionalText(3, file.artist);
+            try metadata_statement.bindOptionalText(4, file.album);
+            try metadata_statement.bindOptionalInt64(5, file.track_number);
+            if (try metadata_statement.step() != .done) return error.SqlFailed;
+            try metadata_statement.reset();
         }
         try self.db.exec("COMMIT;");
     }
@@ -206,6 +227,20 @@ pub const ObservedFileRepository = struct {
         defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    pub fn title(
+        self: *const ObservedFileRepository,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+    ) !?[]u8 {
+        var statement = try self.db.prepare(
+            "SELECT title FROM observed_file_metadata WHERE path=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, path);
+        if (try statement.step() != .row) return null;
+        return try allocator.dupe(u8, statement.columnText(0));
     }
 
     fn bindIdentity(statement: sqlite.Statement, input: ObservedFileInput) !void {

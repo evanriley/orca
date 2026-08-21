@@ -83,6 +83,11 @@ pub const Statement = struct {
         ) != c.SQLITE_OK) return error.BindFailed;
     }
 
+    pub fn bindOptionalText(self: Statement, index: c_int, value: ?[]const u8) Error!void {
+        if (value) |text| return self.bindText(index, text);
+        if (c.sqlite3_bind_null(self.handle, index) != c.SQLITE_OK) return error.BindFailed;
+    }
+
     pub fn bindInt64(self: Statement, index: c_int, value: i64) Error!void {
         if (c.sqlite3_bind_int64(self.handle, index, value) != c.SQLITE_OK) {
             return error.BindFailed;
