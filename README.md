@@ -22,6 +22,13 @@ zig build run -- demo
 zig build bench
 ```
 
+The benchmark defaults to a generated 500,000-track in-memory library. Pass a
+track count and SQLite path to exercise durable WAL storage, for example:
+
+```sh
+zig build bench -- 500000 /tmp/orca-500k.db
+```
+
 `zig build dependency-smoke` verifies the system-library integration pattern on
 Linux by linking and calling into PipeWire. C headers and foreign types remain
 contained in their eventual adapter modules.

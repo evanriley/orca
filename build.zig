@@ -4,11 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const sqlite_translate = b.addTranslateC(.{
+        .root_source_file = b.path("liborca/database/sqlite_import.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const sqlite_module = sqlite_translate.createModule();
+
     const liborca_module = b.addModule("liborca", .{
         .root_source_file = b.path("liborca/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "sqlite", .module = sqlite_module }},
     });
+    liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
 
     const liborca = b.addLibrary(.{
         .name = "orca",

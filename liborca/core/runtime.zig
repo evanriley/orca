@@ -1,5 +1,6 @@
 const std = @import("std");
 const control = @import("control.zig");
+const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
 const job = @import("job.zig");
 const object = @import("object.zig");
@@ -18,13 +19,16 @@ pub const State = enum(u8) {
 };
 
 const RuntimeObject = struct {};
+const LibraryObject = struct {
+    database: ?*database.LibraryDatabase = null,
+};
 
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
     state: std.atomic.Value(State) = .init(.running),
-    libraries: handle.Pool(RuntimeObject, object.LibraryTag),
+    libraries: handle.Pool(LibraryObject, object.LibraryTag),
     players: handle.Pool(RuntimeObject, object.PlayerTag),
     zones: handle.Pool(RuntimeObject, object.ZoneTag),
     jobs: job.Manager,
@@ -67,6 +71,9 @@ pub const OrcaRuntime = struct {
         self.jobs.cancelAndDrain();
         self.zones.discardAll();
         self.players.discardAll();
+        for (self.libraries.slots.items) |*slot| {
+            if (slot.value) |*library| self.closeLibraryDatabase(library);
+        }
         self.libraries.discardAll();
 
         self.state.store(.stopped, .release);
@@ -77,9 +84,27 @@ pub const OrcaRuntime = struct {
         return self.libraries.insert(.{});
     }
 
+    pub fn openLibrary(self: *OrcaRuntime, path: [:0]const u8) !LibraryHandle {
+        try self.requireRunning();
+        const library_database = try self.allocator.create(database.LibraryDatabase);
+        errdefer self.allocator.destroy(library_database);
+        library_database.* = try database.LibraryDatabase.open(self.allocator, path);
+        errdefer library_database.close();
+        return self.libraries.insert(.{ .database = library_database });
+    }
+
     pub fn destroyLibrary(self: *OrcaRuntime, library: LibraryHandle) !void {
         try self.requireRunning();
-        _ = try self.libraries.remove(library);
+        var removed = try self.libraries.remove(library);
+        self.closeLibraryDatabase(&removed);
+    }
+
+    pub fn libraryDatabase(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+    ) !*database.LibraryDatabase {
+        try self.requireRunning();
+        return (try self.libraries.get(library)).database orelse error.LibraryHasNoDatabase;
     }
 
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {
@@ -180,6 +205,14 @@ pub const OrcaRuntime = struct {
         };
     }
 
+    fn closeLibraryDatabase(self: *OrcaRuntime, library: *LibraryObject) void {
+        if (library.database) |library_database| {
+            library_database.close();
+            self.allocator.destroy(library_database);
+            library.database = null;
+        }
+    }
+
     fn requireRunning(self: *const OrcaRuntime) error{RuntimeNotRunning}!void {
         if (self.state.load(.acquire) != .running) return error.RuntimeNotRunning;
     }
@@ -242,4 +275,18 @@ test "slow completion consumers apply bounded backpressure" {
 
     _ = runtime.pollEvent() orelse return error.MissingEvent;
     try std.testing.expect(runtime.processNextCommand());
+}
+
+test "runtime Library handles own independent databases" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const library = try runtime.openLibrary(
+        "file:orca-runtime-library?mode=memory&cache=shared",
+    );
+    const library_database = try runtime.libraryDatabase(library);
+    try library_database.tracks.insertBatch(&.{.{ .title = "Runtime track" }});
+    try std.testing.expectEqual(@as(u64, 1), try library_database.tracks.count());
+    try runtime.destroyLibrary(library);
+    try std.testing.expectError(error.StaleHandle, runtime.libraryDatabase(library));
 }
