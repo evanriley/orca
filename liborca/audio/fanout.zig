@@ -1,4 +1,5 @@
 const buffer = @import("buffer.zig");
+const processing = @import("processing.zig");
 const render = @import("render.zig");
 
 /// Producer-side destination for one independently buffered Zone. A Player's
@@ -9,6 +10,7 @@ pub fn ZoneSink(comptime capacity: usize) type {
         pool: *buffer.BlockPool,
         pipe: *render.RenderPipe(capacity),
         channels: u16,
+        zone_processor: ?processing.Processor = null,
 
         const Self = @This();
 
@@ -23,7 +25,10 @@ pub fn ZoneSink(comptime capacity: usize) type {
             if (sample_count != samples.len or sample_count > self.pool.samples_per_block)
                 return false;
             const index = self.pool.acquire() orelse return false;
-            @memcpy(self.pool.samples(index)[0..sample_count], samples);
+            const destination = self.pool.samples(index)[0..sample_count];
+            @memcpy(destination, samples);
+            if (self.zone_processor) |processor|
+                processor.process(destination, frames, self.channels);
             if (!self.pipe.submit(.{
                 .index = index,
                 .frames = frames,

@@ -4,6 +4,7 @@ pub const buffer = @import("buffer.zig");
 pub const fanout = @import("fanout.zig");
 pub const pcm = @import("pcm.zig");
 pub const player = @import("player.zig");
+pub const processing = @import("processing.zig");
 pub const render = @import("render.zig");
 pub const source_session = @import("source_session.zig");
 pub const spsc = @import("spsc.zig");
@@ -15,6 +16,7 @@ test {
     _ = @import("buffer.zig");
     _ = @import("fanout.zig");
     _ = @import("player.zig");
+    _ = @import("processing.zig");
     _ = @import("render.zig");
     _ = @import("source_session.zig");
     _ = @import("spsc.zig");

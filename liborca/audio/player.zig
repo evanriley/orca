@@ -2,6 +2,7 @@ const std = @import("std");
 const buffer = @import("buffer.zig");
 const fanout = @import("fanout.zig");
 const pcm = @import("pcm.zig");
+const processing = @import("processing.zig");
 const render = @import("render.zig");
 const source_session = @import("source_session.zig");
 
@@ -73,9 +74,21 @@ pub const Player = struct {
         scratch: []f32,
         sinks: []fanout.ZoneSink(capacity),
     ) !FanoutResult {
+        return self.decodeProcessAndFanout(capacity, scratch, null, sinks);
+    }
+
+    pub fn decodeProcessAndFanout(
+        self: *Player,
+        comptime capacity: usize,
+        scratch: []f32,
+        player_processor: ?processing.Processor,
+        sinks: []fanout.ZoneSink(capacity),
+    ) !FanoutResult {
         const format_value = self.format() orelse return error.PlayerHasNoSource;
         const frames = try self.decodeFrames(scratch);
         const samples = scratch[0 .. frames * format_value.channels];
+        if (player_processor) |processor|
+            processor.process(samples, @intCast(frames), format_value.channels);
         return .{
             .frames = frames,
             .zones_accepted = if (frames == 0)
@@ -181,13 +194,25 @@ test "Player decodes once into independently owned Zone pipelines" {
     defer second_pool.deinit();
     var first_pipe: render.RenderPipe(1) = .{};
     var second_pipe: render.RenderPipe(1) = .{};
+    var player_gain: processing.Gain = .{ .linear = .init(0.5) };
+    var zone_gain: processing.Gain = .{ .linear = .init(0.5) };
     const Sink = fanout.ZoneSink(1);
     var sinks = [_]Sink{
         .{ .pool = &first_pool, .pipe = &first_pipe, .channels = 1 },
-        .{ .pool = &second_pool, .pipe = &second_pipe, .channels = 1 },
+        .{
+            .pool = &second_pool,
+            .pipe = &second_pipe,
+            .channels = 1,
+            .zone_processor = zone_gain.processor(),
+        },
     };
     var scratch: [2]f32 = undefined;
-    const result = try player.decodeAndFanout(1, &scratch, &sinks);
+    const result = try player.decodeProcessAndFanout(
+        1,
+        &scratch,
+        player_gain.processor(),
+        &sinks,
+    );
     try std.testing.expectEqual(@as(usize, 2), result.frames);
     try std.testing.expectEqual(@as(usize, 2), result.zones_accepted);
 
@@ -201,5 +226,6 @@ test "Player decodes once into independently owned Zone pipelines" {
         @as(usize, 2),
         second_pipe.render(&second_pool, 1, 1, &second_output),
     );
-    try std.testing.expectEqualSlices(f32, &first_output, &second_output);
+    try std.testing.expectEqualSlices(f32, &.{ 0.125, 0.25 }, &first_output);
+    try std.testing.expectEqualSlices(f32, &.{ 0.0625, 0.125 }, &second_output);
 }
