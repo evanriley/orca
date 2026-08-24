@@ -1,7 +1,8 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
-const metadata = @import("../metadata/root.zig");
 const storage = @import("../storage/root.zig");
+const projection = @import("projection.zig");
+const tag_reader = @import("tag_reader.zig");
 
 pub const CancellationToken = struct {
     requested: std.atomic.Value(bool) = .init(false),
@@ -23,14 +24,64 @@ pub const Result = struct {
     errors: u64 = 0,
     batches_committed: u64 = 0,
     cancelled: bool = false,
+    /// What the projection made of what this scan observed. Zero on a scan
+    /// that changed nothing, because nothing then needs reprojecting.
+    projection: projection.Result = .{},
 };
 
+/// One entry the scan decided to write, held until its batch commits.
+const PendingEntry = struct {
+    path: []u8,
+    audio_format: storage.AudioFormat,
+    identity: database.StorageIdentityKey,
+    quick_hash: storage.QuickHash,
+    tags: ?tag_reader.Tags,
+
+    fn deinit(self: PendingEntry, allocator: std.mem.Allocator) void {
+        if (self.tags) |tags| tags.deinit();
+        allocator.free(self.path);
+    }
+};
+
+/// Walks a root and records what the filesystem currently says.
+///
+/// The scanner observes: it writes `files`, `locations` and
+/// `observed_file_tags` and nothing else. Turning observations into artists,
+/// releases and tracks is the projection's job, and Track metadata is never
+/// written from here.
 pub const Scanner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    observed_files: *database.ObservedFileRepository,
+    files: *database.FileRepository,
+    locations: *database.LocationRepository,
+    observed_tags: *database.ObservedTagsRepository,
+    write_lane: *database.repository.WriteLane,
+    database_handle: database.sqlite.Database,
+    /// The volume the root lives on, resolved by the platform adapter before
+    /// the scan starts — never `st_dev`, which does not survive a remount.
+    volume_id: i64 = 1,
+    root_id: ?i64 = null,
+    /// Stamped onto every location this run reaches, so a completed run can
+    /// name the ones it did not.
+    generation: i64 = 0,
     cancellation: ?*const CancellationToken = null,
     batch_size: usize = 256,
+    /// Where observations become a browsable library.
+    ///
+    /// The scanner still writes only files, locations and observed tags; it
+    /// hands the projection the file ids its batch changed and the projection
+    /// decides, from `EffectiveMetadata`, what Tracks those imply. Absent, a
+    /// scan simply observes and `tracks` is refreshed by a later standalone
+    /// reprojection.
+    projection: ?*projection.Projection = null,
+    /// File ids the last batch committed, held until the projection has
+    /// consumed them. Not part of the scan's observation contract.
+    projected: std.ArrayList(i64) = .empty,
+
+    pub fn deinit(self: *Scanner) void {
+        self.projected.deinit(self.allocator);
+        self.* = undefined;
+    }
 
     pub fn scan(self: *Scanner, root_path: []const u8) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
@@ -42,17 +93,10 @@ pub const Scanner = struct {
         var walker = try root.walk(self.allocator);
         defer walker.deinit();
 
-        var paths: std.ArrayList([]u8) = .empty;
+        var pending: std.ArrayList(PendingEntry) = .empty;
         defer {
-            for (paths.items) |path| self.allocator.free(path);
-            paths.deinit(self.allocator);
-        }
-        var pending: std.ArrayList(database.ObservedFileInput) = .empty;
-        defer pending.deinit(self.allocator);
-        var metadata_values: std.ArrayList([]u8) = .empty;
-        defer {
-            for (metadata_values.items) |value| self.allocator.free(value);
-            metadata_values.deinit(self.allocator);
+            for (pending.items) |entry| entry.deinit(self.allocator);
+            pending.deinit(self.allocator);
         }
         var result: Result = .{};
 
@@ -69,95 +113,131 @@ pub const Scanner = struct {
                 "{s}/{s}",
                 .{ root_path, entry.path },
             );
+            var owned_path = true;
+            defer if (owned_path) self.allocator.free(path);
             var local = storage.LocalFileSource.open(self.io, path) catch {
-                self.allocator.free(path);
                 result.errors += 1;
                 continue;
             };
             defer local.close();
-            const identity = local.readable().identity();
-            const observed = database.ObservedFileInput{
-                .path = path,
-                .inode = std.math.cast(i64, identity.inode) orelse {
-                    self.allocator.free(path);
+            const storage_identity = local.readable().identity();
+            const identity = database.StorageIdentityKey{
+                .volume_id = self.volume_id,
+                .native_inode = std.math.cast(i64, storage_identity.inode) orelse {
                     result.errors += 1;
                     continue;
                 },
-                .size_bytes = std.math.cast(i64, identity.size) orelse {
-                    self.allocator.free(path);
+                .size_bytes = std.math.cast(i64, storage_identity.size) orelse {
                     result.errors += 1;
                     continue;
                 },
-                .modified_ns = std.math.cast(i64, identity.modified_ns) orelse {
-                    self.allocator.free(path);
+                .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse {
                     result.errors += 1;
                     continue;
                 },
-                .audio_format = 0,
             };
-            if (try self.observed_files.isUnchanged(observed)) {
-                self.allocator.free(path);
+            if (try self.locations.isUnchanged(self.volume_id, path, identity)) {
                 result.unchanged += 1;
                 continue;
             }
             const audio_format = (try storage.format.sniff(local.readable())) orelse {
-                self.allocator.free(path);
                 result.unsupported += 1;
                 continue;
             };
-            var changed = observed;
-            changed.audio_format = @backingInt(audio_format);
-            paths.append(self.allocator, path) catch |err| {
-                self.allocator.free(path);
-                return err;
-            };
-            if (audio_format == .mp3) {
-                var tag_buffer: [128]u8 = undefined;
-                if (try metadata.id3v1.read(local.readable(), &tag_buffer)) |tag| {
-                    changed.title = try self.ownText(&metadata_values, tag.title);
-                    changed.artist = try self.ownText(&metadata_values, tag.artist);
-                    changed.album = try self.ownText(&metadata_values, tag.album);
-                    changed.track_number = if (tag.track_number) |number| number else null;
-                }
-            }
-            try pending.append(self.allocator, changed);
+            // Unreadable tags leave the file observed but untagged: a corrupt
+            // tag is not a reason to drop a playable file from the library.
+            const tags = tag_reader.read(
+                self.allocator,
+                audio_format,
+                local.readable(),
+            ) catch null;
+            errdefer if (tags) |owned| owned.deinit();
+            try pending.append(self.allocator, .{
+                .path = path,
+                .audio_format = audio_format,
+                .identity = identity,
+                .quick_hash = try storage.quick_hash.fromSource(local.readable()),
+                .tags = tags,
+            });
+            owned_path = false;
             result.changed += 1;
             if (pending.items.len >= self.batch_size) {
-                try self.flush(&paths, &pending, &metadata_values);
+                try self.flush(&pending);
                 result.batches_committed += 1;
+                try self.project(&result);
             }
         }
         if (pending.items.len > 0) {
-            try self.flush(&paths, &pending, &metadata_values);
+            try self.flush(&pending);
             result.batches_committed += 1;
         }
+        try self.project(&result);
         return result;
     }
 
-    fn flush(
-        self: *Scanner,
-        paths: *std.ArrayList([]u8),
-        pending: *std.ArrayList(database.ObservedFileInput),
-        metadata_values: *std.ArrayList([]u8),
-    ) !void {
-        try self.observed_files.upsertBatch(pending.items);
-        for (paths.items) |path| self.allocator.free(path);
-        for (metadata_values.items) |value| self.allocator.free(value);
-        paths.clearRetainingCapacity();
-        pending.clearRetainingCapacity();
-        metadata_values.clearRetainingCapacity();
+    /// Reproject exactly what the last batches changed.
+    ///
+    /// It runs outside the batch transaction and after the write lane is
+    /// released, because the projection takes both itself, and it is scoped to
+    /// the changed files so a rescan that found nothing new does no work at
+    /// all rather than rebuilding the whole library.
+    fn project(self: *Scanner, result: *Result) !void {
+        const target = self.projection orelse return;
+        if (self.projected.items.len == 0) return;
+        const batch = try target.run(.{ .files = self.projected.items });
+        self.projected.clearRetainingCapacity();
+        result.projection.folders_visited += batch.folders_visited;
+        result.projection.groups_projected += batch.groups_projected;
+        result.projection.files_projected += batch.files_projected;
+        result.projection.tracks_written += batch.tracks_written;
+        result.projection.releases_written += batch.releases_written;
+        result.projection.recordings_created += batch.recordings_created;
+        result.projection.compilations += batch.compilations;
+        result.projection.filename_titles += batch.filename_titles;
+        result.projection.synthetic_positions += batch.synthetic_positions;
+        result.projection.displaced_positions += batch.displaced_positions;
     }
 
-    fn ownText(
-        self: *Scanner,
-        values: *std.ArrayList([]u8),
-        text: []const u8,
-    ) !?[]const u8 {
-        if (text.len == 0) return null;
-        const owned = try self.allocator.dupe(u8, text);
-        errdefer self.allocator.free(owned);
-        try values.append(self.allocator, owned);
-        return owned;
+    /// One bounded commit per batch, resolving each entry's file identity
+    /// inside the same transaction that records it.
+    fn flush(self: *Scanner, pending: *std.ArrayList(PendingEntry)) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.database_handle.exec("BEGIN IMMEDIATE;");
+        errdefer self.database_handle.exec("ROLLBACK;") catch {};
+        for (pending.items) |entry| {
+            const upsert = database.FileUpsert{
+                .audio_format = @backingInt(entry.audio_format),
+                .size_bytes = entry.identity.size_bytes,
+                .quick_hash = &entry.quick_hash,
+            };
+            const existing = (try self.files.resolveByUri(self.volume_id, entry.path)) orelse
+                (try self.files.resolveByIdentity(entry.identity)) orelse
+                try self.files.resolveByQuickHash(&entry.quick_hash);
+            const file_id = if (existing) |id| resolved: {
+                try self.files.updateLocked(id, upsert);
+                break :resolved id;
+            } else try self.files.createLocked(upsert);
+            _ = try self.locations.upsertLocked(.{
+                .file_id = file_id,
+                .volume_id = self.volume_id,
+                .root_id = self.root_id,
+                .uri = entry.path,
+                .native_inode = entry.identity.native_inode,
+                .size_bytes = entry.identity.size_bytes,
+                .modified_ns = entry.identity.modified_ns,
+                .state = .present,
+                .last_seen_generation = self.generation,
+            });
+            if (entry.tags) |tags| try self.observed_tags.upsertBatchLocked(&.{.{
+                .file_id = file_id,
+                .values = tags.values,
+            }});
+            if (self.projection != null) try self.projected.append(self.allocator, file_id);
+        }
+        try self.database_handle.exec("COMMIT;");
+        for (pending.items) |entry| entry.deinit(self.allocator);
+        pending.clearRetainingCapacity();
     }
 };
 
@@ -193,13 +273,18 @@ test "scanner batches audio and skips unchanged files on restart" {
 
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
+        std.testing.io,
         "file:orca-scanner-test?mode=memory&cache=shared",
     );
     defer library.close();
     var scanner = Scanner{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
-        .observed_files = &library.observed_files,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
         .batch_size = 1,
     };
 
@@ -210,19 +295,78 @@ test "scanner batches audio and skips unchanged files on restart" {
     const second = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 0), second.changed);
     try std.testing.expectEqual(@as(u64, 3), second.unchanged);
-    try std.testing.expectEqual(@as(u64, 3), try library.observed_files.count());
+    try std.testing.expectEqual(@as(u64, 3), try library.files.count());
     const mp3_path = try std.fmt.allocPrint(
         std.testing.allocator,
         "{s}/tagged.mp3",
         .{root_path},
     );
     defer std.testing.allocator.free(mp3_path);
-    const observed_title = (try library.observed_files.title(
-        std.testing.allocator,
+    const file_id = (try library.files.resolveByUri(
+        database.LibraryDatabase.null_volume,
         mp3_path,
     )).?;
-    defer std.testing.allocator.free(observed_title);
-    try std.testing.expectEqualStrings("Observed title", observed_title);
+    const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
+    defer observed.deinit();
+    try std.testing.expectEqualStrings("Observed title", observed.values.title.?);
+}
+
+test "a scan projects only the batches it changed and reprojects nothing on a rescan" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "one.flac",
+        .data = "fLaCgenerated one",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "two.flac",
+        .data = "fLaCgenerated two",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-projection?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var target: projection.Projection = .{
+        .allocator = std.testing.allocator,
+        .library = &library,
+    };
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .projection = &target,
+    };
+    defer scanner.deinit();
+
+    // These fixtures carry no tags at all, so the projection has only the
+    // filesystem to work from — and must still produce a browsable Track for
+    // every file rather than nothing. The counters are per batch and a folder
+    // straddling two batches is resolved in both, so they are read here at the
+    // default batch size where the folder lands in one.
+    const first = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 2), first.changed);
+    try std.testing.expectEqual(@as(u64, 2), first.projection.tracks_written);
+    try std.testing.expectEqual(@as(u64, 2), first.projection.filename_titles);
+    try std.testing.expectEqual(@as(u64, 2), try library.tracks.count());
+
+    const second = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 0), second.changed);
+    try std.testing.expectEqual(@as(u64, 0), second.projection.folders_visited);
+    try std.testing.expectEqual(@as(u64, 0), second.projection.tracks_written);
+    try std.testing.expectEqual(@as(u64, 2), try library.tracks.count());
 }
 
 test "cancelled scans stop before filesystem work" {
@@ -238,15 +382,187 @@ test "cancelled scans stop before filesystem work" {
     defer std.testing.allocator.free(root_path);
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
+        std.testing.io,
         "file:orca-cancelled-scanner?mode=memory&cache=shared",
     );
     defer library.close();
     var scanner = Scanner{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
-        .observed_files = &library.observed_files,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
         .cancellation = &token,
     };
     const result = try scanner.scan(root_path);
     try std.testing.expect(result.cancelled);
+}
+
+test "a scan after migration claims the files it inherited instead of re-importing them" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "first.flac",
+        .data = "fLaCgenerated first",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "second.flac",
+        .data = "fLaCgenerated second",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "third.wav",
+        .data = "RIFFxxxxWAVEfmt ",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+    // The database lives outside the scanned root so the walk sees only music.
+    var database_directory = std.testing.tmpDir(.{});
+    defer database_directory.cleanup();
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/library.db",
+        .{database_directory.sub_path},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+    const tracked = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/first.flac",
+        .{root_path},
+    );
+    defer std.testing.allocator.free(tracked);
+
+    // A version-7 library: observations keyed by path, with user state hanging
+    // off those paths, and no `library_roots` row — exactly what the field
+    // produced before this migration existed.
+    {
+        const raw = try database.sqlite.Database.open(database_path);
+        defer raw.close();
+        try database.migrations.applyThrough(raw, 7);
+        var insert = try raw.prepare(
+            \\INSERT INTO observed_files(path, inode, size_bytes, modified_ns, audio_format)
+            \\VALUES (?1, 1, 19, 5, 1);
+        );
+        defer insert.deinit();
+        for ([_][]const u8{ "first.flac", "second.flac", "third.wav" }) |name| {
+            const path = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{s}/{s}",
+                .{ root_path, name },
+            );
+            defer std.testing.allocator.free(path);
+            try insert.bindText(1, path);
+            try std.testing.expectEqual(database.sqlite.Step.done, try insert.step());
+            try insert.reset();
+        }
+        var metadata = try raw.prepare(
+            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked)
+            \\VALUES (?1, 0, 'Curated title', 1, 1);
+        );
+        defer metadata.deinit();
+        try metadata.bindText(1, tracked);
+        try std.testing.expectEqual(database.sqlite.Step.done, try metadata.step());
+        var health = try raw.prepare(
+            \\INSERT INTO library_health_issues(path, kind, severity, details)
+            \\VALUES (?1, 5, 1, 'clipped');
+        );
+        defer health.deinit();
+        try health.bindText(1, tracked);
+        try std.testing.expectEqual(database.sqlite.Step.done, try health.step());
+    }
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        database_path,
+    );
+    defer library.close();
+    try std.testing.expectEqual(@as(u64, 3), try library.files.count());
+    const migrated_file_id = (try library.files.resolveByUri(
+        database.LibraryDatabase.null_volume,
+        tracked,
+    )).?;
+
+    // The platform adapter is deliberately left on: this is the path the field
+    // takes, and it resolves a volume the migration could not have known.
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{});
+    try std.testing.expect(binding.volume_id != database.LibraryDatabase.null_volume);
+    try std.testing.expectEqual(@as(u64, 3), binding.claimed_locations);
+
+    const run = try library.scan_runs.begin(binding.root_id);
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+        .generation = run.generation,
+    };
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 3), result.files_seen);
+    try std.testing.expectEqual(@as(u64, 3), result.changed);
+    _ = try library.files.markMissingBelowGeneration(binding.root_id, run.generation);
+
+    // Nothing was re-imported: the same files, the same locations, the same ids.
+    try std.testing.expectEqual(@as(u64, 3), try library.files.count());
+    try std.testing.expectEqual(@as(u64, 3), try library.locations.count());
+    try std.testing.expectEqual(
+        @as(?i64, migrated_file_id),
+        try library.files.resolveByUri(binding.volume_id, tracked),
+    );
+    try std.testing.expect(
+        (try library.files.resolveByUri(database.LibraryDatabase.null_volume, tracked)) == null,
+    );
+
+    // And the user state migrated onto that file is still on the file the user
+    // is now browsing, rather than stranded on an orphaned duplicate.
+    const curated = (try library.orca_metadata.get(
+        std.testing.allocator,
+        migrated_file_id,
+        .title,
+    )).?;
+    defer curated.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Curated title", curated.text);
+    try std.testing.expect(curated.locked);
+    try std.testing.expectEqual(@as(u64, 1), try library.health_issues.count());
+    var issues = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer issues.deinit();
+    try std.testing.expectEqual(migrated_file_id, issues.items[0].file_id);
+    try std.testing.expectEqualStrings(tracked, issues.items[0].path);
+
+    // Claimed locations are verified by the scan, not left unverified forever.
+    const location_id = (try library.locations.find(binding.volume_id, tracked)).?;
+    try std.testing.expectEqual(
+        database.LocationState.present,
+        try library.locations.stateOf(location_id),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try countUnverified(library.database),
+    );
+
+    // A second scan now takes the unchanged fast path for every entry.
+    const second_run = try library.scan_runs.begin(binding.root_id);
+    scanner.generation = second_run.generation;
+    const second = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 0), second.changed);
+    try std.testing.expectEqual(@as(u64, 3), second.unchanged);
+    try std.testing.expectEqual(@as(u64, 3), try library.files.count());
+}
+
+fn countUnverified(db: database.sqlite.Database) !i64 {
+    var statement = try db.prepare("SELECT count(*) FROM locations WHERE state='unverified';");
+    defer statement.deinit();
+    if (try statement.step() != .row) return error.SqlFailed;
+    return statement.columnInt64(0);
 }
