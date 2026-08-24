@@ -1,6 +1,73 @@
 # Changelog
 
-## Unreleased - 0.1.0-alpha
+## Unreleased - 0.2.0-alpha
+
+### The C ABI reaches the runtime (breaking)
+
+Until now `liborca/orca.h` exposed runtime create/destroy, library open/query,
+and a Player state machine that was not connected to anything. There was no way
+to load a track, attach an output, trigger a scan, read a position, or observe
+an event, which is why the GTK app's play button did nothing. The boundary now
+exposes the surface the frontends actually need.
+
+- **Breaking: `orca_track_view` grew.** It now carries `artist`, `duration_ms`,
+  `track_number`, `disc_number` and `has_file`, each numeric field paired with a
+  `has_*` flag so "zero" and "the library does not know" stay distinguishable.
+  `TrackSummary` already carried all of it. Both consumers are in-tree and there
+  are no external clients, so the break was taken now rather than later.
+  `orca_player_state_snapshot` is untouched; the richer transport view is a
+  **new** `orca_player_status` rather than a grown struct that already shipped.
+- **Scanning is a job, not a blocking call.** `orca_library_add_root`,
+  `orca_library_remove_root` and `orca_library_query_roots` manage roots;
+  `orca_library_start_scan` registers a `work.Registry` worker with its own
+  `std.Io` and its own cancellation token and returns immediately.
+  `orca_job_snapshot_get`, `orca_job_cancel` and `orca_library_scan_stats`
+  observe it. **Scan progress reports `completed_units = files_processed` with
+  `has_total = 0`:** a filesystem walk has no honest denominator until it has
+  finished walking, and Orca does not invent one. Shutdown, `orca_library_close`
+  and `orca_player_destroy` all cancel and join scan workers before anything
+  they hold can be freed.
+- **The scan projects as it commits**, exactly as `orca-cli scan` does, because
+  a scan whose results are never projected has not made a library browsable.
+  `orca_library_start_projection` is the other direction — reprojecting after a
+  metadata change, with no filesystem walk. `orca-cli scan` and `project` now
+  run through those same runtime jobs, so the CLI and the ABI cannot drift.
+- **Events.** `orca_runtime_pump` drives the control lane;
+  `orca_runtime_poll_event` drains the existing lossless completion channel and
+  the existing coalescing telemetry channel into one tagged POD `orca_event`
+  with a named `extern union` payload — ABI-stable, and it imports cleanly into
+  Swift. Kinds: command completed, job progress, job finished, player position.
+- **Transport, queue and now-playing.** `orca_player_set_library`,
+  `_play_track` (through the control lane, correlated by request id),
+  `_play_tracks`, `_enqueue_tracks`, `_next`, `_previous`, `_clear_queue`,
+  `_set_repeat`, `_set_shuffle`, `_set_volume`, `_volume`, `_seek_ms`,
+  `_status_get`, `_now_playing` and `_query_queue`. `orca_player_status`
+  carries transport, repeat, shuffle, epoch, `position_ms`, `duration_ms`,
+  `track_id`, `queue_length`, `queue_index` and volume in one lock-free read.
+  Position is derived from the packed epoch+frames atomic the render callback
+  writes, never reconstructed from events, and now-playing reports the
+  **audible** entry rather than the decode cursor.
+- **Devices and zones.** `orca_enumerate_output_devices`, `orca_zone_create`,
+  `_destroy`, `_attach_player`, `_detach`, `_open_output`, `_close_output` and
+  `_status_get`, plus `orca_player_open_default_output`, which creates,
+  attaches and opens in one call so a single-output frontend never has to know
+  Zones exist. Device id 0 delegates to the server default.
+- **Volume is real.** A `processing.Gain` lives beside each Player, is installed
+  as the engine's Player-scope processor, and applies to canonical PCM once
+  before fanout, so every Zone hears the same level and a stop/start keeps it.
+- **A single-thread contract that is enforced.** All `orca_*` calls for one
+  runtime must come from one thread, `orca_runtime_poll_event` included. Debug
+  builds record the creating thread and return `ORCA_STATUS_WRONG_THREAD` on a
+  violation. This is no longer theoretical: the runtime behind the boundary is
+  genuinely multithreaded and its object pools take no lock.
+- **A Player with nothing to play refuses to play.** `orca_player_play` now
+  requires a loaded source or a non-empty queue *and* an attached Zone. The C
+  ABI smoke test asserted the opposite for as long as the defect existed; that
+  assertion is now inverted, and the test drives the whole path — open, add
+  root, scan as a job, wait, project, query, open a default output, play by id,
+  watch the position advance, pause, seek, next, clear, shut down.
+
+## 0.1.0-alpha
 
 **Version reset.** The project was previously tagged `0.10.0`. That number, and
 the release notes below it, describe subsystems that exist as tested components

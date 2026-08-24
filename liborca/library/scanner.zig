@@ -67,6 +67,10 @@ pub const Scanner = struct {
     /// name the ones it did not.
     generation: i64 = 0,
     cancellation: ?*const CancellationToken = null,
+    /// Files walked so far, published for a host that is showing progress. A
+    /// scan has no honest denominator until the walk finishes, so this is a
+    /// count and never a fraction. Optional: nothing here depends on it.
+    progress: ?*std.atomic.Value(u64) = null,
     batch_size: usize = 256,
     /// Decoders used to read each changed file's declared audio properties.
     /// Injectable so a test can narrow the set; absent, the builtins are used.
@@ -115,6 +119,7 @@ pub const Scanner = struct {
             };
             if (entry.kind != .file) continue;
             result.files_seen += 1;
+            if (self.progress) |counter| counter.store(result.files_seen, .release);
 
             const path = try std.fmt.allocPrint(
                 self.allocator,

@@ -42,6 +42,13 @@ pub const Player = struct {
     /// across a replacement two different queue entries could share a serial
     /// and now-playing would resolve to the wrong track.
     serial_counter: u32 = 0,
+    /// Canonical sample rate and total frame count of the source currently
+    /// loaded, republished by whichever lane loads it. Both lanes that touch
+    /// `sources` do so under the engine `quiesce`/`release` handshake, so these
+    /// exist purely so a *host* can turn frames into milliseconds without
+    /// stopping the producer to read the decoder.
+    published_sample_rate: std.atomic.Value(u32) = .init(0),
+    published_frame_count: std.atomic.Value(u64) = .init(0),
 
     pub fn deinit(self: *Player) void {
         if (self.sources) |*sources| sources.deinit();
@@ -53,6 +60,7 @@ pub const Player = struct {
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
         self.resetTimeline();
+        self.publishSourceInfo();
     }
 
     /// Replaces the whole SourceQueue and retires the prepared audio that
@@ -64,6 +72,7 @@ pub const Player = struct {
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
         self.resetTimeline();
+        self.publishSourceInfo();
         _ = self.epoch.fetchAdd(1, .acq_rel);
     }
 
@@ -76,6 +85,15 @@ pub const Player = struct {
             sources.deinit();
         }
         self.sources = null;
+        self.publishSourceInfo();
+    }
+
+    /// Republishes the loaded source's timeline shape. Called from the lane
+    /// that owns `sources`, never from the render callback.
+    pub fn publishSourceInfo(self: *Player) void {
+        const rate: u32 = if (self.format()) |value| value.sample_rate else 0;
+        self.published_sample_rate.store(rate, .release);
+        self.published_frame_count.store(self.frameCount() orelse 0, .release);
     }
 
     /// Frames in the currently loaded source, when its decoder knows.

@@ -3,6 +3,7 @@ const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
+const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
 const object = @import("object.zig");
 const track_source = @import("track_source.zig");
@@ -29,6 +30,9 @@ const LibraryObject = struct {
 };
 const PlayerObject = struct {
     player: *audio.player.Player,
+    /// Player-scope volume. Lives beside the Player rather than inside the
+    /// engine so the level survives an engine that is stopped and respawned.
+    gain: *audio.processing.Gain,
     /// Track references, cursor, repeat and shuffle. Lives beside the Player
     /// and outlives any individual `SourceQueue`: `stop` releases decoders but
     /// never the list the user assembled.
@@ -69,6 +73,238 @@ pub const ZoneStats = struct {
     rendered_entry_serial: u32,
 };
 
+/// How many finished job records keep their scanner counters queryable. A
+/// bounded tail: a host reads the stats of the scan that just ended, not of
+/// every scan the process ever ran.
+const retained_job_records: usize = 8;
+
+/// Ramp applied to a volume change, in frames. Long enough that a slider does
+/// not click, short enough to feel immediate.
+const volume_ramp_frames: u32 = 512;
+
+pub const ScanRequest = struct {
+    /// Which registered root to walk. Null walks every enabled root.
+    root_id: ?i64 = null,
+    batch_size: usize = 256,
+};
+
+/// What a scan job observed, mirroring `scanner.Result` plus what the
+/// projection made of it. A scan has no honest denominator until its walk
+/// finishes, so there is a count of files processed and no total.
+pub const ScanStats = struct {
+    files_seen: u64 = 0,
+    changed: u64 = 0,
+    unchanged: u64 = 0,
+    unsupported: u64 = 0,
+    errors: u64 = 0,
+    batches_committed: u64 = 0,
+    cancelled: bool = false,
+    folders_visited: u64 = 0,
+    files_projected: u64 = 0,
+    tracks_written: u64 = 0,
+    releases_written: u64 = 0,
+};
+
+/// The same counters as the worker publishes them: monotonic atomics, so the
+/// control lane may read a running scan's progress without stopping it.
+const LiveScanStats = struct {
+    files_seen: std.atomic.Value(u64) = .init(0),
+    changed: std.atomic.Value(u64) = .init(0),
+    unchanged: std.atomic.Value(u64) = .init(0),
+    unsupported: std.atomic.Value(u64) = .init(0),
+    errors: std.atomic.Value(u64) = .init(0),
+    batches_committed: std.atomic.Value(u64) = .init(0),
+    cancelled: std.atomic.Value(bool) = .init(false),
+    folders_visited: std.atomic.Value(u64) = .init(0),
+    files_projected: std.atomic.Value(u64) = .init(0),
+    tracks_written: std.atomic.Value(u64) = .init(0),
+    releases_written: std.atomic.Value(u64) = .init(0),
+
+    fn read(self: *const LiveScanStats, in_flight: u64) ScanStats {
+        return .{
+            .files_seen = self.files_seen.load(.acquire) + in_flight,
+            .changed = self.changed.load(.acquire),
+            .unchanged = self.unchanged.load(.acquire),
+            .unsupported = self.unsupported.load(.acquire),
+            .errors = self.errors.load(.acquire),
+            .batches_committed = self.batches_committed.load(.acquire),
+            .cancelled = self.cancelled.load(.acquire),
+            .folders_visited = self.folders_visited.load(.acquire),
+            .files_projected = self.files_projected.load(.acquire),
+            .tracks_written = self.tracks_written.load(.acquire),
+            .releases_written = self.releases_written.load(.acquire),
+        };
+    }
+};
+
+/// One background worker behind a `JobHandle`.
+///
+/// Threading contract, the same one `core/work.zig` states: the worker thread
+/// touches only this struct and the Library database it was handed. It never
+/// resolves a handle, never reads a `handle.Pool`, and never touches the
+/// runtime. The control lane cancels it, joins it through `work.Registry`, and
+/// only then reads anything that is not an atomic here.
+const JobWorker = struct {
+    allocator: std.mem.Allocator,
+    registration: *work.Registration,
+    work_handle: WorkHandle,
+    job: JobHandle,
+    library: LibraryHandle,
+    /// Borrowed. The control lane joins this worker before the Library it
+    /// belongs to can be closed, which is what makes the raw pointer safe.
+    database: *database.LibraryDatabase,
+    kind: job.Kind,
+    root_id: ?i64,
+    batch_size: usize,
+    /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
+    /// is never borrowed across a thread boundary.
+    threaded: std.Io.Threaded = .init_single_threaded,
+    /// What the scanner polls. Set by `cancelJob` and by every runtime path
+    /// that drains workers, because the registry flag alone cannot reach
+    /// inside a filesystem walk.
+    token: library_pass.CancellationToken = .{},
+    /// Files the *current* root's walk has reached, written by the scanner.
+    progress: std.atomic.Value(u64) = .init(0),
+    stats: LiveScanStats = .{},
+    failed: std.atomic.Value(bool) = .init(false),
+    /// Control lane only: the thread has been joined and the record finalized.
+    retired: bool = false,
+
+    fn run(self: *JobWorker) void {
+        defer {
+            self.threaded.deinit();
+            self.registration.finish();
+        }
+        switch (self.kind) {
+            .scan => self.runScan(),
+            .projection => self.runProjection(),
+            else => self.failed.store(true, .release),
+        }
+    }
+
+    fn cancelled(self: *const JobWorker) bool {
+        return self.token.isCancelled() or self.registration.cancellationRequested();
+    }
+
+    fn runProjection(self: *JobWorker) void {
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        const result = pass.run(.all) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.noteProjection(result);
+    }
+
+    fn runScan(self: *JobWorker) void {
+        const io = self.threaded.io();
+        var roots = self.database.library_roots.list(self.allocator) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        defer roots.deinit();
+        for (roots.items) |root| {
+            if (self.cancelled()) {
+                self.stats.cancelled.store(true, .release);
+                break;
+            }
+            if (!root.enabled) continue;
+            if (self.root_id) |wanted| {
+                if (root.id != wanted) continue;
+            }
+            self.scanRoot(io, root) catch self.failed.store(true, .release);
+        }
+    }
+
+    /// One root, walked exactly as `orca-cli scan` walks it: observe, project
+    /// each committed batch, close the run, and — only on a run that finished —
+    /// name the locations the walk never reached.
+    fn scanRoot(
+        self: *JobWorker,
+        io: std.Io,
+        root: database.repository.LibraryRoot,
+    ) !void {
+        self.progress.store(0, .release);
+        const scan_run = try self.database.scan_runs.begin(root.id);
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        var scanner: library_pass.Scanner = .{
+            .allocator = self.allocator,
+            .io = io,
+            .files = &self.database.files,
+            .locations = &self.database.locations,
+            .observed_tags = &self.database.observed_tags,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .volume_id = root.volume_id,
+            .root_id = root.id,
+            .generation = scan_run.generation,
+            .cancellation = &self.token,
+            .batch_size = self.batch_size,
+            .progress = &self.progress,
+            .projection = &pass,
+        };
+        defer scanner.deinit();
+        const result = try scanner.scan(root.path);
+        try self.database.scan_runs.finish(
+            scan_run.id,
+            if (result.cancelled) .cancelled else .completed,
+            .{
+                .files_seen = result.files_seen,
+                .changed = result.changed,
+                .unchanged = result.unchanged,
+                .unsupported = result.unsupported,
+                .errors = result.errors,
+            },
+        );
+        // Never on a cancelled run: a partial walk must not mark the files it
+        // did not reach as missing.
+        if (!result.cancelled) _ = try self.database.files.markMissingBelowGeneration(
+            root.id,
+            scan_run.generation,
+        );
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.changed, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
+        self.noteProjection(result.projection);
+    }
+
+    fn noteProjection(self: *JobWorker, result: library_pass.projection.Result) void {
+        _ = self.stats.folders_visited.fetchAdd(result.folders_visited, .acq_rel);
+        _ = self.stats.files_projected.fetchAdd(result.files_projected, .acq_rel);
+        _ = self.stats.tracks_written.fetchAdd(result.tracks_written, .acq_rel);
+        _ = self.stats.releases_written.fetchAdd(result.releases_written, .acq_rel);
+    }
+
+    fn filesProcessed(self: *const JobWorker) u64 {
+        return self.stats.files_seen.load(.acquire) + self.progress.load(.acquire);
+    }
+};
+
+/// One lock-free read of everything a transport UI shows.
+pub const PlayerStatus = struct {
+    transport: audio.player.TransportState,
+    repeat: RepeatMode,
+    shuffle: bool,
+    epoch: u32,
+    position_ms: u64,
+    duration_ms: u64,
+    /// The **audible** entry, not the one the decoder has reached.
+    track_id: ?i64,
+    queue_length: u32,
+    queue_index: u32,
+    volume: f32,
+};
+
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 pub const OrcaRuntime = struct {
@@ -93,6 +329,8 @@ pub const OrcaRuntime = struct {
     /// Fixed shuffle seed, for tests that need a reproducible permutation.
     shuffle_seed: ?u64 = null,
     shuffle_counter: u64 = 0,
+    /// Background job workers, live and recently retired. Control lane only.
+    job_workers: std.ArrayList(*JobWorker) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -150,8 +388,11 @@ pub const OrcaRuntime = struct {
         for (self.players.slots.items) |*slot| {
             if (slot.value) |*player| self.stopEngine(player);
         }
+        self.cancelJobWorkers();
         self.work_registry.requestCancellation();
         self.work_registry.drain();
+        self.finalizeDrainedJobWorkers();
+        self.freeAllJobWorkers();
         self.jobs.cancelAndDrain();
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |zone| zone.zone.destroy();
@@ -189,6 +430,14 @@ pub const OrcaRuntime = struct {
 
     pub fn destroyLibrary(self: *OrcaRuntime, library: LibraryHandle) !void {
         try self.requireRunning();
+        // A scan or projection worker holds this database by pointer, so it is
+        // cancelled and joined before the connection can be closed. Work is not
+        // yet scoped per object, so this conservatively drains every worker —
+        // the same trade `joinWorkersBeforeDestroy` documents.
+        self.cancelJobWorkers();
+        self.joinWorkersBeforeDestroy();
+        self.reapStoppedEngines();
+        self.finalizeDrainedJobWorkers();
         // Openers hold a pointer into the Library they resolve through, so
         // every Player bound to it has to let go — with its engine stopped —
         // before the database is closed.
@@ -270,7 +519,10 @@ pub const OrcaRuntime = struct {
         errdefer self.allocator.destroy(queue);
         queue.* = .init(self.allocator, self.nextShuffleSeed());
         errdefer queue.deinit();
-        return self.players.insert(.{ .player = player, .queue = queue });
+        const gain = try self.allocator.create(audio.processing.Gain);
+        errdefer self.allocator.destroy(gain);
+        gain.* = .{};
+        return self.players.insert(.{ .player = player, .queue = queue, .gain = gain });
     }
 
     /// Shuffle must be reproducible when a test asks for it and different
@@ -291,6 +543,7 @@ pub const OrcaRuntime = struct {
         self.stopEngine(try self.players.get(player));
         self.joinWorkersBeforeDestroy();
         self.reapStoppedEngines();
+        self.finalizeDrainedJobWorkers();
         const removed = try self.players.remove(player);
         self.freePlayerObject(removed);
         // Detaching also closes each Zone's output: an OutputSession whose
@@ -485,9 +738,20 @@ pub const OrcaRuntime = struct {
         return try object_value.player.seek(frame);
     }
 
+    /// Refuses a transport start that cannot produce audio.
+    ///
+    /// A Player with neither a loaded source nor a queue entry to load has
+    /// nothing to play, and one with no attached Zone has nowhere to play it.
+    /// Both used to "succeed" into a detached state machine that reported
+    /// PLAYING while nothing was rendering; the C ABI smoke test now asserts
+    /// the rejection instead.
     pub fn playPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
-        (try self.players.get(player)).player.play();
+        const object_value = try self.players.get(player);
+        if (object_value.player.sources == null and object_value.queue.isEmpty())
+            return error.PlayerHasNoSource;
+        if (!self.playerHasZone(player)) return error.PlayerHasNoOutput;
+        object_value.player.play();
     }
 
     pub fn pausePlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
@@ -558,6 +822,7 @@ pub const OrcaRuntime = struct {
 
     fn freePlayerObject(self: *OrcaRuntime, object_value: PlayerObject) void {
         if (object_value.opener) |opener| opener.destroy();
+        self.allocator.destroy(object_value.gain);
         object_value.queue.deinit();
         self.allocator.destroy(object_value.queue);
         object_value.player.deinit();
@@ -808,18 +1073,15 @@ pub const OrcaRuntime = struct {
     }
 
     /// The entry actually being *heard*, which during a gapless transition is
-    /// not the one the decoder has reached. Reading the entry list means
-    /// stopping the engine, so hosts polling at UI rates want
-    /// `playerQueueSnapshot` instead.
+    /// not the one the decoder has reached.
+    ///
+    /// Lock-free, deliberately: the entry list is mutated only by the control
+    /// lane and the engine thread only ever reads it, so a control-lane reader
+    /// cannot race one. Quiescing the producer to answer "what is playing"
+    /// would park decoding on every UI poll.
     pub fn playerNowPlaying(self: *OrcaRuntime, player: PlayerHandle) !?TrackRef {
         try self.requireRunning();
-        const object_value = try self.players.get(player);
-        if (object_value.engine) |engine| {
-            engine.quiesce();
-            defer engine.release();
-            return object_value.queue.current();
-        }
-        return object_value.queue.current();
+        return (try self.players.get(player)).queue.current();
     }
 
     fn requireBoundLibrary(
@@ -920,6 +1182,7 @@ pub const OrcaRuntime = struct {
             .factory = factory,
             .queue = object_state.queue,
             .opener = if (object_state.opener) |opener| opener.opener() else null,
+            .player_processor = object_state.gain.processor(),
         });
         errdefer engine.destroy();
         const work_handle = try self.work_registry.begin();
@@ -999,6 +1262,360 @@ pub const OrcaRuntime = struct {
                 object_value.engine_work = null;
             }
         }
+    }
+
+    // --------------------------------------------------------------- roots
+
+    /// Registers a Library root. Explicitly a user action, which is why this is
+    /// the one path allowed to persist a volume identifier at a mount root.
+    pub fn libraryAddRoot(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        path: []const u8,
+    ) !database.RootBinding {
+        try self.requireRunning();
+        const library_database = try self.libraryDatabase(library);
+        return library_database.ensureRoot(io, path, .{ .allow_persist = true });
+    }
+
+    pub fn libraryRemoveRoot(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        root_id: i64,
+    ) !void {
+        try self.requireRunning();
+        try (try self.libraryDatabase(library)).library_roots.remove(root_id);
+    }
+
+    pub fn libraryRootPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        limit: u32,
+        offset: u32,
+    ) !database.repository.LibraryRootPage {
+        return (try self.libraryDatabase(library)).library_roots.page(
+            self.allocator,
+            limit,
+            offset,
+        );
+    }
+
+    pub fn libraryTrackSummary(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_id: i64,
+    ) !?database.TrackSummary {
+        return (try self.libraryDatabase(library)).tracks.byId(self.allocator, track_id);
+    }
+
+    // ---------------------------------------------------------------- jobs
+
+    /// Starts a filesystem scan on a registered `work.Registry` worker and
+    /// returns immediately. Everything the scan needs — its own `std.Io`, its
+    /// own cancellation token, the Library's serialized write lane — belongs to
+    /// the worker, so the caller's thread is never blocked by a walk.
+    ///
+    /// **The scan projects as it commits.** Each committed batch hands its file
+    /// ids to `library.Projection`, exactly as `orca-cli scan` does, because a
+    /// scan whose results are not projected has not made the library browsable.
+    /// `startLibraryProjection` exists for the other direction: reprojecting
+    /// without a walk, after a metadata edit.
+    pub fn startLibraryScan(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: ScanRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .scan, request);
+    }
+
+    pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
+        return self.startJobWorker(library, .projection, .{});
+    }
+
+    fn startJobWorker(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        kind: job.Kind,
+        request: ScanRequest,
+    ) !JobHandle {
+        try self.requireRunning();
+        if (request.batch_size == 0) return error.InvalidBatchSize;
+        const library_database = try self.libraryDatabase(library);
+        self.pruneRetiredJobWorkers();
+
+        const worker = try self.allocator.create(JobWorker);
+        errdefer self.allocator.destroy(worker);
+        const job_handle = try self.jobs.create(kind, null);
+        errdefer self.jobs.finish(job_handle, .failed) catch {};
+        try self.jobs.start(job_handle);
+
+        const work_handle = try self.work_registry.begin();
+        const registration = self.work_registry.registration(work_handle) catch unreachable;
+        errdefer {
+            registration.finish();
+            self.work_registry.complete(work_handle) catch {};
+        }
+        worker.* = .{
+            .allocator = self.allocator,
+            .registration = registration,
+            .work_handle = work_handle,
+            .job = job_handle,
+            .library = library,
+            .database = library_database,
+            .kind = kind,
+            .root_id = request.root_id,
+            .batch_size = request.batch_size,
+        };
+        try self.job_workers.append(self.allocator, worker);
+        errdefer _ = self.job_workers.pop();
+        registration.thread = try std.Thread.spawn(.{}, JobWorker.run, .{worker});
+        return job_handle;
+    }
+
+    /// Cooperative cancellation for one job. Both flags are set: the registry
+    /// flag is what shutdown observes, and the scanner polls the token.
+    pub fn cancelJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+        try self.requireRunning();
+        try self.jobs.requestCancellation(job_handle);
+        for (self.job_workers.items) |worker| {
+            if (worker.retired or !worker.job.eql(job_handle)) continue;
+            worker.token.cancel();
+            worker.registration.requestCancellation();
+        }
+    }
+
+    /// Job snapshot with the worker's live counters folded in first, so a host
+    /// polling progress never sees a stale count.
+    pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
+        self.syncJobProgress();
+        return self.jobs.snapshot(job_handle);
+    }
+
+    /// Scanner counters for a job, live while it runs and retained for a
+    /// bounded number of finished jobs afterwards.
+    pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
+        for (self.job_workers.items) |worker| {
+            if (!worker.job.eql(job_handle)) continue;
+            return worker.stats.read(worker.progress.load(.acquire));
+        }
+        return error.StaleHandle;
+    }
+
+    fn syncJobProgress(self: *OrcaRuntime) void {
+        for (self.job_workers.items) |worker| {
+            if (worker.retired) continue;
+            self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+        }
+    }
+
+    /// Control lane. Joins every worker whose thread has finished, records the
+    /// job's terminal state and publishes one lossless `job_finished` event per
+    /// job. Called from the runtime pump.
+    pub fn reapFinishedJobs(self: *OrcaRuntime) void {
+        self.syncJobProgress();
+        for (self.job_workers.items) |worker| {
+            if (worker.retired or !worker.registration.isFinished()) continue;
+            // The completion event is lossless: a full channel means the host
+            // has stopped polling, so the worker stays reapable until it drains.
+            if (!self.events.hasCapacity()) return;
+            self.work_registry.complete(worker.work_handle) catch {};
+            self.finalizeJobWorker(worker, true);
+        }
+    }
+
+    /// Records a joined worker's outcome. `publish` is false on the shutdown
+    /// path, where no host will ever poll the event.
+    fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) void {
+        worker.retired = true;
+        const state: job.State = if (worker.failed.load(.acquire))
+            .failed
+        else if (worker.stats.cancelled.load(.acquire))
+            .cancelled
+        else
+            .succeeded;
+        self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+        self.jobs.finish(worker.job, state) catch {};
+        if (!publish) return;
+        self.events.publish(.{
+            .request_id = 0,
+            .outcome = .{ .job_finished = .{ .job = worker.job, .state = state } },
+        }) catch {};
+    }
+
+    /// Control lane. Cancels every job worker's cooperative token. The registry
+    /// flag alone cannot reach inside a scan — the scanner polls a
+    /// `CancellationToken` — so the two are always set together.
+    fn cancelJobWorkers(self: *OrcaRuntime) void {
+        for (self.job_workers.items) |worker| {
+            if (worker.retired) continue;
+            worker.token.cancel();
+        }
+    }
+
+    /// Control lane, immediately after `work_registry.drain()`: every worker
+    /// thread has been joined and its registration already freed, so the
+    /// records are finalized without touching the Registry again.
+    fn finalizeDrainedJobWorkers(self: *OrcaRuntime) void {
+        for (self.job_workers.items) |worker| {
+            if (worker.retired) continue;
+            self.finalizeJobWorker(worker, false);
+        }
+    }
+
+    /// Retains a bounded tail of finished job records so `jobScanStats` still
+    /// answers for a scan that has just completed, and no more.
+    fn pruneRetiredJobWorkers(self: *OrcaRuntime) void {
+        var retired: usize = 0;
+        for (self.job_workers.items) |worker| {
+            if (worker.retired) retired += 1;
+        }
+        if (retired <= retained_job_records) return;
+        var to_drop = retired - retained_job_records;
+        var index: usize = 0;
+        while (index < self.job_workers.items.len and to_drop != 0) {
+            const worker = self.job_workers.items[index];
+            if (!worker.retired) {
+                index += 1;
+                continue;
+            }
+            _ = self.job_workers.orderedRemove(index);
+            self.allocator.destroy(worker);
+            to_drop -= 1;
+        }
+    }
+
+    fn freeAllJobWorkers(self: *OrcaRuntime) void {
+        for (self.job_workers.items) |worker| self.allocator.destroy(worker);
+        self.job_workers.deinit(self.allocator);
+        self.job_workers = .empty;
+    }
+
+    // ------------------------------------------------------- player status
+
+    /// Everything a transport UI needs, in one lock-free read. Position comes
+    /// from the packed epoch+frames atomic the engine derives from the clock
+    /// Zone, never from an event stream.
+    pub fn playerStatus(self: *OrcaRuntime, player: PlayerHandle) !PlayerStatus {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const snapshot = object_value.player.snapshot();
+        const queue_snapshot = object_value.queue.snapshot();
+        const rate = object_value.player.published_sample_rate.load(.acquire);
+        const frames = object_value.player.published_frame_count.load(.acquire);
+        const current = object_value.queue.current();
+        return .{
+            .transport = snapshot.state,
+            .repeat = queue_snapshot.repeat,
+            .shuffle = queue_snapshot.shuffle,
+            .epoch = snapshot.epoch,
+            .position_ms = if (rate == 0) 0 else snapshot.position_frames * 1000 / rate,
+            .duration_ms = if (rate == 0) 0 else frames * 1000 / rate,
+            .track_id = if (current) |ref| ref.track_id else null,
+            .queue_length = queue_snapshot.entries,
+            .queue_index = queue_snapshot.cursor,
+            .volume = object_value.gain.linear.load(.acquire),
+        };
+    }
+
+    /// Copies a bounded page of queue entries into a caller-owned buffer, in
+    /// playback order, so the shuffle permutation is what a host displays.
+    pub fn playerQueuePage(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        offset: u32,
+        output: []TrackRef,
+    ) !usize {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        var count: usize = 0;
+        while (count < output.len) : (count += 1) {
+            output[count] = object_value.queue.refAt(offset + @as(u32, @intCast(count))) orelse
+                break;
+        }
+        return count;
+    }
+
+    /// The Library this Player resolves its queue through, if it is bound.
+    pub fn playerLibrary(self: *OrcaRuntime, player: PlayerHandle) !?LibraryHandle {
+        try self.requireRunning();
+        const opener = (try self.players.get(player)).opener orelse return null;
+        return opener.library;
+    }
+
+    /// Linear volume applied to canonical PCM once, before fanout, so every
+    /// Zone hears the same level. The control block outlives the engine, so a
+    /// stop/start keeps the level the user set.
+    pub fn playerSetVolume(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        linear: f32,
+    ) !void {
+        try self.requireRunning();
+        if (!std.math.isFinite(linear) or linear < 0 or linear > 4) return error.InvalidVolume;
+        (try self.players.get(player)).gain.setLinear(linear, volume_ramp_frames);
+    }
+
+    pub fn playerVolume(self: *OrcaRuntime, player: PlayerHandle) !f32 {
+        try self.requireRunning();
+        return (try self.players.get(player)).gain.linear.load(.acquire);
+    }
+
+    /// Seek in wall-clock milliseconds. The frame conversion needs the loaded
+    /// source's rate, which is why a Player with nothing loaded is refused
+    /// rather than silently seeking to frame zero.
+    pub fn playerSeekMs(self: *OrcaRuntime, player: PlayerHandle, ms: u64) !u32 {
+        try self.requireRunning();
+        const rate = (try self.players.get(player)).player.published_sample_rate.load(.acquire);
+        if (rate == 0) return error.PlayerHasNoSource;
+        return self.seekPlayer(player, ms * rate / 1000);
+    }
+
+    // -------------------------------------------------------- zone helpers
+
+    /// Applies the render policy and requested device latency, then asks the
+    /// Zone's lane to open the output. Both settings are control-lane state and
+    /// are refused once an engine owns the Zone.
+    pub fn zoneOpenOutput(
+        self: *OrcaRuntime,
+        zone: ZoneHandle,
+        device_id: u64,
+        policy: audio.zone.RenderPolicy,
+        latency_frames: u32,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.zones.get(zone);
+        try self.requireZoneIdle(object_value);
+        object_value.zone.zone.policy = policy;
+        object_value.zone.zone.latency.requested_frames = latency_frames;
+        return self.zoneRequestOutput(zone, device_id);
+    }
+
+    /// One call for a frontend with a single output: create a Zone, attach it
+    /// to the Player, and open it. Device id 0 delegates to the server default.
+    /// A single-output host never has to know Zones exist.
+    pub fn playerOpenDefaultOutput(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        device_id: u64,
+    ) !ZoneHandle {
+        try self.requireRunning();
+        _ = try self.players.get(player);
+        const zone = try self.createZone();
+        errdefer self.destroyZone(zone) catch {};
+        try self.attachZone(zone, player);
+        try self.zoneRequestOutput(zone, device_id);
+        return zone;
+    }
+
+    fn playerHasZone(self: *OrcaRuntime, player: PlayerHandle) bool {
+        for (self.zones.slots.items) |*slot| {
+            if (slot.value) |zone| {
+                const attached = zone.attached_player orelse continue;
+                if (attached.eql(player)) return true;
+            }
+        }
+        return false;
     }
 
     /// Stands in for the executors later phases will add: it registers work and
@@ -1104,6 +1721,7 @@ pub const OrcaRuntime = struct {
             error.OutOfMemory => .out_of_memory,
             error.InvalidJobTransition, error.JobAlreadyFinished => .invalid_transition,
             error.PlayerHasNoLibrary, error.PlayerBoundToAnotherLibrary => .player_not_bound,
+            error.PlayerHasNoSource, error.PlayerHasNoOutput => .not_playable,
             error.TrackHasNoPlayableFile => .track_has_no_file,
             error.TrackFileMissing => .track_file_missing,
             error.CodecUnavailable, error.UnsupportedAudioFormat => .codec_unavailable,
@@ -1118,6 +1736,7 @@ pub const OrcaRuntime = struct {
     /// every registered worker. Narrowing this to the workers that actually
     /// hold the destroyed object is a later refinement, never a relaxation.
     fn joinWorkersBeforeDestroy(self: *OrcaRuntime) void {
+        self.cancelJobWorkers();
         self.work_registry.requestCancellation();
         self.work_registry.drain();
     }
@@ -1134,6 +1753,78 @@ pub const OrcaRuntime = struct {
         if (self.state.load(.acquire) != .running) return error.RuntimeNotRunning;
     }
 };
+
+test "a scan runs on a registered worker and honors cancellation" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-scan-job-cancel?mode=memory&cache=shared",
+    );
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    try runtime.cancelJob(job_handle);
+
+    while (true) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        switch (snapshot.state) {
+            .cancelled, .succeeded, .failed => break,
+            else => std.Thread.yield() catch {},
+        }
+    }
+    // The finish notification travels the lossless completion lane, not the
+    // coalescing telemetry one.
+    var finished = false;
+    while (runtime.pollEvent()) |event| switch (event.outcome) {
+        .job_finished => |value| finished = finished or value.job.eql(job_handle),
+        else => {},
+    };
+    try std.testing.expect(finished);
+    try std.testing.expectEqual(@as(usize, 0), runtime.inFlightWorkCount());
+}
+
+test "shutdown joins a scan worker that is still walking" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-scan-job-shutdown?mode=memory&cache=shared",
+    );
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    // No wait: shutdown must cancel the worker's token, join its thread, and
+    // only then close the database the worker is writing to.
+    runtime.shutdown();
+    try std.testing.expectEqual(@as(usize, 0), runtime.inFlightWorkCount());
+    try std.testing.expectError(error.StaleHandle, runtime.jobSnapshotSynced(job_handle));
+}
+
+test "a completed scan projects what it observed" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-scan-job-project?mode=memory&cache=shared",
+    );
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    while (true) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        if (snapshot.state == .succeeded) break;
+        if (snapshot.state == .failed or snapshot.state == .cancelled)
+            return error.ScanDidNotSucceed;
+        std.Thread.yield() catch {};
+    }
+    const stats = try runtime.jobScanStats(job_handle);
+    try std.testing.expect(stats.files_seen > 0);
+    try std.testing.expect(stats.changed > 0);
+    // A scan whose results are never projected has not made a library
+    // browsable, which is why the projection runs inside the scan job.
+    try std.testing.expect(stats.tracks_written > 0);
+    try std.testing.expect(try runtime.libraryTrackCount(library) > 0);
+}
 
 test "runtime can repeatedly start and stop without leaking" {
     for (0..100) |_| {

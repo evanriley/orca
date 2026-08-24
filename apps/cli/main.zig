@@ -27,70 +27,26 @@ pub fn main(init: std.process.Init) !void {
             else => return error.PlayerCreationFailed,
         }
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "scan")) {
+        // The same path the C ABI exposes: register the root, start the scan as
+        // a runtime job on a registered worker, and poll it. The scan projects
+        // as it commits, which is why there is no separate projection step here.
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         var runtime = liborca.OrcaRuntime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        const library_database = try runtime.libraryDatabase(library_handle);
         // Adding a root is an explicit user action, so this is the one place
         // allowed to write a volume identifier to a mount root that has no
         // filesystem UUID of its own.
-        const binding = try library_database.ensureRoot(init.io, args[3], .{
-            .allow_persist = true,
-        });
+        const binding = try runtime.libraryAddRoot(library_handle, init.io, args[3]);
         if (binding.claimed_locations != 0) try stdout.print(
             "claimed {d} migrated locations for volume {d}\n",
             .{ binding.claimed_locations, binding.volume_id },
         );
-        const run = try library_database.scan_runs.begin(binding.root_id);
-        var scanner = liborca.library.Scanner{
-            .allocator = allocator,
-            .io = init.io,
-            .files = &library_database.files,
-            .locations = &library_database.locations,
-            .observed_tags = &library_database.observed_tags,
-            .write_lane = library_database.write_lane,
-            .database_handle = library_database.database,
-            .volume_id = binding.volume_id,
+        const job_handle = try runtime.startLibraryScan(library_handle, .{
             .root_id = binding.root_id,
-            .generation = run.generation,
-        };
-        var projection: liborca.library.Projection = .{
-            .allocator = allocator,
-            .library = library_database,
-        };
-        scanner.projection = &projection;
-        defer scanner.deinit();
-        const result = try scanner.scan(args[3]);
-        try library_database.scan_runs.finish(
-            run.id,
-            if (result.cancelled) .cancelled else .completed,
-            .{
-                .files_seen = result.files_seen,
-                .changed = result.changed,
-                .unchanged = result.unchanged,
-                .unsupported = result.unsupported,
-                .errors = result.errors,
-            },
-        );
-        // Never on a cancelled run: a partial walk must not mark the files it
-        // did not reach as missing.
-        if (!result.cancelled) _ = try library_database.files.markMissingBelowGeneration(
-            binding.root_id,
-            run.generation,
-        );
-        try stdout.print(
-            "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d}\n",
-            .{
-                result.files_seen,
-                result.changed,
-                result.unchanged,
-                result.unsupported,
-                result.errors,
-                result.batches_committed,
-            },
-        );
-        try printProjection(stdout, result.projection);
+        });
+        try awaitJob(&runtime, stdout, job_handle);
+        try printScanStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "project")) {
         // Reprojection without a filesystem walk: this is what refreshes the
         // library after a metadata edit or a provider acceptance, and it is why
@@ -99,12 +55,9 @@ pub fn main(init: std.process.Init) !void {
         var runtime = liborca.OrcaRuntime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        const library_database = try runtime.libraryDatabase(library_handle);
-        var projection: liborca.library.Projection = .{
-            .allocator = allocator,
-            .library = library_database,
-        };
-        try printProjection(stdout, try projection.run(.all));
+        const job_handle = try runtime.startLibraryProjection(library_handle);
+        try awaitJob(&runtime, stdout, job_handle);
+        try printScanStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         var runtime = liborca.OrcaRuntime.init(allocator);
@@ -394,22 +347,54 @@ fn sleepMilliseconds(milliseconds: u32) void {
     _ = std.c.nanosleep(&duration, null);
 }
 
-fn printProjection(
+/// Drives the runtime pump until a job reaches a terminal state, exactly as a
+/// frontend event loop would. Nothing about the scan happens on this thread.
+fn awaitJob(
+    runtime: *liborca.OrcaRuntime,
     stdout: *std.Io.Writer,
-    result: liborca.library.projection.Result,
+    job_handle: liborca.core.JobHandle,
+) !void {
+    while (true) {
+        _ = runtime.processNextCommand();
+        runtime.reapFinishedJobs();
+        while (runtime.pollEvent()) |_| {}
+        while (runtime.pollTelemetry()) |_| {}
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        switch (snapshot.state) {
+            .succeeded => return,
+            .failed => return error.JobFailed,
+            .cancelled => {
+                try stdout.print("cancelled after {d} files\n", .{snapshot.completed_units});
+                return;
+            },
+            else => {},
+        }
+        sleepMilliseconds(20);
+    }
+}
+
+fn printScanStats(
+    stdout: *std.Io.Writer,
+    stats: liborca.core.runtime.ScanStats,
 ) !void {
     try stdout.print(
-        "projected folders={d} groups={d} files={d} tracks={d} compilations={d} " ++
-            "filename_titles={d} synthetic_positions={d} displaced_positions={d}\n",
+        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d}\n",
         .{
-            result.folders_visited,
-            result.groups_projected,
-            result.files_projected,
-            result.tracks_written,
-            result.compilations,
-            result.filename_titles,
-            result.synthetic_positions,
-            result.displaced_positions,
+            stats.files_seen,
+            stats.changed,
+            stats.unchanged,
+            stats.unsupported,
+            stats.errors,
+            stats.batches_committed,
+        },
+    );
+    try stdout.print(
+        "projected folders={d} files={d} tracks={d} releases={d}\n",
+        .{
+            stats.folders_visited,
+            stats.files_projected,
+            stats.tracks_written,
+            stats.releases_written,
         },
     );
 }

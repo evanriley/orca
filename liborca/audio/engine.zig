@@ -40,6 +40,10 @@ pub const Options = struct {
     factory: ?output_api.Factory = null,
     queue: ?*playback_queue.PlaybackQueue = null,
     opener: ?playback_queue.TrackOpener = null,
+    /// Player-scope processing applied to canonical PCM once, before fanout.
+    /// The runtime uses it for the Player's volume gain, whose control block
+    /// outlives the engine so a restart keeps the level the user set.
+    player_processor: ?processing.Processor = null,
 };
 
 /// The one decode producer for a Player.
@@ -128,6 +132,7 @@ pub const PlayerEngine = struct {
             .factory = options.factory,
             .queue = options.queue,
             .opener = options.opener,
+            .player_processor = options.player_processor,
         };
         self.adopted = self.slots[0][0..0];
         return self;
@@ -560,6 +565,10 @@ pub const PlayerEngine = struct {
     /// Derives authoritative position from the clock Zone and publishes a
     /// coalesced hint. Snapshots stay authoritative; this channel is a hint.
     fn publishPosition(self: *PlayerEngine, zones: []*ZoneRuntime) void {
+        // A gapless transition swaps `SourceQueue.current` inside the decode
+        // lane, so the source's shape has to be republished from here rather
+        // than only where a source is loaded.
+        self.player.publishSourceInfo();
         const had_clock_zone = self.clock_zone != null;
         if (self.clock_zone) |current| {
             var still_valid = false;

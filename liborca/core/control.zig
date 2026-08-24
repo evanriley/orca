@@ -44,6 +44,8 @@ pub const Failure = enum {
     /// Nothing in the CodecRegistry can read those bytes.
     codec_unavailable,
     queue_full,
+    /// The Player has nothing to play, or nowhere to play it.
+    not_playable,
     internal,
 };
 
@@ -53,6 +55,13 @@ pub const Outcome = union(enum) {
     zone_created: object.ZoneHandle,
     job_started: object.JobHandle,
     job_cancellation_requested: object.JobHandle,
+    /// A registered worker reached its terminal state and has been joined.
+    /// Correlated with the request that started the job, so a host that
+    /// submitted `start_job` sees start and finish on the same lossless lane.
+    job_finished: struct {
+        job: object.JobHandle,
+        state: job.State,
+    },
     track_playing: object.PlayerHandle,
     failed: Failure,
 };
@@ -118,6 +127,10 @@ pub const EventChannel = struct {
     pub fn hasCapacity(self: *EventChannel) bool {
         return self.queue.count() < 256;
     }
+
+    pub fn count(self: *EventChannel) usize {
+        return self.queue.count();
+    }
 };
 
 /// High-frequency state hints are coalesced by object. Authoritative callers
@@ -131,6 +144,10 @@ pub const TelemetryChannel = struct {
 
     pub fn poll(self: *TelemetryChannel) ?Telemetry {
         return self.queue.pop();
+    }
+
+    pub fn count(self: *TelemetryChannel) usize {
+        return self.queue.count();
     }
 };
 

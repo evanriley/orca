@@ -206,9 +206,13 @@ pub const ZoneRuntime = struct {
                 .bytes_per_frame = try std.math.mul(u16, format.channels, 4),
             },
             .policy = self.zone.policy,
-            // Orca's own render-ahead is the Zone budget; the device is asked
-            // for one block so the two do not compound into a large latency.
-            .requested_latency_frames = frames_per_block,
+            // Orca's own render-ahead is the Zone budget; absent an explicit
+            // request the device is asked for one block, so the two do not
+            // compound into a large latency.
+            .requested_latency_frames = if (self.zone.latency.requested_frames != 0)
+                self.zone.latency.requested_frames
+            else
+                frames_per_block,
         };
         self.output = try factory.open(request, Context.callback, self.context.userdata());
         self.open_format = format;

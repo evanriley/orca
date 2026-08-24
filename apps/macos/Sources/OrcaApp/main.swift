@@ -10,6 +10,16 @@ struct TrackRow: Identifiable {
     let title: String
     let album: String
     let artist: String
+    /// Nil when the library does not know, which is not the same as zero.
+    let durationMilliseconds: Int64?
+    /// False greys the row out without a second question per Track.
+    let hasFile: Bool
+
+    var subtitle: String {
+        guard let durationMilliseconds else { return "\(artist) — \(album)" }
+        let seconds = durationMilliseconds / 1000
+        return String(format: "%@ — %@ · %d:%02d", artist, album, seconds / 60, seconds % 60)
+    }
 }
 
 private func copyString(_ view: orca_string_view) -> String {
@@ -24,7 +34,9 @@ private let receiveTrack: orca_track_callback = { context, track in
         id: track.pointee.id,
         title: copyString(track.pointee.title),
         album: copyString(track.pointee.album),
-        artist: copyString(track.pointee.album_artist)
+        artist: copyString(track.pointee.artist),
+        durationMilliseconds: track.pointee.has_duration != 0 ? track.pointee.duration_ms : nil,
+        hasFile: track.pointee.has_file != 0
     ))
 }
 
@@ -110,17 +122,25 @@ final class RuntimeController: ObservableObject {
         refreshSnapshot()
     }
 
+    /// Authoritative transport state, read as a snapshot rather than
+    /// reconstructed from events. Pumping first lets the control lane execute
+    /// anything this frontend submitted since the last tick.
     private func refreshSnapshot() {
-        var snapshot = orca_player_state_snapshot()
-        guard orca_player_snapshot(runtime, player, &snapshot) == ORCA_STATUS_OK else { return }
-        playbackState = snapshot.state
-        MPNowPlayingInfoCenter.default().playbackState =
-            playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue) ? .playing : .paused
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+        _ = orca_runtime_pump(runtime)
+        var status = orca_player_status()
+        guard orca_player_status_get(runtime, player, &status) == ORCA_STATUS_OK else { return }
+        playbackState = status.transport
+        let playing = playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue)
+        MPNowPlayingInfoCenter.default().playbackState = playing ? .playing : .paused
+        var info: [String: Any] = [
             MPMediaItemPropertyTitle: "Orca",
-            MPNowPlayingInfoPropertyPlaybackRate:
-                playbackState == UInt8(ORCA_TRANSPORT_PLAYING.rawValue) ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyPlaybackRate: playing ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(status.position_ms) / 1000,
         ]
+        if status.duration_ms != 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = Double(status.duration_ms) / 1000
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
     private func configureRemoteCommands() {
@@ -160,8 +180,10 @@ struct ContentView: View {
             List(controller.tracks) { track in
                 VStack(alignment: .leading) {
                     Text(track.title)
-                    Text("\(track.artist) — \(track.album)").font(.secondary)
+                    Text(track.subtitle).font(.secondary)
                 }
+                .opacity(track.hasFile ? 1 : 0.5)
+                .accessibilityLabel(track.hasFile ? track.title : "\(track.title), file unavailable")
             }
             HStack {
                 Button("Open Library…") { choosingLibrary = true }

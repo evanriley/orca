@@ -549,6 +549,29 @@ pub const TrackRepository = struct {
         return collectTrackPage(allocator, statement);
     }
 
+    /// One Track by id, for the "what is playing right now" question. Bounded
+    /// by construction: a single row, copied out, with no statement escaping.
+    pub fn byId(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?TrackSummary {
+        var statement = try self.db.prepare(track_columns ++
+            \\FROM tracks WHERE tracks.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        var page_result = try collectTrackPage(allocator, statement);
+        if (page_result.items.len == 0) {
+            page_result.deinit();
+            return null;
+        }
+        const first = page_result.items[0];
+        for (page_result.items[1..]) |extra| extra.deinit(allocator);
+        allocator.free(page_result.items);
+        return first;
+    }
+
     /// Where a Track's bytes actually live. This is the call that turns "a row
     /// in a list" into "audio a Player can open", so it answers with the
     /// volume's stable key rather than assuming a local path, and prefers a
@@ -902,6 +925,39 @@ pub const LibraryRootRepository = struct {
             "SELECT id, volume_id, path, enabled FROM library_roots ORDER BY id;",
         );
         defer statement.deinit();
+        var roots: std.ArrayList(LibraryRoot) = .empty;
+        errdefer {
+            for (roots.items) |root| root.deinit(allocator);
+            roots.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const path = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(path);
+            try roots.append(allocator, .{
+                .id = statement.columnInt64(0),
+                .volume_id = statement.columnInt64(1),
+                .path = path,
+                .enabled = statement.columnInt64(3) != 0,
+            });
+        }
+        return .{ .allocator = allocator, .items = try roots.toOwnedSlice(allocator) };
+    }
+
+    /// Bounded page, for the ABI: a host never receives an unbounded list, even
+    /// of something as small as a root set.
+    pub fn page(
+        self: *const LibraryRootRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !LibraryRootPage {
+        var statement = try self.db.prepare(
+            \\SELECT id, volume_id, path, enabled FROM library_roots
+            \\ORDER BY id LIMIT ?1 OFFSET ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
         var roots: std.ArrayList(LibraryRoot) = .empty;
         errdefer {
             for (roots.items) |root| root.deinit(allocator);
