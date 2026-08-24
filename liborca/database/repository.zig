@@ -1336,18 +1336,23 @@ pub const LocationRepository = struct {
     /// location a migration produced — has never been confirmed by a scan and
     /// carries whatever tags the old schema had room for, so it is re-observed
     /// once and promoted rather than trusted on sight.
-    pub fn isUnchanged(
+    /// The id of the present Location this identity already describes, or null
+    /// when the entry is new or its bytes changed.
+    ///
+    /// The caller must stamp what this returns through `markSeenLocked`. A scan
+    /// that skips an unchanged file without recording that it *saw* it leaves
+    /// the Location below the run's generation, and the post-run sweep then
+    /// marks a file that is sitting right there as `missing`.
+    pub fn unchangedLocationId(
         self: *const LocationRepository,
         volume_id: i64,
         path: []const u8,
         key: StorageIdentityKey,
-    ) !bool {
+    ) !?i64 {
         var statement = try self.db.prepare(
-            \\SELECT EXISTS(
-            \\    SELECT 1 FROM locations
-            \\    WHERE volume_id=?1 AND uri=?2 AND native_inode=?3
-            \\      AND size_bytes=?4 AND modified_ns=?5 AND state='present'
-            \\);
+            \\SELECT id FROM locations
+            \\WHERE volume_id=?1 AND uri=?2 AND native_inode=?3
+            \\  AND size_bytes=?4 AND modified_ns=?5 AND state='present';
         );
         defer statement.deinit();
         try statement.bindInt64(1, volume_id);
@@ -1355,8 +1360,30 @@ pub const LocationRepository = struct {
         try statement.bindInt64(3, key.native_inode);
         try statement.bindInt64(4, key.size_bytes);
         try statement.bindInt64(5, key.modified_ns);
-        if (try statement.step() != .row) return error.SqlFailed;
-        return statement.columnInt64(0) != 0;
+        return switch (try statement.step()) {
+            .row => statement.columnInt64(0),
+            .done => null,
+        };
+    }
+
+    /// Record that this run reached these Locations, so the sweep does not
+    /// mistake them for absent. Caller holds the write lane.
+    pub fn markSeenLocked(
+        self: *LocationRepository,
+        ids: []const i64,
+        generation: i64,
+    ) !void {
+        if (ids.len == 0) return;
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET last_seen_generation=?2 WHERE id=?1;
+        );
+        defer statement.deinit();
+        for (ids) |id| {
+            try statement.reset();
+            try statement.bindInt64(1, id);
+            try statement.bindInt64(2, generation);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
     }
 
     pub fn uri(
@@ -1384,6 +1411,16 @@ pub const LocationRepository = struct {
 
     pub fn count(self: *const LocationRepository) !u64 {
         var statement = try self.db.prepare("SELECT count(*) FROM locations;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// Locations a scan has confirmed are where the library says they are.
+    pub fn countPresent(self: *const LocationRepository) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM locations WHERE state='present';",
+        );
         defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));

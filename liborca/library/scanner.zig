@@ -86,8 +86,13 @@ pub const Scanner = struct {
     /// File ids the last batch committed, held until the projection has
     /// consumed them. Not part of the scan's observation contract.
     projected: std.ArrayList(i64) = .empty,
+    /// Locations this run skipped as unchanged, awaiting their generation
+    /// stamp. Bounded like a write batch: seeing a file and recording that we
+    /// saw it must not be separated by an unbounded amount of work.
+    seen: std.ArrayList(i64) = .empty,
 
     pub fn deinit(self: *Scanner) void {
+        self.seen.deinit(self.allocator);
         self.projected.deinit(self.allocator);
         self.* = undefined;
     }
@@ -149,7 +154,13 @@ pub const Scanner = struct {
                     continue;
                 },
             };
-            if (try self.locations.isUnchanged(self.volume_id, path, identity)) {
+            if (try self.locations.unchangedLocationId(self.volume_id, path, identity)) |location_id| {
+                // Skipping the work is not the same as not having seen it. The
+                // sweep marks anything below this run's generation `missing`,
+                // so an unstamped skip would report every unchanged file as
+                // absent on the second scan of an untouched library.
+                try self.seen.append(self.allocator, location_id);
+                if (self.seen.items.len >= self.batch_size) try self.flushSeen();
                 result.unchanged += 1;
                 continue;
             }
@@ -195,8 +206,18 @@ pub const Scanner = struct {
             try self.flush(&pending);
             result.batches_committed += 1;
         }
+        try self.flushSeen();
         try self.project(&result);
         return result;
+    }
+
+    /// Stamp the run's generation onto Locations it skipped as unchanged.
+    fn flushSeen(self: *Scanner) !void {
+        if (self.seen.items.len == 0) return;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.locations.markSeenLocked(self.seen.items, self.generation);
+        self.seen.clearRetainingCapacity();
     }
 
     /// Reproject exactly what the last batches changed.
@@ -321,6 +342,7 @@ test "scanner batches audio and skips unchanged files on restart" {
         .database_handle = library.database,
         .batch_size = 1,
     };
+    defer scanner.deinit();
 
     const first = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 3), first.changed);
@@ -430,6 +452,7 @@ test "cancelled scans stop before filesystem work" {
         .database_handle = library.database,
         .cancellation = &token,
     };
+    defer scanner.deinit();
     const result = try scanner.scan(root_path);
     try std.testing.expect(result.cancelled);
 }
@@ -542,6 +565,7 @@ test "a scan after migration claims the files it inherited instead of re-importi
         .root_id = binding.root_id,
         .generation = run.generation,
     };
+    defer scanner.deinit();
     const result = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 3), result.files_seen);
     try std.testing.expectEqual(@as(u64, 3), result.changed);
@@ -637,6 +661,7 @@ test "a scan records the audio properties of every file whose bytes changed" {
         .write_lane = library.write_lane,
         .database_handle = library.database,
     };
+    defer scanner.deinit();
 
     const first = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 4), first.changed);
@@ -725,4 +750,89 @@ fn copyFixture(directory: std.Io.Dir, name: []const u8) !void {
     );
     defer std.testing.allocator.free(bytes);
     try directory.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+test "rescanning an untouched library leaves every file present" {
+    // Regression: the unchanged fast path skipped a file without stamping the
+    // run's generation onto its Location, and the post-run sweep then marked
+    // everything it had skipped as `missing`. A second scan of a library nobody
+    // had touched reported every file absent, which made `has_file` false for
+    // the whole collection and left every Track unplayable.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "kept.flac",
+        .data = "fLaCgenerated kept",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "removed.flac",
+        .data = "fLaCgenerated removed",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var database_directory = std.testing.tmpDir(.{});
+    defer database_directory.cleanup();
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/library.db",
+        .{database_directory.sub_path},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        database_path,
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, root_path, .{});
+
+    const Sweep = struct {
+        fn run(lib: *database.LibraryDatabase, bind: anytype, root: []const u8) !Result {
+            const scan_run = try lib.scan_runs.begin(bind.root_id);
+            var scanner = Scanner{
+                .allocator = std.testing.allocator,
+                .io = std.testing.io,
+                .files = &lib.files,
+                .locations = &lib.locations,
+                .observed_tags = &lib.observed_tags,
+                .write_lane = lib.write_lane,
+                .database_handle = lib.database,
+                .volume_id = bind.volume_id,
+                .root_id = bind.root_id,
+                .generation = scan_run.generation,
+            };
+            defer scanner.deinit();
+            const outcome = try scanner.scan(root);
+            _ = try lib.files.markMissingBelowGeneration(bind.root_id, scan_run.generation);
+            return outcome;
+        }
+    };
+
+    const first = try Sweep.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 2), first.changed);
+    try std.testing.expectEqual(@as(u64, 2), try library.locations.countPresent());
+
+    // The second scan changes nothing, so every entry takes the fast path. It
+    // must still count as seen.
+    const second = try Sweep.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 0), second.changed);
+    try std.testing.expectEqual(@as(u64, 2), second.unchanged);
+    try std.testing.expectEqual(@as(u64, 2), try library.locations.countPresent());
+
+    // A third scan proves it is stable rather than alternating.
+    _ = try Sweep.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 2), try library.locations.countPresent());
+
+    // And the sweep still does its actual job: a file that really went away is
+    // reported missing rather than quietly kept.
+    try temporary.dir.deleteFile(std.testing.io, "removed.flac");
+    _ = try Sweep.run(&library, binding, root_path);
+    try std.testing.expectEqual(@as(u64, 1), try library.locations.countPresent());
 }
