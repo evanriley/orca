@@ -25,7 +25,7 @@ pub fn identify(
     allocator: std.mem.Allocator,
     proposals: *database.IdentificationProposalRepository,
     provider: model.Provider,
-    path: []const u8,
+    file_id: i64,
     query: model.Query,
 ) !Suggestions {
     const candidates = try provider.search(allocator, query);
@@ -43,7 +43,7 @@ pub fn identify(
             .track_number = candidate.track_number,
         }, .{}, &writer.writer);
         try proposals.put(.{
-            .path = path,
+            .file_id = file_id,
             .provider = candidate.provider,
             .provider_id = candidate.provider_id,
             .confidence = result.score,
@@ -57,7 +57,7 @@ pub fn accept(
     allocator: std.mem.Allocator,
     proposals: *database.IdentificationProposalRepository,
     proposal: database.IdentificationProposal,
-    path: []const u8,
+    file_id: i64,
 ) !void {
     const parsed = std.json.parseFromSlice(ProposalPayload, allocator, proposal.payload, .{}) catch
         return error.InvalidProposalPayload;
@@ -66,47 +66,49 @@ pub fn accept(
     var values: [4]database.OrcaMetadataInput = undefined;
     var count: usize = 0;
     if (payload.title.len > 0) {
-        values[count] = .{ .path = path, .field = .title, .value = payload.title, .provenance = .provider };
+        values[count] = .{ .file_id = file_id, .field = .title, .value = payload.title, .provenance = .provider };
         count += 1;
     }
     if (payload.artist.len > 0) {
-        values[count] = .{ .path = path, .field = .artist, .value = payload.artist, .provenance = .provider };
+        values[count] = .{ .file_id = file_id, .field = .artist, .value = payload.artist, .provenance = .provider };
         count += 1;
     }
     if (payload.album.len > 0) {
-        values[count] = .{ .path = path, .field = .album, .value = payload.album, .provenance = .provider };
+        values[count] = .{ .file_id = file_id, .field = .album, .value = payload.album, .provenance = .provider };
         count += 1;
     }
     var track_number_buffer: [16]u8 = undefined;
     if (payload.track_number) |track_number| {
         values[count] = .{
-            .path = path,
+            .file_id = file_id,
             .field = .track_number,
             .value = try std.fmt.bufPrint(&track_number_buffer, "{d}", .{track_number}),
             .provenance = .provider,
         };
         count += 1;
     }
-    try proposals.accept(proposal.id, path, values[0..count]);
+    try proposals.accept(proposal.id, file_id, values[0..count]);
 }
 
 test "accepted proposals update Orca metadata but preserve user locks" {
     const allocator = std.testing.allocator;
     var library = try database.LibraryDatabase.open(
         allocator,
+        std.testing.io,
         "file:orca-identification-workflow?mode=memory&cache=shared",
     );
     defer library.close();
-    const path = "music/track.flac";
-    try library.observed_files.upsertBatch(&.{.{
-        .path = path,
-        .inode = 1,
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 100 });
+    _ = try library.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = "music/track.flac",
+        .native_inode = 1,
         .size_bytes = 100,
         .modified_ns = 1,
-        .audio_format = 1,
-    }});
+    });
     try library.orca_metadata.upsert(.{
-        .path = path,
+        .file_id = file_id,
         .field = .title,
         .value = "User title",
         .provenance = .user,
@@ -116,29 +118,29 @@ test "accepted proposals update Orca metadata but preserve user locks" {
         \\{"title":"Provider title","artist":"Provider artist","album":"Provider album","track_number":2}
     ;
     try library.identification_proposals.put(.{
-        .path = path,
+        .file_id = file_id,
         .provider = "musicbrainz",
         .provider_id = "recording-1",
         .confidence = 0.95,
         .payload = payload,
     });
-    const pending = try library.identification_proposals.pending(allocator, path, 10);
+    const pending = try library.identification_proposals.pending(allocator, file_id, 10);
     defer {
         for (pending) |proposal| proposal.deinit();
         allocator.free(pending);
     }
-    try accept(allocator, &library.identification_proposals, pending[0], path);
-    const title = (try library.orca_metadata.get(allocator, path, .title)).?;
+    try accept(allocator, &library.identification_proposals, pending[0], file_id);
+    const title = (try library.orca_metadata.get(allocator, file_id, .title)).?;
     defer title.deinit(allocator);
     try std.testing.expectEqualStrings("User title", title.text);
     try std.testing.expect(title.locked);
-    const artist = (try library.orca_metadata.get(allocator, path, .artist)).?;
+    const artist = (try library.orca_metadata.get(allocator, file_id, .artist)).?;
     defer artist.deinit(allocator);
     try std.testing.expectEqualStrings("Provider artist", artist.text);
     try std.testing.expectEqual(@import("../metadata/model.zig").Provenance.provider, artist.provenance);
     const remaining = try library.identification_proposals.pending(
         allocator,
-        path,
+        file_id,
         10,
     );
     defer allocator.free(remaining);

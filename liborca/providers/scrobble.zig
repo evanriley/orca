@@ -77,6 +77,7 @@ test "eligible scrobbles are idempotent durable and retried" {
     const allocator = std.testing.allocator;
     var library = try database.LibraryDatabase.open(
         allocator,
+        std.testing.io,
         "file:orca-scrobbles?mode=memory&cache=shared",
     );
     defer library.close();

@@ -178,6 +178,7 @@ test "AcoustID lookup keeps credentials out of durable cache keys" {
     };
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
+        std.testing.io,
         "file:orca-acoustid?mode=memory&cache=shared",
     );
     defer library.close();
