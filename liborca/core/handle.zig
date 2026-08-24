@@ -23,6 +23,13 @@ pub fn Handle(comptime Tag: type) type {
 
 /// Dense generational storage for control-plane objects. The pool owns its
 /// storage; values stored in it must own and release any nested resources.
+///
+/// **This type performs no locking at all**, and `OrcaRuntime` takes no lock
+/// around its pools either. A Pool is therefore owned exclusively by the
+/// serialized control lane: worker threads must never touch a Pool, resolve a
+/// handle, or hold a pointer into slot storage (which moves on growth). Workers
+/// hold a stable heap pointer handed to them at spawn time — see
+/// `core/work.zig:Registration`.
 pub fn Pool(comptime T: type, comptime Tag: type) type {
     return struct {
         allocator: std.mem.Allocator,
