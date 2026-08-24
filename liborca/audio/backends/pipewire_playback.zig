@@ -1,13 +1,12 @@
 const std = @import("std");
 const backend_contract = @import("../backend.zig");
 const buffer = @import("../buffer.zig");
+const loaded_source = @import("../loaded_source.zig");
 const player = @import("../player.zig");
 const render = @import("../render.zig");
-const source_session = @import("../source_session.zig");
 const zone = @import("../zone.zig");
 const pipewire = @import("pipewire.zig");
 const registry_api = @import("../../codec/registry.zig");
-const storage = @import("../../storage/source.zig");
 
 const block_count = 8;
 const frames_per_block = 1024;
@@ -30,17 +29,20 @@ pub fn playFileBlocking(
     device_id: u64,
     policy: zone.RenderPolicy,
 ) !Report {
-    var local = try storage.LocalFileSource.open(io, path);
-    defer local.close();
-    const registry = registry_api.CodecRegistry.builtins();
-    var decoder = try registry.openDetected(allocator, local.readable());
-    const format = decoder.format;
-    const frame_count = decoder.frame_count orelse {
-        decoder.deinit();
+    // The session owns the opened file, so nothing backing the decoder lives in
+    // this frame — the same lifetime a runtime-owned Player will rely on.
+    var initial_source = try loaded_source.LoadedSource.open(
+        allocator,
+        io,
+        registry_api.CodecRegistry.builtins(),
+        path,
+    );
+    const format = initial_source.decoder.format;
+    const frame_count = initial_source.decoder.frame_count orelse {
+        initial_source.deinit();
         return error.UnknownTrackLength;
     };
     var transport: player.Player = .{};
-    var initial_source = source_session.SourceSession.init(decoder);
     transport.loadSource(initial_source) catch |err| {
         initial_source.deinit();
         return err;
@@ -65,12 +67,16 @@ pub fn playFileBlocking(
     var backend: pipewire.Backend = .{};
     backend.init();
     defer backend.deinit();
+    // Superseded by the runtime graph (`audio/engine.zig`); kept only until the
+    // last caller of this stack-local path is gone.
+    var rendered_position: std.atomic.Value(u64) = .init(0);
     var context: pipewire.RenderContext(block_count) = .{
         .pool = &pool,
         .pipe = &pipe,
-        .generation = &transport.generation,
+        .epoch = &transport.epoch,
         .channels = format.channels,
-        .rendered_position = &transport.position_frames,
+        .silenced = &transport.silenced,
+        .position = &rendered_position,
     };
     const output_format = @import("../pcm.zig").Format{
         .sample_format = .float_32,
@@ -128,7 +134,7 @@ pub fn playFileBlocking(
     transport.pause();
 
     return .{
-        .frames_played = transport.position_frames.load(.acquire),
+        .frames_played = render.positionFrames(rendered_position.load(.acquire)),
         .underruns = pipe.underruns.load(.acquire),
         .recoveries = recoveries,
         .timing = try output.?.timing(),

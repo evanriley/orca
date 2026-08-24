@@ -2,6 +2,7 @@ const std = @import("std");
 const contract = @import("../backend.zig");
 const buffer = @import("../buffer.zig");
 const pcm = @import("../pcm.zig");
+const output = @import("../output.zig");
 const render_pipe = @import("../render.zig");
 const zone = @import("../zone.zig");
 
@@ -157,47 +158,86 @@ fn requestedLatency(request: contract.OpenRequest) u32 {
     };
 }
 
-/// Typed context connecting PipeWire's C callback to Orca's wait-free render
-/// pipe. It and every referenced object must outlive the OutputSession.
-pub fn RenderContext(comptime capacity: usize) type {
-    return struct {
-        pool: *const buffer.BlockPool,
-        pipe: *render_pipe.RenderPipe(capacity),
-        generation: *const std.atomic.Value(u64),
-        channels: u16,
-        rendered_position: ?*std.atomic.Value(u64) = null,
-        format_mismatches: std.atomic.Value(u64) = .init(0),
+/// The render context is deliberately backend-neutral and Zone-owned; see
+/// `audio/render.zig`. PipeWire only supplies the C entry point signature.
+pub const RenderContext = render_pipe.RenderContext;
 
-        const Self = @This();
+const OwnedSession = struct {
+    allocator: std.mem.Allocator,
+    session: OutputSession,
+};
 
-        pub fn callback(
-            opaque_context: ?*anyopaque,
-            samples: [*]f32,
-            frames: u32,
-            channels: u32,
-        ) callconv(.c) void {
-            const self: *Self = @ptrCast(@alignCast(opaque_context.?));
-            const output = samples[0 .. frames * channels];
-            if (channels != self.channels) {
-                @memset(output, 0);
-                _ = self.format_mismatches.fetchAdd(1, .monotonic);
-                return;
-            }
-            const rendered = self.pipe.render(
-                self.pool,
-                self.channels,
-                self.generation.load(.monotonic),
-                output,
-            );
-            if (self.rendered_position) |position|
-                _ = position.fetchAdd(rendered, .monotonic);
-        }
+/// Adapts the PipeWire backend to the backend-neutral `output.Factory` the
+/// engine drives. Native stream lifetime never leaves this file.
+pub const OutputFactory = struct {
+    allocator: std.mem.Allocator,
+    backend: *Backend,
 
-        pub fn userdata(self: *Self) *anyopaque {
-            return @ptrCast(self);
-        }
+    pub fn factory(self: *OutputFactory) output.Factory {
+        return .{ .context = self, .vtable = &factory_vtable };
+    }
+
+    const factory_vtable: output.Factory.VTable = .{ .open = open, .discover = discover };
+    const output_vtable: output.Output.VTable = .{
+        .close = closeOutput,
+        .status = outputStatus,
+        .latency = outputLatency,
+        .timing = outputTiming,
     };
-}
+
+    fn open(
+        context: ?*anyopaque,
+        request: contract.OpenRequest,
+        render: output.RenderFn,
+        userdata: ?*anyopaque,
+    ) anyerror!output.Output {
+        const self: *OutputFactory = @ptrCast(@alignCast(context.?));
+        self.backend.init();
+        const owned = try self.allocator.create(OwnedSession);
+        errdefer self.allocator.destroy(owned);
+        owned.* = .{
+            .allocator = self.allocator,
+            .session = try OutputSession.open(request, render, userdata),
+        };
+        return .{ .context = owned, .vtable = &output_vtable };
+    }
+
+    fn discover(context: ?*anyopaque, devices: []contract.Device) anyerror!usize {
+        const self: *OutputFactory = @ptrCast(@alignCast(context.?));
+        self.backend.init();
+        return self.backend.discover(devices);
+    }
+
+    fn closeOutput(context: ?*anyopaque) void {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        const allocator = owned.allocator;
+        owned.session.close();
+        allocator.destroy(owned);
+    }
+
+    fn outputStatus(context: ?*anyopaque) output.Status {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        return switch (owned.session.status()) {
+            .connecting => .connecting,
+            .active => .active,
+            .lost => .lost,
+        };
+    }
+
+    fn outputLatency(
+        context: ?*anyopaque,
+        render_ahead_frames: u32,
+        dsp_frames: u32,
+    ) anyerror!zone.Latency {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        return owned.session.latency(render_ahead_frames, dsp_frames);
+    }
+
+    fn outputTiming(context: ?*anyopaque) anyerror!contract.TimingSnapshot {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        return owned.session.timing();
+    }
+};
 
 fn testRender(
     userdata: ?*anyopaque,
@@ -233,21 +273,65 @@ test "PipeWire callback consumes Orca prepared blocks without allocation" {
     var pipe: render_pipe.RenderPipe(1) = .{};
     const index = pool.acquire().?;
     @memset(pool.samples(index), 0.75);
-    try std.testing.expect(pipe.submit(.{ .index = index, .frames = 3, .generation = 7 }));
-    var generation: std.atomic.Value(u64) = .init(7);
+    try std.testing.expect(pipe.submit(.{ .index = index, .frames = 3, .epoch = 7, .entry_serial = 9 }));
+    var epoch: std.atomic.Value(u32) = .init(7);
     var position: std.atomic.Value(u64) = .init(0);
+    var entry_serial: std.atomic.Value(u32) = .init(0);
     var context: RenderContext(1) = .{
         .pool = &pool,
         .pipe = &pipe,
-        .generation = &generation,
+        .epoch = &epoch,
         .channels = 2,
-        .rendered_position = &position,
+        .position = &position,
+        .rendered_entry_serial = &entry_serial,
     };
 
     var samples: [6]f32 = undefined;
     orca_pw_fill(RenderContext(1).callback, context.userdata(), &samples, 3, 2);
     for (samples) |sample| try std.testing.expectEqual(@as(f32, 0.75), sample);
-    try std.testing.expectEqual(@as(u64, 3), position.load(.monotonic));
+    try std.testing.expectEqual(@as(u16, 7), render_pipe.positionEpoch(position.load(.monotonic)));
+    try std.testing.expectEqual(@as(u64, 3), render_pipe.positionFrames(position.load(.monotonic)));
+    try std.testing.expectEqual(@as(u32, 9), entry_serial.load(.monotonic));
+    pipe.reclaim(&pool);
+}
+
+test "a silenced Player renders zeros without consuming blocks or underrunning" {
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 1, 3, 2);
+    defer pool.deinit();
+    var pipe: render_pipe.RenderPipe(1) = .{};
+    const index = pool.acquire().?;
+    @memset(pool.samples(index), 0.75);
+    try std.testing.expect(pipe.submit(.{
+        .index = index,
+        .frames = 3,
+        .epoch = 1,
+        .entry_serial = 1,
+    }));
+    var epoch: std.atomic.Value(u32) = .init(1);
+    var position: std.atomic.Value(u64) = .init(0);
+    var silenced: std.atomic.Value(bool) = .init(true);
+    var context: RenderContext(1) = .{
+        .pool = &pool,
+        .pipe = &pipe,
+        .epoch = &epoch,
+        .channels = 2,
+        .silenced = &silenced,
+        .position = &position,
+    };
+
+    var samples: [6]f32 = @splat(1);
+    orca_pw_fill(RenderContext(1).callback, context.userdata(), &samples, 3, 2);
+    for (samples) |sample| try std.testing.expectEqual(@as(f32, 0), sample);
+    try std.testing.expectEqual(@as(u64, 0), position.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), pipe.underruns.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), pipe.ready.len());
+    try std.testing.expectEqual(@as(usize, 0), pool.free_len);
+
+    // Resuming consumes the block that pausing preserved.
+    silenced.store(false, .release);
+    orca_pw_fill(RenderContext(1).callback, context.userdata(), &samples, 3, 2);
+    for (samples) |sample| try std.testing.expectEqual(@as(f32, 0.75), sample);
+    try std.testing.expectEqual(@as(u64, 3), render_pipe.positionFrames(position.load(.monotonic)));
     pipe.reclaim(&pool);
 }
 
