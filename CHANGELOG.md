@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased - 0.1.0-alpha
+
+**Version reset.** The project was previously tagged `0.10.0`. That number, and
+the release notes below it, describe subsystems that exist as tested components
+but are **not reachable through the authoritative runtime or ABI path**. The
+version has been reset to `0.1.0-alpha` to stop the changelog from overstating
+what works.
+
+### Added since the reset
+
+- **MP3 playback.** `codec/mp3.zig` decodes MPEG Layer I/II/III through a
+  vendored public-domain `minimp3` contained behind `codec/mp3_shim.c`, with
+  pure-Zig Xing/Info/VBRI parsing, LAME encoder delay and padding trimming, and
+  seeking that is exact for both constant-bitrate streams and variable-bitrate
+  streams with a lazily built frame index. Verified against real library files:
+  reported length matches `ffprobe` on every tagged file tested, and decoded
+  length matches it exactly on eleven of thirteen.
+
+### Fixed since the reset
+
+- **File mutation is now crash-safe end to end.** Journal writes raise SQLite
+  durability for their own transaction, every action of a group is journaled
+  before any filesystem work, stage creation and both rename boundaries fsync the
+  containing directory, `commitReplacement` revalidates source identity
+  immediately before renaming, and `FileIdentity` carries a `quick_hash`
+  (BLAKE3 over first 64 KiB ‖ last 64 KiB ‖ size) so a same-size edit with a
+  preserved timestamp is detected. Recovery never reports `rolled_back` unless
+  the original file is provably back in place; otherwise it records
+  `needs_reconciliation` and retains every file.
+
+### Errata against the release notes below
+
+Verified against the code and by running the binaries, not inferred from docs:
+
+- **No music can be played from the application.** Playback exists only inside
+  `audio/backends/pipewire_playback.zig:playFileBlocking`, reachable solely from
+  `orca-cli play FILE`. The runtime's Player is a detached state machine, no
+  runtime Zone owns an output device, and `orca_player_play` only sets an enum.
+- **Scanning does not produce a browsable library.** `library/scanner.zig`
+  writes only `observed_files`; the `tracks`, `files`, `locations`, `artists`,
+  `releases`, `recordings` and `library_roots` tables stay empty. Confirmed by
+  scanning a 3-file folder and reading the resulting database.
+- **Tags are not read for real-world files.** Only ID3v1 (the obsolete 128-byte
+  trailer) is parsed, and only for MP3. `metadata/vorbis_comment.zig` has
+  `rewrite` and `create` but **no `read`**, so FLAC tags are never extracted.
+  There is no ID3v2 and no MP4 metadata support.
+- **Only WAV, FLAC and QOA can be decoded.** MP3, AAC/M4A/ALAC, Opus and Vorbis
+  fail with `CodecUnavailable`.
+- `0.7.0`'s "immutable mutation previews" *was* inaccurate — an approved plan
+  borrowed caller-owned slices and could be mutated through another alias, and
+  startup journal recovery was only invoked directly by tests. **Both are now
+  fixed:** a plan deep-copies and seals its actions and approval names a content
+  digest, and `LibraryDatabase.open` drives every nonterminal journal record to a
+  terminal state before returning, refusing to open if it cannot.
+- `0.8.0`'s native frontends cannot select or play a track. The GTK list has no
+  row-activation handler, MPRIS accepts Next/Previous with no behavior and
+  reports empty metadata and zero position, and macOS has never been compiled.
+- `0.9.0`'s claim that scheduler yields keep analysis subordinate to playback is
+  unproven; there is no shared scheduler and no contended workload test.
+- `0.10.0`'s scrobble queue is idempotent only for *local enqueue*. Remote
+  delivery is at-least-once, and nothing connects the queue to playback events.
+- Releases `0.3.0` through `0.6.0` are missing from this file entirely.
+
+A capability is now considered done only when it is reachable from `orca-cli` or
+the GUI through the public runtime/ABI path. The notes below are retained
+unedited as a record of what was built, not as a statement of what works.
+
+---
+
 ## 0.10.0 - 2026-08-21
 
 Provider-assisted identification and scrobbling milestone.
