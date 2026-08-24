@@ -85,11 +85,24 @@ nothing else. When adding a feature, the semantics belong in `liborca` and only
 the presentation belongs in `apps/`. A frontend must never grow its own notion
 of transport state, library paging, or metadata resolution.
 
-Frontends reach the engine through `liborca/orca.h` (a C ABI of opaque runtime
-ownership, generational handles, POD snapshots, and **callback-scoped** query
-views). String views are valid only for the duration of their callback; no
-SQLite row, Zig container, or internal layout crosses the ABI. `orca-gtk`
-consumes only that installed header, and the SwiftUI client uses the same ABI.
+**Frontend language is Zig wherever the platform permits it.** The project is
+Zig-first, and that applies to `apps/`, not only to `liborca`. `orca-cli` and
+`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly, per
+section 17.1 of the implementation plan. C appears in a frontend only where a
+platform genuinely forces it.
+
+Non-Zig frontends reach the engine through `liborca/orca.h` (a C ABI of opaque
+runtime ownership, generational handles, POD snapshots, and **callback-scoped**
+query views). String views are valid only for the duration of their callback; no
+SQLite row, Zig container, or internal layout crosses the ABI. The SwiftUI
+client uses that ABI because AppKit requires Swift; `tests/c_abi_smoke.c`
+exercises it end to end so it cannot rot while macOS is uncompiled.
+
+GTK4 is bound with hand-written `extern fn` declarations rather than generated
+bindings. `@cImport` no longer exists in this Zig, `translate-C` fails on GTK4's
+headers (glib's `_Pragma` macros produce thousands of errors), and
+`zig-gobject` does not build on this snapshot. Declare only the symbols the app
+actually uses.
 
 ### Runtime ownership
 
