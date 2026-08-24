@@ -149,6 +149,39 @@ next-source blocks behind current blocks already in the render queue, then
 releases the exhausted decoder. This primes transitions before audible end and
 requires no callback-side source switch or queue mutation.
 
+A `PlaybackQueue` sits above that decode queue: bounded track references, an
+audible cursor, a decode cursor, repeat and shuffle. It is owned by the Player
+and mutated only by the control lane and the engine thread — never by a render
+callback — under the same `quiesce`/`release` handshake that protects
+`SourceQueue`. Enqueueing past capacity applies backpressure rather than growing.
+The three values a host polls (entry count, audible cursor, decode cursor) are
+atomics, so reporting now-playing never has to stop the producer.
+
+The two cursors are separate because the decode cursor leads the audible one by
+the whole render-ahead depth. The audible cursor is derived from the
+`entry_serial` the callback publishes, mapped back to a queue position, and
+every user-facing operation resolves from it — so a skip during a gapless
+transition advances one entry rather than two. Entry serials continue across a
+replaced `SourceQueue`, because a serial that repeated would resolve to the
+wrong entry.
+
+A user skip is a hard switch: the epoch bump makes the callback discard prepared
+audio, so it is immediate rather than waiting for the current entry to drain.
+`previous` restarts the current entry past three seconds and moves the cursor
+back before it. Shuffle generates a permutation and keeps the playing entry at
+the cursor, so toggling it does not restart the song and `previous` still has
+real history; a random pick per advance would have neither property. `repeat_one`
+re-opens a *fresh* session for the same entry rather than seeking the one still
+draining into the pipe.
+
+Auto-advance runs on the engine thread: at `current.eof` with no successor it
+resolves the next entry, opens it, and primes it. A canonical format mismatch is
+not fatal — the successor is held opened but unprimed until every Zone has
+drained, then the outputs are reopened at the new format and it is hard-loaded.
+Gapless when formats match, gapped-but-correct when they do not. A decoder that
+fails part-way ends its entry rather than stalling the queue, and an entry that
+cannot be opened is stepped over, with consecutive failures bounded.
+
 Gapless transitions append compatible successor PCM directly. Optional
 crossfade infrastructure provides a stateful linear envelope that operates on
 caller-owned outgoing and incoming buffers, remains continuous across bounded

@@ -37,6 +37,11 @@ pub const Player = struct {
     /// A freshly constructed Player is stopped, so it starts silenced.
     silenced: std.atomic.Value(bool) = .init(true),
     sources: ?source_session.SourceQueue = null,
+    /// Highest entry serial this Player has ever handed out. A `SourceQueue`
+    /// numbers entries from its own base, so without carrying the counter
+    /// across a replacement two different queue entries could share a serial
+    /// and now-playing would resolve to the wrong track.
+    serial_counter: u32 = 0,
 
     pub fn deinit(self: *Player) void {
         if (self.sources) |*sources| sources.deinit();
@@ -46,6 +51,7 @@ pub const Player = struct {
     pub fn loadSource(self: *Player, source: source_session.SourceSession) !void {
         if (self.sources != null) return error.PlayerSourceAlreadyLoaded;
         self.sources = source_session.SourceQueue.init(source);
+        self.sources.?.rebaseSerials(self.serial_counter);
         self.resetTimeline();
     }
 
@@ -54,10 +60,28 @@ pub const Player = struct {
     /// queue surgery: blocks already handed to a callback under the old epoch
     /// are discarded there rather than being chased down and removed.
     pub fn replaceSource(self: *Player, source: source_session.SourceSession) void {
-        if (self.sources) |*sources| sources.deinit();
+        self.releaseSources();
         self.sources = source_session.SourceQueue.init(source);
+        self.sources.?.rebaseSerials(self.serial_counter);
         self.resetTimeline();
         _ = self.epoch.fetchAdd(1, .acq_rel);
+    }
+
+    /// Drops every decoder without touching the playback queue above it. This
+    /// is what `stop` means: the transport stops and its sources are released,
+    /// while the entries and cursor the user assembled survive.
+    pub fn releaseSources(self: *Player) void {
+        if (self.sources) |*sources| {
+            self.serial_counter = sources.entry_serial_counter;
+            sources.deinit();
+        }
+        self.sources = null;
+    }
+
+    /// Frames in the currently loaded source, when its decoder knows.
+    pub fn frameCount(self: *const Player) ?u64 {
+        if (self.sources) |*sources| return sources.current.decoder.frame_count;
+        return null;
     }
 
     fn resetTimeline(self: *Player) void {

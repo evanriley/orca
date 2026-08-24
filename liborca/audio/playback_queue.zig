@@ -1,0 +1,461 @@
+const std = @import("std");
+const object = @import("../core/object.zig");
+const source_session = @import("source_session.zig");
+
+/// Bounded like every other Orca queue. Enqueueing past this applies
+/// backpressure — `error.PlaybackQueueFull` — rather than growing without limit.
+pub const capacity: usize = 10_000;
+
+/// How many recently prepared entries keep a serial -> position mapping.
+/// The decode lane can be at most one entry ahead of the audible one, so this
+/// only has to outlive the render-ahead depth; eight is generous.
+const serial_map_len: usize = 8;
+
+/// Position past which `previous` restarts the current entry instead of moving
+/// the cursor back. The universal transport convention.
+pub const restart_threshold_ms: u64 = 3_000;
+
+/// A queue entry: which Library, and which Track inside it. Never a path — the
+/// bytes are resolved through `TrackRepository.playableLocation` at the moment
+/// the entry is opened, so a file that moved between enqueue and play is found
+/// at its current location.
+pub const TrackRef = struct {
+    library: object.LibraryHandle,
+    track_id: i64,
+
+    pub fn eql(self: TrackRef, other: TrackRef) bool {
+        return self.track_id == other.track_id and self.library.eql(other.library);
+    }
+};
+
+pub const RepeatMode = enum(u8) { off, all, one };
+
+/// Opens the audio behind a queue entry.
+///
+/// Context + vtable rather than a generic, for the same reason `Decoder` and
+/// `ReadableSource` are: the engine thread holds one of these and must not know
+/// what is behind it — a Library database, a test double, or later a provider.
+/// The returned session is self-contained (`LoadedSource`), so nothing backing
+/// its decoder lives in the caller's frame.
+pub const TrackOpener = struct {
+    context: *anyopaque,
+    open_fn: *const fn (context: *anyopaque, ref: TrackRef) anyerror!source_session.SourceSession,
+
+    pub fn open(self: TrackOpener, ref: TrackRef) anyerror!source_session.SourceSession {
+        return self.open_fn(self.context, ref);
+    }
+};
+
+const SerialRecord = struct { serial: u32 = 0, position: u32 = 0 };
+
+pub const Snapshot = struct {
+    entries: u32,
+    /// Audible position — the entry the render callback is actually emitting.
+    cursor: u32,
+    /// Position the decoder has reached. Leads `cursor` across a gapless
+    /// transition by the whole render-ahead depth.
+    decode_position: u32,
+    repeat: RepeatMode,
+    shuffle: bool,
+};
+
+/// The playback queue that sits *above* `SourceQueue`.
+///
+/// `SourceQueue` is the decode queue: one current session plus one
+/// format-matched prepared successor. This is the list the user actually sees —
+/// track references, a cursor, repeat and shuffle.
+///
+/// Two cursors, deliberately:
+/// * `cursor` is the **audible** position, derived from the `entry_serial` the
+///   render callback publishes. Every user-facing operation (`next`,
+///   `previous`, now-playing) resolves from it, so pressing skip during a
+///   gapless transition advances one track rather than two.
+/// * `decode_position` is where the producer has got to. Auto-advance resolves
+///   from it.
+///
+/// Threading: owned by the Player and mutated only from the control lane and
+/// the engine thread, never from the render callback. The control lane
+/// quiesces the engine before touching the entry list — the same handshake that
+/// protects `Player.sources`, and for the same reason: those are plain
+/// containers. The three values a host polls (cursor, decode position, entry
+/// count) are atomics, so reporting now-playing never has to stop the producer.
+pub const PlaybackQueue = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(TrackRef) = .empty,
+    /// Playback order. Empty means "entry order"; when shuffled it is a
+    /// permutation of entry indices. A permutation rather than a random pick
+    /// per advance, because random-next has no history and breaks `previous`.
+    order: std.ArrayList(u32) = .empty,
+    /// Audible position, decode position and entry count are read by the
+    /// control lane while the engine thread is running, so the three values a
+    /// snapshot needs are atomics. Everything else here is plain state guarded
+    /// by the `quiesce`/`release` handshake.
+    cursor: std.atomic.Value(u32) = .init(0),
+    decode_position: std.atomic.Value(u32) = .init(0),
+    entry_count: std.atomic.Value(u32) = .init(0),
+    repeat: RepeatMode = .off,
+    shuffle: bool = false,
+    prng: std.Random.DefaultPrng,
+    serials: [serial_map_len]SerialRecord = @splat(.{}),
+    serial_head: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, seed: u64) PlaybackQueue {
+        return .{ .allocator = allocator, .prng = .init(seed) };
+    }
+
+    pub fn deinit(self: *PlaybackQueue) void {
+        self.entries.deinit(self.allocator);
+        self.order.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn len(self: *const PlaybackQueue) u32 {
+        return @intCast(self.entries.items.len);
+    }
+
+    /// Audible position. The only queue field a host polls at UI rates, so it
+    /// is readable without stopping the engine.
+    pub fn cursorPosition(self: *const PlaybackQueue) u32 {
+        return self.cursor.load(.acquire);
+    }
+
+    pub fn decodePosition(self: *const PlaybackQueue) u32 {
+        return self.decode_position.load(.acquire);
+    }
+
+    fn setCursor(self: *PlaybackQueue, position: u32) void {
+        self.cursor.store(position, .release);
+    }
+
+    fn publishCount(self: *PlaybackQueue) void {
+        self.entry_count.store(@intCast(self.entries.items.len), .release);
+    }
+
+    pub fn isEmpty(self: *const PlaybackQueue) bool {
+        return self.entries.items.len == 0;
+    }
+
+    /// Lock-free: every field comes from an atomic, so a host may poll this
+    /// while the engine thread is mid-pass.
+    pub fn snapshot(self: *const PlaybackQueue) Snapshot {
+        return .{
+            .entries = self.entry_count.load(.acquire),
+            .cursor = self.cursorPosition(),
+            .decode_position = self.decodePosition(),
+            .repeat = self.repeat,
+            .shuffle = self.shuffle,
+        };
+    }
+
+    /// Entry index behind a playback position, honoring the shuffle permutation.
+    pub fn entryIndex(self: *const PlaybackQueue, position: u32) ?u32 {
+        if (position >= self.entries.items.len) return null;
+        if (self.order.items.len == self.entries.items.len)
+            return self.order.items[position];
+        return position;
+    }
+
+    pub fn refAt(self: *const PlaybackQueue, position: u32) ?TrackRef {
+        const index = self.entryIndex(position) orelse return null;
+        return self.entries.items[index];
+    }
+
+    pub fn current(self: *const PlaybackQueue) ?TrackRef {
+        return self.refAt(self.cursorPosition());
+    }
+
+    // ------------------------------------------------------------ mutation
+
+    pub fn enqueue(self: *PlaybackQueue, refs: []const TrackRef) !void {
+        if (self.entries.items.len + refs.len > capacity) return error.PlaybackQueueFull;
+        const first_new: u32 = @intCast(self.entries.items.len);
+        try self.entries.appendSlice(self.allocator, refs);
+        self.publishCount();
+        if (self.order.items.len != 0) {
+            // Shuffled: new entries join the tail of the existing permutation
+            // rather than being interleaved, so nothing already scheduled moves.
+            var index = first_new;
+            while (index < self.entries.items.len) : (index += 1)
+                try self.order.append(self.allocator, index);
+        }
+    }
+
+    /// Replaces the whole queue and points the cursor at `start`.
+    pub fn replace(self: *PlaybackQueue, refs: []const TrackRef, start: u32) !void {
+        if (refs.len > capacity) return error.PlaybackQueueFull;
+        if (refs.len != 0 and start >= refs.len) return error.PositionOutOfRange;
+        self.entries.clearRetainingCapacity();
+        try self.entries.appendSlice(self.allocator, refs);
+        self.publishCount();
+        self.order.clearRetainingCapacity();
+        self.setCursor(if (refs.len == 0) 0 else start);
+        self.decode_position.store(self.cursorPosition(), .release);
+        self.forgetSerials();
+        if (self.shuffle) {
+            try self.regenerateOrder();
+            // The caller asked for this entry, so it keeps the cursor even
+            // under shuffle: "play this one, shuffle the rest".
+            if (refs.len != 0) self.placeAtCursor(start);
+        }
+    }
+
+    pub fn clear(self: *PlaybackQueue) void {
+        self.entries.clearRetainingCapacity();
+        self.publishCount();
+        self.order.clearRetainingCapacity();
+        self.setCursor(0);
+        self.decode_position.store(0, .release);
+        self.forgetSerials();
+    }
+
+    pub fn setRepeat(self: *PlaybackQueue, mode: RepeatMode) void {
+        self.repeat = mode;
+    }
+
+    /// Toggling shuffle must never restart the song that is playing, so the
+    /// permutation is rotated to leave the currently audible entry sitting at
+    /// the current cursor.
+    pub fn setShuffle(self: *PlaybackQueue, enabled: bool) !void {
+        if (enabled == self.shuffle) return;
+        const playing = self.entryIndex(self.cursorPosition());
+        self.shuffle = enabled;
+        if (enabled) {
+            try self.regenerateOrder();
+            if (playing) |index| self.placeAtCursor(index);
+        } else {
+            self.order.clearRetainingCapacity();
+            // Un-shuffled positions *are* entry indices, so the cursor moves to
+            // where the playing entry lives in list order.
+            if (playing) |index| self.setCursor(index);
+        }
+        self.decode_position.store(self.cursorPosition(), .release);
+    }
+
+    fn regenerateOrder(self: *PlaybackQueue) !void {
+        self.order.clearRetainingCapacity();
+        try self.order.ensureTotalCapacity(self.allocator, self.entries.items.len);
+        var index: u32 = 0;
+        while (index < self.entries.items.len) : (index += 1)
+            self.order.appendAssumeCapacity(index);
+        self.prng.random().shuffle(u32, self.order.items);
+    }
+
+    /// Swaps `entry` into the cursor slot of the permutation.
+    fn placeAtCursor(self: *PlaybackQueue, entry: u32) void {
+        const cursor = self.cursorPosition();
+        if (cursor >= self.order.items.len) return;
+        for (self.order.items, 0..) |value, position| {
+            if (value != entry) continue;
+            self.order.items[position] = self.order.items[cursor];
+            self.order.items[cursor] = entry;
+            return;
+        }
+    }
+
+    // ------------------------------------------------------------ traversal
+
+    /// Position a user-initiated `next` moves to. `repeat_one` deliberately
+    /// does not apply: an explicit skip means "a different track", and only
+    /// auto-advance repeats one.
+    pub fn nextPosition(self: *const PlaybackQueue) ?u32 {
+        if (self.entries.items.len == 0) return null;
+        const cursor = self.cursorPosition();
+        const last: u32 = @intCast(self.entries.items.len - 1);
+        if (cursor < last) return cursor + 1;
+        return if (self.repeat == .all) 0 else null;
+    }
+
+    pub fn previousPosition(self: *const PlaybackQueue) ?u32 {
+        if (self.entries.items.len == 0) return null;
+        const cursor = self.cursorPosition();
+        if (cursor > 0) return cursor - 1;
+        return if (self.repeat == .all)
+            @as(u32, @intCast(self.entries.items.len - 1))
+        else
+            null;
+    }
+
+    /// Position auto-advance follows the decode cursor with. This is where
+    /// repeat lives: `one` re-opens the same entry (as a fresh session, seeked
+    /// to zero — the current one is still draining into the pipe), `all` wraps.
+    pub fn followingPosition(self: *const PlaybackQueue) ?u32 {
+        if (self.entries.items.len == 0) return null;
+        const decode = self.decodePosition();
+        if (self.repeat == .one) return decode;
+        const last: u32 = @intCast(self.entries.items.len - 1);
+        if (decode < last) return decode + 1;
+        return if (self.repeat == .all) 0 else null;
+    }
+
+    /// A hard switch: both cursors move together and every recorded serial is
+    /// dropped, because the audio those serials describe is about to be
+    /// discarded by the epoch bump.
+    pub fn seekTo(self: *PlaybackQueue, position: u32) void {
+        self.setCursor(position);
+        self.decode_position.store(position, .release);
+        self.forgetSerials();
+    }
+
+    /// Auto-advance: only the decode cursor moves. The audible cursor follows
+    /// later, when the callback publishes the successor's entry serial.
+    pub fn advanceDecodeTo(self: *PlaybackQueue, position: u32) void {
+        self.decode_position.store(position, .release);
+    }
+
+    // ------------------------------------------------------- serial mapping
+
+    /// Records that blocks carrying `serial` belong to queue `position`.
+    pub fn noteEntrySerial(self: *PlaybackQueue, serial: u32, position: u32) void {
+        if (serial == 0) return;
+        self.serials[self.serial_head] = .{ .serial = serial, .position = position };
+        self.serial_head = (self.serial_head + 1) % serial_map_len;
+    }
+
+    pub fn positionForSerial(self: *const PlaybackQueue, serial: u32) ?u32 {
+        if (serial == 0) return null;
+        for (self.serials) |record| {
+            if (record.serial == serial) return record.position;
+        }
+        return null;
+    }
+
+    /// Engine thread. Moves the audible cursor to whatever the render callback
+    /// last actually emitted. Unknown serials are ignored, so a stale value left
+    /// over from retired audio can never drag the cursor backwards.
+    pub fn observeRenderedSerial(self: *PlaybackQueue, serial: u32) void {
+        const position = self.positionForSerial(serial) orelse return;
+        self.setCursor(position);
+    }
+
+    fn forgetSerials(self: *PlaybackQueue) void {
+        self.serials = @splat(.{});
+        self.serial_head = 0;
+    }
+};
+
+// ---------------------------------------------------------------------- tests
+
+const testing = std.testing;
+const test_library: object.LibraryHandle = .{ .index = 0, .generation = 1 };
+
+fn makeRefs(allocator: std.mem.Allocator, ids: []const i64) ![]TrackRef {
+    const list = try allocator.alloc(TrackRef, ids.len);
+    for (ids, list) |id, *entry| entry.* = .{ .library = test_library, .track_id = id };
+    return list;
+}
+
+test "enqueue past capacity applies backpressure instead of growing" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const filler = try testing.allocator.alloc(TrackRef, capacity);
+    defer testing.allocator.free(filler);
+    for (filler, 0..) |*entry, index|
+        entry.* = .{ .library = test_library, .track_id = @intCast(index) };
+    try queue.enqueue(filler);
+    try testing.expectEqual(@as(u32, capacity), queue.len());
+    try testing.expectError(
+        error.PlaybackQueueFull,
+        queue.enqueue(&.{.{ .library = test_library, .track_id = 1 }}),
+    );
+    try testing.expectEqual(@as(u32, capacity), queue.len());
+}
+
+test "next stops at the end unless repeat_all wraps the cursor" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 10, 11, 12 });
+    defer testing.allocator.free(list);
+    try queue.enqueue(list);
+
+    try testing.expectEqual(@as(?u32, 1), queue.nextPosition());
+    queue.seekTo(2);
+    try testing.expectEqual(@as(?u32, null), queue.nextPosition());
+    queue.setRepeat(.all);
+    try testing.expectEqual(@as(?u32, 0), queue.nextPosition());
+    try testing.expectEqual(@as(?u32, 1), queue.previousPosition());
+    queue.seekTo(0);
+    try testing.expectEqual(@as(?u32, 2), queue.previousPosition());
+}
+
+test "repeat_one auto-advances onto the same entry while a skip still moves on" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 10, 11, 12 });
+    defer testing.allocator.free(list);
+    try queue.enqueue(list);
+    queue.setRepeat(.one);
+    queue.seekTo(1);
+
+    try testing.expectEqual(@as(?u32, 1), queue.followingPosition());
+    // An explicit skip is a different intent from a track ending.
+    try testing.expectEqual(@as(?u32, 2), queue.nextPosition());
+}
+
+test "toggling shuffle keeps the playing entry under the cursor" {
+    var queue = PlaybackQueue.init(testing.allocator, 0xfeed);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    defer testing.allocator.free(list);
+    try queue.enqueue(list);
+    queue.seekTo(5);
+    const playing = queue.current().?;
+
+    try queue.setShuffle(true);
+    try testing.expectEqual(@as(u32, 5), queue.cursorPosition());
+    try testing.expect(queue.current().?.eql(playing));
+    // Still a permutation: every entry appears exactly once.
+    var seen: [8]bool = @splat(false);
+    for (queue.order.items) |index| {
+        try testing.expect(!seen[index]);
+        seen[index] = true;
+    }
+    for (seen) |value| try testing.expect(value);
+
+    // previous still has real history under shuffle, which a random-next
+    // implementation could not offer.
+    const before = queue.refAt(queue.previousPosition().?).?;
+    queue.seekTo(queue.previousPosition().?);
+    try testing.expect(queue.current().?.eql(before));
+
+    queue.seekTo(5);
+    try queue.setShuffle(false);
+    try testing.expect(queue.current().?.eql(playing));
+}
+
+test "now playing follows the rendered serial rather than the decode cursor" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 10, 11, 12 });
+    defer testing.allocator.free(list);
+    try queue.enqueue(list);
+    queue.noteEntrySerial(7, 0);
+
+    // The producer primes entry 1 while entry 0 is still audible.
+    queue.advanceDecodeTo(1);
+    queue.noteEntrySerial(8, 1);
+    queue.observeRenderedSerial(7);
+    try testing.expectEqual(@as(u32, 0), queue.cursorPosition());
+    try testing.expectEqual(@as(u32, 1), queue.decodePosition());
+
+    // Only once the callback actually renders the successor does now-playing move.
+    queue.observeRenderedSerial(8);
+    try testing.expectEqual(@as(u32, 1), queue.cursorPosition());
+
+    // An unmapped serial is ignored rather than moving the cursor anywhere.
+    queue.observeRenderedSerial(999);
+    try testing.expectEqual(@as(u32, 1), queue.cursorPosition());
+}
+
+test "stopping retains entries and cursor while clearing empties the queue" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const list = try makeRefs(testing.allocator, &.{ 10, 11, 12 });
+    defer testing.allocator.free(list);
+    try queue.replace(list, 2);
+    try testing.expectEqual(@as(u32, 2), queue.cursorPosition());
+    // `stop` is a transport operation: it releases decoders, never entries.
+    try testing.expectEqual(@as(i64, 12), queue.current().?.track_id);
+    queue.clear();
+    try testing.expect(queue.isEmpty());
+    try testing.expect(queue.current() == null);
+}

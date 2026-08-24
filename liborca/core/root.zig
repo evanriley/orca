@@ -4,6 +4,7 @@ pub const job = @import("job.zig");
 pub const object = @import("object.zig");
 pub const queue = @import("queue.zig");
 pub const runtime = @import("runtime.zig");
+pub const track_source = @import("track_source.zig");
 pub const work = @import("work.zig");
 
 pub const OrcaRuntime = runtime.OrcaRuntime;

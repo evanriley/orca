@@ -4,6 +4,7 @@ const object = @import("../core/object.zig");
 const work = @import("../core/work.zig");
 const output_api = @import("output.zig");
 const pcm = @import("pcm.zig");
+const playback_queue = @import("playback_queue.zig");
 const player_api = @import("player.zig");
 const processing = @import("processing.zig");
 const render = @import("render.zig");
@@ -27,11 +28,18 @@ pub const recovery_backoff_ns: u64 = 100 * std.time.ns_per_ms;
 /// How often an active output's negotiated latency is re-read.
 pub const latency_refresh_passes: u64 = 16;
 
+/// Consecutive entries the engine will fail to open before it stops advancing
+/// on its own. Bounded like everything else: a queue full of deleted files must
+/// not become an unbounded open/fail loop at the engine's park interval.
+pub const max_consecutive_open_failures: u32 = 8;
+
 pub const Options = struct {
     player: *player_api.Player,
     handle: object.PlayerHandle,
     telemetry: ?*control.TelemetryChannel = null,
     factory: ?output_api.Factory = null,
+    queue: ?*playback_queue.PlaybackQueue = null,
+    opener: ?playback_queue.TrackOpener = null,
 };
 
 /// The one decode producer for a Player.
@@ -56,6 +64,11 @@ pub const PlayerEngine = struct {
     factory: ?output_api.Factory,
     registration: ?*work.Registration = null,
     player_processor: ?processing.Processor = null,
+    /// The playback queue that sits above the decode queue. Plain state, owned
+    /// jointly by this thread and the control lane under the
+    /// `quiesce`/`release` handshake — the render callback never touches it.
+    queue: ?*playback_queue.PlaybackQueue = null,
+    opener: ?playback_queue.TrackOpener = null,
 
     // ---- Acknowledged double-buffered zone-set publication ----
     /// Two slots, only one of which the engine can be referencing at a time.
@@ -89,6 +102,21 @@ pub const PlayerEngine = struct {
     elapsed_ns: u64 = 0,
     last_telemetry_ns: u64 = 0,
     passes: u64 = 0,
+    /// A successor whose canonical format does not match the current source, so
+    /// it could not be primed gaplessly. It is held here, already opened, until
+    /// every Zone has drained; then it is hard-loaded and the outputs reopen at
+    /// its format. Gapless when formats match, gapped-but-correct when they do
+    /// not — which is the honest answer for a mixed FLAC/MP3 library.
+    pending_source: ?source_session.SourceSession = null,
+    pending_position: u32 = 0,
+    consecutive_open_failures: u32 = 0,
+    /// Diagnostics for the control lane: how many entries auto-advance opened,
+    /// how many of those were gapless, and how many needed an output reopen.
+    entries_started: u64 = 0,
+    gapless_transitions: u64 = 0,
+    format_switch_transitions: u64 = 0,
+    open_failures: u64 = 0,
+    decode_errors: u64 = 0,
 
     pub fn create(allocator: std.mem.Allocator, options: Options) !*PlayerEngine {
         const self = try allocator.create(PlayerEngine);
@@ -98,6 +126,8 @@ pub const PlayerEngine = struct {
             .handle = options.handle,
             .telemetry = options.telemetry,
             .factory = options.factory,
+            .queue = options.queue,
+            .opener = options.opener,
         };
         self.adopted = self.slots[0][0..0];
         return self;
@@ -186,6 +216,7 @@ pub const PlayerEngine = struct {
         // whatever it last had queued.
         self.adoptZones();
         for (self.adopted) |runtime_zone| runtime_zone.silenced.store(true, .release);
+        self.releasePending();
         self.running.store(false, .release);
         registration.finish();
     }
@@ -201,11 +232,148 @@ pub const PlayerEngine = struct {
             runtime_zone.pipe.reclaim(&runtime_zone.pool);
             runtime_zone.silenced.store(silenced, .release);
         }
+        self.serviceQueue(zones);
         const format = self.player.format();
+        // Closing a stream whose negotiated format no longer matches has to
+        // happen before this pass decodes into it, or the callback would be
+        // handed PCM in a layout it cannot render.
+        self.reopenOnFormatChange(zones, format);
         self.pump(zones, format);
         self.serviceOutputs(zones, format);
         self.publishPosition(zones);
         self.publishDrained(zones);
+    }
+
+    /// Drops a successor the engine opened but never handed to the Player.
+    /// Called from the engine thread on exit and from the control lane once the
+    /// thread has been joined, so a queued-but-unplayed decoder is never leaked.
+    pub fn releasePending(self: *PlayerEngine) void {
+        if (self.pending_source) |*pending| pending.deinit();
+        self.pending_source = null;
+    }
+
+    /// Control lane, under `quiesce`. A hard transport switch retires whatever
+    /// the engine had lined up: the audio it describes is about to be discarded
+    /// by the epoch bump, and its queue position is no longer the one wanted.
+    pub fn discardPending(self: *PlayerEngine) void {
+        self.releasePending();
+        self.consecutive_open_failures = 0;
+    }
+
+    /// The playback queue lane: start the queue when nothing is loaded, prime
+    /// the successor before the current source runs out, and complete a
+    /// deferred hard switch once every Zone has drained.
+    ///
+    /// All of this is deliberately on the engine thread. Opening a track means
+    /// a SQLite read and a file open, neither of which may happen on a caller's
+    /// UI thread or inside a render callback.
+    fn serviceQueue(self: *PlayerEngine, zones: []*ZoneRuntime) void {
+        const queue = self.queue orelse return;
+        const opener = self.opener orelse return;
+
+        if (self.pending_source != null) {
+            self.completeFormatSwitch(zones, queue);
+            return;
+        }
+        if (self.player.state.load(.acquire) != .playing) return;
+        if (self.consecutive_open_failures >= max_consecutive_open_failures) return;
+
+        if (self.player.sources == null) {
+            // Nothing loaded: start at the cursor. This is what makes
+            // "enqueue then play" work without the control lane opening a file.
+            const position = queue.cursorPosition();
+            const ref = queue.refAt(position) orelse return;
+            var session = opener.open(ref) catch {
+                self.noteOpenFailure(queue, position);
+                return;
+            };
+            self.player.replaceSource(session);
+            session = undefined;
+            queue.seekTo(position);
+            queue.noteEntrySerial(self.player.entrySerial(), position);
+            self.consecutive_open_failures = 0;
+            self.entries_started += 1;
+            return;
+        }
+
+        const sources = &self.player.sources.?;
+        if (!sources.current.eof or sources.next != null) return;
+        const position = queue.followingPosition() orelse return;
+        const ref = queue.refAt(position) orelse return;
+        var session = opener.open(ref) catch {
+            self.noteOpenFailure(queue, position);
+            return;
+        };
+        self.player.primeNextSource(session) catch |err| {
+            if (err == error.GaplessFormatMismatch) {
+                // Not fatal, and not something to resample around: hold the
+                // successor unprimed, let the pipe drain, then hard-switch.
+                self.pending_source = session;
+                self.pending_position = position;
+                return;
+            }
+            session.deinit();
+            self.noteOpenFailure(queue, position);
+            return;
+        };
+        queue.advanceDecodeTo(position);
+        queue.noteEntrySerial(sources.next_entry_serial, position);
+        self.consecutive_open_failures = 0;
+        self.entries_started += 1;
+        self.gapless_transitions += 1;
+    }
+
+    /// A successor in a different canonical format waits here until the current
+    /// one has decoded out *and* every Zone has handed back every block. Only
+    /// then can the outputs be reopened without truncating audio the listener
+    /// has not heard yet.
+    fn completeFormatSwitch(
+        self: *PlayerEngine,
+        zones: []*ZoneRuntime,
+        queue: *playback_queue.PlaybackQueue,
+    ) void {
+        if (!self.player.finishedDecoding()) return;
+        for (zones) |runtime_zone| {
+            if (!runtime_zone.output_requested.load(.acquire)) continue;
+            if (!runtime_zone.quiescent()) return;
+        }
+        const pending = self.pending_source.?;
+        self.pending_source = null;
+        const position = self.pending_position;
+        self.player.replaceSource(pending);
+        queue.seekTo(position);
+        queue.noteEntrySerial(self.player.entrySerial(), position);
+        self.consecutive_open_failures = 0;
+        self.entries_started += 1;
+        self.format_switch_transitions += 1;
+    }
+
+    fn noteOpenFailure(
+        self: *PlayerEngine,
+        queue: *playback_queue.PlaybackQueue,
+        position: u32,
+    ) void {
+        self.open_failures += 1;
+        self.consecutive_open_failures +|= 1;
+        // Step past the entry that could not be opened so one unreadable file
+        // does not hold the whole queue still.
+        queue.advanceDecodeTo(position);
+    }
+
+    /// Closes any Zone output whose negotiated format the current source can no
+    /// longer feed. `serviceOutputs` reopens it later in the same pass.
+    fn reopenOnFormatChange(self: *PlayerEngine, zones: []*ZoneRuntime, format: ?pcm.Format) void {
+        _ = self;
+        const format_value = format orelse return;
+        for (zones) |runtime_zone| {
+            if (runtime_zone.output == null) continue;
+            if (!runtime_zone.outputFormatChanged(format_value)) continue;
+            runtime_zone.closeOutput();
+            runtime_zone.resetPipe();
+            runtime_zone.zone.close();
+            runtime_zone.stalled_passes = 0;
+            runtime_zone.publishState();
+        }
     }
 
     fn adoptZones(self: *PlayerEngine) void {
@@ -264,7 +432,15 @@ pub const PlayerEngine = struct {
                 self.player_processor,
                 storage[0..count],
                 epoch,
-            ) catch break;
+            ) catch {
+                // A decoder that fails mid-entry has to end the entry. Leaving
+                // it merely "not finished" would stall the whole queue: nothing
+                // would ever prime a successor and every Zone would underrun
+                // for the rest of the session.
+                self.decode_errors += 1;
+                if (self.player.sources) |*sources| sources.current.eof = true;
+                break;
+            };
             if (result.frames == 0) break;
             produced += 1;
         }
@@ -406,6 +582,10 @@ pub const PlayerEngine = struct {
             }
         }
         const clock_zone = self.clock_zone orelse return;
+        // Now-playing follows the serial the callback actually rendered, not
+        // the decode cursor, which leads it by the whole render-ahead depth.
+        if (self.queue) |queue|
+            queue.observeRenderedSerial(clock_zone.rendered_entry_serial.load(.monotonic));
         const epoch = self.player.epoch.load(.acquire);
         const sample = clock_zone.position.load(.monotonic);
         if (render.positionEpoch(sample) != @as(u16, @truncate(epoch))) return;
@@ -469,6 +649,7 @@ const RampDecoder = struct {
     position: u64 = 0,
     total: u64,
     channels: u16 = 1,
+    sample_rate: u32 = 48_000,
 
     fn decoder(self: *RampDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
@@ -477,7 +658,7 @@ const RampDecoder = struct {
             .format = .{
                 .sample_format = .float_32,
                 .channels = self.channels,
-                .sample_rate = 48_000,
+                .sample_rate = self.sample_rate,
                 .bits_per_sample = 32,
                 .bytes_per_frame = self.channels * 4,
             },
@@ -797,4 +978,325 @@ test "unpublishing a Zone is acknowledged before the control lane frees it" {
     harness.registration.awaitCompletion();
     keep.closeOutput();
     keep.resetPipe();
+}
+
+// -------------------------------------------------------------- queue tests
+
+/// Opens a synthetic track per id. Stands in for `TrackSourceOpener` so the
+/// queue lane can be driven with no database, no filesystem and no hardware.
+const TrackPlan = struct {
+    track_id: i64,
+    frames: u64,
+    channels: u16 = 1,
+    sample_rate: u32 = 48_000,
+};
+
+const TestOpener = struct {
+    allocator: std.mem.Allocator,
+    plans: []const TrackPlan,
+    opens: usize = 0,
+    fail_ids: []const i64 = &.{},
+
+    const Backing = struct {
+        allocator: std.mem.Allocator,
+        decoder_state: RampDecoder,
+
+        fn release(context: *anyopaque) void {
+            const self: *Backing = @ptrCast(@alignCast(context));
+            self.allocator.destroy(self);
+        }
+    };
+
+    fn opener(self: *TestOpener) playback_queue.TrackOpener {
+        return .{ .context = self, .open_fn = open };
+    }
+
+    fn open(
+        context: *anyopaque,
+        ref: playback_queue.TrackRef,
+    ) anyerror!source_session.SourceSession {
+        const self: *TestOpener = @ptrCast(@alignCast(context));
+        for (self.fail_ids) |id| {
+            if (id == ref.track_id) return error.TrackFileMissing;
+        }
+        for (self.plans) |plan| {
+            if (plan.track_id != ref.track_id) continue;
+            self.opens += 1;
+            const backing = try self.allocator.create(Backing);
+            backing.* = .{
+                .allocator = self.allocator,
+                .decoder_state = .{
+                    .total = plan.frames,
+                    .channels = plan.channels,
+                    .sample_rate = plan.sample_rate,
+                },
+            };
+            return source_session.SourceSession.initOwned(
+                backing.decoder_state.decoder(),
+                .{ .context = backing, .release = Backing.release },
+            );
+        }
+        return error.TrackHasNoPlayableFile;
+    }
+};
+
+const QueueHarness = struct {
+    allocator: std.mem.Allocator,
+    backend: output_api.TestBackend,
+    player: player_api.Player = .{},
+    queue: playback_queue.PlaybackQueue = undefined,
+    test_opener: TestOpener = undefined,
+    engine: *PlayerEngine = undefined,
+    registration: work.Registration = .{},
+    runtime_zone: *ZoneRuntime = undefined,
+
+    fn init(allocator: std.mem.Allocator, plans: []const TrackPlan) !*QueueHarness {
+        const self = try allocator.create(QueueHarness);
+        self.* = .{ .allocator = allocator, .backend = .{ .allocator = allocator } };
+        self.queue = .init(allocator, 0xabc_def);
+        self.test_opener = .{ .allocator = allocator, .plans = plans };
+        self.engine = try PlayerEngine.create(allocator, .{
+            .player = &self.player,
+            .handle = .{ .index = 0, .generation = 1 },
+            .factory = self.backend.factory(),
+            .queue = &self.queue,
+            .opener = self.test_opener.opener(),
+        });
+        self.engine.registration = &self.registration;
+        self.runtime_zone = try openZone(allocator);
+        try self.engine.publishZones(&.{self.runtime_zone});
+        return self;
+    }
+
+    fn deinit(self: *QueueHarness) void {
+        const allocator = self.allocator;
+        self.engine.releasePending();
+        self.engine.destroy();
+        self.runtime_zone.destroy();
+        self.player.deinit();
+        self.queue.deinit();
+        self.backend.deinit();
+        allocator.destroy(self);
+    }
+
+    fn enqueue(self: *QueueHarness, ids: []const i64) !void {
+        var refs: [16]playback_queue.TrackRef = undefined;
+        for (ids, refs[0..ids.len]) |id, *ref|
+            ref.* = .{ .library = .{ .index = 0, .generation = 1 }, .track_id = id };
+        try self.queue.enqueue(refs[0..ids.len]);
+    }
+
+    /// One engine pass plus one device callback, which is what actually moves
+    /// the audible cursor: now-playing follows rendered audio, not decoding.
+    fn step(self: *QueueHarness, callback_frames: u32) void {
+        self.engine.pass();
+        if (callback_frames == 0) return;
+        if (liveStreamFor(&self.backend, self.runtime_zone)) |stream| {
+            var samples: [frames_per_block * 2]f32 = undefined;
+            const channels = @max(1, self.runtime_zone.channels);
+            stream.pump(samples[0 .. callback_frames * channels], callback_frames);
+        }
+    }
+
+    fn run(self: *QueueHarness, passes: usize, callback_frames: u32) void {
+        for (0..passes) |_| self.step(callback_frames);
+    }
+};
+
+test "auto-advance opens the next entry at EOF and stays gapless" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 2048 },
+        .{ .track_id = 11, .frames = 2048 },
+        .{ .track_id = 12, .frames = 2048 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+
+    harness.run(200, 128);
+
+    // Every entry was started, and every transition was gapless: the formats
+    // match, so no output ever had to be reopened.
+    try std.testing.expectEqual(@as(u64, 3), harness.engine.entries_started);
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.format_switch_transitions);
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+    // A gapless transition keeps one epoch throughout: no discontinuity.
+    try std.testing.expectEqual(@as(u32, 2), harness.player.snapshot().epoch);
+}
+
+test "now playing reports the audible entry, not the decoded one" {
+    const allocator = std.testing.allocator;
+    // A first entry short enough that the producer decodes past its end while
+    // its audio is all still sitting in the render queue, unheard.
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 2 * frames_per_block },
+        .{ .track_id = 11, .frames = 8192 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    // Decode with no device callbacks at all: the successor gets primed while
+    // nothing whatsoever has been rendered.
+    var pass: usize = 0;
+    while (pass < 64 and harness.engine.gapless_transitions == 0) : (pass += 1)
+        harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+
+    // Render a fraction of the first entry. The decode cursor is a whole entry
+    // ahead, so reporting it would name the wrong track here.
+    harness.step(64);
+    harness.step(64);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+
+    // Only once the callback crosses into the successor's blocks does
+    // now-playing move — and it does so without any epoch change.
+    const epoch_before = harness.player.snapshot().epoch;
+    harness.run(64, frames_per_block);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expectEqual(epoch_before, harness.player.snapshot().epoch);
+}
+
+test "a format change between entries reopens the output instead of failing" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 2048, .channels = 1, .sample_rate = 44_100 },
+        .{ .track_id = 11, .frames = 2048, .channels = 2, .sample_rate = 48_000 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    harness.run(400, 128);
+
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.entries_started);
+    // Not gapless — honestly reported as a format switch rather than an error.
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.format_switch_transitions);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    // The stream really was reopened at the new layout.
+    try std.testing.expectEqual(@as(u16, 2), harness.runtime_zone.channels);
+    try std.testing.expectEqual(
+        @as(u32, 48_000),
+        harness.runtime_zone.open_format.?.sample_rate,
+    );
+    try std.testing.expectEqual(
+        zone_model.OutputState.active,
+        harness.runtime_zone.outputState(),
+    );
+}
+
+test "repeat_one re-primes a fresh session instead of seeking the draining one" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 1024 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{10});
+    harness.queue.setRepeat(.one);
+    harness.player.play();
+
+    harness.run(200, 128);
+
+    // The same entry, opened again and again — each with its own decoder, so
+    // the copy still draining into the pipe is never seeked underneath.
+    try std.testing.expect(harness.engine.gapless_transitions > 2);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+}
+
+test "repeat_all wraps the queue back to its first entry" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 1024 },
+        .{ .track_id = 11, .frames = 1024 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.queue.setRepeat(.all);
+    harness.player.play();
+
+    harness.run(400, 128);
+    try std.testing.expect(harness.engine.entries_started > 3);
+    // Wrapped rather than stopping at the end.
+    try std.testing.expect(harness.test_opener.opens > 3);
+}
+
+test "an unreadable entry is stepped over rather than looping forever" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 1024 },
+        .{ .track_id = 11, .frames = 1024 },
+        .{ .track_id = 12, .frames = 1024 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{11};
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+
+    harness.run(300, 128);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.open_failures);
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.entries_started);
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.decodePosition());
+}
+
+const FailingDecoder = struct {
+    position: u64 = 0,
+    fail_after: u64,
+
+    fn decoder(self: *FailingDecoder) @import("../codec/decoder.zig").Decoder {
+        return .{
+            .context = self,
+            .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
+            .format = .{
+                .sample_format = .float_32,
+                .channels = 1,
+                .sample_rate = 48_000,
+                .bits_per_sample = 32,
+                .bytes_per_frame = 4,
+            },
+            .frame_count = 1_000_000,
+        };
+    }
+
+    fn read(context: *anyopaque, output: []f32) !usize {
+        const self: *FailingDecoder = @ptrCast(@alignCast(context));
+        if (self.position >= self.fail_after) return error.EndOfStream;
+        const frames = @min(output.len, self.fail_after - self.position);
+        @memset(output[0..frames], 0.25);
+        self.position += frames;
+        return frames;
+    }
+
+    fn seekTo(_: *anyopaque, _: u64) !void {}
+    fn release(_: *anyopaque) void {}
+};
+
+test "a decoder that fails mid-entry ends the entry instead of stalling the queue" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 11, .frames = 1024 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+
+    // Entry 0 claims a million frames and then throws. Without ending the
+    // entry, nothing would ever prime entry 1 and every Zone would underrun
+    // for the rest of the session — which is exactly what real FLAC files do
+    // after a seek near their end.
+    var failing: FailingDecoder = .{ .fail_after = 512 };
+    try harness.player.loadSource(source_session.SourceSession.init(failing.decoder()));
+    harness.queue.noteEntrySerial(harness.player.entrySerial(), 0);
+    harness.player.play();
+
+    harness.run(200, 128);
+
+    try std.testing.expect(harness.engine.decode_errors > 0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.entries_started);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
 }

@@ -5,6 +5,7 @@ const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
 const job = @import("job.zig");
 const object = @import("object.zig");
+const track_source = @import("track_source.zig");
 const work = @import("work.zig");
 
 pub const LibraryHandle = object.LibraryHandle;
@@ -12,6 +13,9 @@ pub const PlayerHandle = object.PlayerHandle;
 pub const ZoneHandle = object.ZoneHandle;
 pub const JobHandle = object.JobHandle;
 pub const WorkHandle = work.WorkHandle;
+pub const TrackRef = audio.playback_queue.TrackRef;
+pub const RepeatMode = audio.playback_queue.RepeatMode;
+pub const QueueSnapshot = audio.playback_queue.Snapshot;
 
 pub const State = enum(u8) {
     running,
@@ -25,6 +29,13 @@ const LibraryObject = struct {
 };
 const PlayerObject = struct {
     player: *audio.player.Player,
+    /// Track references, cursor, repeat and shuffle. Lives beside the Player
+    /// and outlives any individual `SourceQueue`: `stop` releases decoders but
+    /// never the list the user assembled.
+    queue: *audio.playback_queue.PlaybackQueue,
+    /// Resolves queue entries to audio. Bound to one Library, holding its own
+    /// read-only connection, so the engine thread never touches a `handle.Pool`.
+    opener: ?*track_source.TrackSourceOpener = null,
     /// The one decode producer for this Player. Spawned lazily when a source
     /// first arrives, registered with `work.Registry`, joined before the Player
     /// is freed.
@@ -34,6 +45,19 @@ const PlayerObject = struct {
 const ZoneObject = struct {
     zone: *audio.zone_runtime.ZoneRuntime,
     attached_player: ?PlayerHandle = null,
+};
+
+/// Producer-side counters for the queue lane. Diagnostics, not transport
+/// state: an authoritative consumer reads snapshots.
+pub const QueueStats = struct {
+    entries_started: u64,
+    gapless_transitions: u64,
+    format_switch_transitions: u64,
+    open_failures: u64,
+    /// Entries whose decoder failed part-way. The entry is ended and the queue
+    /// moves on rather than stalling; a nonzero count is a real problem worth
+    /// surfacing to a host.
+    decode_errors: u64,
 };
 
 pub const ZoneStats = struct {
@@ -66,6 +90,9 @@ pub const OrcaRuntime = struct {
     /// for tests that must be deterministic without an audio server. Must be set
     /// before any Player engine is spawned; engines capture it once.
     output_factory_override: ?audio.output.Factory = null,
+    /// Fixed shuffle seed, for tests that need a reproducible permutation.
+    shuffle_seed: ?u64 = null,
+    shuffle_counter: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -131,10 +158,7 @@ pub const OrcaRuntime = struct {
         }
         self.zones.discardAll();
         for (self.players.slots.items) |*slot| {
-            if (slot.value) |player| {
-                player.player.deinit();
-                self.allocator.destroy(player.player);
-            }
+            if (slot.value) |player| self.freePlayerObject(player);
         }
         self.players.discardAll();
         for (self.libraries.slots.items) |*slot| {
@@ -165,8 +189,33 @@ pub const OrcaRuntime = struct {
 
     pub fn destroyLibrary(self: *OrcaRuntime, library: LibraryHandle) !void {
         try self.requireRunning();
+        // Openers hold a pointer into the Library they resolve through, so
+        // every Player bound to it has to let go — with its engine stopped —
+        // before the database is closed.
+        self.unbindLibraryFromPlayers(library);
         var removed = try self.libraries.remove(library);
         self.closeLibraryDatabase(&removed);
+    }
+
+    fn unbindLibraryFromPlayers(self: *OrcaRuntime, library: LibraryHandle) void {
+        for (self.players.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const opener = object_value.opener orelse continue;
+            if (!opener.library.eql(library)) continue;
+            if (object_value.engine) |engine| {
+                engine.quiesce();
+                defer engine.release();
+                engine.opener = null;
+                engine.releasePending();
+                object_value.player.releaseSources();
+                object_value.opener = null;
+                opener.destroy();
+                continue;
+            }
+            object_value.player.releaseSources();
+            object_value.opener = null;
+            opener.destroy();
+        }
     }
 
     pub fn libraryDatabase(
@@ -217,7 +266,24 @@ pub const OrcaRuntime = struct {
         const player = try self.allocator.create(audio.player.Player);
         errdefer self.allocator.destroy(player);
         player.* = .{};
-        return self.players.insert(.{ .player = player });
+        const queue = try self.allocator.create(audio.playback_queue.PlaybackQueue);
+        errdefer self.allocator.destroy(queue);
+        queue.* = .init(self.allocator, self.nextShuffleSeed());
+        errdefer queue.deinit();
+        return self.players.insert(.{ .player = player, .queue = queue });
+    }
+
+    /// Shuffle must be reproducible when a test asks for it and different
+    /// between runs otherwise, so the seed comes from the runtime rather than a
+    /// global. Address entropy plus a per-Player counter is enough for a
+    /// listening order; nothing here is security-relevant.
+    fn nextShuffleSeed(self: *OrcaRuntime) u64 {
+        if (self.shuffle_seed) |seed| return seed;
+        self.shuffle_counter +%= 1;
+        return std.hash.Wyhash.hash(
+            @intFromPtr(self) *% 0x9e37_79b9_7f4a_7c15,
+            std.mem.asBytes(&self.shuffle_counter),
+        );
     }
 
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
@@ -226,8 +292,7 @@ pub const OrcaRuntime = struct {
         self.joinWorkersBeforeDestroy();
         self.reapStoppedEngines();
         const removed = try self.players.remove(player);
-        removed.player.deinit();
-        self.allocator.destroy(removed.player);
+        self.freePlayerObject(removed);
         // Detaching also closes each Zone's output: an OutputSession whose
         // producer is gone would otherwise keep rendering whatever it had left.
         for (self.zones.slots.items) |*slot| {
@@ -430,9 +495,21 @@ pub const OrcaRuntime = struct {
         (try self.players.get(player)).player.pause();
     }
 
+    /// Stops the transport and releases its decoders. Entries and cursor
+    /// survive, so `stop` then `play` resumes the same queue at the same place.
     pub fn stopPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
-        (try self.players.get(player)).player.stop();
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            engine.discardPending();
+            object_value.player.stop();
+            object_value.player.releaseSources();
+            return;
+        }
+        object_value.player.stop();
+        object_value.player.releaseSources();
     }
 
     pub fn playerSnapshot(self: *OrcaRuntime, player: PlayerHandle) !audio.player.Snapshot {
@@ -479,17 +556,370 @@ pub const OrcaRuntime = struct {
         return engine.isDrained();
     }
 
+    fn freePlayerObject(self: *OrcaRuntime, object_value: PlayerObject) void {
+        if (object_value.opener) |opener| opener.destroy();
+        object_value.queue.deinit();
+        self.allocator.destroy(object_value.queue);
+        object_value.player.deinit();
+        self.allocator.destroy(object_value.player);
+    }
+
+    // ----------------------------------------------------------- playback queue
+
+    /// Binds this Player's queue to a Library, opening the independent
+    /// read-only connection its entries are resolved through. Re-binding to a
+    /// different Library replaces the opener, which is why it stops the engine
+    /// first: the engine holds the opener by value.
+    pub fn playerBindLibrary(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+    ) !void {
+        try self.requireRunning();
+        const existing = try self.players.get(player);
+        if (existing.opener) |opener| {
+            if (opener.library.eql(library)) return;
+        }
+        const library_database = try self.libraryDatabase(library);
+        const opener = try track_source.TrackSourceOpener.create(
+            self.allocator,
+            io,
+            library,
+            library_database,
+        );
+        errdefer opener.destroy();
+
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            if (object_value.opener) |old| old.destroy();
+            object_value.opener = opener;
+            engine.opener = opener.opener();
+        } else {
+            if (object_value.opener) |old| old.destroy();
+            object_value.opener = opener;
+        }
+    }
+
+    /// B3: `track id -> playing audio`. Resolves the Track's location on an
+    /// independent read-only connection, opens a self-contained SourceSession
+    /// for it, and hard-loads it. Never on a host's UI thread: this is the
+    /// runtime's control lane, and the file I/O is deliberately here rather
+    /// than anywhere near a render callback.
+    pub fn playerPlayTrack(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+        track_id: i64,
+    ) !void {
+        return self.playerPlayTracks(player, library, io, &.{track_id}, 0);
+    }
+
+    /// The same call for a Player already bound to `library`. This is the form
+    /// the command lane uses: binding is the step that needs an `std.Io`, and
+    /// it has already happened by the time a `play_track` command executes.
+    pub fn playerPlayTrackBound(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        track_id: i64,
+    ) !void {
+        return self.playerPlayTracksBound(player, library, &.{track_id}, 0);
+    }
+
+    /// `playNow`: replace the queue, load `start`, bump the epoch, play.
+    pub fn playerPlayTracks(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+        track_ids: []const i64,
+        start: u32,
+    ) !void {
+        try self.requireRunning();
+        try self.playerBindLibrary(player, library, io);
+        return self.playerPlayTracksBound(player, library, track_ids, start);
+    }
+
+    pub fn playerPlayTracksBound(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        track_ids: []const i64,
+        start: u32,
+    ) !void {
+        try self.requireRunning();
+        try self.requireBoundLibrary(player, library);
+        const refs = try self.trackRefs(library, track_ids);
+        defer self.allocator.free(refs);
+        const engine = try self.ensureEngine(player);
+        engine.quiesce();
+        defer engine.release();
+        engine.discardPending();
+        const object_value = try self.players.get(player);
+        try object_value.queue.replace(refs, start);
+        try loadCursor(object_value);
+        object_value.player.play();
+    }
+
+    /// Appends to the queue. An idle Player starts on the first new entry —
+    /// "enqueue into nothing" is how a host begins playback without a separate
+    /// play call.
+    pub fn playerEnqueueTracks(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+        track_ids: []const i64,
+    ) !void {
+        try self.requireRunning();
+        try self.playerBindLibrary(player, library, io);
+        return self.playerEnqueueTracksBound(player, library, track_ids);
+    }
+
+    pub fn playerEnqueueTracksBound(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        track_ids: []const i64,
+    ) !void {
+        try self.requireRunning();
+        try self.requireBoundLibrary(player, library);
+        const refs = try self.trackRefs(library, track_ids);
+        defer self.allocator.free(refs);
+        const engine = try self.ensureEngine(player);
+        engine.quiesce();
+        defer engine.release();
+        const object_value = try self.players.get(player);
+        const was_idle = object_value.player.sources == null;
+        const first_new = object_value.queue.len();
+        try object_value.queue.enqueue(refs);
+        if (!was_idle or refs.len == 0) return;
+        engine.discardPending();
+        object_value.queue.seekTo(first_new);
+        try loadCursor(object_value);
+        object_value.player.play();
+    }
+
+    /// A user skip is a **hard** switch: the epoch bump makes the callback
+    /// discard everything already prepared, so it is immediate rather than
+    /// waiting for the current track to drain. Returns false at the end of a
+    /// queue that is not repeating.
+    pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        if (engine) |value| value.discardPending();
+        const target = object_value.queue.nextPosition() orelse return false;
+        object_value.queue.seekTo(target);
+        try loadCursor(object_value);
+        object_value.player.play();
+        return true;
+    }
+
+    /// Past three seconds `previous` restarts the current entry; before it, the
+    /// cursor moves back. The universal transport convention, and the reason a
+    /// shuffle permutation matters: random-next has no history to move back to.
+    pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        if (object_value.player.format()) |format| {
+            if (format.sample_rate != 0) {
+                const frames = object_value.player.snapshot().position_frames;
+                const elapsed_ms = frames * 1000 / format.sample_rate;
+                if (elapsed_ms > audio.playback_queue.restart_threshold_ms) {
+                    _ = try object_value.player.seek(0);
+                    return true;
+                }
+            }
+        }
+        const target = object_value.queue.previousPosition() orelse {
+            if (object_value.player.sources != null) _ = try object_value.player.seek(0);
+            return false;
+        };
+        if (engine) |value| value.discardPending();
+        object_value.queue.seekTo(target);
+        try loadCursor(object_value);
+        object_value.player.play();
+        return true;
+    }
+
+    pub fn playerSetRepeat(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        mode: RepeatMode,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            object_value.queue.setRepeat(mode);
+            return;
+        }
+        object_value.queue.setRepeat(mode);
+    }
+
+    pub fn playerSetShuffle(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        enabled: bool,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            return object_value.queue.setShuffle(enabled);
+        }
+        return object_value.queue.setShuffle(enabled);
+    }
+
+    /// Empties the queue and releases the decoders with it.
+    pub fn playerClearQueue(self: *OrcaRuntime, player: PlayerHandle) !void {
+        try self.requireRunning();
+        try self.stopPlayer(player);
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            object_value.queue.clear();
+            return;
+        }
+        object_value.queue.clear();
+    }
+
+    /// Lock-free: entry count, audible cursor and decode cursor all come from
+    /// atomics, so a host may poll this at UI rates without stopping the engine.
+    pub fn playerQueueSnapshot(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+    ) !QueueSnapshot {
+        try self.requireRunning();
+        return (try self.players.get(player)).queue.snapshot();
+    }
+
+    /// The entry actually being *heard*, which during a gapless transition is
+    /// not the one the decoder has reached. Reading the entry list means
+    /// stopping the engine, so hosts polling at UI rates want
+    /// `playerQueueSnapshot` instead.
+    pub fn playerNowPlaying(self: *OrcaRuntime, player: PlayerHandle) !?TrackRef {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        if (object_value.engine) |engine| {
+            engine.quiesce();
+            defer engine.release();
+            return object_value.queue.current();
+        }
+        return object_value.queue.current();
+    }
+
+    fn requireBoundLibrary(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+    ) !void {
+        const opener = (try self.players.get(player)).opener orelse
+            return error.PlayerHasNoLibrary;
+        if (!opener.library.eql(library)) return error.PlayerBoundToAnotherLibrary;
+    }
+
+    /// Reads engine-thread counters, so it stops the engine for the duration.
+    /// Called after a run, never in a UI poll loop.
+    pub fn playerQueueStats(self: *OrcaRuntime, player: PlayerHandle) !QueueStats {
+        try self.requireRunning();
+        const engine = (try self.players.get(player)).engine orelse return .{
+            .entries_started = 0,
+            .gapless_transitions = 0,
+            .format_switch_transitions = 0,
+            .open_failures = 0,
+            .decode_errors = 0,
+        };
+        engine.quiesce();
+        defer engine.release();
+        return .{
+            .entries_started = engine.entries_started,
+            .gapless_transitions = engine.gapless_transitions,
+            .format_switch_transitions = engine.format_switch_transitions,
+            .open_failures = engine.open_failures,
+            .decode_errors = engine.decode_errors,
+        };
+    }
+
+    /// Seek to `tail_ms` before the end of the current entry. Exists so tests
+    /// and the CLI can exercise a real album's transitions without waiting out
+    /// every track in real time.
+    pub fn playerSeekToTail(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        tail_ms: u64,
+    ) !bool {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        const format = object_value.player.format() orelse return false;
+        const total = object_value.player.frameCount() orelse return false;
+        if (format.sample_rate == 0) return false;
+        const tail_frames = tail_ms * format.sample_rate / 1000;
+        _ = try object_value.player.seek(total -| tail_frames);
+        return true;
+    }
+
+    fn trackRefs(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+    ) ![]TrackRef {
+        if (track_ids.len > audio.playback_queue.capacity) return error.PlaybackQueueFull;
+        const refs = try self.allocator.alloc(TrackRef, track_ids.len);
+        for (track_ids, refs) |id, *ref| ref.* = .{ .library = library, .track_id = id };
+        return refs;
+    }
+
+    /// Opens the entry under the cursor and hard-loads it. The caller must have
+    /// quiesced the engine: this replaces the Player's whole `SourceQueue`.
+    fn loadCursor(object_value: *PlayerObject) !void {
+        const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
+        const cursor = object_value.queue.cursorPosition();
+        const ref = object_value.queue.current() orelse {
+            object_value.player.releaseSources();
+            return;
+        };
+        var session = try opener.openTrack(ref);
+        const format = session.decoder.format;
+        if (format.channels == 0 or format.channels > audio.zone_runtime.max_channels) {
+            session.deinit();
+            return error.UnsupportedChannelCount;
+        }
+        object_value.player.replaceSource(session);
+        object_value.queue.seekTo(cursor);
+        object_value.queue.noteEntrySerial(object_value.player.entrySerial(), cursor);
+    }
+
     /// Spawns the Player's single decode producer. Registered with
     /// `work.Registry`, so `drain`, `destroyPlayer` and `shutdown` all join it
     /// rather than leaving it running against freed objects.
     fn ensureEngine(self: *OrcaRuntime, player: PlayerHandle) !*audio.engine.PlayerEngine {
         if ((try self.players.get(player)).engine) |existing| return existing;
         const factory = self.outputFactory();
+        const object_state = try self.players.get(player);
         const engine = try audio.engine.PlayerEngine.create(self.allocator, .{
-            .player = (try self.players.get(player)).player,
+            .player = object_state.player,
             .handle = player,
             .telemetry = &self.telemetry,
             .factory = factory,
+            .queue = object_state.queue,
+            .opener = if (object_state.opener) |opener| opener.opener() else null,
         });
         errdefer engine.destroy();
         const work_handle = try self.work_registry.begin();
@@ -547,6 +977,9 @@ pub const OrcaRuntime = struct {
         const engine = object_value.engine orelse return;
         if (object_value.engine_work) |work_handle|
             self.work_registry.complete(work_handle) catch {};
+        // The thread is joined, so a successor it had opened but never handed
+        // to the Player is this lane's to release.
+        engine.releasePending();
         engine.destroy();
         object_value.engine = null;
         object_value.engine_work = null;
@@ -560,6 +993,7 @@ pub const OrcaRuntime = struct {
         for (self.players.slots.items) |*slot| {
             if (slot.value) |*object_value| {
                 const engine = object_value.engine orelse continue;
+                engine.releasePending();
                 engine.destroy();
                 object_value.engine = null;
                 object_value.engine_work = null;
@@ -652,6 +1086,14 @@ pub const OrcaRuntime = struct {
                 try self.jobs.requestCancellation(job_handle);
                 break :blk .{ .job_cancellation_requested = job_handle };
             },
+            .play_track => |request| blk: {
+                try self.playerPlayTrackBound(
+                    request.player,
+                    request.library,
+                    request.track_id,
+                );
+                break :blk .{ .track_playing = request.player };
+            },
         };
     }
 
@@ -661,6 +1103,11 @@ pub const OrcaRuntime = struct {
             error.StaleHandle => .stale_handle,
             error.OutOfMemory => .out_of_memory,
             error.InvalidJobTransition, error.JobAlreadyFinished => .invalid_transition,
+            error.PlayerHasNoLibrary, error.PlayerBoundToAnotherLibrary => .player_not_bound,
+            error.TrackHasNoPlayableFile => .track_has_no_file,
+            error.TrackFileMissing => .track_file_missing,
+            error.CodecUnavailable, error.UnsupportedAudioFormat => .codec_unavailable,
+            error.PlaybackQueueFull => .queue_full,
             else => .internal,
         };
     }
@@ -1011,4 +1458,297 @@ test "engine-owned Zone output state is not mutable from the control lane" {
     );
     try std.testing.expectError(error.ZoneOwnedByEngine, runtime.markZoneOutputLost(zone));
     try std.testing.expectError(error.ZoneOwnedByEngine, runtime.setZonePolicy(zone, .interactive));
+}
+
+// ------------------------------------------------------------- queue tests
+
+/// Builds a Library whose Tracks point at real fixture files, so the queue is
+/// exercised through the same `playableLocation` -> `LocalFileSource` ->
+/// `CodecRegistry` path a projected corpus uses.
+fn openFixtureLibrary(
+    runtime: *OrcaRuntime,
+    uri: [:0]const u8,
+    paths: []const []const u8,
+) !struct { library: LibraryHandle, ids: [4]i64 } {
+    const library = try runtime.openLibrary(std.testing.io, uri);
+    const library_database = try runtime.libraryDatabase(library);
+    const volume_id = try library_database.volumes.ensure(.{
+        .stable_key = "uuid:queue-fixture",
+        .label = "Fixtures",
+    });
+    var ids: [4]i64 = @splat(0);
+    for (paths, 0..) |path, index| {
+        const file_id = try library_database.files.create(.{
+            .audio_format = 1,
+            .size_bytes = 1024,
+        });
+        _ = try library_database.locations.upsert(.{
+            .file_id = file_id,
+            .volume_id = volume_id,
+            .uri = path,
+        });
+        var title_buffer: [32]u8 = undefined;
+        try library_database.tracks.upsertTracks(&.{.{
+            .title = try std.fmt.bufPrint(&title_buffer, "Entry {d}", .{index}),
+            .preferred_file_id = file_id,
+        }});
+        var page = try library_database.tracks.page(std.testing.allocator, 1, @intCast(index));
+        defer page.deinit();
+        ids[index] = page.items[0].id;
+    }
+    return .{ .library = library, .ids = ids };
+}
+
+test "a queue of Library tracks plays through the real resolve-open-decode path" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-play?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/generated-reference.wav",
+            "fixtures/audio/generated-reference.flac",
+        },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(
+        player,
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0..2],
+        0,
+    );
+
+    var samples: [512]f32 = @splat(0);
+    var waited: usize = 0;
+    while (waited < 20_000) : (waited += 1) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerQueueStats(player)).entries_started > 0) break;
+        std.Thread.yield() catch {};
+    }
+    // The engine resolved the *second* entry on its own, opened it, and primed
+    // it behind the first: this is auto-advance through the database.
+    const stats = try runtime.playerQueueStats(player);
+    try std.testing.expectEqual(@as(u64, 1), stats.entries_started);
+    try std.testing.expectEqual(@as(u64, 0), stats.open_failures);
+    try std.testing.expectEqual(@as(u32, 1), (try runtime.playerQueueSnapshot(player)).decode_position);
+
+    // And now-playing is the audible entry, resolvable back to a Track id.
+    waited = 0;
+    while (waited < 20_000) : (waited += 1) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerQueueSnapshot(player)).cursor == 1) break;
+        std.Thread.yield() catch {};
+    }
+    const now_playing = (try runtime.playerNowPlaying(player)).?;
+    try std.testing.expectEqual(fixtures.ids[1], now_playing.track_id);
+}
+
+test "a user skip is immediate and does not wait for the current entry to drain" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-skip?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/generated-reference.wav",
+            "fixtures/audio/generated-reference.flac",
+            "fixtures/audio/tagged-reference.flac",
+        },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(
+        player,
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0..3],
+        0,
+    );
+    const epoch_before = (try runtime.playerSnapshot(player)).epoch;
+
+    // No pumping at all: nothing has drained, and the skip still lands.
+    try std.testing.expect(try runtime.playerNext(player));
+    const snapshot = try runtime.playerQueueSnapshot(player);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.cursor);
+    // The epoch moved, which is what makes already-prepared audio disappear
+    // from the callback rather than being played out first.
+    try std.testing.expect((try runtime.playerSnapshot(player)).epoch != epoch_before);
+    try std.testing.expectEqual(
+        fixtures.ids[1],
+        (try runtime.playerNowPlaying(player)).?.track_id,
+    );
+
+    try std.testing.expect(try runtime.playerNext(player));
+    // The end of a non-repeating queue reports honestly instead of wrapping.
+    try std.testing.expect(!try runtime.playerNext(player));
+    try runtime.playerSetRepeat(player, .all);
+    try std.testing.expect(try runtime.playerNext(player));
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        (try runtime.playerQueueSnapshot(player)).cursor,
+    );
+}
+
+test "previous restarts the entry past three seconds and steps back before it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-previous?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/generated-reference.wav",
+            "fixtures/audio/generated-reference.flac",
+        },
+    );
+    const player = try runtime.createPlayer();
+    try runtime.playerPlayTracks(
+        player,
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0..2],
+        1,
+    );
+
+    // Under three seconds in: move to the previous entry.
+    try std.testing.expect(try runtime.playerPrevious(player));
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        (try runtime.playerQueueSnapshot(player)).cursor,
+    );
+
+    // Past three seconds: restart this entry instead of leaving it.
+    const format = (try runtime.players.get(player)).player.format().?;
+    _ = try runtime.seekPlayer(player, 4 * format.sample_rate);
+    try std.testing.expect(try runtime.playerPrevious(player));
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        (try runtime.playerQueueSnapshot(player)).cursor,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        (try runtime.playerSnapshot(player)).position_frames,
+    );
+}
+
+test "stop keeps the queue while clear empties it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-stop?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/generated-reference.wav",
+            "fixtures/audio/generated-reference.flac",
+        },
+    );
+    const player = try runtime.createPlayer();
+    try runtime.playerPlayTracks(
+        player,
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0..2],
+        1,
+    );
+
+    try runtime.stopPlayer(player);
+    const stopped = try runtime.playerQueueSnapshot(player);
+    try std.testing.expectEqual(@as(u32, 2), stopped.entries);
+    try std.testing.expectEqual(@as(u32, 1), stopped.cursor);
+    try std.testing.expect((try runtime.players.get(player)).player.sources == null);
+
+    try runtime.playerClearQueue(player);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        (try runtime.playerQueueSnapshot(player)).entries,
+    );
+}
+
+test "a track with no file behind it fails typed through the command lane" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-queue-typed?mode=memory&cache=shared",
+    );
+    const library_database = try runtime.libraryDatabase(library);
+    try library_database.tracks.upsertTracks(&.{.{ .title = "Orphan" }});
+    var page = try library_database.tracks.page(std.testing.allocator, 1, 0);
+    defer page.deinit();
+    const player = try runtime.createPlayer();
+    try runtime.playerBindLibrary(player, library, std.testing.io);
+
+    const request_id = try runtime.submit(.{ .play_track = .{
+        .player = player,
+        .library = library,
+        .track_id = page.items[0].id,
+    } });
+    try std.testing.expect(runtime.processNextCommand());
+    const event = runtime.pollEvent() orelse return error.MissingEvent;
+    try std.testing.expectEqual(request_id, event.request_id);
+    switch (event.outcome) {
+        .failed => |failure| try std.testing.expectEqual(
+            control.Failure.track_has_no_file,
+            failure,
+        ),
+        else => return error.UnexpectedOutcome,
+    }
+}
+
+test "destroying a Library releases every Player bound to it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-unbind?mode=memory&cache=shared",
+        &.{"fixtures/audio/generated-reference.wav"},
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(
+        player,
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0..1],
+        0,
+    );
+
+    // The opener holds a pointer into the Library. Closing it while an engine
+    // thread could still resolve through it would be a use-after-free.
+    try runtime.destroyLibrary(fixtures.library);
+    try std.testing.expect((try runtime.players.get(player)).opener == null);
+    try std.testing.expect((try runtime.players.get(player)).player.sources == null);
+    // The queue itself is the user's list and survives; it just cannot resolve.
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        (try runtime.playerQueueSnapshot(player)).entries,
+    );
 }

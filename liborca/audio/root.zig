@@ -10,6 +10,7 @@ pub const loaded_source = @import("loaded_source.zig");
 pub const nodes = @import("nodes.zig");
 pub const output = @import("output.zig");
 pub const pcm = @import("pcm.zig");
+pub const playback_queue = @import("playback_queue.zig");
 pub const player = @import("player.zig");
 pub const processing = @import("processing.zig");
 pub const render = @import("render.zig");
@@ -33,6 +34,7 @@ test {
     _ = @import("loaded_source.zig");
     _ = @import("nodes.zig");
     _ = @import("output.zig");
+    _ = @import("playback_queue.zig");
     _ = @import("player.zig");
     _ = @import("processing.zig");
     _ = @import("render.zig");

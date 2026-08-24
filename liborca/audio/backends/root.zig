@@ -7,11 +7,6 @@ pub const native = switch (builtin.os.tag) {
     else => struct {},
 };
 
-pub const playback = switch (builtin.os.tag) {
-    .linux => @import("pipewire_playback.zig"),
-    else => struct {},
-};
-
 /// Process-level owner of the host audio backend. `platform.zig`'s rule applies
 /// here too: the foreign library's lifetime lives in the adapter for that
 /// platform, and everything above this sees only `output.Factory`.
@@ -49,5 +44,4 @@ const NullHost = struct {
 
 test {
     if (builtin.os.tag == .linux) _ = @import("pipewire.zig");
-    if (builtin.os.tag == .linux) _ = @import("pipewire_playback.zig");
 }

@@ -10,6 +10,44 @@ what works.
 
 ### Added since the reset
 
+- **A playback queue: Orca plays a song, and a list of songs.** A bounded
+  `PlaybackQueue` of Library track references sits above the gapless decode
+  queue, with enqueue, play-now, next, previous, stop, clear, repeat and
+  shuffle. `playerPlayTrack` resolves a Track id through
+  `TrackRepository.playableLocation` on an independent read-only connection,
+  opens a self-contained decoder for it, and loads it on the control lane —
+  never on a caller's UI thread — failing with typed reasons (`track_has_no_file`,
+  `track_file_missing`, `codec_unavailable`) and marking the Location `missing`
+  when the file has gone. Auto-advance primes the next entry at end-of-decode, so
+  a real album plays gaplessly; a canonical format mismatch is not fatal but
+  drains the pipe and reopens the Zone output at the new format, verified on
+  hardware across 44.1 kHz -> 96 kHz -> 44.1 kHz. A user skip is a hard switch
+  and immediate, `previous` restarts past three seconds, shuffle uses a
+  permutation so `previous` keeps working, and now-playing is derived from the
+  `entry_serial` the render callback publishes rather than from the decode
+  cursor, which leads it by the whole render-ahead depth. `orca-cli play-tracks`
+  drives all of it.
+- **`playFileBlocking` is gone.** The stack-local single-Zone playback path has
+  been deleted; `orca-cli play` runs through the runtime object graph, which is
+  the only implementation left.
+
+- **Scanned files carry their decoded audio properties.** A file whose bytes are
+  new or changed is probed through the codec registry, and `files.sample_rate`,
+  `bit_depth`, `channels` and `duration_ms` record what its container declares.
+  Only headers are read, so a 22,060-file cold scan is unchanged at ~3.2 s and a
+  rescan that finds nothing changed still does no format work at all. A file that
+  will not open is recorded with no properties rather than failing the scan.
+  Duration reaches `tracks.duration_ms` through the projection, so a Track lists
+  its length. Verified against `ffprobe` on real library files: exact for every
+  FLAC and every MP3 carrying a Xing/Info header, and within 0.1% on
+  variable-bitrate MP3s that declare no length at all, which no reader can do
+  better on without decoding.
+- **`tracks.preferred_file_id` is chosen on declared properties.** Higher bit
+  depth wins, then higher sample rate, then a location a scan has confirmed; the
+  container ranking is now only a tiebreak between encodings that declare the
+  same thing. A missing property is unknown rather than zero, so a lossy file
+  with no sample width to state loses to a real 16-bit one, and a file the
+  scanner could not open never outranks one it could.
 - **MP3 playback.** `codec/mp3.zig` decodes MPEG Layer I/II/III through a
   vendored public-domain `minimp3` contained behind `codec/mp3_shim.c`, with
   pure-Zig Xing/Info/VBRI parsing, LAME encoder delay and padding trimming, and

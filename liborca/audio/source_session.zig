@@ -126,6 +126,16 @@ pub const SourceQueue = struct {
         self.* = undefined;
     }
 
+    /// Continues entry numbering from a previous queue, so a serial identifies
+    /// one queue entry for the whole life of a Player rather than only within
+    /// one `SourceQueue`. Without this, the first entry of every replacement
+    /// queue would reuse serial 1 and now-playing could resolve to the wrong
+    /// track after a skip.
+    pub fn rebaseSerials(self: *SourceQueue, previous: u32) void {
+        self.entry_serial_counter = previous;
+        self.current_entry_serial = self.nextSerial();
+    }
+
     pub fn format(self: *const SourceQueue) @import("pcm.zig").Format {
         return self.current.decoder.format;
     }

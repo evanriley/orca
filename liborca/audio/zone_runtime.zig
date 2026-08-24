@@ -73,6 +73,11 @@ pub const ZoneRuntime = struct {
     // ---- Engine-thread-only state ----
     output: ?output_api.Output = null,
     channels: u16 = 0,
+    /// Canonical format the open stream was negotiated for. `RenderContext`
+    /// channel count and the negotiated rate are fixed when a stream opens, so
+    /// a queue entry in a different format needs the output reopened rather
+    /// than resampled — see `docs/audio-engine.md` on the resampler.
+    open_format: ?pcm.Format = null,
     /// Consecutive engine passes during which this Zone accepted no PCM while
     /// its output claimed to be active. A backend that stops consuming must not
     /// be able to stall the shared decode cursor for every other Zone.
@@ -206,6 +211,14 @@ pub const ZoneRuntime = struct {
             .requested_latency_frames = frames_per_block,
         };
         self.output = try factory.open(request, Context.callback, self.context.userdata());
+        self.open_format = format;
+    }
+
+    /// True when the open stream cannot carry `format` — the two properties
+    /// fixed at open time are the channel count and the sample rate.
+    pub fn outputFormatChanged(self: *const ZoneRuntime, format: pcm.Format) bool {
+        const open = self.open_format orelse return false;
+        return open.channels != format.channels or open.sample_rate != format.sample_rate;
     }
 
     /// Engine thread, or the control lane once the Zone is unpublished.
@@ -214,6 +227,7 @@ pub const ZoneRuntime = struct {
             active.close();
             self.output = null;
         }
+        self.open_format = null;
     }
 
     /// Reclaims every block still held by the render path. Legal only while no

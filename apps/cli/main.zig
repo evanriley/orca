@@ -200,11 +200,25 @@ pub fn main(init: std.process.Init) !void {
                 stats.backend_quantum_frames,
             },
         );
+    } else if (args.len >= 4 and std.mem.eql(u8, args[1], "play-tracks")) {
+        try playTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
     } else {
         try stdout.writeAll(
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
             \\                 | analyze DATABASE AUDIO
-            \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]]
+            \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
+            \\                 | play-tracks DATABASE IDS [OPTIONS]]
+            \\
+            \\play-tracks plays a comma-separated list of Track ids as a playback
+            \\queue. Options:
+            \\  --device=ID        output device (0 = server default)
+            \\  --start=N          queue position to begin at
+            \\  --repeat=off|all|one
+            \\  --shuffle
+            \\  --tail=MS          on each new entry, seek to MS before its end
+            \\  --skip-after=MS    issue next MS after each entry becomes audible
+            \\  --previous-after=MS  issue previous once, MS after playback starts
+            \\  --limit=MS         stop after MS of wall clock
             \\
             \\The host-independent Orca control client.
             \\
@@ -212,6 +226,164 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.flush();
+}
+
+const PlayTracksOptions = struct {
+    device: u64 = 0,
+    start: u32 = 0,
+    repeat: liborca.core.runtime.RepeatMode = .off,
+    shuffle: bool = false,
+    tail_ms: ?u64 = null,
+    skip_after_ms: ?u64 = null,
+    previous_after_ms: ?u64 = null,
+    limit_ms: u64 = 10 * 60 * 1000,
+};
+
+fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
+    if (std.mem.eql(u8, argument, "--shuffle")) {
+        options.shuffle = true;
+        return;
+    }
+    const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
+    const name = argument[0..split];
+    const value = argument[split + 1 ..];
+    if (std.mem.eql(u8, name, "--device")) {
+        options.device = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--start")) {
+        options.start = try std.fmt.parseInt(u32, value, 10);
+    } else if (std.mem.eql(u8, name, "--repeat")) {
+        options.repeat = if (std.mem.eql(u8, value, "all"))
+            .all
+        else if (std.mem.eql(u8, value, "one"))
+            .one
+        else if (std.mem.eql(u8, value, "off"))
+            .off
+        else
+            return error.UnknownRepeatMode;
+    } else if (std.mem.eql(u8, name, "--tail")) {
+        options.tail_ms = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--skip-after")) {
+        options.skip_after_ms = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--previous-after")) {
+        options.previous_after_ms = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--limit")) {
+        options.limit_ms = try std.fmt.parseInt(u64, value, 10);
+    } else return error.UnknownOption;
+}
+
+/// The queue driven from the outside, exactly as a frontend would drive it.
+///
+/// Everything here is presentation: parse ids, call the runtime, print what it
+/// reports. No transport state, no notion of "which track is next", and no
+/// decoding — those all live in `liborca`, which is the whole point of using
+/// the CLI as the architectural test client.
+fn playTracks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_list: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var options: PlayTracksOptions = .{};
+    for (option_arguments) |argument| try parseOption(&options, argument);
+
+    var ids: std.ArrayList(i64) = .empty;
+    defer ids.deinit(allocator);
+    var walk = std.mem.splitScalar(u8, id_list, ',');
+    while (walk.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " ");
+        if (trimmed.len == 0) continue;
+        try ids.append(allocator, try std.fmt.parseInt(i64, trimmed, 10));
+    }
+    if (ids.items.len == 0) return error.NoTrackIds;
+
+    const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
+    var runtime = liborca.OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(io, database_path);
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, options.device);
+
+    try runtime.playerSetRepeat(player, options.repeat);
+    if (options.shuffle) try runtime.playerSetShuffle(player, true);
+    try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
+
+    var elapsed_ms: u64 = 0;
+    var entry_elapsed_ms: u64 = 0;
+    var last_cursor: ?u32 = null;
+    var took_previous = options.previous_after_ms == null;
+    // How often the producer was observed a whole entry ahead of the audio.
+    // Nonzero is the proof that now-playing is derived from rendered audio
+    // rather than from the decode cursor.
+    var decode_lead_polls: u64 = 0;
+    while (elapsed_ms < options.limit_ms) {
+        const snapshot = try runtime.playerQueueSnapshot(player);
+        if (snapshot.decode_position != snapshot.cursor) decode_lead_polls += 1;
+        if (last_cursor == null or last_cursor.? != snapshot.cursor) {
+            last_cursor = snapshot.cursor;
+            entry_elapsed_ms = 0;
+            const now_playing = try runtime.playerNowPlaying(player);
+            try stdout.print(
+                "now-playing at={d}ms position={d} decode_position={d} track={?d}\n",
+                .{
+                    elapsed_ms,
+                    snapshot.cursor,
+                    snapshot.decode_position,
+                    if (now_playing) |ref| ref.track_id else null,
+                },
+            );
+            try stdout.flush();
+            if (options.tail_ms) |tail| _ = try runtime.playerSeekToTail(player, tail);
+        }
+        if (!took_previous and elapsed_ms >= options.previous_after_ms.?) {
+            took_previous = true;
+            const moved = try runtime.playerPrevious(player);
+            try stdout.print("previous at={d}ms moved={}\n", .{ elapsed_ms, moved });
+            try stdout.flush();
+            last_cursor = null;
+        }
+        if (options.skip_after_ms) |after| {
+            if (entry_elapsed_ms >= after) {
+                const moved = try runtime.playerNext(player);
+                try stdout.print("next at={d}ms moved={}\n", .{ elapsed_ms, moved });
+                try stdout.flush();
+                if (!moved) break;
+                last_cursor = null;
+                continue;
+            }
+        }
+        if (try runtime.playerDrained(player)) break;
+        sleepMilliseconds(10);
+        elapsed_ms += 10;
+        entry_elapsed_ms += 10;
+    }
+
+    try runtime.pausePlayer(player);
+    sleepMilliseconds(200);
+    const snapshot = try runtime.playerQueueSnapshot(player);
+    const stats = try runtime.playerQueueStats(player);
+    const zone_stats = try runtime.zoneStats(zone);
+    try stdout.print(
+        "queue entries={d} cursor={d} started={d} gapless={d} format_switch={d} " ++
+            "open_failures={d} decode_errors={d} decode_lead_polls={d} " ++
+            "underruns={d} quantum={d} state={s}\n",
+        .{
+            snapshot.entries,
+            snapshot.cursor,
+            stats.entries_started,
+            stats.gapless_transitions,
+            stats.format_switch_transitions,
+            stats.open_failures,
+            stats.decode_errors,
+            decode_lead_polls,
+            zone_stats.underruns,
+            zone_stats.backend_quantum_frames,
+            @tagName(zone_stats.output_state),
+        },
+    );
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {

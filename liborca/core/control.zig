@@ -14,6 +14,14 @@ pub const Action = union(enum) {
         total_units: ?u64,
     },
     cancel_job: object.JobHandle,
+    /// Resolve a Library Track to audio and start playing it. The Player must
+    /// already be bound to the Library — binding is the step that needs an
+    /// `std.Io`, and it happens once, off this lane.
+    play_track: struct {
+        player: object.PlayerHandle,
+        library: object.LibraryHandle,
+        track_id: i64,
+    },
 };
 
 pub const Command = struct {
@@ -26,6 +34,16 @@ pub const Failure = enum {
     stale_handle,
     out_of_memory,
     invalid_transition,
+    /// The Player has no Library bound, or the entry names a different one.
+    player_not_bound,
+    /// The Track exists but no file behind it can be played.
+    track_has_no_file,
+    /// The database still lists the file; the filesystem no longer has it. The
+    /// Location is marked `missing` as a side effect of discovering this.
+    track_file_missing,
+    /// Nothing in the CodecRegistry can read those bytes.
+    codec_unavailable,
+    queue_full,
     internal,
 };
 
@@ -35,6 +53,7 @@ pub const Outcome = union(enum) {
     zone_created: object.ZoneHandle,
     job_started: object.JobHandle,
     job_cancellation_requested: object.JobHandle,
+    track_playing: object.PlayerHandle,
     failed: Failure,
 };
 
