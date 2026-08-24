@@ -13,7 +13,7 @@ pub fn main(init: std.process.Init) !void {
     else
         try allocator.dupeSentinel(u8, "file:orca-benchmark?mode=memory&cache=shared", 0);
 
-    var library = try liborca.database.LibraryDatabase.open(allocator, path);
+    var library = try liborca.database.LibraryDatabase.open(allocator, init.io, path);
     defer library.close();
     try library.database.exec("DELETE FROM tracks;");
 
@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var inserted: usize = 0;
     while (inserted < track_count) {
         const count = @min(batch.len, track_count - inserted);
-        try library.tracks.insertBatch(batch[0..count]);
+        try library.tracks.upsertTracks(batch[0..count]);
         inserted += count;
     }
     const insert_ns = insert_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 2) {
         library.close();
         const open_start = std.Io.Clock.awake.now(init.io);
-        library = try liborca.database.LibraryDatabase.open(allocator, path);
+        library = try liborca.database.LibraryDatabase.open(allocator, init.io, path);
         open_ns = open_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     }
 

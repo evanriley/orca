@@ -50,19 +50,31 @@ pub const HealthIssueView = extern struct {
 
 pub const HealthIssueCallback = *const fn (?*anyopaque, *const HealthIssueView) callconv(.c) void;
 
+/// A foreign frontend cannot hand Orca a `std.Io`, so the boundary owns one.
+/// It is the synchronous, allocation-free implementation: liborca performs no
+/// async I/O, and a host's event loop must never be co-opted by the ABI.
 const RuntimeBox = struct {
     runtime: core.OrcaRuntime,
+    threaded: std.Io.Threaded,
+
+    fn io(self: *RuntimeBox) std.Io {
+        return self.threaded.io();
+    }
 };
 
 pub export fn orca_runtime_create() callconv(.c) ?*Runtime {
     const box = std.heap.c_allocator.create(RuntimeBox) catch return null;
-    box.* = .{ .runtime = .init(std.heap.c_allocator) };
+    box.* = .{
+        .runtime = .init(std.heap.c_allocator),
+        .threaded = .init_single_threaded,
+    };
     return @ptrCast(box);
 }
 
 pub export fn orca_runtime_destroy(runtime: ?*Runtime) callconv(.c) void {
     const box = runtimeBox(runtime) orelse return;
     box.runtime.deinit();
+    box.threaded.deinit();
     std.heap.c_allocator.destroy(box);
 }
 
@@ -74,7 +86,7 @@ pub export fn orca_library_open(
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     const path_pointer = path orelse return .invalid_argument;
     const destination = output orelse return .invalid_argument;
-    const library = box.runtime.openLibrary(std.mem.span(path_pointer)) catch |err|
+    const library = box.runtime.openLibrary(box.io(), std.mem.span(path_pointer)) catch |err|
         return mapError(err);
     destination.* = exportLibraryHandle(library);
     return .ok;
@@ -236,7 +248,7 @@ pub export fn orca_player_snapshot(
         return mapError(err);
     destination.* = .{
         .state = @backingInt(snapshot.state),
-        .generation = snapshot.generation,
+        .generation = snapshot.epoch,
         .position_frames = snapshot.position_frames,
     };
     return .ok;
@@ -301,7 +313,7 @@ test "C ABI library query is bounded and callback-scoped" {
         &library,
     ));
     const box = runtimeBox(runtime).?;
-    try (try box.runtime.libraryDatabase(importLibrary(library))).tracks.insertBatch(&.{
+    try (try box.runtime.libraryDatabase(importLibrary(library))).tracks.upsertTracks(&.{
         .{ .title = "First", .album = "Generated", .album_artist = "Orca" },
         .{ .title = "Second", .album = "Generated", .album_artist = "Orca" },
     });
@@ -321,7 +333,13 @@ test "C ABI library query is bounded and callback-scoped" {
     ));
     try std.testing.expectEqual(@as(usize, 1), visited);
     const database = try box.runtime.libraryDatabase(importLibrary(library));
-    try database.health_issues.replacePath("track.flac", &.{.{
+    const file_id = try database.files.create(.{ .size_bytes = 1024 });
+    _ = try database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = @import("database/root.zig").LibraryDatabase.null_volume,
+        .uri = "track.flac",
+    });
+    try database.health_issues.replaceFile(file_id, &.{.{
         .kind = .clipping,
         .severity = .warning,
         .details = "clipped",

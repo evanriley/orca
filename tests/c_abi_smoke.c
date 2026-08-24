@@ -29,6 +29,16 @@ int main(void) {
     if (orca_library_close(runtime, library) != ORCA_STATUS_OK) return 13;
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;
+    /* KNOWN-WRONG SEMANTIC - do not trust this assertion.
+     *
+     * A Player with no loaded source and no attached output Zone must not be
+     * able to enter PLAYING. It can today only because the runtime Player is a
+     * detached state machine: orca_player_play sets an enum and no runtime Zone
+     * owns an OutputSession. This test currently locks that defect in place.
+     *
+     * When runtime-owned playback lands, invert this: play without a playable
+     * source and an attached output must be rejected, and the assertion below
+     * must expect a failure status rather than ORCA_STATUS_OK. */
     if (orca_player_play(runtime, player) != ORCA_STATUS_OK) return 3;
     orca_player_state_snapshot snapshot;
     if (orca_player_snapshot(runtime, player, &snapshot) != ORCA_STATUS_OK) return 4;

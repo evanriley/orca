@@ -2,6 +2,7 @@ const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const scanner = @import("../library/scanner.zig");
+const quick_hash = @import("../storage/quick_hash.zig");
 const storage = @import("../storage/root.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoding = @import("encoding.zig");
@@ -42,32 +43,40 @@ pub const Service = struct {
     /// so transport and render threads remain schedulable on constrained hosts.
     yield_between_chunks: bool = true,
 
-    pub fn analyzeFile(self: Service, path: []const u8, parameters: diagnostics.Parameters) !Analysis {
+    /// Analyze one file, caching against `file_id` and the file's quick hash.
+    ///
+    /// Passing no `file_id` analyzes without touching the cache — the honest
+    /// answer for a source the Library has no identity for yet. Keying on the
+    /// quick hash rather than size and mtime is what lets a loudness
+    /// measurement survive Orca writing a tag into the same file.
+    pub fn analyzeFile(
+        self: Service,
+        file_id: ?i64,
+        path: []const u8,
+        parameters: diagnostics.Parameters,
+    ) !Analysis {
         if (self.cancelled()) return error.Cancelled;
         var local = try storage.LocalFileSource.open(self.io, path);
         defer local.close();
         const initial_identity = local.readable().identity();
-        const modified_ns = std.math.cast(i64, initial_identity.modified_ns) orelse
-            return error.SourceTimestampOutOfRange;
+        const source_identity = try quick_hash.fromSource(local.readable());
         const diagnostics_key: database.AnalysisCacheKey = .{
-            .path = path,
+            .file_id = file_id orelse 0,
             .kind = diagnostics_cache_kind,
             .algorithm_id = "orca.audio-diagnostics",
             .algorithm_version = 1,
             .parameter_hash = encoding.parameterHash(parameters),
-            .source_size = initial_identity.size,
-            .source_modified_ns = modified_ns,
+            .source_identity = source_identity,
         };
         const fingerprint_key: database.AnalysisCacheKey = .{
-            .path = path,
+            .file_id = file_id orelse 0,
             .kind = fingerprint_cache_kind,
             .algorithm_id = "orca.temporal-fingerprint",
             .algorithm_version = 1,
             .parameter_hash = @splat(0),
-            .source_size = initial_identity.size,
-            .source_modified_ns = modified_ns,
+            .source_identity = source_identity,
         };
-        if (self.cache) |cache| {
+        if (if (file_id == null) null else self.cache) |cache| {
             const cached_diagnostics = try self.loadDiagnostics(cache, diagnostics_key);
             const cached_fingerprint = try self.loadFingerprint(cache, fingerprint_key);
             if (cached_diagnostics != null and cached_fingerprint != null) {
@@ -126,7 +135,7 @@ pub const Service = struct {
         fingerprint_result.source_hash = source_hash;
 
         try self.verifyIdentity(path, initial_identity);
-        if (self.cache) |cache| {
+        if (if (file_id == null) null else self.cache) |cache| {
             const bytes = try encoding.encode(self.allocator, result);
             defer self.allocator.free(bytes);
             try cache.put(diagnostics_key, bytes);
@@ -200,6 +209,7 @@ test "service streams codecs into cache and cancellation publishes nothing" {
     const allocator = std.testing.allocator;
     var library = try database.LibraryDatabase.open(
         allocator,
+        std.testing.io,
         "file:orca-analysis-service?mode=memory&cache=shared",
     );
     defer library.close();
@@ -210,14 +220,23 @@ test "service streams codecs into cache and cancellation publishes nothing" {
         .codecs = &codecs,
         .cache = &library.analysis_cache,
     };
-    var first = try service.analyzeFile("fixtures/audio/generated-reference.flac", .{
-        .waveform_buckets = 16,
-    });
+    const binding = try library.resolveOrCreateFile(
+        std.testing.io,
+        "fixtures/audio/generated-reference.flac",
+        .{ .stable_key = "test:analysis" },
+    );
+    var first = try service.analyzeFile(
+        binding.file_id,
+        "fixtures/audio/generated-reference.flac",
+        .{ .waveform_buckets = 16 },
+    );
     defer first.deinit();
     try std.testing.expect(!first.cache_hit);
-    var second = try service.analyzeFile("fixtures/audio/generated-reference.flac", .{
-        .waveform_buckets = 16,
-    });
+    var second = try service.analyzeFile(
+        binding.file_id,
+        "fixtures/audio/generated-reference.flac",
+        .{ .waveform_buckets = 16 },
+    );
     defer second.deinit();
     try std.testing.expect(second.cache_hit);
     try std.testing.expectEqual(first.diagnostics.sample_peak, second.diagnostics.sample_peak);
@@ -228,6 +247,7 @@ test "service streams codecs into cache and cancellation publishes nothing" {
     var cancelled_service = service;
     cancelled_service.cancellation = &cancellation;
     try std.testing.expectError(error.Cancelled, cancelled_service.analyzeFile(
+        null,
         "fixtures/audio/generated-reference.qoa",
         .{ .waveform_buckets = 16 },
     ));
