@@ -591,15 +591,36 @@ pub const PlayerEngine = struct {
             }
         }
         const clock_zone = self.clock_zone orelse return;
+        const epoch = self.player.epoch.load(.acquire);
+        // Load order mirrors the callback's store order in reverse: position
+        // first (acquire), then the serial and the anchor it wrote before it.
+        // Anything newer than the position is therefore detectable below rather
+        // than silently paired with the wrong entry.
+        const sample = clock_zone.position.load(.acquire);
+        const serial = clock_zone.rendered_entry_serial.load(.monotonic);
+        const anchor = clock_zone.entry_anchor.load(.monotonic);
         // Now-playing follows the serial the callback actually rendered, not
         // the decode cursor, which leads it by the whole render-ahead depth.
-        if (self.queue) |queue|
-            queue.observeRenderedSerial(clock_zone.rendered_entry_serial.load(.monotonic));
-        const epoch = self.player.epoch.load(.acquire);
-        const sample = clock_zone.position.load(.monotonic);
+        if (self.queue) |queue| queue.observeRenderedSerial(serial);
         if (render.positionEpoch(sample) != @as(u16, @truncate(epoch))) return;
-        const frames = self.player.epoch_base_frames.load(.acquire) +
-            render.positionFrames(sample);
+        // The anchor's stamp is the low half of the serial that owns it. A
+        // mismatch means the two were read from different moments, so the pair
+        // is discarded exactly as a mismatched epoch is.
+        if (render.entryAnchorStamp(anchor) != @as(u16, @truncate(serial))) return;
+        const rendered_frames = render.positionFrames(sample);
+        const entry_start = render.entryAnchorFrames(anchor);
+        // An anchor past the frame count means the audible entry changed while
+        // this sample was being assembled; the next pass reports the new entry.
+        if (entry_start > rendered_frames) return;
+        const in_entry = rendered_frames - entry_start;
+        // A non-zero anchor means this entry began *inside* the current epoch —
+        // a gapless advance — so it started at its own frame zero. Only an entry
+        // that was already audible when the epoch was stamped carries the seek
+        // base that was stamped with it.
+        const frames = if (entry_start == 0)
+            self.player.epoch_base_frames.load(.acquire) + in_entry
+        else
+            in_entry;
         // Drop the sample if a seek landed while it was being assembled; the
         // next pass reports the new epoch's position instead of a stale one.
         if (self.player.epoch.load(.acquire) != epoch) return;
@@ -1171,6 +1192,78 @@ test "now playing reports the audible entry, not the decoded one" {
     try std.testing.expectEqual(epoch_before, harness.player.snapshot().epoch);
 }
 
+test "position restarts at zero for every entry a gapless advance reaches" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 8192;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames },
+        .{ .track_id = 11, .frames = entry_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    // Highest position ever reported while each entry was the audible one. The
+    // epoch does not move across a gapless advance, so without re-anchoring the
+    // second entry would inherit the first entry's whole duration.
+    var highest: [2]u64 = .{ 0, 0 };
+    var first_after_advance: ?u64 = null;
+    for (0..200) |_| {
+        harness.step(128);
+        const cursor = harness.queue.cursorPosition();
+        const frames = harness.player.snapshot().position_frames;
+        highest[cursor] = @max(highest[cursor], frames);
+        if (cursor == 1 and first_after_advance == null) first_after_advance = frames;
+    }
+
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    // Neither entry is ever reported past its own end.
+    try std.testing.expect(highest[0] <= entry_frames);
+    try std.testing.expect(highest[1] <= entry_frames);
+    // The successor started from its own zero rather than continuing the first.
+    try std.testing.expect(first_after_advance.? <= 128);
+    // ...and it still ran all the way through, so nothing was clamped away.
+    try std.testing.expect(highest[1] >= entry_frames - 128);
+    // One epoch throughout: this was a gapless advance, not a hard switch.
+    try std.testing.expectEqual(@as(u32, 2), harness.player.snapshot().epoch);
+}
+
+test "a seek base stays inside the entry it was stamped for" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 8192;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames },
+        .{ .track_id = 11, .frames = entry_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    harness.run(4, 128);
+
+    // Seek near the end of the first entry: the epoch moves and a seek base is
+    // stamped with it. The gapless advance that follows must not add that base
+    // to the successor's position.
+    const seek_target: u64 = entry_frames - 1024;
+    _ = try harness.player.seek(seek_target);
+    harness.step(128);
+    try std.testing.expect(harness.player.snapshot().position_frames >= seek_target);
+
+    var highest: [2]u64 = .{ 0, 0 };
+    var first_after_advance: ?u64 = null;
+    for (0..200) |_| {
+        harness.step(128);
+        const cursor = harness.queue.cursorPosition();
+        const frames = harness.player.snapshot().position_frames;
+        highest[cursor] = @max(highest[cursor], frames);
+        if (cursor == 1 and first_after_advance == null) first_after_advance = frames;
+    }
+
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expect(highest[0] <= entry_frames);
+    try std.testing.expect(highest[1] <= entry_frames);
+    try std.testing.expect(first_after_advance.? <= 128);
+}
+
 test "a format change between entries reopens the output instead of failing" {
     const allocator = std.testing.allocator;
     var harness = try QueueHarness.init(allocator, &.{
@@ -1200,17 +1293,53 @@ test "a format change between entries reopens the output instead of failing" {
     );
 }
 
+test "position restarts for an entry reached through a format switch" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 4096;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames, .channels = 1, .sample_rate = 44_100 },
+        .{ .track_id = 11, .frames = entry_frames, .channels = 2, .sample_rate = 48_000 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    // A format switch drains every Zone, reopens the outputs and hard-loads the
+    // successor. That path bumps the epoch, so the entry it starts has to
+    // re-anchor from zero just as a gapless one does.
+    var highest: [2]u64 = .{ 0, 0 };
+    for (0..400) |_| {
+        harness.step(128);
+        const cursor = harness.queue.cursorPosition();
+        highest[cursor] = @max(highest[cursor], harness.player.snapshot().position_frames);
+    }
+
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.format_switch_transitions);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expect(highest[0] <= entry_frames);
+    try std.testing.expect(highest[1] <= entry_frames);
+    try std.testing.expect(highest[1] >= entry_frames - 128);
+}
+
 test "repeat_one re-primes a fresh session instead of seeking the draining one" {
     const allocator = std.testing.allocator;
+    const entry_frames: u64 = 1024;
     var harness = try QueueHarness.init(allocator, &.{
-        .{ .track_id = 10, .frames = 1024 },
+        .{ .track_id = 10, .frames = entry_frames },
     });
     defer harness.deinit();
     try harness.enqueue(&.{10});
     harness.queue.setRepeat(.one);
     harness.player.play();
 
-    harness.run(200, 128);
+    var highest: u64 = 0;
+    for (0..200) |_| {
+        harness.step(128);
+        highest = @max(highest, harness.player.snapshot().position_frames);
+    }
+    // Each repetition is a fresh entry with a fresh serial, so position starts
+    // over rather than counting the repeats up.
+    try std.testing.expect(highest <= entry_frames);
 
     // The same entry, opened again and again — each with its own decoder, so
     // the copy still draining into the pipe is never seeked underneath.

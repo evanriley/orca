@@ -350,6 +350,52 @@ int main(void) {
     if (orca_player_next(runtime, player, &moved) != ORCA_STATUS_OK) return 83;
     if (moved != 0) return 84;
 
+    /* ---- position is anchored to the audible entry, not to the epoch ---- */
+    /* Two copies of one entry, so both report the same duration and the only
+     * thing that can push position past the end is the queue advancing. A
+     * gapless advance deliberately keeps a single epoch, so a position derived
+     * from frames-since-epoch alone would keep climbing straight through the
+     * second entry. Conditional on audio really rendering, like the claim
+     * above: with no audio server nothing ever advances. */
+    if (rendered) {
+        int64_t pair[2];
+        pair[0] = capture.first_playable_id;
+        pair[1] = capture.first_playable_id;
+        if (orca_player_play_tracks(runtime, player, pair, 2, 0) != ORCA_STATUS_OK) return 91;
+        int advanced = 0;
+        int past_end = 0;
+        uint64_t last_position = 0;
+        int settled_ms = 0;
+        for (int elapsed = 0; elapsed < 3000; elapsed += 20) {
+            if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return 92;
+            for (;;) {
+                orca_event event;
+                uint32_t remaining = 0;
+                if (orca_runtime_poll_event(runtime, &event, &remaining) != ORCA_STATUS_OK)
+                    return 93;
+                if (event.kind == ORCA_EVENT_NONE) break;
+            }
+            if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 94;
+            if (status.duration_ms > 0 && status.position_ms > status.duration_ms + 100)
+                past_end = 1;
+            if (status.queue_index == 1) advanced = 1;
+            if (status.position_ms == last_position) {
+                settled_ms += 20;
+            } else {
+                last_position = status.position_ms;
+                settled_ms = 0;
+            }
+            /* The whole queue has played out once the second entry is current
+             * and the clock has stopped moving. */
+            if (advanced && settled_ms >= 300) break;
+            sleep_ms(20);
+        }
+        /* Elapsed time that runs past the end of the track it belongs to is
+         * exactly what a transport bar cannot survive. */
+        if (past_end) return 95;
+        if (!advanced) return 96;
+    }
+
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;
     if (status.queue_length != 0) return 87;

@@ -59,6 +59,10 @@ pub const ZoneRuntime = struct {
     /// Packed epoch + frames-since-epoch; see `render.packPosition`.
     position: std.atomic.Value(u64) = .init(0),
     rendered_entry_serial: std.atomic.Value(u32) = .init(0),
+    /// Packed serial stamp + frames-since-epoch at which the audible entry
+    /// started; see `render.packEntryAnchor`. Position within a queue entry is
+    /// `frames since epoch - this`, because a gapless advance keeps the epoch.
+    entry_anchor: std.atomic.Value(u64) = .init(0),
 
     // ---- Control lane -> engine requests ----
     output_requested: std.atomic.Value(bool) = .init(false),
@@ -123,6 +127,7 @@ pub const ZoneRuntime = struct {
             .silenced = &self.silenced,
             .position = &self.position,
             .rendered_entry_serial = &self.rendered_entry_serial,
+            .entry_anchor = &self.entry_anchor,
         };
         return self;
     }
@@ -258,6 +263,10 @@ test "a Zone owns the atomics its render callback reads" {
     try std.testing.expectEqual(&runtime_zone.epoch, runtime_zone.context.epoch);
     try std.testing.expectEqual(&runtime_zone.silenced, runtime_zone.context.silenced.?);
     try std.testing.expectEqual(&runtime_zone.position, runtime_zone.context.position.?);
+    try std.testing.expectEqual(
+        &runtime_zone.entry_anchor,
+        runtime_zone.context.entry_anchor.?,
+    );
 }
 
 test "closing an output lets a Zone reclaim every prepared block" {

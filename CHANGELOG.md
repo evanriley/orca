@@ -66,6 +66,17 @@ exposes the surface the frontends actually need.
   assertion is now inverted, and the test drives the whole path — open, add
   root, scan as a job, wait, project, query, open a default output, play by id,
   watch the position advance, pause, seek, next, clear, shut down.
+- **Position is anchored to the audible queue entry, not to the epoch.**
+  `orca_player_status.position_ms` used to keep accumulating across a gapless
+  auto-advance, so every entry after the first reported the sum of everything
+  played before it — elapsed time past the end of the track, and a seek slider
+  pinned past its maximum. A gapless transition deliberately does not bump the
+  epoch, so frames-since-epoch was never the right anchor for a per-track
+  position. The render callback now also publishes the frames-since-epoch value
+  at which the audible entry started, packed with that entry's serial in a
+  single `u64` so the control lane can detect a torn pair and discard it exactly
+  as it discards a mismatched epoch. No lock, no allocation and no extra work in
+  the render callback.
 
 ## 0.1.0-alpha
 

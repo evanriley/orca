@@ -54,10 +54,10 @@ device negotiated a bit-perfect native output path.
 
 A runtime Zone owns its whole private render path: `BlockPool`, `RenderPipe`,
 `RenderContext` and `OutputSession`, plus every atomic the render callback reads
-— epoch, silence, packed position and rendered entry serial. None of those
-pointers may lead back into a Player, because an output can outlive a Player
-detach and the real-time thread cannot re-resolve a generational handle. The
-producer publishes the Player's epoch into the Zone's own epoch atomic
+— epoch, silence, packed position, rendered entry serial and entry anchor. None
+of those pointers may lead back into a Player, because an output can outlive a
+Player detach and the real-time thread cannot re-resolve a generational handle.
+The producer publishes the Player's epoch into the Zone's own epoch atomic
 immediately before submitting blocks under it.
 
 One `PlayerEngine` thread per Player is the single decode producer: SPSC queues
@@ -82,12 +82,30 @@ the same acknowledged double-buffering used for prepared processing chains.
 Rendered position is published as one `u64` — high 16 bits epoch, low 48 bits
 frames since that epoch — written by the callback with a single store and read by
 the control lane with a single load, so a frame count can never be paired with
-the wrong epoch. Authoritative position is `epoch base frames + clock Zone frames
-since epoch`; a sample whose epoch does not match is discarded rather than
-reported. The clock Zone is the first attached Zone with an active output, and
-promoting a replacement stamps a new epoch so the promoted Zone's counter starts
-from a known base. Coalesced position hints reach hosts through the telemetry
-channel at roughly 10 Hz.
+the wrong epoch. A sample whose epoch does not match is discarded rather than
+reported.
+
+The epoch is the right anchor for the *timeline* and the wrong one for a
+*per-entry* position: a gapless auto-advance deliberately keeps one epoch, so
+frames-since-epoch runs straight through the whole queue. The callback therefore
+publishes a second packed `u64`, the **entry anchor**: the frames-since-epoch
+value at which the entry now being rendered became audible, stamped with the low
+16 bits of that entry's serial. Position inside the audible entry is
+`frames since epoch - entry anchor`, plus the seek base only when the anchor is
+zero — an entry that began inside the current epoch started at its own frame
+zero, while one that was already audible when the epoch was stamped carries the
+base stamped with it. Consistency is checked, never locked: the callback writes
+the anchor and the serial before releasing the position, the control lane loads
+the position first and the other two after, and a stamp that disagrees with the
+published serial or an anchor ahead of the frame count proves the pair came from
+different moments, so the sample is dropped exactly as a mismatched epoch is.
+Consecutive entries take consecutive serials, so a 16-bit stamp cannot alias
+inside a torn read.
+
+The clock Zone is the first attached Zone with an active output, and promoting a
+replacement stamps a new epoch so the promoted Zone's counter starts from a known
+base. Coalesced position hints reach hosts through the telemetry channel at
+roughly 10 Hz.
 
 Render-ahead depth follows the Zone's policy but never falls below the negotiated
 device quantum: a producer that stays less than one callback's demand ahead
