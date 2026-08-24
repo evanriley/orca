@@ -21,6 +21,16 @@ audio files commit in bounded transactions through the Library's shared write
 lane; unsupported and transiently unreadable files are counted without
 invalidating successful batches.
 
+A changed audio file is also probed through the codec registry for what its
+container declares — sample rate, channels, sample width and frame count, which
+becomes `files.duration_ms`. Only headers are read, never audio. Probing is on
+the changed path alone: the unchanged skip is what makes a rescan of a large
+library nearly free, and reopening every file would spend that. A file that
+sniffs as audio and then refuses to open is recorded with no properties and the
+scan continues, exactly as an unreadable tag is handled — malformed and
+truncated audio is normal in a real library. A transform codec such as MPEG has
+no sample width to declare, and that stays unknown rather than being invented.
+
 Cancellation is checked before filesystem work and between entries. A cancelled
 or interrupted scan is resumable by restarting it: already committed unchanged
 identities are skipped, so no traversal-order checkpoint is required. Filesystem

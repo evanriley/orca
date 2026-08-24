@@ -727,8 +727,8 @@ fn groupByPosition(allocator: std.mem.Allocator, entries: []const Entry) ![]Posi
 
 /// Which encoding playback should reach for, cached on the Track so starting
 /// one is a single indexed lookup rather than a three-way join: the most
-/// information first (bit depth, then sample rate), then lossless over lossy,
-/// then a location a scan has actually confirmed.
+/// information first (bit depth, then sample rate), then a location a scan has
+/// actually confirmed, and only then the container as a tiebreak.
 fn bestEncoding(entries: []const Entry, members: []const usize) usize {
     var best = members[0];
     for (members[1..]) |candidate| {
@@ -737,24 +737,48 @@ fn bestEncoding(entries: []const Entry, members: []const usize) usize {
     return best;
 }
 
+/// A missing property is *unknown* — never zero, and never best.
+///
+/// Unknown loses to any known value: a file the scanner could not open states
+/// nothing about itself, and playback should reach for the encoding that does.
+/// Two unknowns are equally uninformative and defer to the next property. And
+/// nothing is coerced to a number, so a genuine zero in the column ranks as the
+/// zero it is rather than masquerading as unknown. This is what makes a 16-bit
+/// FLAC outrank an MPEG file that has no sample width to state: a real property
+/// decides it, not the container's name.
+///
+/// Returns null when the two are indistinguishable on this property.
+fn betterProperty(candidate: ?i64, incumbent: ?i64) ?bool {
+    if (candidate) |known_candidate| {
+        const known_incumbent = incumbent orelse return true;
+        if (known_candidate == known_incumbent) return null;
+        return known_candidate > known_incumbent;
+    }
+    return if (incumbent == null) null else false;
+}
+
 fn preferredOver(candidate: Entry, incumbent: Entry) bool {
-    const candidate_depth = candidate.bit_depth orelse 0;
-    const incumbent_depth = incumbent.bit_depth orelse 0;
-    if (candidate_depth != incumbent_depth) return candidate_depth > incumbent_depth;
-    const candidate_rate = candidate.sample_rate orelse 0;
-    const incumbent_rate = incumbent.sample_rate orelse 0;
-    if (candidate_rate != incumbent_rate) return candidate_rate > incumbent_rate;
+    // Reachability outranks fidelity, because this field is what playback
+    // resolves through. A 24-bit copy on an unplugged drive is not a better
+    // encoding to play than a 16-bit copy that is actually there — it is no
+    // encoding at all, and preferring it makes the Track unplayable while a
+    // usable file sits beside it. The choice is self-correcting: projection
+    // recomputes this cache, so remounting the drive restores the better
+    // encoding on the next scan. `has_playable_file` still answers
+    // reachability for hosts; this decides what playback actually opens.
+    if (candidate.location_present != incumbent.location_present)
+        return candidate.location_present;
+    if (betterProperty(candidate.bit_depth, incumbent.bit_depth)) |better| return better;
+    if (betterProperty(candidate.sample_rate, incumbent.sample_rate)) |better| return better;
     const candidate_rank = formatRank(candidate.audio_format);
     const incumbent_rank = formatRank(incumbent.audio_format);
     if (candidate_rank != incumbent_rank) return candidate_rank < incumbent_rank;
-    if (candidate.location_present != incumbent.location_present)
-        return candidate.location_present;
     return candidate.file_id < incumbent.file_id;
 }
 
-/// Lower is better. Lossless first, because the reference library's `files`
-/// rows carry no bit depth until an analysis job fills one in, and without
-/// this a FLAC and an MP3 of one song would be separated by file id alone.
+/// Lower is better. This is the last word, not the first: it separates two
+/// encodings whose declared properties are identical — two 16/44100 files in
+/// different containers — and short of decoding both, nothing else can.
 fn formatRank(audio_format: u8) u8 {
     const known = std.enums.fromInt(storage.AudioFormat, audio_format) orelse return 9;
     return switch (known) {
@@ -966,6 +990,27 @@ fn observe(
         .audio_format = @backingInt(audio_format),
         .size_bytes = 1024,
     });
+    _ = try library.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = uri,
+        .state = .present,
+    });
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = values });
+    return file_id;
+}
+
+fn observeEncoding(
+    library: *database.LibraryDatabase,
+    uri: []const u8,
+    audio_format: storage.AudioFormat,
+    properties: database.FileUpsert,
+    values: metadata.ObservedTags,
+) !i64 {
+    var upsert = properties;
+    upsert.audio_format = @backingInt(audio_format);
+    upsert.size_bytes = 1024;
+    const file_id = try library.files.create(upsert);
     _ = try library.locations.upsert(.{
         .file_id = file_id,
         .volume_id = database.LibraryDatabase.null_volume,
@@ -1457,4 +1502,154 @@ test "a projected track resolves to the bytes a Player can open" {
         storage.AudioFormat.flac,
         std.enums.fromInt(storage.AudioFormat, resolved.audio_format).?,
     );
+}
+
+test "a track reports the duration of the encoding it prefers" {
+    var library = try openTestLibrary("file:orca-projection-duration?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observeEncoding(
+        &library,
+        "/m/Artist/one.flac",
+        .flac,
+        .{ .sample_rate = 44100, .bit_depth = 16, .channels = 2, .duration_ms = 213_000 },
+        .{ .title = "One", .artist = "Artist", .album = "Album", .track_number = 1 },
+    );
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    var page = try library.tracks.page(testing.allocator, 4, 0);
+    defer page.deinit();
+    try testing.expectEqual(@as(?i64, 213_000), page.items[0].duration_ms);
+}
+
+test "the preferred encoding is chosen by declared properties rather than container name" {
+    var library = try openTestLibrary("file:orca-projection-merit?mode=memory&cache=shared");
+    defer library.close();
+    const tags = metadata.ObservedTags{
+        .title = "One",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    };
+    // MPEG audio declares a rate and a channel count but no sample width, so
+    // the 16 real bits of the FLAC decide this — not the word "flac".
+    const mp3 = try observeEncoding(
+        &library,
+        "/m/Artist/one.mp3",
+        .mp3,
+        .{ .sample_rate = 44100, .channels = 2, .duration_ms = 213_000 },
+        tags,
+    );
+    const flac = try observeEncoding(
+        &library,
+        "/m/Artist/one.flac",
+        .flac,
+        .{ .sample_rate = 44100, .bit_depth = 16, .channels = 2, .duration_ms = 213_040 },
+        tags,
+    );
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(u64, 1), try library.tracks.count());
+    try testing.expectEqual(
+        flac,
+        try scalar(&library, "SELECT preferred_file_id FROM tracks;"),
+    );
+    try testing.expectEqual(
+        @as(i64, 213_040),
+        try scalar(&library, "SELECT duration_ms FROM tracks;"),
+    );
+    _ = mp3;
+}
+
+test "a higher bit depth wins over a lossless sibling of the same container" {
+    const shallow: Entry = .{
+        .file_id = 1,
+        .uri = "/m/a.flac",
+        .audio_format = @backingInt(storage.AudioFormat.flac),
+        .bit_depth = 16,
+        .sample_rate = 44100,
+        .duration_ms = 1000,
+        .recording_id = null,
+        .location_present = true,
+        .title = "",
+        .artist = "",
+        .artist_mbid = null,
+        .album = "",
+        .album_key = "",
+        .album_artist = null,
+        .album_artist_mbid = null,
+        .track_number = null,
+        .disc_number = null,
+        .date = null,
+        .compilation = null,
+        .musicbrainz_release_id = null,
+        .musicbrainz_recording_id = null,
+    };
+    var deep = shallow;
+    deep.file_id = 2;
+    deep.bit_depth = 24;
+    deep.sample_rate = 96000;
+    try testing.expect(preferredOver(deep, shallow));
+    try testing.expect(!preferredOver(shallow, deep));
+
+    // A file whose properties could not be read states nothing about itself and
+    // must not outrank one that does, whatever container it is in.
+    var unprobed = shallow;
+    unprobed.file_id = 3;
+    unprobed.bit_depth = null;
+    unprobed.sample_rate = null;
+    try testing.expect(!preferredOver(unprobed, shallow));
+    try testing.expect(preferredOver(shallow, unprobed));
+
+    // Two files that are equally uninformative fall through to the container,
+    // which is the only thing left that can separate them.
+    var unprobed_mp3 = unprobed;
+    unprobed_mp3.file_id = 4;
+    unprobed_mp3.audio_format = @backingInt(storage.AudioFormat.mp3);
+    try testing.expect(!preferredOver(unprobed_mp3, unprobed));
+    try testing.expect(preferredOver(unprobed, unprobed_mp3));
+}
+
+test "a reachable encoding is preferred over a better one that is missing" {
+    // preferred_file_id is what playback opens, so an unreachable file is not a
+    // better encoding — it is nothing to play. A Track must not become
+    // unplayable because its highest-fidelity copy lives on an unplugged drive
+    // while a usable one sits beside it.
+    const present_shallow: Entry = .{
+        .file_id = 1,
+        .uri = "/m/internal.flac",
+        .audio_format = @backingInt(storage.AudioFormat.flac),
+        .bit_depth = 16,
+        .sample_rate = 44100,
+        .duration_ms = 1000,
+        .recording_id = null,
+        .location_present = true,
+        .title = "",
+        .artist = "",
+        .artist_mbid = null,
+        .album = "",
+        .album_key = "",
+        .album_artist = null,
+        .album_artist_mbid = null,
+        .track_number = null,
+        .disc_number = null,
+        .date = null,
+        .compilation = null,
+        .musicbrainz_release_id = null,
+        .musicbrainz_recording_id = null,
+    };
+    var missing_deep = present_shallow;
+    missing_deep.file_id = 2;
+    missing_deep.uri = "/m/external.flac";
+    missing_deep.bit_depth = 24;
+    missing_deep.sample_rate = 96000;
+    missing_deep.location_present = false;
+
+    try testing.expect(preferredOver(present_shallow, missing_deep));
+    try testing.expect(!preferredOver(missing_deep, present_shallow));
+
+    // Once the drive comes back, projection recomputes and fidelity decides
+    // again — the preference is a cache, not a verdict.
+    missing_deep.location_present = true;
+    try testing.expect(preferredOver(missing_deep, present_shallow));
 }

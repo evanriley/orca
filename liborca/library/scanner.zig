@@ -1,4 +1,5 @@
 const std = @import("std");
+const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const storage = @import("../storage/root.zig");
 const projection = @import("projection.zig");
@@ -35,6 +36,7 @@ const PendingEntry = struct {
     audio_format: storage.AudioFormat,
     identity: database.StorageIdentityKey,
     quick_hash: storage.QuickHash,
+    properties: codec.registry.Properties,
     tags: ?tag_reader.Tags,
 
     fn deinit(self: PendingEntry, allocator: std.mem.Allocator) void {
@@ -66,6 +68,9 @@ pub const Scanner = struct {
     generation: i64 = 0,
     cancellation: ?*const CancellationToken = null,
     batch_size: usize = 256,
+    /// Decoders used to read each changed file's declared audio properties.
+    /// Injectable so a test can narrow the set; absent, the builtins are used.
+    codecs: ?*const codec.CodecRegistry = null,
     /// Where observations become a browsable library.
     ///
     /// The scanner still writes only files, locations and observed tags; it
@@ -92,6 +97,9 @@ pub const Scanner = struct {
         defer root.close(self.io);
         var walker = try root.walk(self.allocator);
         defer walker.deinit();
+
+        var builtin_codecs = codec.CodecRegistry.builtins();
+        const codecs = self.codecs orelse &builtin_codecs;
 
         var pending: std.ArrayList(PendingEntry) = .empty;
         defer {
@@ -152,11 +160,22 @@ pub const Scanner = struct {
                 local.readable(),
             ) catch null;
             errdefer if (tags) |owned| owned.deinit();
+            // Only changed bytes are probed: the unchanged fast path above is
+            // what keeps a rescan of a large library nearly free, and opening a
+            // decoder there would throw that away. A file that will not open is
+            // recorded with no properties rather than failing the scan —
+            // truncated and malformed audio is normal in a real library.
+            const properties = codecs.probe(
+                self.allocator,
+                audio_format,
+                local.readable(),
+            ) catch codec.registry.Properties{};
             try pending.append(self.allocator, .{
                 .path = path,
                 .audio_format = audio_format,
                 .identity = identity,
                 .quick_hash = try storage.quick_hash.fromSource(local.readable()),
+                .properties = properties,
                 .tags = tags,
             });
             owned_path = false;
@@ -209,6 +228,10 @@ pub const Scanner = struct {
             const upsert = database.FileUpsert{
                 .audio_format = @backingInt(entry.audio_format),
                 .size_bytes = entry.identity.size_bytes,
+                .sample_rate = optionalCount(entry.properties.sample_rate),
+                .bit_depth = optionalCount(entry.properties.bit_depth),
+                .channels = optionalCount(entry.properties.channels),
+                .duration_ms = optionalCount(entry.properties.duration_ms),
                 .quick_hash = &entry.quick_hash,
             };
             const existing = (try self.files.resolveByUri(self.volume_id, entry.path)) orelse
@@ -240,6 +263,12 @@ pub const Scanner = struct {
         pending.clearRetainingCapacity();
     }
 };
+
+/// A property too large for the column is stored as unknown rather than as a
+/// wrapped or saturated number.
+fn optionalCount(value: anytype) ?i64 {
+    return std.math.cast(i64, value orelse return null);
+}
 
 test "scanner batches audio and skips unchanged files on restart" {
     var temporary = std.testing.tmpDir(.{});
@@ -565,4 +594,130 @@ fn countUnverified(db: database.sqlite.Database) !i64 {
     defer statement.deinit();
     if (try statement.step() != .row) return error.SqlFailed;
     return statement.columnInt64(0);
+}
+
+test "a scan records the audio properties of every file whose bytes changed" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    for ([_][]const u8{
+        "tagged-reference.flac",
+        "vbr-xing-reference.mp3",
+        "truncated-reference.mp3",
+    }) |name| try copyFixture(temporary.dir, name);
+    // Malformed audio is normal in a real library: this one sniffs as FLAC and
+    // then refuses to open, and the scan must record it and keep going.
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "broken.flac",
+        .data = "fLaC but not a stream",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-properties?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+
+    const first = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 4), first.changed);
+    try std.testing.expectEqual(@as(u64, 0), first.errors);
+
+    // Lossless declares a sample width; MPEG audio has none to declare and is
+    // left unknown rather than given an invented one.
+    try expectProperties(&library, root_path, "tagged-reference.flac", .{
+        .sample_rate = 44100,
+        .bit_depth = 16,
+        .channels = 2,
+        .duration_ms = 200,
+    });
+    try expectProperties(&library, root_path, "vbr-xing-reference.mp3", .{
+        .sample_rate = 44100,
+        .bit_depth = null,
+        .channels = 2,
+        .duration_ms = 2000,
+    });
+    try expectProperties(&library, root_path, "broken.flac", .{
+        .sample_rate = null,
+        .bit_depth = null,
+        .channels = null,
+        .duration_ms = null,
+    });
+
+    // And the fast path stays the fast path: nothing changed, so nothing is
+    // reopened and no decoder runs at all.
+    const second = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 0), second.changed);
+    try std.testing.expectEqual(@as(u64, 4), second.unchanged);
+}
+
+const ExpectedProperties = struct {
+    sample_rate: ?i64,
+    bit_depth: ?i64,
+    channels: ?i64,
+    duration_ms: ?i64,
+};
+
+fn expectProperties(
+    library: *database.LibraryDatabase,
+    root_path: []const u8,
+    name: []const u8,
+    expected: ExpectedProperties,
+) !void {
+    const path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{s}/{s}",
+        .{ root_path, name },
+    );
+    defer std.testing.allocator.free(path);
+    const file_id = (try library.files.resolveByUri(
+        database.LibraryDatabase.null_volume,
+        path,
+    )).?;
+    var statement = try library.database.prepare(
+        "SELECT sample_rate, bit_depth, channels, duration_ms FROM files WHERE id=?1;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    if (try statement.step() != .row) return error.SqlFailed;
+    try std.testing.expectEqual(expected.sample_rate, column(statement, 0));
+    try std.testing.expectEqual(expected.bit_depth, column(statement, 1));
+    try std.testing.expectEqual(expected.channels, column(statement, 2));
+    try std.testing.expectEqual(expected.duration_ms, column(statement, 3));
+}
+
+fn column(statement: database.sqlite.Statement, index: c_int) ?i64 {
+    if (statement.columnIsNull(index)) return null;
+    return statement.columnInt64(index);
+}
+
+fn copyFixture(directory: std.Io.Dir, name: []const u8) !void {
+    const source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "fixtures/audio/{s}",
+        .{name},
+    );
+    defer std.testing.allocator.free(source);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        source,
+        std.testing.allocator,
+        .limited(4 * 1024 * 1024),
+    );
+    defer std.testing.allocator.free(bytes);
+    try directory.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 }

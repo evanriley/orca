@@ -8,6 +8,12 @@ at 32/64 bits. It walks RIFF chunks rather than assuming a fixed 44-byte header,
 rejects truncated or unsupported input, reports exact frame counts, and performs
 bounded positional frame reads. It does not allocate while reading frames.
 
+`CodecRegistry.probe` answers what a container declares — sample rate, channels,
+sample width, and a duration derived from the declared frame count — by opening
+a decoder and reading no audio. It returns Orca facts: the caller never sees a
+decoder, a container header, or a codec error dressed as a property, and a
+property the container does not state comes back null rather than zero.
+
 ## MPEG audio (MP3)
 
 `codec/mp3.zig` is the `Decoder` implementation; `codec/mp3_stream.zig` is the

@@ -49,7 +49,13 @@ fills `artists`, `releases`, `recordings` and `tracks`, and it reads
 not raw observations. That keeps the law intact and makes the projection
 re-runnable after a user edit or a provider acceptance, not only after a scan.
 `tracks.preferred_file_id` is a denormalized cache so starting playback is one
-indexed lookup rather than a three-way join.
+indexed lookup rather than a three-way join. Which encoding it names is decided
+on declared properties: higher bit depth, then higher sample rate, then a
+location a scan has confirmed, with the container ranking only as a tiebreak
+between encodings that declare the same thing. A property the file does not
+declare is *unknown*, never zero — so an MPEG file, which has no sample width to
+state, loses to a real 16-bit encoding of the same song, and a file the scanner
+could not open never outranks one it could.
 
 `library/projection.zig` resolves a whole `(containing folder, album key)` group
 at once, because the album-artist cascade asks a question about a set — *do all
