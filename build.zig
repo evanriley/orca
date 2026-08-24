@@ -25,6 +25,12 @@ pub fn build(b: *std.Build) void {
         },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+    // Vendored minimp3 behind a narrow shim. Header-only and public domain,
+    // so this is a source addition on every target and not a system linkage.
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/mp3_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),

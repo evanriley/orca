@@ -58,6 +58,11 @@ pub const CodecRegistry = struct {
             .open = @import("flac.zig").openDecoder,
         }) catch unreachable;
         registry.register(.{
+            .name = "MPEG Audio",
+            .format = .mp3,
+            .open = @import("mp3.zig").openDecoder,
+        }) catch unreachable;
+        registry.register(.{
             .name = "Quite OK Audio",
             .format = .qoa,
             .open = @import("qoa.zig").openDecoder,
@@ -68,6 +73,6 @@ pub const CodecRegistry = struct {
 
 test "builtin registry rejects duplicate codec ownership" {
     var codecs = CodecRegistry.builtins();
-    try std.testing.expectEqual(@as(usize, 3), codecs.count);
+    try std.testing.expectEqual(@as(usize, 4), codecs.count);
     try std.testing.expectError(error.CodecAlreadyRegistered, codecs.register(codecs.entries[0]));
 }
