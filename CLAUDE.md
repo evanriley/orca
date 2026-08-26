@@ -191,8 +191,13 @@ second SPSC queue for producer-side reclamation. Missing audio is zero-filled
 and counted as an underrun.
 
 Related invariants: transport state is independent of physical output (seeks
-publish a new generation, and stale-generation blocks are discarded rather than
-surgically removed from the queue); Players decode canonical PCM once and
+publish a new **epoch**, and stale-epoch blocks are discarded rather than
+surgically removed from the queue). Track identity travels separately, as
+`entry_serial`, because the two questions are incompatible: "is this audio
+stale after a seek" must be compared, while "which track is this" must not be,
+or gapless breaks. What is *audible* is resolved from the entry serial the
+render callback publishes, never from the decode cursor, which runs a whole
+entry ahead of the audio; Players decode canonical PCM once and
 fanout copies it into independently owned Zone pools so one Zone's failure
 cannot starve another; processing chains are fixed-capacity and triple-buffered
 so the control lane publishes a prepared chain that the render lane adopts only
