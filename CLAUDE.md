@@ -110,6 +110,19 @@ The id it prints is **orca's** device id, which is not the PipeWire node id —
 liborca's enumeration numbers devices itself. Resolve it through the script or
 `orca-cli devices`, never through `pw-dump`.
 
+Pass an index for a second, distinct silent sink. Multi-zone and device-attach
+tests need two different outputs, and reaching for real hardware to get the
+second one defeats the purpose:
+
+```sh
+zone_a=$(scripts/silent-sink.sh 1)
+zone_b=$(scripts/silent-sink.sh 2)
+```
+
+Note that **omitting the device argument is not silent**: device id 0 means the
+system default sink, which is real hardware. Pass an explicit device on every
+invocation, including throwaway checks.
+
 ### Running a single test
 
 There is no test filter wired into `build.zig` — `zig build test` runs all ~109

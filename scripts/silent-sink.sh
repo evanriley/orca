@@ -12,6 +12,13 @@
 #   device=$(scripts/silent-sink.sh)
 #   zig build run -- play fixtures/audio/generated-reference.flac "$device"
 #
+# Pass an index for a second, distinct silent sink. Multi-zone and device
+# attach tests need two different outputs, and reaching for real hardware to
+# get the second one is exactly what this script exists to avoid:
+#
+#   zone_a=$(scripts/silent-sink.sh 1)
+#   zone_b=$(scripts/silent-sink.sh 2)
+#
 # The node is created with object.linger=true, so it survives this script and
 # every later run reuses it. It does not survive a PipeWire restart or a
 # reboot; this script simply recreates it when that happens.
@@ -22,8 +29,15 @@
 
 set -euo pipefail
 
-sink_name="orca-null-sink"
-sink_description="Orca Silent Test Sink"
+index="${1:-1}"
+case "$index" in
+    1) suffix=""  ; label="" ;;
+    [0-9]*) suffix="-$index"; label=" $index" ;;
+    *) echo "silent-sink: index must be a number" >&2; exit 2 ;;
+esac
+
+sink_name="orca-null-sink${suffix}"
+sink_description="Orca Silent Test Sink${label}"
 orca_cli="${ORCA_CLI:-zig-out/bin/orca-cli}"
 
 sink_node_exists() {
