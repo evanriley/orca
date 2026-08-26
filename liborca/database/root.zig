@@ -2,6 +2,7 @@ pub const library = @import("library.zig");
 pub const migrations = @import("migrations.zig");
 pub const repository = @import("repository.zig");
 pub const sqlite = @import("sqlite.zig");
+pub const text_key = @import("text_key.zig");
 
 pub const LibraryDatabase = library.LibraryDatabase;
 pub const VolumeOptions = library.VolumeOptions;
@@ -10,11 +11,19 @@ pub const FileBinding = library.FileBinding;
 pub const TrackSummary = repository.TrackSummary;
 pub const TrackInput = repository.TrackInput;
 pub const TrackPage = repository.TrackPage;
+pub const TrackSort = repository.TrackSort;
+pub const SortDirection = repository.SortDirection;
+pub const TrackQuery = repository.TrackQuery;
 pub const TrackRepository = repository.TrackRepository;
 pub const ArtistUpsert = repository.ArtistUpsert;
 pub const ArtistRepository = repository.ArtistRepository;
+pub const ArtistSummary = repository.ArtistSummary;
+pub const ArtistPage = repository.ArtistPage;
 pub const ReleaseUpsert = repository.ReleaseUpsert;
 pub const ReleaseRepository = repository.ReleaseRepository;
+pub const ReleaseSummary = repository.ReleaseSummary;
+pub const ReleasePage = repository.ReleasePage;
+pub const ReleaseQuery = repository.ReleaseQuery;
 pub const RecordingInput = repository.RecordingInput;
 pub const RecordingRepository = repository.RecordingRepository;
 pub const VolumeInput = repository.VolumeInput;
@@ -63,4 +72,5 @@ test {
     _ = @import("migrations.zig");
     _ = @import("repository.zig");
     _ = @import("sqlite.zig");
+    _ = @import("text_key.zig");
 }

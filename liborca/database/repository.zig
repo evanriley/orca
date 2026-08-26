@@ -30,6 +30,10 @@ pub const WriteLane = struct {
 pub const TrackInput = struct {
     recording_id: ?i64 = null,
     release_id: ?i64 = null,
+    /// The Artist row this Track is filed under, resolved from the same key
+    /// `ArtistRepository` stores. One primary artist per Track, deliberately —
+    /// see the note on migration 9.
+    artist_id: ?i64 = null,
     title: []const u8,
     artist: []const u8 = "",
     album: []const u8 = "",
@@ -47,6 +51,10 @@ pub const TrackInput = struct {
 pub const ArtistUpsert = struct {
     key: []const u8,
     name: []const u8,
+    /// The folded key an artist listing orders by — `text_key.sortKey`, which
+    /// drops a leading English article so "The Beatles" files under B. Stored
+    /// rather than computed per query so one index serves the whole listing.
+    sort_name: []const u8 = "",
     musicbrainz_artist_id: ?[]const u8 = null,
 };
 
@@ -58,6 +66,9 @@ pub const ReleaseUpsert = struct {
     title: []const u8,
     album_artist: []const u8 = "",
     release_date: ?[]const u8 = null,
+    /// The Artist row this release is filed under. One album artist per
+    /// release, deliberately — see the note on migration 9.
+    album_artist_id: ?i64 = null,
     is_compilation: bool = false,
     disc_count: ?i64 = null,
     musicbrainz_release_id: ?[]const u8 = null,
@@ -426,6 +437,56 @@ pub const TrackPage = struct {
     }
 };
 
+/// What a Track listing is ordered by.
+///
+/// Every one of these names an index created by migration 9, and every ORDER BY
+/// they produce ends in `tracks.id`. Both matter. Without the unique tiebreaker
+/// a LIMIT/OFFSET walk over a column with ties — 3,251 Tracks in the reference
+/// library share a title with another — is free to return one row on two pages
+/// and skip a third, because SQLite may order equal keys differently between
+/// two evaluations of the same statement.
+pub const TrackSort = enum {
+    /// Insertion order. The cheapest listing there is, and the default, so a
+    /// caller that has no opinion pays for none.
+    id,
+    artist,
+    album,
+    title,
+    /// Disc, then track number, which is the order an album is listened to.
+    track_number,
+    duration,
+    date_added,
+};
+
+pub const SortDirection = enum {
+    ascending,
+    descending,
+
+    fn suffix(self: SortDirection) []const u8 {
+        return switch (self) {
+            .ascending => "",
+            .descending => " DESC",
+        };
+    }
+};
+
+/// One bounded, ordered, filtered request for a page of Tracks.
+///
+/// A filter is a relational one — `artist_id`, `release_id` — never a text
+/// match against the denormalized columns, so an artist browse and an album
+/// browse ask the question the schema can actually index.
+pub const TrackQuery = struct {
+    artist_id: ?i64 = null,
+    release_id: ?i64 = null,
+    sort: TrackSort = .id,
+    direction: SortDirection = .ascending,
+    limit: u32 = max_page,
+    offset: u32 = 0,
+};
+
+/// The largest page any repository hands back, matching the C ABI's own bound.
+pub const max_page = 512;
+
 pub const TrackRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
@@ -453,15 +514,15 @@ pub const TrackRepository = struct {
         var update = try self.db.prepare(
             \\UPDATE tracks SET
             \\    recording_id=?1, title=?2, artist=?3, album=?4, album_artist=?5,
-            \\    duration_ms=?6, preferred_file_id=?7
+            \\    duration_ms=?6, preferred_file_id=?7, artist_id=?11
             \\WHERE release_id=?8 AND COALESCE(disc_number, 1)=?9 AND track_number=?10;
         );
         defer update.deinit();
         var insert = try self.db.prepare(
             \\INSERT INTO tracks(
             \\    recording_id, release_id, title, artist, album, album_artist,
-            \\    duration_ms, track_number, disc_number, preferred_file_id
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+            \\    duration_ms, track_number, disc_number, preferred_file_id, artist_id
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
         );
         defer insert.deinit();
         for (tracks) |track| {
@@ -476,6 +537,7 @@ pub const TrackRepository = struct {
                 try update.bindOptionalInt64(8, track.release_id);
                 try update.bindInt64(9, track.disc_number orelse 1);
                 try update.bindOptionalInt64(10, track.track_number);
+                try update.bindOptionalInt64(11, track.artist_id);
                 if (try update.step() != .done) return error.SqlFailed;
                 const updated = self.db.changes() != 0;
                 try update.reset();
@@ -491,6 +553,7 @@ pub const TrackRepository = struct {
             try insert.bindOptionalInt64(8, track.track_number);
             try insert.bindOptionalInt64(9, track.disc_number);
             try insert.bindOptionalInt64(10, track.preferred_file_id);
+            try insert.bindOptionalInt64(11, track.artist_id);
             if (try insert.step() != .done) return error.SqlFailed;
             try insert.reset();
         }
@@ -534,19 +597,52 @@ pub const TrackRepository = struct {
         return collectTrackPage(allocator, statement);
     }
 
+    /// One bounded page of Tracks, in an order the caller named.
+    ///
+    /// Both halves of `query` are load-bearing. The sort decides which index
+    /// SQLite walks, and because every generated ORDER BY ends in `tracks.id`
+    /// the walk is a total order — so page N+1 continues exactly where page N
+    /// stopped, even across the thousands of Tracks that share a title with
+    /// another. The filters are relational: `artist_id` and `release_id`, not
+    /// a text match against the denormalized columns.
     pub fn page(
         self: *const TrackRepository,
         allocator: std.mem.Allocator,
-        limit: u32,
-        offset: u32,
+        query: TrackQuery,
     ) !TrackPage {
-        var statement = try self.db.prepare(track_columns ++
-            \\FROM tracks ORDER BY tracks.id LIMIT ?1 OFFSET ?2;
+        if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
+        const filter: TrackFilter = if (query.artist_id != null and query.release_id != null)
+            .artist_and_release
+        else if (query.artist_id != null)
+            .artist
+        else if (query.release_id != null)
+            .release
+        else
+            .none;
+        var statement = try self.db.prepare(
+            trackQueryText(filter, query.sort, query.direction),
         );
         defer statement.deinit();
-        try statement.bindInt64(1, limit);
-        try statement.bindInt64(2, offset);
+        try statement.bindInt64(1, query.limit);
+        try statement.bindInt64(2, query.offset);
+        if (query.artist_id) |artist_id| try statement.bindInt64(3, artist_id);
+        if (query.release_id) |release_id| try statement.bindInt64(4, release_id);
         return collectTrackPage(allocator, statement);
+    }
+
+    /// How many Tracks a filtered listing has to page through, so a host can
+    /// size a scrollbar without walking the listing.
+    pub fn countMatching(self: *const TrackRepository, query: TrackQuery) !u64 {
+        var statement = try self.db.prepare(
+            \\SELECT count(*) FROM tracks
+            \\WHERE (?1 IS NULL OR tracks.artist_id = ?1)
+            \\  AND (?2 IS NULL OR tracks.release_id = ?2);
+        );
+        defer statement.deinit();
+        try statement.bindOptionalInt64(1, query.artist_id);
+        try statement.bindOptionalInt64(2, query.release_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     /// One Track by id, for the "what is playing right now" question. Bounded
@@ -639,6 +735,74 @@ const track_columns =
     \\
 ;
 
+const TrackFilter = enum { none, artist, release, artist_and_release };
+
+/// A NULL track number sorts after every real one rather than before every
+/// one, which is what "the untagged tail of the album" means. The same
+/// expression appears in `tracks_sort_*` and `tracks_by_*`, so SQLite can
+/// satisfy the ORDER BY from the index instead of building a temp B-tree.
+const null_position = "2147483647";
+
+fn positionTerms(comptime direction: SortDirection) []const u8 {
+    const suffix = comptime direction.suffix();
+    return "COALESCE(tracks.disc_number, 1)" ++ suffix ++
+        ", COALESCE(tracks.track_number, " ++ null_position ++ ")" ++ suffix;
+}
+
+fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) []const u8 {
+    const suffix = comptime direction.suffix();
+    const tiebreak = ", tracks.id" ++ suffix;
+    return switch (sort) {
+        .id => "tracks.id" ++ suffix,
+        .artist => "tracks.artist COLLATE NOCASE" ++ suffix ++
+            ", tracks.album COLLATE NOCASE" ++ suffix ++
+            ", " ++ positionTerms(direction) ++ tiebreak,
+        .album => "tracks.album COLLATE NOCASE" ++ suffix ++
+            ", " ++ positionTerms(direction) ++ tiebreak,
+        .title => "tracks.title COLLATE NOCASE" ++ suffix ++ tiebreak,
+        .track_number => positionTerms(direction) ++ tiebreak,
+        .duration => "tracks.duration_ms" ++ suffix ++ tiebreak,
+        .date_added => "tracks.created_at" ++ suffix ++ tiebreak,
+    };
+}
+
+fn buildTrackQuery(
+    comptime filter: TrackFilter,
+    comptime sort: TrackSort,
+    comptime direction: SortDirection,
+) [:0]const u8 {
+    const where = switch (filter) {
+        .none => "",
+        .artist => "WHERE tracks.artist_id = ?3\n",
+        .release => "WHERE tracks.release_id = ?4\n",
+        .artist_and_release => "WHERE tracks.artist_id = ?3 AND tracks.release_id = ?4\n",
+    };
+    return track_columns ++ "FROM tracks\n" ++ where ++
+        "ORDER BY " ++ orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;";
+}
+
+/// Every (filter, sort, direction) combination as its own prepared-once
+/// statement text. There are 56 of them; concatenating SQL at runtime instead
+/// would mean an allocation and a string the caller could influence, and this
+/// boundary refuses both on principle.
+fn trackQueryText(
+    filter: TrackFilter,
+    sort: TrackSort,
+    direction: SortDirection,
+) [:0]const u8 {
+    return switch (filter) {
+        inline else => |resolved_filter| switch (sort) {
+            inline else => |resolved_sort| switch (direction) {
+                inline else => |resolved_direction| comptime buildTrackQuery(
+                    resolved_filter,
+                    resolved_sort,
+                    resolved_direction,
+                ),
+            },
+        },
+    };
+}
+
 fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !TrackPage {
     var results: std.ArrayList(TrackSummary) = .empty;
     errdefer {
@@ -722,6 +886,33 @@ pub const VolumeRepository = struct {
 
 /// Artists as the projection resolves them.
 ///
+/// An Artist as a browse listing shows one: the name to display, the key it is
+/// filed under, and how much of the library is theirs.
+pub const ArtistSummary = struct {
+    id: i64,
+    name: []u8,
+    /// The folded sort key. A host displays `name` and trusts this only for
+    /// section headers, because it is lowercased and article-stripped.
+    sort_name: []u8,
+    release_count: u32,
+    track_count: u32,
+
+    pub fn deinit(self: ArtistSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.sort_name);
+    }
+};
+
+pub const ArtistPage = struct {
+    allocator: std.mem.Allocator,
+    items: []ArtistSummary,
+
+    pub fn deinit(self: ArtistPage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
 /// Identity is the normalized name (`artists.key`), which is what makes
 /// `Sigur Rós`, `sigur rós` and `Sigur  Rós` one artist. A MusicBrainz artist
 /// id, when the files carry one, outranks that: it recognizes the same artist
@@ -754,9 +945,12 @@ pub const ArtistRepository = struct {
             if (try lookup.step() == .row) return lookup.columnInt64(0);
         };
         var statement = try self.db.prepare(
-            \\INSERT INTO artists(name, key, musicbrainz_artist_id) VALUES (?1, ?2, ?3)
+            \\INSERT INTO artists(name, key, sort_name, musicbrainz_artist_id)
+            \\VALUES (?1, ?2, ?4, ?3)
             \\ON CONFLICT(key) DO UPDATE SET
             \\    name = CASE WHEN excluded.name = '' THEN artists.name ELSE excluded.name END,
+            \\    sort_name = CASE
+            \\        WHEN excluded.name = '' THEN artists.sort_name ELSE excluded.sort_name END,
             \\    musicbrainz_artist_id =
             \\        COALESCE(artists.musicbrainz_artist_id, excluded.musicbrainz_artist_id)
             \\RETURNING id;
@@ -765,8 +959,53 @@ pub const ArtistRepository = struct {
         try statement.bindText(1, input.name);
         try statement.bindText(2, input.key);
         try statement.bindOptionalText(3, presentText(input.musicbrainz_artist_id));
+        try statement.bindText(4, input.sort_name);
         if (try statement.step() != .row) return error.SqlFailed;
         return statement.columnInt64(0);
+    }
+
+    /// One bounded page of Artists in sort-key order.
+    ///
+    /// `sort_name` is unique enough for a person but not for a database, so
+    /// the order ends in `artists.id` — the same total-order rule the Track
+    /// listing follows, for the same reason.
+    pub fn page(
+        self: *const ArtistRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !ArtistPage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(artist_columns ++
+            \\FROM artists
+            \\ORDER BY artists.sort_name, artists.id
+            \\LIMIT ?1 OFFSET ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
+        return collectArtistPage(allocator, statement);
+    }
+
+    pub fn byId(
+        self: *const ArtistRepository,
+        allocator: std.mem.Allocator,
+        artist_id: i64,
+    ) !?ArtistSummary {
+        var statement = try self.db.prepare(artist_columns ++
+            \\FROM artists WHERE artists.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, artist_id);
+        var found = try collectArtistPage(allocator, statement);
+        if (found.items.len == 0) {
+            found.deinit();
+            return null;
+        }
+        const first = found.items[0];
+        for (found.items[1..]) |extra| extra.deinit(allocator);
+        allocator.free(found.items);
+        return first;
     }
 
     pub fn count(self: *const ArtistRepository) !u64 {
@@ -776,6 +1015,114 @@ pub const ArtistRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 };
+
+/// The per-artist counts are correlated subqueries rather than a GROUP BY
+/// join: each is one range count over `tracks_by_artist` / `releases_by_artist`
+/// for a page of at most 512 rows, and a join would have to aggregate the whole
+/// table before the LIMIT could apply.
+const artist_columns =
+    \\SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),
+    \\       (SELECT count(*) FROM releases WHERE releases.album_artist_id = artists.id),
+    \\       (SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.id)
+    \\
+;
+
+fn collectArtistPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !ArtistPage {
+    var results: std.ArrayList(ArtistSummary) = .empty;
+    errdefer {
+        for (results.items) |item| item.deinit(allocator);
+        results.deinit(allocator);
+    }
+    while (try statement.step() == .row) {
+        const name = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(name);
+        const sort_name = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(sort_name);
+        try results.append(allocator, .{
+            .id = statement.columnInt64(0),
+            .name = name,
+            .sort_name = sort_name,
+            .release_count = @intCast(statement.columnInt64(3)),
+            .track_count = @intCast(statement.columnInt64(4)),
+        });
+    }
+    return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
+}
+
+/// A Release as a browse listing shows one.
+pub const ReleaseSummary = struct {
+    id: i64,
+    title: []u8,
+    album_artist: []u8,
+    album_artist_id: ?i64,
+    release_date: ?[]const u8,
+    is_compilation: bool,
+    disc_count: ?i64,
+    track_count: u32,
+    /// Summed over the Tracks that declare one; a Track whose duration is
+    /// unknown contributes nothing rather than a zero-length lie.
+    total_duration_ms: i64,
+
+    pub fn deinit(self: ReleaseSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.title);
+        allocator.free(self.album_artist);
+        if (self.release_date) |date| allocator.free(date);
+    }
+};
+
+pub const ReleasePage = struct {
+    allocator: std.mem.Allocator,
+    items: []ReleaseSummary,
+
+    pub fn deinit(self: ReleasePage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
+/// One bounded request for a page of Releases, optionally scoped to an Artist.
+pub const ReleaseQuery = struct {
+    album_artist_id: ?i64 = null,
+    limit: u32 = max_page,
+    offset: u32 = 0,
+};
+
+const release_columns =
+    \\SELECT releases.id, releases.title, releases.album_artist, releases.album_artist_id,
+    \\       releases.release_date, releases.is_compilation, releases.disc_count,
+    \\       (SELECT count(*) FROM tracks WHERE tracks.release_id = releases.id),
+    \\       (SELECT COALESCE(sum(tracks.duration_ms), 0) FROM tracks
+    \\        WHERE tracks.release_id = releases.id)
+    \\
+;
+
+fn collectReleasePage(allocator: std.mem.Allocator, statement: sqlite.Statement) !ReleasePage {
+    var results: std.ArrayList(ReleaseSummary) = .empty;
+    errdefer {
+        for (results.items) |item| item.deinit(allocator);
+        results.deinit(allocator);
+    }
+    while (try statement.step() == .row) {
+        const title = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(title);
+        const album_artist = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(album_artist);
+        const release_date = try dupeNullable(allocator, statement, 4);
+        errdefer if (release_date) |date| allocator.free(date);
+        try results.append(allocator, .{
+            .id = statement.columnInt64(0),
+            .title = title,
+            .album_artist = album_artist,
+            .album_artist_id = optionalInt64(statement, 3),
+            .release_date = release_date,
+            .is_compilation = statement.columnInt64(5) != 0,
+            .disc_count = optionalInt64(statement, 6),
+            .track_count = @intCast(statement.columnInt64(7)),
+            .total_duration_ms = statement.columnInt64(8),
+        });
+    }
+    return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
+}
 
 /// Releases as the projection resolves them, keyed by `release_key`.
 pub const ReleaseRepository = struct {
@@ -798,11 +1145,12 @@ pub const ReleaseRepository = struct {
         var statement = try self.db.prepare(
             \\INSERT INTO releases(
             \\    title, album_artist, release_date, is_compilation,
-            \\    disc_count, release_key, musicbrainz_release_id
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\    disc_count, release_key, musicbrainz_release_id, album_artist_id
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             \\ON CONFLICT(release_key) DO UPDATE SET
             \\    title=excluded.title,
             \\    album_artist=excluded.album_artist,
+            \\    album_artist_id=excluded.album_artist_id,
             \\    release_date=COALESCE(excluded.release_date, releases.release_date),
             \\    is_compilation=excluded.is_compilation,
             \\    disc_count=max(
@@ -823,8 +1171,58 @@ pub const ReleaseRepository = struct {
         try statement.bindOptionalInt64(5, input.disc_count);
         try statement.bindText(6, input.release_key);
         try statement.bindOptionalText(7, presentText(input.musicbrainz_release_id));
+        try statement.bindOptionalInt64(8, input.album_artist_id);
         if (try statement.step() != .row) return error.SqlFailed;
         return statement.columnInt64(0);
+    }
+
+    /// One bounded page of Releases, optionally scoped to one Artist, ordered
+    /// by title with `releases.id` as the tiebreaker so paging is total.
+    pub fn page(
+        self: *const ReleaseRepository,
+        allocator: std.mem.Allocator,
+        query: ReleaseQuery,
+    ) !ReleasePage {
+        if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
+        var statement = if (query.album_artist_id == null)
+            try self.db.prepare(release_columns ++
+                \\FROM releases
+                \\ORDER BY releases.title COLLATE NOCASE, releases.id
+                \\LIMIT ?1 OFFSET ?2;
+            )
+        else
+            try self.db.prepare(release_columns ++
+                \\FROM releases
+                \\WHERE releases.album_artist_id = ?3
+                \\ORDER BY releases.title COLLATE NOCASE, releases.id
+                \\LIMIT ?1 OFFSET ?2;
+            );
+        defer statement.deinit();
+        try statement.bindInt64(1, query.limit);
+        try statement.bindInt64(2, query.offset);
+        if (query.album_artist_id) |artist_id| try statement.bindInt64(3, artist_id);
+        return collectReleasePage(allocator, statement);
+    }
+
+    pub fn byId(
+        self: *const ReleaseRepository,
+        allocator: std.mem.Allocator,
+        release_id: i64,
+    ) !?ReleaseSummary {
+        var statement = try self.db.prepare(release_columns ++
+            \\FROM releases WHERE releases.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        var found = try collectReleasePage(allocator, statement);
+        if (found.items.len == 0) {
+            found.deinit();
+            return null;
+        }
+        const first = found.items[0];
+        for (found.items[1..]) |extra| extra.deinit(allocator);
+        allocator.free(found.items);
+        return first;
     }
 
     pub fn count(self: *const ReleaseRepository) !u64 {

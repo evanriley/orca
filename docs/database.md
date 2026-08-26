@@ -83,6 +83,68 @@ Extended-A, Greek, Cyrillic and the halfwidth/fullwidth forms, and does not
 canonically compose, so a precomposed `é` and a decomposed `e`+U+0301 remain
 distinct keys.
 
+## The browse model
+
+Version 9 makes the library *browsable* rather than merely listable. Before it,
+the only artist reachable from a Track was the denormalized `tracks.artist`
+text, so "what else is by this artist" was a full table scan and a string
+comparison, and no query could answer it at all through the public API.
+
+`tracks.artist_id` and `releases.album_artist_id` are the relational links, and
+`artists.sort_name` is the key an Artist listing orders by. All three are
+written by `library/projection.zig` going forward and backfilled by migration 9
+for a library that already exists.
+
+**One primary artist per Track, one album artist per Release, deliberately.**
+The tag data is single-valued on ARTIST and ALBUMARTIST in essentially every
+file, and splitting featured credits is a metadata problem — it needs a parser,
+a provenance story and a user-visible review step — not a schema one. The
+extension path is a `track_artists(track_id, artist_id, ordinal, role)` join
+table *alongside* these columns, with `artist_id` staying as the primary artist
+a listing files by. Nothing in version 9 has to be undone to get there.
+
+`artists.sort_name` is a folded **sort key**, not a display name:
+`database/text_key.zig` lowercases, collapses whitespace and drops a leading
+English article, so "The Beatles" files under B and one plain index serves the
+whole listing under a BINARY collation. Hosts display `artists.name`.
+
+### Ordering and paging
+
+`TrackRepository.page` takes a `TrackQuery`: a sort key (`id`, `artist`,
+`album`, `title`, `track_number`, `duration`, `date_added`), a direction, and
+relational filters on `artist_id` and `release_id`. `ArtistRepository.page`
+and `ReleaseRepository.page` are the same shape for their own tables. All
+three return bounded, caller-owned pages of at most 512 rows and never expose a
+SQLite row or statement.
+
+**Every generated ORDER BY ends in the row's own id.** This is not decoration.
+3,476 Tracks in the reference library share a title with another, 33 have no
+artist and 43 Releases span more than one disc; without a unique tiebreaker a
+LIMIT/OFFSET walk over a column with ties is free to return one row on two
+pages and skip a third, because SQLite may order equal keys differently between
+two evaluations of the same statement. A descending sort reverses *every* term
+including the tiebreaker, which keeps the order total and lets SQLite walk the
+same index backwards.
+
+The `id` in an ORDER BY is never named in an index. `id` is `INTEGER PRIMARY
+KEY`, so it *is* the rowid and SQLite already appends it to every index entry —
+`ORDER BY title COLLATE NOCASE, tracks.id` is satisfied straight out of
+`tracks(title COLLATE NOCASE)` with no temp B-tree.
+
+Against the 22,060-Track reference library every unfiltered sort is an ordered
+index scan, and every Artist-filtered sort but one is an indexed SEARCH. Two
+cases still build a temp B-tree, both over a bounded set and both deliberate: an
+Artist-filtered listing sorted by artist *name* (bounded by that Artist's
+Tracks; 158 at most here), and a Release-filtered listing sorted by anything
+other than disc-and-track (bounded by one Release; 81 at most). Indexing those
+would cost seven more composite indexes on the largest table in the schema to
+order at most a few dozen rows.
+
+Per-artist and per-release counts are correlated scalar subqueries rather than
+a GROUP BY join, because a join would have to aggregate the whole table before
+the LIMIT could apply. Each is one covering range count over `tracks_artist`,
+`tracks_release` or `releases_by_artist`.
+
 ## Schema and migrations
 
 Schema changes are transactional and selected by `PRAGMA user_version`. Version
@@ -103,6 +165,21 @@ size-and-mtime cache key is preserved as a distinguishable legacy
 `fixtures/database/v7-library.db` is a checked-in version-7 database, generated
 by `fixtures/database/v7-library.sql`, that the migration tests migrate and
 assert row-for-row.
+
+Migration 9 backfills `tracks.artist_id` and `releases.album_artist_id` by
+running the *same two-step cascade* `ArtistRepository.ensureLocked` runs, in the
+same order: a MusicBrainz artist id outranks the name, and only what it cannot
+answer falls back to the folded key. `migrations.zig` registers
+`orca_artist_key` and `orca_artist_sort_key` as SQLite functions over
+`database/text_key.zig`, so the backfill executes the same Zig the projection
+executes rather than a reimplementation in SQL that would be free to drift. On
+the 22,060-Track reference library the migration takes about five seconds, and
+22,027 Tracks get an `artist_id`; the 33 that do not are exactly the Tracks
+whose artist tag is empty, and an empty name is an absent artist rather than an
+artist named "". Migrating and then reprojecting that library produces
+byte-identical `artist_id`, `album_artist_id` and `sort_name` columns — the
+convergence `library/projection.zig` asserts on a fixture and
+`migrations.artist_backfill` exists as a separate constant to make testable.
 
 `LibraryDatabase.open` applies migrations only as far as
 `migrations.journal_ready_version` (the version at which `mutation_operations`
@@ -133,7 +210,12 @@ bounded, caller-owned pages and never expose SQLite rows or statements.
 - Connections use SQLite's full-mutex mode and a five-second busy timeout.
 - Prepared batch statements are reused within one transaction.
 
-Automated coverage verifies independent libraries and indexes, FTS paging, a
+Automated coverage verifies that a migrated library files every Track exactly
+where a fresh projection does, that an album returns in disc-then-track order,
+that paging a sort with ties returns every Track exactly once, that reversing a
+sort reverses the whole listing rather than only its first key, that an
+out-of-range page is refused rather than clamped, and additionally independent
+libraries and indexes, FTS paging, a
 10,000-row transactional update, concurrent read access while four write
 producers serialize, that a rename preserves file identity and everything
 attached to it, and that migrating the checked-in version-7 fixture preserves

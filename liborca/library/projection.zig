@@ -338,10 +338,19 @@ pub const Projection = struct {
         result: *Result,
     ) !void {
         const identity = try self.resolveRelease(allocator, folder, entries);
+        // The album artist is resolved *before* the release, because the
+        // release now carries the Artist row it is filed under rather than
+        // only the name it was tagged with.
+        const album_artist_id = try self.ensureArtist(
+            allocator,
+            identity.album_artist,
+            identity.album_artist_mbid,
+        );
         const release_id = try self.library.releases.upsertLocked(.{
             .release_key = identity.key,
             .title = identity.title,
             .album_artist = identity.album_artist,
+            .album_artist_id = album_artist_id,
             .release_date = identity.release_date,
             .is_compilation = identity.is_compilation,
             .disc_count = identity.disc_count,
@@ -350,12 +359,6 @@ pub const Projection = struct {
         result.releases_written += 1;
         if (identity.is_compilation) result.compilations += 1;
 
-        _ = try self.library.artists.ensureLocked(.{
-            .key = try normalizeKey(allocator, identity.album_artist),
-            .name = identity.album_artist,
-            .musicbrainz_artist_id = identity.album_artist_mbid,
-        });
-
         try assignPositions(allocator, entries);
         const positions = try groupByPosition(allocator, entries);
 
@@ -363,17 +366,14 @@ pub const Projection = struct {
         for (positions) |position| {
             const members = position.entries.items;
             const lead = &entries[members[0]];
-            _ = try self.library.artists.ensureLocked(.{
-                .key = try normalizeKey(allocator, lead.artist),
-                .name = lead.artist,
-                .musicbrainz_artist_id = lead.artist_mbid,
-            });
+            const artist_id = try self.ensureArtist(allocator, lead.artist, lead.artist_mbid);
 
             const recording_id = try self.resolveRecording(allocator, entries, members);
             const preferred = &entries[bestEncoding(entries, members)];
             try tracks.append(allocator, .{
                 .recording_id = recording_id,
                 .release_id = release_id,
+                .artist_id = artist_id,
                 .title = lead.title,
                 .artist = lead.artist,
                 .album = identity.title,
@@ -420,6 +420,27 @@ pub const Projection = struct {
         }
         try self.library.tracks.upsertTracksLocked(tracks.items);
         result.tracks_written += @intCast(tracks.items.len);
+    }
+
+    /// Resolve one Artist row and hand back its id.
+    ///
+    /// Both the key and the sort key come from `database/text_key.zig`, which
+    /// is the same code migration 9 registers as a SQLite function to backfill
+    /// an existing library. A fresh scan and a migrated database therefore
+    /// produce identical `artist_id` values, which `projection.zig` asserts
+    /// directly.
+    fn ensureArtist(
+        self: *Projection,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        musicbrainz_artist_id: ?[]const u8,
+    ) !?i64 {
+        return self.library.artists.ensureLocked(.{
+            .key = try normalizeKey(allocator, name),
+            .name = name,
+            .sort_name = try text_key.sortKey(allocator, name),
+            .musicbrainz_artist_id = musicbrainz_artist_id,
+        });
     }
 
     /// The album-artist cascade, in the order `docs/design` fixes it.
@@ -571,7 +592,7 @@ fn soleArtist(entries: []const Entry) ?[]const u8 {
     return candidate;
 }
 
-const key_buffer_size = 512;
+const key_buffer_size = text_key.key_buffer_size;
 
 /// The group's answer for a field several files may or may not carry: the most
 /// common non-null value, ties broken lexicographically so two runs over the
@@ -865,113 +886,13 @@ fn optionalInt64(statement: database.sqlite.Statement, column: c_int) ?i64 {
     return statement.columnInt64(column);
 }
 
-/// Fold a display name onto the key two spellings of one name share.
-///
-/// The specification asks for NFKC plus full case folding. This implements the
-/// part of that which a music library actually exercises without shipping the
-/// Unicode tables: whitespace is collapsed and trimmed, halfwidth/fullwidth
-/// forms are folded to ASCII, and case is folded across ASCII, Latin-1, Latin
-/// Extended-A, Greek and Cyrillic. Canonical composition is *not* performed, so
-/// a precomposed `é` and a decomposed `e`+U+0301 remain distinct keys. That is
-/// a deliberate, documented shortfall rather than an oversight — see the module
-/// note in `docs/database.md` if it ever needs closing.
-pub fn normalizeKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    try out.ensureTotalCapacity(allocator, text.len);
-    try normalizeAppend(&out, allocator, text);
-    return out.toOwnedSlice(allocator);
-}
+const text_key = @import("../database/text_key.zig");
 
-fn normalizeAppend(
-    out: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    text: []const u8,
-) !void {
-    var pending_space = false;
-    var wrote = false;
-    var index: usize = 0;
-    while (index < text.len) {
-        const length = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
-        if (index + length > text.len) break;
-        const point = std.unicode.utf8Decode(text[index .. index + length]) catch {
-            index += 1;
-            continue;
-        };
-        index += length;
-        if (isSpace(point)) {
-            pending_space = wrote;
-            continue;
-        }
-        if (pending_space) {
-            try out.append(allocator, ' ');
-            pending_space = false;
-        }
-        var buffer: [4]u8 = undefined;
-        const written = std.unicode.utf8Encode(fold(point), &buffer) catch continue;
-        try out.appendSlice(allocator, buffer[0..written]);
-        wrote = true;
-    }
-}
-
-/// Stack-only normalization for the hot comparison inside the sole-artist rule,
-/// which runs once per file per group and must not allocate to answer.
-/// Over-long names are truncated at the buffer, which can only ever merge two
-/// artists sharing a 512-byte prefix.
-fn normalizeInto(buffer: []u8, text: []const u8) []const u8 {
-    var length: usize = 0;
-    var pending_space = false;
-    var index: usize = 0;
-    while (index < text.len) {
-        const sequence = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
-        if (index + sequence > text.len) break;
-        const point = std.unicode.utf8Decode(text[index .. index + sequence]) catch {
-            index += 1;
-            continue;
-        };
-        index += sequence;
-        if (isSpace(point)) {
-            pending_space = length != 0;
-            continue;
-        }
-        if (pending_space) {
-            if (length == buffer.len) break;
-            buffer[length] = ' ';
-            length += 1;
-            pending_space = false;
-        }
-        var encoded: [4]u8 = undefined;
-        const written = std.unicode.utf8Encode(fold(point), &encoded) catch continue;
-        if (length + written > buffer.len) break;
-        @memcpy(buffer[length..][0..written], encoded[0..written]);
-        length += written;
-    }
-    return buffer[0..length];
-}
-
-fn isSpace(point: u21) bool {
-    return switch (point) {
-        ' ', '\t', '\r', '\n', 0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x3000 => true,
-        0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f => true,
-        else => false,
-    };
-}
-
-fn fold(point: u21) u21 {
-    return switch (point) {
-        'A'...'Z' => point + 32,
-        // Fullwidth forms fold onto their ASCII equivalents, then onto case.
-        0xff21...0xff3a => point - 0xfee0 + 32,
-        0xff01...0xff20, 0xff3b...0xff5e => point - 0xfee0,
-        0xc0...0xd6, 0xd8...0xde => point + 32,
-        0x100...0x137, 0x14a...0x177 => if (point % 2 == 0) point + 1 else point,
-        0x139...0x148, 0x179...0x17e => if (point % 2 == 1) point + 1 else point,
-        0x178 => 0xff,
-        0x391...0x3a1, 0x3a3...0x3ab => point + 32,
-        0x400...0x40f => point + 80,
-        0x410...0x42f => point + 32,
-        else => point,
-    };
-}
+/// The artist/release key folding, and the sort key an artist listing orders
+/// by, both live in `database/text_key.zig`: a schema migration backfilling
+/// `tracks.artist_id` has to fold exactly the way this projection folds.
+pub const normalizeKey = text_key.normalizeKey;
+const normalizeInto = text_key.normalizeInto;
 
 const testing = std.testing;
 
@@ -1022,7 +943,7 @@ fn observeEncoding(
 }
 
 fn trackTitles(library: *database.LibraryDatabase) !database.TrackPage {
-    return library.tracks.page(testing.allocator, 256, 0);
+    return library.tracks.page(testing.allocator, .{ .limit = 256, .offset = 0 });
 }
 
 fn scalar(library: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
@@ -1054,7 +975,7 @@ test "an explicit album artist names the release and keeps it off the compilatio
     try testing.expectEqual(@as(u64, 2), result.tracks_written);
     try testing.expectEqual(@as(u64, 0), result.compilations);
     try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT is_compilation FROM releases;"));
-    var page = try library.tracks.page(testing.allocator, 1, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 1, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings("The Beatles", page.items[0].album_artist);
 }
@@ -1079,7 +1000,7 @@ test "a compilation flag makes the release Various Artists" {
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     const result = try projection.run(.all);
     try testing.expectEqual(@as(u64, 1), result.compilations);
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings(various_artists, page.items[0].album_artist);
 }
@@ -1102,7 +1023,7 @@ test "one artist across a folder's album becomes that artist's release" {
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     const result = try projection.run(.all);
     try testing.expectEqual(@as(u64, 0), result.compilations);
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings("Nils Frahm", page.items[0].album_artist);
 }
@@ -1277,7 +1198,7 @@ test "an untitled file is listed under its filename rather than as a blank row" 
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     const result = try projection.run(.all);
     try testing.expectEqual(@as(u64, 1), result.filename_titles);
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings("03 - Blue Monday", page.items[0].title);
 }
@@ -1447,7 +1368,7 @@ test "a locked user title outranks the file and reaches the projected track" {
     });
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.{ .files = &.{file_id} });
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings("User title", page.items[0].title);
 }
@@ -1489,7 +1410,7 @@ test "a projected track resolves to the bytes a Player can open" {
     });
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expect(page.items[0].has_playable_file);
     const resolved = (try library.tracks.playableLocation(
@@ -1516,7 +1437,7 @@ test "a track reports the duration of the encoding it prefers" {
     );
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    var page = try library.tracks.page(testing.allocator, 4, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 4, .offset = 0 });
     defer page.deinit();
     try testing.expectEqual(@as(?i64, 213_000), page.items[0].duration_ms);
 }
@@ -1652,4 +1573,292 @@ test "a reachable encoding is preferred over a better one that is missing" {
     // again — the preference is a cache, not a verdict.
     missing_deep.location_present = true;
     try testing.expect(preferredOver(missing_deep, present_shallow));
+}
+
+/// A small library with everything the browse model has to survive: two
+/// artists, one of them with a leading article, a multi-disc release, a
+/// compilation, a MusicBrainz-identified featured credit, and two songs that
+/// share a title.
+fn observeBrowseLibrary(library: *database.LibraryDatabase) !void {
+    _ = try observe(library, "/m/The Band/d1t1.flac", .flac, .{
+        .title = "Shared",
+        .artist = "The Band",
+        .album = "Set",
+        .album_artist = "The Band",
+        .track_number = 1,
+        .disc_number = 1,
+        .musicbrainz_artist_id = "band-mbid",
+        .musicbrainz_album_artist_id = "band-mbid",
+    });
+    _ = try observe(library, "/m/The Band/d1t2.flac", .flac, .{
+        .title = "Second",
+        .artist = "The Band",
+        .album = "Set",
+        .album_artist = "The Band",
+        .track_number = 2,
+        .disc_number = 1,
+        .musicbrainz_artist_id = "band-mbid",
+        .musicbrainz_album_artist_id = "band-mbid",
+    });
+    // A featured credit carrying the band's own MusicBrainz id: the projection
+    // files it under the band, and so must the migration's backfill.
+    _ = try observe(library, "/m/The Band/d2t1.flac", .flac, .{
+        .title = "Shared",
+        .artist = "The Band feat. Guest",
+        .album = "Set",
+        .album_artist = "The Band",
+        .track_number = 1,
+        .disc_number = 2,
+        .musicbrainz_artist_id = "band-mbid",
+        .musicbrainz_album_artist_id = "band-mbid",
+    });
+    _ = try observe(library, "/m/Various/x.flac", .flac, .{
+        .title = "Alpha",
+        .artist = "Alice",
+        .album = "Mix",
+        .track_number = 1,
+    });
+    _ = try observe(library, "/m/Various/y.flac", .flac, .{
+        .title = "Beta",
+        .artist = "Bob",
+        .album = "Mix",
+        .track_number = 2,
+    });
+}
+
+fn artistIdOf(library: *database.LibraryDatabase, name: []const u8) !i64 {
+    var statement = try library.database.prepare("SELECT id FROM artists WHERE name=?1;");
+    defer statement.deinit();
+    try statement.bindText(1, name);
+    if (try statement.step() != .row) return error.NoSuchArtist;
+    return statement.columnInt64(0);
+}
+
+test "every projected track is filed under an artist row rather than a name" {
+    var library = try openTestLibrary("file:orca-projection-artistid?mode=memory&cache=shared");
+    defer library.close();
+    try observeBrowseLibrary(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    try testing.expectEqual(
+        @as(i64, 0),
+        try scalar(&library, "SELECT count(*) FROM tracks WHERE artist_id IS NULL;"),
+    );
+    try testing.expectEqual(
+        @as(i64, 0),
+        try scalar(&library, "SELECT count(*) FROM releases WHERE album_artist_id IS NULL;"),
+    );
+    // The featured credit resolves to the band, because its MusicBrainz artist
+    // id outranks the name it was tagged with.
+    const band = try artistIdOf(&library, "The Band");
+    try testing.expectEqual(@as(i64, 3), try scalar(
+        &library,
+        "SELECT count(*) FROM tracks WHERE artist_id=(SELECT id FROM artists WHERE name='The Band');",
+    ));
+    var page = try library.tracks.page(testing.allocator, .{ .artist_id = band, .limit = 16 });
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 3), page.items.len);
+}
+
+test "a leading article does not decide where an artist files" {
+    var library = try openTestLibrary("file:orca-projection-sortname?mode=memory&cache=shared");
+    defer library.close();
+    try observeBrowseLibrary(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    var page = try library.artists.page(testing.allocator, 16, 0);
+    defer page.deinit();
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(testing.allocator);
+    for (page.items) |artist| try names.append(testing.allocator, artist.name);
+    // Alice, Bob, The Band — not "The Band" first under T, and not last under B
+    // because "band" sorts after "bob" only if the article stayed on.
+    try testing.expectEqualStrings("Alice", names.items[0]);
+    try testing.expectEqualStrings("The Band", names.items[1]);
+    try testing.expectEqualStrings("Bob", names.items[2]);
+}
+
+test "a migrated library files every track exactly where a fresh projection does" {
+    var library = try openTestLibrary("file:orca-projection-backfill?mode=memory&cache=shared");
+    defer library.close();
+    try observeBrowseLibrary(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    const projected = try scalar(&library, browse_fingerprint);
+    // Exactly the state a version-8 database is in: the columns exist, and
+    // nothing has ever filled them.
+    try library.database.exec(
+        \\UPDATE tracks SET artist_id=NULL;
+        \\UPDATE releases SET album_artist_id=NULL;
+        \\UPDATE artists SET sort_name=NULL;
+    );
+    try testing.expect(projected != try scalar(&library, browse_fingerprint));
+
+    try database.migrations.registerKeyFunctions(library.database);
+    try library.database.exec(database.migrations.artist_backfill);
+    try testing.expectEqual(projected, try scalar(&library, browse_fingerprint));
+}
+
+/// One number over every value the browse model added, so "the same rows" is
+/// asserted rather than sampled.
+const browse_fingerprint =
+    \\SELECT
+    \\    (SELECT COALESCE(sum(id * 1000003 + COALESCE(artist_id, -1)), 0) FROM tracks)
+    \\  + (SELECT COALESCE(sum(id * 7919 + COALESCE(album_artist_id, -1)), 0) FROM releases)
+    \\  + (SELECT COALESCE(sum(id * length(COALESCE(sort_name, ''))), 0) FROM artists);
+;
+
+test "an album comes back in disc then track order" {
+    var library = try openTestLibrary("file:orca-projection-discorder?mode=memory&cache=shared");
+    defer library.close();
+    try observeBrowseLibrary(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    var releases = try library.releases.page(testing.allocator, .{ .limit = 16 });
+    defer releases.deinit();
+    var set_id: i64 = 0;
+    for (releases.items) |release| {
+        if (std.mem.eql(u8, release.title, "Set")) set_id = release.id;
+    }
+    try testing.expect(set_id != 0);
+
+    var page = try library.tracks.page(testing.allocator, .{
+        .release_id = set_id,
+        .sort = .track_number,
+        .limit = 16,
+    });
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 3), page.items.len);
+    try testing.expectEqual(@as(?i64, 1), page.items[0].disc_number);
+    try testing.expectEqual(@as(?i64, 1), page.items[0].track_number);
+    try testing.expectEqual(@as(?i64, 1), page.items[1].disc_number);
+    try testing.expectEqual(@as(?i64, 2), page.items[1].track_number);
+    // Disc 2 track 1 comes last, not alongside disc 1 track 1.
+    try testing.expectEqual(@as(?i64, 2), page.items[2].disc_number);
+    try testing.expectEqual(@as(?i64, 1), page.items[2].track_number);
+}
+
+test "paging a sort with ties returns every track exactly once" {
+    var library = try openTestLibrary("file:orca-projection-tiedpages?mode=memory&cache=shared");
+    defer library.close();
+    // Five songs sharing one title, so every ordering decision falls through to
+    // the tiebreaker.
+    for (0..5) |index| {
+        var uri_buffer: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&uri_buffer, "/m/Tied/{d}.flac", .{index});
+        _ = try observe(&library, uri, .flac, .{
+            .title = "Same",
+            .artist = "Artist",
+            .album = "Album",
+            .album_artist = "Artist",
+            .track_number = @intCast(index + 1),
+        });
+    }
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    var seen: std.ArrayList(i64) = .empty;
+    defer seen.deinit(testing.allocator);
+    var offset: u32 = 0;
+    while (offset < 6) : (offset += 2) {
+        var page = try library.tracks.page(testing.allocator, .{
+            .sort = .title,
+            .limit = 2,
+            .offset = offset,
+        });
+        defer page.deinit();
+        for (page.items) |item| try seen.append(testing.allocator, item.id);
+    }
+    var whole = try library.tracks.page(testing.allocator, .{ .sort = .title, .limit = 16 });
+    defer whole.deinit();
+    try testing.expectEqual(whole.items.len, seen.items.len);
+    for (whole.items, seen.items) |expected, actual| try testing.expectEqual(expected.id, actual);
+}
+
+test "reversing a sort reverses the whole listing rather than only its first key" {
+    var library = try openTestLibrary("file:orca-projection-desc?mode=memory&cache=shared");
+    defer library.close();
+    try observeBrowseLibrary(&library);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    var ascending = try library.tracks.page(testing.allocator, .{ .sort = .title, .limit = 16 });
+    defer ascending.deinit();
+    var descending = try library.tracks.page(testing.allocator, .{
+        .sort = .title,
+        .direction = .descending,
+        .limit = 16,
+    });
+    defer descending.deinit();
+    try testing.expectEqual(ascending.items.len, descending.items.len);
+    for (ascending.items, 0..) |item, index| {
+        const mirrored = descending.items[descending.items.len - 1 - index];
+        try testing.expectEqual(item.id, mirrored.id);
+    }
+}
+
+test "a release reports how many tracks it holds and how long they run" {
+    var library = try openTestLibrary("file:orca-projection-releasesum?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/Artist/a.flac", .flac, .{
+        .title = "One",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    });
+    _ = try observe(&library, "/m/Artist/b.flac", .flac, .{
+        .title = "Two",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 2,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try library.database.exec("UPDATE tracks SET duration_ms=1000 WHERE track_number=1;");
+
+    var page = try library.releases.page(testing.allocator, .{ .limit = 16 });
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 1), page.items.len);
+    try testing.expectEqual(@as(u32, 2), page.items[0].track_count);
+    // The Track with no declared duration contributes nothing rather than a
+    // zero-length lie.
+    try testing.expectEqual(@as(i64, 1000), page.items[0].total_duration_ms);
+
+    const artist = try artistIdOf(&library, "Artist");
+    var scoped = try library.releases.page(testing.allocator, .{
+        .album_artist_id = artist,
+        .limit = 16,
+    });
+    defer scoped.deinit();
+    try testing.expectEqual(@as(usize, 1), scoped.items.len);
+    var elsewhere = try library.releases.page(testing.allocator, .{
+        .album_artist_id = artist + 1000,
+        .limit = 16,
+    });
+    defer elsewhere.deinit();
+    try testing.expectEqual(@as(usize, 0), elsewhere.items.len);
+}
+
+test "an out-of-range page is refused rather than clamped" {
+    var library = try openTestLibrary("file:orca-projection-pagebound?mode=memory&cache=shared");
+    defer library.close();
+    try testing.expectError(
+        error.PageOutOfRange,
+        library.tracks.page(testing.allocator, .{ .limit = 0 }),
+    );
+    try testing.expectError(
+        error.PageOutOfRange,
+        library.tracks.page(testing.allocator, .{ .limit = 513 }),
+    );
+    try testing.expectError(error.PageOutOfRange, library.artists.page(testing.allocator, 0, 0));
+    try testing.expectError(
+        error.PageOutOfRange,
+        library.releases.page(testing.allocator, .{ .limit = 513 }),
+    );
 }

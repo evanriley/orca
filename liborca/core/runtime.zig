@@ -486,11 +486,76 @@ pub const OrcaRuntime = struct {
         limit: u32,
         offset: u32,
     ) !database.TrackPage {
+        return self.libraryTrackQuery(library, query, .{ .limit = limit, .offset = offset });
+    }
+
+    /// The browse listing: a bounded page of Tracks in a caller-named order,
+    /// optionally scoped to one Artist or one Release.
+    ///
+    /// A full-text `query` and a relational filter are alternatives, not a
+    /// combination: FTS5 orders by relevance, which no sort key or `tracks.id`
+    /// tiebreaker can reconcile with. Asking for both is a caller bug rather
+    /// than a silently-ignored argument.
+    pub fn libraryTrackQuery(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        text_query: []const u8,
+        page_query: database.TrackQuery,
+    ) !database.TrackPage {
         const tracks = &(try self.libraryDatabase(library)).tracks;
-        return if (query.len == 0)
-            tracks.page(self.allocator, limit, offset)
-        else
-            tracks.search(self.allocator, query, limit, offset);
+        if (text_query.len == 0) return tracks.page(self.allocator, page_query);
+        if (page_query.artist_id != null or page_query.release_id != null)
+            return error.SearchDoesNotFilter;
+        return tracks.search(self.allocator, text_query, page_query.limit, page_query.offset);
+    }
+
+    pub fn libraryTrackMatchCount(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.TrackQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).tracks.countMatching(query);
+    }
+
+    pub fn libraryArtistCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).artists.count();
+    }
+
+    pub fn libraryArtistPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        limit: u32,
+        offset: u32,
+    ) !database.ArtistPage {
+        return (try self.libraryDatabase(library)).artists.page(self.allocator, limit, offset);
+    }
+
+    pub fn libraryArtist(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        artist_id: i64,
+    ) !?database.ArtistSummary {
+        return (try self.libraryDatabase(library)).artists.byId(self.allocator, artist_id);
+    }
+
+    pub fn libraryReleaseCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).releases.count();
+    }
+
+    pub fn libraryReleasePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ReleaseQuery,
+    ) !database.ReleasePage {
+        return (try self.libraryDatabase(library)).releases.page(self.allocator, query);
+    }
+
+    pub fn libraryRelease(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+    ) !?database.ReleaseSummary {
+        return (try self.libraryDatabase(library)).releases.byId(self.allocator, release_id);
     }
 
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -926,6 +991,16 @@ pub const OrcaRuntime = struct {
         engine.discardPending();
         const object_value = try self.players.get(player);
         try object_value.queue.replace(refs, start);
+        // `replace` has already destroyed whatever this Player was playing, so
+        // a start that cannot open its first entry has no consistent state to
+        // fall back to. Leaving the transport running would advertise a
+        // now-playing track that is not playing and cannot be made to play.
+        // Unwind to genuinely stopped instead.
+        errdefer {
+            object_value.player.stop();
+            object_value.player.releaseSources();
+            object_value.queue.clear();
+        }
         try loadCursor(object_value);
         object_value.player.play();
     }
@@ -2183,7 +2258,7 @@ fn openFixtureLibrary(
             .title = try std.fmt.bufPrint(&title_buffer, "Entry {d}", .{index}),
             .preferred_file_id = file_id,
         }});
-        var page = try library_database.tracks.page(std.testing.allocator, 1, @intCast(index));
+        var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = @intCast(index) });
         defer page.deinit();
         ids[index] = page.items[0].id;
     }
@@ -2386,7 +2461,7 @@ test "a track with no file behind it fails typed through the command lane" {
     );
     const library_database = try runtime.libraryDatabase(library);
     try library_database.tracks.upsertTracks(&.{.{ .title = "Orphan" }});
-    var page = try library_database.tracks.page(std.testing.allocator, 1, 0);
+    var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = 0 });
     defer page.deinit();
     const player = try runtime.createPlayer();
     try runtime.playerBindLibrary(player, library, std.testing.io);

@@ -130,6 +130,68 @@ typedef struct orca_track_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_track_callback)(void *context, const orca_track_view *track);
 
+typedef enum orca_track_sort {
+    /* Insertion order. The cheapest listing there is. */
+    ORCA_TRACK_SORT_ID = 0,
+    ORCA_TRACK_SORT_ARTIST = 1,
+    ORCA_TRACK_SORT_ALBUM = 2,
+    ORCA_TRACK_SORT_TITLE = 3,
+    /* Disc, then track number: the order an album is listened to. */
+    ORCA_TRACK_SORT_TRACK_NUMBER = 4,
+    ORCA_TRACK_SORT_DURATION = 5,
+    ORCA_TRACK_SORT_DATE_ADDED = 6,
+} orca_track_sort;
+
+/* One bounded, ordered, filtered request for a page of Tracks.
+ *
+ * `artist_id` and `release_id` are relational filters; pass -1 for "no
+ * filter". Every order this produces ends in the Track id, so paging is a
+ * total order: page N+1 continues exactly where page N stopped even when
+ * thousands of Tracks share a title. `limit` must be between 1 and 512. */
+typedef struct orca_track_query {
+    int64_t artist_id;
+    int64_t release_id;
+    uint8_t sort;
+    uint8_t descending;
+    uint8_t reserved[2];
+    uint32_t limit;
+    uint32_t offset;
+} orca_track_query;
+
+typedef struct orca_artist_view {
+    int64_t id;
+    uint32_t release_count;
+    uint32_t track_count;
+    orca_string_view name;
+    /* The folded key the listing is ordered by: lowercased, whitespace
+     * collapsed, a leading English article dropped. Display `name`. */
+    orca_string_view sort_name;
+} orca_artist_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_artist_callback)(void *context, const orca_artist_view *artist);
+
+typedef struct orca_release_view {
+    int64_t id;
+    int64_t album_artist_id;
+    int64_t disc_count;
+    /* Summed over the Tracks that declare a duration. */
+    int64_t total_duration_ms;
+    uint32_t track_count;
+    uint8_t has_album_artist_id;
+    uint8_t has_disc_count;
+    uint8_t is_compilation;
+    uint8_t reserved[3];
+    orca_string_view title;
+    orca_string_view album_artist;
+    /* Empty when the release has no date; a date is text, not a number, so it
+     * needs no has_* flag. */
+    orca_string_view release_date;
+} orca_release_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_release_callback)(void *context, const orca_release_view *release);
+
 typedef struct orca_health_issue_view {
     uint8_t kind;
     uint8_t severity;
@@ -396,6 +458,80 @@ orca_status orca_library_query_health_issues(
     uint32_t offset,
     void *context,
     orca_health_issue_callback callback
+);
+
+
+/* ------------------------------------------------------------- browsing */
+
+/* The browse model: Artists, the Releases filed under one, and the Tracks on
+ * one Release or by one Artist. All three are bounded, caller-driven pages
+ * with an explicit, total order - liborca owns browse semantics, a frontend
+ * owns only how the rows look. */
+
+orca_status orca_library_artist_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+/* Artists in sort-name order. `limit` must be between 1 and 512. */
+orca_status orca_library_query_artists(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_artist_callback callback
+);
+/* Invokes the callback once, or not at all if no such Artist exists. */
+orca_status orca_library_artist_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t artist_id,
+    void *context,
+    orca_artist_callback callback
+);
+
+orca_status orca_library_release_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+/* Releases in title order. `album_artist_id` of -1 lists every Release;
+ * anything else lists that Artist's. `limit` must be between 1 and 512. */
+orca_status orca_library_query_releases(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t album_artist_id,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_release_callback callback
+);
+/* Invokes the callback once, or not at all if no such Release exists. */
+orca_status orca_library_release_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    void *context,
+    orca_release_callback callback
+);
+
+/* A sorted, filtered page of Tracks. This is what an album view and an artist
+ * view are built from. `query` may not be null. */
+orca_status orca_library_browse_tracks(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_track_query *query,
+    void *context,
+    orca_track_callback callback
+);
+/* How many Tracks the filters in `query` match, so a host can size a
+ * scrollbar without walking the listing. Sort, limit and offset are ignored. */
+orca_status orca_library_track_match_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_track_query *query,
+    uint64_t *output
 );
 
 /* Registering a root is an explicit user action: it is the one path allowed to

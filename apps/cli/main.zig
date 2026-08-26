@@ -105,6 +105,12 @@ pub fn main(init: std.process.Init) !void {
             "{s}\t{s}\t{s}\t{s}\n",
             .{ @tagName(issue.severity), @tagName(issue.kind), issue.path, issue.details },
         );
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artists")) {
+        try listArtists(allocator, init.io, stdout, args[2], args[3..]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "releases")) {
+        try listReleases(allocator, init.io, stdout, args[2], args[3..]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "tracks")) {
+        try listTracks(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
         var runtime = liborca.OrcaRuntime.init(allocator);
         defer runtime.deinit();
@@ -160,7 +166,20 @@ pub fn main(init: std.process.Init) !void {
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
             \\                 | analyze DATABASE AUDIO
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
-            \\                 | play-tracks DATABASE IDS [OPTIONS]]
+            \\                 | play-tracks DATABASE IDS [OPTIONS]
+            \\                 | artists DATABASE [OPTIONS]
+            \\                 | releases DATABASE [--artist ID] [OPTIONS]
+            \\                 | tracks DATABASE [OPTIONS]]
+            \\
+            \\Browsing. artists lists Artists in sort order; releases lists Releases,
+            \\optionally one Artist's; tracks lists Tracks in a named order, optionally
+            \\scoped to one Artist or one Release. Options:
+            \\  --artist ID        only this Artist
+            \\  --release ID       only this Release (tracks only)
+            \\  --sort KEY         id|artist|album|title|track|duration|added (tracks only)
+            \\  --desc             reverse the order
+            \\  --limit N          page size, 1 to 512 (default 50)
+            \\  --offset N         rows to skip
             \\
             \\play-tracks plays a comma-separated list of Track ids as a playback
             \\queue. Options:
@@ -337,6 +356,177 @@ fn playTracks(
             @tagName(zone_stats.output_state),
         },
     );
+}
+
+const BrowseOptions = struct {
+    artist_id: ?i64 = null,
+    release_id: ?i64 = null,
+    sort: liborca.database.TrackSort = .id,
+    descending: bool = false,
+    limit: u32 = 50,
+    offset: u32 = 0,
+};
+
+/// `--name value` pairs, matching the shape the rest of this file already
+/// parses. A flag this verb does not understand is an error rather than
+/// something quietly ignored: a mistyped `--sort` that silently listed
+/// insertion order would look like a liborca bug.
+fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
+    var options: BrowseOptions = .{};
+    var index: usize = 0;
+    while (index < arguments.len) {
+        const name = arguments[index];
+        if (std.mem.eql(u8, name, "--desc")) {
+            options.descending = true;
+            index += 1;
+            continue;
+        }
+        if (index + 1 >= arguments.len) return error.MissingOptionValue;
+        const value = arguments[index + 1];
+        index += 2;
+        if (std.mem.eql(u8, name, "--artist")) {
+            options.artist_id = try std.fmt.parseInt(i64, value, 10);
+        } else if (std.mem.eql(u8, name, "--release")) {
+            options.release_id = try std.fmt.parseInt(i64, value, 10);
+        } else if (std.mem.eql(u8, name, "--limit")) {
+            options.limit = try std.fmt.parseInt(u32, value, 10);
+        } else if (std.mem.eql(u8, name, "--offset")) {
+            options.offset = try std.fmt.parseInt(u32, value, 10);
+        } else if (std.mem.eql(u8, name, "--sort")) {
+            options.sort = if (std.mem.eql(u8, value, "id"))
+                .id
+            else if (std.mem.eql(u8, value, "artist"))
+                .artist
+            else if (std.mem.eql(u8, value, "album"))
+                .album
+            else if (std.mem.eql(u8, value, "title"))
+                .title
+            else if (std.mem.eql(u8, value, "track"))
+                .track_number
+            else if (std.mem.eql(u8, value, "duration"))
+                .duration
+            else if (std.mem.eql(u8, value, "added"))
+                .date_added
+            else
+                return error.UnknownSortKey;
+        } else return error.UnknownOption;
+    }
+    return options;
+}
+
+/// `mm:ss` from a duration liborca reports in milliseconds.
+///
+/// The cast to unsigned is not cosmetic: `{d:0>2}` on a signed integer emits a
+/// sign, so a signed seconds value prints `4:+07`.
+fn writeDuration(stdout: *std.Io.Writer, duration_ms: ?i64) !void {
+    const milliseconds = duration_ms orelse {
+        try stdout.writeAll("-:--");
+        return;
+    };
+    const total_seconds: u64 = @intCast(@divTrunc(@max(milliseconds, 0), 1000));
+    try stdout.print("{d}:{d:0>2}", .{ total_seconds / 60, total_seconds % 60 });
+}
+
+fn openBrowseLibrary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    runtime: *liborca.OrcaRuntime,
+    database_path_argument: []const u8,
+) !liborca.core.LibraryHandle {
+    const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
+    return runtime.openLibrary(io, database_path);
+}
+
+fn listArtists(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    const options = try parseBrowseOptions(option_arguments);
+    var runtime = liborca.OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    var page = try runtime.libraryArtistPage(library, options.limit, options.offset);
+    defer page.deinit();
+    try stdout.print(
+        "{d} artists total\n",
+        .{try runtime.libraryArtistCount(library)},
+    );
+    for (page.items) |artist| try stdout.print(
+        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]\n",
+        .{ artist.id, artist.name, artist.release_count, artist.track_count, artist.sort_name },
+    );
+}
+
+fn listReleases(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    const options = try parseBrowseOptions(option_arguments);
+    var runtime = liborca.OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    var page = try runtime.libraryReleasePage(library, .{
+        .album_artist_id = options.artist_id,
+        .limit = options.limit,
+        .offset = options.offset,
+    });
+    defer page.deinit();
+    for (page.items) |release| {
+        try stdout.print("{d}\t{s}\t{s}\t", .{ release.id, release.title, release.album_artist });
+        try writeDuration(stdout, release.total_duration_ms);
+        try stdout.print(
+            "\t{d} tracks\t{d} disc(s)\t{s}{s}\n",
+            .{
+                release.track_count,
+                release.disc_count orelse 1,
+                release.release_date orelse "-",
+                if (release.is_compilation) "\tcompilation" else "",
+            },
+        );
+    }
+}
+
+fn listTracks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    const options = try parseBrowseOptions(option_arguments);
+    var runtime = liborca.OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const query: liborca.database.TrackQuery = .{
+        .artist_id = options.artist_id,
+        .release_id = options.release_id,
+        .sort = options.sort,
+        .direction = if (options.descending) .descending else .ascending,
+        .limit = options.limit,
+        .offset = options.offset,
+    };
+    var page = try runtime.libraryTrackQuery(library, "", query);
+    defer page.deinit();
+    try stdout.print(
+        "{d} tracks match\n",
+        .{try runtime.libraryTrackMatchCount(library, query)},
+    );
+    for (page.items) |track| {
+        const disc: u64 = @intCast(@max(track.disc_number orelse 1, 0));
+        const number: u64 = @intCast(@max(track.track_number orelse 0, 0));
+        try stdout.print(
+            "{d}\t{d}-{d:0>2}\t{s}\t{s}\t{s}\t",
+            .{ track.id, disc, number, track.title, track.artist, track.album },
+        );
+        try writeDuration(stdout, track.duration_ms);
+        try stdout.print("{s}\n", .{if (track.has_playable_file) "" else "\tunreachable"});
+    }
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {

@@ -1,7 +1,8 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const text_key = @import("text_key.zig");
 
-pub const current_version = 8;
+pub const current_version = 9;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -537,6 +538,162 @@ const migration_8 =
     \\    ON tracks(release_id, COALESCE(disc_number, 1), COALESCE(track_number, -id));
 ;
 
+/// Version 9: the browse model.
+///
+/// Until this migration the only artist reachable from a Track was the
+/// denormalized `tracks.artist` text, so nothing could ask "what else is by
+/// this artist" without a full table scan and a string comparison. It adds the
+/// two relational links a browse model needs, backfills them from the text
+/// that is already there, gives every artist a sort key, and creates the
+/// indexes the new queries order by.
+///
+/// **One artist per track, one album artist per release, deliberately.** The
+/// tag data this targets is single-valued on ARTIST and ALBUMARTIST in
+/// essentially every file, and splitting featured artists is a metadata
+/// problem (it needs a parser, a provenance story and a user-visible review
+/// step) rather than a schema one. The extension path, when that work happens,
+/// is a `track_artists(track_id, artist_id, ordinal, role)` join table
+/// alongside these columns: `artist_id` stays as the *primary* artist a
+/// listing sorts and files by, and the join table carries the rest. Nothing
+/// here has to be undone to get there.
+///
+/// The backfill runs the same two-step cascade `ArtistRepository.ensureLocked`
+/// runs, in the same order, because anything else would file 538 Tracks of the
+/// reference library differently from a fresh scan. A MusicBrainz artist id
+/// outranks the name — it is what recognizes "Cosmo's Midnight feat. Wave
+/// Racer" as Cosmo's Midnight — so the observed id on a Track's preferred file
+/// is tried first, and only what it cannot answer falls back to
+/// `orca_artist_key`, which is `text_key.normalizeKey`, the exact function
+/// `ArtistRepository` folds with. A migrated database and a freshly scanned one
+/// therefore agree row for row, which `library/projection.zig` asserts.
+///
+/// None of the new indexes names `id` explicitly. `id` is `INTEGER PRIMARY
+/// KEY`, so it *is* the rowid and SQLite already appends it to every index
+/// entry — which is why an `ORDER BY ... , tracks.id` that ends a listing's
+/// total order is satisfied straight from `tracks(title COLLATE NOCASE)` with
+/// no temp B-tree, and why spelling it out would only store the value twice.
+const migration_9_columns =
+    \\ALTER TABLE tracks ADD COLUMN artist_id INTEGER REFERENCES artists(id);
+    \\ALTER TABLE releases ADD COLUMN album_artist_id INTEGER REFERENCES artists(id);
+;
+
+/// The backfill on its own, so a test can null the three columns out of a
+/// freshly projected library, run exactly this, and prove the result is what
+/// the projection wrote. That equivalence is the whole promise of the
+/// migration; asserting it against the migration as a whole would also be
+/// asserting `CREATE INDEX`, which proves nothing about who an artist is.
+pub const artist_backfill =
+    \\UPDATE artists SET sort_name = orca_artist_sort_key(name);
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    JOIN observed_file_tags ON observed_file_tags.musicbrainz_artist_id =
+    \\        artists.musicbrainz_artist_id
+    \\    WHERE observed_file_tags.file_id = tracks.preferred_file_id
+    \\      AND COALESCE(observed_file_tags.musicbrainz_artist_id, '') <> ''
+    \\    ORDER BY artists.id LIMIT 1
+    \\) WHERE tracks.artist <> '';
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT artists.id FROM artists WHERE artists.key = orca_artist_key(tracks.artist)
+    \\) WHERE tracks.artist_id IS NULL AND tracks.artist <> '';
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    JOIN observed_file_tags ON observed_file_tags.musicbrainz_album_artist_id =
+    \\        artists.musicbrainz_artist_id
+    \\    JOIN tracks ON tracks.preferred_file_id = observed_file_tags.file_id
+    \\    WHERE tracks.release_id = releases.id
+    \\      AND COALESCE(observed_file_tags.musicbrainz_album_artist_id, '') <> ''
+    \\    ORDER BY artists.id LIMIT 1
+    \\) WHERE releases.album_artist <> '';
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    WHERE artists.key = orca_artist_key(releases.album_artist)
+    \\) WHERE releases.album_artist_id IS NULL AND releases.album_artist <> '';
+;
+
+const migration_9_indexes =
+    \\CREATE INDEX artists_sort ON artists(sort_name);
+    \\CREATE INDEX releases_by_artist
+    \\    ON releases(album_artist_id, title COLLATE NOCASE);
+    \\DROP INDEX tracks_album;
+    \\CREATE INDEX tracks_sort_artist ON tracks(
+    \\    artist COLLATE NOCASE, album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_album ON tracks(
+    \\    album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_title ON tracks(title COLLATE NOCASE);
+    \\CREATE INDEX tracks_sort_position ON tracks(
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_duration ON tracks(duration_ms);
+    \\CREATE INDEX tracks_sort_added ON tracks(created_at);
+    \\CREATE INDEX tracks_by_artist ON tracks(
+    \\    artist_id, album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_by_artist_title ON tracks(artist_id, title COLLATE NOCASE);
+    \\CREATE INDEX tracks_by_artist_duration ON tracks(artist_id, duration_ms);
+    \\CREATE INDEX tracks_by_artist_added ON tracks(artist_id, created_at);
+    \\CREATE INDEX tracks_by_artist_position ON tracks(
+    \\    artist_id, COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_by_release ON tracks(
+    \\    release_id, COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_artist ON tracks(artist_id);
+    \\CREATE INDEX tracks_release ON tracks(release_id);
+;
+
+const migration_9 = migration_9_columns ++ artist_backfill ++ migration_9_indexes;
+
+/// How much stack the key functions fold a name in.
+///
+/// The folding never grows its input — fullwidth forms shrink, case folding is
+/// length-preserving — so this bounds the longest artist name the backfill can
+/// see. Overflow raises a SQL error and rolls the migration back rather than
+/// silently writing a truncated key, because a truncated key is an artist who
+/// exists twice.
+const key_scratch_bytes = 8 * 1024;
+
+fn foldInto(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+    comptime fold: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error![]const u8,
+) void {
+    if (argc != 1) return sqlite.resultError(context, "expected one argument");
+    var buffer: [key_scratch_bytes]u8 = undefined;
+    var scratch: std.heap.FixedBufferAllocator = .init(&buffer);
+    const folded = fold(scratch.allocator(), sqlite.valueText(argv[0])) catch
+        return sqlite.resultError(context, "artist name too long to fold");
+    sqlite.resultText(context, folded);
+}
+
+fn artistKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldInto(context, argc, argv, text_key.normalizeKey);
+}
+
+fn artistSortKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldInto(context, argc, argv, text_key.sortKey);
+}
+
+/// Teach a connection the two foldings, so a migration can match the text a
+/// projection wrote without reimplementing the fold in SQL.
+pub fn registerKeyFunctions(db: sqlite.Database) sqlite.Error!void {
+    try db.createTextFunction("orca_artist_key", null, artistKeyFunction);
+    try db.createTextFunction("orca_artist_sort_key", null, artistSortKeyFunction);
+}
+
 /// The schema version at which `mutation_operations` exists. Startup journal
 /// recovery runs at exactly this point: the journal must be readable, and no
 /// later migration may rewrite tables a nonterminal operation depends on before
@@ -556,6 +713,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     };
     if (version > current_version) return error.SchemaVersionTooNew;
     if (version >= target_version) return;
+    try registerKeyFunctions(db);
 
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
@@ -571,6 +729,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
         try deriveLegacyRoot(db);
         try db.exec("DROP TABLE temp.legacy_scanned;");
     }
+    if (version < 9 and target_version >= 9) try db.exec(migration_9);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -751,7 +910,7 @@ test "migrating the version-7 fixture preserves every path-keyed row" {
     defer db.close();
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     // Three scanned files plus the two orphan paths that only analysis and
     // health knew about.
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM files;"));
@@ -910,7 +1069,7 @@ test "migrating a database that is already current changes nothing" {
     defer std.testing.allocator.free(schema_again);
     try std.testing.expectEqualStrings(schema, schema_again);
     try std.testing.expectEqual(files, try scalar(db, "SELECT count(*) FROM files;"));
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
 }
 
 test "an empty database migrates straight to the current version" {
@@ -921,7 +1080,7 @@ test "an empty database migrates straight to the current version" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM files;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM locations;"));
     try std.testing.expectEqual(
@@ -939,6 +1098,6 @@ test "an unknown newer schema version is refused rather than opened" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try db.exec("PRAGMA user_version=9;");
+    try db.exec("PRAGMA user_version=10;");
     try std.testing.expectError(error.SchemaVersionTooNew, apply(db));
 }

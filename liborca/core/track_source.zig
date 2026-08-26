@@ -145,7 +145,7 @@ fn projectSingleFile(
         .title = "Reference",
         .preferred_file_id = file_id,
     }});
-    var page = try library.tracks.page(testing.allocator, 1, 0);
+    var page = try library.tracks.page(testing.allocator, .{ .limit = 1, .offset = 0 });
     defer page.deinit();
     return page.items[0].id;
 }

@@ -804,7 +804,7 @@ test "a Track resolves to the location its preferred file lives at" {
         .preferred_file_id = file_id,
     }});
 
-    var page = try library.tracks.page(std.testing.allocator, 10, 0);
+    var page = try library.tracks.page(std.testing.allocator, .{ .limit = 10, .offset = 0 });
     defer page.deinit();
     try std.testing.expectEqualStrings("Nick Drake", page.items[0].artist);
     try std.testing.expect(page.items[0].has_playable_file);
@@ -822,7 +822,7 @@ test "a Track resolves to the location its preferred file lives at" {
     // A Track with no file behind it is reported as unplayable rather than
     // failing at the point a host tries to start it.
     try library.tracks.upsertTracks(&.{.{ .title = "Orphan" }});
-    var second = try library.tracks.page(std.testing.allocator, 10, 1);
+    var second = try library.tracks.page(std.testing.allocator, .{ .limit = 10, .offset = 1 });
     defer second.deinit();
     try std.testing.expect(!second.items[0].has_playable_file);
     try std.testing.expect(
