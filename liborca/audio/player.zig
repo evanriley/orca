@@ -21,6 +21,35 @@ pub const FanoutResult = struct {
     zones_accepted: usize,
 };
 
+/// A seek the control lane could not apply itself, because the entry it targets
+/// is no longer the entry being decoded. The engine services it by re-opening
+/// the audible entry; see `Player.seek`.
+pub const PendingSeek = struct {
+    /// Entry serial the seek was issued against — the *audible* one.
+    serial: u32,
+    frame: u64,
+};
+
+/// Timeline shape of one queue entry, remembered by serial.
+///
+/// The decode cursor leads the audible one by the whole render-ahead depth, so
+/// `sources.current` already describes the *next* track while the previous one
+/// is still being heard. Reporting duration from it makes now-playing advertise
+/// the successor's length for the whole lookahead window. Keeping a small
+/// serial-keyed ring lets duration be resolved through the same audible cursor
+/// position already uses, so identity, duration and position agree by
+/// construction rather than by coincidence.
+const EntryInfo = struct {
+    serial: u32 = 0,
+    sample_rate: u32 = 0,
+    frame_count: u64 = 0,
+};
+
+/// Only the current and the one primed successor can be in flight, so this only
+/// has to outlive the render-ahead depth. Eight matches the playback queue's
+/// serial map for the same reason.
+const entry_info_len: usize = 8;
+
 pub const Player = struct {
     state: std.atomic.Value(TransportState) = .init(.stopped),
     /// Transport epoch: bumped on seek and stop, carried on every prepared
@@ -49,6 +78,17 @@ pub const Player = struct {
     /// stopping the producer to read the decoder.
     published_sample_rate: std.atomic.Value(u32) = .init(0),
     published_frame_count: std.atomic.Value(u64) = .init(0),
+    /// Serial of the entry the render callback is actually emitting, published
+    /// by the engine from the clock Zone. Zero until something has rendered, in
+    /// which case the decode cursor is the only answer available.
+    audible_entry_serial: std.atomic.Value(u32) = .init(0),
+    /// Timeline shape per entry serial. Plain state, written by whichever lane
+    /// owns `sources` — the control lane under `quiesce`, or the engine thread.
+    entry_info: [entry_info_len]EntryInfo = @splat(.{}),
+    entry_info_head: usize = 0,
+    /// A seek whose target entry is no longer the one being decoded. Set by the
+    /// control lane under `quiesce`, taken by the engine on its next pass.
+    pending_seek: ?PendingSeek = null,
 
     pub fn deinit(self: *Player) void {
         if (self.sources) |*sources| sources.deinit();
@@ -59,6 +99,7 @@ pub const Player = struct {
         if (self.sources != null) return error.PlayerSourceAlreadyLoaded;
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
+        self.adoptLoadedEntryAsAudible();
         self.resetTimeline();
         self.publishSourceInfo();
     }
@@ -69,11 +110,23 @@ pub const Player = struct {
     /// are discarded there rather than being chased down and removed.
     pub fn replaceSource(self: *Player, source: source_session.SourceSession) void {
         self.releaseSources();
+        self.pending_seek = null;
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
+        self.adoptLoadedEntryAsAudible();
         self.resetTimeline();
         self.publishSourceInfo();
         _ = self.epoch.fetchAdd(1, .acq_rel);
+    }
+
+    /// A hard load retires every prepared block through the epoch bump, so the
+    /// entry that becomes audible *is* the one just loaded. The serial the
+    /// callback last published describes audio that no longer exists, and the
+    /// callback republishes only when the audible entry changes — so without
+    /// this the audible cursor would be pinned to a retired entry until the next
+    /// transition.
+    fn adoptLoadedEntryAsAudible(self: *Player) void {
+        self.audible_entry_serial.store(self.sources.?.current_entry_serial, .release);
     }
 
     /// Drops every decoder without touching the playback queue above it. This
@@ -85,21 +138,83 @@ pub const Player = struct {
             sources.deinit();
         }
         self.sources = null;
+        self.pending_seek = null;
+        self.audible_entry_serial.store(0, .release);
+        self.forgetEntryInfo();
         self.publishSourceInfo();
     }
 
-    /// Republishes the loaded source's timeline shape. Called from the lane
-    /// that owns `sources`, never from the render callback.
+    /// Republishes the timeline shape hosts read. Called from the lane that owns
+    /// `sources`, never from the render callback.
+    ///
+    /// It records the entry being *decoded* and publishes the entry being
+    /// *heard*. Those are the same track except during the render-ahead window
+    /// of a gapless transition, which is exactly the window in which publishing
+    /// the decoded one made now-playing advertise the next track's duration
+    /// while the previous one was still audible.
     pub fn publishSourceInfo(self: *Player) void {
-        const rate: u32 = if (self.format()) |value| value.sample_rate else 0;
-        self.published_sample_rate.store(rate, .release);
-        self.published_frame_count.store(self.frameCount() orelse 0, .release);
+        if (self.sources) |*sources| {
+            self.recordEntryInfo(.{
+                .serial = sources.current_entry_serial,
+                .sample_rate = sources.current.decoder.format.sample_rate,
+                .frame_count = sources.current.decoder.frame_count orelse 0,
+            });
+        }
+        const audible = self.audibleEntryInfo();
+        self.published_sample_rate.store(audible.sample_rate, .release);
+        self.published_frame_count.store(audible.frame_count, .release);
     }
 
-    /// Frames in the currently loaded source, when its decoder knows.
+    /// Engine thread. Adopts the entry serial the render callback published, so
+    /// duration, identity and position all resolve through one cursor.
+    pub fn observeRenderedSerial(self: *Player, serial: u32) void {
+        if (serial == 0) return;
+        self.audible_entry_serial.store(serial, .release);
+    }
+
+    fn recordEntryInfo(self: *Player, info: EntryInfo) void {
+        if (info.serial == 0) return;
+        for (&self.entry_info) |*record| {
+            if (record.serial != info.serial) continue;
+            record.* = info;
+            return;
+        }
+        self.entry_info[self.entry_info_head] = info;
+        self.entry_info_head = (self.entry_info_head + 1) % entry_info_len;
+    }
+
+    fn forgetEntryInfo(self: *Player) void {
+        self.entry_info = @splat(.{});
+        self.entry_info_head = 0;
+    }
+
+    /// Shape of the entry actually being heard. Falls back to the decoding entry
+    /// when nothing has rendered yet, or when the audible serial is older than
+    /// the ring remembers — in both cases the decode cursor is the only answer
+    /// available, and it is the correct one for the first case.
+    fn audibleEntryInfo(self: *const Player) EntryInfo {
+        const sources = if (self.sources) |*value| value else return .{};
+        const fallback: EntryInfo = .{
+            .serial = sources.current_entry_serial,
+            .sample_rate = sources.current.decoder.format.sample_rate,
+            .frame_count = sources.current.decoder.frame_count orelse 0,
+        };
+        const serial = self.audible_entry_serial.load(.acquire);
+        if (serial == 0 or serial == sources.current_entry_serial) return fallback;
+        for (self.entry_info) |record| {
+            if (record.serial == serial) return record;
+        }
+        return fallback;
+    }
+
+    /// Frames in the entry currently being heard, when its decoder knows.
+    /// Anchored on the audible cursor for the same reason duration is: a seek
+    /// relative to "the end of this track" must mean the track the listener is
+    /// hearing, not the one the producer has run ahead into.
     pub fn frameCount(self: *const Player) ?u64 {
-        if (self.sources) |*sources| return sources.current.decoder.frame_count;
-        return null;
+        if (self.sources == null) return null;
+        const frames = self.audibleEntryInfo().frame_count;
+        return if (frames == 0) null else frames;
     }
 
     fn resetTimeline(self: *Player) void {
@@ -230,6 +345,7 @@ pub const Player = struct {
     }
 
     pub fn stop(self: *Player) void {
+        self.pending_seek = null;
         self.silenced.store(true, .release);
         self.state.store(.stopped, .release);
         self.position_frames.store(0, .release);
@@ -237,11 +353,60 @@ pub const Player = struct {
         _ = self.epoch.fetchAdd(1, .acq_rel);
     }
 
+    /// Control lane, under the engine `quiesce` handshake.
+    ///
+    /// A seek means "move to this point in the track I am *hearing*". Because
+    /// the producer runs a whole entry ahead, `sources.current` during a gapless
+    /// transition is already the successor and its predecessor's decoder has
+    /// been released — so seeking it would drop the listener into the following
+    /// song. When that is the case the seek is recorded instead and the engine
+    /// re-opens the audible entry on its next pass; the epoch bump published
+    /// here retires the decode-ahead work in the meantime, through the same
+    /// mechanism every other discontinuity uses.
     pub fn seek(self: *Player, frame: u64) !u32 {
+        if (self.deferredSeekTarget()) |serial| {
+            self.pending_seek = .{ .serial = serial, .frame = frame };
+            self.position_frames.store(frame, .release);
+            self.epoch_base_frames.store(frame, .release);
+            return self.epoch.fetchAdd(1, .acq_rel) +% 1;
+        }
+        return self.seekCurrent(frame);
+    }
+
+    /// Serial of the audible entry when it is *not* the entry being decoded.
+    /// Null means the two agree — or that nothing has rendered yet, in which
+    /// case the decoding entry is the one that will become audible.
+    fn deferredSeekTarget(self: *const Player) ?u32 {
+        const sources = if (self.sources) |*value| value else return null;
+        const audible = self.audible_entry_serial.load(.acquire);
+        if (audible == 0 or audible == sources.current_entry_serial) return null;
+        return audible;
+    }
+
+    /// Seeks the source that is actually loaded. The engine uses this after it
+    /// has re-opened the audible entry, where deferring again would loop: the
+    /// callback has not yet rendered the reopened entry, so the audible serial
+    /// still names the retired one.
+    pub fn seekCurrent(self: *Player, frame: u64) !u32 {
+        self.pending_seek = null;
         if (self.sources) |*sources| try sources.seek(frame);
         self.position_frames.store(frame, .release);
         self.epoch_base_frames.store(frame, .release);
         return self.epoch.fetchAdd(1, .acq_rel) +% 1;
+    }
+
+    /// Engine thread. Claims a deferred seek, so servicing it can never observe
+    /// the same request twice.
+    pub fn takePendingSeek(self: *Player) ?PendingSeek {
+        const request = self.pending_seek orelse return null;
+        self.pending_seek = null;
+        return request;
+    }
+
+    /// A hard transport switch retires a deferred seek with everything else it
+    /// retires: the entry that seek named is no longer the one wanted.
+    pub fn clearPendingSeek(self: *Player) void {
+        self.pending_seek = null;
     }
 
     /// Retires prepared audio without moving the source. Used when the clock
@@ -363,6 +528,56 @@ test "Player decodes once into independently owned Zone pipelines" {
         first_pipe.render(&first_pool, 1, seek_epoch, &first_output),
     );
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.75 }, &first_output);
+}
+
+test "a hard load makes the entry it loaded the audible one immediately" {
+    var first: TestDecoder = .{};
+    var player: Player = .{};
+    defer player.deinit();
+    try player.loadSource(source_session.SourceSession.init(first.decoder()));
+    const first_serial = player.entrySerial();
+    try std.testing.expectEqual(first_serial, player.audible_entry_serial.load(.acquire));
+
+    // The callback republishes a serial only when the audible entry changes, so
+    // after a hard switch it still names audio the epoch bump just retired.
+    // Left uncorrected, both cursors would stay pinned to the retired entry.
+    var second: TestDecoder = .{};
+    player.replaceSource(source_session.SourceSession.init(second.decoder()));
+    try std.testing.expect(player.entrySerial() != first_serial);
+    try std.testing.expectEqual(player.entrySerial(), player.audible_entry_serial.load(.acquire));
+
+    player.releaseSources();
+    try std.testing.expectEqual(@as(u32, 0), player.audible_entry_serial.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), player.published_frame_count.load(.acquire));
+}
+
+test "a seek is deferred when the audible entry is no longer the decoded one" {
+    var first: TestDecoder = .{};
+    var player: Player = .{};
+    defer player.deinit();
+    try player.loadSource(source_session.SourceSession.init(first.decoder()));
+    const audible = player.entrySerial();
+
+    // Stand in for a gapless advance: the producer has moved on to the
+    // successor while the predecessor's audio is still being rendered.
+    var second: TestDecoder = .{};
+    try player.primeNextSource(source_session.SourceSession.init(second.decoder()));
+    var scratch: [8]f32 = undefined;
+    _ = try player.decodeFrames(&scratch);
+    try std.testing.expect(player.entrySerial() != audible);
+
+    // The seek names the entry being heard, so it must not touch the decoder
+    // that has run ahead of it.
+    _ = try player.seek(2);
+    try std.testing.expectEqual(@as(?PendingSeek, .{ .serial = audible, .frame = 2 }), player.pending_seek);
+    try std.testing.expectEqual(@as(usize, 4), second.position);
+    // ...and the epoch still moved, so the audio prepared ahead is discarded
+    // through the same mechanism every other discontinuity uses.
+    try std.testing.expectEqual(@as(u64, 2), player.snapshot().position_frames);
+
+    const request = player.takePendingSeek().?;
+    try std.testing.expectEqual(audible, request.serial);
+    try std.testing.expect(player.takePendingSeek() == null);
 }
 
 test "pausing silences output without discarding prepared audio" {
