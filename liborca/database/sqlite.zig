@@ -7,6 +7,7 @@ pub const Error = error{
     SqlFailed,
     BindFailed,
     SchemaVersionTooNew,
+    ForeignKeyViolation,
 };
 
 pub const Database = struct {

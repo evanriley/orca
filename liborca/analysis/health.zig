@@ -143,10 +143,12 @@ test "health evaluation persists metadata and audio diagnostics" {
     defer evaluation.deinit();
     var library = try database.LibraryDatabase.open(
         allocator,
+        std.testing.io,
         "file:orca-health-evaluator?mode=memory&cache=shared",
     );
     defer library.close();
-    try library.health_issues.replacePath("track.flac", evaluation.issues.items);
+    const file_id = try library.files.create(.{ .size_bytes = 4096 });
+    try library.health_issues.replaceFile(file_id, evaluation.issues.items);
     try std.testing.expectEqual(@as(u64, 7), try library.health_issues.count());
 }
 

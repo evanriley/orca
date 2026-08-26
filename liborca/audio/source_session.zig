@@ -3,10 +3,23 @@ const buffer = @import("buffer.zig");
 const decoder_api = @import("../codec/decoder.zig");
 const render = @import("render.zig");
 
+/// Producer-owned backing storage for a SourceSession's decoder.
+///
+/// A Decoder holds a `ReadableSource` that borrows whatever object produced it.
+/// When that object is not guaranteed to outlive the session by construction —
+/// which is every case outside a single stack frame — the session must own it
+/// and release it *strictly after* the decoder. See `loaded_source.zig`.
+pub const OwnedSource = struct {
+    context: *anyopaque,
+    release: *const fn (context: *anyopaque) void,
+};
+
 /// Codec-neutral producer-side lifetime. Decoder-specific state remains behind
-/// Decoder's Orca-owned interface and the underlying source must outlive it.
+/// Decoder's Orca-owned interface. A session with an `owned_source` is
+/// self-contained: nothing in the caller's frame has to outlive it.
 pub const SourceSession = struct {
     decoder: decoder_api.Decoder,
+    owned_source: ?OwnedSource = null,
     next_frame: u64 = 0,
     eof: bool = false,
 
@@ -14,8 +27,16 @@ pub const SourceSession = struct {
         return .{ .decoder = decoder };
     }
 
+    /// Takes ownership of `source`, which is released after `decoder`.
+    pub fn initOwned(decoder: decoder_api.Decoder, source: OwnedSource) SourceSession {
+        return .{ .decoder = decoder, .owned_source = source };
+    }
+
     pub fn deinit(self: *SourceSession) void {
+        // Order matters: the decoder may still read through the source while
+        // tearing down, so the backing source is released last.
         self.decoder.deinit();
+        if (self.owned_source) |source| source.release(source.context);
         self.* = undefined;
     }
 
@@ -45,7 +66,8 @@ pub const SourceSession = struct {
         comptime queue_capacity: usize,
         pipe: *render.RenderPipe(queue_capacity),
         pool: *buffer.BlockPool,
-        generation: u64,
+        epoch: u32,
+        entry_serial: u32,
     ) !usize {
         pipe.reclaim(pool);
         if (self.eof) return 0;
@@ -67,7 +89,8 @@ pub const SourceSession = struct {
             if (!pipe.submit(.{
                 .index = index,
                 .frames = @intCast(frames),
-                .generation = generation,
+                .epoch = epoch,
+                .entry_serial = entry_serial,
             })) {
                 pool.release(index);
                 break;
@@ -85,6 +108,12 @@ pub const SourceSession = struct {
 pub const SourceQueue = struct {
     current: SourceSession,
     next: ?SourceSession = null,
+    /// Identifies the entry whose blocks are currently being prepared. It is
+    /// carried on every ReadyBlock and never compared by the callback, so a
+    /// gapless transition can append successor blocks under the same epoch.
+    current_entry_serial: u32 = 1,
+    next_entry_serial: u32 = 0,
+    entry_serial_counter: u32 = 1,
     transitions_queued: u64 = 0,
 
     pub fn init(current: SourceSession) SourceQueue {
@@ -95,6 +124,16 @@ pub const SourceQueue = struct {
         self.current.deinit();
         if (self.next) |*next| next.deinit();
         self.* = undefined;
+    }
+
+    /// Continues entry numbering from a previous queue, so a serial identifies
+    /// one queue entry for the whole life of a Player rather than only within
+    /// one `SourceQueue`. Without this, the first entry of every replacement
+    /// queue would reuse serial 1 and now-playing could resolve to the wrong
+    /// track after a skip.
+    pub fn rebaseSerials(self: *SourceQueue, previous: u32) void {
+        self.entry_serial_counter = previous;
+        self.current_entry_serial = self.nextSerial();
     }
 
     pub fn format(self: *const SourceQueue) @import("pcm.zig").Format {
@@ -114,6 +153,7 @@ pub const SourceQueue = struct {
         if (!formatsMatch(self.current.decoder.format, next.decoder.format))
             return error.GaplessFormatMismatch;
         self.next = next;
+        self.next_entry_serial = self.nextSerial();
     }
 
     /// Decode canonical PCM without assigning it to an output. The control
@@ -138,11 +178,23 @@ pub const SourceQueue = struct {
         comptime queue_capacity: usize,
         pipe: *render.RenderPipe(queue_capacity),
         pool: *buffer.BlockPool,
-        generation: u64,
+        epoch: u32,
     ) !usize {
-        var prepared = try self.current.prime(queue_capacity, pipe, pool, generation);
+        var prepared = try self.current.prime(
+            queue_capacity,
+            pipe,
+            pool,
+            epoch,
+            self.current_entry_serial,
+        );
         if (self.current.eof and self.advance()) {
-            prepared += try self.current.prime(queue_capacity, pipe, pool, generation);
+            prepared += try self.current.prime(
+                queue_capacity,
+                pipe,
+                pool,
+                epoch,
+                self.current_entry_serial,
+            );
         }
         return prepared;
     }
@@ -156,8 +208,16 @@ pub const SourceQueue = struct {
         self.current.deinit();
         self.current = self.next.?;
         self.next = null;
+        self.current_entry_serial = self.next_entry_serial;
+        self.next_entry_serial = 0;
         self.transitions_queued += 1;
         return true;
+    }
+
+    fn nextSerial(self: *SourceQueue) u32 {
+        self.entry_serial_counter +%= 1;
+        if (self.entry_serial_counter == 0) self.entry_serial_counter = 1;
+        return self.entry_serial_counter;
     }
 };
 
@@ -197,7 +257,7 @@ test "WAV source session primes bounded canonical blocks" {
     var pool = try buffer.BlockPool.init(std.testing.allocator, 2, 2, 1);
     defer pool.deinit();
     var pipe: render.RenderPipe(2) = .{};
-    try std.testing.expectEqual(@as(usize, 2), try session.prime(2, &pipe, &pool, 3));
+    try std.testing.expectEqual(@as(usize, 2), try session.prime(2, &pipe, &pool, 3, 1));
     try std.testing.expect(session.eof);
 
     var output: [4]f32 = undefined;
@@ -264,4 +324,64 @@ test "next source is queued before current prepared audio is consumed" {
         &.{ 0.25, 0.5, 0.75, 32767.0 / 32768.0 },
         &output,
     );
+}
+
+const ConstantDecoder = struct {
+    value: f32,
+    remaining: usize,
+
+    fn decoder(self: *ConstantDecoder) @import("../codec/decoder.zig").Decoder {
+        return .{
+            .context = self,
+            .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
+            .format = .{
+                .sample_format = .float_32,
+                .channels = 1,
+                .sample_rate = 48_000,
+                .bits_per_sample = 32,
+                .bytes_per_frame = 4,
+            },
+            .frame_count = 2,
+        };
+    }
+
+    fn read(context: *anyopaque, output: []f32) !usize {
+        const self: *ConstantDecoder = @ptrCast(@alignCast(context));
+        const count = @min(output.len, self.remaining);
+        @memset(output[0..count], self.value);
+        self.remaining -= count;
+        return count;
+    }
+
+    fn seekTo(_: *anyopaque, _: u64) !void {}
+    fn release(_: *anyopaque) void {}
+};
+
+test "a gapless transition keeps the epoch and only changes the entry serial" {
+    var first_decoder: ConstantDecoder = .{ .value = 0.25, .remaining = 2 };
+    var second_decoder: ConstantDecoder = .{ .value = 0.5, .remaining = 2 };
+    var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
+    defer sources.deinit();
+    const first_serial = sources.current_entry_serial;
+    try sources.primeNext(SourceSession.init(second_decoder.decoder()));
+    try std.testing.expect(sources.next_entry_serial != first_serial);
+
+    var pool = try buffer.BlockPool.init(std.testing.allocator, 4, 2, 1);
+    defer pool.deinit();
+    var pipe: render.RenderPipe(4) = .{};
+    // Both tracks are prepared under one epoch, so the callback never discards
+    // the successor's audio and the transition stays gapless.
+    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 6));
+    const second_serial = sources.current_entry_serial;
+    try std.testing.expect(first_serial != second_serial);
+
+    var output: [2]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), pipe.render(&pool, 1, 6, &output));
+    try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.25 }, &output);
+    try std.testing.expectEqual(first_serial, pipe.rendered_entry_serial.load(.monotonic));
+
+    try std.testing.expectEqual(@as(usize, 2), pipe.render(&pool, 1, 6, &output));
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5 }, &output);
+    try std.testing.expectEqual(second_serial, pipe.rendered_entry_serial.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), pipe.underruns.load(.monotonic));
 }

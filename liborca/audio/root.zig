@@ -1,12 +1,16 @@
 pub const backend = @import("backend.zig");
 pub const backends = @import("backends/root.zig");
 pub const buffer = @import("buffer.zig");
+pub const engine = @import("engine.zig");
 pub const equalizer = @import("equalizer.zig");
 pub const fanout = @import("fanout.zig");
 pub const graph = @import("graph.zig");
 pub const kernels = @import("kernels.zig");
+pub const loaded_source = @import("loaded_source.zig");
 pub const nodes = @import("nodes.zig");
+pub const output = @import("output.zig");
 pub const pcm = @import("pcm.zig");
+pub const playback_queue = @import("playback_queue.zig");
 pub const player = @import("player.zig");
 pub const processing = @import("processing.zig");
 pub const render = @import("render.zig");
@@ -16,16 +20,21 @@ pub const source_session = @import("source_session.zig");
 pub const spsc = @import("spsc.zig");
 pub const transition = @import("transition.zig");
 pub const zone = @import("zone.zig");
+pub const zone_runtime = @import("zone_runtime.zig");
 
 test {
     _ = @import("backend.zig");
     _ = @import("backends/root.zig");
     _ = @import("buffer.zig");
+    _ = @import("engine.zig");
     _ = @import("equalizer.zig");
     _ = @import("fanout.zig");
     _ = @import("graph.zig");
     _ = @import("kernels.zig");
+    _ = @import("loaded_source.zig");
     _ = @import("nodes.zig");
+    _ = @import("output.zig");
+    _ = @import("playback_queue.zig");
     _ = @import("player.zig");
     _ = @import("processing.zig");
     _ = @import("render.zig");
@@ -35,4 +44,5 @@ test {
     _ = @import("spsc.zig");
     _ = @import("transition.zig");
     _ = @import("zone.zig");
+    _ = @import("zone_runtime.zig");
 }

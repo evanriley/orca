@@ -10,7 +10,9 @@ pub const TransportState = enum(u8) { stopped, playing, paused };
 
 pub const Snapshot = struct {
     state: TransportState,
-    generation: u64,
+    /// Transport epoch. Bumped by seek and stop; compared by the render
+    /// callback so audio prepared before a discontinuity is discarded.
+    epoch: u32,
     position_frames: u64,
 };
 
@@ -21,9 +23,32 @@ pub const FanoutResult = struct {
 
 pub const Player = struct {
     state: std.atomic.Value(TransportState) = .init(.stopped),
-    generation: std.atomic.Value(u64) = .init(1),
+    /// Transport epoch: bumped on seek and stop, carried on every prepared
+    /// block, and the only field the render callback compares. Track identity
+    /// travels separately as `ReadyBlock.entry_serial`.
+    epoch: std.atomic.Value(u32) = .init(1),
     position_frames: std.atomic.Value(u64) = .init(0),
+    /// Frame the current epoch started at. Authoritative position is derived on
+    /// the control lane as `epoch_base_frames + clock zone frames-since-epoch`,
+    /// which is why the two halves are stamped together by every discontinuity.
+    epoch_base_frames: std.atomic.Value(u64) = .init(0),
+    /// Read by the render callback on the real-time lane. When set, the
+    /// callback emits silence without consuming blocks or counting underruns.
+    /// A freshly constructed Player is stopped, so it starts silenced.
+    silenced: std.atomic.Value(bool) = .init(true),
     sources: ?source_session.SourceQueue = null,
+    /// Highest entry serial this Player has ever handed out. A `SourceQueue`
+    /// numbers entries from its own base, so without carrying the counter
+    /// across a replacement two different queue entries could share a serial
+    /// and now-playing would resolve to the wrong track.
+    serial_counter: u32 = 0,
+    /// Canonical sample rate and total frame count of the source currently
+    /// loaded, republished by whichever lane loads it. Both lanes that touch
+    /// `sources` do so under the engine `quiesce`/`release` handshake, so these
+    /// exist purely so a *host* can turn frames into milliseconds without
+    /// stopping the producer to read the decoder.
+    published_sample_rate: std.atomic.Value(u32) = .init(0),
+    published_frame_count: std.atomic.Value(u64) = .init(0),
 
     pub fn deinit(self: *Player) void {
         if (self.sources) |*sources| sources.deinit();
@@ -33,6 +58,53 @@ pub const Player = struct {
     pub fn loadSource(self: *Player, source: source_session.SourceSession) !void {
         if (self.sources != null) return error.PlayerSourceAlreadyLoaded;
         self.sources = source_session.SourceQueue.init(source);
+        self.sources.?.rebaseSerials(self.serial_counter);
+        self.resetTimeline();
+        self.publishSourceInfo();
+    }
+
+    /// Replaces the whole SourceQueue and retires the prepared audio that
+    /// belonged to it. Bumping the epoch is what makes this safe without any
+    /// queue surgery: blocks already handed to a callback under the old epoch
+    /// are discarded there rather than being chased down and removed.
+    pub fn replaceSource(self: *Player, source: source_session.SourceSession) void {
+        self.releaseSources();
+        self.sources = source_session.SourceQueue.init(source);
+        self.sources.?.rebaseSerials(self.serial_counter);
+        self.resetTimeline();
+        self.publishSourceInfo();
+        _ = self.epoch.fetchAdd(1, .acq_rel);
+    }
+
+    /// Drops every decoder without touching the playback queue above it. This
+    /// is what `stop` means: the transport stops and its sources are released,
+    /// while the entries and cursor the user assembled survive.
+    pub fn releaseSources(self: *Player) void {
+        if (self.sources) |*sources| {
+            self.serial_counter = sources.entry_serial_counter;
+            sources.deinit();
+        }
+        self.sources = null;
+        self.publishSourceInfo();
+    }
+
+    /// Republishes the loaded source's timeline shape. Called from the lane
+    /// that owns `sources`, never from the render callback.
+    pub fn publishSourceInfo(self: *Player) void {
+        const rate: u32 = if (self.format()) |value| value.sample_rate else 0;
+        self.published_sample_rate.store(rate, .release);
+        self.published_frame_count.store(self.frameCount() orelse 0, .release);
+    }
+
+    /// Frames in the currently loaded source, when its decoder knows.
+    pub fn frameCount(self: *const Player) ?u64 {
+        if (self.sources) |*sources| return sources.current.decoder.frame_count;
+        return null;
+    }
+
+    fn resetTimeline(self: *Player) void {
+        self.position_frames.store(0, .release);
+        self.epoch_base_frames.store(0, .release);
     }
 
     pub fn primeNextSource(self: *Player, source: source_session.SourceSession) !void {
@@ -40,6 +112,9 @@ pub const Player = struct {
         return error.PlayerHasNoSource;
     }
 
+    /// Single-Zone convenience that primes straight into one pool. Kept for
+    /// tests and benchmarks only: the runtime path decodes once and fans out
+    /// into independently owned Zone pools via `decodeProcessAndFanout`.
     pub fn prime(
         self: *Player,
         comptime queue_capacity: usize,
@@ -51,7 +126,7 @@ pub const Player = struct {
                 queue_capacity,
                 pipe,
                 pool,
-                self.generation.load(.acquire),
+                self.epoch.load(.acquire),
             );
         }
         return error.PlayerHasNoSource;
@@ -88,6 +163,27 @@ pub const Player = struct {
         player_processor: ?processing.Processor,
         sinks: []fanout.ZoneSink(capacity),
     ) !FanoutResult {
+        return self.decodeProcessAndFanoutUnderEpoch(
+            capacity,
+            scratch,
+            player_processor,
+            sinks,
+            self.epoch.load(.acquire),
+        );
+    }
+
+    /// Same fanout, under an epoch the caller has already published into every
+    /// Zone's own atomic. The engine loads the epoch once, publishes it, and
+    /// submits under it, so a Zone can never hold blocks stamped with an epoch
+    /// its callback has not been told about.
+    pub fn decodeProcessAndFanoutUnderEpoch(
+        self: *Player,
+        comptime capacity: usize,
+        scratch: []f32,
+        player_processor: ?processing.Processor,
+        sinks: []fanout.ZoneSink(capacity),
+        epoch: u32,
+    ) !FanoutResult {
         const format_value = self.format() orelse return error.PlayerHasNoSource;
         const frames = try self.decodeFrames(scratch);
         const samples = scratch[0 .. frames * format_value.channels];
@@ -103,9 +199,16 @@ pub const Player = struct {
                     sinks,
                     samples,
                     @intCast(frames),
-                    self.generation.load(.acquire),
+                    epoch,
+                    self.entrySerial(),
                 ),
         };
+    }
+
+    /// Queue entry whose PCM the producer is currently emitting. Zero when no
+    /// source is loaded. Never compared by the render callback.
+    pub fn entrySerial(self: *const Player) u32 {
+        return if (self.sources) |*sources| sources.current_entry_serial else 0;
     }
 
     pub fn finishedDecoding(self: *const Player) bool {
@@ -113,39 +216,56 @@ pub const Player = struct {
     }
 
     pub fn play(self: *Player) void {
+        // Unsilence before publishing the state so the callback never observes
+        // "playing" while still emitting silence.
+        self.silenced.store(false, .release);
         self.state.store(.playing, .release);
     }
 
+    /// Takes effect inside the very next render callback: prepared blocks stay
+    /// queued, position stops advancing, and no underrun is recorded.
     pub fn pause(self: *Player) void {
+        self.silenced.store(true, .release);
         self.state.store(.paused, .release);
     }
 
     pub fn stop(self: *Player) void {
+        self.silenced.store(true, .release);
         self.state.store(.stopped, .release);
         self.position_frames.store(0, .release);
-        _ = self.generation.fetchAdd(1, .acq_rel);
+        self.epoch_base_frames.store(0, .release);
+        _ = self.epoch.fetchAdd(1, .acq_rel);
     }
 
-    pub fn seek(self: *Player, frame: u64) !u64 {
+    pub fn seek(self: *Player, frame: u64) !u32 {
         if (self.sources) |*sources| try sources.seek(frame);
         self.position_frames.store(frame, .release);
-        return self.generation.fetchAdd(1, .acq_rel) +% 1;
+        self.epoch_base_frames.store(frame, .release);
+        return self.epoch.fetchAdd(1, .acq_rel) +% 1;
+    }
+
+    /// Retires prepared audio without moving the source. Used when the clock
+    /// Zone is replaced: the promoted Zone's frame counter starts from zero, so
+    /// the timeline has to be rebased onto the position already reported.
+    pub fn stampEpoch(self: *Player) u32 {
+        self.epoch_base_frames.store(self.position_frames.load(.acquire), .release);
+        return self.epoch.fetchAdd(1, .acq_rel) +% 1;
     }
 
     pub fn snapshot(self: *const Player) Snapshot {
         return .{
             .state = self.state.load(.acquire),
-            .generation = self.generation.load(.acquire),
+            .epoch = self.epoch.load(.acquire),
             .position_frames = self.position_frames.load(.acquire),
         };
     }
 };
 
-test "seek advances generation instead of editing queues" {
+test "seek advances the transport epoch instead of editing queues" {
     var player: Player = .{};
-    const generation = try player.seek(48_000);
+    const epoch = try player.seek(48_000);
     const current = player.snapshot();
-    try std.testing.expectEqual(generation, current.generation);
+    try std.testing.expectEqual(epoch, current.epoch);
     try std.testing.expectEqual(@as(u64, 48_000), current.position_frames);
 }
 
@@ -234,13 +354,38 @@ test "Player decodes once into independently owned Zone pipelines" {
     try std.testing.expectEqualSlices(f32, &.{ 0.125, 0.25 }, &first_output);
     try std.testing.expectEqualSlices(f32, &.{ 0.0625, 0.125 }, &second_output);
 
-    const seek_generation = try player.seek(1);
+    const seek_epoch = try player.seek(1);
     try std.testing.expectEqual(@as(usize, 1), test_decoder.position);
     const after_seek = try player.decodeAndFanout(1, &scratch, &sinks);
     try std.testing.expectEqual(@as(usize, 2), after_seek.frames);
     try std.testing.expectEqual(
         @as(usize, 2),
-        first_pipe.render(&first_pool, 1, seek_generation, &first_output),
+        first_pipe.render(&first_pool, 1, seek_epoch, &first_output),
     );
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.75 }, &first_output);
+}
+
+test "pausing silences output without discarding prepared audio" {
+    var player: Player = .{};
+    try std.testing.expect(player.silenced.load(.acquire));
+
+    player.play();
+    try std.testing.expect(!player.silenced.load(.acquire));
+    const playing_epoch = player.snapshot().epoch;
+
+    player.pause();
+    try std.testing.expect(player.silenced.load(.acquire));
+    try std.testing.expectEqual(TransportState.paused, player.snapshot().state);
+    // Pause must not invalidate queued blocks: resuming continues where the
+    // callback left off, so the epoch is unchanged.
+    try std.testing.expectEqual(playing_epoch, player.snapshot().epoch);
+
+    player.play();
+    try std.testing.expect(!player.silenced.load(.acquire));
+    try std.testing.expectEqual(playing_epoch, player.snapshot().epoch);
+
+    // Stop is a discontinuity: it silences output *and* retires the epoch.
+    player.stop();
+    try std.testing.expect(player.silenced.load(.acquire));
+    try std.testing.expect(player.snapshot().epoch != playing_epoch);
 }

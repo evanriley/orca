@@ -151,6 +151,7 @@ test "MusicBrainz adapter caches parsed candidates and tolerates offline refresh
     };
     var library = try database.LibraryDatabase.open(
         std.testing.allocator,
+        std.testing.io,
         "file:orca-musicbrainz?mode=memory&cache=shared",
     );
     defer library.close();

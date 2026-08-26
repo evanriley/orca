@@ -25,6 +25,12 @@ pub fn build(b: *std.Build) void {
         },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
+    // Vendored minimp3 behind a narrow shim. Header-only and public domain,
+    // so this is a source addition on every target and not a system linkage.
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/mp3_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),
@@ -107,39 +113,21 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_c_abi_smoke.step);
 
     if (target.result.os.tag == .linux) {
+        // The GTK4 frontend is Zig and consumes liborca's Zig-facing API
+        // directly. GTK itself is bound with hand-written `extern fn`
+        // declarations in `apps/linux/gtk.zig`, so no C include paths are
+        // needed here — only the linkage pkg-config resolves.
         const linux_app_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/main.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         });
-        linux_app_module.addCSourceFile(.{
-            .file = b.path("apps/linux/main.c"),
-            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
-        });
-        linux_app_module.addCSourceFile(.{
-            .file = b.path("apps/linux/mpris.c"),
-            .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
-        });
-        linux_app_module.addIncludePath(b.path("liborca"));
-        for ([_][]const u8{
-            "/usr/include/gtk-4.0",
-            "/usr/include/pango-1.0",
-            "/usr/include/fribidi",
-            "/usr/include/harfbuzz",
-            "/usr/include/gdk-pixbuf-2.0",
-            "/usr/include/glycin-2",
-            "/usr/include/cairo",
-            "/usr/include/freetype2",
-            "/usr/include/libpng16",
-            "/usr/include/pixman-1",
-            "/usr/include/graphene-1.0",
-            "/usr/lib/graphene-1.0/include",
-        }) |path| linux_app_module.addSystemIncludePath(b.graph.cwdRelativePath(path));
         linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
-        linux_app_module.linkLibrary(liborca);
         const linux_app = b.addExecutable(.{
             .name = "orca-gtk",
             .root_module = linux_app_module,

@@ -1,42 +1,219 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const metadata = @import("../metadata/model.zig");
+const quick_hash = @import("../storage/quick_hash.zig");
 
+/// The one logical write lane per Library.
+///
+/// A scan worker holds this across a bounded 256-row transaction while UI
+/// threads read, so waiting must park rather than spin. `std.Thread.Mutex` does
+/// not exist in this toolchain; `std.Io.Mutex` does, and it futex-waits, so the
+/// lane carries the `io` its Library was opened with.
 pub const WriteLane = struct {
-    lock: std.atomic.Mutex = .unlocked,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
 
+    /// Uncancelable on purpose: a half-applied write transaction is not a state
+    /// this lane is allowed to leave behind.
     pub fn acquire(self: *WriteLane) void {
-        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+        self.mutex.lockUncancelable(self.io);
     }
 
     pub fn release(self: *WriteLane) void {
-        self.lock.unlock();
+        self.mutex.unlock(self.io);
     }
 };
 
+/// The projection's input. A Track is a position on a Release, so this is
+/// written by `library/projection.zig` after resolving artists, releases and
+/// recordings — never by the scanner, which only observes files.
 pub const TrackInput = struct {
+    recording_id: ?i64 = null,
+    release_id: ?i64 = null,
     title: []const u8,
+    artist: []const u8 = "",
     album: []const u8 = "",
     album_artist: []const u8 = "",
     duration_ms: ?i64 = null,
     track_number: ?i64 = null,
     disc_number: ?i64 = null,
+    /// Denormalized cache of the encoding playback should reach for, so
+    /// starting a Track is one indexed lookup instead of a three-way join.
+    preferred_file_id: ?i64 = null,
 };
 
-pub const ObservedFileInput = struct {
-    path: []const u8,
-    inode: i64,
+/// The projection's artist input. Identity is `key` — the normalized name —
+/// unless a MusicBrainz artist id is present, which outranks it.
+pub const ArtistUpsert = struct {
+    key: []const u8,
+    name: []const u8,
+    musicbrainz_artist_id: ?[]const u8 = null,
+};
+
+/// The projection's release input, keyed by the composite `release_key` the
+/// projection derives from album, album artist and the strongest available
+/// release identifier.
+pub const ReleaseUpsert = struct {
+    release_key: []const u8,
+    title: []const u8,
+    album_artist: []const u8 = "",
+    release_date: ?[]const u8 = null,
+    is_compilation: bool = false,
+    disc_count: ?i64 = null,
+    musicbrainz_release_id: ?[]const u8 = null,
+};
+
+/// A performance, distinct from the Track position that presents it and from
+/// the files that encode it.
+pub const RecordingInput = struct {
+    title: []const u8,
+    duration_ms: ?i64 = null,
+};
+
+pub const VolumeInput = struct {
+    stable_key: []const u8,
+    label: []const u8 = "",
+};
+
+pub const LibraryRoot = struct {
+    id: i64,
+    volume_id: i64,
+    path: []u8,
+    enabled: bool,
+
+    pub fn deinit(self: LibraryRoot, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
+};
+
+pub const LibraryRootPage = struct {
+    allocator: std.mem.Allocator,
+    items: []LibraryRoot,
+
+    pub fn deinit(self: LibraryRootPage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
+pub const ScanRunState = enum {
+    running,
+    completed,
+    cancelled,
+    failed,
+
+    pub fn text(self: ScanRunState) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn parse(value: []const u8) ?ScanRunState {
+        return std.meta.stringToEnum(ScanRunState, value);
+    }
+};
+
+pub const ScanRun = struct {
+    id: i64,
+    root_id: i64,
+    /// Monotonic per root. A location not stamped with the generation of a
+    /// completed run is a sweep candidate, never a deletion candidate.
+    generation: i64,
+};
+
+pub const ScanCounters = struct {
+    files_seen: u64 = 0,
+    changed: u64 = 0,
+    unchanged: u64 = 0,
+    unsupported: u64 = 0,
+    errors: u64 = 0,
+};
+
+pub const FileUpsert = struct {
+    audio_format: u8 = 0,
+    codec: []const u8 = "",
+    size_bytes: i64 = 0,
+    sample_rate: ?i64 = null,
+    bit_depth: ?i64 = null,
+    channels: ?i64 = null,
+    duration_ms: ?i64 = null,
+    quick_hash: ?[]const u8 = null,
+    audio_hash: ?[]const u8 = null,
+    content_hash: ?[]const u8 = null,
+};
+
+pub const LocationState = enum {
+    present,
+    missing,
+    unverified,
+
+    pub fn text(self: LocationState) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn parse(value: []const u8) ?LocationState {
+        return std.meta.stringToEnum(LocationState, value);
+    }
+};
+
+pub const LocationUpsert = struct {
+    file_id: i64,
+    volume_id: i64,
+    root_id: ?i64 = null,
+    uri: []const u8,
+    native_device: ?i64 = null,
+    native_inode: ?i64 = null,
+    size_bytes: i64 = 0,
+    modified_ns: i64 = 0,
+    state: LocationState = .present,
+    last_seen_generation: i64 = 0,
+};
+
+pub const StorageIdentityKey = struct {
+    volume_id: i64,
+    native_inode: i64,
     size_bytes: i64,
     modified_ns: i64,
+};
+
+/// Everything playback needs to open a Track's bytes without a second query.
+pub const ResolvedLocation = struct {
+    allocator: std.mem.Allocator,
+    file_id: i64,
+    volume_stable_key: []u8,
+    uri: []u8,
     audio_format: u8,
-    title: ?[]const u8 = null,
-    artist: ?[]const u8 = null,
-    album: ?[]const u8 = null,
-    track_number: ?i64 = null,
+
+    pub fn deinit(self: ResolvedLocation) void {
+        self.allocator.free(self.volume_stable_key);
+        self.allocator.free(self.uri);
+    }
+};
+
+/// Observed tags as the readers produce them, addressed by file identity.
+///
+/// The tag set is `metadata.ObservedTags` verbatim: anything a reader can
+/// report is storable, because the previous schema silently dropped every
+/// field it had no column for — including the MusicBrainz release id, which is
+/// the strongest key the projection has for grouping files into a Release.
+pub const ObservedTagsInput = struct {
+    file_id: i64,
+    values: metadata.ObservedTags,
+};
+
+/// Stored observed tags plus the arena their text lives in, mirroring
+/// `library.tag_reader.Tags` so a round trip costs the caller one `deinit`.
+pub const StoredObservedTags = struct {
+    arena: *std.heap.ArenaAllocator,
+    values: metadata.ObservedTags,
+
+    pub fn deinit(self: StoredObservedTags) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
 };
 
 pub const OrcaMetadataInput = struct {
-    path: []const u8,
+    file_id: i64,
     field: metadata.Field,
     value: []const u8,
     provenance: metadata.Provenance,
@@ -64,31 +241,39 @@ pub const MutationState = enum {
     needs_reconciliation,
 };
 
+/// A journal record keeps its paths — a filesystem operation's subject
+/// genuinely is a path, which is not an identity violation — and carries
+/// `file_id` so the journal can restore musical identity after a move.
 pub const MutationOperationInput = struct {
     plan_id: u64,
     group_id: u64,
     action_index: u32,
     kind: MutationKind,
+    file_id: ?i64 = null,
     source_path: []const u8,
     destination_path: ?[]const u8 = null,
     stage_path: ?[]const u8 = null,
     backup_path: ?[]const u8 = null,
     expected_size: u64,
     expected_modified_ns: i64,
+    expected_quick_hash: quick_hash.Digest,
 };
 
 pub const MutationOperation = struct {
     allocator: std.mem.Allocator,
     id: i64,
     kind: MutationKind,
+    file_id: ?i64,
     source_path: []u8,
     destination_path: ?[]u8,
     stage_path: ?[]u8,
     backup_path: ?[]u8,
     expected_size: u64,
     expected_modified_ns: i64,
+    expected_quick_hash: ?quick_hash.Digest,
     committed_size: ?u64,
     committed_modified_ns: ?i64,
+    committed_quick_hash: ?quick_hash.Digest,
     state: MutationState,
 
     pub fn deinit(self: MutationOperation) void {
@@ -99,14 +284,16 @@ pub const MutationOperation = struct {
     }
 };
 
+/// Analysis is cached against `files.id` and the file's quick hash, not its
+/// size and modification time: writing a tag changes both of those and must not
+/// invalidate a loudness measurement of audio that did not change.
 pub const AnalysisCacheKey = struct {
-    path: []const u8,
+    file_id: i64,
     kind: u8,
     algorithm_id: []const u8,
     algorithm_version: u32,
     parameter_hash: [32]u8,
-    source_size: u64,
-    source_modified_ns: i64,
+    source_identity: quick_hash.Digest,
 };
 
 pub const HealthIssueKind = enum(u8) {
@@ -132,6 +319,10 @@ pub const HealthIssueInput = struct {
 };
 
 pub const HealthIssue = struct {
+    file_id: i64,
+    /// The location a host should show for this issue, empty when the file has
+    /// no location on any known volume. Presentation only — identity is
+    /// `file_id`.
     path: []u8,
     kind: HealthIssueKind,
     severity: HealthSeverity,
@@ -182,7 +373,7 @@ pub const ScrobbleQueueEntry = struct {
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
 pub const IdentificationProposalInput = struct {
-    path: []const u8,
+    file_id: i64,
     provider: []const u8,
     provider_id: []const u8,
     confidence: f32,
@@ -207,11 +398,19 @@ pub const IdentificationProposal = struct {
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
+    artist: []u8,
     album: []u8,
     album_artist: []u8,
+    duration_ms: ?i64,
+    track_number: ?i64,
+    disc_number: ?i64,
+    /// Whether the Track resolves to a file with a location, so a host can grey
+    /// out a row without asking a second question per Track.
+    has_playable_file: bool,
 
     pub fn deinit(self: TrackSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
+        allocator.free(self.artist);
         allocator.free(self.album);
         allocator.free(self.album_artist);
     }
@@ -231,29 +430,70 @@ pub const TrackRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
-    pub fn insertBatch(self: *TrackRepository, tracks: []const TrackInput) !void {
+    /// Upsert by position, because a Track *is* a position on a Release: the
+    /// same `(release_id, disc, track)` re-projected must update the row it
+    /// already has rather than duplicate it. Rows without a Release or a track
+    /// number have no position to collide on and always insert, which is what
+    /// `tracks_position` (`COALESCE(track_number, -id)`) encodes.
+    pub fn upsertTracks(self: *TrackRepository, tracks: []const TrackInput) !void {
+        if (tracks.len == 0) return;
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
-
-        var statement = try self.db.prepare(
-            \\INSERT INTO tracks(
-            \\    title, album, album_artist, duration_ms, track_number, disc_number
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6);
-        );
-        defer statement.deinit();
-        for (tracks) |track| {
-            try statement.bindText(1, track.title);
-            try statement.bindText(2, track.album);
-            try statement.bindText(3, track.album_artist);
-            try statement.bindOptionalInt64(4, track.duration_ms);
-            try statement.bindOptionalInt64(5, track.track_number);
-            try statement.bindOptionalInt64(6, track.disc_number);
-            if (try statement.step() != .done) return error.SqlFailed;
-            try statement.reset();
-        }
+        try self.upsertTracksLocked(tracks);
         try self.db.exec("COMMIT;");
+    }
+
+    /// Same as `upsertTracks` for a caller that already holds the write lane
+    /// and an open transaction. The projection resolves artists, releases,
+    /// recordings and tracks for one folder as a single bounded commit.
+    pub fn upsertTracksLocked(self: *TrackRepository, tracks: []const TrackInput) !void {
+        if (tracks.len == 0) return;
+        var update = try self.db.prepare(
+            \\UPDATE tracks SET
+            \\    recording_id=?1, title=?2, artist=?3, album=?4, album_artist=?5,
+            \\    duration_ms=?6, preferred_file_id=?7
+            \\WHERE release_id=?8 AND COALESCE(disc_number, 1)=?9 AND track_number=?10;
+        );
+        defer update.deinit();
+        var insert = try self.db.prepare(
+            \\INSERT INTO tracks(
+            \\    recording_id, release_id, title, artist, album, album_artist,
+            \\    duration_ms, track_number, disc_number, preferred_file_id
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+        );
+        defer insert.deinit();
+        for (tracks) |track| {
+            if (track.release_id != null and track.track_number != null) {
+                try update.bindOptionalInt64(1, track.recording_id);
+                try update.bindText(2, track.title);
+                try update.bindText(3, track.artist);
+                try update.bindText(4, track.album);
+                try update.bindText(5, track.album_artist);
+                try update.bindOptionalInt64(6, track.duration_ms);
+                try update.bindOptionalInt64(7, track.preferred_file_id);
+                try update.bindOptionalInt64(8, track.release_id);
+                try update.bindInt64(9, track.disc_number orelse 1);
+                try update.bindOptionalInt64(10, track.track_number);
+                if (try update.step() != .done) return error.SqlFailed;
+                const updated = self.db.changes() != 0;
+                try update.reset();
+                if (updated) continue;
+            }
+            try insert.bindOptionalInt64(1, track.recording_id);
+            try insert.bindOptionalInt64(2, track.release_id);
+            try insert.bindText(3, track.title);
+            try insert.bindText(4, track.artist);
+            try insert.bindText(5, track.album);
+            try insert.bindText(6, track.album_artist);
+            try insert.bindOptionalInt64(7, track.duration_ms);
+            try insert.bindOptionalInt64(8, track.track_number);
+            try insert.bindOptionalInt64(9, track.disc_number);
+            try insert.bindOptionalInt64(10, track.preferred_file_id);
+            if (try insert.step() != .done) return error.SqlFailed;
+            try insert.reset();
+        }
     }
 
     pub fn setRatings(self: *TrackRepository, ids: []const i64, rating: u8) !void {
@@ -280,8 +520,7 @@ pub const TrackRepository = struct {
         limit: u32,
         offset: u32,
     ) !TrackPage {
-        var statement = try self.db.prepare(
-            \\SELECT tracks.id, tracks.title, tracks.album, tracks.album_artist
+        var statement = try self.db.prepare(track_columns ++
             \\FROM track_search
             \\JOIN tracks ON tracks.id = track_search.rowid
             \\WHERE track_search MATCH ?1
@@ -301,14 +540,76 @@ pub const TrackRepository = struct {
         limit: u32,
         offset: u32,
     ) !TrackPage {
-        var statement = try self.db.prepare(
-            \\SELECT id, title, album, album_artist FROM tracks
-            \\ORDER BY id LIMIT ?1 OFFSET ?2;
+        var statement = try self.db.prepare(track_columns ++
+            \\FROM tracks ORDER BY tracks.id LIMIT ?1 OFFSET ?2;
         );
         defer statement.deinit();
         try statement.bindInt64(1, limit);
         try statement.bindInt64(2, offset);
         return collectTrackPage(allocator, statement);
+    }
+
+    /// One Track by id, for the "what is playing right now" question. Bounded
+    /// by construction: a single row, copied out, with no statement escaping.
+    pub fn byId(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?TrackSummary {
+        var statement = try self.db.prepare(track_columns ++
+            \\FROM tracks WHERE tracks.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        var page_result = try collectTrackPage(allocator, statement);
+        if (page_result.items.len == 0) {
+            page_result.deinit();
+            return null;
+        }
+        const first = page_result.items[0];
+        for (page_result.items[1..]) |extra| extra.deinit(allocator);
+        allocator.free(page_result.items);
+        return first;
+    }
+
+    /// Where a Track's bytes actually live. This is the call that turns "a row
+    /// in a list" into "audio a Player can open", so it answers with the
+    /// volume's stable key rather than assuming a local path, and prefers a
+    /// location that a scan has confirmed.
+    pub fn playableLocation(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?ResolvedLocation {
+        var statement = try self.db.prepare(
+            \\SELECT locations.file_id, volumes.stable_key, locations.uri, files.audio_format
+            \\FROM tracks
+            \\JOIN files ON files.id = COALESCE(
+            \\    tracks.preferred_file_id,
+            \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1)
+            \\)
+            \\JOIN locations ON locations.file_id = files.id
+            \\JOIN volumes ON volumes.id = locations.volume_id
+            \\WHERE tracks.id = ?1
+            \\ORDER BY CASE locations.state
+            \\    WHEN 'present' THEN 0 WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
+            \\LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return null;
+        const stable_key = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(stable_key);
+        const uri = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(uri);
+        return .{
+            .allocator = allocator,
+            .file_id = statement.columnInt64(0),
+            .volume_stable_key = stable_key,
+            .uri = uri,
+            .audio_format = std.math.cast(u8, statement.columnInt64(3)) orelse
+                return error.InvalidStoredAudioFormat,
+        };
     }
 
     pub fn count(self: *const TrackRepository) !u64 {
@@ -327,6 +628,17 @@ pub const TrackRepository = struct {
     }
 };
 
+const track_columns =
+    \\SELECT tracks.id, tracks.title, tracks.artist, tracks.album, tracks.album_artist,
+    \\       tracks.duration_ms, tracks.track_number, tracks.disc_number,
+    \\       EXISTS(
+    \\           SELECT 1 FROM locations
+    \\           WHERE locations.file_id = tracks.preferred_file_id
+    \\             AND locations.state <> 'missing'
+    \\       )
+    \\
+;
+
 fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !TrackPage {
     var results: std.ArrayList(TrackSummary) = .empty;
     errdefer {
@@ -336,123 +648,1054 @@ fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !
     while (try statement.step() == .row) {
         const title = try allocator.dupe(u8, statement.columnText(1));
         errdefer allocator.free(title);
-        const album = try allocator.dupe(u8, statement.columnText(2));
+        const artist = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(artist);
+        const album = try allocator.dupe(u8, statement.columnText(3));
         errdefer allocator.free(album);
-        const album_artist = try allocator.dupe(u8, statement.columnText(3));
+        const album_artist = try allocator.dupe(u8, statement.columnText(4));
         errdefer allocator.free(album_artist);
         try results.append(allocator, .{
             .id = statement.columnInt64(0),
             .title = title,
+            .artist = artist,
             .album = album,
             .album_artist = album_artist,
+            .duration_ms = optionalInt64(statement, 5),
+            .track_number = optionalInt64(statement, 6),
+            .disc_number = optionalInt64(statement, 7),
+            .has_playable_file = statement.columnInt64(8) != 0,
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
 }
 
-pub const ObservedFileRepository = struct {
+pub const VolumeRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
-    pub fn isUnchanged(self: *const ObservedFileRepository, input: ObservedFileInput) !bool {
-        var statement = try self.db.prepare(
-            \\SELECT EXISTS(
-            \\    SELECT 1 FROM observed_files
-            \\    WHERE path=?1 AND inode=?2 AND size_bytes=?3 AND modified_ns=?4
-            \\);
-        );
-        defer statement.deinit();
-        try bindIdentity(statement, input);
-        if (try statement.step() != .row) return error.SqlFailed;
-        return statement.columnInt64(0) != 0;
+    /// Volumes are identified by a key the platform adapter resolved, never by
+    /// `st_dev`, which is not stable across reboots or remounts.
+    pub fn ensure(self: *VolumeRepository, input: VolumeInput) !i64 {
+        if (input.stable_key.len == 0) return error.InvalidVolumeKey;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.ensureLocked(input);
     }
 
-    pub fn upsertBatch(self: *ObservedFileRepository, files: []const ObservedFileInput) !void {
-        if (files.len == 0) return;
+    /// Same as `ensure` for a caller that already holds the write lane.
+    pub fn ensureLocked(self: *VolumeRepository, input: VolumeInput) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO volumes(stable_key, label, last_seen_at)
+            \\VALUES (?1, ?2, unixepoch())
+            \\ON CONFLICT(stable_key) DO UPDATE SET
+            \\    label=CASE WHEN excluded.label='' THEN volumes.label ELSE excluded.label END,
+            \\    last_seen_at=excluded.last_seen_at
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.stable_key);
+        try statement.bindText(2, input.label);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn find(self: *const VolumeRepository, stable_key: []const u8) !?i64 {
+        var statement = try self.db.prepare("SELECT id FROM volumes WHERE stable_key=?1;");
+        defer statement.deinit();
+        try statement.bindText(1, stable_key);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    pub fn stableKey(
+        self: *const VolumeRepository,
+        allocator: std.mem.Allocator,
+        volume_id: i64,
+    ) !?[]u8 {
+        var statement = try self.db.prepare("SELECT stable_key FROM volumes WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        if (try statement.step() != .row) return null;
+        return try allocator.dupe(u8, statement.columnText(0));
+    }
+};
+
+/// Artists as the projection resolves them.
+///
+/// Identity is the normalized name (`artists.key`), which is what makes
+/// `Sigur Rós`, `sigur rós` and `Sigur  Rós` one artist. A MusicBrainz artist
+/// id, when the files carry one, outranks that: it recognizes the same artist
+/// under a differently spelled name, and it is looked up first.
+pub const ArtistRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn ensure(self: *ArtistRepository, input: ArtistUpsert) !?i64 {
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
-        var statement = try self.db.prepare(
-            \\INSERT INTO observed_files(
-            \\    path, inode, size_bytes, modified_ns, audio_format, observed_at
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
-            \\ON CONFLICT(path) DO UPDATE SET
-            \\    inode=excluded.inode,
-            \\    size_bytes=excluded.size_bytes,
-            \\    modified_ns=excluded.modified_ns,
-            \\    audio_format=excluded.audio_format,
-            \\    observed_at=excluded.observed_at;
-        );
-        defer statement.deinit();
-        var metadata_statement = try self.db.prepare(
-            \\INSERT INTO observed_file_metadata(path, title, artist, album, track_number)
-            \\VALUES (?1, ?2, ?3, ?4, ?5)
-            \\ON CONFLICT(path) DO UPDATE SET
-            \\    title=excluded.title,
-            \\    artist=excluded.artist,
-            \\    album=excluded.album,
-            \\    track_number=excluded.track_number;
-        );
-        defer metadata_statement.deinit();
-        for (files) |file| {
-            try bindIdentity(statement, file);
-            try statement.bindInt64(5, file.audio_format);
-            if (try statement.step() != .done) return error.SqlFailed;
-            try statement.reset();
-            try metadata_statement.bindText(1, file.path);
-            try metadata_statement.bindOptionalText(2, file.title);
-            try metadata_statement.bindOptionalText(3, file.artist);
-            try metadata_statement.bindOptionalText(4, file.album);
-            try metadata_statement.bindOptionalInt64(5, file.track_number);
-            if (try metadata_statement.step() != .done) return error.SqlFailed;
-            try metadata_statement.reset();
-        }
+        const id = try self.ensureLocked(input);
         try self.db.exec("COMMIT;");
+        return id;
     }
 
-    pub fn count(self: *const ObservedFileRepository) !u64 {
-        var statement = try self.db.prepare("SELECT count(*) FROM observed_files;");
+    /// Null for a nameless artist: an empty name is an absent artist, not an
+    /// artist whose name happens to be empty, and collapsing every untagged
+    /// file onto one shared row would be worse than having no row.
+    pub fn ensureLocked(self: *ArtistRepository, input: ArtistUpsert) !?i64 {
+        if (input.key.len == 0) return null;
+        if (input.musicbrainz_artist_id) |mbid| if (mbid.len != 0) {
+            var lookup = try self.db.prepare(
+                "SELECT id FROM artists WHERE musicbrainz_artist_id=?1 LIMIT 1;",
+            );
+            defer lookup.deinit();
+            try lookup.bindText(1, mbid);
+            if (try lookup.step() == .row) return lookup.columnInt64(0);
+        };
+        var statement = try self.db.prepare(
+            \\INSERT INTO artists(name, key, musicbrainz_artist_id) VALUES (?1, ?2, ?3)
+            \\ON CONFLICT(key) DO UPDATE SET
+            \\    name = CASE WHEN excluded.name = '' THEN artists.name ELSE excluded.name END,
+            \\    musicbrainz_artist_id =
+            \\        COALESCE(artists.musicbrainz_artist_id, excluded.musicbrainz_artist_id)
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.name);
+        try statement.bindText(2, input.key);
+        try statement.bindOptionalText(3, presentText(input.musicbrainz_artist_id));
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn count(self: *const ArtistRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM artists;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+/// Releases as the projection resolves them, keyed by `release_key`.
+pub const ReleaseRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn upsert(self: *ReleaseRepository, input: ReleaseUpsert) !i64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const id = try self.upsertLocked(input);
+        try self.db.exec("COMMIT;");
+        return id;
+    }
+
+    /// `disc_count` only ever grows: one folder of a two-disc set projected on
+    /// its own must not shrink a release the other folder already widened.
+    pub fn upsertLocked(self: *ReleaseRepository, input: ReleaseUpsert) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO releases(
+            \\    title, album_artist, release_date, is_compilation,
+            \\    disc_count, release_key, musicbrainz_release_id
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            \\ON CONFLICT(release_key) DO UPDATE SET
+            \\    title=excluded.title,
+            \\    album_artist=excluded.album_artist,
+            \\    release_date=COALESCE(excluded.release_date, releases.release_date),
+            \\    is_compilation=excluded.is_compilation,
+            \\    disc_count=max(
+            \\        COALESCE(excluded.disc_count, 1),
+            \\        COALESCE(releases.disc_count, 1)
+            \\    ),
+            \\    musicbrainz_release_id=COALESCE(
+            \\        excluded.musicbrainz_release_id,
+            \\        releases.musicbrainz_release_id
+            \\    )
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.title);
+        try statement.bindText(2, input.album_artist);
+        try statement.bindOptionalText(3, presentText(input.release_date));
+        try statement.bindInt64(4, @intFromBool(input.is_compilation));
+        try statement.bindOptionalInt64(5, input.disc_count);
+        try statement.bindText(6, input.release_key);
+        try statement.bindOptionalText(7, presentText(input.musicbrainz_release_id));
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn count(self: *const ReleaseRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM releases;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+/// Recordings — performances — which files encode and tracks position.
+///
+/// The schema carries no key column for a recording, so the projection keeps
+/// the mapping itself and reuses whatever `files.recording_id` already says.
+/// This repository therefore inserts and updates; it never resolves.
+pub const RecordingRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn insertLocked(self: *RecordingRepository, input: RecordingInput) !i64 {
+        var statement = try self.db.prepare(
+            "INSERT INTO recordings(title, duration_ms) VALUES (?1, ?2) RETURNING id;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.title);
+        try statement.bindOptionalInt64(2, input.duration_ms);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn updateLocked(self: *RecordingRepository, id: i64, input: RecordingInput) !void {
+        var statement = try self.db.prepare(
+            "UPDATE recordings SET title=?1, duration_ms=COALESCE(?2, duration_ms) WHERE id=?3;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.title);
+        try statement.bindOptionalInt64(2, input.duration_ms);
+        try statement.bindInt64(3, id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn count(self: *const RecordingRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM recordings;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+pub const LibraryRootRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn add(self: *LibraryRootRepository, volume_id: i64, path: []const u8) !i64 {
+        if (path.len == 0) return error.InvalidLibraryRoot;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.addLocked(volume_id, path);
+    }
+
+    pub fn addLocked(self: *LibraryRootRepository, volume_id: i64, path: []const u8) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO library_roots(volume_id, path, enabled) VALUES (?1, ?2, 1)
+            \\ON CONFLICT(path) DO UPDATE SET volume_id=excluded.volume_id
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn remove(self: *LibraryRootRepository, root_id: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare("DELETE FROM library_roots WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn setEnabled(self: *LibraryRootRepository, root_id: i64, enabled: bool) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare("UPDATE library_roots SET enabled=?1 WHERE id=?2;");
+        defer statement.deinit();
+        try statement.bindInt64(1, @intFromBool(enabled));
+        try statement.bindInt64(2, root_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn list(
+        self: *const LibraryRootRepository,
+        allocator: std.mem.Allocator,
+    ) !LibraryRootPage {
+        var statement = try self.db.prepare(
+            "SELECT id, volume_id, path, enabled FROM library_roots ORDER BY id;",
+        );
+        defer statement.deinit();
+        var roots: std.ArrayList(LibraryRoot) = .empty;
+        errdefer {
+            for (roots.items) |root| root.deinit(allocator);
+            roots.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const path = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(path);
+            try roots.append(allocator, .{
+                .id = statement.columnInt64(0),
+                .volume_id = statement.columnInt64(1),
+                .path = path,
+                .enabled = statement.columnInt64(3) != 0,
+            });
+        }
+        return .{ .allocator = allocator, .items = try roots.toOwnedSlice(allocator) };
+    }
+
+    /// Bounded page, for the ABI: a host never receives an unbounded list, even
+    /// of something as small as a root set.
+    pub fn page(
+        self: *const LibraryRootRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !LibraryRootPage {
+        var statement = try self.db.prepare(
+            \\SELECT id, volume_id, path, enabled FROM library_roots
+            \\ORDER BY id LIMIT ?1 OFFSET ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
+        var roots: std.ArrayList(LibraryRoot) = .empty;
+        errdefer {
+            for (roots.items) |root| root.deinit(allocator);
+            roots.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const path = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(path);
+            try roots.append(allocator, .{
+                .id = statement.columnInt64(0),
+                .volume_id = statement.columnInt64(1),
+                .path = path,
+                .enabled = statement.columnInt64(3) != 0,
+            });
+        }
+        return .{ .allocator = allocator, .items = try roots.toOwnedSlice(allocator) };
+    }
+};
+
+pub const ScanRunRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    /// Opens a run with the next generation for this root. Generations are
+    /// per-root and monotonic so a sweep can name exactly the locations this
+    /// run did not reach.
+    pub fn begin(self: *ScanRunRepository, root_id: i64) !ScanRun {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\INSERT INTO scan_runs(root_id, generation, started_at, state)
+            \\VALUES (
+            \\    ?1,
+            \\    COALESCE((SELECT max(generation) FROM scan_runs WHERE root_id=?1), 0) + 1,
+            \\    unixepoch(),
+            \\    'running'
+            \\) RETURNING id, generation;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{
+            .id = statement.columnInt64(0),
+            .root_id = root_id,
+            .generation = statement.columnInt64(1),
+        };
+    }
+
+    pub fn finish(
+        self: *ScanRunRepository,
+        run_id: i64,
+        result: ScanRunState,
+        counters: ScanCounters,
+    ) !void {
+        if (result == .running) return error.InvalidScanRunState;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE scan_runs SET state=?1, finished_at=unixepoch(),
+            \\    files_seen=?2, changed=?3, unchanged=?4, unsupported=?5, errors=?6
+            \\WHERE id=?7 AND state='running';
+        );
+        defer statement.deinit();
+        try statement.bindText(1, result.text());
+        try statement.bindInt64(2, @intCast(counters.files_seen));
+        try statement.bindInt64(3, @intCast(counters.changed));
+        try statement.bindInt64(4, @intCast(counters.unchanged));
+        try statement.bindInt64(5, @intCast(counters.unsupported));
+        try statement.bindInt64(6, @intCast(counters.errors));
+        try statement.bindInt64(7, run_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleScanRun;
+    }
+
+    pub fn cancel(self: *ScanRunRepository, run_id: i64, counters: ScanCounters) !void {
+        return self.finish(run_id, .cancelled, counters);
+    }
+
+    pub fn outcome(self: *const ScanRunRepository, run_id: i64) !ScanRunState {
+        var statement = try self.db.prepare("SELECT state FROM scan_runs WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, run_id);
+        if (try statement.step() != .row) return error.ScanRunNotFound;
+        return ScanRunState.parse(statement.columnText(0)) orelse
+            error.InvalidStoredScanRunState;
+    }
+};
+
+/// Byte facts about one encoding, and the identity tiers that re-find it.
+pub const FileRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn create(self: *FileRepository, input: FileUpsert) !i64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.createLocked(input);
+    }
+
+    pub fn createLocked(self: *FileRepository, input: FileUpsert) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO files(
+            \\    audio_format, codec, size_bytes, sample_rate, bit_depth, channels,
+            \\    duration_ms, quick_hash, audio_hash, content_hash, first_seen_at
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, unixepoch())
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try bindFile(statement, input);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn update(self: *FileRepository, file_id: i64, input: FileUpsert) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.updateLocked(file_id, input);
+    }
+
+    pub fn updateLocked(self: *FileRepository, file_id: i64, input: FileUpsert) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET audio_format=?1, codec=?2, size_bytes=?3, sample_rate=?4,
+            \\    bit_depth=?5, channels=?6, duration_ms=?7, quick_hash=?8,
+            \\    audio_hash=COALESCE(?9, audio_hash), content_hash=COALESCE(?10, content_hash)
+            \\WHERE id=?11;
+        );
+        defer statement.deinit();
+        try bindFile(statement, input);
+        try statement.bindInt64(11, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Tier 4 of the identity cascade, written by the analysis job rather than
+    /// the scanner: a hash of the audio payload alone survives Orca's own tag
+    /// writes, which change size, mtime and quick hash but not the audio.
+    pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn stampGeneration(self: *FileRepository, file_id: i64, generation: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            "UPDATE files SET last_scan_generation=?1 WHERE id=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, generation);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Tier 1: the same path on the same volume.
+    pub fn resolveByUri(
+        self: *const FileRepository,
+        volume_id: i64,
+        uri: []const u8,
+    ) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT file_id FROM locations WHERE volume_id=?1 AND uri=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, uri);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Tier 2: the same inode, size and mtime somewhere else on the volume —
+    /// a rename or a move within one filesystem.
+    pub fn resolveByIdentity(self: *const FileRepository, key: StorageIdentityKey) !?i64 {
+        var statement = try self.db.prepare(
+            \\SELECT file_id FROM locations
+            \\WHERE volume_id=?1 AND native_inode=?2 AND size_bytes=?3 AND modified_ns=?4
+            \\ORDER BY CASE state WHEN 'missing' THEN 0 ELSE 1 END, id
+            \\LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, key.volume_id);
+        try statement.bindInt64(2, key.native_inode);
+        try statement.bindInt64(3, key.size_bytes);
+        try statement.bindInt64(4, key.modified_ns);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Tier 3: the same leading and trailing bytes and length — a copy, a
+    /// cross-volume move, or a restore from backup.
+    pub fn resolveByQuickHash(self: *const FileRepository, digest: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM files WHERE quick_hash=?1 ORDER BY id LIMIT 1;",
+        );
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Sweep after a completed, uncancelled run: locations under this root that
+    /// the run did not reach become `missing`. Never a delete — an unmounted
+    /// drive must not eat a library.
+    pub fn markMissingBelowGeneration(
+        self: *FileRepository,
+        root_id: i64,
+        generation: i64,
+    ) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET state='missing', missing_since=unixepoch()
+            \\WHERE root_id=?1 AND last_seen_generation<?2 AND state<>'missing';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        try statement.bindInt64(2, generation);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
+    }
+
+    /// Attach a file to the performance it encodes. Written only by the
+    /// projection: a file is an encoding, and which performance it encodes is
+    /// a resolution decision, not a filesystem observation.
+    pub fn setRecordingLocked(
+        self: *FileRepository,
+        file_id: i64,
+        recording_id: ?i64,
+    ) !void {
+        var statement = try self.db.prepare(
+            "UPDATE files SET recording_id=?1 WHERE id=?2 AND recording_id IS NOT ?1;",
+        );
+        defer statement.deinit();
+        try statement.bindOptionalInt64(1, recording_id);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn count(self: *const FileRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM files;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+fn bindFile(statement: sqlite.Statement, input: FileUpsert) !void {
+    try statement.bindInt64(1, input.audio_format);
+    try statement.bindText(2, input.codec);
+    try statement.bindInt64(3, input.size_bytes);
+    try statement.bindOptionalInt64(4, input.sample_rate);
+    try statement.bindOptionalInt64(5, input.bit_depth);
+    try statement.bindOptionalInt64(6, input.channels);
+    try statement.bindOptionalInt64(7, input.duration_ms);
+    try bindOptionalBlob(statement, 8, input.quick_hash);
+    try bindOptionalBlob(statement, 9, input.audio_hash);
+    try bindOptionalBlob(statement, 10, input.content_hash);
+}
+
+pub const LocationRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn upsert(self: *LocationRepository, input: LocationUpsert) !i64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.upsertLocked(input);
+    }
+
+    pub fn upsertLocked(self: *LocationRepository, input: LocationUpsert) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO locations(
+            \\    file_id, volume_id, root_id, uri, native_device, native_inode,
+            \\    size_bytes, modified_ns, state, missing_since, last_seen_generation
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)
+            \\ON CONFLICT(volume_id, uri) DO UPDATE SET
+            \\    file_id=excluded.file_id,
+            \\    root_id=COALESCE(excluded.root_id, locations.root_id),
+            \\    native_device=excluded.native_device,
+            \\    native_inode=excluded.native_inode,
+            \\    size_bytes=excluded.size_bytes,
+            \\    modified_ns=excluded.modified_ns,
+            \\    state=excluded.state,
+            \\    missing_since=NULL,
+            \\    last_seen_generation=excluded.last_seen_generation
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, input.file_id);
+        try statement.bindInt64(2, input.volume_id);
+        try statement.bindOptionalInt64(3, input.root_id);
+        try statement.bindText(4, input.uri);
+        try statement.bindOptionalInt64(5, input.native_device);
+        try statement.bindOptionalInt64(6, input.native_inode);
+        try statement.bindInt64(7, input.size_bytes);
+        try statement.bindInt64(8, input.modified_ns);
+        try statement.bindText(9, input.state.text());
+        try statement.bindInt64(10, input.last_seen_generation);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    /// Move locations a migration left on the fallback volume onto the real
+    /// volume and root a scan just resolved.
+    ///
+    /// A migration cannot know what volume a path lives on — the storage may
+    /// not even be mounted — so it parks every migrated location on the
+    /// `legacy` volume in the `unverified` state. The first scan that resolves
+    /// a real volume for a root claims the ones under it. Without this the
+    /// scanner's `(volume_id, uri)` lookup misses every migrated row and
+    /// re-imports the entire library as new files, silently orphaning every
+    /// preserved lock, analysis result and health issue on the old rows.
+    ///
+    /// `UPDATE OR IGNORE` because a location may already exist at that URI on
+    /// the target volume; the live row wins and the legacy row is left for the
+    /// operator to see rather than being destroyed here.
+    pub fn claimLegacyLocations(
+        self: *LocationRepository,
+        legacy_volume_id: i64,
+        volume_id: i64,
+        root_id: i64,
+        root_path: []const u8,
+    ) !u64 {
+        if (legacy_volume_id == volume_id) return 0;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE OR IGNORE locations SET volume_id=?1, root_id=?2
+            \\WHERE volume_id=?3 AND state='unverified'
+            \\  AND (uri=?4 OR substr(uri, 1, length(?4) + 1) = ?4 || '/');
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindInt64(2, root_id);
+        try statement.bindInt64(3, legacy_volume_id);
+        try statement.bindText(4, root_path);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
+    }
+
+    /// A move within a volume: the uri changes and `files.id` does not, so
+    /// metadata, locks, analysis and health attached to the file survive.
+    pub fn move(self: *LocationRepository, location_id: i64, destination: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET uri=?1, state='present', missing_since=NULL
+            \\WHERE id=?2;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, destination);
+        try statement.bindInt64(2, location_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.LocationNotFound;
+    }
+
+    pub fn find(self: *const LocationRepository, volume_id: i64, path: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM locations WHERE volume_id=?1 AND uri=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Tier 1 of the identity cascade in one query: this path, on this volume,
+    /// with the filesystem facts a scan already recorded. A hit means no
+    /// format, tag or hash work is needed for this entry at all.
+    ///
+    /// Only a `present` location can be unchanged. An `unverified` one — every
+    /// location a migration produced — has never been confirmed by a scan and
+    /// carries whatever tags the old schema had room for, so it is re-observed
+    /// once and promoted rather than trusted on sight.
+    /// The id of the present Location this identity already describes, or null
+    /// when the entry is new or its bytes changed.
+    ///
+    /// The caller must stamp what this returns through `markSeenLocked`. A scan
+    /// that skips an unchanged file without recording that it *saw* it leaves
+    /// the Location below the run's generation, and the post-run sweep then
+    /// marks a file that is sitting right there as `missing`.
+    pub fn unchangedLocationId(
+        self: *const LocationRepository,
+        volume_id: i64,
+        path: []const u8,
+        key: StorageIdentityKey,
+    ) !?i64 {
+        var statement = try self.db.prepare(
+            \\SELECT id FROM locations
+            \\WHERE volume_id=?1 AND uri=?2 AND native_inode=?3
+            \\  AND size_bytes=?4 AND modified_ns=?5 AND state='present';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, path);
+        try statement.bindInt64(3, key.native_inode);
+        try statement.bindInt64(4, key.size_bytes);
+        try statement.bindInt64(5, key.modified_ns);
+        return switch (try statement.step()) {
+            .row => statement.columnInt64(0),
+            .done => null,
+        };
+    }
+
+    /// Record that this run reached these Locations, so the sweep does not
+    /// mistake them for absent. Caller holds the write lane.
+    pub fn markSeenLocked(
+        self: *LocationRepository,
+        ids: []const i64,
+        generation: i64,
+    ) !void {
+        if (ids.len == 0) return;
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET last_seen_generation=?2 WHERE id=?1;
+        );
+        defer statement.deinit();
+        for (ids) |id| {
+            try statement.reset();
+            try statement.bindInt64(1, id);
+            try statement.bindInt64(2, generation);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
+    }
+
+    pub fn uri(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !?[]u8 {
+        var statement = try self.db.prepare(
+            "SELECT uri FROM locations WHERE file_id=?1 ORDER BY id LIMIT 1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+        return try allocator.dupe(u8, statement.columnText(0));
+    }
+
+    pub fn stateOf(self: *const LocationRepository, location_id: i64) !LocationState {
+        var statement = try self.db.prepare("SELECT state FROM locations WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, location_id);
+        if (try statement.step() != .row) return error.LocationNotFound;
+        return LocationState.parse(statement.columnText(0)) orelse
+            error.InvalidStoredLocationState;
+    }
+
+    pub fn count(self: *const LocationRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM locations;");
         defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
 
-    pub fn title(
-        self: *const ObservedFileRepository,
-        allocator: std.mem.Allocator,
-        path: []const u8,
-    ) !?[]u8 {
+    /// Locations a scan has confirmed are where the library says they are.
+    pub fn countPresent(self: *const LocationRepository) !u64 {
         var statement = try self.db.prepare(
-            "SELECT title FROM observed_file_metadata WHERE path=?1;",
+            "SELECT count(*) FROM locations WHERE state='present';",
         );
         defer statement.deinit();
-        try statement.bindText(1, path);
-        if (try statement.step() != .row) return null;
-        return try allocator.dupe(u8, statement.columnText(0));
-    }
-
-    fn bindIdentity(statement: sqlite.Statement, input: ObservedFileInput) !void {
-        try statement.bindText(1, input.path);
-        try statement.bindInt64(2, input.inode);
-        try statement.bindInt64(3, input.size_bytes);
-        try statement.bindInt64(4, input.modified_ns);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 };
+
+/// Observed tags for one file: what the file itself says, nothing resolved.
+///
+/// Every field `metadata.ObservedTags` can carry has a column, because the
+/// previous path-keyed table stored four of them and discarded the rest at this
+/// boundary. Genres are the one multi-valued field, and they get their own
+/// ordinal-keyed child table rather than a delimiter-packed string: order and
+/// multiplicity survive a round trip exactly, and "every file tagged Ambient"
+/// stays an indexable query instead of a substring match.
+pub const ObservedTagsRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn upsert(self: *ObservedTagsRepository, input: ObservedTagsInput) !void {
+        return self.upsertBatch(&.{input});
+    }
+
+    pub fn upsertBatch(self: *ObservedTagsRepository, inputs: []const ObservedTagsInput) !void {
+        if (inputs.len == 0) return;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        try self.upsertBatchLocked(inputs);
+        try self.db.exec("COMMIT;");
+    }
+
+    /// Same as `upsertBatch` for a caller that already holds the write lane and
+    /// an open transaction — a scan batch writes files, locations and tags as
+    /// one bounded commit.
+    pub fn upsertBatchLocked(
+        self: *ObservedTagsRepository,
+        inputs: []const ObservedTagsInput,
+    ) !void {
+        var statement = try self.db.prepare(
+            \\INSERT INTO observed_file_tags(
+            \\    file_id, title, artist, album, album_artist, composer,
+            \\    track_number, track_total, disc_number, disc_total,
+            \\    date, original_date, compilation, label, media, isrc,
+            \\    release_country, release_type, release_status,
+            \\    musicbrainz_recording_id, musicbrainz_release_id,
+            \\    musicbrainz_release_group_id, musicbrainz_release_track_id,
+            \\    musicbrainz_artist_id, musicbrainz_album_artist_id,
+            \\    artwork_mime_type, artwork_byte_size, artwork_kind, observed_at
+            \\) VALUES (
+            \\    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+            \\    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
+            \\    unixepoch()
+            \\) ON CONFLICT(file_id) DO UPDATE SET
+            \\    title=excluded.title, artist=excluded.artist, album=excluded.album,
+            \\    album_artist=excluded.album_artist, composer=excluded.composer,
+            \\    track_number=excluded.track_number, track_total=excluded.track_total,
+            \\    disc_number=excluded.disc_number, disc_total=excluded.disc_total,
+            \\    date=excluded.date, original_date=excluded.original_date,
+            \\    compilation=excluded.compilation, label=excluded.label,
+            \\    media=excluded.media, isrc=excluded.isrc,
+            \\    release_country=excluded.release_country,
+            \\    release_type=excluded.release_type,
+            \\    release_status=excluded.release_status,
+            \\    musicbrainz_recording_id=excluded.musicbrainz_recording_id,
+            \\    musicbrainz_release_id=excluded.musicbrainz_release_id,
+            \\    musicbrainz_release_group_id=excluded.musicbrainz_release_group_id,
+            \\    musicbrainz_release_track_id=excluded.musicbrainz_release_track_id,
+            \\    musicbrainz_artist_id=excluded.musicbrainz_artist_id,
+            \\    musicbrainz_album_artist_id=excluded.musicbrainz_album_artist_id,
+            \\    artwork_mime_type=excluded.artwork_mime_type,
+            \\    artwork_byte_size=excluded.artwork_byte_size,
+            \\    artwork_kind=excluded.artwork_kind,
+            \\    observed_at=excluded.observed_at;
+        );
+        defer statement.deinit();
+        var delete_genres = try self.db.prepare(
+            "DELETE FROM observed_file_genres WHERE file_id=?1;",
+        );
+        defer delete_genres.deinit();
+        var insert_genre = try self.db.prepare(
+            "INSERT INTO observed_file_genres(file_id, ordinal, value) VALUES (?1, ?2, ?3);",
+        );
+        defer insert_genre.deinit();
+        for (inputs) |input| {
+            const tags = input.values;
+            try statement.bindInt64(1, input.file_id);
+            try statement.bindOptionalText(2, presentText(tags.title));
+            try statement.bindOptionalText(3, presentText(tags.artist));
+            try statement.bindOptionalText(4, presentText(tags.album));
+            try statement.bindOptionalText(5, presentText(tags.album_artist));
+            try statement.bindOptionalText(6, presentText(tags.composer));
+            try statement.bindOptionalInt64(7, optionalCount(tags.track_number));
+            try statement.bindOptionalInt64(8, optionalCount(tags.track_total));
+            try statement.bindOptionalInt64(9, optionalCount(tags.disc_number));
+            try statement.bindOptionalInt64(10, optionalCount(tags.disc_total));
+            try statement.bindOptionalText(11, presentText(tags.date));
+            try statement.bindOptionalText(12, presentText(tags.original_date));
+            try statement.bindOptionalInt64(
+                13,
+                if (tags.compilation) |flag| @intFromBool(flag) else null,
+            );
+            try statement.bindOptionalText(14, presentText(tags.label));
+            try statement.bindOptionalText(15, presentText(tags.media));
+            try statement.bindOptionalText(16, presentText(tags.isrc));
+            try statement.bindOptionalText(17, presentText(tags.release_country));
+            try statement.bindOptionalText(18, presentText(tags.release_type));
+            try statement.bindOptionalText(19, presentText(tags.release_status));
+            try statement.bindOptionalText(20, presentText(tags.musicbrainz_recording_id));
+            try statement.bindOptionalText(21, presentText(tags.musicbrainz_release_id));
+            try statement.bindOptionalText(22, presentText(tags.musicbrainz_release_group_id));
+            try statement.bindOptionalText(23, presentText(tags.musicbrainz_release_track_id));
+            try statement.bindOptionalText(24, presentText(tags.musicbrainz_artist_id));
+            try statement.bindOptionalText(25, presentText(tags.musicbrainz_album_artist_id));
+            if (tags.artwork) |artwork| {
+                try statement.bindText(26, artwork.mime_type);
+                try statement.bindInt64(27, @intCast(artwork.byte_size));
+                try statement.bindInt64(28, @backingInt(artwork.kind));
+            } else {
+                try statement.bindOptionalText(26, null);
+                try statement.bindOptionalInt64(27, null);
+                try statement.bindOptionalInt64(28, null);
+            }
+            if (try statement.step() != .done) return error.SqlFailed;
+            try statement.reset();
+
+            try delete_genres.bindInt64(1, input.file_id);
+            if (try delete_genres.step() != .done) return error.SqlFailed;
+            try delete_genres.reset();
+            for (tags.genres, 0..) |genre, ordinal| {
+                if (genre.len == 0) continue;
+                try insert_genre.bindInt64(1, input.file_id);
+                try insert_genre.bindInt64(2, @intCast(ordinal));
+                try insert_genre.bindText(3, genre);
+                if (try insert_genre.step() != .done) return error.SqlFailed;
+                try insert_genre.reset();
+            }
+        }
+    }
+
+    pub fn get(
+        self: *const ObservedTagsRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !?StoredObservedTags {
+        var statement = try self.db.prepare(
+            \\SELECT title, artist, album, album_artist, composer,
+            \\       track_number, track_total, disc_number, disc_total,
+            \\       date, original_date, compilation, label, media, isrc,
+            \\       release_country, release_type, release_status,
+            \\       musicbrainz_recording_id, musicbrainz_release_id,
+            \\       musicbrainz_release_group_id, musicbrainz_release_track_id,
+            \\       musicbrainz_artist_id, musicbrainz_album_artist_id,
+            \\       artwork_mime_type, artwork_byte_size, artwork_kind
+            \\FROM observed_file_tags WHERE file_id=?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        errdefer allocator.destroy(arena);
+        arena.* = .init(allocator);
+        errdefer arena.deinit();
+        const scratch = arena.allocator();
+        var values: metadata.ObservedTags = .{
+            .title = try dupeNullable(scratch, statement, 0),
+            .artist = try dupeNullable(scratch, statement, 1),
+            .album = try dupeNullable(scratch, statement, 2),
+            .album_artist = try dupeNullable(scratch, statement, 3),
+            .composer = try dupeNullable(scratch, statement, 4),
+            .track_number = countColumn(statement, 5),
+            .track_total = countColumn(statement, 6),
+            .disc_number = countColumn(statement, 7),
+            .disc_total = countColumn(statement, 8),
+            .date = try dupeNullable(scratch, statement, 9),
+            .original_date = try dupeNullable(scratch, statement, 10),
+            .compilation = if (statement.columnIsNull(11))
+                null
+            else
+                statement.columnInt64(11) != 0,
+            .label = try dupeNullable(scratch, statement, 12),
+            .media = try dupeNullable(scratch, statement, 13),
+            .isrc = try dupeNullable(scratch, statement, 14),
+            .release_country = try dupeNullable(scratch, statement, 15),
+            .release_type = try dupeNullable(scratch, statement, 16),
+            .release_status = try dupeNullable(scratch, statement, 17),
+            .musicbrainz_recording_id = try dupeNullable(scratch, statement, 18),
+            .musicbrainz_release_id = try dupeNullable(scratch, statement, 19),
+            .musicbrainz_release_group_id = try dupeNullable(scratch, statement, 20),
+            .musicbrainz_release_track_id = try dupeNullable(scratch, statement, 21),
+            .musicbrainz_artist_id = try dupeNullable(scratch, statement, 22),
+            .musicbrainz_album_artist_id = try dupeNullable(scratch, statement, 23),
+        };
+        if (try dupeNullable(scratch, statement, 24)) |mime_type| values.artwork = .{
+            .mime_type = mime_type,
+            .byte_size = @intCast(statement.columnInt64(25)),
+            .kind = std.enums.fromInt(metadata.ArtworkKind, statement.columnInt64(26)) orelse
+                .other,
+        };
+        values.genres = try self.genres(scratch, file_id);
+        return .{ .arena = arena, .values = values };
+    }
+
+    fn genres(
+        self: *const ObservedTagsRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) ![]const []const u8 {
+        var statement = try self.db.prepare(
+            "SELECT value FROM observed_file_genres WHERE file_id=?1 ORDER BY ordinal;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        var values: std.ArrayList([]const u8) = .empty;
+        errdefer values.deinit(allocator);
+        while (try statement.step() == .row)
+            try values.append(allocator, try allocator.dupe(u8, statement.columnText(0)));
+        return values.toOwnedSlice(allocator);
+    }
+
+    pub fn count(self: *const ObservedTagsRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM observed_file_tags;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+fn presentText(value: ?[]const u8) ?[]const u8 {
+    const text = value orelse return null;
+    return if (text.len == 0) null else text;
+}
+
+fn optionalCount(value: ?u32) ?i64 {
+    return if (value) |number| @intCast(number) else null;
+}
+
+fn countColumn(statement: sqlite.Statement, column: c_int) ?u32 {
+    if (statement.columnIsNull(column)) return null;
+    return std.math.cast(u32, statement.columnInt64(column));
+}
+
+fn dupeNullable(
+    allocator: std.mem.Allocator,
+    statement: sqlite.Statement,
+    column: c_int,
+) !?[]const u8 {
+    if (statement.columnIsNull(column)) return null;
+    return try allocator.dupe(u8, statement.columnText(column));
+}
+
+fn optionalInt64(statement: sqlite.Statement, column: c_int) ?i64 {
+    if (statement.columnIsNull(column)) return null;
+    return statement.columnInt64(column);
+}
+
+fn bindOptionalBlob(statement: sqlite.Statement, index: c_int, value: ?[]const u8) !void {
+    if (value) |bytes| return statement.bindBlob(index, bytes);
+    return statement.bindOptionalText(index, null);
+}
 
 pub const OrcaMetadataRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
     pub fn upsert(self: *OrcaMetadataRepository, input: OrcaMetadataInput) !void {
-        if (input.path.len == 0 or input.value.len == 0 or input.provenance == .observed_file)
+        if (input.file_id == 0 or input.value.len == 0 or input.provenance == .observed_file)
             return error.InvalidOrcaMetadata;
         self.write_lane.acquire();
         defer self.write_lane.release();
         var statement = try self.db.prepare(
-            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked, updated_at)
+            \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
-            \\ON CONFLICT(path, field) DO UPDATE SET
+            \\ON CONFLICT(file_id, field) DO UPDATE SET
             \\    value=excluded.value,
             \\    provenance=excluded.provenance,
             \\    locked=excluded.locked,
@@ -460,7 +1703,7 @@ pub const OrcaMetadataRepository = struct {
             \\WHERE orca_metadata_values.locked=0 OR excluded.provenance=?6;
         );
         defer statement.deinit();
-        try statement.bindText(1, input.path);
+        try statement.bindInt64(1, input.file_id);
         try statement.bindInt64(2, @backingInt(input.field));
         try statement.bindText(3, input.value);
         try statement.bindInt64(4, @backingInt(input.provenance));
@@ -472,14 +1715,15 @@ pub const OrcaMetadataRepository = struct {
     pub fn get(
         self: *const OrcaMetadataRepository,
         allocator: std.mem.Allocator,
-        path: []const u8,
+        file_id: i64,
         field: metadata.Field,
     ) !?StoredMetadataValue {
         var statement = try self.db.prepare(
-            "SELECT value, provenance, locked FROM orca_metadata_values WHERE path=?1 AND field=?2;",
+            \\SELECT value, provenance, locked FROM orca_metadata_values
+            \\WHERE file_id=?1 AND field=?2;
         );
         defer statement.deinit();
-        try statement.bindText(1, path);
+        try statement.bindInt64(1, file_id);
         try statement.bindInt64(2, @backingInt(field));
         if (try statement.step() != .row) return null;
         const provenance = std.enums.fromInt(
@@ -498,16 +1742,32 @@ pub const MutationJournalRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
+    /// The journal is the only record that a file mutation is in flight, so its
+    /// writes must reach stable storage before the filesystem changes they
+    /// describe. `synchronous=NORMAL` does not fsync a WAL commit, so journal
+    /// writes raise durability for their own transaction and restore the
+    /// library-wide setting afterwards.
+    fn beginDurable(self: *MutationJournalRepository) !void {
+        try self.db.exec("PRAGMA synchronous=FULL;");
+    }
+
+    fn endDurable(self: *MutationJournalRepository) void {
+        self.db.exec("PRAGMA synchronous=NORMAL;") catch {};
+    }
+
     pub fn prepare(self: *MutationJournalRepository, input: MutationOperationInput) !i64 {
         if (input.plan_id == 0 or input.group_id == 0 or input.source_path.len == 0)
             return error.InvalidMutationOperation;
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
         var statement = try self.db.prepare(
             \\INSERT INTO mutation_operations(
             \\    plan_id, group_id, action_index, kind, source_path, destination_path,
-            \\    stage_path, backup_path, expected_size, expected_modified_ns, state
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
+            \\    stage_path, backup_path, expected_size, expected_modified_ns, state,
+            \\    file_id, expected_quick_hash
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13);
         );
         defer statement.deinit();
         try statement.bindInt64(1, @intCast(input.plan_id));
@@ -521,6 +1781,8 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(9, @intCast(input.expected_size));
         try statement.bindInt64(10, input.expected_modified_ns);
         try statement.bindInt64(11, @backingInt(MutationState.planned));
+        try statement.bindOptionalInt64(12, input.file_id);
+        try statement.bindBlob(13, &input.expected_quick_hash);
         if (try statement.step() != .done) return error.SqlFailed;
         return self.db.lastInsertRowId();
     }
@@ -535,6 +1797,8 @@ pub const MutationJournalRepository = struct {
         if (!validMutationTransition(expected, next)) return error.InvalidMutationTransition;
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
         var statement = try self.db.prepare(
             \\UPDATE mutation_operations
             \\SET state=?1, error=?2, updated_at=unixepoch()
@@ -565,12 +1829,16 @@ pub const MutationJournalRepository = struct {
         operation_id: i64,
         committed_size: u64,
         committed_modified_ns: i64,
+        committed_quick_hash: quick_hash.Digest,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
         var statement = try self.db.prepare(
             \\UPDATE mutation_operations
-            \\SET state=?1, committed_size=?2, committed_modified_ns=?3, updated_at=unixepoch()
+            \\SET state=?1, committed_size=?2, committed_modified_ns=?3,
+            \\    committed_quick_hash=?6, updated_at=unixepoch()
             \\WHERE id=?4 AND state=?5;
         );
         defer statement.deinit();
@@ -579,6 +1847,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(3, committed_modified_ns);
         try statement.bindInt64(4, operation_id);
         try statement.bindInt64(5, @backingInt(MutationState.staged));
+        try statement.bindBlob(6, &committed_quick_hash);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -589,12 +1858,16 @@ pub const MutationJournalRepository = struct {
         expected_state: MutationState,
         size: u64,
         modified_ns: i64,
+        digest: quick_hash.Digest,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
         var statement = try self.db.prepare(
             \\UPDATE mutation_operations
-            \\SET committed_size=?1, committed_modified_ns=?2, updated_at=unixepoch()
+            \\SET committed_size=?1, committed_modified_ns=?2, committed_quick_hash=?5,
+            \\    updated_at=unixepoch()
             \\WHERE id=?3 AND state=?4;
         );
         defer statement.deinit();
@@ -602,6 +1875,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(2, modified_ns);
         try statement.bindInt64(3, operation_id);
         try statement.bindInt64(4, @backingInt(expected_state));
+        try statement.bindBlob(5, &digest);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -614,7 +1888,8 @@ pub const MutationJournalRepository = struct {
         var statement = try self.db.prepare(
             \\SELECT kind, source_path, destination_path, stage_path, backup_path,
             \\       expected_size, expected_modified_ns,
-            \\       committed_size, committed_modified_ns, state
+            \\       committed_size, committed_modified_ns, state,
+            \\       file_id, expected_quick_hash, committed_quick_hash
             \\FROM mutation_operations WHERE id=?1;
         );
         defer statement.deinit();
@@ -636,16 +1911,41 @@ pub const MutationJournalRepository = struct {
             .allocator = allocator,
             .id = operation_id,
             .kind = kind,
+            .file_id = optionalInt64(statement, 10),
             .source_path = source_path,
             .destination_path = destination_path,
             .stage_path = stage_path,
             .backup_path = backup_path,
             .expected_size = @intCast(statement.columnInt64(5)),
             .expected_modified_ns = statement.columnInt64(6),
+            .expected_quick_hash = digestColumn(statement, 11),
             .committed_size = if (statement.columnIsNull(7)) null else @intCast(statement.columnInt64(7)),
             .committed_modified_ns = if (statement.columnIsNull(8)) null else statement.columnInt64(8),
+            .committed_quick_hash = digestColumn(statement, 12),
             .state = state_value,
         };
+    }
+
+    /// Groups holding at least one operation that has not reached a terminal
+    /// state. Startup recovery drives exactly these to a terminal state before a
+    /// Library becomes available.
+    pub fn nonterminalGroupIds(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+    ) ![]u64 {
+        var statement = try self.db.prepare(
+            \\SELECT DISTINCT group_id FROM mutation_operations
+            \\WHERE state IN (?1, ?2, ?3) ORDER BY group_id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @backingInt(MutationState.planned));
+        try statement.bindInt64(2, @backingInt(MutationState.staged));
+        try statement.bindInt64(3, @backingInt(MutationState.failed));
+        var ids: std.ArrayList(u64) = .empty;
+        errdefer ids.deinit(allocator);
+        while (try statement.step() == .row)
+            try ids.append(allocator, @intCast(statement.columnInt64(0)));
+        return ids.toOwnedSlice(allocator);
     }
 
     pub fn groupOperationIds(
@@ -678,9 +1978,9 @@ pub const AnalysisCacheRepository = struct {
     ) !?[]u8 {
         var statement = try self.db.prepare(
             \\SELECT result FROM analysis_results
-            \\WHERE path=?1 AND kind=?2 AND algorithm_id=?3
+            \\WHERE file_id=?1 AND kind=?2 AND algorithm_id=?3
             \\  AND algorithm_version=?4 AND parameter_hash=?5
-            \\  AND source_size=?6 AND source_modified_ns=?7;
+            \\  AND source_identity=?6;
         );
         defer statement.deinit();
         try bindAnalysisKey(statement, &key);
@@ -693,14 +1993,14 @@ pub const AnalysisCacheRepository = struct {
         defer self.write_lane.release();
         var statement = try self.db.prepare(
             \\INSERT INTO analysis_results(
-            \\    path, kind, algorithm_id, algorithm_version, parameter_hash,
-            \\    source_size, source_modified_ns, result
-            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            \\    file_id, kind, algorithm_id, algorithm_version, parameter_hash,
+            \\    source_identity, result
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             \\ON CONFLICT DO UPDATE SET result=excluded.result, created_at=unixepoch();
         );
         defer statement.deinit();
         try bindAnalysisKey(statement, &key);
-        try statement.bindBlob(8, result);
+        try statement.bindBlob(7, result);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 };
@@ -709,28 +2009,28 @@ pub const HealthIssueRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
-    /// Replaces all derived health state for one path in a single transaction.
-    /// An empty issue list marks the path healthy.
-    pub fn replacePath(
+    /// Replaces all derived health state for one file in a single transaction.
+    /// An empty issue list marks the file healthy.
+    pub fn replaceFile(
         self: *HealthIssueRepository,
-        path: []const u8,
+        file_id: i64,
         issues: []const HealthIssueInput,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
-        var delete = try self.db.prepare("DELETE FROM library_health_issues WHERE path=?1;");
+        var delete = try self.db.prepare("DELETE FROM library_health_issues WHERE file_id=?1;");
         defer delete.deinit();
-        try delete.bindText(1, path);
+        try delete.bindInt64(1, file_id);
         if (try delete.step() != .done) return error.SqlFailed;
         var insert = try self.db.prepare(
-            \\INSERT INTO library_health_issues(path, kind, severity, details, updated_at)
+            \\INSERT INTO library_health_issues(file_id, kind, severity, details, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, unixepoch());
         );
         defer insert.deinit();
         for (issues) |issue| {
-            try insert.bindText(1, path);
+            try insert.bindInt64(1, file_id);
             try insert.bindInt64(2, @backingInt(issue.kind));
             try insert.bindInt64(3, @backingInt(issue.severity));
             try insert.bindText(4, issue.details);
@@ -740,6 +2040,49 @@ pub const HealthIssueRepository = struct {
         try self.db.exec("COMMIT;");
     }
 
+    /// Record one derived issue without disturbing the others.
+    ///
+    /// `replaceFile` is the analyzer's call: it owns every issue it can decide.
+    /// The projection decides exactly one kind — `missing_track_number` — so it
+    /// must not be able to erase a loudness or corruption finding on its way
+    /// past.
+    pub fn recordLocked(
+        self: *HealthIssueRepository,
+        file_id: i64,
+        issue: HealthIssueInput,
+    ) !void {
+        var statement = try self.db.prepare(
+            \\INSERT INTO library_health_issues(file_id, kind, severity, details, updated_at)
+            \\VALUES (?1, ?2, ?3, ?4, unixepoch())
+            \\ON CONFLICT(file_id, kind) DO UPDATE SET
+            \\    severity=excluded.severity,
+            \\    details=excluded.details,
+            \\    updated_at=excluded.updated_at;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, @backingInt(issue.kind));
+        try statement.bindInt64(3, @backingInt(issue.severity));
+        try statement.bindText(4, issue.details);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Retire one issue kind for one file, so a reprojection that resolves the
+    /// problem also clears the report of it.
+    pub fn clearLocked(
+        self: *HealthIssueRepository,
+        file_id: i64,
+        kind: HealthIssueKind,
+    ) !void {
+        var statement = try self.db.prepare(
+            "DELETE FROM library_health_issues WHERE file_id=?1 AND kind=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, @backingInt(kind));
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
     pub fn page(
         self: *const HealthIssueRepository,
         allocator: std.mem.Allocator,
@@ -747,8 +2090,14 @@ pub const HealthIssueRepository = struct {
         offset: u32,
     ) !HealthIssuePage {
         var statement = try self.db.prepare(
-            \\SELECT path, kind, severity, details FROM library_health_issues
-            \\ORDER BY severity DESC, kind, path LIMIT ?1 OFFSET ?2;
+            \\SELECT library_health_issues.file_id, kind, severity, details,
+            \\       COALESCE((
+            \\           SELECT uri FROM locations
+            \\           WHERE locations.file_id = library_health_issues.file_id
+            \\           ORDER BY locations.id LIMIT 1
+            \\       ), '')
+            \\FROM library_health_issues
+            \\ORDER BY severity DESC, kind, file_id LIMIT ?1 OFFSET ?2;
         );
         defer statement.deinit();
         try statement.bindInt64(1, limit);
@@ -759,11 +2108,12 @@ pub const HealthIssueRepository = struct {
             issues.deinit(allocator);
         }
         while (try statement.step() == .row) {
-            const path = try allocator.dupe(u8, statement.columnText(0));
+            const path = try allocator.dupe(u8, statement.columnText(4));
             errdefer allocator.free(path);
             const details = try allocator.dupe(u8, statement.columnText(3));
             errdefer allocator.free(details);
             try issues.append(allocator, .{
+                .file_id = statement.columnInt64(0),
                 .path = path,
                 .kind = std.enums.fromInt(HealthIssueKind, statement.columnInt64(1)) orelse
                     return error.InvalidStoredHealthIssue,
@@ -955,21 +2305,21 @@ pub const IdentificationProposalRepository = struct {
     write_lane: *WriteLane,
 
     pub fn put(self: *IdentificationProposalRepository, input: IdentificationProposalInput) !void {
-        if (input.path.len == 0 or input.provider.len == 0 or input.provider_id.len == 0 or
+        if (input.file_id == 0 or input.provider.len == 0 or input.provider_id.len == 0 or
             input.payload.len == 0 or !std.math.isFinite(input.confidence) or
             input.confidence < 0 or input.confidence > 1) return error.InvalidIdentificationProposal;
         self.write_lane.acquire();
         defer self.write_lane.release();
         var statement = try self.db.prepare(
             \\INSERT INTO identification_proposals(
-            \\    path, provider, provider_id, confidence, payload, state, updated_at)
+            \\    file_id, provider, provider_id, confidence, payload, state, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())
-            \\ON CONFLICT(path, provider, provider_id) DO UPDATE SET
+            \\ON CONFLICT(file_id, provider, provider_id) DO UPDATE SET
             \\    confidence=excluded.confidence, payload=excluded.payload,
             \\    updated_at=excluded.updated_at;
         );
         defer statement.deinit();
-        try statement.bindText(1, input.path);
+        try statement.bindInt64(1, input.file_id);
         try statement.bindText(2, input.provider);
         try statement.bindText(3, input.provider_id);
         try statement.bindDouble(4, input.confidence);
@@ -980,16 +2330,16 @@ pub const IdentificationProposalRepository = struct {
     pub fn pending(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
-        path: []const u8,
+        file_id: i64,
         limit: u32,
     ) ![]IdentificationProposal {
         var statement = try self.db.prepare(
             \\SELECT id, provider, provider_id, confidence, payload
-            \\FROM identification_proposals WHERE path=?1 AND state=0
+            \\FROM identification_proposals WHERE file_id=?1 AND state=0
             \\ORDER BY confidence DESC, id LIMIT ?2;
         );
         defer statement.deinit();
-        try statement.bindText(1, path);
+        try statement.bindInt64(1, file_id);
         try statement.bindInt64(2, limit);
         var proposals: std.ArrayList(IdentificationProposal) = .empty;
         errdefer {
@@ -1020,11 +2370,11 @@ pub const IdentificationProposalRepository = struct {
     pub fn accept(
         self: *IdentificationProposalRepository,
         proposal_id: i64,
-        path: []const u8,
+        file_id: i64,
         values: []const OrcaMetadataInput,
     ) !void {
         for (values) |value| {
-            if (!std.mem.eql(u8, value.path, path) or value.provenance != .provider or
+            if (value.file_id != file_id or value.provenance != .provider or
                 value.value.len == 0) return error.InvalidProviderMetadata;
         }
         self.write_lane.acquire();
@@ -1033,23 +2383,23 @@ pub const IdentificationProposalRepository = struct {
         errdefer self.db.exec("ROLLBACK;") catch {};
         var update = try self.db.prepare(
             \\UPDATE identification_proposals SET state=1, updated_at=unixepoch()
-            \\WHERE id=?1 AND path=?2 AND state=0;
+            \\WHERE id=?1 AND file_id=?2 AND state=0;
         );
         defer update.deinit();
         try update.bindInt64(1, proposal_id);
-        try update.bindText(2, path);
+        try update.bindInt64(2, file_id);
         if (try update.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleIdentificationProposal;
         var metadata_statement = try self.db.prepare(
-            \\INSERT INTO orca_metadata_values(path, field, value, provenance, locked, updated_at)
+            \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, 0, unixepoch())
-            \\ON CONFLICT(path, field) DO UPDATE SET value=excluded.value,
+            \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
             \\    provenance=excluded.provenance, updated_at=excluded.updated_at
             \\WHERE orca_metadata_values.locked=0;
         );
         defer metadata_statement.deinit();
         for (values) |value| {
-            try metadata_statement.bindText(1, path);
+            try metadata_statement.bindInt64(1, file_id);
             try metadata_statement.bindInt64(2, @backingInt(value.field));
             try metadata_statement.bindText(3, value.value);
             try metadata_statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
@@ -1061,13 +2411,20 @@ pub const IdentificationProposalRepository = struct {
 };
 
 fn bindAnalysisKey(statement: sqlite.Statement, key: *const AnalysisCacheKey) !void {
-    try statement.bindText(1, key.path);
+    try statement.bindInt64(1, key.file_id);
     try statement.bindInt64(2, key.kind);
     try statement.bindText(3, key.algorithm_id);
     try statement.bindInt64(4, key.algorithm_version);
     try statement.bindBlob(5, &key.parameter_hash);
-    try statement.bindInt64(6, @intCast(key.source_size));
-    try statement.bindInt64(7, key.source_modified_ns);
+    try statement.bindBlob(6, &key.source_identity);
+}
+
+fn digestColumn(statement: sqlite.Statement, column: c_int) ?quick_hash.Digest {
+    const bytes = statement.columnBlob(column);
+    if (bytes.len != @typeInfo(quick_hash.Digest).array.len) return null;
+    var digest: quick_hash.Digest = undefined;
+    @memcpy(&digest, bytes);
+    return digest;
 }
 
 fn duplicateNullableColumn(

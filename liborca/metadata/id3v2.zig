@@ -1,0 +1,725 @@
+const std = @import("std");
+const id3v1 = @import("id3v1.zig");
+const model = @import("model.zig");
+const source = @import("../storage/source.zig");
+
+/// An ID3v2 size field is syncsafe and therefore cannot exceed 256 MiB, but no
+/// honest tag approaches that. Anything larger is refused before allocating.
+pub const max_tag_bytes: usize = 16 << 20;
+
+const max_text_bytes: usize = 1 << 20;
+
+pub const ReadError = error{
+    InvalidId3v2Tag,
+    TruncatedId3v2Tag,
+    InvalidId3v2Text,
+    Id3v2TagTooLarge,
+};
+
+/// Read canonical tags from the ID3v2 tag at the start of a stream.
+///
+/// Returns null when the stream carries no ID3v2 tag Orca can read: no `ID3`
+/// identifier, an empty tag, or a major version outside 2.3/2.4. Callers fall
+/// back to ID3v1 in that case. Text allocated from `allocator` lives until the
+/// caller frees it; callers are expected to pass an arena.
+pub fn read(
+    allocator: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?model.ObservedTags {
+    var header: [10]u8 = undefined;
+    if (try readExact(readable, 0, &header) != header.len) return null;
+    if (!std.mem.eql(u8, header[0..3], "ID3")) return null;
+    if (header[3] == 0xff or header[4] == 0xff) return error.InvalidId3v2Tag;
+    const major = header[3];
+    const size = try syncsafe(header[6..10].*);
+    if (size == 0) return null;
+    if (size > max_tag_bytes) return error.Id3v2TagTooLarge;
+    // ID3v2.2 frame identifiers are three bytes wide and a different frame set;
+    // it is deliberately not read here, and neither is any future major.
+    if (major < 3 or major > 4) return null;
+
+    const body = try allocator.alloc(u8, size);
+    defer allocator.free(body);
+    if (try readExact(readable, header.len, body) != body.len)
+        return error.TruncatedId3v2Tag;
+
+    const flags = header[5];
+    var span: []u8 = body;
+    if (flags & 0x80 != 0) span = unsynchronize(span);
+    if (flags & 0x40 != 0) span = try skipExtendedHeader(span, major);
+    return try parseFrames(allocator, span, major);
+}
+
+/// Total bytes an ID3v2 tag occupies at the head of a stream, or zero when the
+/// stream does not begin with one. Lets container readers skip a leading tag.
+pub fn prefixLength(readable: source.ReadableSource) !u64 {
+    var header: [10]u8 = undefined;
+    if (try readExact(readable, 0, &header) != header.len) return 0;
+    if (!std.mem.eql(u8, header[0..3], "ID3")) return 0;
+    if (header[3] == 0xff or header[4] == 0xff) return error.InvalidId3v2Tag;
+    const size = try syncsafe(header[6..10].*);
+    const footer: u64 = if (header[5] & 0x10 != 0) 10 else 0;
+    return @as(u64, header.len) + size + footer;
+}
+
+fn syncsafe(bytes: [4]u8) !u32 {
+    var value: u32 = 0;
+    for (bytes) |byte| {
+        if (byte & 0x80 != 0) return error.InvalidId3v2Tag;
+        value = (value << 7) | byte;
+    }
+    return value;
+}
+
+/// Undo unsynchronization in place: every `0xFF 0x00` pair becomes `0xFF`. The
+/// result aliases the input buffer, which is why callers own mutable bytes.
+fn unsynchronize(bytes: []u8) []u8 {
+    var write: usize = 0;
+    var read_index: usize = 0;
+    while (read_index < bytes.len) {
+        const byte = bytes[read_index];
+        bytes[write] = byte;
+        write += 1;
+        read_index += 1;
+        if (byte == 0xff and read_index < bytes.len and bytes[read_index] == 0x00)
+            read_index += 1;
+    }
+    return bytes[0..write];
+}
+
+fn skipExtendedHeader(bytes: []u8, major: u8) ![]u8 {
+    if (bytes.len < 6) return error.TruncatedId3v2Tag;
+    // v2.4 states a syncsafe size that includes the size field; v2.3 states a
+    // plain size that excludes it.
+    const declared: usize = if (major >= 4)
+        try syncsafe(bytes[0..4].*)
+    else
+        std.mem.readInt(u32, bytes[0..4], .big) + 4;
+    if (declared < 4 or declared > bytes.len) return error.TruncatedId3v2Tag;
+    return bytes[declared..];
+}
+
+fn parseFrames(
+    allocator: std.mem.Allocator,
+    body: []u8,
+    major: u8,
+) !model.ObservedTags {
+    var tags: model.ObservedTags = .{};
+    var genres: std.ArrayList([]const u8) = .empty;
+    defer genres.deinit(allocator);
+    var pending_day_month: ?[]const u8 = null;
+
+    var position: usize = 0;
+    while (position + 10 <= body.len) {
+        const identifier = body[position..][0..4].*;
+        // Padding, or a stream that stopped making sense: keep what was read
+        // rather than discarding a tag over trailing garbage.
+        if (identifier[0] == 0 or !isFrameIdentifier(&identifier)) break;
+        const size_bytes = body[position + 4 ..][0..4].*;
+        const declared: usize = if (major >= 4)
+            syncsafe(size_bytes) catch std.mem.readInt(u32, &size_bytes, .big)
+        else
+            std.mem.readInt(u32, &size_bytes, .big);
+        const format_flags = body[position + 9];
+        position += 10;
+        if (declared > body.len - position) return error.TruncatedId3v2Tag;
+        var data = body[position..][0..declared];
+        position += declared;
+
+        if (major >= 4) {
+            if (format_flags & 0x40 != 0) data = advance(data, 1) orelse continue;
+            // Compressed or encrypted frame payloads are skipped, not guessed at.
+            if (format_flags & 0x0c != 0) continue;
+            if (format_flags & 0x01 != 0) data = advance(data, 4) orelse continue;
+            if (format_flags & 0x02 != 0) data = unsynchronize(data);
+        } else {
+            if (format_flags & 0xc0 != 0) continue;
+            if (format_flags & 0x20 != 0) data = advance(data, 1) orelse continue;
+        }
+        try applyFrame(allocator, &identifier, data, &tags, &genres, &pending_day_month);
+    }
+
+    if (pending_day_month) |day_month| try applyDayMonth(allocator, &tags, day_month);
+    tags.genres = try genres.toOwnedSlice(allocator);
+    return tags;
+}
+
+fn advance(data: []u8, count: usize) ?[]u8 {
+    if (data.len < count) return null;
+    return data[count..];
+}
+
+fn isFrameIdentifier(identifier: *const [4]u8) bool {
+    for (identifier) |byte| {
+        if (!std.ascii.isUpper(byte) and !std.ascii.isDigit(byte)) return false;
+    }
+    return true;
+}
+
+/// Frame identifiers, encoding bytes, `n/total` packing, and numeric genre
+/// references all terminate here; only canonical values leave this function.
+fn applyFrame(
+    allocator: std.mem.Allocator,
+    identifier: *const [4]u8,
+    data: []const u8,
+    tags: *model.ObservedTags,
+    genres: *std.ArrayList([]const u8),
+    pending_day_month: *?[]const u8,
+) !void {
+    const id = identifier.*;
+    if (std.mem.eql(u8, &id, "APIC")) return applyPicture(allocator, data, tags);
+    if (std.mem.eql(u8, &id, "UFID")) return applyUniqueFileIdentifier(allocator, data, tags);
+    if (std.mem.eql(u8, &id, "TXXX")) return applyUserText(allocator, data, tags);
+    if (id[0] != 'T') return;
+
+    var values = try decodeTextValues(allocator, data);
+    defer values.deinit(allocator);
+    if (values.items.len == 0) return;
+    const first = values.items[0];
+
+    if (std.mem.eql(u8, &id, "TCON")) {
+        for (values.items) |value| {
+            const name = try canonicalGenre(allocator, value);
+            if (name.len != 0) try genres.append(allocator, name);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, &id, "TIT2")) return claim(&tags.title, first);
+    if (std.mem.eql(u8, &id, "TPE1")) return claim(&tags.artist, first);
+    if (std.mem.eql(u8, &id, "TPE2")) return claim(&tags.album_artist, first);
+    if (std.mem.eql(u8, &id, "TALB")) return claim(&tags.album, first);
+    if (std.mem.eql(u8, &id, "TCOM")) return claim(&tags.composer, first);
+    if (std.mem.eql(u8, &id, "TPUB")) return claim(&tags.label, first);
+    if (std.mem.eql(u8, &id, "TMED")) return claim(&tags.media, first);
+    if (std.mem.eql(u8, &id, "TSRC")) return claim(&tags.isrc, first);
+    if (std.mem.eql(u8, &id, "TRCK")) return claimPair(first, &tags.track_number, &tags.track_total);
+    if (std.mem.eql(u8, &id, "TPOS")) return claimPair(first, &tags.disc_number, &tags.disc_total);
+    if (std.mem.eql(u8, &id, "TCMP")) {
+        if (tags.compilation == null) tags.compilation = isTruthy(first);
+        return;
+    }
+    if (std.mem.eql(u8, &id, "TDRC") or std.mem.eql(u8, &id, "TYER"))
+        return claim(&tags.date, first);
+    if (std.mem.eql(u8, &id, "TDOR") or std.mem.eql(u8, &id, "TORY"))
+        return claim(&tags.original_date, first);
+    // v2.3 splits the release date into a year frame and a `DDMM` frame; the
+    // pair is recombined once both have been seen.
+    if (std.mem.eql(u8, &id, "TDAT") and pending_day_month.* == null and first.len == 4)
+        pending_day_month.* = try allocator.dupe(u8, first);
+}
+
+fn applyDayMonth(
+    allocator: std.mem.Allocator,
+    tags: *model.ObservedTags,
+    day_month: []const u8,
+) !void {
+    const year = tags.date orelse return;
+    if (year.len != 4) return;
+    for (day_month) |byte| if (!std.ascii.isDigit(byte)) return;
+    tags.date = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
+        year,
+        day_month[2..4],
+        day_month[0..2],
+    });
+}
+
+fn applyUserText(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    tags: *model.ObservedTags,
+) !void {
+    var values = try decodeTextValues(allocator, data);
+    defer values.deinit(allocator);
+    if (values.items.len < 2) return;
+    const description = values.items[0];
+    const value = values.items[1];
+    if (value.len == 0) return;
+    if (eqlAny(description, &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" }))
+        return claim(&tags.musicbrainz_recording_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID" }))
+        return claim(&tags.musicbrainz_release_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Release Group Id", "MUSICBRAINZ_RELEASEGROUPID" }))
+        return claim(&tags.musicbrainz_release_group_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Release Track Id", "MUSICBRAINZ_RELEASETRACKID" }))
+        return claim(&tags.musicbrainz_release_track_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Artist Id", "MUSICBRAINZ_ARTISTID" }))
+        return claim(&tags.musicbrainz_artist_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Album Artist Id", "MUSICBRAINZ_ALBUMARTISTID" }))
+        return claim(&tags.musicbrainz_album_artist_id, value);
+    if (eqlAny(description, &.{ "MusicBrainz Album Type", "RELEASETYPE" }))
+        return claim(&tags.release_type, value);
+    if (eqlAny(description, &.{ "MusicBrainz Album Status", "RELEASESTATUS" }))
+        return claim(&tags.release_status, value);
+    if (eqlAny(description, &.{ "MusicBrainz Album Release Country", "RELEASECOUNTRY" }))
+        return claim(&tags.release_country, value);
+    if (eqlAny(description, &.{ "originaldate", "originalyear" }))
+        return claim(&tags.original_date, value);
+    if (eqlAny(description, &.{"LABEL"})) return claim(&tags.label, value);
+    if (eqlAny(description, &.{"ISRC"})) return claim(&tags.isrc, value);
+    if (eqlAny(description, &.{"COMPILATION"})) {
+        if (tags.compilation == null) tags.compilation = isTruthy(value);
+        return;
+    }
+}
+
+fn applyUniqueFileIdentifier(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    tags: *model.ObservedTags,
+) !void {
+    const split = std.mem.indexOfScalar(u8, data, 0) orelse return;
+    const owner = data[0..split];
+    if (!std.mem.eql(u8, owner, "http://musicbrainz.org")) return;
+    const identifier = data[split + 1 ..];
+    if (identifier.len == 0 or identifier.len > 128) return;
+    for (identifier) |byte| if (byte < 0x20 or byte > 0x7e) return;
+    if (tags.musicbrainz_recording_id != null) return;
+    tags.musicbrainz_recording_id = try allocator.dupe(u8, identifier);
+}
+
+/// Artwork is reported, never decoded: enough to say a cover exists, what type
+/// it claims to be, and how large it is.
+fn applyPicture(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    tags: *model.ObservedTags,
+) !void {
+    if (data.len < 4) return;
+    const encoding = data[0];
+    const mime_end = std.mem.indexOfScalar(u8, data[1..], 0) orelse return;
+    const mime = data[1 .. 1 + mime_end];
+    var cursor = 1 + mime_end + 1;
+    if (cursor >= data.len) return;
+    const picture_type = data[cursor];
+    cursor += 1;
+    const description = terminatorLength(encoding, data[cursor..]) orelse return;
+    cursor += description;
+    if (cursor > data.len) return;
+
+    const kind: model.ArtworkKind = switch (picture_type) {
+        3 => .front_cover,
+        4 => .back_cover,
+        else => .other,
+    };
+    if (tags.artwork) |existing| {
+        if (existing.kind == .front_cover or kind != .front_cover) return;
+    }
+    tags.artwork = .{
+        .mime_type = try id3v1.latin1ToUtf8(allocator, mime),
+        .byte_size = data.len - cursor,
+        .kind = kind,
+    };
+}
+
+/// Bytes consumed by a terminated string, including its terminator.
+fn terminatorLength(encoding: u8, bytes: []const u8) ?usize {
+    if (isWideEncoding(encoding)) {
+        var index: usize = 0;
+        while (index + 1 < bytes.len) : (index += 2) {
+            if (bytes[index] == 0 and bytes[index + 1] == 0) return index + 2;
+        }
+        return bytes.len;
+    }
+    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse return bytes.len;
+    return end + 1;
+}
+
+fn isWideEncoding(encoding: u8) bool {
+    return encoding == 1 or encoding == 2;
+}
+
+/// Decode a text frame body: one encoding byte followed by one or more
+/// terminator-separated values. Multi-value frames are legal in v2.4.
+fn decodeTextValues(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+) !std.ArrayList([]const u8) {
+    var values: std.ArrayList([]const u8) = .empty;
+    errdefer values.deinit(allocator);
+    if (data.len == 0) return values;
+    const encoding = data[0];
+    if (encoding > 3) return error.InvalidId3v2Text;
+    var rest = data[1..];
+    if (rest.len > max_text_bytes) return error.InvalidId3v2Text;
+    const step: usize = if (isWideEncoding(encoding)) 2 else 1;
+    var start: usize = 0;
+    var index: usize = 0;
+    while (index + step <= rest.len) : (index += step) {
+        const terminated = if (step == 1)
+            rest[index] == 0
+        else
+            rest[index] == 0 and rest[index + 1] == 0;
+        if (!terminated) continue;
+        try values.append(allocator, try decodeText(allocator, encoding, rest[start..index]));
+        start = index + step;
+    }
+    if (start < rest.len)
+        try values.append(allocator, try decodeText(allocator, encoding, rest[start..]));
+    // A frame that is nothing but terminators still carries no values.
+    while (values.items.len > 0 and values.items[values.items.len - 1].len == 0)
+        _ = values.pop();
+    return values;
+}
+
+fn decodeText(allocator: std.mem.Allocator, encoding: u8, bytes: []const u8) ![]const u8 {
+    return switch (encoding) {
+        0 => id3v1.latin1ToUtf8(allocator, bytes),
+        1 => decodeUtf16(allocator, bytes, null),
+        2 => decodeUtf16(allocator, bytes, .big),
+        3 => blk: {
+            if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidId3v2Text;
+            break :blk allocator.dupe(u8, bytes);
+        },
+        else => error.InvalidId3v2Text,
+    };
+}
+
+/// UTF-16 text carries a BOM in encoding 1 and is big-endian in encoding 2.
+/// A missing BOM is treated as little-endian, which is what the encoders that
+/// omit it actually produce.
+fn decodeUtf16(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    fixed: ?std.builtin.Endian,
+) ![]const u8 {
+    var rest = bytes;
+    var endian = fixed orelse .little;
+    if (fixed == null and rest.len >= 2) {
+        if (rest[0] == 0xff and rest[1] == 0xfe) {
+            endian = .little;
+            rest = rest[2..];
+        } else if (rest[0] == 0xfe and rest[1] == 0xff) {
+            endian = .big;
+            rest = rest[2..];
+        }
+    }
+    if (rest.len % 2 != 0) return error.InvalidId3v2Text;
+    const units = try allocator.alloc(u16, rest.len / 2);
+    defer allocator.free(units);
+    for (units, 0..) |*unit, index| {
+        const value = std.mem.readInt(u16, rest[index * 2 ..][0..2], endian);
+        unit.* = std.mem.nativeToLittle(u16, value);
+    }
+    return std.unicode.utf16LeToUtf8Alloc(allocator, units) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidId3v2Text,
+    };
+}
+
+/// `TCON` may hold a name, a bare ID3v1 genre number, a parenthesized number,
+/// or one of the two special codes. Only a name is returned.
+fn canonicalGenre(allocator: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var text = std.mem.trim(u8, value, " ");
+    if (text.len >= 2 and text[0] == '(' and text[text.len - 1] == ')')
+        text = text[1 .. text.len - 1];
+    if (std.mem.eql(u8, text, "RX")) return allocator.dupe(u8, "Remix");
+    if (std.mem.eql(u8, text, "CR")) return allocator.dupe(u8, "Cover");
+    if (text.len != 0 and isAllDigits(text)) {
+        const code = std.fmt.parseUnsigned(u8, text, 10) catch return allocator.dupe(u8, text);
+        if (id3v1.genreName(code)) |name| return allocator.dupe(u8, name);
+        return allocator.dupe(u8, "");
+    }
+    return allocator.dupe(u8, text);
+}
+
+fn isAllDigits(text: []const u8) bool {
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
+
+/// First frame wins: duplicate frames are common and a later one must not
+/// silently replace an earlier value.
+fn claim(field: *?[]const u8, value: []const u8) void {
+    if (field.* != null or value.len == 0) return;
+    field.* = value;
+}
+
+fn claimPair(value: []const u8, number: *?u32, total: *?u32) void {
+    if (std.mem.indexOfScalar(u8, value, '/')) |split| {
+        claimNumber(value[0..split], number);
+        claimNumber(value[split + 1 ..], total);
+        return;
+    }
+    claimNumber(value, number);
+}
+
+fn claimNumber(value: []const u8, field: *?u32) void {
+    if (field.* != null) return;
+    const trimmed = std.mem.trim(u8, value, " ");
+    if (trimmed.len == 0) return;
+    field.* = std.fmt.parseUnsigned(u32, trimmed, 10) catch null;
+}
+
+fn isTruthy(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "1") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes");
+}
+
+fn eqlAny(text: []const u8, spellings: []const []const u8) bool {
+    for (spellings) |spelling| if (std.ascii.eqlIgnoreCase(text, spelling)) return true;
+    return false;
+}
+
+fn readExact(readable: source.ReadableSource, offset: u64, buffer: []u8) !usize {
+    var filled: usize = 0;
+    while (filled < buffer.len) {
+        const chunk = try readable.readAt(offset + filled, buffer[filled..]);
+        if (chunk == 0) break;
+        filled += chunk;
+    }
+    return filled;
+}
+
+fn expectTags(allocator: std.mem.Allocator, bytes: []const u8) !?model.ObservedTags {
+    var memory = source.MemorySource{ .bytes = bytes };
+    return read(allocator, memory.readable());
+}
+
+fn buildTag(
+    allocator: std.mem.Allocator,
+    major: u8,
+    flags: u8,
+    frames: []const u8,
+) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, "ID3");
+    try bytes.appendSlice(allocator, &.{ major, 0, flags });
+    var size: [4]u8 = undefined;
+    const length: u32 = @intCast(frames.len);
+    size[0] = @intCast((length >> 21) & 0x7f);
+    size[1] = @intCast((length >> 14) & 0x7f);
+    size[2] = @intCast((length >> 7) & 0x7f);
+    size[3] = @intCast(length & 0x7f);
+    try bytes.appendSlice(allocator, &size);
+    try bytes.appendSlice(allocator, frames);
+    return bytes.toOwnedSlice(allocator);
+}
+
+fn buildFrame(
+    allocator: std.mem.Allocator,
+    identifier: *const [4]u8,
+    major: u8,
+    payload: []const u8,
+) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try bytes.appendSlice(allocator, identifier);
+    var size: [4]u8 = undefined;
+    const length: u32 = @intCast(payload.len);
+    if (major >= 4) {
+        size[0] = @intCast((length >> 21) & 0x7f);
+        size[1] = @intCast((length >> 14) & 0x7f);
+        size[2] = @intCast((length >> 7) & 0x7f);
+        size[3] = @intCast(length & 0x7f);
+    } else {
+        std.mem.writeInt(u32, &size, length, .big);
+    }
+    try bytes.appendSlice(allocator, &size);
+    try bytes.appendSlice(allocator, &.{ 0, 0 });
+    try bytes.appendSlice(allocator, payload);
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "ID3v2.4 frames map onto canonical fields without leaking frame identifiers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var frames: std.ArrayList(u8) = .empty;
+    for ([_]struct { id: *const [4]u8, payload: []const u8 }{
+        .{ .id = "TIT2", .payload = "\x03Reference Tone" },
+        .{ .id = "TPE1", .payload = "\x03Orca Test" },
+        .{ .id = "TPE2", .payload = "\x03Orca Ensemble" },
+        .{ .id = "TALB", .payload = "\x03Fixtures" },
+        .{ .id = "TRCK", .payload = "\x032/9" },
+        .{ .id = "TPOS", .payload = "\x031/2" },
+        .{ .id = "TDRC", .payload = "\x032026-08-23" },
+        .{ .id = "TCMP", .payload = "\x031" },
+        .{ .id = "TCON", .payload = "\x03Ambient\x00(9)" },
+        .{ .id = "TXXX", .payload = "\x03MusicBrainz Album Id\x00release-uuid" },
+    }) |frame| {
+        const encoded = try buildFrame(allocator, frame.id, 4, frame.payload);
+        try frames.appendSlice(allocator, encoded);
+    }
+    const tag = try buildTag(allocator, 4, 0, frames.items);
+    const tags = (try expectTags(allocator, tag)).?;
+
+    try std.testing.expectEqualStrings("Reference Tone", tags.title.?);
+    try std.testing.expectEqualStrings("Orca Test", tags.artist.?);
+    try std.testing.expectEqualStrings("Orca Ensemble", tags.album_artist.?);
+    try std.testing.expectEqualStrings("Fixtures", tags.album.?);
+    try std.testing.expectEqual(@as(?u32, 2), tags.track_number);
+    try std.testing.expectEqual(@as(?u32, 9), tags.track_total);
+    try std.testing.expectEqual(@as(?u32, 1), tags.disc_number);
+    try std.testing.expectEqual(@as(?u32, 2), tags.disc_total);
+    try std.testing.expectEqualStrings("2026-08-23", tags.date.?);
+    try std.testing.expectEqual(@as(?bool, true), tags.compilation);
+    try std.testing.expectEqual(@as(usize, 2), tags.genres.len);
+    try std.testing.expectEqualStrings("Ambient", tags.genres[0]);
+    try std.testing.expectEqualStrings("Metal", tags.genres[1]);
+    try std.testing.expectEqualStrings("release-uuid", tags.musicbrainz_release_id.?);
+}
+
+test "ID3v2.3 sizes, Latin-1 text, and split date frames read correctly" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TIT2", 3, "\x00Caf\xe9"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TYER", 3, "\x001999"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TDAT", 3, "\x000112"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TRCK", 3, "\x0007"));
+    const tag = try buildTag(allocator, 3, 0, frames.items);
+    const tags = (try expectTags(allocator, tag)).?;
+
+    try std.testing.expectEqualStrings("Café", tags.title.?);
+    try std.testing.expectEqualStrings("1999-12-01", tags.date.?);
+    try std.testing.expectEqual(@as(?u32, 7), tags.track_number);
+}
+
+test "UTF-16 text frames decode from either byte order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(
+        allocator,
+        "TIT2",
+        3,
+        "\x01\xff\xfeS\x00o\x00l\x00",
+    ));
+    try frames.appendSlice(allocator, try buildFrame(
+        allocator,
+        "TPE1",
+        3,
+        "\x01\xfe\xff\x00M\x00o\x00o\x00n",
+    ));
+    try frames.appendSlice(allocator, try buildFrame(
+        allocator,
+        "TALB",
+        4,
+        "\x02\x00S\x00k\x00y",
+    ));
+    const tag = try buildTag(allocator, 4, 0, frames.items);
+    const tags = (try expectTags(allocator, tag)).?;
+    try std.testing.expectEqualStrings("Sol", tags.title.?);
+    try std.testing.expectEqualStrings("Moon", tags.artist.?);
+    try std.testing.expectEqualStrings("Sky", tags.album.?);
+}
+
+test "unsynchronized tags are restored before frames are parsed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const payload = "\x00\xff\xfeend";
+    const frame = try buildFrame(allocator, "TIT2", 3, payload);
+    var unsynced: std.ArrayList(u8) = .empty;
+    for (frame) |byte| {
+        try unsynced.append(allocator, byte);
+        if (byte == 0xff) try unsynced.append(allocator, 0x00);
+    }
+    const tag = try buildTag(allocator, 3, 0x80, unsynced.items);
+    const tags = (try expectTags(allocator, tag)).?;
+    try std.testing.expectEqualStrings("ÿþend", tags.title.?);
+}
+
+test "extended headers are skipped in both supported versions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const frame = try buildFrame(allocator, "TIT2", 3, "\x00After header");
+    var v3: std.ArrayList(u8) = .empty;
+    try v3.appendSlice(allocator, &.{ 0, 0, 0, 6, 0, 0, 0, 0, 0, 0 });
+    try v3.appendSlice(allocator, frame);
+    const v3_tags = (try expectTags(allocator, try buildTag(allocator, 3, 0x40, v3.items))).?;
+    try std.testing.expectEqualStrings("After header", v3_tags.title.?);
+
+    const v4_frame = try buildFrame(allocator, "TIT2", 4, "\x00After header");
+    var v4: std.ArrayList(u8) = .empty;
+    try v4.appendSlice(allocator, &.{ 0, 0, 0, 6, 1, 0 });
+    try v4.appendSlice(allocator, v4_frame);
+    const v4_tags = (try expectTags(allocator, try buildTag(allocator, 4, 0x40, v4.items))).?;
+    try std.testing.expectEqualStrings("After header", v4_tags.title.?);
+}
+
+test "APIC artwork is reported by type and size without decoding image data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var payload: std.ArrayList(u8) = .empty;
+    try payload.appendSlice(allocator, "\x00image/jpeg\x00");
+    try payload.append(allocator, 3);
+    try payload.appendSlice(allocator, "cover\x00");
+    try payload.appendNTimes(allocator, 0x5a, 64);
+    const frame = try buildFrame(allocator, "APIC", 4, payload.items);
+    const tags = (try expectTags(allocator, try buildTag(allocator, 4, 0, frame))).?;
+
+    try std.testing.expectEqualStrings("image/jpeg", tags.artwork.?.mime_type);
+    try std.testing.expectEqual(@as(u64, 64), tags.artwork.?.byte_size);
+    try std.testing.expectEqual(model.ArtworkKind.front_cover, tags.artwork.?.kind);
+}
+
+test "truncated and malformed ID3v2 tags are rejected without reading past the end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expect(try expectTags(allocator, "ID3") == null);
+    try std.testing.expect(try expectTags(allocator, "no tag here at all") == null);
+    // v2.2 is a real but unsupported version, not a parse failure.
+    try std.testing.expect(try expectTags(
+        allocator,
+        "ID3\x02\x00\x00\x00\x00\x00\x0aTT2\x00\x00\x04\x00abc",
+    ) == null);
+    try std.testing.expectError(
+        error.InvalidId3v2Tag,
+        expectTags(allocator, "ID3\xff\x00\x00\x00\x00\x00\x0a"),
+    );
+    try std.testing.expectError(
+        error.InvalidId3v2Tag,
+        expectTags(allocator, "ID3\x04\x00\x00\x00\x00\x80\x0a"),
+    );
+    // Header declares more bytes than the stream holds.
+    try std.testing.expectError(
+        error.TruncatedId3v2Tag,
+        expectTags(allocator, "ID3\x04\x00\x00\x00\x00\x01\x00short"),
+    );
+    // A frame declares more bytes than the tag holds.
+    const frames = try buildFrame(allocator, "TIT2", 4, "\x03Title");
+    frames[7] = 0x40;
+    try std.testing.expectError(
+        error.TruncatedId3v2Tag,
+        expectTags(allocator, try buildTag(allocator, 4, 0, frames)),
+    );
+    // Trailing garbage after a valid frame keeps what was already read.
+    var mixed: std.ArrayList(u8) = .empty;
+    try mixed.appendSlice(allocator, try buildFrame(allocator, "TIT2", 4, "\x03Kept"));
+    try mixed.appendSlice(allocator, "\xfe\xfe\xfe\xfe\x00\x00\x00\x02\x00\x00zz");
+    const tags = (try expectTags(allocator, try buildTag(allocator, 4, 0, mixed.items))).?;
+    try std.testing.expectEqualStrings("Kept", tags.title.?);
+}
+
+test "tagged MP3 fixture reads its real ID3v2 frames" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var file = try source.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.mp3",
+    );
+    defer file.close();
+    const tags = (try read(allocator, file.readable())).?;
+    try std.testing.expectEqualStrings("Reference Tone", tags.title.?);
+    try std.testing.expectEqualStrings("Orca Test", tags.artist.?);
+    try std.testing.expectEqualStrings("Fixtures", tags.album.?);
+    try std.testing.expectEqual(@as(?u32, 1), tags.track_number);
+    try std.testing.expect(try prefixLength(file.readable()) > 10);
+}

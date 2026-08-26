@@ -1,9 +1,23 @@
 # Audio engine ownership and real-time boundary
 
 Player transport state is independent of physical output. A seek first moves
-the codec-neutral source, then publishes a new generation and timeline frame;
-prepared blocks from older generations are discarded by the callback without
-queue surgery.
+the codec-neutral source, then publishes a new **epoch** and timeline frame;
+prepared blocks from older epochs are discarded by the callback without queue
+surgery.
+
+Epoch and track identity are deliberately separate fields on a prepared block.
+The callback compares **only** the epoch, because a gapless transition appends
+the successor track's blocks under the *same* epoch — comparing track identity
+there would discard exactly the audio gapless depends on. The successor instead
+carries a new `entry_serial`, which the callback publishes (never compares) so
+the control lane can report which queue entry is actually being rendered. The
+decode cursor leads the audible cursor by the whole render-ahead depth, so
+now-playing is derived from that published serial rather than from the decoder's
+position.
+
+A paused Player is honored inside the callback: it writes silence and returns
+without consuming prepared blocks, without advancing position, and without
+counting an underrun. Pausing therefore does not discard prepared audio.
 
 Decoded/processed PCM uses preallocated `BlockPool` storage. One producer passes
 block indices to one callback through a bounded wait-free SPSC queue. The
@@ -21,7 +35,7 @@ DSP nodes expose sample/rate/layout effects, algorithmic latency, lookahead,
 tail and block constraints, reset behavior, and direct-RT safety. Prepared
 ordered chains are triple-buffered: the control lane writes an unclaimed slot
 and publishes it atomically, while the render lane adopts it only at a block
-boundary. Acknowledged generations make old node-context reclamation explicit.
+boundary. Acknowledged publication makes old node-context reclamation explicit.
 Gain and ReplayGain changes use frame ramps; metering publishes peak/RMS
 snapshots without changing samples. Built-in processing also includes peaking
 parametric EQ, stereo crossfeed, and a resettable DC blocker.
@@ -37,6 +51,65 @@ direct-RT eligibility, and total algorithmic latency. They distinguish source
 PCM from canonical float32 working PCM and conservatively explain why a path is
 not bit-perfect. Eligibility is not an assertion that the current backend and
 device negotiated a bit-perfect native output path.
+
+A runtime Zone owns its whole private render path: `BlockPool`, `RenderPipe`,
+`RenderContext` and `OutputSession`, plus every atomic the render callback reads
+— epoch, silence, packed position, rendered entry serial and entry anchor. None
+of those pointers may lead back into a Player, because an output can outlive a
+Player detach and the real-time thread cannot re-resolve a generational handle.
+The producer publishes the Player's epoch into the Zone's own epoch atomic
+immediately before submitting blocks under it.
+
+One `PlayerEngine` thread per Player is the single decode producer: SPSC queues
+require exactly one producer and fanout is one-producer-many-consumers. It is
+spawned lazily when a Player first receives a source and registered with
+`work.Registry`, so `drain`, `destroyPlayer` and `shutdown` join it rather than
+abandoning it. Each pass adopts a published zone set, reclaims consumed blocks,
+decodes one canonical block per Zone budget, fans it out, services output
+opening and bounded recovery, publishes position, and parks briefly so
+play/pause/seek take effect within a device quantum. The Player's `SourceQueue`
+is plain state rather than an atomic, so loading a source or seeking quiesces the
+engine first.
+
+The engine thread never resolves a handle. `core/handle.zig` performs no locking,
+so generational handles protect handles, not a pointer a worker already
+dereferenced. The control lane writes an immutable `[]*ZoneRuntime` into an
+unclaimed slot and publishes it with a single atomic store; the engine adopts it
+at a pass boundary and bumps an acknowledgement counter; the control lane frees
+a Zone or closes its output only after observing that acknowledgement. This is
+the same acknowledged double-buffering used for prepared processing chains.
+
+Rendered position is published as one `u64` — high 16 bits epoch, low 48 bits
+frames since that epoch — written by the callback with a single store and read by
+the control lane with a single load, so a frame count can never be paired with
+the wrong epoch. A sample whose epoch does not match is discarded rather than
+reported.
+
+The epoch is the right anchor for the *timeline* and the wrong one for a
+*per-entry* position: a gapless auto-advance deliberately keeps one epoch, so
+frames-since-epoch runs straight through the whole queue. The callback therefore
+publishes a second packed `u64`, the **entry anchor**: the frames-since-epoch
+value at which the entry now being rendered became audible, stamped with the low
+16 bits of that entry's serial. Position inside the audible entry is
+`frames since epoch - entry anchor`, plus the seek base only when the anchor is
+zero — an entry that began inside the current epoch started at its own frame
+zero, while one that was already audible when the epoch was stamped carries the
+base stamped with it. Consistency is checked, never locked: the callback writes
+the anchor and the serial before releasing the position, the control lane loads
+the position first and the other two after, and a stamp that disagrees with the
+published serial or an anchor ahead of the frame count proves the pair came from
+different moments, so the sample is dropped exactly as a mismatched epoch is.
+Consecutive entries take consecutive serials, so a 16-bit stamp cannot alias
+inside a torn read.
+
+The clock Zone is the first attached Zone with an active output, and promoting a
+replacement stamps a new epoch so the promoted Zone's counter starts from a known
+base. Coalesced position hints reach hosts through the telemetry channel at
+roughly 10 Hz.
+
+Render-ahead depth follows the Zone's policy but never falls below the negotiated
+device quantum: a producer that stays less than one callback's demand ahead
+underruns on every callback regardless of how promptly it runs.
 
 Zones hold render policy independently from Players. Interactive policy limits
 the producer to a direct one-block handoff, while robust and custom policies
@@ -55,8 +128,8 @@ silent stream against the current user's server; normal tests require no live
 audio service.
 
 PipeWire stream-state changes are translated into an atomic Orca status. A lost
-output is closed and reopened with bounded attempts while its Player generation
-and prepared render path remain intact. Recovery state belongs to each Zone;
+output is closed and reopened with bounded attempts while its Player epoch and
+prepared render path remain intact. Recovery state belongs to each Zone;
 another Zone remains active if reopening ultimately fails.
 
 Device discovery returns bounded Orca-owned snapshots and uses PipeWire object
@@ -93,6 +166,39 @@ successor. When decoding reaches the current source's end, it appends compatible
 next-source blocks behind current blocks already in the render queue, then
 releases the exhausted decoder. This primes transitions before audible end and
 requires no callback-side source switch or queue mutation.
+
+A `PlaybackQueue` sits above that decode queue: bounded track references, an
+audible cursor, a decode cursor, repeat and shuffle. It is owned by the Player
+and mutated only by the control lane and the engine thread — never by a render
+callback — under the same `quiesce`/`release` handshake that protects
+`SourceQueue`. Enqueueing past capacity applies backpressure rather than growing.
+The three values a host polls (entry count, audible cursor, decode cursor) are
+atomics, so reporting now-playing never has to stop the producer.
+
+The two cursors are separate because the decode cursor leads the audible one by
+the whole render-ahead depth. The audible cursor is derived from the
+`entry_serial` the callback publishes, mapped back to a queue position, and
+every user-facing operation resolves from it — so a skip during a gapless
+transition advances one entry rather than two. Entry serials continue across a
+replaced `SourceQueue`, because a serial that repeated would resolve to the
+wrong entry.
+
+A user skip is a hard switch: the epoch bump makes the callback discard prepared
+audio, so it is immediate rather than waiting for the current entry to drain.
+`previous` restarts the current entry past three seconds and moves the cursor
+back before it. Shuffle generates a permutation and keeps the playing entry at
+the cursor, so toggling it does not restart the song and `previous` still has
+real history; a random pick per advance would have neither property. `repeat_one`
+re-opens a *fresh* session for the same entry rather than seeking the one still
+draining into the pipe.
+
+Auto-advance runs on the engine thread: at `current.eof` with no successor it
+resolves the next entry, opens it, and primes it. A canonical format mismatch is
+not fatal — the successor is held opened but unprimed until every Zone has
+drained, then the outputs are reopened at the new format and it is hard-loaded.
+Gapless when formats match, gapped-but-correct when they do not. A decoder that
+fails part-way ends its entry rather than stalling the queue, and an entry that
+cannot be opened is stepped over, with consecutive failures bounded.
 
 Gapless transitions append compatible successor PCM directly. Optional
 crossfade infrastructure provides a stateful linear envelope that operates on

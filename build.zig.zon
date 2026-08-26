@@ -1,6 +1,6 @@
 .{
     .name = .orca,
-    .version = "0.10.0",
+    .version = "0.2.0-alpha",
     .minimum_zig_version = "0.17.0-dev.1770+5d7cf3f34",
     .dependencies = .{
         .flac = .{

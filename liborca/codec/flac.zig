@@ -8,6 +8,9 @@ const Context = struct {
     reader_buffer: [8192]u8,
     source_reader: storage.BufferedSourceReader,
     native: native_flac.Decoder,
+    /// Set once the stream has been seeked. See `readFrames` for why end of
+    /// stream stops being an error after that point.
+    sought: bool,
 };
 
 pub fn openDecoder(
@@ -17,6 +20,7 @@ pub fn openDecoder(
     const format = try readFormat(source);
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
+    context.sought = false;
     context.source_reader = .init(source, &context.reader_buffer);
     context.allocator = allocator;
     context.native = try native_flac.Decoder.init(
@@ -97,13 +101,33 @@ fn big64(bytes: *const [8]u8) u64 {
 
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    const samples = try context.native.read(f32, output);
+    const samples = context.native.read(f32, output) catch |err| switch (err) {
+        // The decoder raises `EndOfStream` when it reaches the end of the
+        // stream having decoded a different number of frames than STREAMINFO
+        // declared. Unsought, that genuinely means the file is truncated and
+        // the caller should hear about it. After a seek it means nothing at
+        // all: the frames before the seek target were never decoded, so the
+        // running count cannot match the declared total and every correct
+        // stream ends this way.
+        //
+        // Reporting it as a decode failure ended playback of the track at the
+        // seek point, and because the Decoder contract signals end of input
+        // with zero frames rather than an error, the caller could not tell
+        // that apart from a corrupt file. Once sought, report the clean end.
+        //
+        // The cost is that a truncated file seeked into ends quietly instead
+        // of erroring. That is the right trade for playback, and the unsought
+        // path — every ordinary play from the beginning — still detects it.
+        error.EndOfStream => if (context.sought) return 0 else return err,
+        else => return err,
+    };
     return samples.len / context.native.channels;
 }
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     try context.native.seekTo(frame);
+    context.sought = true;
 }
 
 fn deinit(context_ptr: *anyopaque) void {
@@ -178,4 +202,38 @@ test "malformed FLAC metadata fails before decoder allocation" {
         std.testing.allocator,
         local.readable(),
     ));
+}
+
+test "reading to the end after a seek reports end of input rather than failing" {
+    // Regression: playing a real FLAC album stalled on the first track with
+    // 8,266 underruns. The decoder raises `EndOfStream` when its frame count
+    // disagrees with STREAMINFO, which is unavoidable after a seek, so the
+    // engine saw a decode failure instead of the end of the track and never
+    // advanced. 90% of the target library is FLAC, so this path is the common
+    // one, not an edge case.
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/generated-reference.flac",
+    );
+    defer local.close();
+
+    var codec = try openDecoder(std.testing.allocator, local.readable());
+    defer codec.deinit();
+
+    const total = codec.frame_count orelse return error.MissingFrameCount;
+    try std.testing.expect(total > 1);
+
+    // Seek near the end, then drain. Every read must succeed, and the stream
+    // must terminate by reporting zero frames.
+    try codec.seek(total - 1);
+    var scratch: [4096]f32 = undefined;
+    var guard: usize = 0;
+    while (guard < 64) : (guard += 1) {
+        const frames = try codec.readFrames(&scratch);
+        if (frames == 0) break;
+    }
+    try std.testing.expect(guard < 64);
+
+    // Further reads at the end stay clean rather than erroring.
+    try std.testing.expectEqual(@as(usize, 0), try codec.readFrames(&scratch));
 }

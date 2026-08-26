@@ -1,5 +1,190 @@
 # Changelog
 
+## Unreleased - 0.2.0-alpha
+
+### The C ABI reaches the runtime (breaking)
+
+Until now `liborca/orca.h` exposed runtime create/destroy, library open/query,
+and a Player state machine that was not connected to anything. There was no way
+to load a track, attach an output, trigger a scan, read a position, or observe
+an event, which is why the GTK app's play button did nothing. The boundary now
+exposes the surface the frontends actually need.
+
+- **Breaking: `orca_track_view` grew.** It now carries `artist`, `duration_ms`,
+  `track_number`, `disc_number` and `has_file`, each numeric field paired with a
+  `has_*` flag so "zero" and "the library does not know" stay distinguishable.
+  `TrackSummary` already carried all of it. Both consumers are in-tree and there
+  are no external clients, so the break was taken now rather than later.
+  `orca_player_state_snapshot` is untouched; the richer transport view is a
+  **new** `orca_player_status` rather than a grown struct that already shipped.
+- **Scanning is a job, not a blocking call.** `orca_library_add_root`,
+  `orca_library_remove_root` and `orca_library_query_roots` manage roots;
+  `orca_library_start_scan` registers a `work.Registry` worker with its own
+  `std.Io` and its own cancellation token and returns immediately.
+  `orca_job_snapshot_get`, `orca_job_cancel` and `orca_library_scan_stats`
+  observe it. **Scan progress reports `completed_units = files_processed` with
+  `has_total = 0`:** a filesystem walk has no honest denominator until it has
+  finished walking, and Orca does not invent one. Shutdown, `orca_library_close`
+  and `orca_player_destroy` all cancel and join scan workers before anything
+  they hold can be freed.
+- **The scan projects as it commits**, exactly as `orca-cli scan` does, because
+  a scan whose results are never projected has not made a library browsable.
+  `orca_library_start_projection` is the other direction — reprojecting after a
+  metadata change, with no filesystem walk. `orca-cli scan` and `project` now
+  run through those same runtime jobs, so the CLI and the ABI cannot drift.
+- **Events.** `orca_runtime_pump` drives the control lane;
+  `orca_runtime_poll_event` drains the existing lossless completion channel and
+  the existing coalescing telemetry channel into one tagged POD `orca_event`
+  with a named `extern union` payload — ABI-stable, and it imports cleanly into
+  Swift. Kinds: command completed, job progress, job finished, player position.
+- **Transport, queue and now-playing.** `orca_player_set_library`,
+  `_play_track` (through the control lane, correlated by request id),
+  `_play_tracks`, `_enqueue_tracks`, `_next`, `_previous`, `_clear_queue`,
+  `_set_repeat`, `_set_shuffle`, `_set_volume`, `_volume`, `_seek_ms`,
+  `_status_get`, `_now_playing` and `_query_queue`. `orca_player_status`
+  carries transport, repeat, shuffle, epoch, `position_ms`, `duration_ms`,
+  `track_id`, `queue_length`, `queue_index` and volume in one lock-free read.
+  Position is derived from the packed epoch+frames atomic the render callback
+  writes, never reconstructed from events, and now-playing reports the
+  **audible** entry rather than the decode cursor.
+- **Devices and zones.** `orca_enumerate_output_devices`, `orca_zone_create`,
+  `_destroy`, `_attach_player`, `_detach`, `_open_output`, `_close_output` and
+  `_status_get`, plus `orca_player_open_default_output`, which creates,
+  attaches and opens in one call so a single-output frontend never has to know
+  Zones exist. Device id 0 delegates to the server default.
+- **Volume is real.** A `processing.Gain` lives beside each Player, is installed
+  as the engine's Player-scope processor, and applies to canonical PCM once
+  before fanout, so every Zone hears the same level and a stop/start keeps it.
+- **A single-thread contract that is enforced.** All `orca_*` calls for one
+  runtime must come from one thread, `orca_runtime_poll_event` included. Debug
+  builds record the creating thread and return `ORCA_STATUS_WRONG_THREAD` on a
+  violation. This is no longer theoretical: the runtime behind the boundary is
+  genuinely multithreaded and its object pools take no lock.
+- **A Player with nothing to play refuses to play.** `orca_player_play` now
+  requires a loaded source or a non-empty queue *and* an attached Zone. The C
+  ABI smoke test asserted the opposite for as long as the defect existed; that
+  assertion is now inverted, and the test drives the whole path — open, add
+  root, scan as a job, wait, project, query, open a default output, play by id,
+  watch the position advance, pause, seek, next, clear, shut down.
+- **Position is anchored to the audible queue entry, not to the epoch.**
+  `orca_player_status.position_ms` used to keep accumulating across a gapless
+  auto-advance, so every entry after the first reported the sum of everything
+  played before it — elapsed time past the end of the track, and a seek slider
+  pinned past its maximum. A gapless transition deliberately does not bump the
+  epoch, so frames-since-epoch was never the right anchor for a per-track
+  position. The render callback now also publishes the frames-since-epoch value
+  at which the audible entry started, packed with that entry's serial in a
+  single `u64` so the control lane can detect a torn pair and discard it exactly
+  as it discards a mismatched epoch. No lock, no allocation and no extra work in
+  the render callback.
+
+## 0.1.0-alpha
+
+**Version reset.** The project was previously tagged `0.10.0`. That number, and
+the release notes below it, describe subsystems that exist as tested components
+but are **not reachable through the authoritative runtime or ABI path**. The
+version has been reset to `0.1.0-alpha` to stop the changelog from overstating
+what works.
+
+### Added since the reset
+
+- **A playback queue: Orca plays a song, and a list of songs.** A bounded
+  `PlaybackQueue` of Library track references sits above the gapless decode
+  queue, with enqueue, play-now, next, previous, stop, clear, repeat and
+  shuffle. `playerPlayTrack` resolves a Track id through
+  `TrackRepository.playableLocation` on an independent read-only connection,
+  opens a self-contained decoder for it, and loads it on the control lane —
+  never on a caller's UI thread — failing with typed reasons (`track_has_no_file`,
+  `track_file_missing`, `codec_unavailable`) and marking the Location `missing`
+  when the file has gone. Auto-advance primes the next entry at end-of-decode, so
+  a real album plays gaplessly; a canonical format mismatch is not fatal but
+  drains the pipe and reopens the Zone output at the new format, verified on
+  hardware across 44.1 kHz -> 96 kHz -> 44.1 kHz. A user skip is a hard switch
+  and immediate, `previous` restarts past three seconds, shuffle uses a
+  permutation so `previous` keeps working, and now-playing is derived from the
+  `entry_serial` the render callback publishes rather than from the decode
+  cursor, which leads it by the whole render-ahead depth. `orca-cli play-tracks`
+  drives all of it.
+- **`playFileBlocking` is gone.** The stack-local single-Zone playback path has
+  been deleted; `orca-cli play` runs through the runtime object graph, which is
+  the only implementation left.
+
+- **Scanned files carry their decoded audio properties.** A file whose bytes are
+  new or changed is probed through the codec registry, and `files.sample_rate`,
+  `bit_depth`, `channels` and `duration_ms` record what its container declares.
+  Only headers are read, so a 22,060-file cold scan is unchanged at ~3.2 s and a
+  rescan that finds nothing changed still does no format work at all. A file that
+  will not open is recorded with no properties rather than failing the scan.
+  Duration reaches `tracks.duration_ms` through the projection, so a Track lists
+  its length. Verified against `ffprobe` on real library files: exact for every
+  FLAC and every MP3 carrying a Xing/Info header, and within 0.1% on
+  variable-bitrate MP3s that declare no length at all, which no reader can do
+  better on without decoding.
+- **`tracks.preferred_file_id` is chosen on declared properties.** Higher bit
+  depth wins, then higher sample rate, then a location a scan has confirmed; the
+  container ranking is now only a tiebreak between encodings that declare the
+  same thing. A missing property is unknown rather than zero, so a lossy file
+  with no sample width to state loses to a real 16-bit one, and a file the
+  scanner could not open never outranks one it could.
+- **MP3 playback.** `codec/mp3.zig` decodes MPEG Layer I/II/III through a
+  vendored public-domain `minimp3` contained behind `codec/mp3_shim.c`, with
+  pure-Zig Xing/Info/VBRI parsing, LAME encoder delay and padding trimming, and
+  seeking that is exact for both constant-bitrate streams and variable-bitrate
+  streams with a lazily built frame index. Verified against real library files:
+  reported length matches `ffprobe` on every tagged file tested, and decoded
+  length matches it exactly on eleven of thirteen.
+
+### Fixed since the reset
+
+- **File mutation is now crash-safe end to end.** Journal writes raise SQLite
+  durability for their own transaction, every action of a group is journaled
+  before any filesystem work, stage creation and both rename boundaries fsync the
+  containing directory, `commitReplacement` revalidates source identity
+  immediately before renaming, and `FileIdentity` carries a `quick_hash`
+  (BLAKE3 over first 64 KiB ‖ last 64 KiB ‖ size) so a same-size edit with a
+  preserved timestamp is detected. Recovery never reports `rolled_back` unless
+  the original file is provably back in place; otherwise it records
+  `needs_reconciliation` and retains every file.
+
+### Errata against the release notes below
+
+Verified against the code and by running the binaries, not inferred from docs:
+
+- **No music can be played from the application.** Playback exists only inside
+  `audio/backends/pipewire_playback.zig:playFileBlocking`, reachable solely from
+  `orca-cli play FILE`. The runtime's Player is a detached state machine, no
+  runtime Zone owns an output device, and `orca_player_play` only sets an enum.
+- **Scanning does not produce a browsable library.** `library/scanner.zig`
+  writes only `observed_files`; the `tracks`, `files`, `locations`, `artists`,
+  `releases`, `recordings` and `library_roots` tables stay empty. Confirmed by
+  scanning a 3-file folder and reading the resulting database.
+- **Tags are not read for real-world files.** Only ID3v1 (the obsolete 128-byte
+  trailer) is parsed, and only for MP3. `metadata/vorbis_comment.zig` has
+  `rewrite` and `create` but **no `read`**, so FLAC tags are never extracted.
+  There is no ID3v2 and no MP4 metadata support.
+- **Only WAV, FLAC and QOA can be decoded.** MP3, AAC/M4A/ALAC, Opus and Vorbis
+  fail with `CodecUnavailable`.
+- `0.7.0`'s "immutable mutation previews" *was* inaccurate — an approved plan
+  borrowed caller-owned slices and could be mutated through another alias, and
+  startup journal recovery was only invoked directly by tests. **Both are now
+  fixed:** a plan deep-copies and seals its actions and approval names a content
+  digest, and `LibraryDatabase.open` drives every nonterminal journal record to a
+  terminal state before returning, refusing to open if it cannot.
+- `0.8.0`'s native frontends cannot select or play a track. The GTK list has no
+  row-activation handler, MPRIS accepts Next/Previous with no behavior and
+  reports empty metadata and zero position, and macOS has never been compiled.
+- `0.9.0`'s claim that scheduler yields keep analysis subordinate to playback is
+  unproven; there is no shared scheduler and no contended workload test.
+- `0.10.0`'s scrobble queue is idempotent only for *local enqueue*. Remote
+  delivery is at-least-once, and nothing connects the queue to playback events.
+- Releases `0.3.0` through `0.6.0` are missing from this file entirely.
+
+A capability is now considered done only when it is reachable from `orca-cli` or
+the GUI through the public runtime/ABI path. The notes below are retained
+unedited as a record of what was built, not as a statement of what works.
+
+---
+
 ## 0.10.0 - 2026-08-21
 
 Provider-assisted identification and scrobbling milestone.

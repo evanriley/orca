@@ -103,6 +103,47 @@ pub const BufferedSourceReader = struct {
     };
 };
 
+/// An in-memory `ReadableSource`, for tests and for callers that already hold
+/// the bytes. Identity is synthetic and stable for the buffer it was built from.
+pub const MemorySource = struct {
+    bytes: []const u8,
+    inode: std.Io.File.INode = 0,
+    modified_ns: i96 = 0,
+
+    pub fn readable(self: *MemorySource) ReadableSource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn readAt(context: *anyopaque, offset: u64, buffer: []u8) !usize {
+        const self: *MemorySource = @ptrCast(@alignCast(context));
+        if (offset >= self.bytes.len) return 0;
+        const start: usize = @intCast(offset);
+        const count = @min(buffer.len, self.bytes.len - start);
+        @memcpy(buffer[0..count], self.bytes[start .. start + count]);
+        return count;
+    }
+
+    fn getSize(context: *anyopaque) u64 {
+        const self: *MemorySource = @ptrCast(@alignCast(context));
+        return self.bytes.len;
+    }
+
+    fn getIdentity(context: *anyopaque) StorageIdentity {
+        const self: *MemorySource = @ptrCast(@alignCast(context));
+        return .{
+            .inode = self.inode,
+            .size = self.bytes.len,
+            .modified_ns = self.modified_ns,
+        };
+    }
+
+    const vtable = ReadableSource.VTable{
+        .read_at = readAt,
+        .size = getSize,
+        .identity = getIdentity,
+    };
+};
+
 pub const LocalFileSource = struct {
     io: std.Io,
     file: std.Io.File,
@@ -175,4 +216,14 @@ test "local files satisfy offset reads and identity capabilities" {
     try std.testing.expectEqualStrings("source", &buffer);
     try std.testing.expectEqual(@as(u64, 11), source.size());
     try std.testing.expectEqual(source.size(), source.identity().size);
+}
+
+test "memory sources answer bounded reads past their end" {
+    var memory = MemorySource{ .bytes = "orca" };
+    const readable = memory.readable();
+    var buffer: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try readable.readAt(2, &buffer));
+    try std.testing.expectEqualStrings("ca", buffer[0..2]);
+    try std.testing.expectEqual(@as(usize, 0), try readable.readAt(4, &buffer));
+    try std.testing.expectEqual(@as(u64, 4), readable.size());
 }

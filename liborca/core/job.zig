@@ -4,6 +4,9 @@ const object = @import("object.zig");
 
 pub const Kind = enum {
     scan,
+    /// Turning observed files into artists, releases and tracks. A pass of its
+    /// own, because a metadata edit reprojects without walking a filesystem.
+    projection,
     analysis,
     conversion,
     ripping,
@@ -67,6 +70,40 @@ pub const Manager = struct {
             if (completed_units > total) return error.InvalidProgress;
         }
         job.snapshot.completed_units = completed_units;
+    }
+
+    /// Records progress from a worker that may already have been asked to
+    /// cancel: a cancelling job is still doing work until its worker returns,
+    /// and refusing its last progress report would make the snapshot lie.
+    pub fn observeProgress(
+        self: *Manager,
+        job_handle: object.JobHandle,
+        completed_units: u64,
+    ) !void {
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .running, .cancelling => job.snapshot.completed_units = completed_units,
+            else => return error.InvalidJobTransition,
+        }
+    }
+
+    /// Terminal transition, recorded once the worker behind the job has been
+    /// joined. Only the control lane may call it, and only with a terminal
+    /// state.
+    pub fn finish(
+        self: *Manager,
+        job_handle: object.JobHandle,
+        state: State,
+    ) !void {
+        switch (state) {
+            .cancelled, .succeeded, .failed => {},
+            else => return error.InvalidJobTransition,
+        }
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .queued, .running, .cancelling => job.snapshot.state = state,
+            else => return error.JobAlreadyFinished,
+        }
     }
 
     pub fn requestCancellation(self: *Manager, job_handle: object.JobHandle) !void {
