@@ -25,6 +25,30 @@ libraries. `sqlite3` is linked via pkg-config; PipeWire deliberately is not
 (its emitted flags break Zig's current pkg-config parser — see the comment in
 `build.zig`).
 
+### Snapshot facts that cost time to rediscover
+
+These are properties of this specific Zig snapshot, not of the project. Each one
+was found the expensive way.
+
+- **`std.Thread.Mutex`, `std.Thread.Condition` and `std.Thread.ResetEvent` do not
+  exist.** Use atomics plus `std.Thread.join`. `std.Io.Mutex` and
+  `std.Io.Condition` do exist, but need an `io` in scope.
+- **`@cImport` does not exist.** `b.addTranslateC` is the replacement, and it
+  fails outright on GTK4's headers.
+- **`std.Io.Dir` cannot fsync a directory.** Its `handle` is not an fsync-able fd
+  (`EBADF` under `std.Io.Threaded`); open the directory *path as a file* instead.
+  Durable renames depend on this.
+- **`{d:0>2}` on a signed integer emits a sign**, so a duration of six seconds
+  formats as `0:+6`. Convert to unsigned before formatting.
+- `std.crypto.hash.Blake3` is available.
+
+### Verifying a build
+
+Never write `zig build 2>&1 | tail -3 && echo OK`. In a pipeline `$?` is the
+status of `tail`, not of the compiler, so a failed build reports success and the
+"verification" that follows runs a stale binary. This masked a real compile
+failure for two rounds. Check `${PIPESTATUS[0]}`, or run `zig build` unpiped.
+
 ## Commands
 
 ```sh
