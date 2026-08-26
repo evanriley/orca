@@ -19,8 +19,63 @@
 #include "orca.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Which output this test opens.
+ *
+ * Device 0 is the server default, which on a developer's machine is their
+ * actual speakers - so `zig build test` used to be audible every single run,
+ * which on a machine somebody is working at is unacceptable.
+ *
+ * Selection order:
+ *   1. ORCA_TEST_DEVICE, if set, names an orca device id explicitly.
+ *   2. Otherwise a sink published by scripts/silent-sink.sh, found by name.
+ *      This is the case that matters: it makes `zig build test` silent with
+ *      no ceremony, for anyone who has ever run that script.
+ *   3. Otherwise device 0, because a CI host has no silent sink and the test
+ *      must still exercise a real output rather than skipping.
+ *
+ * A null sink is a real PipeWire sink, so this weakens nothing: quantum
+ * negotiation, render callbacks and underrun accounting all still run. */
+#define SILENT_SINK_PREFIX "Orca Silent Test Sink"
+
+struct silent_device_search {
+    uint64_t id;
+    int found;
+};
+
+static void note_silent_device(void *context, const orca_device_view *device) {
+    struct silent_device_search *search = context;
+    size_t prefix_length = sizeof(SILENT_SINK_PREFIX) - 1;
+    if (search->found) return;
+    if (device->name.length < prefix_length) return;
+    if (memcmp(device->name.pointer, SILENT_SINK_PREFIX, prefix_length) != 0) return;
+    search->id = device->id;
+    search->found = 1;
+}
+
+static uint64_t test_device_id(orca_runtime *runtime) {
+    struct silent_device_search search;
+    const char *configured = getenv("ORCA_TEST_DEVICE");
+    if (configured != 0 && configured[0] != 0) {
+        return (uint64_t)strtoull(configured, 0, 10);
+    }
+
+    search.id = 0;
+    search.found = 0;
+    if (orca_enumerate_output_devices(runtime, &search, note_silent_device) ==
+            ORCA_STATUS_OK &&
+        search.found) {
+        printf("routing playback at silent device %llu\n",
+               (unsigned long long)search.id);
+        return search.id;
+    }
+
+    printf("no silent sink found; opening the default output (this is audible)\n");
+    return 0;
+}
 
 static void sleep_ms(long milliseconds) {
     struct timespec duration;
@@ -43,6 +98,72 @@ static void capture_track(void *context, const orca_track_view *track) {
     if (track->artist.length != 0) capture->with_artist += 1;
     if (track->has_file && capture->first_playable_id == 0)
         capture->first_playable_id = track->id;
+}
+
+struct artist_capture {
+    uint32_t count;
+    int64_t first_id;
+    uint32_t with_name;
+    uint32_t with_tracks;
+    int sorted;
+    char previous[256];
+};
+
+static void capture_artist(void *context, const orca_artist_view *artist) {
+    struct artist_capture *capture = context;
+    char current[256];
+    size_t length = artist->sort_name.length;
+    if (length >= sizeof current) length = sizeof current - 1;
+    memcpy(current, artist->sort_name.pointer, length);
+    current[length] = 0;
+    if (capture->count != 0 && strcmp(capture->previous, current) > 0) capture->sorted = 0;
+    memcpy(capture->previous, current, length + 1);
+
+    capture->count += 1;
+    if (artist->name.length != 0) capture->with_name += 1;
+    if (artist->track_count != 0) capture->with_tracks += 1;
+    if (capture->first_id == 0 && artist->track_count != 0) capture->first_id = artist->id;
+}
+
+struct release_capture {
+    uint32_t count;
+    int64_t first_id;
+    uint32_t with_tracks;
+    int64_t longest_ms;
+};
+
+static void capture_release(void *context, const orca_release_view *release) {
+    struct release_capture *capture = context;
+    capture->count += 1;
+    if (release->track_count != 0) capture->with_tracks += 1;
+    if (release->total_duration_ms > capture->longest_ms)
+        capture->longest_ms = release->total_duration_ms;
+    if (capture->first_id == 0 && release->track_count != 0) capture->first_id = release->id;
+}
+
+/* Records the disc/track pair of every row, in arrival order, so the album
+ * order the repository promises can be checked rather than assumed. */
+struct order_capture {
+    uint32_t count;
+    int ordered;
+    int64_t previous_disc;
+    int64_t previous_number;
+    int64_t ids[64];
+};
+
+static void capture_order(void *context, const orca_track_view *track) {
+    struct order_capture *capture = context;
+    int64_t disc = track->has_disc_number ? track->disc_number : 1;
+    int64_t number = track->has_track_number ? track->track_number : 2147483647;
+    if (capture->count != 0) {
+        if (disc < capture->previous_disc) capture->ordered = 0;
+        if (disc == capture->previous_disc && number < capture->previous_number)
+            capture->ordered = 0;
+    }
+    capture->previous_disc = disc;
+    capture->previous_number = number;
+    if (capture->count < 64) capture->ids[capture->count] = track->id;
+    capture->count += 1;
 }
 
 static void count_issue(void *context, const orca_health_issue_view *issue) {
@@ -211,6 +332,148 @@ int main(void) {
     if (capture.with_artist == 0) return 37;
     if (capture.first_playable_id == 0) return 38;
 
+
+    /* ---- browsing: artists -> that artist's releases -> that release's
+     * tracks, which is the path an album view walks ---- */
+    uint64_t artist_count = 0;
+    if (orca_library_artist_count(runtime, library, &artist_count) != ORCA_STATUS_OK) return 100;
+    if (artist_count == 0) return 101;
+    uint64_t release_count = 0;
+    if (orca_library_release_count(runtime, library, &release_count) != ORCA_STATUS_OK) return 102;
+    if (release_count == 0) return 103;
+
+    /* Bounds are part of the contract here too. */
+    if (orca_library_query_artists(runtime, library, 0, 0, 0, capture_artist) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 104;
+    if (orca_library_query_releases(runtime, library, -1, 513, 0, 0, capture_release) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 105;
+
+    struct artist_capture artists;
+    memset(&artists, 0, sizeof artists);
+    artists.sorted = 1;
+    if (orca_library_query_artists(runtime, library, 512, 0, &artists, capture_artist) !=
+        ORCA_STATUS_OK)
+        return 106;
+    if (artists.count == 0) return 107;
+    if (artists.with_name != artists.count) return 108;
+    if (!artists.sorted) return 109; /* sort_name order, not insertion order */
+    if (artists.with_tracks == 0) return 110;
+    if (artists.first_id == 0) return 111;
+
+    /* One artist by id, through the same view. */
+    struct artist_capture one_artist;
+    memset(&one_artist, 0, sizeof one_artist);
+    one_artist.sorted = 1;
+    if (orca_library_artist_get(runtime, library, artists.first_id, &one_artist,
+                                capture_artist) != ORCA_STATUS_OK)
+        return 112;
+    if (one_artist.count != 1) return 113;
+    /* A missing artist is zero callbacks, not an error. */
+    memset(&one_artist, 0, sizeof one_artist);
+    if (orca_library_artist_get(runtime, library, 9999999, &one_artist, capture_artist) !=
+        ORCA_STATUS_OK)
+        return 114;
+    if (one_artist.count != 0) return 115;
+
+    struct release_capture releases;
+    memset(&releases, 0, sizeof releases);
+    if (orca_library_query_releases(runtime, library, artists.first_id, 512, 0, &releases,
+                                    capture_release) != ORCA_STATUS_OK)
+        return 116;
+    if (releases.count == 0) return 117; /* the artist listing must reach an album */
+    if (releases.first_id == 0) return 118;
+    if (releases.longest_ms <= 0) return 119; /* durations really summed */
+
+    struct release_capture one_release;
+    memset(&one_release, 0, sizeof one_release);
+    if (orca_library_release_get(runtime, library, releases.first_id, &one_release,
+                                 capture_release) != ORCA_STATUS_OK)
+        return 120;
+    if (one_release.count != 1) return 121;
+
+    /* The album view: this release's tracks, in disc-then-track order. */
+    orca_track_query browse;
+    memset(&browse, 0, sizeof browse);
+    browse.artist_id = -1;
+    browse.release_id = releases.first_id;
+    browse.sort = ORCA_TRACK_SORT_TRACK_NUMBER;
+    browse.limit = 512;
+    struct order_capture album;
+    memset(&album, 0, sizeof album);
+    album.ordered = 1;
+    if (orca_library_browse_tracks(runtime, library, &browse, &album, capture_order) !=
+        ORCA_STATUS_OK)
+        return 122;
+    if (album.count == 0) return 123;
+    if (!album.ordered) return 124;
+
+    uint64_t matched = 0;
+    if (orca_library_track_match_count(runtime, library, &browse, &matched) != ORCA_STATUS_OK)
+        return 125;
+    if (matched != album.count) return 126;
+
+    /* The artist view: every track by that artist, by title, and its reverse.
+     * Reversing must reverse the whole listing, tiebreaker included. */
+    browse.artist_id = artists.first_id;
+    browse.release_id = -1;
+    browse.sort = ORCA_TRACK_SORT_TITLE;
+    struct order_capture ascending;
+    memset(&ascending, 0, sizeof ascending);
+    ascending.ordered = 1;
+    if (orca_library_browse_tracks(runtime, library, &browse, &ascending, capture_order) !=
+        ORCA_STATUS_OK)
+        return 127;
+    if (ascending.count == 0) return 128;
+    if (ascending.count > 64) return 129; /* the fixture corpus is small */
+
+    browse.descending = 1;
+    struct order_capture descending;
+    memset(&descending, 0, sizeof descending);
+    descending.ordered = 1;
+    if (orca_library_browse_tracks(runtime, library, &browse, &descending, capture_order) !=
+        ORCA_STATUS_OK)
+        return 130;
+    if (descending.count != ascending.count) return 131;
+    for (uint32_t i = 0; i < ascending.count; i += 1) {
+        if (ascending.ids[i] != descending.ids[descending.count - 1 - i]) return 132;
+    }
+
+    /* Paging that order two rows at a time must reproduce it exactly: no row
+     * twice, none skipped, even where titles tie. */
+    browse.descending = 0;
+    browse.limit = 2;
+    uint32_t walked = 0;
+    for (uint32_t offset = 0; offset < ascending.count; offset += 2) {
+        struct order_capture step;
+        memset(&step, 0, sizeof step);
+        step.ordered = 1;
+        browse.offset = offset;
+        if (orca_library_browse_tracks(runtime, library, &browse, &step, capture_order) !=
+            ORCA_STATUS_OK)
+            return 133;
+        for (uint32_t i = 0; i < step.count; i += 1) {
+            if (walked >= ascending.count) return 134;
+            if (step.ids[i] != ascending.ids[walked]) return 135;
+            walked += 1;
+        }
+    }
+    if (walked != ascending.count) return 136;
+
+    /* A sort byte this build does not know is refused, not defaulted. */
+    memset(&browse, 0, sizeof browse);
+    browse.artist_id = -1;
+    browse.release_id = -1;
+    browse.sort = 99;
+    browse.limit = 8;
+    if (orca_library_browse_tracks(runtime, library, &browse, &album, capture_order) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 137;
+    if (orca_library_browse_tracks(runtime, library, 0, &album, capture_order) !=
+        ORCA_STATUS_INVALID_ARGUMENT)
+        return 138;
+
     /* ---- transport ---- */
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;
@@ -234,7 +497,9 @@ int main(void) {
         return 41;
 
     orca_handle zone;
-    if (orca_player_open_default_output(runtime, player, 0, &zone) != ORCA_STATUS_OK) return 42;
+    if (orca_player_open_default_output(runtime, player, test_device_id(runtime), &zone) !=
+        ORCA_STATUS_OK)
+        return 42;
 
     if (orca_player_set_volume(runtime, player, 0.25f) != ORCA_STATUS_OK) return 43;
     float volume = 0;
