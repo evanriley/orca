@@ -606,9 +606,13 @@ pub const OrcaRuntime = struct {
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
         self.stopEngine(try self.players.get(player));
-        self.joinWorkersBeforeDestroy();
-        self.reapStoppedEngines();
-        self.finalizeDrainedJobWorkers();
+        // Join only the workers bound to this Player. This used to drain the
+        // whole registry, which cancelled every *other* Player's engine and
+        // every running scan job as a side effect of destroying one Player --
+        // the other engines respawned on their next load, so it read as a
+        // stutter rather than as the fault it was, and an in-flight scan was
+        // simply lost.
+        self.work_registry.drainOwner(playerOwnerTag(player));
         const removed = try self.players.remove(player);
         self.freePlayerObject(removed);
         // Detaching also closes each Zone's output: an OutputSession whose
@@ -1260,7 +1264,7 @@ pub const OrcaRuntime = struct {
             .player_processor = object_state.gain.processor(),
         });
         errdefer engine.destroy();
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(playerOwnerTag(player));
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         // `complete` waits for the worker, so a registration whose thread never
         // started has to be marked finished or the wait would never return.
@@ -1425,7 +1429,7 @@ pub const OrcaRuntime = struct {
         errdefer self.jobs.finish(job_handle, .failed) catch {};
         try self.jobs.start(job_handle);
 
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(work.unowned);
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         errdefer {
             registration.finish();
@@ -1699,7 +1703,7 @@ pub const OrcaRuntime = struct {
     /// handle. The worker only ever touches its own `work.Registration`.
     pub fn startDummyWork(self: *OrcaRuntime) !WorkHandle {
         try self.requireRunning();
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(work.unowned);
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         registration.thread = std.Thread.spawn(
             .{},
@@ -1810,6 +1814,13 @@ pub const OrcaRuntime = struct {
     /// yet scoped per object, so a destroy conservatively cancels and joins
     /// every registered worker. Narrowing this to the workers that actually
     /// hold the destroyed object is a later refinement, never a relaxation.
+    /// Identifies a Player to the work registry. Generation is part of the
+    /// tag, so a registration left by a destroyed Player can never match the
+    /// later occupant of the same slot.
+    fn playerOwnerTag(player: PlayerHandle) u64 {
+        return (@as(u64, player.index) << 32) | @as(u64, player.generation);
+    }
+
     fn joinWorkersBeforeDestroy(self: *OrcaRuntime) void {
         self.cancelJobWorkers();
         self.work_registry.requestCancellation();
@@ -1952,7 +1963,7 @@ test "shutdown cannot return while a worker still uses a runtime object" {
     defer runtime.deinit();
 
     const player = try runtime.createPlayer();
-    const work_handle = try runtime.work_registry.begin();
+    const work_handle = try runtime.work_registry.begin(work.unowned);
     var worker: BlockingRuntimeWorker = .{
         .registration = try runtime.work_registry.registration(work_handle),
         .player = (try runtime.players.get(player)).player,
@@ -1972,12 +1983,43 @@ test "shutdown cannot return while a worker still uses a runtime object" {
     try std.testing.expectError(error.RuntimeNotRunning, runtime.playerSnapshot(player));
 }
 
+test "destroying one Player leaves other Players and unrelated work running" {
+    // Destroying a Player used to drain the entire work registry. Every other
+    // Player's engine thread was cancelled and joined as collateral, and any
+    // scan in flight was cancelled with them. The engines respawned on their
+    // next load, which is why this looked like a stutter instead of a fault.
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const keeper = try runtime.createPlayer();
+    const doomed = try runtime.createPlayer();
+    _ = try runtime.ensureEngine(keeper);
+    _ = try runtime.ensureEngine(doomed);
+    // Work unbound to any Player: a scan must outlive a Player being destroyed,
+    // because it never touches one.
+    const unrelated = try runtime.startDummyWork();
+    try std.testing.expectEqual(@as(usize, 3), runtime.inFlightWorkCount());
+
+    try runtime.destroyPlayer(doomed);
+
+    try std.testing.expectError(error.StaleHandle, runtime.players.get(doomed));
+    try std.testing.expect((try runtime.players.get(keeper)).engine != null);
+    // Exactly the destroyed Player's registration was retired.
+    try std.testing.expectEqual(@as(usize, 2), runtime.inFlightWorkCount());
+    try std.testing.expect(!try runtime.work_registry.cancellationRequested(unrelated));
+
+    try runtime.completeDummyWork(unrelated);
+}
+
 test "destroying a Player joins workers before freeing it" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
 
     const player = try runtime.createPlayer();
-    const work_handle = try runtime.work_registry.begin();
+    const work_handle = try runtime.work_registry.begin(OrcaRuntime.playerOwnerTag(player));
     var worker: BlockingRuntimeWorker = .{
         .registration = try runtime.work_registry.registration(work_handle),
         .player = (try runtime.players.get(player)).player,
