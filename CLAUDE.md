@@ -87,6 +87,29 @@ zig build pipewire-live-smoke   # opens a short silent stream on the user's Pipe
 
 Ordinary tests require no audio server.
 
+### Testing playback without making noise
+
+This project is developed on somebody's desk, and playback verification used to
+mean audible test tones firing while they worked. Do not play test audio to real
+hardware.
+
+```sh
+device=$(scripts/silent-sink.sh)
+zig build run -- play fixtures/audio/tagged-reference.flac "$device"
+```
+
+`scripts/silent-sink.sh` creates (idempotently) a `support.null-audio-sink`
+PipeWire node and prints its orca device id. It is a *real* sink: it consumes
+audio in real time and discards it, so quantum negotiation, render callbacks,
+epoch handling, position anchoring, underrun accounting and drain all behave
+exactly as on hardware. Verified against `ffprobe` — frame counts match the
+source exactly and the negotiated quantum tracks the sample rate (256 at 48 kHz,
+235 at 44.1 kHz), so timing-sensitive measurement on it is trustworthy.
+
+The id it prints is **orca's** device id, which is not the PipeWire node id —
+liborca's enumeration numbers devices itself. Resolve it through the script or
+`orca-cli devices`, never through `pw-dump`.
+
 ### Running a single test
 
 There is no test filter wired into `build.zig` — `zig build test` runs all ~109
