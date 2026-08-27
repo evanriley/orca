@@ -97,11 +97,10 @@ pub fn loadNextArtistPage(self: *App) void {
     const store = self.artists orelse return;
     if (self.artists_exhausted) return;
     const library = self.library orelse return;
-    var page = self.runtime.libraryArtistPage(
-        library,
-        app.page_size,
-        self.artists_loaded,
-    ) catch {
+    var page = self.runtime.libraryArtistPage(library, .{
+        .limit = app.page_size,
+        .offset = self.artists_loaded,
+    }) catch {
         self.artists_exhausted = true;
         return;
     };

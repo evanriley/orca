@@ -1668,7 +1668,7 @@ test "a leading article does not decide where an artist files" {
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
 
-    var page = try library.artists.page(testing.allocator, 16, 0);
+    var page = try library.artists.page(testing.allocator, .{ .limit = 16 });
     defer page.deinit();
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(testing.allocator);
@@ -1856,7 +1856,10 @@ test "an out-of-range page is refused rather than clamped" {
         error.PageOutOfRange,
         library.tracks.page(testing.allocator, .{ .limit = 513 }),
     );
-    try testing.expectError(error.PageOutOfRange, library.artists.page(testing.allocator, 0, 0));
+    try testing.expectError(
+        error.PageOutOfRange,
+        library.artists.page(testing.allocator, .{ .limit = 0 }),
+    );
     try testing.expectError(
         error.PageOutOfRange,
         library.releases.page(testing.allocator, .{ .limit = 513 }),

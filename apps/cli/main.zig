@@ -500,6 +500,9 @@ fn playTracks(
 
 const BrowseOptions = struct {
     artist_id: ?i64 = null,
+    /// Free text for `artists`, folded the way artist keys are folded, so
+    /// `--filter el-p` finds the one spelled with a U+2010 hyphen.
+    filter: []const u8 = "",
     release_id: ?i64 = null,
     sort: liborca.database.TrackSort = .id,
     descending: bool = false,
@@ -526,6 +529,8 @@ fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
         index += 2;
         if (std.mem.eql(u8, name, "--artist")) {
             options.artist_id = try std.fmt.parseInt(i64, value, 10);
+        } else if (std.mem.eql(u8, name, "--filter")) {
+            options.filter = value;
         } else if (std.mem.eql(u8, name, "--release")) {
             options.release_id = try std.fmt.parseInt(i64, value, 10);
         } else if (std.mem.eql(u8, name, "--limit")) {
@@ -588,11 +593,21 @@ fn listArtists(
     var runtime = liborca.OrcaRuntime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
-    var page = try runtime.libraryArtistPage(library, options.limit, options.offset);
+    var page = try runtime.libraryArtistPage(library, .{
+        .filter = options.filter,
+        .limit = options.limit,
+        .offset = options.offset,
+    });
     defer page.deinit();
+    // The count of what matched, not of the library, or a filtered listing
+    // reports a total it is not showing.
+    const query: liborca.database.repository.ArtistQuery = .{ .filter = options.filter };
     try stdout.print(
-        "{d} artists total\n",
-        .{try runtime.libraryArtistCount(library)},
+        "{d} artists {s}\n",
+        .{
+            try runtime.libraryArtistCountMatching(library, query),
+            if (options.filter.len == 0) "total" else "match",
+        },
     );
     for (page.items) |artist| try stdout.print(
         "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]\n",

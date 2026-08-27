@@ -464,7 +464,10 @@ pub export fn orca_library_query_artists(
     if (box.foreignThread()) return .wrong_thread;
     const visit = callback orelse return .invalid_argument;
     if (limit == 0 or limit > max_page) return .invalid_argument;
-    var page = box.runtime.libraryArtistPage(importLibrary(library), limit, offset) catch |err|
+    var page = box.runtime.libraryArtistPage(importLibrary(library), .{
+        .limit = limit,
+        .offset = offset,
+    }) catch |err|
         return mapError(err);
     defer page.deinit();
     for (page.items) |item| {

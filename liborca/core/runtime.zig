@@ -627,10 +627,29 @@ pub const OrcaRuntime = struct {
     pub fn libraryArtistPage(
         self: *OrcaRuntime,
         library: LibraryHandle,
-        limit: u32,
-        offset: u32,
+        query: database.repository.ArtistQuery,
     ) !database.ArtistPage {
-        return (try self.libraryDatabase(library)).artists.page(self.allocator, limit, offset);
+        return (try self.libraryDatabase(library)).artists.page(self.allocator, query);
+    }
+
+    /// How many Artists `libraryArtistPage` would return for the same query.
+    /// A browser cannot show a total otherwise, and paging to exhaustion to
+    /// count is what a bounded page exists to avoid.
+    pub fn libraryArtistCountMatching(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.repository.ArtistQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).artists.countMatching(query);
+    }
+
+    /// How many Releases `libraryReleasePage` would return for the same query.
+    pub fn libraryReleaseCountMatching(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.repository.ReleaseQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).releases.countMatching(query);
     }
 
     pub fn libraryArtist(

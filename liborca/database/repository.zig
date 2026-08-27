@@ -2,6 +2,7 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const metadata = @import("../metadata/model.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
+const text_key = @import("text_key.zig");
 
 /// The one logical write lane per Library.
 ///
@@ -1147,27 +1148,63 @@ pub const ArtistRepository = struct {
         return statement.columnInt64(0);
     }
 
-    /// One bounded page of Artists in sort-key order.
+    /// One bounded page of Artists in sort-key order, optionally narrowed to
+    /// those whose name contains `filter`.
     ///
     /// `sort_name` is unique enough for a person but not for a database, so
     /// the order ends in `artists.id` — the same total-order rule the Track
     /// listing follows, for the same reason.
+    ///
+    /// The needle is folded exactly as `artists.key` was, so typing `el-p`
+    /// finds `El‐P` spelled with U+2010 and `stevie nicks` finds `Stevie
+    /// Nicks`. Matching uses `instr` rather than `LIKE` so a name containing
+    /// `%` or `_` is a literal rather than a wildcard, and the fold is done on
+    /// the stack because a search box calls this on every keystroke.
+    ///
+    /// A filtered listing scans the artist table. That is deliberate: an
+    /// infix match cannot use an index, the table is 2,468 rows on a
+    /// 22,060-track library, and artists grow far more slowly than tracks. If
+    /// that ever stops being true the answer is an FTS table, not an index.
     pub fn page(
         self: *const ArtistRepository,
         allocator: std.mem.Allocator,
-        limit: u32,
-        offset: u32,
+        query: ArtistQuery,
     ) !ArtistPage {
-        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        var statement = try self.db.prepare(artist_columns ++
-            \\FROM artists
-            \\ORDER BY artists.sort_name, artists.id
-            \\LIMIT ?1 OFFSET ?2;
+        if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
+        var folded: [text_key.key_buffer_size]u8 = undefined;
+        const needle = text_key.normalizeInto(&folded, query.filter);
+        var statement = if (needle.len == 0)
+            try self.db.prepare(artist_columns ++
+                \\FROM artists
+                \\ORDER BY artists.sort_name, artists.id
+                \\LIMIT ?1 OFFSET ?2;
+            )
+        else
+            try self.db.prepare(artist_columns ++
+                \\FROM artists
+                \\WHERE instr(artists.key, ?3) > 0
+                \\ORDER BY artists.sort_name, artists.id
+                \\LIMIT ?1 OFFSET ?2;
+            );
+        defer statement.deinit();
+        try statement.bindInt64(1, query.limit);
+        try statement.bindInt64(2, query.offset);
+        if (needle.len != 0) try statement.bindText(3, needle);
+        return collectArtistPage(allocator, statement);
+    }
+
+    /// Counts what `page` would return, sharing its folding and its predicate.
+    pub fn countMatching(self: *const ArtistRepository, query: ArtistQuery) !u64 {
+        var folded: [text_key.key_buffer_size]u8 = undefined;
+        const needle = text_key.normalizeInto(&folded, query.filter);
+        if (needle.len == 0) return self.count();
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM artists WHERE instr(artists.key, ?1) > 0;",
         );
         defer statement.deinit();
-        try statement.bindInt64(1, limit);
-        try statement.bindInt64(2, offset);
-        return collectArtistPage(allocator, statement);
+        try statement.bindText(1, needle);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     pub fn byId(
@@ -1270,6 +1307,14 @@ pub const ReleasePage = struct {
 };
 
 /// One bounded request for a page of Releases, optionally scoped to an Artist.
+pub const ArtistQuery = struct {
+    /// Free text. Folded the way `artists.key` was folded before matching, so
+    /// a search is spelling-insensitive in the same way identity is.
+    filter: []const u8 = "",
+    limit: u32 = max_page,
+    offset: u32 = 0,
+};
+
 pub const ReleaseQuery = struct {
     album_artist_id: ?i64 = null,
     limit: u32 = max_page,
