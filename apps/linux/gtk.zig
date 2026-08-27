@@ -45,6 +45,12 @@ pub const GAction = opaque {};
 pub const GSimpleAction = opaque {};
 pub const GActionMap = opaque {};
 pub const Label = opaque {};
+pub const Image = opaque {};
+pub const GdkPaintable = opaque {};
+pub const GdkTexture = opaque {};
+pub const GdkPixbuf = opaque {};
+pub const GBytes = opaque {};
+pub const GInputStream = opaque {};
 pub const Button = opaque {};
 pub const ToggleButton = opaque {};
 pub const MenuButton = opaque {};
@@ -246,6 +252,34 @@ pub extern fn g_application_activate(application: *GApplication) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
 
+// -------------------------------------------------------- images in memory
+//
+// A cover arrives from liborca as caller-owned encoded bytes, and has to
+// become something a widget can draw without ever touching the filesystem.
+// The stream and the *scaled* decode are what keep a pathological image from
+// turning a 12 MiB JPEG into hundreds of megabytes of pixels.
+
+/// Borrows `data` rather than copying it. The plain `g_bytes_new` copies, and
+/// on the largest cover in the reference library that second 11.3 MiB buffer
+/// was worth 12 MB of resident memory for the length of one decode. The borrow
+/// is sound only because the decode is synchronous and the GBytes is dropped
+/// before the borrowed buffer is.
+pub extern fn g_bytes_new_static(data: ?*const anyopaque, size: usize) *GBytes;
+pub extern fn g_bytes_unref(bytes: *GBytes) void;
+pub extern fn g_memory_input_stream_new_from_bytes(bytes: *GBytes) *GInputStream;
+
+/// Decodes at most `width` x `height` pixels. The scaling happens inside the
+/// loader, so the full-resolution image is never materialized.
+pub extern fn gdk_pixbuf_new_from_stream_at_scale(
+    stream: *GInputStream,
+    width: c_int,
+    height: c_int,
+    preserve_aspect_ratio: gboolean,
+    cancellable: ?*GCancellable,
+    err: *?*GError,
+) ?*GdkPixbuf;
+pub extern fn gdk_texture_new_for_pixbuf(pixbuf: *GdkPixbuf) *GdkTexture;
+
 // ---------------------------------------------------------------- GVariant
 //
 // Everything here is the non-variadic form. `g_variant_new`,
@@ -429,6 +463,11 @@ pub extern fn gtk_search_entry_set_placeholder_text(
 ) void;
 pub extern fn gtk_editable_get_text(editable: *Editable) [*:0]const u8;
 pub extern fn gtk_editable_set_text(editable: *Editable, text: [*:0]const u8) void;
+
+pub extern fn gtk_image_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
+pub extern fn gtk_image_set_from_icon_name(image: *Image, icon_name: ?[*:0]const u8) void;
+pub extern fn gtk_image_set_from_paintable(image: *Image, paintable: ?*GdkPaintable) void;
+pub extern fn gtk_image_set_pixel_size(image: *Image, pixel_size: c_int) void;
 
 pub extern fn gtk_label_new(text: ?[*:0]const u8) *Widget;
 pub extern fn gtk_label_set_text(label: *Label, text: [*:0]const u8) void;

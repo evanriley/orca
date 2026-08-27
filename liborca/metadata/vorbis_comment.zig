@@ -25,48 +25,169 @@ pub fn read(
     allocator: std.mem.Allocator,
     readable: source.ReadableSource,
 ) !?model.ObservedTags {
-    var magic: [4]u8 = undefined;
-    if (try readExact(readable, 0, &magic) != magic.len) return null;
-    if (!std.mem.eql(u8, &magic, "fLaC")) return error.InvalidFlacStream;
-
     var tags: model.ObservedTags = .{};
     var genres: std.ArrayList([]const u8) = .empty;
     defer genres.deinit(allocator);
     var found_comment = false;
-    var offset: u64 = magic.len;
-    var block_index: usize = 0;
-    while (block_index < 4096) : (block_index += 1) {
-        var header: [4]u8 = undefined;
-        if (try readExact(readable, offset, &header) != header.len)
-            return error.TruncatedFlacStream;
-        offset += header.len;
-        const is_last = header[0] & 0x80 != 0;
-        const block_type = header[0] & 0x7f;
-        const length: usize = (@as(usize, header[1]) << 16) |
-            (@as(usize, header[2]) << 8) | @as(usize, header[3]);
-        if (length > max_metadata_block_size) return error.InvalidFlacStream;
-        if (offset + length > readable.size()) return error.TruncatedFlacStream;
-
-        switch (block_type) {
+    var blocks = (try BlockIterator.init(readable)) orelse return null;
+    while (try blocks.next()) |block| {
+        switch (block.block_type) {
             4 => {
                 if (found_comment) return error.InvalidVorbisComment;
                 found_comment = true;
-                const payload = try allocator.alloc(u8, length);
+                const payload = try allocator.alloc(u8, block.length);
                 defer allocator.free(payload);
-                if (try readExact(readable, offset, payload) != length)
+                if (try readExact(readable, block.offset, payload) != block.length)
                     return error.TruncatedFlacStream;
                 try parseInto(allocator, payload, &tags, &genres);
             },
-            6 => try readPictureHeader(allocator, readable, offset, length, &tags),
+            6 => try readPictureHeader(allocator, readable, block, &tags),
             else => {},
         }
-        offset += length;
-        if (is_last) break;
-    } else return error.InvalidFlacStream;
+    }
 
     if (!found_comment and tags.artwork == null) return null;
     tags.genres = try genres.toOwnedSlice(allocator);
     return tags;
+}
+
+/// Extract the cover image a FLAC `PICTURE` block carries, or null when the
+/// stream has none Orca can use.
+///
+/// Same preference as `read` records: the first front cover wins, and with no
+/// front cover the first usable picture is taken, so the bytes handed back are
+/// the picture the scan said was there.
+pub fn readPicture(
+    allocator: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?model.EmbeddedImage {
+    var blocks = (try BlockIterator.init(readable)) orelse return null;
+    var chosen: ?PictureBlock = null;
+    while (try blocks.next()) |block| {
+        if (block.block_type != 6) continue;
+        const picture = (try readPictureBlock(readable, block)) orelse continue;
+        if (chosen) |existing| {
+            if (existing.kind == .front_cover or picture.kind != .front_cover) continue;
+        }
+        chosen = picture;
+        if (picture.kind == .front_cover) break;
+    }
+
+    const picture = chosen orelse return null;
+    // Bounded before the allocation, and against a length the block declares
+    // rather than one that has already been believed.
+    if (picture.data_length > model.max_image_bytes) return error.ArtworkTooLarge;
+    const bytes = try allocator.alloc(u8, picture.data_length);
+    errdefer allocator.free(bytes);
+    if (try readExact(readable, picture.data_offset, bytes) != bytes.len)
+        return error.TruncatedArtwork;
+    return try model.adoptImage(allocator, bytes, picture.kind);
+}
+
+/// One FLAC metadata block: what it is, and where its body lives in the file.
+const MetadataBlock = struct {
+    block_type: u8,
+    offset: u64,
+    length: usize,
+};
+
+/// Walks a FLAC stream's metadata blocks.
+///
+/// Extracted so that reading comments and reading a cover image are the same
+/// walk. A stream that never sets the last-block flag is refused after a
+/// bounded number of blocks rather than followed for ever.
+const BlockIterator = struct {
+    readable: source.ReadableSource,
+    offset: u64 = 4,
+    finished: bool = false,
+    remaining: usize = 4096,
+
+    /// Null when the source is too short to be a FLAC stream at all, which
+    /// callers report as "no tags" rather than as a failure.
+    fn init(readable: source.ReadableSource) !?BlockIterator {
+        var magic: [4]u8 = undefined;
+        if (try readExact(readable, 0, &magic) != magic.len) return null;
+        if (!std.mem.eql(u8, &magic, "fLaC")) return error.InvalidFlacStream;
+        return .{ .readable = readable };
+    }
+
+    fn next(self: *BlockIterator) !?MetadataBlock {
+        if (self.finished) return null;
+        if (self.remaining == 0) return error.InvalidFlacStream;
+        self.remaining -= 1;
+
+        var header: [4]u8 = undefined;
+        if (try readExact(self.readable, self.offset, &header) != header.len)
+            return error.TruncatedFlacStream;
+        self.offset += header.len;
+        self.finished = header[0] & 0x80 != 0;
+        const length: usize = (@as(usize, header[1]) << 16) |
+            (@as(usize, header[2]) << 8) | @as(usize, header[3]);
+        if (length > max_metadata_block_size) return error.InvalidFlacStream;
+        if (self.offset + length > self.readable.size()) return error.TruncatedFlacStream;
+        const block: MetadataBlock = .{
+            .block_type = header[0] & 0x7f,
+            .offset = self.offset,
+            .length = length,
+        };
+        self.offset += length;
+        return block;
+    }
+};
+
+/// Where a `PICTURE` block's declared type and payload live in the file.
+const PictureBlock = struct {
+    kind: model.ArtworkKind,
+    mime_offset: u64,
+    mime_length: u32,
+    data_offset: u64,
+    data_length: u32,
+};
+
+/// Parse a `PICTURE` block's fixed header.
+///
+/// The one definition of the block's layout: an observation and a fetch must
+/// not be able to disagree about which bytes are the image. Null for a block
+/// whose fields do not fit inside it, or that declares no payload — malformed
+/// metadata is normal in a real library and is skipped, not fatal.
+fn readPictureBlock(
+    readable: source.ReadableSource,
+    block: MetadataBlock,
+) !?PictureBlock {
+    if (block.length < 32) return null;
+    var head: [8]u8 = undefined;
+    if (try readExact(readable, block.offset, &head) != head.len)
+        return error.TruncatedFlacStream;
+    const picture_type = std.mem.readInt(u32, head[0..4], .big);
+    const mime_length = std.mem.readInt(u32, head[4..8], .big);
+    if (mime_length > max_picture_text_size) return null;
+    if (8 + @as(u64, mime_length) + 24 > block.length) return null;
+
+    var description_length: [4]u8 = undefined;
+    if (try readExact(readable, block.offset + 8 + mime_length, &description_length) != 4)
+        return error.TruncatedFlacStream;
+    const description = std.mem.readInt(u32, &description_length, .big);
+    if (description > max_picture_text_size) return null;
+    // 4 description-length bytes, the description, then width, height, colour
+    // depth and indexed-colour count — four more 32-bit fields.
+    const length_offset = @as(u64, 8) + mime_length + 4 + description + 16;
+    if (length_offset + 4 > block.length) return null;
+
+    var data_length: [4]u8 = undefined;
+    if (try readExact(readable, block.offset + length_offset, &data_length) != 4)
+        return error.TruncatedFlacStream;
+    const declared = std.mem.readInt(u32, &data_length, .big);
+    if (declared == 0) return null;
+    // The block must actually contain the payload it claims. Nothing checked
+    // this while artwork was only ever described.
+    if (length_offset + 4 + @as(u64, declared) > block.length) return null;
+    return .{
+        .kind = artworkKind(picture_type),
+        .mime_offset = block.offset + 8,
+        .mime_length = mime_length,
+        .data_offset = block.offset + length_offset + 4,
+        .data_length = declared,
+    };
 }
 
 /// Parse a bare Vorbis comment payload — vendor string, count, `KEY=value`
@@ -201,49 +322,29 @@ fn isTruthy(value: []const u8) bool {
         std.ascii.eqlIgnoreCase(value, "yes");
 }
 
-/// FLAC PICTURE blocks are described, never decoded: presence, MIME type, and
-/// payload size are all the library needs before a user asks for the image.
+/// FLAC PICTURE blocks are *observed* here, never decoded: presence, MIME type,
+/// and payload size are all the library needs before a user asks for the image.
+/// `readPicture` is the other half, and both read the block through
+/// `readPictureBlock`.
 fn readPictureHeader(
     allocator: std.mem.Allocator,
     readable: source.ReadableSource,
-    offset: u64,
-    length: usize,
+    block: MetadataBlock,
     tags: *model.ObservedTags,
 ) !void {
-    if (length < 32) return;
-    var head: [8]u8 = undefined;
-    if (try readExact(readable, offset, &head) != head.len) return error.TruncatedFlacStream;
-    const picture_type = std.mem.readInt(u32, head[0..4], .big);
-    const mime_length = std.mem.readInt(u32, head[4..8], .big);
-    if (mime_length > max_picture_text_size or 8 + mime_length + 24 > length) return;
-    const mime = try allocator.alloc(u8, mime_length);
-    errdefer allocator.free(mime);
-    if (try readExact(readable, offset + 8, mime) != mime.len)
-        return error.TruncatedFlacStream;
-    var description_length: [4]u8 = undefined;
-    if (try readExact(readable, offset + 8 + mime_length, &description_length) != 4)
-        return error.TruncatedFlacStream;
-    const description = std.mem.readInt(u32, &description_length, .big);
-    const data_offset = @as(u64, 8) + mime_length + 4 + description + 16;
-    if (description > max_picture_text_size or data_offset + 4 > length) {
-        allocator.free(mime);
-        return;
-    }
-    var data_length: [4]u8 = undefined;
-    if (try readExact(readable, offset + data_offset, &data_length) != 4)
-        return error.TruncatedFlacStream;
-    const kind = artworkKind(picture_type);
+    const picture = (try readPictureBlock(readable, block)) orelse return;
     if (tags.artwork) |existing| {
-        if (existing.kind == .front_cover or kind != .front_cover) {
-            allocator.free(mime);
-            return;
-        }
-        allocator.free(existing.mime_type);
+        if (existing.kind == .front_cover or picture.kind != .front_cover) return;
     }
+    const mime = try allocator.alloc(u8, picture.mime_length);
+    errdefer allocator.free(mime);
+    if (try readExact(readable, picture.mime_offset, mime) != mime.len)
+        return error.TruncatedFlacStream;
+    if (tags.artwork) |existing| allocator.free(existing.mime_type);
     tags.artwork = .{
         .mime_type = mime,
-        .byte_size = std.mem.readInt(u32, &data_length, .big),
-        .kind = kind,
+        .byte_size = picture.data_length,
+        .kind = picture.kind,
     };
 }
 

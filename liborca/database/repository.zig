@@ -858,6 +858,53 @@ pub const TrackRepository = struct {
         };
     }
 
+    /// Which of a Release's Tracks might supply its cover, in listening order.
+    ///
+    /// Fills `out` and returns how many ids were written, so the answer is
+    /// bounded by the caller's buffer and allocates nothing.
+    ///
+    /// The predicate is what the *scan* observed — `artwork_mime_type` is not
+    /// null and the payload is not empty — rather than what a file turns out to
+    /// contain. That is what makes this cheap: a Release whose files carry no
+    /// artwork answers with one indexed query and opens no files at all, where
+    /// finding out by reading would mean opening every track to learn nothing.
+    /// The observation can be stale, so it selects candidates rather than
+    /// deciding; the bytes are still read from the file.
+    ///
+    /// The order is `tracks_position`'s: disc, then track number, then id. It
+    /// is a total order over a Release, so the same Release yields the same
+    /// cover on every run — which is the whole point when its tracks disagree.
+    pub fn artworkCandidatesInto(
+        self: *const TrackRepository,
+        release_id: i64,
+        out: []i64,
+    ) !usize {
+        if (out.len == 0) return 0;
+        var statement = try self.db.prepare(
+            \\SELECT tracks.id
+            \\FROM tracks
+            \\JOIN files ON files.id = COALESCE(
+            \\    tracks.preferred_file_id,
+            \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1)
+            \\)
+            \\JOIN observed_file_tags ON observed_file_tags.file_id = files.id
+            \\WHERE tracks.release_id = ?1
+            \\  AND observed_file_tags.artwork_mime_type IS NOT NULL
+            \\  AND COALESCE(observed_file_tags.artwork_byte_size, 0) > 0
+            \\ORDER BY COALESCE(tracks.disc_number, 1),
+            \\         COALESCE(tracks.track_number, -tracks.id),
+            \\         tracks.id
+            \\LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        try statement.bindInt64(2, @intCast(out.len));
+        var written: usize = 0;
+        while (written < out.len and try statement.step() == .row) : (written += 1)
+            out[written] = statement.columnInt64(0);
+        return written;
+    }
+
     pub fn count(self: *const TrackRepository) !u64 {
         var statement = try self.db.prepare("SELECT count(*) FROM tracks;");
         defer statement.deinit();

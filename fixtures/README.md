@@ -16,3 +16,11 @@ a FLAC stream, and 104 files in the reference library do; these fixtures keep
 that case covered without it. The tag is deliberately longer than the 64-byte
 prefix container detection reads first, so resolving it requires the second read
 rather than a longer one.
+
+`audio/covered-reference.flac`, `audio/covered-reference.mp3` and
+`audio/id3-covered-reference.flac` carry a 217-byte synthetic PNG — a 16x16
+FFmpeg `testsrc` frame — as a front cover, in a FLAC `PICTURE` block, an ID3v2
+`APIC` frame, and a `PICTURE` block behind an ID3v2 tag long enough to defeat
+the 64-byte prefix read. `audio/covered-alternate-reference.flac` carries a
+*different* 138-byte cover, so a test asserting which of a Release's tracks
+supplied its artwork can tell them apart. No fixture contains third-party media.

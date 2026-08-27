@@ -83,9 +83,10 @@ zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
-zig build run -- artists DATABASE [--limit N] [--offset N]
+zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
 zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
 zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
+zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]

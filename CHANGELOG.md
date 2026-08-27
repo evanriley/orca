@@ -2,6 +2,56 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Album art became reachable, and the player shows it
+
+- **Embedded cover art can be read, not just counted.** `observed_file_tags`
+  had recorded an artwork MIME type, size and kind since the scanner existed,
+  and nothing could obtain the image behind them. `metadata/artwork.zig` sniffs
+  the container and dispatches to `id3v2.readPicture` or
+  `vorbis_comment.readPicture`, which extract `APIC` and `PICTURE` payloads
+  through the *same* frame and block parsers the observation already used — so
+  an observation and a fetch cannot disagree about which bytes are the image.
+  Verified byte-for-byte against an independent extractor on a real FLAC
+  (254,372 bytes) and a real MP3 (422,564 bytes).
+- **A leading ID3v2 tag does not hide a cover.** Artwork resolves the payload
+  offset exactly as the codec registry does, so the reference library's 104
+  ID3-fronted FLACs give up their `PICTURE` block. The adversarial case — a
+  216,921-byte picture block behind a 219,663-byte tag — extracts to the exact
+  216,870 image bytes an independent tool reports.
+- **The media type is read from the bytes, not from the claim.** 93 files in
+  the reference library declare `image/jpg`, 24 declare nothing, and one
+  album's covers are 5.3 MB animated GIFs behind an empty declaration. A
+  payload that is not a recognised image is refused rather than handed to a
+  platform decoder, and the size bound — 12 MiB, below both containers'
+  ceilings so it can actually fire, above the library's largest real cover of
+  11.29 MiB — is checked against the declared length before anything is
+  allocated to honour it.
+- **Nothing is stored in the Library and nothing is cached.** 19,031 of the
+  22,060 files carry a readable cover, totalling 6.09 GB; that does not belong
+  in a SQLite file. Reading on demand costs one open per request, can never go
+  stale — a track whose observation predates the current reader still yields
+  its cover — and a whole-library audit of all 22,060 files took 6.3 seconds.
+  A bounded per-Release cache is the right next step and is deliberately not
+  here yet, because the one consumer loads a single image per track change.
+- **A Release's artwork is its first track's, in listening order, that has
+  one.** Real tag data disagrees within an album, so the rule is chosen to be
+  stable across runs (the unique `tracks_position` order), cheap (candidates
+  are pre-filtered by what the scan observed, so a coverless Release opens no
+  files at all, and at most eight are tried), and unsurprising.
+- **The GTK transport bar shows the now-playing cover.** One `GtkImage` in two
+  states, refreshed only when the audible Track changes. A missing cover, a
+  missing file, a refused image and an undecodable one all show the same
+  placeholder. Decoding is bounded to 128 pixels inside gdk-pixbuf's scaling
+  loader, because an 11.3 MiB JPEG is 3000 pixels square and encoded size says
+  nothing about pixel count. Driven through the real widgets on the real
+  library: 154 MB resident with all 22,060 tracks open and no cover shown,
+  168 MB with an ordinary cover, 192 MB with the largest cover in the library,
+  steady across eleven consecutive loads.
+- **The Releases pane deliberately shows no thumbnails.** 512 covers per page
+  load is 512 file opens and roughly 150 MB of encoded image on one scroll.
+  `libraryReleaseArtwork` exists for when a grid view and a cache do.
+- `orca-cli artwork DATABASE (--track=ID | --release=ID) [--out=PATH]`.
+
 ### Analysis became a library job, and playback started using it
 
 - **`orca-cli analyze-library DATABASE` measures a whole Library.** Loudness,

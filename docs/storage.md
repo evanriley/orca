@@ -38,6 +38,11 @@ failed on the magic bytes, so they would neither play nor probe.
   trailing ID3v1, APEv2 and Lyrics3 tags it must exclude from the audio region.
   `sniffBytes`, which is pure over a prefix and often cannot reach past the tag,
   answers the same way.
+- **Neither does the artwork reader.** `metadata/artwork.zig` resolves the
+  prefix the same way before asking a container for its cover, so the 104
+  ID3-fronted FLACs give up their `PICTURE` block like any other. The reference
+  adversarial file carries a 216,921-byte picture block behind a 219,663-byte
+  tag; read from byte zero it looks like an MPEG file with no `APIC` frame.
 - **The decoder never sees the tag.** `CodecRegistry.open` and `openDetected`
   hand the codec a `source.OffsetSource` view of the suffix when detection
   reports a non-zero payload offset, and the returned Decoder owns that view for

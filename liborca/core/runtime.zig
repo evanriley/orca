@@ -6,7 +6,9 @@ const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
 const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
+const metadata = @import("../metadata/root.zig");
 const object = @import("object.zig");
+const storage = @import("../storage/root.zig");
 const track_source = @import("track_source.zig");
 const work = @import("work.zig");
 
@@ -410,6 +412,25 @@ pub const PlayerStatus = struct {
 
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
+/// Open one file and read the cover image out of it.
+///
+/// A file the Library still lists but the filesystem no longer has is null,
+/// not an error. The Library's record of where a file is is only as fresh as
+/// the last scan, and reconciling that is the scanner's job — an artwork query
+/// is a read and must not start writing `missing` states from under it.
+fn readEmbeddedArtwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri: []const u8,
+) !?metadata.EmbeddedImage {
+    var local = storage.LocalFileSource.open(io, uri) catch |err| switch (err) {
+        error.FileNotFound, error.BadPathName, error.AccessDenied, error.IsDir => return null,
+        else => return err,
+    };
+    defer local.close();
+    return metadata.artwork.read(allocator, local.readable());
+}
+
 pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
     state: std.atomic.Value(State) = .init(.running),
@@ -678,6 +699,73 @@ pub const OrcaRuntime = struct {
         release_id: i64,
     ) !?database.ReleaseSummary {
         return (try self.libraryDatabase(library)).releases.byId(self.allocator, release_id);
+    }
+
+    /// The cover image embedded in a Track's file, or null when it has none.
+    ///
+    /// Caller-owned bytes plus the media type those bytes actually are; free
+    /// with `EmbeddedImage.deinit`. Read from the file on every call, and
+    /// deliberately not cached and deliberately not stored: see
+    /// `docs/metadata.md` for the measurements behind both decisions.
+    ///
+    /// A Track with no file, a file that has since gone, and a file with no
+    /// cover are all the same answer — null. None of them is a failure a host
+    /// should surface, and a missing cover is not a reason to fail a query the
+    /// caller made about a track it can still play.
+    pub fn libraryTrackArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        track_id: i64,
+    ) !?metadata.EmbeddedImage {
+        const tracks = &(try self.libraryDatabase(library)).tracks;
+        const resolved = (try tracks.playableLocation(self.allocator, track_id)) orelse
+            return null;
+        defer resolved.deinit();
+        return readEmbeddedArtwork(self.allocator, io, resolved.uri);
+    }
+
+    /// How many of a Release's Tracks are opened before it is reported as
+    /// having no usable cover.
+    ///
+    /// Only files the last scan observed artwork in are candidates at all, so
+    /// this bound is reached only when a Release's leading tracks each declare
+    /// a cover that no longer reads — a re-tagged file, a rejected image. Eight
+    /// is generous for that and still bounded; without a bound, one Release
+    /// with a hundred broken tracks would open a hundred files to answer "no".
+    pub const max_release_artwork_candidates: usize = 8;
+
+    /// The cover image for a Release, or null when none of its files has one.
+    ///
+    /// **A Release's artwork is its first track's, in listening order.** Real
+    /// tag data disagrees within an album — different sizes, different crops,
+    /// per-track covers on compilations — so the rule has to pick, and the
+    /// three properties that matter are that it be *stable* across runs,
+    /// *cheap*, and *the one a person would expect*. Ordering by disc, track
+    /// number and then id is the unique order `tracks_position` already
+    /// enforces, so the same Release yields the same cover every time; it costs
+    /// one indexed query plus one file open; and the front cover on track one
+    /// is the album cover in every collection anyone actually has.
+    ///
+    /// The alternatives were rejected for failing one of those: a majority vote
+    /// would have to read every file in the Release, and "the largest image"
+    /// would too, and both change their answer when one track is re-tagged.
+    pub fn libraryReleaseArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        release_id: i64,
+    ) !?metadata.EmbeddedImage {
+        const tracks = &(try self.libraryDatabase(library)).tracks;
+        var candidates: [max_release_artwork_candidates]i64 = undefined;
+        const count = try tracks.artworkCandidatesInto(release_id, &candidates);
+        for (candidates[0..count]) |track_id| {
+            // A candidate whose cover will not read is skipped rather than
+            // fatal: the next track's cover is the same album's.
+            const image = self.libraryTrackArtwork(library, io, track_id) catch continue;
+            if (image) |present| return present;
+        }
+        return null;
     }
 
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -2824,4 +2912,159 @@ test "destroying a Library releases every Player bound to it" {
         @as(u32, 1),
         (try runtime.playerQueueSnapshot(player)).entries,
     );
+}
+
+// ----------------------------------------------------------- artwork tests
+
+/// A Release whose Tracks point at real fixture files and whose observed tags
+/// record what those files actually carry, so the candidate query is exercised
+/// against the same columns a scan writes.
+fn openArtworkLibrary(
+    runtime: *OrcaRuntime,
+    uri: [:0]const u8,
+    paths: []const []const u8,
+) !struct { library: LibraryHandle, release_id: i64, ids: [4]i64 } {
+    const library = try runtime.openLibrary(std.testing.io, uri);
+    const library_database = try runtime.libraryDatabase(library);
+    const volume_id = try library_database.volumes.ensure(.{
+        .stable_key = "uuid:artwork-fixture",
+        .label = "Fixtures",
+    });
+    const release_id = try library_database.releases.upsert(.{
+        .release_key = "artwork-fixture",
+        .title = "Covered",
+    });
+    var ids: [4]i64 = @splat(0);
+    for (paths, 0..) |path, index| {
+        const file_id = try library_database.files.create(.{
+            .audio_format = 1,
+            .size_bytes = 1024,
+        });
+        _ = try library_database.locations.upsert(.{
+            .file_id = file_id,
+            .volume_id = volume_id,
+            .uri = path,
+        });
+        // Exactly what a scan of this file would have observed.
+        var file = try storage.LocalFileSource.open(std.testing.io, path);
+        defer file.close();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        // Through the payload offset, as the scanner does: one of these
+        // fixtures is a FLAC stream behind an ID3v2 tag.
+        const detection = (try storage.format.detect(file.readable())).?;
+        var tag_view: storage.OffsetSource = .{
+            .inner = file.readable(),
+            .offset = detection.payload_offset,
+        };
+        const observed = try library_pass.tag_reader.read(
+            arena.allocator(),
+            detection.format,
+            if (detection.payload_offset == 0) file.readable() else tag_view.readable(),
+        );
+        try library_database.observed_tags.upsertBatch(&.{.{
+            .file_id = file_id,
+            .values = if (observed) |tags| tags.values else .{},
+        }});
+        if (observed) |tags| tags.deinit();
+
+        var title_buffer: [32]u8 = undefined;
+        try library_database.tracks.upsertTracks(&.{.{
+            .title = try std.fmt.bufPrint(&title_buffer, "Entry {d}", .{index}),
+            .release_id = release_id,
+            .track_number = @intCast(index + 1),
+            .preferred_file_id = file_id,
+        }});
+        var page = try library_database.tracks.page(
+            std.testing.allocator,
+            .{ .limit = 1, .offset = @intCast(index) },
+        );
+        defer page.deinit();
+        ids[index] = page.items[0].id;
+    }
+    return .{ .library = library, .release_id = release_id, .ids = ids };
+}
+
+test "a Track resolves to the cover embedded in its own file" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-track?mode=memory&cache=shared",
+        &.{ "fixtures/audio/covered-reference.flac", "fixtures/audio/tagged-reference.flac" },
+    );
+
+    const image = (try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0],
+    )).?;
+    defer image.deinit();
+    try std.testing.expectEqualStrings("image/png", image.mime_type);
+    try std.testing.expectEqual(@as(usize, 217), image.bytes.len);
+
+    // The second file carries no picture, and that is an answer, not a failure.
+    try std.testing.expect((try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[1],
+    )) == null);
+}
+
+test "a Track whose file has gone reports no cover rather than failing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-missing?mode=memory&cache=shared",
+        &.{"fixtures/audio/covered-reference.flac"},
+    );
+    // Repoint the Location at a path nothing is at, exactly as a moved file
+    // leaves the Library until the next scan reconciles it.
+    const library_database = try runtime.libraryDatabase(fixtures.library);
+    const volume_id = (try library_database.volumes.find("uuid:artwork-fixture")).?;
+    const location_id = (try library_database.locations.find(
+        volume_id,
+        "fixtures/audio/covered-reference.flac",
+    )).?;
+    try library_database.locations.move(location_id, "fixtures/audio/does-not-exist.flac");
+    try std.testing.expect((try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0],
+    )) == null);
+}
+
+test "a Release takes its cover from its first track in listening order" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    // Track one carries no cover at all, so the rule is "the first track that
+    // has one" rather than "track one or nothing". Tracks two and three carry
+    // *different* covers, which is what makes the order observable: a Release
+    // whose tracks disagree must still answer the same way every time.
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-release?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/tagged-reference.flac",
+            "fixtures/audio/covered-reference.mp3",
+            "fixtures/audio/covered-alternate-reference.flac",
+        },
+    );
+    const image = (try runtime.libraryReleaseArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.release_id,
+    )).?;
+    defer image.deinit();
+    try std.testing.expectEqualStrings("image/png", image.mime_type);
+    // Track two's cover, not track three's 138-byte one.
+    try std.testing.expectEqual(@as(usize, 217), image.bytes.len);
+
+    // A Release nothing was filed under has no cover and opens no files.
+    try std.testing.expect((try runtime.libraryReleaseArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.release_id + 1,
+    )) == null);
 }

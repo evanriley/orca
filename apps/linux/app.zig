@@ -147,6 +147,11 @@ pub const App = struct {
     total_label: ?*gtk.Label = null,
     now_playing_title: ?*gtk.Label = null,
     now_playing_detail: ?*gtk.Label = null,
+    /// The now-playing cover. One widget in two states: a paintable when the
+    /// audible track's file carries a readable image, and a placeholder icon
+    /// when it does not, so there is no second widget to keep visible in step
+    /// with a nullable image.
+    now_playing_cover: ?*gtk.Image = null,
     volume_button: ?*gtk.Widget = null,
     device_drop_down: ?*gtk.DropDown = null,
     device_names: ?*gtk.StringList = null,

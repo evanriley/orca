@@ -180,6 +180,8 @@ pub fn main(init: std.process.Init) !void {
         try listReleases(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "tracks")) {
         try listTracks(allocator, init.io, stdout, args[2], args[3..]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
+        try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
         var runtime = liborca.OrcaRuntime.init(allocator);
         defer runtime.deinit();
@@ -240,7 +242,8 @@ pub fn main(init: std.process.Init) !void {
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | artists DATABASE [OPTIONS]
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
-            \\                 | tracks DATABASE [OPTIONS]]
+            \\                 | tracks DATABASE [OPTIONS]
+            \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]]
             \\
             \\Browsing. artists lists Artists in sort order; releases lists Releases,
             \\optionally one Artist's; tracks lists Tracks in a named order, optionally
@@ -580,6 +583,60 @@ fn openBrowseLibrary(
 ) !liborca.core.LibraryHandle {
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
     return runtime.openLibrary(io, database_path);
+}
+
+/// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]`.
+///
+/// The reachability check for embedded cover art: it goes through the same
+/// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
+/// be produced here cannot be produced anywhere. `--out` writes the exact bytes
+/// so they can be compared against what an independent tool extracts.
+fn showArtwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var track_id: ?i64 = null;
+    var release_id: ?i64 = null;
+    var out_path: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < option_arguments.len) : (index += 1) {
+        const argument = option_arguments[index];
+        if (std.mem.startsWith(u8, argument, "--track=")) {
+            track_id = try std.fmt.parseInt(i64, argument["--track=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--release=")) {
+            release_id = try std.fmt.parseInt(i64, argument["--release=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--out=")) {
+            out_path = argument["--out=".len..];
+        } else return error.UnknownOption;
+    }
+    // One subject per call. Asking for both would make "which id did this
+    // image come from" unanswerable from the output.
+    if ((track_id == null) == (release_id == null)) return error.MissingSubject;
+
+    var runtime = liborca.OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const image = if (track_id) |id|
+        try runtime.libraryTrackArtwork(library, io, id)
+    else
+        try runtime.libraryReleaseArtwork(library, io, release_id.?);
+    const present = image orelse {
+        try stdout.print("no artwork\n", .{});
+        return;
+    };
+    defer present.deinit();
+    try stdout.print("{s}\t{d} bytes\t{s}\n", .{
+        present.mime_type,
+        present.bytes.len,
+        @tagName(present.kind),
+    });
+    if (out_path) |path| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = present.bytes });
+        try stdout.print("wrote {s}\n", .{path});
+    }
 }
 
 fn listArtists(
