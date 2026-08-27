@@ -40,6 +40,9 @@ was found the expensive way.
   Durable renames depend on this.
 - **`{d:0>2}` on a signed integer emits a sign**, so a duration of six seconds
   formats as `0:+6`. Convert to unsigned before formatting.
+- **`std.fmt.bufPrintZ` does not exist.** `std.fmt.bufPrint` does; for a
+  sentinel-terminated string known at compile time, `std.fmt.comptimePrint` is
+  usually what you actually wanted.
 - `std.crypto.hash.Blake3` is available.
 
 ### Verifying a build
