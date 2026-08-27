@@ -51,6 +51,16 @@ Gain and ReplayGain changes use frame ramps; metering publishes peak/RMS
 snapshots without changing samples. Built-in processing also includes peaking
 parametric EQ, stereo crossfeed, and a resettable DC blocker.
 
+User volume and loudness correction are two independent atomics whose product
+the render lane reads as one number, so applying a correction never moves the
+host's volume slider and a volume change never discards the correction. The
+correction itself is chosen on the control lane when a Player loads a queue
+entry — that lookup reads SQLite and must never happen on the render lane — and
+is keyed on the identity of the bytes just opened, so an entry with no
+measurement of its own plays at unity rather than inheriting the previous
+entry's. See `docs/analysis.md`, which also records the one place this does not
+yet reach: a gapless auto-advance.
+
 The resampler interface uses caller-owned input/output buffers and reports
 partial consumption. Its current linear implementation is a streaming scalar
 reference, not a production-quality band-limited resampler. Gain and metering

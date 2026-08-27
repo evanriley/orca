@@ -138,6 +138,11 @@ the tag, so those rows probe like any other; the `total_samples = 0` row is
 still honestly unknown, and a file that opens and then refuses to decode still
 raises `unreadable_file`.
 
+`library/analysis_pass.zig` is the same shape one level deeper: also keyed on
+`files.id`, also a runtime job with bounded commits and no walk, but decoding
+whole files rather than reading headers, which changes what "bounded" and
+"resumable" have to mean. `docs/analysis.md` covers it.
+
 Platform watcher adapters submit root-scoped hints through a bounded channel.
 Unread storms coalesce to one hint per root, including explicit overflow hints;
 consumers respond with normal scanner reconciliation. No watcher event directly

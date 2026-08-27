@@ -13,10 +13,11 @@ coalesces unread Player-position and Job-progress hints by stable handle.
 Authoritative consumers query snapshots instead of reconstructing state from
 events.
 
-Jobs share one state/progress/cancellation representation across scanner,
-projection, and future analysis, conversion, ripping, provider, artwork and
-mutation workers. Job state remains owned by the serialized runtime control
-lane; the worker publishes counters through atomics and is joined through
+Jobs share one state/progress/cancellation representation across the scanner,
+the projection, the property backfill, the library-wide analysis, and future
+conversion, ripping, provider, artwork and mutation workers. Job state remains
+owned by the serialized runtime control lane; the worker publishes counters
+through atomics and is joined through
 `work.Registry` before its terminal state is recorded and its lossless
 `job_finished` completion is published.
 
@@ -28,4 +29,13 @@ Library close, Player destroy — sets both before it blocks.
 
 Progress with no honest denominator is reported as a count, never as a fraction.
 A filesystem scan does not know how many files it will find until it has found
-them, so its snapshot carries `completed_units` and no total.
+them, so its snapshot carries `completed_units` and no total. A pass keyed on
+`files.id` does know: the property backfill and the library-wide analysis each
+answer "how many rows still owe work" with one indexed count before they start,
+so their snapshots carry a total and a host may show a fraction.
+
+Cancellation is not only a shutdown path. The library-wide analysis decodes
+whole files, so a run is measured in hours and stopping it is the ordinary way
+to use it: the token is polled inside a decode, the batch already measured is
+still committed, and a later run selects only what is left. `docs/analysis.md`
+covers what that resumption is keyed on.

@@ -22,7 +22,8 @@ A scan re-finds a file through a cascade, cheapest first:
 3. `files.quick_hash` — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size), from
    `storage/quick_hash.zig`. Catches copies, cross-volume moves and restores.
 4. `files.audio_hash` — over the decoded audio payload only, so it survives
-   Orca's own tag writes. Computed by an analysis job, never by a scanner.
+   Orca's own tag writes. Written by `library/analysis_pass.zig`, which is the
+   only pass that decodes a whole file, and never by a scanner.
 
 Volumes are identified by a `stable_key` the platform adapter resolves — a
 filesystem UUID, else an identifier persisted at the mount root, else
@@ -156,6 +157,16 @@ and analysis, health, Orca metadata and identification proposals all key on
 `files.id`. Unknown newer schema versions are rejected rather than opened
 destructively, and `PRAGMA foreign_key_check` runs inside the migration
 transaction so a migration that would leave dangling rows rolls back instead.
+
+`analysis_results` is `WITHOUT ROWID`, keyed on `(file_id, kind, algorithm_id,
+algorithm_version, parameter_hash, source_identity)`. That key is load-bearing
+beyond caching: it is also how the library-wide analysis decides which files
+still owe work, because it already encodes every reason a stored measurement
+stops describing a file. A marker column on `files` would be a second source of
+truth free to disagree with the results it claims to describe.
+`repository.unanalyzed_predicate` is the one definition of that question,
+shared by the paged selection, the count that gives the job its denominator,
+and the plan test that asserts neither is a table scan. See `docs/analysis.md`.
 
 Migration 8 preserves paths that only ever appeared in `analysis_results` or
 `library_health_issues` — an `orca-cli analyze` of a file no scan ever saw — by

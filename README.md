@@ -21,6 +21,7 @@ zig build run -- --version
 zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
 zig build run -- analyze /tmp/orca.db /path/to/audio
+zig build run -- analyze-library /tmp/orca.db
 zig build run -- health /tmp/orca.db
 zig build run -- play /path/to/audio
 ORCA_LIBRARY=/path/to/library.db zig build run-linux

@@ -2,6 +2,37 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Analysis became a library job, and playback started using it
+
+- **`orca-cli analyze-library DATABASE` measures a whole Library.** Loudness,
+  peak, clipping, silence, waveform and temporal fingerprint were computed only
+  for one file a human named, so `Gain.setReplayGain` was called by nothing and
+  a quiet track stayed quiet. `library/analysis_pass.zig` runs the same
+  measurement over every file the Library has not measured yet, as a runtime
+  job on the shared `JobWorker` — reachable from the Zig API, the C ABI
+  (`orca_library_start_analysis`) and the CLI, with `files.audio_hash` written
+  for the first time.
+- **It is built to be stopped.** It decodes whole files, so a run is hours
+  rather than seconds: 50 real files measured in 27.2 s (0.545 s each,
+  ReleaseFast), which extrapolates to about 3.3 hours for the 22,060-file
+  reference library. Cancellation is honored inside a decode, the batch already
+  measured still commits, and the next run selects only the remainder — a pass
+  cancelled after 11 of 50 files was followed by one that measured exactly 39.
+- **"Already analyzed" is the analysis cache key, not a new flag.** The key
+  already encodes every reason a measurement stops describing a file — its
+  bytes, its algorithm version, its parameters — so selection is an anti-join
+  against `analysis_results`' own primary key rather than a marker column free
+  to disagree with the results it describes. The page query is
+  `SEARCH files USING INTEGER PRIMARY KEY` plus one full-prefix covering-index
+  probe per row; no new index, no table scan.
+- **ReplayGain reaches the audio.** A Player publishes the loaded entry's
+  correction on the control lane, keyed on the identity of the bytes it just
+  opened, so an entry with no measurement plays at unity instead of inheriting
+  the previous one's and a file edited since the last scan loses a correction
+  it no longer matches. On the reference corpus the loudest and quietest tracks
+  went from 17.30 dB apart to 0.71 dB. `off` and `track` modes reach the ABI
+  and `orca-cli play-tracks --replay-gain=`; album gain is out of scope.
+
 ### The library became browsable, and stopped losing 104 files
 
 - **Tracks are connected to artists.** The projection wrote 2,474 artists and
