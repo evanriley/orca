@@ -164,16 +164,36 @@ pub const Scanner = struct {
                 result.unchanged += 1;
                 continue;
             }
-            const audio_format = (try storage.format.sniff(local.readable())) orelse {
+            const detection = (try storage.format.detect(local.readable())) orelse {
                 result.unsupported += 1;
                 continue;
             };
+            const audio_format = detection.format;
+            // A tag reader is defined over the container it is handed, so an
+            // ID3v2 tag in front of a FLAC stream has to be stepped over before
+            // asking for Vorbis comments. Without this the reader looks at byte
+            // zero, finds a tag rather than `fLaC`, and the file is filed under
+            // a filename with no artist and no album -- present in the library
+            // and invisible to every browse of it. 104 files in a real 20,000
+            // track library are shaped this way, and they carry complete
+            // Vorbis comments behind the tag.
+            //
+            // `codecs.probe` needs no such help: the registry resolves the
+            // prefix itself for every decoder it opens.
+            var tag_view: storage.OffsetSource = .{
+                .inner = local.readable(),
+                .offset = detection.payload_offset,
+            };
+            const tag_source = if (detection.payload_offset == 0)
+                local.readable()
+            else
+                tag_view.readable();
             // Unreadable tags leave the file observed but untagged: a corrupt
             // tag is not a reason to drop a playable file from the library.
             const tags = tag_reader.read(
                 self.allocator,
                 audio_format,
-                local.readable(),
+                tag_source,
             ) catch null;
             errdefer if (tags) |owned| owned.deinit();
             // Only changed bytes are probed: the unchanged fast path above is
@@ -848,4 +868,81 @@ test "rescanning an untouched library leaves every file present" {
     try temporary.dir.deleteFile(std.testing.io, "removed.flac");
     _ = try Sweep.run(&library, binding, root_path);
     try std.testing.expectEqual(@as(u64, 1), try library.locations.countPresent());
+}
+
+test "an ID3 tag in front of a FLAC stream does not hide the tags behind it" {
+    // The 104 files in the real library shaped this way carry complete Vorbis
+    // comments. Before the tag reader stepped over the ID3v2 tag it looked for
+    // them at byte zero, found the tag instead, and filed the file under a
+    // filename with no artist and no album -- present in the library and
+    // absent from every browse of it.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    var fixture = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.flac",
+    );
+    const readable = fixture.readable();
+    const stream = try std.testing.allocator.alloc(u8, @intCast(readable.size()));
+    defer std.testing.allocator.free(stream);
+    try std.testing.expectEqual(stream.len, try readable.readAt(0, stream));
+    fixture.close();
+
+    // A minimal ID3v2.4 header: "ID3", version, flags, then the payload size as
+    // four syncsafe bytes -- seven bits each, high bit always clear. The tag
+    // body here is zero padding, which is what a tagger's reserved space looks
+    // like anyway.
+    const tag_body = 300;
+    const tagged = try std.testing.allocator.alloc(u8, 10 + tag_body + stream.len);
+    defer std.testing.allocator.free(tagged);
+    @memset(tagged[0 .. 10 + tag_body], 0);
+    @memcpy(tagged[0..3], "ID3");
+    tagged[3] = 4;
+    tagged[4] = 0;
+    tagged[5] = 0;
+    tagged[6] = @intCast((tag_body >> 21) & 0x7f);
+    tagged[7] = @intCast((tag_body >> 14) & 0x7f);
+    tagged[8] = @intCast((tag_body >> 7) & 0x7f);
+    tagged[9] = @intCast(tag_body & 0x7f);
+    @memcpy(tagged[10 + tag_body ..], stream);
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "id3-then-flac.flac",
+        .data = tagged,
+    });
+
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-id3-flac?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+    defer scanner.deinit();
+
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 1), result.changed);
+    try std.testing.expectEqual(@as(u64, 0), result.unsupported);
+
+    const stored = try library.observed_tags.get(std.testing.allocator, 1);
+    defer if (stored) |owned| owned.deinit();
+    try std.testing.expect(stored != null);
+    // The same values the untagged fixture yields, read from behind the tag.
+    try std.testing.expectEqualStrings("Reference Tone", stored.?.values.title.?);
+    try std.testing.expectEqualStrings("Orca Test", stored.?.values.artist.?);
 }
