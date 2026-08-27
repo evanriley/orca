@@ -80,3 +80,66 @@ against the bytes that follow it.
 Free-format and reserved-field frames are refused. Streams that change channel
 count or sample rate mid-file are refused rather than silently reinterpreted.
 Truncated input ends the stream; input that never syncs fails at open.
+
+## Known defect: FLAC mid-side decoding is not lossless
+
+**The pinned `audiophile/flac` dependency reconstructs mid-side stereo
+incorrectly.** Roughly half of all decoded samples are one LSB low, on the
+majority of real FLAC files, because mid-side is the stereo mode encoders
+usually choose.
+
+A FLAC encoder storing mid-side writes `mid = (left + right) >> 1` and
+`side = left - right`. The low bit of `mid` is discarded, and it is recoverable
+precisely because `left + right` and `left - right` always share parity — so
+the missing bit is `side & 1`. The specification's reconstruction restores it
+first:
+
+    restored = (mid << 1) | (side & 1)
+    left     = (restored + side) >> 1
+    right    = (restored - side) >> 1
+
+`zig-pkg/flac-1.0.2-*/src/Frame.zig` instead computes:
+
+    left  = mid + (side >> 1)
+    right = left - side
+
+which drops the restoration. For odd `side` the result is one too low, and
+`right` inherits the error. Exhaustively over 208,208 (left, right) pairs the
+specification formula round-trips exactly and this one is wrong for **50.0%**
+of them, always by exactly 1 LSB. The smallest counterexample is
+`left = 1, right = 0`, which decodes as `(0, -1)`.
+
+Measured on 30 seconds of real music, two FLAC encodings of one PCM stream that
+`ffmpeg` confirms are byte-identical when decoded:
+
+    our WAV decode vs our FLAC decode : 513,872 of 1,048,576 samples differ
+    largest difference               : 0.0000305176  (exactly 1 LSB at 16-bit)
+    compression level 0 vs level 12  : 4,544 samples differ
+
+The last line is why this is not merely academic: the error depends on the
+*encoding*, so two files holding identical audio decode differently.
+
+**What it does and does not affect.** One LSB at 16 bits is −96 dBFS, so this is
+inaudible and playback quality is not a practical concern. What it does break is
+anything treating decoded audio as an identity:
+
+- `files.audio_hash` is encoding-dependent, so exact-duplicate detection misses
+  genuinely byte-identical pairs and demotes them to `likely_duplicate`. One
+  such pair is already known in the reference library.
+- Loudness, peak and fingerprints vary slightly with encoding.
+
+**Fixing it invalidates every stored `audio_hash` and every fingerprint**, so
+the analysis pass would have to be re-run over the library. That, plus the fact
+that the defect is in a pinned third-party package rather than in Orca, is why
+it is documented here rather than worked around: the options are to report it
+upstream, to vendor a corrected copy, or to accept it, and that is a decision
+about dependencies rather than a code change.
+
+## Known gap: WAVE_FORMAT_EXTENSIBLE is refused
+
+`wav.zig` rejects a `fmt ` chunk of 40 bytes with `UnsupportedWavEncoding`.
+That is `WAVE_FORMAT_EXTENSIBLE`, which ffmpeg emits by default for stereo
+`pcm_s16le`, so a WAV produced by the most obvious command line will not open.
+The real sample format is the SubFormat GUID's first two bytes, which map onto
+the same tags the 16-byte header uses. No file in the reference library is
+affected, since it contains no WAV at all.
