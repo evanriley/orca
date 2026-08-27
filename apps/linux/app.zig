@@ -55,6 +55,11 @@ pub const App = struct {
     scan_job: ?liborca.core.JobHandle = null,
     scanning: bool = false,
     library_path: ?[:0]u8 = null,
+    /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
+    /// Development affordance only: it exists so an automated run can be held to a
+    /// silent sink instead of device 0, which is the system default and therefore
+    /// somebody's speakers.
+    pinned_output_device: ?u64 = null,
     /// Correlates the last `play_track` submission with its completion event, so
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,

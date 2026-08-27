@@ -5,7 +5,6 @@
 //! never adjusted, cached across tracks, or reconstructed from telemetry: that
 //! is engine state and it belongs to liborca.
 
-const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
@@ -40,7 +39,16 @@ fn isNotReady(err: anyerror) bool {
 
 const max_devices = 32;
 
+/// The output the next Zone should open.
+///
+/// `ORCA_OUTPUT_DEVICE` overrides the dropdown, naming an orca device id from
+/// `orca-cli devices`. It exists so an automated run can be pinned to a silent
+/// sink: device 0 means "system default", which on a developer's machine is
+/// their speakers, and a test that plays to them is unacceptable. It mirrors
+/// `ORCA_LIBRARY`, and like it is a development affordance rather than
+/// configuration -- a person picks their device from the dropdown.
 fn selectedDeviceId(self: *App) u64 {
+    if (self.pinned_output_device) |pinned| return pinned;
     const drop_down = self.device_drop_down orelse return 0;
     if (self.device_ids.items.len == 0) return 0;
     const selected = gtk.gtk_drop_down_get_selected(drop_down);

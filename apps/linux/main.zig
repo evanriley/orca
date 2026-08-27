@@ -71,10 +71,13 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
     _ = window.build(self, gtk.cast(gtk.Application, application));
     transport.refreshDevices(self);
-    // Opening the output at launch means the transport works the moment a row
-    // is activated. A machine with no audio server simply has no Zone, which the
-    // play path reports honestly rather than pretending to play.
-    _ = transport.ensureOutput(self);
+    // The output is opened on first play, not here. Opening it at launch held
+    // the user's default sink for as long as the window was open, whether or
+    // not they ever played anything -- it shows up in their mixer, and on a
+    // device that only allows one client it locks everything else out. The
+    // play path already calls `ensureOutput`, so nothing is lost but the
+    // device grab, and a machine with no audio server still reports honestly
+    // at the point a play is attempted rather than at startup.
     browse.reload(self);
     self.reload();
     if (self.library != null) {
@@ -113,6 +116,20 @@ fn resolveLibraryPath(
     return allocator.printSentinel("{s}/library.db", .{directory}, 0) catch null;
 }
 
+/// `ORCA_OUTPUT_DEVICE` names an orca device id from `orca-cli devices`, and
+/// overrides the device dropdown when set.
+///
+/// It exists because device 0 means "system default", which on the machine
+/// this is developed on is the user's speakers, and an automated run that
+/// plays to them is unacceptable. `scripts/silent-sink.sh` prints an id to put
+/// here. Like `ORCA_LIBRARY` this is a development affordance, not
+/// configuration: a person chooses their output from the dropdown.
+fn resolvePinnedOutput(environ: *std.process.Environ.Map) ?u64 {
+    const configured = environ.get("ORCA_OUTPUT_DEVICE") orelse return null;
+    if (configured.len == 0) return null;
+    return std.fmt.parseInt(u64, configured, 10) catch null;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const allocator = init.arena.allocator();
     track_model.allocator = allocator;
@@ -132,6 +149,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
+    self.pinned_output_device = resolvePinnedOutput(init.environ_map);
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
