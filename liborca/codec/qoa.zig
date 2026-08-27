@@ -26,6 +26,7 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &vtable,
+        .codec = decoder_api.codec_id.qoa,
         .source_format = .{
             .sample_format = .signed_16,
             .channels = format.channels,

@@ -253,6 +253,10 @@ pub const Scanner = struct {
         for (pending.items) |entry| {
             const upsert = database.FileUpsert{
                 .audio_format = @backingInt(entry.audio_format),
+                // Empty only for a file that sniffed as audio and then refused
+                // to open: the container is known, the encoding inside it is
+                // not, and an invented identifier would be worse than none.
+                .codec = entry.properties.codec orelse "",
                 .size_bytes = entry.identity.size_bytes,
                 .sample_rate = optionalCount(entry.properties.sample_rate),
                 .bit_depth = optionalCount(entry.properties.bit_depth),
@@ -669,19 +673,26 @@ test "a scan records the audio properties of every file whose bytes changed" {
 
     // Lossless declares a sample width; MPEG audio has none to declare and is
     // left unknown rather than given an invented one.
+    // `codec` names the encoding, not the container, so a lossless row and a
+    // lossy row are told apart by it without consulting anything else.
     try expectProperties(&library, root_path, "tagged-reference.flac", .{
+        .codec = "flac",
         .sample_rate = 44100,
         .bit_depth = 16,
         .channels = 2,
         .duration_ms = 200,
     });
     try expectProperties(&library, root_path, "vbr-xing-reference.mp3", .{
+        .codec = "mp3",
         .sample_rate = 44100,
         .bit_depth = null,
         .channels = 2,
         .duration_ms = 2000,
     });
+    // Sniffed as FLAC, would not open: the container is known and the encoding
+    // is not, so the identifier stays empty rather than being guessed from it.
     try expectProperties(&library, root_path, "broken.flac", .{
+        .codec = "",
         .sample_rate = null,
         .bit_depth = null,
         .channels = null,
@@ -696,6 +707,7 @@ test "a scan records the audio properties of every file whose bytes changed" {
 }
 
 const ExpectedProperties = struct {
+    codec: []const u8,
     sample_rate: ?i64,
     bit_depth: ?i64,
     channels: ?i64,
@@ -719,7 +731,7 @@ fn expectProperties(
         path,
     )).?;
     var statement = try library.database.prepare(
-        "SELECT sample_rate, bit_depth, channels, duration_ms FROM files WHERE id=?1;",
+        "SELECT sample_rate, bit_depth, channels, duration_ms, codec FROM files WHERE id=?1;",
     );
     defer statement.deinit();
     try statement.bindInt64(1, file_id);
@@ -728,6 +740,7 @@ fn expectProperties(
     try std.testing.expectEqual(expected.bit_depth, column(statement, 1));
     try std.testing.expectEqual(expected.channels, column(statement, 2));
     try std.testing.expectEqual(expected.duration_ms, column(statement, 3));
+    try std.testing.expectEqualStrings(expected.codec, statement.columnText(4));
 }
 
 fn column(statement: database.sqlite.Statement, index: c_int) ?i64 {

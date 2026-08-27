@@ -39,6 +39,7 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &vtable,
+        .codec = decoder_api.codec_id.flac,
         .source_format = .{
             .sample_format = if (format.bits_per_sample <= 16)
                 .signed_16

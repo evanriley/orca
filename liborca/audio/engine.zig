@@ -745,6 +745,8 @@ const RampDecoder = struct {
     fn decoder(self: *RampDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
             .context = self,
+            // A test double still has to name its encoding: canonical float PCM.
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
             .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
             .format = .{
                 .sample_format = .float_32,
@@ -1591,6 +1593,8 @@ const FailingDecoder = struct {
     fn decoder(self: *FailingDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
             .context = self,
+            // A test double still has to name its encoding: canonical float PCM.
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
             .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
             .format = .{
                 .sample_format = .float_32,

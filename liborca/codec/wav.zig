@@ -1,5 +1,6 @@
 const std = @import("std");
 const audio_pcm = @import("../audio/pcm.zig");
+const decoder_api = @import("decoder.zig");
 const storage = @import("../storage/root.zig");
 
 pub const SampleFormat = audio_pcm.SampleFormat;
@@ -15,7 +16,7 @@ const DecoderContext = struct {
 pub fn openDecoder(
     allocator: std.mem.Allocator,
     source: storage.ReadableSource,
-) !@import("decoder.zig").Decoder {
+) !decoder_api.Decoder {
     const reader = try Reader.open(source);
     const context = try allocator.create(DecoderContext);
     errdefer allocator.destroy(context);
@@ -26,6 +27,12 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &decoder_vtable,
+        // RIFF/WAVE is a container: what it holds is integer PCM or IEEE
+        // float, and only the format chunk says which.
+        .codec = switch (reader.format.sample_format) {
+            .float_32, .float_64 => decoder_api.codec_id.pcm_float,
+            else => decoder_api.codec_id.pcm,
+        },
         .source_format = reader.format,
         .format = .{
             .sample_format = .float_32,

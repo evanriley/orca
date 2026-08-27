@@ -440,6 +440,8 @@ const TestDecoder = struct {
     fn decoder(self: *TestDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
             .context = self,
+            // A test double still has to name its encoding: canonical float PCM.
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
             .vtable = &.{
                 .read_frames = read,
                 .seek = seek,

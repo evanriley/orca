@@ -14,6 +14,29 @@ a decoder and reading no audio. It returns Orca facts: the caller never sees a
 decoder, a container header, or a codec error dressed as a property, and a
 property the container does not state comes back null rather than zero.
 
+## Codec identity
+
+A probe also reports **which encoding** the container turned out to hold, as a
+stable lowercase identifier from `decoder.codec_id`: `pcm`, `pcm_float`,
+`flac`, `qoa`, `mp1`, `mp2`, `mp3`. The scanner stores it in `files.codec` and
+the property backfill repairs it for rows written before it existed.
+
+**It is not a synonym for `audio_format`.** `audio_format` names the container
+a file was sniffed as, which decides who opens it; `codec` names the encoding
+inside, which decides what the bytes cost and what quality they carry. The two
+coincide for FLAC and QOA and diverge everywhere a container is a wrapper: a
+RIFF/WAVE file holds integer PCM or IEEE float, an MPEG stream is Layer I, II
+or III, and the MP4 and Ogg containers this project will grow into hold AAC or
+ALAC and Vorbis or Opus. A library that recorded only the container could not
+tell an ALAC rip from an AAC one.
+
+The identifier is matched on by equality, never displayed — a human-readable
+label belongs to the frontend. Lossy and lossless are told apart by
+`codec_id.isLossless`, which is a function of the identifier rather than a
+second stored column that could disagree with the first. A file that sniffs as
+audio and then refuses to open keeps an **empty** codec: the container is known
+and the encoding is not, and an invented identifier would be worse than none.
+
 ## MPEG audio (MP3)
 
 `codec/mp3.zig` is the `Decoder` implementation; `codec/mp3_stream.zig` is the

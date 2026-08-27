@@ -14,6 +14,10 @@ pub const Descriptor = struct {
 /// has no integer sample width to report, and inventing one would let a lossy
 /// file outrank a genuine 16-bit lossless encoding of the same song.
 pub const Properties = struct {
+    /// The encoding the container turned out to hold, from
+    /// `decoder.codec_id`. Static storage: the decoder that reported it has
+    /// already been closed by the time a probe returns.
+    codec: ?[]const u8 = null,
     sample_rate: ?u32 = null,
     channels: ?u16 = null,
     bit_depth: ?u16 = null,
@@ -115,6 +119,7 @@ pub const CodecRegistry = struct {
 fn properties(opened: decoder.Decoder) Properties {
     const rate = opened.format.sample_rate;
     return .{
+        .codec = opened.codec,
         .sample_rate = if (rate == 0) null else rate,
         .channels = if (opened.format.channels == 0) null else opened.format.channels,
         .bit_depth = if (opened.source_format) |declared| declared.bits_per_sample else null,
@@ -139,6 +144,7 @@ test "probing reports the properties a container declares and no invented ones" 
     );
     defer lossless.close();
     const flac = try codecs.probeDetected(std.testing.allocator, lossless.readable());
+    try std.testing.expectEqualStrings("flac", flac.codec.?);
     try std.testing.expectEqual(@as(?u32, 44100), flac.sample_rate);
     try std.testing.expectEqual(@as(?u16, 2), flac.channels);
     try std.testing.expectEqual(@as(?u16, 16), flac.bit_depth);
@@ -153,6 +159,7 @@ test "probing reports the properties a container declares and no invented ones" 
     );
     defer lossy.close();
     const mp3 = try codecs.probeDetected(std.testing.allocator, lossy.readable());
+    try std.testing.expectEqualStrings("mp3", mp3.codec.?);
     try std.testing.expectEqual(@as(?u32, 44100), mp3.sample_rate);
     try std.testing.expectEqual(@as(?u16, 2), mp3.channels);
     try std.testing.expectEqual(@as(?u16, null), mp3.bit_depth);

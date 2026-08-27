@@ -151,6 +151,53 @@ pub const FileUpsert = struct {
     content_hash: ?[]const u8 = null,
 };
 
+/// The `files` rows a property backfill still owes a probe.
+///
+/// This is textually **one** string, shared by migration 10's partial index
+/// and by `FileRepository.incompletePropertiesPage`. SQLite uses a partial
+/// index only when the query's WHERE clause contains the index's own
+/// predicate, and it matches that by expression, not by meaning: a paraphrase
+/// here would silently turn row selection into a full scan of the largest
+/// table in the schema.
+///
+/// `bit_depth` is deliberately not one of the terms. A transform codec has no
+/// integer sample width to declare, so a null there is an answer rather than a
+/// gap — 2,213 of the reference library's 22,060 rows are lossy, and including
+/// it would re-probe every one of them on every run for ever.
+pub const incomplete_properties_predicate =
+    "duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec = ''";
+
+/// Audio facts a probe learned about one already-recorded file.
+///
+/// Narrower than `FileUpsert` on purpose: a backfill reads headers, so it has
+/// nothing to say about size, container or quick hash, and must not overwrite
+/// what the scanner observed about them with defaults it made up.
+pub const FilePropertyUpdate = struct {
+    codec: []const u8 = "",
+    sample_rate: ?i64 = null,
+    bit_depth: ?i64 = null,
+    channels: ?i64 = null,
+    duration_ms: ?i64 = null,
+};
+
+/// One incomplete file and where to read it.
+pub const IncompleteFile = struct {
+    id: i64,
+    /// Empty when no location on any known volume names this file, which is a
+    /// row the backfill can only count and move past.
+    uri: []u8,
+};
+
+pub const IncompleteFilePage = struct {
+    allocator: std.mem.Allocator,
+    items: []IncompleteFile,
+
+    pub fn deinit(self: IncompleteFilePage) void {
+        for (self.items) |item| self.allocator.free(item.uri);
+        self.allocator.free(self.items);
+    }
+};
+
 pub const LocationState = enum {
     present,
     missing,
@@ -319,6 +366,12 @@ pub const HealthIssueKind = enum(u8) {
     corrupt_audio,
     exact_duplicate,
     likely_duplicate,
+    /// The file behind a row could not be opened or would not decode. Owned by
+    /// the property backfill alone, which is why it is not `corrupt_audio`:
+    /// that kind belongs to the analyzer, which decodes the whole stream, and
+    /// a header-only pass must not be able to clear a finding made by reading
+    /// audio it never looked at.
+    unreadable_file,
 };
 
 pub const HealthSeverity = enum(u8) { information, warning, error_severity };
@@ -1486,6 +1539,95 @@ pub const FileRepository = struct {
         try bindFile(statement, input);
         try statement.bindInt64(11, file_id);
         if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Records what a probe read from a file's headers, and nothing else.
+    ///
+    /// `update` would also rewrite `audio_format`, `size_bytes` and
+    /// `quick_hash` from a caller that never computed them. A backfill reads
+    /// headers only, so it writes only what headers say and leaves the
+    /// scanner's observations of the bytes alone.
+    pub fn updatePropertiesLocked(
+        self: *FileRepository,
+        file_id: i64,
+        input: FilePropertyUpdate,
+    ) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET codec=?1, sample_rate=?2, bit_depth=?3, channels=?4,
+            \\    duration_ms=?5
+            \\WHERE id=?6;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.codec);
+        try statement.bindOptionalInt64(2, input.sample_rate);
+        try statement.bindOptionalInt64(3, input.bit_depth);
+        try statement.bindOptionalInt64(4, input.channels);
+        try statement.bindOptionalInt64(5, input.duration_ms);
+        try statement.bindInt64(6, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// One bounded page of files that still owe a probe, past `after_id`.
+    ///
+    /// The cursor is the file id rather than an offset, so a page whose rows
+    /// the caller could not repair does not make the next page re-serve them,
+    /// and a run interrupted half way resumes from where it stopped without
+    /// any checkpoint of its own. `all` re-serves every file regardless of
+    /// what it already declares, which is the force mode's whole meaning.
+    ///
+    /// Each row carries the location a reader should open: a present one in
+    /// preference to an unverified one, and a missing one only if there is
+    /// nothing better, because a drive that is back gets probed rather than
+    /// skipped.
+    pub fn incompletePropertiesPage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+        all: bool,
+    ) !IncompleteFilePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        const uri_column =
+            \\(SELECT locations.uri FROM locations WHERE locations.file_id = files.id
+            \\ ORDER BY CASE locations.state WHEN 'present' THEN 0
+            \\               WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
+            \\ LIMIT 1)
+        ;
+        var statement = try self.db.prepare(if (all)
+            "SELECT files.id, " ++ uri_column ++
+                " FROM files WHERE files.id > ?1 ORDER BY files.id LIMIT ?2;"
+        else
+            "SELECT files.id, " ++ uri_column ++
+                " FROM files WHERE files.id > ?1 AND (" ++
+                incomplete_properties_predicate ++ ") ORDER BY files.id LIMIT ?2;");
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+
+        var items: std.ArrayList(IncompleteFile) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.uri);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const uri = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(uri);
+            try items.append(allocator, .{ .id = statement.columnInt64(0), .uri = uri });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// How many files still owe a probe. A backfill, unlike a filesystem walk,
+    /// has an honest denominator before it starts, so its job snapshot reports
+    /// a fraction rather than a bare count.
+    pub fn incompletePropertiesCount(self: *const FileRepository, all: bool) !u64 {
+        var statement = try self.db.prepare(if (all)
+            "SELECT count(*) FROM files;"
+        else
+            "SELECT count(*) FROM files WHERE " ++ incomplete_properties_predicate ++ ";");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     /// Tier 4 of the identity cascade, written by the analysis job rather than

@@ -98,6 +98,13 @@ pub fn openDecoder(
     return .{
         .context = context,
         .vtable = &vtable,
+        // The layer is what the encoding is: a Layer II stream and a Layer III
+        // stream share a container and nothing else about their cost.
+        .codec = switch (info.header.layer) {
+            .layer1 => decoder_api.codec_id.mp1,
+            .layer2 => decoder_api.codec_id.mp2,
+            .layer3 => decoder_api.codec_id.mp3,
+        },
         // MPEG audio is a transform codec: there is no integer PCM the file
         // "declares", so the canonical float view is the only honest one.
         .source_format = null,
