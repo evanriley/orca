@@ -82,7 +82,7 @@ test "a loaded source outlives the frame that opened it" {
     try std.testing.expect(session.owned_source != null);
 
     var samples: [4]f32 = undefined;
-    try std.testing.expectEqual(@as(usize, 4), try session.readFrames(&samples));
+    try std.testing.expectEqual(@as(usize, 4), try session.readFrames(&samples, true));
     try std.testing.expectEqualSlices(f32, &.{ -1, 0, 32767.0 / 32768.0, 0.5 }, &samples);
 }
 

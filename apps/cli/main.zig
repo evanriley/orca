@@ -287,8 +287,18 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 }
 
+/// A volume change scheduled mid-run. Exists so the independence of user
+/// volume and loudness correction is observable from outside: changing one
+/// while a track plays must leave the other exactly where it was.
+const ScheduledVolume = struct {
+    at_ms: u64,
+    linear: f32,
+};
+
 const PlayTracksOptions = struct {
     device: u64 = 0,
+    volume: f32 = 1,
+    set_volume: ?ScheduledVolume = null,
     replay_gain: liborca.audio.processing.ReplayGainMode = .track,
     start: u32 = 0,
     repeat: liborca.core.runtime.RepeatMode = .off,
@@ -309,6 +319,15 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     const value = argument[split + 1 ..];
     if (std.mem.eql(u8, name, "--device")) {
         options.device = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--volume")) {
+        options.volume = try std.fmt.parseFloat(f32, value);
+    } else if (std.mem.eql(u8, name, "--set-volume")) {
+        const separator = std.mem.indexOfScalar(u8, value, ':') orelse
+            return error.MalformedScheduledVolume;
+        options.set_volume = .{
+            .at_ms = try std.fmt.parseInt(u64, value[0..separator], 10),
+            .linear = try std.fmt.parseFloat(f32, value[separator + 1 ..]),
+        };
     } else if (std.mem.eql(u8, name, "--start")) {
         options.start = try std.fmt.parseInt(u32, value, 10);
     } else if (std.mem.eql(u8, name, "--replay-gain")) {
@@ -374,6 +393,7 @@ fn playTracks(
     try runtime.attachZone(zone, player);
     try runtime.zoneRequestOutput(zone, options.device);
 
+    try runtime.playerSetVolume(player, options.volume);
     try runtime.playerSetReplayGainMode(player, options.replay_gain);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
@@ -383,6 +403,7 @@ fn playTracks(
     var entry_elapsed_ms: u64 = 0;
     var last_cursor: ?u32 = null;
     var took_previous = options.previous_after_ms == null;
+    var set_volume = options.set_volume == null;
     // How often the producer was observed a whole entry ahead of the audio.
     // Nonzero is the proof that now-playing is derived from rendered audio
     // rather than from the decode cursor.
@@ -395,8 +416,9 @@ fn playTracks(
             entry_elapsed_ms = 0;
             const now_playing = try runtime.playerNowPlaying(player);
             // volume and gain differing is what a loudness correction looks
-            // like from outside: the render lane multiplies by `gain`, and
-            // `volume` is only what the user asked for.
+            // like from outside: `gain` is what the audible entry's samples
+            // are being multiplied by, and `volume` is only what the user
+            // asked for.
             try stdout.print(
                 "now-playing at={d}ms position={d} decode_position={d} track={?d} " ++
                     "volume={d:.6} gain={d:.6}\n",
@@ -411,6 +433,22 @@ fn playTracks(
             );
             try stdout.flush();
             if (options.tail_ms) |tail| _ = try runtime.playerSeekToTail(player, tail);
+        }
+        if (!set_volume and elapsed_ms >= options.set_volume.?.at_ms) {
+            set_volume = true;
+            try runtime.playerSetVolume(player, options.set_volume.?.linear);
+            // Printed as a pair on purpose: a volume change that disturbed the
+            // loudness correction, or a correction that moved the volume,
+            // would show up here as the other number moving.
+            try stdout.print(
+                "set-volume at={d}ms volume={d:.6} gain={d:.6}\n",
+                .{
+                    elapsed_ms,
+                    try runtime.playerVolume(player),
+                    try runtime.playerEffectiveGain(player),
+                },
+            );
+            try stdout.flush();
         }
         if (!took_previous and elapsed_ms >= options.previous_after_ms.?) {
             took_previous = true;

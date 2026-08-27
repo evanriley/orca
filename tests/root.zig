@@ -32,7 +32,7 @@ test "registered lossless and lossy codecs share SourceSession pipeline" {
         );
         defer pool.deinit();
         var pipe: liborca.audio.render.RenderPipe(2) = .{};
-        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1));
+        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, true));
         const output = try std.testing.allocator.alloc(f32, frames * channels);
         defer std.testing.allocator.free(output);
         try std.testing.expectEqual(frames, pipe.render(&pool, channels, 1, output));
@@ -428,11 +428,16 @@ test "an analyzed entry plays corrected and an unanalyzed entry plays at unity" 
     try std.testing.expect(try runtime.playerNext(player));
     try std.testing.expectEqual(@as(f32, 1), try runtime.playerEffectiveGain(player));
 
-    // Turning correction off leaves the render lane multiplying by the volume
-    // alone, on the next entry loaded.
+    // Turning correction off leaves the audio untouched, not merely reported as
+    // untouched. The mode gates the decode, so this has to be checked against
+    // rendered samples: a gate applied only where the gain is reported would
+    // satisfy every other assertion here while the audio stayed corrected.
     try runtime.playerSetReplayGainMode(player, .off);
     try runtime.playerPlayTracks(player, library, std.testing.io, &.{measured.track_id}, 0);
     try std.testing.expectEqual(@as(f32, 1), try runtime.playerEffectiveGain(player));
+    const uncorrected = try observeEntry(&runtime, &backend, player, 0, 100);
+    // The fixture is a half-scale sine, so uncorrected playback peaks there.
+    try std.testing.expect(uncorrected.peak > 0.45 and uncorrected.peak < 0.55);
 }
 
 test "a loud track and a quiet track play closer in level after correction than before" {
@@ -554,4 +559,227 @@ test "an entry whose bytes changed since it was measured plays at unity" {
     try writeSineWav(temporary.dir, "edited.wav", 0.25, 2);
     try runtime.playerPlayTracks(player, library, std.testing.io, &.{edited.track_id}, 0);
     try std.testing.expectEqual(@as(f32, 1), try runtime.playerEffectiveGain(player));
+}
+
+/// What one queue entry sounded like, and what the runtime said about it.
+const EntryObservation = struct {
+    /// Effective gain reported while this entry was the audible one.
+    gain: f32,
+    /// Loudest sample the backend actually rendered inside this entry.
+    peak: f32,
+};
+
+/// Pumps the test backend until entry `target` is audible, then keeps pumping
+/// and measures what is actually coming out.
+///
+/// The pumping is what makes the advance *gapless* rather than a skip: the
+/// entry ends because its audio ran out, so the successor arrives on the engine
+/// thread and never passes through the control lane's hard-load path.
+fn observeEntry(
+    runtime: *liborca.OrcaRuntime,
+    backend: *liborca.audio.output.TestBackend,
+    player: liborca.core.object.PlayerHandle,
+    target: u32,
+    measured_blocks: usize,
+) !EntryObservation {
+    var samples: [128]f32 = @splat(0);
+    var pumped: usize = 0;
+    while (pumped < 4_000_000) : (pumped += 1) {
+        if ((try runtime.playerQueueSnapshot(player)).cursor == target) break;
+        if (backend.liveStream()) |stream| stream.pump(&samples, 128);
+        std.Thread.yield() catch {};
+    }
+    if ((try runtime.playerQueueSnapshot(player)).cursor != target)
+        return error.EntryNeverBecameAudible;
+    const gain = try runtime.playerEffectiveGain(player);
+    var peak: f32 = 0;
+    var measured: usize = 0;
+    var attempts: usize = 0;
+    while (measured < measured_blocks and attempts < 4_000_000) : (attempts += 1) {
+        if ((try runtime.playerQueueSnapshot(player)).cursor != target) break;
+        // The engine opens the Zone's output on its own lane, so a stream may
+        // not exist yet on the first attempts.
+        const stream = backend.liveStream() orelse {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        stream.pump(&samples, 128);
+        var block_peak: f32 = 0;
+        for (samples) |value| block_peak = @max(block_peak, @abs(value));
+        // A 128-frame block spans about three periods of the test tone, so an
+        // all-zero one is the producer being outrun rather than a zero
+        // crossing. Those blocks say nothing about level; give the engine room
+        // and ask again.
+        if (block_peak == 0) {
+            std.Thread.yield() catch {};
+            continue;
+        }
+        peak = @max(peak, block_peak);
+        measured += 1;
+    }
+    if (measured == 0) return error.EntryRenderedNothing;
+    return .{ .gain = gain, .peak = peak };
+}
+
+/// The multiplier a correction of `loudness` produces, computed the way the
+/// engine computes it so the expectation is the contract rather than a
+/// transcribed constant.
+fn expectedGain(loudness: liborca.analysis.encoding.Loudness) f32 {
+    return liborca.audio.processing.replayGainMultiplier(
+        loudness.replay_gain_db,
+        loudness.sample_peak,
+    );
+}
+
+test "a gapless auto-advance adopts the successor's own loudness correction" {
+    // Auto-advance runs on the engine thread and never reaches the control
+    // lane's hard-load path, so a Player-level correction published at load
+    // stayed on the *previous* entry's figure for the whole of the next track.
+    // Within one album — the normal case for this library — that applies track
+    // one's correction to every track after it.
+    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    // The same tone 20 dB apart and in one canonical format, so the transition
+    // between them is genuinely gapless and the two corrections are far enough
+    // apart that inheriting the wrong one cannot be mistaken for rounding.
+    try writeSineWav(temporary.dir, "loud.wav", 0.5, 2);
+    try writeSineWav(temporary.dir, "quiet.wav", 0.05, 2);
+    var loud_path: [128]u8 = undefined;
+    var quiet_path: [128]u8 = undefined;
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-replay-gain-gapless?mode=memory&cache=shared",
+    );
+    const database = try runtime.libraryDatabase(library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-gapless" });
+    const loud_uri = try std.fmt.bufPrint(
+        &loud_path,
+        ".zig-cache/tmp/{s}/loud.wav",
+        .{temporary.sub_path},
+    );
+    const quiet_uri = try std.fmt.bufPrint(
+        &quiet_path,
+        ".zig-cache/tmp/{s}/quiet.wav",
+        .{temporary.sub_path},
+    );
+    const loud = try recordAnalyzableTrack(database, volume_id, loud_uri, "Loud");
+    const quiet = try recordAnalyzableTrack(database, volume_id, quiet_uri, "Quiet");
+    try std.testing.expectEqual(@as(u64, 2), (try runLibraryAnalysis(database)).changed);
+    const loud_loudness = (try storedLoudness(database, loud.file_id, loud_uri)).?;
+    const quiet_loudness = (try storedLoudness(database, quiet.file_id, quiet_uri)).?;
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    // Full render-ahead depth, so the producer really does run a whole entry
+    // ahead of the audio — the window the defect lived in.
+    try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = 8192 } }, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerPlayTracks(
+        player,
+        library,
+        std.testing.io,
+        &.{ loud.track_id, quiet.track_id },
+        0,
+    );
+
+    const loud_entry = try observeEntry(&runtime, &backend, player, 0, 100);
+    const quiet_entry = try observeEntry(&runtime, &backend, player, 1, 100);
+    try std.testing.expectApproxEqRel(expectedGain(loud_loudness), loud_entry.gain, 0.001);
+    try std.testing.expectApproxEqRel(expectedGain(quiet_loudness), quiet_entry.gain, 0.001);
+
+    // And the samples themselves, which is the assertion that cannot be
+    // satisfied by reporting alone. Two tones 20 dB apart, each corrected
+    // toward the same target, must leave the output at the same level. Under
+    // the defect the successor was still being multiplied by the loud track's
+    // attenuation and rendered about 20 dB below this.
+    try std.testing.expect(loud_entry.peak > 0.15 and loud_entry.peak < 0.21);
+    try std.testing.expectApproxEqRel(loud_entry.peak, quiet_entry.peak, 0.05);
+
+    // The transition itself is unregressed: it stayed gapless, and nothing was
+    // stepped over or failed to decode.
+    const stats = try runtime.playerQueueStats(player);
+    try std.testing.expect(stats.gapless_transitions >= 1);
+    try std.testing.expectEqual(@as(u64, 0), stats.format_switch_transitions);
+    try std.testing.expectEqual(@as(u64, 0), stats.open_failures);
+    try std.testing.expectEqual(@as(u64, 0), stats.decode_errors);
+}
+
+test "an unanalyzed entry reached by a gapless advance plays at unity" {
+    // The same defect in its quieter form: inheritance across the transition
+    // is silent when the successor has no measurement of its own, because
+    // nothing about the audio says it is being played at another track's level.
+    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeSineWav(temporary.dir, "analyzed.wav", 0.5, 2);
+    try writeSineWav(temporary.dir, "unanalyzed.wav", 0.5, 2);
+    var analyzed_path: [128]u8 = undefined;
+    var unanalyzed_path: [128]u8 = undefined;
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-replay-gain-gapless-unity?mode=memory&cache=shared",
+    );
+    const database = try runtime.libraryDatabase(library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-unity" });
+    const analyzed_uri = try std.fmt.bufPrint(
+        &analyzed_path,
+        ".zig-cache/tmp/{s}/analyzed.wav",
+        .{temporary.sub_path},
+    );
+    const unanalyzed_uri = try std.fmt.bufPrint(
+        &unanalyzed_path,
+        ".zig-cache/tmp/{s}/unanalyzed.wav",
+        .{temporary.sub_path},
+    );
+    const analyzed = try recordAnalyzableTrack(database, volume_id, analyzed_uri, "Analyzed");
+    // Only the first file is projected when the pass runs, so the second is a
+    // Track the Library has genuinely never measured.
+    try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
+    const unanalyzed = try recordAnalyzableTrack(
+        database,
+        volume_id,
+        unanalyzed_uri,
+        "Unanalyzed",
+    );
+    try std.testing.expectEqual(
+        @as(?liborca.analysis.encoding.Loudness, null),
+        try storedLoudness(database, unanalyzed.file_id, unanalyzed_uri),
+    );
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = 8192 } }, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerPlayTracks(
+        player,
+        library,
+        std.testing.io,
+        &.{ analyzed.track_id, unanalyzed.track_id },
+        0,
+    );
+
+    const analyzed_entry = try observeEntry(&runtime, &backend, player, 0, 100);
+    const unanalyzed_entry = try observeEntry(&runtime, &backend, player, 1, 100);
+    try std.testing.expect(analyzed_entry.gain < 0.6);
+    try std.testing.expectEqual(@as(f32, 1), unanalyzed_entry.gain);
+
+    // Identical audio, so an entry that inherited its predecessor's correction
+    // would render at the predecessor's level rather than at its own.
+    try std.testing.expect(unanalyzed_entry.peak > 0.45 and unanalyzed_entry.peak < 0.55);
+    try std.testing.expect(unanalyzed_entry.peak > 2 * analyzed_entry.peak);
 }

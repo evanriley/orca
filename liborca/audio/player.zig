@@ -43,6 +43,10 @@ const EntryInfo = struct {
     serial: u32 = 0,
     sample_rate: u32 = 0,
     frame_count: u64 = 0,
+    /// The entry's own loudness correction, so a host can report what the
+    /// audio it is hearing is being multiplied by. The correction is applied
+    /// by the session that decodes the entry, not from here.
+    replay_gain: f32 = 1,
 };
 
 /// Only the current and the one primed successor can be in flight, so this only
@@ -82,6 +86,16 @@ pub const Player = struct {
     /// by the engine from the clock Zone. Zero until something has rendered, in
     /// which case the decode cursor is the only answer available.
     audible_entry_serial: std.atomic.Value(u32) = .init(0),
+    /// Loudness correction of the entry being *heard*, republished alongside
+    /// its timeline shape. Reporting only: the correction is applied by the
+    /// session that decodes the entry, so this is what a host may display
+    /// rather than what any lane multiplies by.
+    published_replay_gain: std.atomic.Value(f32) = .init(1),
+    /// Whether entries are decoded with their own loudness correction. An
+    /// atomic because the decode lane reads it on every canonical block, which
+    /// is what makes turning correction off take effect as the already-decoded
+    /// render-ahead drains rather than at the next track.
+    replay_gain_mode: std.atomic.Value(processing.ReplayGainMode) = .init(.track),
     /// Timeline shape per entry serial. Plain state, written by whichever lane
     /// owns `sources` — the control lane under `quiesce`, or the engine thread.
     entry_info: [entry_info_len]EntryInfo = @splat(.{}),
@@ -158,11 +172,28 @@ pub const Player = struct {
                 .serial = sources.current_entry_serial,
                 .sample_rate = sources.current.decoder.format.sample_rate,
                 .frame_count = sources.current.decoder.frame_count orelse 0,
+                .replay_gain = sources.current.replay_gain,
             });
         }
         const audible = self.audibleEntryInfo();
         self.published_sample_rate.store(audible.sample_rate, .release);
         self.published_frame_count.store(audible.frame_count, .release);
+        self.published_replay_gain.store(audible.replay_gain, .release);
+    }
+
+    /// Whether the decode lane is applying corrections at all.
+    pub fn replayGainEnabled(self: *const Player) bool {
+        return self.replay_gain_mode.load(.acquire) == .track;
+    }
+
+    /// The correction in force on the audio currently audible: the audible
+    /// entry's own figure, or exactly 1 when correction is off.
+    ///
+    /// Gated at read rather than at publication so a mode change is reflected
+    /// here as promptly as it is reflected in the audio.
+    pub fn effectiveReplayGain(self: *const Player) f32 {
+        if (!self.replayGainEnabled()) return 1;
+        return self.published_replay_gain.load(.acquire);
     }
 
     /// Engine thread. Adopts the entry serial the render callback published, so
@@ -198,6 +229,7 @@ pub const Player = struct {
             .serial = sources.current_entry_serial,
             .sample_rate = sources.current.decoder.format.sample_rate,
             .frame_count = sources.current.decoder.frame_count orelse 0,
+            .replay_gain = sources.current.replay_gain,
         };
         const serial = self.audible_entry_serial.load(.acquire);
         if (serial == 0 or serial == sources.current_entry_serial) return fallback;
@@ -242,6 +274,7 @@ pub const Player = struct {
                 pipe,
                 pool,
                 self.epoch.load(.acquire),
+                self.replayGainEnabled(),
             );
         }
         return error.PlayerHasNoSource;
@@ -250,7 +283,7 @@ pub const Player = struct {
     /// Producer/control-lane decode used by multi-Zone fanout. Decoder and
     /// source I/O never run on an output callback.
     pub fn decodeFrames(self: *Player, samples: []f32) !usize {
-        if (self.sources) |*sources| return sources.readFrames(samples);
+        if (self.sources) |*sources| return sources.readFrames(samples, self.replayGainEnabled());
         return error.PlayerHasNoSource;
     }
 

@@ -747,9 +747,10 @@ typedef enum orca_replay_gain_mode {
     ORCA_REPLAY_GAIN_TRACK = 1,
 } orca_replay_gain_mode;
 
-/* Takes effect on the next entry loaded, not on the one already playing: the
- * correction is published when an entry is opened, and re-publishing it
- * mid-track would move the level under the listener. Defaults to TRACK. */
+/* Takes effect as soon as the audio already decoded ahead of the listener
+ * drains -- a fraction of a second, not the rest of the track. The level steps
+ * rather than ramping when it does, which is the answer to an explicit
+ * request. Defaults to TRACK. */
 orca_status orca_player_set_replay_gain_mode(
     orca_runtime *runtime,
     orca_handle player,
@@ -760,9 +761,11 @@ orca_status orca_player_replay_gain_mode(
     orca_handle player,
     uint8_t *output
 );
-/* The multiplier the render lane is applying: volume times the loaded entry's
- * loudness correction. Equal to the volume when there is no correction, so the
- * two differing is what "ReplayGain is doing something" looks like. */
+/* What the audio currently audible is being multiplied by: volume times the
+ * loudness correction of the entry actually being heard. Equal to the volume
+ * when there is no correction, so the two differing is what "ReplayGain is
+ * doing something" looks like. The correction is applied to the samples as the
+ * entry is decoded, so this reports rather than drives it. */
 orca_status orca_player_effective_gain(
     orca_runtime *runtime,
     orca_handle player,

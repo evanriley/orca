@@ -84,28 +84,32 @@ pub const TrackSourceOpener = struct {
         return self.openTrack(ref);
     }
 
+    /// Opens a queue entry's audio, already carrying its own loudness
+    /// correction.
+    ///
+    /// The correction is attached **here**, at the one place a queue entry
+    /// becomes audio, rather than at each caller. Every path that produces a
+    /// session — the control lane's hard load, the engine thread's gapless
+    /// auto-advance, a deferred format switch, a seek that re-opens the
+    /// audible entry — goes through this function, so none of them can forget
+    /// to publish one and none of them can publish a stale one.
+    ///
+    /// That does mean the engine thread reads two indexed rows and two 64 KiB
+    /// file ranges when it opens an entry. It already resolves the Location
+    /// and opens the file on that lane for the same reason: opening is not the
+    /// decode path, it happens once per entry, and it is emphatically not the
+    /// render lane. Pre-resolving corrections on the control lane instead
+    /// would mean guessing which entry auto-advance is going to pick, which
+    /// repeat and shuffle make unknowable until it picks it.
     pub fn openTrack(
         self: *TrackSourceOpener,
         ref: TrackRef,
     ) !audio.source_session.SourceSession {
-        return (try self.openTrackDetailed(ref)).session;
-    }
-
-    /// The same open, plus the `files` row the audio actually came from.
-    ///
-    /// A caller that only wants audio uses `openTrack`. The control lane wants
-    /// the file id as well, because everything else it must publish for the
-    /// entry — its loudness correction first — is keyed on the file, and
-    /// resolving the track a second time could resolve it to a different one.
-    pub fn openTrackDetailed(
-        self: *TrackSourceOpener,
-        ref: TrackRef,
-    ) !OpenedTrack {
         if (!ref.library.eql(self.library)) return error.TrackNotInBoundLibrary;
         const resolved = (try self.tracks.playableLocation(self.allocator, ref.track_id)) orelse
             return error.TrackHasNoPlayableFile;
         defer resolved.deinit();
-        const session = audio.loaded_source.LoadedSource.open(
+        var session = audio.loaded_source.LoadedSource.open(
             self.allocator,
             self.io,
             self.codecs,
@@ -120,21 +124,22 @@ pub const TrackSourceOpener = struct {
             error.UnsupportedAudioFormat => return error.CodecUnavailable,
             else => return err,
         };
-        return .{
-            .session = session,
-            .file_id = resolved.file_id,
-            // Observed, not taken from the row. Everything keyed on the file's
-            // content — its loudness correction first — must be keyed on the
-            // content that is about to be decoded, not on what the Library
-            // last recorded about it. Null when it could not be read, which
-            // means only that nothing content-keyed can be adopted.
-            .source_identity = observedIdentity(self.io, resolved.uri),
-        };
+        // Observed, not taken from the row. The correction must be keyed on
+        // the content that is about to be decoded, not on what the Library
+        // last recorded about it. A lookup that fails is a correction we
+        // cannot vouch for, which is the same answer as one that is absent —
+        // and it must never fail the load, because the track is playable
+        // either way.
+        session.replay_gain = self.replayGain(
+            resolved.file_id,
+            observedIdentity(self.io, resolved.uri),
+        ) catch 1;
+        return session;
     }
 
-    /// The loudness correction measured from exactly these bytes, or null.
+    /// The loudness correction measured from exactly these bytes, or 1.
     ///
-    /// Null covers four different situations on purpose — never analyzed,
+    /// Unity covers four different situations on purpose — never analyzed,
     /// analyzed under other parameters, analyzed under an older algorithm, and
     /// analyzed from bytes this file no longer has — because a Player does the
     /// same thing with all four: play at unity. A correction whose provenance
@@ -143,30 +148,30 @@ pub const TrackSourceOpener = struct {
     /// Library's own record of a file's bytes is only as fresh as the last
     /// scan.
     ///
+    /// Only the canonical parameters are adopted. The target LUFS is one of
+    /// them, so adopting a measurement made under arbitrary parameters would
+    /// apply a correction toward a target nobody chose.
+    ///
     /// Reads only the fixed header of the stored result. The rest is a
-    /// waveform, and this runs on the control lane while a track is loading.
-    pub fn replayGain(
+    /// waveform, and this runs while a track is loading.
+    fn replayGain(
         self: *const TrackSourceOpener,
         file_id: i64,
         source_identity: ?quick_hash.Digest,
-    ) !?analysis.encoding.Loudness {
-        const identity = source_identity orelse return null;
+    ) !f32 {
+        const identity = source_identity orelse return 1;
         var header: [analysis.encoding.header_size]u8 = undefined;
         const stored = (try self.analysis_cache.resultInto(
             analysis.service.diagnosticsKey(file_id, identity, .{}),
             &header,
-        )) orelse return null;
-        if (stored < header.len) return null;
-        return analysis.encoding.decodeLoudness(&header);
+        )) orelse return 1;
+        if (stored < header.len) return 1;
+        const loudness = (try analysis.encoding.decodeLoudness(&header)) orelse return 1;
+        return audio.processing.replayGainMultiplier(
+            loudness.replay_gain_db,
+            loudness.sample_peak,
+        );
     }
-};
-
-/// One opened queue entry: the audio, which file row it came from, and the
-/// identity of the bytes that were actually opened.
-pub const OpenedTrack = struct {
-    session: audio.source_session.SourceSession,
-    file_id: i64,
-    source_identity: ?quick_hash.Digest,
 };
 
 /// The quick hash of a file that has just been opened for playback.
@@ -250,7 +255,7 @@ test "a track id resolves to a self-contained decodable session" {
     // Self-contained: nothing backing the decoder lives in this frame.
     try testing.expect(session.owned_source != null);
     var samples: [64]f32 = undefined;
-    try testing.expect(try session.readFrames(&samples) > 0);
+    try testing.expect(try session.readFrames(&samples, true) > 0);
 }
 
 test "a track whose file has gone marks its location missing and fails typed" {

@@ -34,10 +34,6 @@ const PlayerObject = struct {
     /// Player-scope volume. Lives beside the Player rather than inside the
     /// engine so the level survives an engine that is stopped and respawned.
     gain: *audio.processing.Gain,
-    /// Whether loading an entry publishes that entry's loudness correction.
-    /// On by default: a Library that has been analyzed exists to be listened
-    /// to at an even level, and a host that disagrees turns it off.
-    replay_gain_mode: audio.processing.ReplayGainMode = .track,
     /// Track references, cursor, repeat and shuffle. Lives beside the Player
     /// and outlives any individual `SourceQueue`: `stop` releases decoders but
     /// never the list the user assembled.
@@ -1341,70 +1337,17 @@ pub const OrcaRuntime = struct {
         const cursor = object_value.queue.cursorPosition();
         const ref = object_value.queue.current() orelse {
             object_value.player.releaseSources();
-            // Nothing is loaded, so no entry's correction is in force. Leaving
-            // the last one published would apply it to whatever loads next.
-            object_value.gain.clearReplayGain(0);
             return;
         };
-        const opened = try opener.openTrackDetailed(ref);
-        var session = opened.session;
+        var session = try opener.openTrack(ref);
         const format = session.decoder.format;
         if (format.channels == 0 or format.channels > audio.zone_runtime.max_channels) {
             session.deinit();
             return error.UnsupportedChannelCount;
         }
-        publishReplayGain(object_value, opener, opened);
         object_value.player.replaceSource(session);
         object_value.queue.seekTo(cursor);
         object_value.queue.noteEntrySerial(object_value.player.entrySerial(), cursor);
-    }
-
-    /// Publishes the loudness correction for the entry being loaded.
-    ///
-    /// This is a SQLite read, so it happens here — on the control lane, while
-    /// the entry is being opened — and never on the render lane, which may not
-    /// allocate, block or touch a database. What crosses to the render lane is
-    /// the two atomics `Gain` already exposes.
-    ///
-    /// An entry with no usable correction is published as unity rather than
-    /// left alone. Leaving the previous entry's figure in place would play one
-    /// track at another track's loudness, which is the specific failure this
-    /// whole feature exists to avoid, and it would be silent.
-    ///
-    /// "Usable" is keyed on the identity of the bytes that were just opened,
-    /// not on what the Library records about them, so a file edited since the
-    /// last scan plays at unity instead of at a correction measured from audio
-    /// it no longer contains.
-    ///
-    /// The change is immediate rather than ramped: every caller of
-    /// `loadCursor` is a hard load, whose epoch bump has already made the
-    /// callback discard the prepared audio the old correction applied to, so
-    /// there is nothing left to ramp between.
-    ///
-    /// Known gap: a *gapless* auto-advance runs on the engine thread and does
-    /// not come through here, so the successor entry keeps the correction of
-    /// the entry before it until the next hard load. Fixing that means
-    /// publishing a correction per entry serial and adopting it at a block
-    /// boundary, which is the same shape as a prepared processing chain and is
-    /// deliberately not built here.
-    fn publishReplayGain(
-        object_value: *PlayerObject,
-        opener: *track_source.TrackSourceOpener,
-        opened: track_source.OpenedTrack,
-    ) void {
-        if (object_value.replay_gain_mode == .off) {
-            object_value.gain.clearReplayGain(0);
-            return;
-        }
-        // A lookup that fails is a correction we cannot vouch for, which is
-        // the same answer as one that is absent. It must never fail the load:
-        // the track is playable either way.
-        const loudness = opener.replayGain(opened.file_id, opened.source_identity) catch null;
-        if (loudness) |value| {
-            object_value.gain.setReplayGain(value.replay_gain_db, value.sample_peak, 0);
-        } else {
-            object_value.gain.clearReplayGain(0);
-        }
     }
 
     /// Spawns the Player's single decode producer. Registered with
@@ -1808,7 +1751,7 @@ pub const OrcaRuntime = struct {
             .track_id = if (current) |ref| ref.track_id else null,
             .queue_length = queue_snapshot.entries,
             .queue_index = queue_snapshot.cursor,
-            .volume = object_value.gain.volume.load(.acquire),
+            .volume = object_value.gain.linear.load(.acquire),
         };
     }
 
@@ -1852,21 +1795,25 @@ pub const OrcaRuntime = struct {
 
     pub fn playerVolume(self: *OrcaRuntime, player: PlayerHandle) !f32 {
         try self.requireRunning();
-        return (try self.players.get(player)).gain.volume.load(.acquire);
+        return (try self.players.get(player)).gain.linear.load(.acquire);
     }
 
-    /// Whether entries are loaded with their own loudness correction.
+    /// Whether entries are decoded with their own loudness correction.
     ///
-    /// Takes effect on the next entry that is loaded, not on the one already
-    /// playing: the correction is published when an entry is opened, and
-    /// re-publishing it mid-track would change the level under the listener.
+    /// Takes effect as soon as the audio already decoded ahead of the listener
+    /// drains — a fraction of a second, not the rest of the track. The decode
+    /// lane reads the mode per canonical block, so a host that turns
+    /// correction off hears it happen rather than wondering whether the
+    /// control did anything. The level then steps rather than ramping: the
+    /// correction changes by however much the entry was being corrected, and
+    /// that step is the answer to an explicit request.
     pub fn playerSetReplayGainMode(
         self: *OrcaRuntime,
         player: PlayerHandle,
         mode: audio.processing.ReplayGainMode,
     ) !void {
         try self.requireRunning();
-        (try self.players.get(player)).replay_gain_mode = mode;
+        (try self.players.get(player)).player.replay_gain_mode.store(mode, .release);
     }
 
     pub fn playerReplayGainMode(
@@ -1874,18 +1821,27 @@ pub const OrcaRuntime = struct {
         player: PlayerHandle,
     ) !audio.processing.ReplayGainMode {
         try self.requireRunning();
-        return (try self.players.get(player)).replay_gain_mode;
+        return (try self.players.get(player)).player.replay_gain_mode.load(.acquire);
     }
 
-    /// The multiplier the render lane is actually applying: user volume times
-    /// the loudness correction of the entry that was loaded.
+    /// What the audio currently audible is being multiplied by: user volume
+    /// times the loudness correction of the *audible* entry.
+    ///
+    /// The two halves come from two places because they are applied in two
+    /// places. Volume is one Player-scope node; the correction belongs to the
+    /// audio and is applied by the session that decoded it, which is what
+    /// makes a gapless transition correct. This resolves the correction
+    /// through the same audible entry serial that identity, duration and
+    /// position resolve through, so all four describe one entry.
     ///
     /// Distinct from `playerVolume` on purpose. A host shows the volume it was
     /// given; this is what the audio is being multiplied by, and the two
     /// differing is exactly what "ReplayGain is doing something" looks like.
     pub fn playerEffectiveGain(self: *OrcaRuntime, player: PlayerHandle) !f32 {
         try self.requireRunning();
-        return (try self.players.get(player)).gain.linear.load(.acquire);
+        const object_value = try self.players.get(player);
+        return object_value.gain.linear.load(.acquire) *
+            object_value.player.effectiveReplayGain();
     }
 
     /// Seek in wall-clock milliseconds. The frame conversion needs the loaded

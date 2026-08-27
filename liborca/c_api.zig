@@ -1059,6 +1059,7 @@ pub export fn orca_player_volume(
 
 /// 0 turns loudness correction off, 1 corrects each entry by its own measured
 /// loudness. Any other value is refused rather than treated as one of those.
+/// Takes effect once the audio decoded ahead of the listener drains.
 pub export fn orca_player_set_replay_gain_mode(
     runtime: ?*Runtime,
     player: Handle,
@@ -1090,8 +1091,9 @@ pub export fn orca_player_replay_gain_mode(
     return .ok;
 }
 
-/// The multiplier the render lane is applying: volume times the loaded entry's
-/// loudness correction. Equal to the volume when there is no correction.
+/// What the audio currently audible is being multiplied by: volume times the
+/// loudness correction of the entry actually being heard. Equal to the volume
+/// when there is no correction.
 pub export fn orca_player_effective_gain(
     runtime: ?*Runtime,
     player: Handle,
