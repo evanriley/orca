@@ -47,28 +47,33 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     const model = gtk.cast(gtk.ListModel, selection);
     const chosen = gtk.gtk_selection_model_get_selection(selection);
 
-    // Activation is not selection. A double-click inside a multi-row selection
-    // plays that selection as a queue starting at the activated row; anywhere
-    // else it plays just the row that was activated.
+    // Activation is not selection. Activating a multi-row selection plays that
+    // selection as a queue, from its first row.
+    //
+    // It used to start at the activated row, which sounds reasonable and is
+    // wrong for the way a selection is actually made. Selecting track 1 and
+    // shift-clicking track 11 leaves the cursor on 11, so GTK reports 11 as
+    // the activated position and pressing Enter began at the last track and
+    // reported the end of the queue on the next skip. The row that happens to
+    // hold the cursor is not the row the user means; the top of what they
+    // highlighted is.
     if (gtk.gtk_bitset_get_size(chosen) > 1 and gtk.gtk_bitset_contains(chosen, position) != 0) {
         defer gtk.gtk_bitset_unref(chosen);
         var ids: std.ArrayList(i64) = .empty;
         defer ids.deinit(self.allocator);
-        var start: u32 = 0;
         var iter: gtk.BitsetIter = .{};
         var index: c_uint = 0;
         var valid = gtk.gtk_bitset_iter_init_first(&iter, chosen, &index);
+        // A bitset iterates ascending, so this is the order the rows are shown
+        // in, which is the order the user highlighted them in.
         while (valid != 0) : (valid = gtk.gtk_bitset_iter_next(&iter, &index)) {
             const item = gtk.g_list_model_get_item(model, index) orelse continue;
             const row: *TrackObject = @ptrCast(@alignCast(item));
-            if (row.hasFile()) {
-                if (index == position) start = @intCast(ids.items.len);
-                ids.append(self.allocator, row.id()) catch {};
-            }
+            if (row.hasFile()) ids.append(self.allocator, row.id()) catch {};
             gtk.g_object_unref(item);
         }
         if (ids.items.len != 0)
-            transport.playIds(self, ids.items, start)
+            transport.playIds(self, ids.items, 0)
         else
             self.setStatus("None of the selected tracks has a playable file");
         return;
