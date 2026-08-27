@@ -2480,6 +2480,37 @@ test "runtime Zone policies and failures remain independent" {
     );
 }
 
+/// A wall-clock bound for a test that is waiting on another thread.
+///
+/// The waits here counted `std.Thread.yield()` calls, and a count of yields is
+/// not a duration. On a loaded machine 8,000 yields elapse in a small fraction
+/// of the time an engine needs to open an output, so
+/// "…actually renders" failed intermittently with `expected .active, found
+/// .closed` — the engine had not finished, not misbehaved. Load made it worse,
+/// which is the signature of this mistake and the reason it survived: it is
+/// green on an idle machine, and green is what people check.
+///
+/// Time is what these tests are waiting for, so time is what bounds them. The
+/// sleep also stops a spin-wait from competing with the very thread it is
+/// waiting for.
+const TestDeadline = struct {
+    remaining_ms: u64,
+
+    fn init(milliseconds: u64) TestDeadline {
+        return .{ .remaining_ms = milliseconds };
+    }
+
+    /// Sleeps a millisecond and reports whether there is time left. Written as
+    /// a loop condition: `while (!ready and deadline.tick()) {}`.
+    fn tick(self: *TestDeadline) bool {
+        if (self.remaining_ms == 0) return false;
+        self.remaining_ms -= 1;
+        const duration: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&duration, null);
+        return true;
+    }
+};
+
 test "a runtime Player and Zone form one object graph that actually renders" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
@@ -2500,9 +2531,9 @@ test "a runtime Player and Zone form one object graph that actually renders" {
 
     // The Zone's own OutputSession is what the engine opens — nothing about
     // playback lives on a caller frame any more.
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
     var waited: usize = 0;
-    while (try runtime.zoneOutputState(zone) != .active and waited < 8000) : (waited += 1)
-        std.Thread.yield() catch {};
     try std.testing.expectEqual(
         audio.zone.OutputState.active,
         try runtime.zoneOutputState(zone),
@@ -2586,9 +2617,8 @@ test "destroying a Zone is acknowledged by the engine before its path is freed" 
     try runtime.zoneRequestOutput(removed, 0);
     try runtime.playPlayer(player);
 
-    var waited: usize = 0;
-    while (try runtime.zoneOutputState(removed) != .active and waited < 8000) : (waited += 1)
-        std.Thread.yield() catch {};
+    var removed_deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(removed) != .active and removed_deadline.tick()) {}
     try std.testing.expectEqual(@as(usize, 2), backend.stream_count);
 
     // No global work drain here: removal is published to the engine and the
