@@ -20,6 +20,14 @@ pub const WriteLane = struct {
         self.mutex.lockUncancelable(self.io);
     }
 
+    /// Takes the lane only if it is free. For a writer that would rather skip
+    /// its write than wait — the decode producer is the case this exists for,
+    /// since a job worker holds this lane across a whole batch commit and a
+    /// producer parked behind one starves the render callback into underruns.
+    pub fn tryAcquire(self: *WriteLane) bool {
+        return self.mutex.tryLock();
+    }
+
     pub fn release(self: *WriteLane) void {
         self.mutex.unlock(self.io);
     }
@@ -2261,6 +2269,30 @@ pub const LocationRepository = struct {
         try statement.bindInt64(1, file_id);
         if (try statement.step() != .row) return null;
         return try allocator.dupe(u8, statement.columnText(0));
+    }
+
+    /// Records that a file the Library still lists is not where it says.
+    ///
+    /// Called from the decode producer when a track will not open, so it
+    /// **declines the write rather than waiting for it**. A job worker holds
+    /// the write lane across an entire batch commit; a producer parked behind
+    /// one stops feeding the render callback, which zero-fills and counts
+    /// underruns. Missing audio is a worse answer than a stale row.
+    ///
+    /// Skipping costs nothing that matters: the scanner is the authority on
+    /// location state and reconciles it properly, and the next attempt on this
+    /// track tries again. Returns whether the row was written.
+    pub fn markMissingIfLaneFree(self: *LocationRepository, file_id: i64) !bool {
+        if (!self.write_lane.tryAcquire()) return false;
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET state='missing', missing_since=unixepoch()
+            \\WHERE file_id=?1 AND state<>'missing';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return true;
     }
 
     pub fn stateOf(self: *const LocationRepository, location_id: i64) !LocationState {
