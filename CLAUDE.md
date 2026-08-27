@@ -167,6 +167,31 @@ Tests are run from the repository root and load fixtures by relative path
 
 ## Architecture
 
+### The rule that matters most
+
+**A capability is not done until it is reachable from `orca-cli` or the GUI
+through the public runtime/ABI path.** No exit criterion may be closed by a
+unit test against an isolated component.
+
+This is not a style preference. It is the rule whose absence produced the state
+this repository had to be recovered from: ~12,000 lines of well-tested,
+genuinely good components, a tag claiming a working music player, and no way to
+play music. Every subsystem was an island. The scanner wrote only
+`observed_files`; the `tracks` table was empty in any real database; playback
+existed solely as a stack-local path in one CLI subcommand; the GTK window had
+no row-activation handler. Each piece had passing tests.
+
+The same pattern keeps surfacing as the seams get built. `Gain.setReplayGain`
+existed, was correct, and was called by nothing. `fingerprint.findDuplicates`
+existed, was correct, was called by nothing, and was O(n²) over a slice that
+cannot be constructed at the target scale. Both were found by asking "what
+calls this?", which is the question a test never asks.
+
+So: when you finish something, run it. Through `orca-cli`, against real data if
+any exists, and look at the output. A green `zig build test` means the parts
+work. It says nothing about whether they are connected, and this codebase's
+characteristic defect lives exactly there.
+
 ### The non-negotiable boundary
 
 `liborca` owns *all* music, library, audio, metadata, mutation, and job
