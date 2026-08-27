@@ -178,6 +178,10 @@ pub const FilePropertyUpdate = struct {
     bit_depth: ?i64 = null,
     channels: ?i64 = null,
     duration_ms: ?i64 = null,
+    /// The container the probe actually found, when it disagrees with what the
+    /// row says. Null leaves the stored value alone, so a probe that could not
+    /// determine the container never overwrites a good answer with a guess.
+    audio_format: ?i64 = null,
 };
 
 /// One incomplete file and where to read it.
@@ -1585,7 +1589,7 @@ pub const FileRepository = struct {
     ) !void {
         var statement = try self.db.prepare(
             \\UPDATE files SET codec=?1, sample_rate=?2, bit_depth=?3, channels=?4,
-            \\    duration_ms=?5
+            \\    duration_ms=?5, audio_format=COALESCE(?7, audio_format)
             \\WHERE id=?6;
         );
         defer statement.deinit();
@@ -1595,6 +1599,7 @@ pub const FileRepository = struct {
         try statement.bindOptionalInt64(4, input.channels);
         try statement.bindOptionalInt64(5, input.duration_ms);
         try statement.bindInt64(6, file_id);
+        try statement.bindOptionalInt64(7, input.audio_format);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 

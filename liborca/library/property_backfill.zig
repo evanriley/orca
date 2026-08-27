@@ -180,6 +180,13 @@ pub const PropertyBackfill = struct {
         if (uri.len == 0) return .skipped;
         var local = storage.LocalFileSource.open(self.io, uri) catch return .skipped;
         defer local.close();
+        // Detected here rather than taken from the row, because the row is
+        // exactly what may be wrong. A library scanned before sniffing looked
+        // past an ID3v2 tag recorded 104 FLAC files as MPEG, and nothing else
+        // will ever correct that column: the scanner's unchanged fast path
+        // never re-reads a file whose bytes have not moved, which for a music
+        // collection is every file, for ever.
+        const detection = storage.format.detect(local.readable()) catch null;
         const properties = codecs.probeDetected(self.allocator, local.readable()) catch |err| {
             // Sniffing decides who opens a file, so a container nothing claims
             // is a row that is not audio rather than a file that is broken.
@@ -192,6 +199,10 @@ pub const PropertyBackfill = struct {
             .bit_depth = optionalCount(properties.bit_depth),
             .channels = optionalCount(properties.channels),
             .duration_ms = optionalCount(properties.duration_ms),
+            .audio_format = if (detection) |resolved|
+                @backingInt(resolved.format)
+            else
+                null,
         } };
     }
 
@@ -648,5 +659,34 @@ test "forcing a backfill re-probes a row that already declares properties" {
     try testing.expectEqual(@as(i64, 200), try scalar(
         &fixture.library,
         "SELECT duration_ms FROM files;",
+    ));
+}
+
+test "a row that names the wrong container is corrected by the probe that reads it" {
+    // A library scanned before sniffing looked past an ID3v2 tag recorded 104
+    // real FLAC files as MPEG. Nothing else will ever fix that column: the
+    // scanner's unchanged fast path never re-reads a file whose bytes have not
+    // moved, and a music collection's bytes never move. This pass is the only
+    // thing that opens those rows again.
+    var fixture = try Fixture.init("file:orca-backfill-container?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("id3-prefixed-reference.flac");
+    // Exactly what the old sniffer wrote: ID3 at byte zero, therefore MPEG.
+    const misfiled = try fixture.record("id3-prefixed-reference.flac", .{
+        .audio_format = @backingInt(storage.AudioFormat.mp3),
+    }, reference_tags);
+
+    var pass = fixture.backfill();
+    defer pass.deinit();
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.changed);
+
+    try testing.expectEqual(
+        @as(i64, @backingInt(storage.AudioFormat.flac)),
+        try scalar(&fixture.library, "SELECT audio_format FROM files WHERE id = 1;"),
+    );
+    try testing.expectEqual(misfiled, try scalar(
+        &fixture.library,
+        "SELECT id FROM files WHERE codec = 'flac';",
     ));
 }
