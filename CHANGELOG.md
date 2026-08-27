@@ -2,6 +2,49 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### The library became browsable, and stopped losing 104 files
+
+- **Tracks are connected to artists.** The projection wrote 2,474 artists and
+  2,637 releases and nothing could read any of them back — no list, no page, no
+  lookup by id — and there was no relational link at all: `tracks` had no
+  `artist_id`, `recordings` no artist, `releases` no `album_artist_id`.
+  Migration 9 adds the links and 11 re-keys them; `ArtistPage`, `ReleasePage`
+  and a `TrackQuery` with seven sort keys, a direction and artist/release
+  filters expose them through the runtime, the C ABI and `orca-cli artists /
+  releases / tracks`. Paging is exact under ties: every `ORDER BY` ends with a
+  unique tiebreaker, without which `LIMIT`/`OFFSET` silently drops and
+  duplicates rows — 3,476 of 22,060 tracks share a title.
+- **An artist's tracks are the ones credited to them *or* on a release they are
+  the album artist of.** The narrow definition left 33 artists owning an album
+  and no songs, and those are not tag defects to normalize away: a featured
+  credit, a collaboration, an `&`-versus-`,` convention, or simply no `ARTIST`
+  tag. Widening the definition covers all of them and guesses at nothing.
+- **The key fold learned typographic punctuation.** `ALBUMARTIST` carries what
+  a metadata service supplied and `ARTIST` carries what somebody typed, so
+  `El‐P` (U+2010) and `El-P` were two artists — one holding every release, the
+  other every track. Migration 11 merges them; **migration 12 re-keys releases
+  for the same reason**, without which any reprojection built a parallel
+  release beside each stale one and turned 22,060 tracks into 23,271.
+- **An ID3 tag is not a format.** `sniff` answered `ID3` with `.mp3`, so 104
+  genuine FLAC files in a real library were handed to the MPEG decoder and were
+  **unplayable**. Detection now returns a payload offset and the codec registry
+  presents the decoder an `OffsetSource`; the scanner steps the tag reader over
+  it too, so those files stop scanning as untitled with no artist. MPEG
+  deliberately keeps offset 0, because its decoder is defined over the whole
+  file including trailing tags.
+- **A FLAC that stops inside its final block is finished, not broken.** Real
+  files end untidily — one of those 104 stops 2,620 frames short of the
+  11,979,324 its STREAMINFO declares. That raised `OutOfSync`, which failed
+  analysis outright and ended playback in a decode error. A shortfall smaller
+  than one maximum block is at most the final frame; anything larger still
+  errors.
+- **Destroying one Player no longer tears down every other one.** It drained
+  the whole work registry, cancelling every other Player's engine thread and
+  every scan in flight. Registrations carry an owner tag now.
+- **User volume and replay gain no longer overwrite each other.** They shared
+  one stored value, so applying a loudness correction would have moved the
+  host's volume slider.
+
 ### Files declare what they are, and old rows can be repaired
 
 - **`files.codec` is written.** It was declared and then always stored as the
