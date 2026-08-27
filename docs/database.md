@@ -222,6 +222,13 @@ would be largest precisely when there is nothing to do. The predicate has a
 single definition shared by the index and the query, because SQLite decides
 whether a partial index applies by comparing expressions rather than meanings.
 
+Migration 13 adds `files_duration ON files(duration_ms, id)`, which is what
+makes duplicate detection an indexed question rather than an O(n²) one. It is
+full rather than partial, and that is the opposite choice to migration 10 for
+the opposite reason: a duplicate scan asks its question of *every* file, and
+the rows it asks about do not shrink as anything gets repaired. It covers both
+columns so the bucket lookup reads the index alone. See `docs/analysis.md`.
+
 `files.codec` is the **encoding**, not the container. `files.audio_format` is
 the container a file was sniffed as, which decides who opens it; `codec` is a
 stable lowercase identifier for what turned out to be inside — `pcm`,

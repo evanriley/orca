@@ -104,6 +104,10 @@ pub const AnalysisRequest = struct {
     batch_size: usize = 32,
 };
 
+pub const DuplicateScanRequest = struct {
+    batch_size: usize = 256,
+};
+
 /// Everything a job worker needs that is not the Library or the kind. One
 /// struct rather than a widening parameter list, because every kind takes a
 /// bounded batch size and each takes at most one thing besides.
@@ -206,6 +210,7 @@ const JobWorker = struct {
             .projection => self.runProjection(),
             .property_backfill => self.runPropertyBackfill(),
             .analysis => self.runAnalysis(),
+            .duplicate_scan => self.runDuplicateScan(),
             else => self.failed.store(true, .release),
         }
     }
@@ -300,6 +305,48 @@ const JobWorker = struct {
         _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
         _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
         _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
+    }
+
+    /// Finds the audio the Library holds more than once.
+    ///
+    /// Nothing is decoded and no file is opened: the pass compares
+    /// measurements the analysis job already stored, through two indexes. That
+    /// is why it is a job of its own rather than a phase of the analysis --
+    /// the measuring takes hours and the comparing takes seconds, and a person
+    /// who has analyzed their library should not have to analyze it again to
+    /// ask the question a second time.
+    ///
+    /// The counters reuse `ScanStats` with this pass's own meaning, exactly as
+    /// the backfill and the analysis do; `orca.h` documents the mapping.
+    fn runDuplicateScan(self: *JobWorker) void {
+        var pass: library_pass.DuplicateScan = .{
+            .allocator = self.allocator,
+            .files = &self.database.files,
+            .locations = &self.database.locations,
+            .analysis_cache = &self.database.analysis_cache,
+            .health_issues = &self.database.health_issues,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.exact + result.likely, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unique, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.uncomparable, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        _ = self.stats.folders_visited.fetchAdd(result.buckets_truncated, .acq_rel);
+        _ = self.stats.files_projected.fetchAdd(result.comparisons, .acq_rel);
+        _ = self.stats.tracks_written.fetchAdd(result.exact, .acq_rel);
+        _ = self.stats.releases_written.fetchAdd(result.likely, .acq_rel);
         if (result.cancelled) self.stats.cancelled.store(true, .release);
     }
 
@@ -1668,6 +1715,24 @@ pub const OrcaRuntime = struct {
         });
     }
 
+    /// Starts the duplicate scan: reports every file whose audio the Library
+    /// also holds somewhere else.
+    ///
+    /// It reads measurements rather than files, so a full run over a measured
+    /// library is seconds rather than the hours the analysis itself takes. Its
+    /// denominator is every file in the Library, because every file is
+    /// examined -- including the ones no analysis has reached, which are
+    /// counted as uncomparable rather than quietly reported as unique.
+    pub fn startLibraryDuplicateScan(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: DuplicateScanRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .duplicate_scan, .{
+            .batch_size = request.batch_size,
+        });
+    }
+
     fn startJobWorker(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -1685,6 +1750,7 @@ pub const OrcaRuntime = struct {
             .analysis => try library_database.files.unanalyzedCount(
                 analysis_service.diagnosticsSelector(.{}),
             ),
+            .duplicate_scan => try library_database.files.count(),
             else => null,
         };
         const worker = try self.allocator.create(JobWorker);

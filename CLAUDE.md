@@ -81,6 +81,7 @@ zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]
 zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--cancel-after=MS]
+zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
 zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]

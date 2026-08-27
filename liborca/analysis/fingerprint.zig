@@ -188,6 +188,15 @@ pub fn similarity(first: []const u16, second: []const u16) f32 {
 
 pub const DuplicateKind = enum { none, likely_recording, exact_audio, exact_file };
 
+/// The one pairwise duplicate comparison in the codebase.
+///
+/// It used to have a companion that took every candidate in a library as one
+/// slice and compared all of them, which nothing called and nothing could have
+/// called: the slice cannot be built at 22,060 files, let alone at 500,000.
+/// Finding the pairs worth comparing is an indexing problem rather than a
+/// comparison one, so it lives in `library/duplicate_pass.zig`, which bucks
+/// candidates by decoded-audio hash and by duration and calls this only inside
+/// a bucket bounded by a constant.
 pub fn classifyDuplicate(first: Result, second: Result, likely_threshold: f32) DuplicateKind {
     if (first.source_hash != null and second.source_hash != null and
         std.mem.eql(u8, &first.source_hash.?, &second.source_hash.?)) return .exact_file;
@@ -195,44 +204,6 @@ pub fn classifyDuplicate(first: Result, second: Result, likely_threshold: f32) D
     if (similarity(first.signatures, second.signatures) >= likely_threshold)
         return .likely_recording;
     return .none;
-}
-
-pub const Candidate = struct {
-    path: []const u8,
-    fingerprint: *const Result,
-};
-
-pub const Match = struct {
-    first_index: usize,
-    second_index: usize,
-    kind: DuplicateKind,
-    similarity_score: f32,
-};
-
-pub fn findDuplicates(
-    allocator: std.mem.Allocator,
-    candidates: []const Candidate,
-    likely_threshold: f32,
-) ![]Match {
-    if (likely_threshold < 0 or likely_threshold > 1) return error.InvalidSimilarityThreshold;
-    var matches: std.ArrayList(Match) = .empty;
-    errdefer matches.deinit(allocator);
-    for (candidates, 0..) |first, first_index| {
-        for (candidates[first_index + 1 ..], first_index + 1..) |second, second_index| {
-            const kind = classifyDuplicate(first.fingerprint.*, second.fingerprint.*, likely_threshold);
-            if (kind == .none) continue;
-            try matches.append(allocator, .{
-                .first_index = first_index,
-                .second_index = second_index,
-                .kind = kind,
-                .similarity_score = similarity(
-                    first.fingerprint.signatures,
-                    second.fingerprint.signatures,
-                ),
-            });
-        }
-    }
-    return matches.toOwnedSlice(allocator);
 }
 
 fn quantize(value: f64) u4 {
@@ -274,11 +245,12 @@ test "temporal fingerprints are streaming-stable and rank nearby audio" {
     const nearby_result = try nearby.finish();
     defer nearby_result.deinit();
     try std.testing.expect(similarity(first_result.signatures, nearby_result.signatures) > 0.95);
-    const matches = try findDuplicates(allocator, &.{
-        .{ .path = "first.flac", .fingerprint = &first_result },
-        .{ .path = "nearby.qoa", .fingerprint = &nearby_result },
-    }, 0.95);
-    defer allocator.free(matches);
-    try std.testing.expectEqual(@as(usize, 1), matches.len);
-    try std.testing.expectEqual(DuplicateKind.likely_recording, matches[0].kind);
+    try std.testing.expectEqual(
+        DuplicateKind.likely_recording,
+        classifyDuplicate(first_result, nearby_result, 0.95),
+    );
+    try std.testing.expectEqual(
+        DuplicateKind.exact_audio,
+        classifyDuplicate(first_result, second_result, 0.95),
+    );
 }

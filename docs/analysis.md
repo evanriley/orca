@@ -232,10 +232,237 @@ produced when the successor was still inheriting its predecessor's figure.
 
 ## Duplicate detection
 
-`fingerprint.findDuplicates` still takes `[]const Candidate` and compares every
-pair, which cannot exist at 22,060 files let alone 500,000. It is deliberately
-untouched. The indexed shape is: bucket by `files.audio_hash` (which the pass
-now writes) for exact-audio matches, and compare temporal signatures only
-within a bucket of plausible candidates — same duration to within a tolerance,
-say — so the pairwise comparison is bounded by a bucket rather than by the
-library.
+`library/duplicate_pass.zig` reports every file whose audio the Library also
+holds somewhere else. It is a runtime job (`OrcaRuntime.startLibraryDuplicateScan`,
+`orca_library_start_duplicate_scan`, `orca-cli duplicates`) on the same
+`JobWorker` machinery as the scan, the projection, the property backfill and
+the analysis pass: the same cancellation token, the same job snapshot, bounded
+commits, and row selection through an indexed query.
+
+The pass it replaced was the shape this codebase keeps recovering from.
+`fingerprint.findDuplicates` took `[]const Candidate` — every file's
+fingerprint resident at once — and compared every pair. It was correct, it was
+tested, nothing called it, and at 22,060 files the slice it wanted could not be
+built, let alone at 500,000. `fingerprint.classifyDuplicate` survives it and is
+now the only pairwise comparison in the codebase; what changed is that
+something else decides which pairs are worth handing it.
+
+**This pass opens no files.** Everything it compares, the analysis pass already
+measured and stored, which is why a full run over a measured library is seconds
+where the analysis behind it is hours — and why asking the question a second
+time does not mean measuring the library a second time.
+
+### What the two findings mean
+
+- **`exact_duplicate`** — Orca holds this audio at more than one place, and a
+  person can act on it without listening to anything. Two sources, and the
+  second one is not optional: a *byte-identical copy never becomes a second
+  `files` row*, because the scanner's identity cascade resolves it by quick
+  hash to the row that already exists. The Library models it as one file at two
+  present locations, so no amount of comparing rows could ever find it.
+  1. one `files` row with a second `present` location, or
+  2. two `files` rows whose `files.audio_hash` — BLAKE3 over the decoded
+     samples — is byte-identical. Same audio, whatever the container, the
+     bitrate or the tags claim.
+- **`likely_duplicate`** — the audio only *resembles* another file's, above a
+  similarity threshold, and the claim will sometimes be wrong. It is worth
+  making because it catches the case the exact test structurally cannot: a
+  lossy transcode of the same master decodes to different samples and so
+  hashes differently, while remaining the same recording twice on disk. The
+  message carries the match percentage, because a claim that can be wrong
+  should travel with the number behind it.
+
+The threshold is **0.985**, and it is measured rather than chosen. The
+fingerprint's floor for *unrelated* music is not zero: four coarse bins per
+50 ms block agree by chance most of the time, so the usable band is the top two
+percent of the scale.
+
+| pairs | similarity |
+| --- | --- |
+| one master as FLAC, WAV, 190k / 128k / 96k MP3 | 0.9904 – 1.0000 |
+| a real FLAC and its own MP3 in the reference library | 0.98511 |
+| one song, two different masters, same length | 0.8820 – 0.9260 |
+| unrelated tracks sharing a duration window, 11,568 real comparisons | up to 0.9590 |
+| one track and its own instrumental or karaoke cut | 0.9660 – 0.9800 |
+
+0.985 is the widest gap in that band. A first pass used 0.95, which looked
+generous against a 116-file corpus whose unrelated pairs topped out at 0.899;
+the same threshold over the reference library produced 31 findings, most of
+them unrelated tracks — `Crowded House` against `Blondie` at 0.954, `Boards of
+Canada` against `AC/DC` at 0.952. The two hardest pairs sat at 0.9800 and
+0.9660: a track against its own instrumental remix, and a track against its own
+karaoke cut. Both are genuinely different audio, and both are now below the
+line.
+
+The margin above the line is thinner than the margin below it. The reference
+library's one real FLAC-and-MP3 pair — `Autechre — Ccec`, 298.971 s against
+298.987 s — scores 0.98511 against a threshold of 0.985, which is 0.00011 of
+room. Constructed transcodes of a pop master down to 96 kbps never fell below
+0.9904; dense electronic material transcodes further from its own fingerprint
+than that. So the number to revisit, if this ever misses a transcode somebody
+knows about, is this one — and the honest reading is that between about 0.96
+and 0.985 the fingerprint stops separating a transcode from an unrelated track
+of the same length.
+
+`exact` outranks `likely` rather than accompanying it. They are two strengths
+of one claim, and telling somebody a file is both certainly and probably a
+duplicate of something helps them decide nothing.
+
+### The three indexed queries
+
+| question | query | plan |
+| --- | --- | --- |
+| which file next | `files.id > ?` | `SEARCH files USING INTEGER PRIMARY KEY (rowid>?)` |
+| certain bucket | `audio_hash = ?` | `SEARCH files USING COVERING INDEX files_audio_hash (audio_hash=?)` |
+| plausible bucket | `duration_ms BETWEEN ? AND ?` | `SEARCH files USING INDEX files_duration (duration_ms>? AND duration_ms<?)` |
+
+None of the three is a scan. `files_audio_hash` already existed; migration 13
+adds `files_duration ON files(duration_ms, id)`.
+
+Duration is the bucket key for the plausible half because length is the
+cheapest necessary condition for two files being the same recording and the
+only one an index can answer. The default tolerance is **±250 ms**: two
+encodings of one master differ only by codec padding — an MPEG encoder's delay
+and its final partial frame come to a few tens of milliseconds — so a quarter
+of a second is generous for the case that exists to catch, while a wider window
+finds the same matches after comparing proportionally more files and eventually
+starts admitting genuinely different recordings that happen to run the same
+length.
+
+### Bounds
+
+A bucket holds at most **`max_bucket_peers` = 64** files, which is what turns
+O(n²) into O(n): the work is bounded by a constant per file rather than by the
+size of the library. At most **two decoded fingerprints are resident at any
+moment** — the candidate's and the one peer being compared against it — about
+19 KB at the reference library's ~4,200-signature average, against the 388 MB
+every fingerprint in that library would occupy at once. A bucket that hits the
+cap is *counted* (`truncated_buckets`), because some pairs inside it went
+uncompared and a scan that quietly stopped looking would be the same lie of
+omission as the one below.
+
+Batches are 256 files and commit in one transaction, and the cursor is a
+`files.id`.
+
+The pass is **restartable rather than incremental**, and that is a property of
+the question rather than a shortcut. Whether a file is a duplicate is a
+relation between rows: adding one file can make an existing file a duplicate
+and deleting one can stop it being one, so there is no subset of rows that
+still owes work and nothing to resume *from*. A cancelled run keeps every
+batch it committed; the next run examines the library again from the start,
+which costs a second.
+
+### A file with no measurement
+
+Most of a library carries no `audio_hash` until the analysis pass has reached
+it, and nothing can be said about such a file: it cannot be compared, and it
+cannot be found as somebody else's duplicate either. Reporting "no duplicates"
+over such a library would be a lie of omission, so those files are counted as
+**uncomparable** and the count is printed on its own line. A zero-finding run
+with a large uncomparable count means *not measured*, not *no duplicates*.
+
+No health issue is filed per uncomparable file. `missing_analysis` already
+means that, and 22,060 fresh defects on an unanalyzed library would bury every
+real finding — the same argument the analysis pass makes about absent files.
+
+### Re-running
+
+Every examined file has **both** of this pass's kinds rewritten, present or
+absent. That is `library_health_issues`' replace-by-file semantic narrowed to
+the two kinds this pass owns: `replaceFile` would also erase the corruption and
+metadata findings other passes made, and an insert-only pass would let a
+duplicate that has since been deleted keep its report for ever. Recording is an
+upsert on `(file_id, kind)`, so a second run converges on the same rows rather
+than doubling them.
+
+Both members of a pair are reported, because either is the one somebody might
+delete.
+
+### What limits the exact test today
+
+The exact test assumes `files.audio_hash` is a function of the audio. **On this
+build it is not**, and the reason is not in this pass: liborca's FLAC decoder
+does not return the samples the file contains. Measured against the encoder's
+own PCM on a real 210-second track — 18,522,000 samples, ffmpeg's `s16le`
+output as ground truth:
+
+| decoder | samples disagreeing with the file's PCM |
+| --- | --- |
+| `codec/wav.zig` | 0 |
+| `codec/flac.zig` | 4,717,148 (25.5%), each one LSB low |
+
+FLAC is lossless, so this is a decoder defect, and its error pattern depends on
+how the file was *encoded*: re-encoding the same PCM to FLAC produces a
+different set of wrong samples, so two FLACs holding bit-identical audio hash
+differently. The consequence for duplicate detection is visible in the
+verification corpus: a WAV and a FLAC of the same master, and a real
+`Bossfight — Badmash` pair whose PCM is byte-for-byte identical, are both
+reported as **likely at 100.0%** where they should have been **exact**. The
+exact test still fires where two files came out of the *same* encoder run and
+differ only in their tags — all three of the reference library's exact pairs
+are exactly that.
+
+Fixing the decoder is out of this pass's scope and is not free: every stored
+`audio_hash` and every stored fingerprint was taken through it, so a correction
+invalidates them and the analysis has to run again. Recorded here because it is
+the single change that would most improve what this pass can say.
+
+### Measured cost
+
+A 116-file corpus — four artist directories scanned read-only out of the
+reference library, plus six constructed files — fully analyzed,
+`-Doptimize=ReleaseFast`:
+
+```
+116 files to examine
+examined=116 exact=2 likely=4 unique=110 unreadable=0 batches=1
+uncomparable=0 comparisons=45 truncated_buckets=0
+```
+
+All six findings are correct, and the two adversarial pairs are correctly
+silent: `2Pac — 2 of Amerikaz Most Wanted` in two different masters, trimmed to
+the same length so they share a bucket, scores 0.8820, and
+`Ja Rule — Always on Time` in two different masters at identical length scores
+0.9260.
+
+The full 22,060-file reference library, with 3,543 of those files analyzed:
+
+```
+22060 files to examine
+examined=22060 exact=6 likely=4 unique=3518 unreadable=0 batches=87
+uncomparable=18532 comparisons=20117 truncated_buckets=443
+```
+
+| measurement | value |
+| --- | --- |
+| wall clock | 1.30 s |
+| peak RSS | 16.1 MiB, against a 13.0 MiB empty-process baseline |
+| resident fingerprints | 2 |
+
+Five duplicate pairs, **no false positives**, every one confirmed by hand
+against the files themselves with `ffmpeg -f s16le | md5sum`:
+
+| finding | reported | what the files are |
+| --- | --- | --- |
+| `Pauline Herr — Dodgeball`, two pairs | exact | identical PCM |
+| `Roel Funcken — Nefit Kraton` / `— Scane Breitner` | exact | identical PCM under two different titles |
+| `Uppermost — Visions`, two albums | likely, 100.0% | identical PCM — *should* have been exact; see above |
+| `Autechre — Ccec`, FLAC and MP3 | likely, 98.5% | the same recording, one of them transcoded |
+
+The `Roel Funcken` pair is the one nothing else in the codebase could have
+found: two files with different titles, different track numbers and identical
+audio. The 18,532 uncomparable rows are files `analyze-library` has not reached
+yet, and they are why this run's answer is a partial one — the same run over a
+fully analyzed library would examine the same 22,060 rows and compare all of
+them.
+
+Two consecutive runs produce byte-identical output and leave the same ten
+health rows, not twenty. Interrupted at 200 ms with `--batch=32`, a run reports
+`examined=627 batches=20` and keeps what those twenty batches committed; the
+next run completes the library and reaches the same ten rows.
+
+`orca-cli duplicates` builds its runtime on `std.heap.smp_allocator` rather
+than on the process arena every other subcommand uses. The pass frees each
+fingerprint as soon as it has been compared, and an arena does not honour that:
+on the arena the same run peaked at **185.8 MiB**, one 9 KB fingerprint per
+comparison, which at the 500,000-file target would not fit in memory at all.

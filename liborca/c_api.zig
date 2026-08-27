@@ -228,6 +228,13 @@ pub const AnalysisOptions = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const DuplicateScanOptions = extern struct {
+    /// Files per selected page and per bounded commit. Zero selects the
+    /// default.
+    batch_size: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
 pub const BackfillOptions = extern struct {
     batch_size: u32,
     /// Nonzero re-probes rows that already declare properties.
@@ -850,6 +857,33 @@ pub export fn orca_library_start_analysis(
     return .ok;
 }
 
+/// Starts the duplicate scan. `options` may be null.
+///
+/// Reachable from the ABI for the same reason every other pass is: a
+/// capability only a unit test can invoke is not a capability the product has.
+/// The stats come back through `orca_library_scan_stats` with this pass's own
+/// meaning -- see `orca_duplicate_scan_options` in the header.
+pub export fn orca_library_start_duplicate_scan(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const DuplicateScanOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = job_output orelse return .invalid_argument;
+    var request: core.runtime.DuplicateScanRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+    }
+    const started = box.runtime.startLibraryDuplicateScan(
+        importLibrary(library),
+        request,
+    ) catch |err| return mapError(err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
 pub export fn orca_job_cancel(runtime: ?*Runtime, job_handle: Handle) callconv(.c) Status {
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     if (box.foreignThread()) return .wrong_thread;
@@ -1458,6 +1492,7 @@ fn exportJobKind(kind: job.Kind) u8 {
         .projection => 1,
         .property_backfill => 2,
         .analysis => 3,
+        .duplicate_scan => 4,
         else => 255,
     };
 }

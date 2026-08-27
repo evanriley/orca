@@ -416,6 +416,68 @@ int main(void) {
         return 163;
     if (analysis_stats.files_seen != 0) return 164;
 
+    /* ---- the duplicate scan as a job ---- */
+    /* The fixtures were just measured, so this can actually compare them. Its
+     * denominator is every file in the Library, because it examines every row
+     * -- including the ones no analysis reached, which it reports as
+     * uncomparable rather than quietly counting as unique. Running it twice
+     * must leave the same health rows behind, not twice as many. */
+    orca_handle duplicate_job;
+    orca_duplicate_scan_options duplicate_options;
+    memset(&duplicate_options, 0, sizeof duplicate_options);
+    duplicate_options.batch_size = 8;
+    if (orca_library_start_duplicate_scan(runtime, library, &duplicate_options,
+                                          &duplicate_job) != ORCA_STATUS_OK)
+        return 170;
+    orca_job_snapshot duplicate_planned;
+    if (orca_job_snapshot_get(runtime, duplicate_job, &duplicate_planned) != ORCA_STATUS_OK)
+        return 171;
+    if (duplicate_planned.kind != ORCA_JOB_KIND_DUPLICATE_SCAN) return 172;
+    if (duplicate_planned.has_total == 0) return 173;
+    if (duplicate_planned.total_units == 0) return 174;
+    uint8_t duplicate_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
+        settled = job_settled(runtime, duplicate_job, &duplicate_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 175;
+    if (duplicate_state != ORCA_JOB_SUCCEEDED) return 176;
+    orca_scan_stats duplicate_stats;
+    if (orca_library_scan_stats(runtime, duplicate_job, &duplicate_stats) != ORCA_STATUS_OK)
+        return 177;
+    if (duplicate_stats.files_seen == 0) return 178;
+    /* files_seen accounts for every row exactly once, in exactly one bucket. */
+    if (duplicate_stats.files_seen != duplicate_stats.tracks_written +
+                                          duplicate_stats.releases_written +
+                                          duplicate_stats.unchanged +
+                                          duplicate_stats.unsupported +
+                                          duplicate_stats.errors)
+        return 179;
+    uint64_t issues_after_first = 0;
+    if (orca_library_health_issue_count(runtime, library, &issues_after_first) !=
+        ORCA_STATUS_OK)
+        return 180;
+
+    if (orca_library_start_duplicate_scan(runtime, library, &duplicate_options,
+                                          &duplicate_job) != ORCA_STATUS_OK)
+        return 181;
+    duplicate_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
+        settled = job_settled(runtime, duplicate_job, &duplicate_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 182;
+    if (duplicate_state != ORCA_JOB_SUCCEEDED) return 183;
+    uint64_t issues_after_second = 0;
+    if (orca_library_health_issue_count(runtime, library, &issues_after_second) !=
+        ORCA_STATUS_OK)
+        return 184;
+    if (issues_after_second != issues_after_first) return 185;
+
     /* ---- the extended track view ---- */
     struct track_capture capture;
     memset(&capture, 0, sizeof capture);

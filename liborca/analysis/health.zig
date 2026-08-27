@@ -15,7 +15,21 @@ pub const Facts = struct {
     corrupt_details: ?[]const u8 = null,
     exact_duplicate_path: ?[]const u8 = null,
     likely_duplicate_path: ?[]const u8 = null,
+    /// How closely the likely duplicate's temporal fingerprint matched, as a
+    /// percentage. A likely match is a claim that will sometimes be wrong, so
+    /// the number behind it travels with it rather than being discarded at the
+    /// point the claim is made.
+    likely_duplicate_similarity: f32 = 0,
 };
+
+/// The one wording for each duplicate finding.
+///
+/// Shared by `evaluate` and by `library/duplicate_pass.zig`, which is what
+/// actually produces these two kinds at library scale. Two spellings would
+/// drift, and `orca-cli health` would describe the same finding two ways
+/// depending on which pass filed it.
+pub const exact_duplicate_details = "content also appears at {s}";
+pub const likely_duplicate_details = "audio resembles {s} ({d:.1}% match)";
 
 pub const Evaluation = struct {
     allocator: std.mem.Allocator,
@@ -100,14 +114,14 @@ pub fn evaluate(allocator: std.mem.Allocator, facts: Facts) !Evaluation {
     if (facts.exact_duplicate_path) |path| try evaluation.addFormatted(
         .exact_duplicate,
         .warning,
-        "content also appears at {s}",
+        exact_duplicate_details,
         .{path},
     );
     if (facts.likely_duplicate_path) |path| try evaluation.addFormatted(
         .likely_duplicate,
         .information,
-        "audio resembles {s}",
-        .{path},
+        likely_duplicate_details,
+        .{ path, facts.likely_duplicate_similarity },
     );
     return evaluation;
 }

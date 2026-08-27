@@ -94,6 +94,7 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_PROJECTION = 1,
     ORCA_JOB_KIND_PROPERTY_BACKFILL = 2,
     ORCA_JOB_KIND_ANALYSIS = 3,
+    ORCA_JOB_KIND_DUPLICATE_SCAN = 4,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -335,6 +336,15 @@ typedef struct orca_analysis_options {
     uint32_t batch_size;
     uint8_t reserved[4];
 } orca_analysis_options;
+
+typedef struct orca_duplicate_scan_options {
+    /* Files per selected page and per bounded commit. Zero selects the
+     * default. Far larger than the analysis job's, because a unit of work here
+     * is a handful of indexed lookups rather than a file decoded end to end -
+     * this pass opens no files at all. */
+    uint32_t batch_size;
+    uint8_t reserved[4];
+} orca_duplicate_scan_options;
 
 typedef struct orca_backfill_options {
     /* Rows per selected page and per bounded commit. Zero selects the
@@ -661,6 +671,40 @@ orca_status orca_library_start_analysis(
     orca_runtime *runtime,
     orca_handle library,
     const orca_analysis_options *options,
+    orca_handle *job
+);
+
+/*
+ * Starts the duplicate scan: reports every file whose audio the Library also
+ * holds somewhere else. `options` may be null.
+ *
+ * It compares measurements the analysis job stored rather than reading files,
+ * through two indexes - equal decoded-audio hash for the certain case, and a
+ * duration window inside which temporal fingerprints are compared for the
+ * probable one - so a full run over a measured library takes seconds where the
+ * analysis itself takes hours.
+ *
+ * Findings are recorded as library health issues, readable through
+ * orca_library_query_health_issues: kind 9 is the certain finding and kind 10
+ * the probable one. Both kinds are REWRITTEN for every file examined, so a second run converges on the same
+ * rows rather than doubling them, and a duplicate that has since been deleted
+ * stops being reported.
+ *
+ * Progress and results are read through orca_job_snapshot_get and
+ * orca_library_scan_stats. In those stats `files_seen` counts rows examined,
+ * `changed` files given a finding, `unchanged` files compared and matched by
+ * nothing, `errors` files whose stored fingerprint would not decode, and
+ * `unsupported` files nothing could be said about because they have never been
+ * analyzed or never been probed - which is the number that says whether a
+ * "no duplicates" answer means anything. `tracks_written` and
+ * `releases_written` carry the exact and likely finding counts, `folders_
+ * visited` the buckets that hit the per-candidate comparison cap, and
+ * `files_projected` the fingerprint comparisons performed.
+ */
+orca_status orca_library_start_duplicate_scan(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_duplicate_scan_options *options,
     orca_handle *job
 );
 

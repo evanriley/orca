@@ -2,6 +2,51 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Duplicate detection became reachable, indexed and bounded
+
+- **`orca-cli duplicates` reports the audio a Library holds twice.** A runtime
+  job (`OrcaRuntime.startLibraryDuplicateScan`,
+  `orca_library_start_duplicate_scan`) on the same `JobWorker` machinery as the
+  scan, the projection, the property backfill and the analysis pass: same
+  cancellation token, same job snapshot, bounded commits, indexed row
+  selection. Findings land in `library_health_issues` as `exact_duplicate` and
+  `likely_duplicate` — two kinds that had existed, and two `analysis/health.zig`
+  facts that had existed, with nothing producing either.
+- **`fingerprint.findDuplicates` is gone.** It took every candidate in the
+  library as one slice and compared all pairs: correct, tested, called by
+  nothing, and impossible to call at 22,060 files let alone 500,000.
+  `classifyDuplicate` survives it as the only pairwise comparison in the
+  codebase; what changed is that an index now decides which pairs reach it.
+- **Three indexed queries, no scans.** Selection walks `files` by primary key;
+  the certain bucket is an equality search of `files_audio_hash`; the plausible
+  bucket is a range search of `files_duration`, added by migration 13. A bucket
+  holds at most 64 files, so the work is bounded by a constant per file, and at
+  most two decoded fingerprints are resident at a time.
+- **A file nothing has measured is counted, not silently called unique.**
+  Reporting "no duplicates" over an unanalyzed library would be a lie of
+  omission; 19,108 of the reference library's 22,060 rows are uncomparable
+  today, and the run says so on its own line.
+- **The likely threshold is 0.985, measured against the real library.**
+  Constructed encodings of one master score 0.9904–1.0000 and the library's one
+  real FLAC-and-MP3 pair scores 0.98511; unrelated tracks sharing a duration
+  window reach 0.9590 across 11,568 real comparisons, and a track against its
+  own karaoke cut reaches 0.9800. An earlier 0.95 produced 31 findings on the
+  reference library, most of them unrelated tracks.
+- Full run over the 22,060-file reference library (3,543 of it analyzed):
+  1.30 s, 16.1 MiB peak RSS, 20,117 comparisons, five duplicate pairs and **no
+  false positives** — every finding confirmed by hand against the files. One of
+  them, `Roel Funcken — Nefit Kraton` against `— Scane Breitner`, is identical
+  PCM under two different titles, which nothing else in the codebase could have
+  found. 18,532 rows were reported uncomparable because `analyze-library` has
+  not reached them. Re-running produces the same rows rather than twice as
+  many, and a duplicate that has been deleted stops being reported.
+- **Known limitation, recorded rather than worked around.** `codec/flac.zig`
+  disagrees with the file's own PCM on 25.5% of samples (one LSB low, measured
+  against ffmpeg on 18,522,000 samples), and its error pattern depends on the
+  encoding, so two FLACs holding identical audio hash differently. That costs
+  the exact test some findings it should make: a real byte-identical pair is
+  reported as likely at 100.0% instead of exact. See `docs/analysis.md`.
+
 ### Album art became reachable, and the player shows it
 
 - **Embedded cover art can be read, not just counted.** `observed_file_tags`

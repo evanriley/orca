@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 
 pub const analysis_pass = @import("analysis_pass.zig");
+pub const duplicate_pass = @import("duplicate_pass.zig");
 pub const projection = @import("projection.zig");
 pub const property_backfill = @import("property_backfill.zig");
 pub const scanner = @import("scanner.zig");
@@ -12,6 +13,7 @@ pub const NativeRootWatcher = switch (builtin.os.tag) {
 };
 
 pub const CancellationToken = scanner.CancellationToken;
+pub const DuplicateScan = duplicate_pass.DuplicateScan;
 pub const LibraryAnalysis = analysis_pass.LibraryAnalysis;
 pub const Projection = projection.Projection;
 pub const ProjectionScope = projection.Scope;
@@ -22,6 +24,7 @@ pub const WatchHintChannel = watch_hints.Channel;
 
 test {
     _ = @import("analysis_pass.zig");
+    _ = @import("duplicate_pass.zig");
     _ = @import("projection.zig");
     _ = @import("property_backfill.zig");
     _ = @import("scanner.zig");

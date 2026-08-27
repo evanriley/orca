@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 12;
+pub const current_version = 13;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -792,6 +792,20 @@ const migration_12 =
     \\                   orca_release_key(releases.release_key)));
 ;
 
+/// The bucket key duplicate detection compares temporal fingerprints inside.
+///
+/// Two files can only be the same recording if they are the same length, so a
+/// duration window is what makes a pairwise comparison affordable: it turns
+/// "compare this file against the library" into "compare it against the
+/// handful of files that could possibly match". Without an index that window
+/// is a full scan of `files` per candidate, which is O(n^2) reads -- the exact
+/// cost the indexed design exists to avoid.
+///
+/// `files_audio_hash` already serves the other bucket, exact decoded audio, so
+/// only this one had to be added.
+const migration_13 =
+    "CREATE INDEX files_duration ON files(duration_ms, id);";
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -928,6 +942,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 10 and target_version >= 10) try db.exec(migration_10);
     if (version < 11 and target_version >= 11) try db.exec(migration_11);
     if (version < 12 and target_version >= 12) try db.exec(migration_12);
+    if (version < 13 and target_version >= 13) try db.exec(migration_13);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
