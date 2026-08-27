@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
         const job_handle = try runtime.startLibraryScan(library_handle, .{
             .root_id = binding.root_id,
         });
-        try awaitJob(&runtime, stdout, job_handle);
+        try awaitJob(&runtime, stdout, job_handle, null);
         try printScanStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "project")) {
         // Reprojection without a filesystem walk: this is what refreshes the
@@ -56,8 +56,41 @@ pub fn main(init: std.process.Init) !void {
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
         const job_handle = try runtime.startLibraryProjection(library_handle);
-        try awaitJob(&runtime, stdout, job_handle);
+        try awaitJob(&runtime, stdout, job_handle, null);
         try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "backfill")) {
+        // Repairs `files` rows whose declared audio properties are missing,
+        // with no filesystem walk. The job reprojects each repaired batch
+        // itself, which is why there is no `project` step after this one.
+        // `--cancel-after=MS` is the same kind of affordance `play-tracks`
+        // carries: the CLI is the architectural test client, and a cooperative
+        // cancellation nothing outside a unit test can trigger is not one a
+        // host can rely on.
+        var force = false;
+        var cancel_after_ms: ?u64 = null;
+        for (args[3..]) |argument| {
+            if (std.mem.eql(u8, argument, "--force")) {
+                force = true;
+            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
+                cancel_after_ms = try std.fmt.parseInt(
+                    u64,
+                    argument["--cancel-after=".len..],
+                    10,
+                );
+            } else return error.UnknownOption;
+        }
+        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
+        var runtime = liborca.OrcaRuntime.init(allocator);
+        defer runtime.deinit();
+        const library_handle = try runtime.openLibrary(init.io, database_path);
+        const job_handle = try runtime.startLibraryPropertyBackfill(library_handle, .{
+            .force = force,
+        });
+        const planned = try runtime.jobSnapshotSynced(job_handle);
+        try stdout.print("{d} files to probe\n", .{planned.total_units orelse 0});
+        try stdout.flush();
+        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
+        try printBackfillStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         var runtime = liborca.OrcaRuntime.init(allocator);
@@ -164,6 +197,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try stdout.writeAll(
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
+            \\                 | backfill DATABASE [--force] [--cancel-after=MS]
             \\                 | analyze DATABASE AUDIO
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
             \\                 | play-tracks DATABASE IDS [OPTIONS]
@@ -191,6 +225,13 @@ pub fn main(init: std.process.Init) !void {
             \\  --skip-after=MS    issue next MS after each entry becomes audible
             \\  --previous-after=MS  issue previous once, MS after playback starts
             \\  --limit=MS         stop after MS of wall clock
+            \\
+            \\backfill re-reads the headers of files whose declared audio properties
+            \\are missing and reprojects the Tracks derived from them, without walking
+            \\a filesystem. --force also re-probes rows that already declare
+            \\properties, which is for a probe implementation that improved rather
+            \\than for ordinary use. --cancel-after=MS interrupts the job cooperatively
+            \\once it has run that long; a later run resumes what it did not finish.
             \\
             \\The host-independent Orca control client.
             \\
@@ -543,8 +584,19 @@ fn awaitJob(
     runtime: *liborca.OrcaRuntime,
     stdout: *std.Io.Writer,
     job_handle: liborca.core.JobHandle,
+    cancel_after_ms: ?u64,
 ) !void {
+    var elapsed_ms: u64 = 0;
+    var cancelled = false;
     while (true) {
+        if (cancel_after_ms) |deadline| {
+            if (!cancelled and elapsed_ms >= deadline) {
+                cancelled = true;
+                try runtime.cancelJob(job_handle);
+                try stdout.print("cancellation requested at {d}ms\n", .{elapsed_ms});
+                try stdout.flush();
+            }
+        }
         _ = runtime.processNextCommand();
         runtime.reapFinishedJobs();
         while (runtime.pollEvent()) |_| {}
@@ -560,7 +612,35 @@ fn awaitJob(
             else => {},
         }
         sleepMilliseconds(20);
+        elapsed_ms += 20;
     }
+}
+
+/// The same counters, named for what a repair pass means by them.
+fn printBackfillStats(
+    stdout: *std.Io.Writer,
+    stats: liborca.core.runtime.ScanStats,
+) !void {
+    try stdout.print(
+        "examined={d} repaired={d} still_unknown={d} unreachable={d} unreadable={d} batches={d}\n",
+        .{
+            stats.files_seen,
+            stats.changed,
+            stats.unchanged,
+            stats.unsupported,
+            stats.errors,
+            stats.batches_committed,
+        },
+    );
+    try stdout.print(
+        "projected folders={d} files={d} tracks={d} releases={d}\n",
+        .{
+            stats.folders_visited,
+            stats.files_projected,
+            stats.tracks_written,
+            stats.releases_written,
+        },
+    );
 }
 
 fn printScanStats(

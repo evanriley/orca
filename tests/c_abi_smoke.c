@@ -208,7 +208,8 @@ static void capture_now_playing(void *context, const orca_now_playing_view *view
 
 /* Pumps the control lane and drains events, reporting whether the named job
  * reached a terminal state. */
-static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state) {
+static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state,
+                       uint8_t expect_total) {
     orca_job_snapshot snapshot;
     if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return -1;
     for (;;) {
@@ -225,7 +226,9 @@ static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state) {
         if (remaining == 0) break;
     }
     if (orca_job_snapshot_get(runtime, job, &snapshot) != ORCA_STATUS_OK) return -1;
-    if (snapshot.has_total != 0) return -1; /* a scan must not invent a total */
+    /* A filesystem walk must not invent a denominator; a backfill, which knows
+     * how many rows still owe a probe before it starts, must publish one. */
+    if ((snapshot.has_total != 0) != (expect_total != 0)) return -1;
     if (snapshot.state == ORCA_JOB_SUCCEEDED || snapshot.state == ORCA_JOB_FAILED ||
         snapshot.state == ORCA_JOB_CANCELLED) {
         *state = snapshot.state;
@@ -288,7 +291,7 @@ int main(void) {
     uint8_t scan_state = ORCA_JOB_RUNNING;
     int settled = 0;
     for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, scan_job, &scan_state);
+        settled = job_settled(runtime, scan_job, &scan_state, 0);
         if (settled != 0) break;
         sleep_ms(10);
     }
@@ -314,12 +317,55 @@ int main(void) {
     uint8_t projection_state = ORCA_JOB_RUNNING;
     settled = 0;
     for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, projection_job, &projection_state);
+        settled = job_settled(runtime, projection_job, &projection_state, 0);
         if (settled != 0) break;
         sleep_ms(10);
     }
     if (settled != 1) return 32;
     if (projection_state != ORCA_JOB_SUCCEEDED) return 33;
+
+    /* ---- the property backfill as a job ---- */
+    /* The scan above already probed every fixture, so a default backfill has
+     * nothing to repair and must say so rather than reopening the library. A
+     * forced one re-probes them all, which is the difference the flag names. */
+    orca_handle backfill_job;
+    orca_backfill_options backfill_options;
+    memset(&backfill_options, 0, sizeof backfill_options);
+    backfill_options.batch_size = 16;
+    if (orca_library_start_property_backfill(runtime, library, &backfill_options,
+                                             &backfill_job) != ORCA_STATUS_OK)
+        return 139;
+    uint8_t backfill_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
+        settled = job_settled(runtime, backfill_job, &backfill_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 140;
+    if (backfill_state != ORCA_JOB_SUCCEEDED) return 141;
+    orca_scan_stats backfill_stats;
+    if (orca_library_scan_stats(runtime, backfill_job, &backfill_stats) != ORCA_STATUS_OK)
+        return 142;
+    if (backfill_stats.changed != 0) return 143;
+
+    backfill_options.force = 1;
+    if (orca_library_start_property_backfill(runtime, library, &backfill_options,
+                                             &backfill_job) != ORCA_STATUS_OK)
+        return 144;
+    backfill_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
+        settled = job_settled(runtime, backfill_job, &backfill_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 145;
+    if (backfill_state != ORCA_JOB_SUCCEEDED) return 146;
+    if (orca_library_scan_stats(runtime, backfill_job, &backfill_stats) != ORCA_STATUS_OK)
+        return 147;
+    if (backfill_stats.files_seen == 0) return 148;
+    if (backfill_stats.changed == 0) return 149;
 
     /* ---- the extended track view ---- */
     struct track_capture capture;

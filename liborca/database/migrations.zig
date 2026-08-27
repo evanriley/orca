@@ -1,8 +1,9 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 9;
+pub const current_version = 10;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -648,6 +649,30 @@ const migration_9_indexes =
 
 const migration_9 = migration_9_columns ++ artist_backfill ++ migration_9_indexes;
 
+/// Version 10: finding the files whose declared properties are still missing.
+///
+/// A library scanned before probing existed keeps null `duration_ms`,
+/// `sample_rate` and `channels` for ever, because only a file whose *bytes*
+/// change is ever re-probed and a music collection's bytes essentially never
+/// change. The repair pass that fixes that needs to ask "which rows still owe
+/// a probe" repeatedly, and asking it with a bare `WHERE ... IS NULL` would
+/// scan every row of the largest table in the schema each time.
+///
+/// A **partial** index answers it instead, and it is the right shape here for
+/// a reason that is not obvious: the index contains exactly the rows that are
+/// still broken, so it starts small on a healthy library, shrinks as the pass
+/// repairs rows, and reaches empty — at which point asking the question costs
+/// one B-tree probe rather than 500,000 row reads. A full index on the same
+/// columns would instead be largest precisely when there is nothing to do.
+///
+/// The predicate is `repository.incomplete_properties_predicate` verbatim.
+/// SQLite matches a partial index against a query by expression rather than by
+/// meaning, so the two must be the same string, which is why it has exactly
+/// one definition and both sides import it.
+const migration_10 =
+    "CREATE INDEX files_incomplete_properties ON files(id) WHERE " ++
+    repository.incomplete_properties_predicate ++ ";";
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -730,6 +755,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
         try db.exec("DROP TABLE temp.legacy_scanned;");
     }
     if (version < 9 and target_version >= 9) try db.exec(migration_9);
+    if (version < 10 and target_version >= 10) try db.exec(migration_10);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1098,6 +1124,6 @@ test "an unknown newer schema version is refused rather than opened" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try db.exec("PRAGMA user_version=10;");
+    try db.exec("PRAGMA user_version=11;");
     try std.testing.expectError(error.SchemaVersionTooNew, apply(db));
 }

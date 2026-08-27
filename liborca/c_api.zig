@@ -220,6 +220,13 @@ pub const ScanOptions = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const BackfillOptions = extern struct {
+    batch_size: u32,
+    /// Nonzero re-probes rows that already declare properties.
+    force: u8 = 0,
+    _reserved: [3]u8 = @splat(0),
+};
+
 pub const EventKind = enum(u8) {
     none = 0,
     command_completed = 1,
@@ -773,6 +780,34 @@ pub export fn orca_library_start_projection(
     const destination = job_output orelse return .invalid_argument;
     const started = box.runtime.startLibraryProjection(importLibrary(library)) catch |err|
         return mapError(err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+/// Starts the property backfill. `options` may be null.
+///
+/// Reachable from the ABI for the same reason a scan is: a capability only a
+/// unit test can invoke is not a capability the product has. The stats are
+/// read back through `orca_library_scan_stats`, whose fields carry the
+/// backfill's own meaning — see `orca_backfill_options` in the header.
+pub export fn orca_library_start_property_backfill(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const BackfillOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = job_output orelse return .invalid_argument;
+    var request: core.runtime.BackfillRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+        request.force = value.force != 0;
+    }
+    const started = box.runtime.startLibraryPropertyBackfill(
+        importLibrary(library),
+        request,
+    ) catch |err| return mapError(err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -1333,6 +1368,7 @@ fn exportJobKind(kind: job.Kind) u8 {
     return switch (kind) {
         .scan => 0,
         .projection => 1,
+        .property_backfill => 2,
         else => 255,
     };
 }

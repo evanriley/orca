@@ -200,6 +200,24 @@ cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
 virtual table, recreates both, and rebuilds the index. Repository APIs return
 bounded, caller-owned pages and never expose SQLite rows or statements.
 
+Migration 10 adds one partial index, `files_incomplete_properties`, over
+`repository.incomplete_properties_predicate` — the rows whose declared audio
+properties are still missing. It is partial rather than full for a reason worth
+stating: the index contains exactly the rows that are broken, so it starts
+small on a healthy library, shrinks as the property backfill repairs rows, and
+reaches empty, at which point asking "what still needs probing" costs one
+B-tree probe instead of 500,000 row reads. A full index on the same columns
+would be largest precisely when there is nothing to do. The predicate has a
+single definition shared by the index and the query, because SQLite decides
+whether a partial index applies by comparing expressions rather than meanings.
+
+`files.codec` is the **encoding**, not the container. `files.audio_format` is
+the container a file was sniffed as, which decides who opens it; `codec` is a
+stable lowercase identifier for what turned out to be inside — `pcm`,
+`pcm_float`, `flac`, `qoa`, `mp1`, `mp2`, `mp3` — which decides what the bytes
+cost. They coincide for FLAC and QOA and diverge wherever a container is a
+wrapper. See `docs/codecs.md`.
+
 ## Concurrency
 
 - The primary connection uses WAL and `synchronous=NORMAL`.

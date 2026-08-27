@@ -88,6 +88,22 @@ pub const ScanRequest = struct {
     batch_size: usize = 256,
 };
 
+pub const BackfillRequest = struct {
+    batch_size: usize = 256,
+    /// Re-probe rows that already declare properties. See
+    /// `library.PropertyBackfill.force` for why this is not the default.
+    force: bool = false,
+};
+
+/// Everything a job worker needs that is not the Library or the kind. One
+/// struct rather than a widening parameter list, because every kind takes a
+/// bounded batch size and each takes at most one thing besides.
+const WorkerRequest = struct {
+    root_id: ?i64 = null,
+    batch_size: usize = 256,
+    force: bool = false,
+};
+
 /// What a scan job observed, mirroring `scanner.Result` plus what the
 /// projection made of it. A scan has no honest denominator until its walk
 /// finishes, so there is a count of files processed and no total.
@@ -156,6 +172,7 @@ const JobWorker = struct {
     kind: job.Kind,
     root_id: ?i64,
     batch_size: usize,
+    force: bool,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -178,6 +195,7 @@ const JobWorker = struct {
         switch (self.kind) {
             .scan => self.runScan(),
             .projection => self.runProjection(),
+            .property_backfill => self.runPropertyBackfill(),
             else => self.failed.store(true, .release),
         }
     }
@@ -196,6 +214,48 @@ const JobWorker = struct {
             return;
         };
         self.noteProjection(result);
+    }
+
+    /// Repairs `files` rows with missing properties and reprojects each batch.
+    ///
+    /// The reprojection is not optional and not the caller's to sequence:
+    /// `tracks.duration_ms` is *derived* from the file rows, so a backfill
+    /// that repaired the files and left the Tracks reading zero would have
+    /// fixed nothing a user can see. It is scoped to the repaired ids, exactly
+    /// as a scan batch is, so repairing 104 rows reprojects the handful of
+    /// folders they live in rather than the whole library.
+    fn runPropertyBackfill(self: *JobWorker) void {
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        var backfill: library_pass.PropertyBackfill = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .files = &self.database.files,
+            .health_issues = &self.database.health_issues,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+            .force = self.force,
+            .projection = &pass,
+        };
+        defer backfill.deinit();
+        const result = backfill.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.changed, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
+        self.noteProjection(result.projection);
     }
 
     fn runScan(self: *JobWorker) void {
@@ -1405,27 +1465,52 @@ pub const OrcaRuntime = struct {
         library: LibraryHandle,
         request: ScanRequest,
     ) !JobHandle {
-        return self.startJobWorker(library, .scan, request);
+        return self.startJobWorker(library, .scan, .{
+            .root_id = request.root_id,
+            .batch_size = request.batch_size,
+        });
     }
 
     pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
         return self.startJobWorker(library, .projection, .{});
     }
 
+    /// Starts the property backfill: probes the headers of `files` rows whose
+    /// declared audio properties are missing, and reprojects each repaired
+    /// batch so the Tracks derived from them stop reading zero.
+    ///
+    /// Unlike a scan this job has an honest denominator before it starts —
+    /// which rows still owe a probe is one indexed count — so its snapshot
+    /// carries a total and a host may show a fraction.
+    pub fn startLibraryPropertyBackfill(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: BackfillRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .property_backfill, .{
+            .batch_size = request.batch_size,
+            .force = request.force,
+        });
+    }
+
     fn startJobWorker(
         self: *OrcaRuntime,
         library: LibraryHandle,
         kind: job.Kind,
-        request: ScanRequest,
+        request: WorkerRequest,
     ) !JobHandle {
         try self.requireRunning();
         if (request.batch_size == 0) return error.InvalidBatchSize;
         const library_database = try self.libraryDatabase(library);
         self.pruneRetiredJobWorkers();
 
+        const total_units: ?u64 = if (kind == .property_backfill)
+            try library_database.files.incompletePropertiesCount(request.force)
+        else
+            null;
         const worker = try self.allocator.create(JobWorker);
         errdefer self.allocator.destroy(worker);
-        const job_handle = try self.jobs.create(kind, null);
+        const job_handle = try self.jobs.create(kind, total_units);
         errdefer self.jobs.finish(job_handle, .failed) catch {};
         try self.jobs.start(job_handle);
 
@@ -1445,6 +1530,7 @@ pub const OrcaRuntime = struct {
             .kind = kind,
             .root_id = request.root_id,
             .batch_size = request.batch_size,
+            .force = request.force,
         };
         try self.job_workers.append(self.allocator, worker);
         errdefer _ = self.job_workers.pop();

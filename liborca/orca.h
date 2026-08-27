@@ -92,6 +92,7 @@ typedef enum orca_job_state {
 typedef enum orca_job_kind {
     ORCA_JOB_KIND_SCAN = 0,
     ORCA_JOB_KIND_PROJECTION = 1,
+    ORCA_JOB_KIND_PROPERTY_BACKFILL = 2,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -292,7 +293,9 @@ typedef struct orca_job_snapshot {
     uint8_t kind;   /* orca_job_kind */
     uint8_t state;  /* orca_job_state */
     /* Zero for a scan. A filesystem walk has no honest denominator until it
-     * has finished walking, and Orca does not invent one. */
+     * has finished walking, and Orca does not invent one. A property backfill
+     * does have one before it starts - how many rows still owe a probe is one
+     * indexed count - so it reports a total and a host may show a fraction. */
     uint8_t has_total;
     uint8_t reserved[5];
     uint64_t completed_units;
@@ -320,6 +323,25 @@ typedef struct orca_scan_options {
     uint32_t batch_size;
     uint8_t reserved[4];
 } orca_scan_options;
+
+typedef struct orca_backfill_options {
+    /* Rows per selected page and per bounded commit. Zero selects the
+     * default. Capped at 512, the bound every repository page shares. */
+    uint32_t batch_size;
+    /*
+     * Nonzero re-probes rows that ALREADY declare properties.
+     *
+     * Off is the right default: a probe reads what a container declares, so
+     * running it again on a row that has an answer reads the same bytes and
+     * writes the same numbers. Force exists for the one case the default
+     * cannot serve - a probe implementation that got better, where a stored
+     * value is present but no longer what this build would compute. A forced
+     * run is NOT restart-resumable: a re-probed row still matches, so an
+     * interrupted one starts over rather than resuming.
+     */
+    uint8_t force;
+    uint8_t reserved[3];
+} orca_backfill_options;
 
 /* ---------------------------------------------------------------- events */
 
@@ -577,6 +599,28 @@ orca_status orca_library_start_scan(
 orca_status orca_library_start_projection(
     orca_runtime *runtime,
     orca_handle library,
+    orca_handle *job
+);
+
+/*
+ * Starts the property backfill: re-reads the headers of `files` rows whose
+ * declared audio properties are missing, and reprojects each repaired batch.
+ *
+ * The reprojection is part of the job rather than a step the caller sequences:
+ * a Track's duration is DERIVED from its file row, so a backfill that repaired
+ * the files and left the Tracks reading zero would have fixed nothing anybody
+ * can see. `options` may be null.
+ *
+ * Progress and results are read through orca_job_snapshot_get and
+ * orca_library_scan_stats. In those stats `files_seen` counts rows examined,
+ * `changed` rows repaired, `errors` files that opened and would not decode,
+ * and `unsupported` files that are not reachable or are not audio - the last
+ * of which is not a failure of the pass.
+ */
+orca_status orca_library_start_property_backfill(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_backfill_options *options,
     orca_handle *job
 );
 
