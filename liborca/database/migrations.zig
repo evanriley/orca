@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 11;
+pub const current_version = 12;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -722,6 +722,37 @@ const migration_11 =
     \\CREATE UNIQUE INDEX artists_key ON artists(key);
 ;
 
+/// Re-key releases for the same reason as migration 11, which missed them.
+///
+/// `release_key` is folded text joined by 0x1f separators, so applying the
+/// current fold to the *stored* key yields exactly what composing it afresh
+/// would: the separators and a MusicBrainz id pass through untouched, and
+/// folding already-folded case and whitespace is a no-op. Only the newly
+/// folded punctuation moves.
+///
+/// Leaving these stale was a live corruption rather than an inconsistency.
+/// `ReleaseRepository.upsert` keys on `release_key`, so the next projection of
+/// an already-projected library -- a rescan, a metadata edit, or the property
+/// backfill's per-batch reprojection -- matched nothing and built a parallel
+/// release beside each stale one. Measured on the real library: 22,060 tracks
+/// and 2,637 releases became 23,271 and 2,760 after a single backfill, every
+/// duplicate pair differing only by an apostrophe.
+///
+/// Unlike artists, colliding rows are skipped rather than merged. Two releases
+/// that fold together are the same album spelled two ways, and their tracks
+/// share track numbers, so repointing them would violate `tracks_position` and
+/// fail the migration -- refusing to open the library over a duplicate album
+/// is far worse than leaving two rows for a projection to reconcile. The real
+/// library has no such collision.
+const migration_12 =
+    \\UPDATE releases
+    \\   SET release_key = orca_artist_key(release_key)
+    \\ WHERE orca_artist_key(release_key) <> release_key
+    \\   AND NOT EXISTS (
+    \\        SELECT 1 FROM releases other
+    \\         WHERE other.release_key = orca_artist_key(releases.release_key));
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -806,6 +837,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 9 and target_version >= 9) try db.exec(migration_9);
     if (version < 10 and target_version >= 10) try db.exec(migration_10);
     if (version < 11 and target_version >= 11) try db.exec(migration_11);
+    if (version < 12 and target_version >= 12) try db.exec(migration_12);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1255,4 +1287,59 @@ test "artists that merely look alike are left alone by the re-key" {
     try apply(db);
 
     try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM artists;"));
+}
+
+test "release keys are stable under the fold that is current" {
+    // A stale release key is not cosmetic: ReleaseRepository.upsert keys on it,
+    // so the next projection of an already-projected library builds a parallel
+    // release beside every stale one. On the real library a single property
+    // backfill turned 22,060 tracks and 2,637 releases into 23,271 and 2,760,
+    // every duplicate pair differing only by an apostrophe.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "rekey.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    // Keys as a pre-punctuation fold left them: the typographic apostrophe the
+    // tag carried survived into the stored key.
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'A Sailor''s Guide to Earth', 'Sturgill Simpson',
+        \\        'a sailor' || char(8217) || 's guide to earth');
+    );
+
+    try apply(db);
+
+    const stable = try scalar(
+        db,
+        "SELECT count(*) FROM releases WHERE release_key = orca_artist_key(release_key);",
+    );
+    try std.testing.expectEqual(@as(i64, 1), stable);
+    try checkForeignKeys(db);
+}
+
+test "a release key that would collide on re-keying is left as it is" {
+    // Two releases folding together are one album spelled two ways, and their
+    // tracks share track numbers. Repointing them would violate
+    // tracks_position and fail the migration -- refusing to open a library over
+    // a duplicate album is far worse than leaving a projection to reconcile it.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "collide.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'Ten', 'Pearl Jam', 'ten'),
+        \\       (2, 'Ten', 'Pearl Jam', 'ten' || char(8217));
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM releases;"));
+    try checkForeignKeys(db);
 }
