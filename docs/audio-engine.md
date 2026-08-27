@@ -47,19 +47,22 @@ tail and block constraints, reset behavior, and direct-RT safety. Prepared
 ordered chains are triple-buffered: the control lane writes an unclaimed slot
 and publishes it atomically, while the render lane adopts it only at a block
 boundary. Acknowledged publication makes old node-context reclamation explicit.
-Gain and ReplayGain changes use frame ramps; metering publishes peak/RMS
-snapshots without changing samples. Built-in processing also includes peaking
+Volume changes use frame ramps; metering publishes peak/RMS snapshots without
+changing samples. Built-in processing also includes peaking
 parametric EQ, stereo crossfeed, and a resettable DC blocker.
 
-User volume and loudness correction are two independent atomics whose product
-the render lane reads as one number, so applying a correction never moves the
-host's volume slider and a volume change never discards the correction. The
-correction itself is chosen on the control lane when a Player loads a queue
-entry — that lookup reads SQLite and must never happen on the render lane — and
-is keyed on the identity of the bytes just opened, so an entry with no
-measurement of its own plays at unity rather than inheriting the previous
-entry's. See `docs/analysis.md`, which also records the one place this does not
-yet reach: a gapless auto-advance.
+User volume and loudness correction are applied in two different places
+because they are two different kinds of thing. Volume is one Player-scope
+ramped multiplier; the correction belongs to the *audio*, and is applied by the
+`SourceSession` that decodes it, from a figure attached to that session when
+the entry was opened. A Player-level correction cannot be right during a
+gapless transition — the pipe then holds prepared blocks belonging to two
+entries at once — and a per-block one cannot be right either, because one
+canonical block is filled from two decoders across the boundary. Per decode it
+always is. Every path that produces a session goes through one opener, so a
+hard load, an auto-advance, a format switch and a seek re-open all carry the
+right correction without any of them republishing anything. See
+`docs/analysis.md`.
 
 The resampler interface uses caller-owned input/output buffers and reports
 partial consumption. Its current linear implementation is a streaming scalar

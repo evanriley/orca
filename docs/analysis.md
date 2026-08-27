@@ -134,19 +134,30 @@ believing a timing — a plain `zig build` reinstalls the Debug binary over it.
 
 ## ReplayGain on playback
 
-`Gain` keeps user volume and replay gain as two independent atomics whose
-product the render lane reads as one number, so applying a correction never
-moves the host's volume and a volume change never discards the correction.
+The correction is a property of the **audio**, not of the Player. Each
+`SourceSession` carries the linear correction measured from the bytes it is
+decoding, and scales the frames it produces by it. `Gain` is user volume and
+nothing else.
 
-The correction is published on the **control lane**, in `loadCursor`, at the
-moment a Player opens a queue entry — the same lane that already does the file
-I/O. Nothing on the render lane reads SQLite, allocates or blocks; what crosses
-is the two atomics `Gain` already exposes.
+That placement is the whole design, and it follows from where a gapless
+transition puts the audio. During one, the render pipe holds prepared blocks
+belonging to two entries at the same time, so a single Player-level multiplier
+is wrong for one of them for the entire lookahead window — measured at 163 ms
+on a 96 kHz FLAC boundary, and a whole track when nothing corrects it
+afterwards. A value published per *block* and keyed on `entry_serial` is closer
+but still not right: `SourceQueue.readFrames` fills one canonical block from two
+decoders across the boundary, so up to 256 frames of every transition would
+carry the neighbour's correction. A value applied per decode cannot, because the
+decoder that produced the frames is the one that owns the figure.
 
+- **One attachment point.** `TrackSourceOpener.openTrack` is the only place a
+  queue entry becomes audio, so it is the only place the correction is
+  attached. A hard load, a gapless auto-advance, a deferred format switch and a
+  seek that re-opens the audible entry all go through it. Nothing publishes a
+  correction, so nothing can forget to.
 - **Absence is unity, never inheritance.** An entry with no usable correction
-  publishes 1.0 rather than leaving the previous entry's figure in place.
-  Playing one track at another track's loudness is the exact failure the
-  feature exists to prevent, and it would be silent.
+  carries 1. Playing one track at another track's loudness is the exact failure
+  the feature exists to prevent, and it would be silent.
 - **Provenance is checked against the bytes, not the row.** The lookup is keyed
   on the quick hash of the file that was just opened, not on
   `files.quick_hash`, because the Library's record is only as fresh as the last
@@ -160,17 +171,51 @@ is the two atomics `Gain` already exposes.
   arbitrary one would apply a correction toward a target nobody chose.
 - **A boost is capped at `1 / peak`.** Bringing a quiet track up only as far as
   its headroom allows is a deliberate quietening of the correction rather than
-  a limiter, because a limiter in the render lane would change the audio.
+  a limiter, because a limiter would change the audio rather than its level.
 - **`ReplayGainMode` is `off` or `track`.** Album-level ReplayGain is out of
   scope and is deliberately not a third value: it needs a release-scoped
   measurement `analysis/` does not compute and a notion of "the release this
   entry belongs to" the playback queue does not carry, and naming it without
   both would apply track gain under an album label.
 
+### Where each lane's work happens
+
+The opener reads SQLite and two 64 KiB file ranges. That happens on whichever
+lane opens the entry — the control lane for a hard load, the **engine thread**
+for an auto-advance. Both already resolve a Location and open a file there, and
+opening is not the decode path: it happens once per entry, and it is
+emphatically not the render callback, which still only copies prepared blocks.
+Pre-resolving corrections on the control lane instead would mean guessing which
+entry auto-advance is about to pick, which repeat and shuffle make unknowable
+until it picks it.
+
+### Turning it off
+
+The mode is a Player atomic that the decode lane reads per canonical block,
+rather than something baked into a session when it is opened. Baking it in
+would mean a host that turns correction off heard nothing change until the next
+track — up to several minutes of a control that appears not to work. Reading it
+per block instead means the change takes effect as the audio already decoded
+ahead of the listener drains, a fraction of a second.
+
+The cost is disclosed rather than hidden: the level then *steps* rather than
+ramping, by however much the entry was being corrected. That step is the answer
+to an explicit request, and it is the smaller of the two problems. `off` is
+exactly 1 — the multiply is skipped entirely, not multiplied by a float that
+happens to be one.
+
+### What a host sees
+
+`playerEffectiveGain` / `orca_player_effective_gain` reports volume times the
+correction of the entry actually being *heard*, resolved through the same
+`entry_serial` that identity, duration and position resolve through, so all
+four describe one entry. It reports rather than drives: nothing multiplies by
+it.
+
 Measured on the reference corpus, through `orca-cli play-tracks` at a silent
 PipeWire sink, with `volume=1.0`:
 
-| track | measured | render-lane gain | effective |
+| track | measured | reported gain | effective |
 | --- | --- | --- | --- |
 | loudest | -6.81 LUFS | 0.275756 (-11.19 dB) | -18.00 LUFS |
 | quietest | -24.11 LUFS | 1.862241 (+5.40 dB) | -18.71 LUFS |
@@ -180,14 +225,10 @@ is the peak cap in action: +6.11 dB was measured, +5.40 dB (`1 / 0.537`) is
 applied. With the sign inverted the two would sit 33.89 dB apart, which is what
 `tests/root.zig` asserts against.
 
-### Known gap
-
-A **gapless auto-advance** runs on the engine thread and does not pass through
-`loadCursor`, so the successor entry keeps the previous entry's correction
-until the next hard load (a skip, a seek that re-opens, or a new queue).
-Closing it means publishing a correction per `entry_serial` and adopting it at
-a block boundary — the same shape as a prepared processing chain — and is not
-built.
+Queued as `44,3` and left to advance **gaplessly**, the same two tracks report
+0.275756 and then 1.862241, with `gapless=1`, `decode_errors=0`,
+`open_failures=0` and one to three underruns — the same counts the queue
+produced when the successor was still inheriting its predecessor's figure.
 
 ## Duplicate detection
 

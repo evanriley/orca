@@ -25,13 +25,27 @@
   to disagree with the results it describes. The page query is
   `SEARCH files USING INTEGER PRIMARY KEY` plus one full-prefix covering-index
   probe per row; no new index, no table scan.
-- **ReplayGain reaches the audio.** A Player publishes the loaded entry's
-  correction on the control lane, keyed on the identity of the bytes it just
-  opened, so an entry with no measurement plays at unity instead of inheriting
-  the previous one's and a file edited since the last scan loses a correction
-  it no longer matches. On the reference corpus the loudest and quietest tracks
-  went from 17.30 dB apart to 0.71 dB. `off` and `track` modes reach the ABI
-  and `orca-cli play-tracks --replay-gain=`; album gain is out of scope.
+- **ReplayGain reaches the audio, and stays right across a gapless
+  transition.** The correction is a property of the audio rather than of the
+  Player: the session that decodes an entry carries the figure measured from
+  those exact bytes and scales its own frames by it, so an entry with no
+  measurement plays at unity instead of inheriting the previous one's and a
+  file edited since the last scan loses a correction it no longer matches. A
+  Player-level multiplier could not be right during a gapless advance — the
+  pipe holds two entries' blocks at once — and neither could a per-block one,
+  because a canonical block is filled from two decoders across the boundary.
+  Attaching it at the single point where a queue entry becomes audio covers
+  the hard load, the auto-advance, the format switch and the seek re-open
+  together. On the reference corpus the loudest and quietest tracks went from
+  17.30 dB apart to 0.71 dB, gaplessly as well as on a skip, with the
+  transition's gapless, decode-error, open-failure and underrun counts
+  unchanged. `off` and `track` reach the ABI and `orca-cli play-tracks
+  --replay-gain=`, and now take effect as the decoded-ahead audio drains
+  rather than at the next track; album gain is out of scope.
+- **`orca-cli play-tracks` can move the volume.** `--volume=N` and
+  `--set-volume=MS:N` exist so that user volume and loudness correction being
+  independent is checkable from outside: changing one mid-track leaves the
+  other exactly where it was.
 
 ### The library became browsable, and stopped losing 104 files
 
