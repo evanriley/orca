@@ -26,6 +26,64 @@ pub fn read(
     allocator: std.mem.Allocator,
     readable: source.ReadableSource,
 ) !?model.ObservedTags {
+    const tag = try loadTag(allocator, readable) orelse return null;
+    defer tag.deinit();
+    return try parseFrames(allocator, tag.span, tag.major);
+}
+
+/// Extract the cover image an `APIC` frame carries, or null when the tag has
+/// none Orca can use.
+///
+/// A front cover outranks every other picture type, and the first front cover
+/// wins; with no front cover present the first usable picture is taken. That
+/// is the same preference `applyPicture` records as an observation, so a file
+/// whose scan says "front cover, 216 KB, image/jpeg" hands back those bytes
+/// and not a different picture from the same tag.
+pub fn readPicture(
+    allocator: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?model.EmbeddedImage {
+    const tag = try loadTag(allocator, readable) orelse return null;
+    defer tag.deinit();
+
+    var frames: FrameIterator = .{ .body = tag.span, .major = tag.major };
+    var chosen: ?Picture = null;
+    while (try frames.next()) |frame| {
+        if (!std.mem.eql(u8, &frame.identifier, "APIC")) continue;
+        const picture = decodePicture(frame.data) orelse continue;
+        if (chosen) |existing| {
+            if (existing.kind == .front_cover or picture.kind != .front_cover) continue;
+        }
+        chosen = picture;
+        if (picture.kind == .front_cover) break;
+    }
+
+    const picture = chosen orelse return null;
+    // Bounded before the copy, not after it. The tag body is already capped at
+    // `max_tag_bytes`, so this can only bite when the two bounds differ.
+    if (picture.data.len > model.max_image_bytes) return error.ArtworkTooLarge;
+    const bytes = try allocator.dupe(u8, picture.data);
+    errdefer allocator.free(bytes);
+    return try model.adoptImage(allocator, bytes, picture.kind);
+}
+
+/// A tag read into memory, unsynchronized and past its extended header.
+const LoadedTag = struct {
+    allocator: std.mem.Allocator,
+    /// The allocation, which `span` is a view into.
+    body: []u8,
+    span: []u8,
+    major: u8,
+
+    fn deinit(self: LoadedTag) void {
+        self.allocator.free(self.body);
+    }
+};
+
+fn loadTag(
+    allocator: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?LoadedTag {
     var header: [10]u8 = undefined;
     if (try readExact(readable, 0, &header) != header.len) return null;
     if (!std.mem.eql(u8, header[0..3], "ID3")) return null;
@@ -39,7 +97,7 @@ pub fn read(
     if (major < 3 or major > 4) return null;
 
     const body = try allocator.alloc(u8, size);
-    defer allocator.free(body);
+    errdefer allocator.free(body);
     if (try readExact(readable, header.len, body) != body.len)
         return error.TruncatedId3v2Tag;
 
@@ -47,7 +105,7 @@ pub fn read(
     var span: []u8 = body;
     if (flags & 0x80 != 0) span = unsynchronize(span);
     if (flags & 0x40 != 0) span = try skipExtendedHeader(span, major);
-    return try parseFrames(allocator, span, major);
+    return .{ .allocator = allocator, .body = body, .span = span, .major = major };
 }
 
 /// Total bytes an ID3v2 tag occupies at the head of a stream, or zero when the
@@ -99,6 +157,57 @@ fn skipExtendedHeader(bytes: []u8, major: u8) ![]u8 {
     return bytes[declared..];
 }
 
+/// One frame's identifier and its payload, already stripped of the group,
+/// data-length and per-frame unsynchronization prefixes the flags announce.
+const Frame = struct {
+    identifier: [4]u8,
+    data: []u8,
+};
+
+/// Walks a tag body frame by frame.
+///
+/// Extracted so that reading tags and reading a cover image are the same walk
+/// over the same bytes. They diverge only in what they do with a frame, and a
+/// second copy of ID3v2's size-field and frame-flag rules is exactly the kind
+/// of thing that drifts.
+const FrameIterator = struct {
+    body: []u8,
+    major: u8,
+    position: usize = 0,
+
+    fn next(self: *FrameIterator) !?Frame {
+        while (self.position + 10 <= self.body.len) {
+            const identifier = self.body[self.position..][0..4].*;
+            // Padding, or a stream that stopped making sense: keep what was
+            // read rather than discarding a tag over trailing garbage.
+            if (identifier[0] == 0 or !isFrameIdentifier(&identifier)) return null;
+            const size_bytes = self.body[self.position + 4 ..][0..4].*;
+            const declared: usize = if (self.major >= 4)
+                syncsafe(size_bytes) catch std.mem.readInt(u32, &size_bytes, .big)
+            else
+                std.mem.readInt(u32, &size_bytes, .big);
+            const format_flags = self.body[self.position + 9];
+            self.position += 10;
+            if (declared > self.body.len - self.position) return error.TruncatedId3v2Tag;
+            var data = self.body[self.position..][0..declared];
+            self.position += declared;
+
+            if (self.major >= 4) {
+                if (format_flags & 0x40 != 0) data = advance(data, 1) orelse continue;
+                // Compressed or encrypted payloads are skipped, not guessed at.
+                if (format_flags & 0x0c != 0) continue;
+                if (format_flags & 0x01 != 0) data = advance(data, 4) orelse continue;
+                if (format_flags & 0x02 != 0) data = unsynchronize(data);
+            } else {
+                if (format_flags & 0xc0 != 0) continue;
+                if (format_flags & 0x20 != 0) data = advance(data, 1) orelse continue;
+            }
+            return .{ .identifier = identifier, .data = data };
+        }
+        return null;
+    }
+};
+
 fn parseFrames(
     allocator: std.mem.Allocator,
     body: []u8,
@@ -109,35 +218,15 @@ fn parseFrames(
     defer genres.deinit(allocator);
     var pending_day_month: ?[]const u8 = null;
 
-    var position: usize = 0;
-    while (position + 10 <= body.len) {
-        const identifier = body[position..][0..4].*;
-        // Padding, or a stream that stopped making sense: keep what was read
-        // rather than discarding a tag over trailing garbage.
-        if (identifier[0] == 0 or !isFrameIdentifier(&identifier)) break;
-        const size_bytes = body[position + 4 ..][0..4].*;
-        const declared: usize = if (major >= 4)
-            syncsafe(size_bytes) catch std.mem.readInt(u32, &size_bytes, .big)
-        else
-            std.mem.readInt(u32, &size_bytes, .big);
-        const format_flags = body[position + 9];
-        position += 10;
-        if (declared > body.len - position) return error.TruncatedId3v2Tag;
-        var data = body[position..][0..declared];
-        position += declared;
-
-        if (major >= 4) {
-            if (format_flags & 0x40 != 0) data = advance(data, 1) orelse continue;
-            // Compressed or encrypted frame payloads are skipped, not guessed at.
-            if (format_flags & 0x0c != 0) continue;
-            if (format_flags & 0x01 != 0) data = advance(data, 4) orelse continue;
-            if (format_flags & 0x02 != 0) data = unsynchronize(data);
-        } else {
-            if (format_flags & 0xc0 != 0) continue;
-            if (format_flags & 0x20 != 0) data = advance(data, 1) orelse continue;
-        }
-        try applyFrame(allocator, &identifier, data, &tags, &genres, &pending_day_month);
-    }
+    var frames: FrameIterator = .{ .body = body, .major = major };
+    while (try frames.next()) |frame| try applyFrame(
+        allocator,
+        &frame.identifier,
+        frame.data,
+        &tags,
+        &genres,
+        &pending_day_month,
+    );
 
     if (pending_day_month) |day_month| try applyDayMonth(allocator, &tags, day_month);
     tags.genres = try genres.toOwnedSlice(allocator);
@@ -277,37 +366,62 @@ fn applyUniqueFileIdentifier(
     tags.musicbrainz_recording_id = try allocator.dupe(u8, identifier);
 }
 
-/// Artwork is reported, never decoded: enough to say a cover exists, what type
-/// it claims to be, and how large it is.
+/// What an `APIC` frame body means, with the frame layout stripped off.
+///
+/// `mime` and `data` borrow the frame, which borrows the tag body.
+const Picture = struct {
+    mime: []const u8,
+    data: []const u8,
+    kind: model.ArtworkKind,
+};
+
+/// Split an `APIC` body into its declared type and its payload.
+///
+/// The one definition of the frame's layout: an observation and a fetch must
+/// not be able to disagree about which bytes are the image. Returns null for a
+/// frame that carries no image — a malformed body, an empty payload, or the
+/// `-->` MIME type, which the spec defines as a *link* to an image elsewhere
+/// rather than an image.
+fn decodePicture(data: []const u8) ?Picture {
+    if (data.len < 4) return null;
+    const encoding = data[0];
+    const mime_end = std.mem.indexOfScalar(u8, data[1..], 0) orelse return null;
+    const mime = data[1 .. 1 + mime_end];
+    var cursor = 1 + mime_end + 1;
+    if (cursor >= data.len) return null;
+    const picture_type = data[cursor];
+    cursor += 1;
+    const description = terminatorLength(encoding, data[cursor..]) orelse return null;
+    cursor += description;
+    if (cursor >= data.len) return null;
+    if (std.mem.eql(u8, mime, "-->")) return null;
+    return .{
+        .mime = mime,
+        .data = data[cursor..],
+        .kind = switch (picture_type) {
+            3 => .front_cover,
+            4 => .back_cover,
+            else => .other,
+        },
+    };
+}
+
+/// Artwork is *observed* here, never decoded: enough to say a cover exists,
+/// what type it claims to be, and how large it is. `readPicture` is the other
+/// half, and both read the frame through `decodePicture`.
 fn applyPicture(
     allocator: std.mem.Allocator,
     data: []const u8,
     tags: *model.ObservedTags,
 ) !void {
-    if (data.len < 4) return;
-    const encoding = data[0];
-    const mime_end = std.mem.indexOfScalar(u8, data[1..], 0) orelse return;
-    const mime = data[1 .. 1 + mime_end];
-    var cursor = 1 + mime_end + 1;
-    if (cursor >= data.len) return;
-    const picture_type = data[cursor];
-    cursor += 1;
-    const description = terminatorLength(encoding, data[cursor..]) orelse return;
-    cursor += description;
-    if (cursor > data.len) return;
-
-    const kind: model.ArtworkKind = switch (picture_type) {
-        3 => .front_cover,
-        4 => .back_cover,
-        else => .other,
-    };
+    const picture = decodePicture(data) orelse return;
     if (tags.artwork) |existing| {
-        if (existing.kind == .front_cover or kind != .front_cover) return;
+        if (existing.kind == .front_cover or picture.kind != .front_cover) return;
     }
     tags.artwork = .{
-        .mime_type = try id3v1.latin1ToUtf8(allocator, mime),
-        .byte_size = data.len - cursor,
-        .kind = kind,
+        .mime_type = try id3v1.latin1ToUtf8(allocator, picture.mime),
+        .byte_size = picture.data.len,
+        .kind = picture.kind,
     };
 }
 

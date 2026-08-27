@@ -804,7 +804,7 @@ test "a Track resolves to the location its preferred file lives at" {
         .preferred_file_id = file_id,
     }});
 
-    var page = try library.tracks.page(std.testing.allocator, 10, 0);
+    var page = try library.tracks.page(std.testing.allocator, .{ .limit = 10, .offset = 0 });
     defer page.deinit();
     try std.testing.expectEqualStrings("Nick Drake", page.items[0].artist);
     try std.testing.expect(page.items[0].has_playable_file);
@@ -822,7 +822,7 @@ test "a Track resolves to the location its preferred file lives at" {
     // A Track with no file behind it is reported as unplayable rather than
     // failing at the point a host tries to start it.
     try library.tracks.upsertTracks(&.{.{ .title = "Orphan" }});
-    var second = try library.tracks.page(std.testing.allocator, 10, 1);
+    var second = try library.tracks.page(std.testing.allocator, .{ .limit = 10, .offset = 1 });
     defer second.deinit();
     try std.testing.expect(!second.items[0].has_playable_file);
     try std.testing.expect(
@@ -985,4 +985,166 @@ test "opening a version-7 library recovers its journal before the schema moves" 
     const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
     defer observed.deinit();
     try std.testing.expectEqualStrings("Northern Sky", observed.values.title.?);
+}
+
+test "an artist's tracks include the ones on a release they are the album artist of" {
+    // The narrow definition -- credit only -- leaves an artist owning an album
+    // and no songs whenever the track credit differs from the album credit,
+    // which real tags do constantly: a featured artist, a collaboration, a
+    // separator convention, or simply no ARTIST tag at all. Browsing to that
+    // artist showed the album and nothing in it.
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-artist-shelf?mode=memory&cache=shared",
+    );
+    defer library.close();
+
+    const headliner = (try library.artists.ensure(.{
+        .key = "grayarea",
+        .name = "Grayarea",
+        .sort_name = "grayarea",
+    })).?;
+    const featured = (try library.artists.ensure(.{
+        .key = "grayarea feat. erik shepard",
+        .name = "Grayarea feat. Erik Shepard",
+        .sort_name = "grayarea feat. erik shepard",
+    })).?;
+    // Deliberately two artists: a featured credit is not a spelling of the
+    // headline act, and merging them would destroy information.
+    try std.testing.expect(headliner != featured);
+
+    const release = try library.releases.upsert(.{
+        .release_key = "grayarea|gravity",
+        .title = "Gravity",
+        .album_artist = "Grayarea",
+        .album_artist_id = headliner,
+    });
+    try library.tracks.upsertTracks(&.{
+        .{
+            .title = "Gravity",
+            .artist = "Grayarea feat. Erik Shepard",
+            .artist_id = featured,
+            .release_id = release,
+            .track_number = 1,
+        },
+        .{
+            .title = "Gravity (Reprise)",
+            .artist = "Grayarea",
+            .artist_id = headliner,
+            .release_id = release,
+            .track_number = 2,
+        },
+    });
+
+    var page = try library.tracks.page(std.testing.allocator, .{ .artist_id = headliner });
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    // Credited once and on the album: counted once, not twice.
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try library.tracks.countMatching(.{ .artist_id = headliner }),
+    );
+
+    // The count and the page it counts must agree. They had separate copies of
+    // the predicate and drifted the moment this definition widened.
+    var artists = try library.artists.page(std.testing.allocator, .{ .limit = 16 });
+    defer artists.deinit();
+    for (artists.items) |artist| {
+        if (artist.id != headliner) continue;
+        try std.testing.expectEqual(@as(u64, 2), artist.track_count);
+        try std.testing.expectEqual(@as(u64, 1), artist.release_count);
+    }
+
+    // The featured artist keeps their own credit and gains nothing.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.tracks.countMatching(.{ .artist_id = featured }),
+    );
+
+    // ...but they do appear on the record, and the release listing has to say
+    // so. Defining an artist's tracks widely and their releases narrowly left
+    // 276 artists in a real library showing songs and an empty album list.
+    var featured_releases = try library.releases.page(
+        std.testing.allocator,
+        .{ .album_artist_id = featured },
+    );
+    defer featured_releases.deinit();
+    try std.testing.expectEqual(@as(usize, 1), featured_releases.items.len);
+    try std.testing.expectEqual(release, featured_releases.items[0].id);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.releases.countMatching(.{ .album_artist_id = featured }),
+    );
+
+    // The headliner is not double-counted for fronting it and appearing on it.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.releases.countMatching(.{ .album_artist_id = headliner }),
+    );
+
+    // The count beside an artist must agree with the pane it labels.
+    var listing = try library.artists.page(std.testing.allocator, .{ .limit = 16 });
+    defer listing.deinit();
+    for (listing.items) |artist| {
+        if (artist.id != featured) continue;
+        try std.testing.expectEqual(@as(u64, 1), artist.release_count);
+    }
+}
+
+test "an artist search matches the spelling a person types, not the one stored" {
+    // The artist key folds punctuation and case, so a search has to fold the
+    // needle the same way or it is stricter than identity is: the library
+    // holds `El‐P` with U+2010 because that is what the album artist tag said,
+    // and nobody types that.
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-artist-search?mode=memory&cache=shared",
+    );
+    defer library.close();
+    for ([_][2][]const u8{
+        .{ "el-p", "El\u{2010}P" },
+        .{ "the o'jays", "The O\u{2019}Jays" },
+        .{ "stevie nicks", "Stevie Nicks" },
+    }) |pair| {
+        _ = try library.artists.ensure(.{
+            .key = pair[0],
+            .name = pair[1],
+            .sort_name = pair[0],
+        });
+    }
+
+    // Typed with an ASCII hyphen; stored with U+2010.
+    var hyphen = try library.artists.page(std.testing.allocator, .{ .filter = "El-P" });
+    defer hyphen.deinit();
+    try std.testing.expectEqual(@as(usize, 1), hyphen.items.len);
+    try std.testing.expectEqualStrings("El\u{2010}P", hyphen.items[0].name);
+
+    // Typed with a straight apostrophe; stored with a curly one.
+    var quote = try library.artists.page(std.testing.allocator, .{ .filter = "O'Jays" });
+    defer quote.deinit();
+    try std.testing.expectEqual(@as(usize, 1), quote.items.len);
+
+    // A substring in the middle, and case-insensitively.
+    var infix = try library.artists.page(std.testing.allocator, .{ .filter = "NICKS" });
+    defer infix.deinit();
+    try std.testing.expectEqual(@as(usize, 1), infix.items.len);
+
+    // The count reports what matched, not what exists.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.artists.countMatching(.{ .filter = "nicks" }),
+    );
+    try std.testing.expectEqual(@as(u64, 3), try library.artists.countMatching(.{}));
+
+    // A name containing a LIKE wildcard is matched literally, which is why the
+    // predicate is `instr` rather than `LIKE`.
+    _ = try library.artists.ensure(.{ .key = "100% silk", .name = "100% Silk", .sort_name = "100% silk" });
+    var literal = try library.artists.page(std.testing.allocator, .{ .filter = "100%" });
+    defer literal.deinit();
+    try std.testing.expectEqual(@as(usize, 1), literal.items.len);
+    var wildcard = try library.artists.page(std.testing.allocator, .{ .filter = "%silk" });
+    defer wildcard.deinit();
+    try std.testing.expectEqual(@as(usize, 0), wildcard.items.len);
 }

@@ -4,6 +4,9 @@ const handle = @import("handle.zig");
 const WorkTag = struct {};
 pub const WorkHandle = handle.Handle(WorkTag);
 
+/// The owner tag for work that belongs to no single runtime object.
+pub const unowned: u64 = 0;
+
 pub const State = enum {
     active,
     cancellation_requested,
@@ -27,6 +30,14 @@ pub const Registration = struct {
     /// Set by the control lane when it spawned a joinable OS thread for this
     /// registration. `awaitCompletion` joins it instead of spinning.
     thread: ?std.Thread = null,
+    /// Which runtime object this worker may still touch, as an opaque tag the
+    /// control lane assigns. Destroying one object has to join the workers
+    /// that could reach *it* -- and only those. `unowned` means the worker is
+    /// not bound to a single object and is joined only by a full `drain`.
+    owner: u64 = unowned,
+    /// This registration's own handle, so a targeted drain can retire it
+    /// through `complete` rather than reimplementing slot invalidation.
+    work_handle: WorkHandle = .{ .index = 0, .generation = 0 },
 
     /// Control lane. Safe to call repeatedly.
     pub fn requestCancellation(self: *Registration) void {
@@ -84,11 +95,31 @@ pub const Registry = struct {
         self.* = undefined;
     }
 
-    pub fn begin(self: *Registry) !WorkHandle {
+    pub fn begin(self: *Registry, owner: u64) !WorkHandle {
         const entry = try self.allocator.create(Registration);
         errdefer self.allocator.destroy(entry);
-        entry.* = .{};
-        return self.pool.insert(entry);
+        entry.* = .{ .owner = owner };
+        const work_handle = try self.pool.insert(entry);
+        entry.work_handle = work_handle;
+        return work_handle;
+    }
+
+    /// Control lane. Joins exactly the workers bound to `owner`, then releases
+    /// them -- the precondition for destroying that one object.
+    ///
+    /// `drain` is the blanket form and is correct but indiscriminate: using it
+    /// to destroy a single Player also cancelled every other Player's engine
+    /// and every running scan job, which is a real fault rather than mere
+    /// waste. Workers tagged `unowned` are never retired here, because a scan
+    /// job does not touch a Player and must outlive one being destroyed.
+    pub fn drainOwner(self: *Registry, owner: u64) void {
+        if (owner == unowned) return;
+        var index: usize = 0;
+        while (index < self.pool.slots.items.len) : (index += 1) {
+            const entry = self.pool.slots.items[index].value orelse continue;
+            if (entry.owner != owner) continue;
+            self.complete(entry.work_handle) catch {};
+        }
     }
 
     /// Control lane. The pointer stays valid until this registration is
@@ -143,7 +174,7 @@ test "work is cancelled before it is drained" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
 
-    const work_handle = try registry.begin();
+    const work_handle = try registry.begin(unowned);
     const entry = try registry.registration(work_handle);
     entry.finish();
     registry.requestCancellation();
@@ -180,7 +211,7 @@ test "draining blocks until a blocked worker has actually finished" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
 
-    const work_handle = try registry.begin();
+    const work_handle = try registry.begin(unowned);
     var worker: BlockedWorker = .{ .registration = try registry.registration(work_handle) };
     worker.registration.thread = try std.Thread.spawn(.{}, BlockedWorker.run, .{&worker});
     while (!worker.running.load(.acquire)) std.Thread.yield() catch {};
@@ -200,8 +231,8 @@ test "completing one registration joins only that worker" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
 
-    const first = try registry.begin();
-    const second = try registry.begin();
+    const first = try registry.begin(unowned);
+    const second = try registry.begin(unowned);
     var worker: BlockedWorker = .{ .registration = try registry.registration(first) };
     worker.registration.thread = try std.Thread.spawn(.{}, BlockedWorker.run, .{&worker});
     while (!worker.running.load(.acquire)) std.Thread.yield() catch {};

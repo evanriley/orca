@@ -63,6 +63,29 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux
 Transport buttons invoke the same authoritative Player operations and snapshots
 used by the CLI/control plane. GTK owns presentation only.
 
+The transport bar shows the **now-playing track's cover**, and only that one.
+It is loaded when the audible Track changes, never on the 100 ms tick. A track
+with no cover, a track whose file has gone, an image liborca refused and an
+image gdk-pixbuf could not decode all show the same placeholder icon: one
+`GtkImage` in two states, so there is no second widget to keep visible in step
+with a nullable image.
+
+Decoding is bounded independently of liborca's byte bound, because encoded size
+says nothing about pixel count — the reference library's largest cover is an
+11.3 MiB JPEG. `gdk_pixbuf_new_from_stream_at_scale` scales inside the loader,
+so a 128-pixel request never materializes the full image, and the encoded bytes
+are borrowed by the stream rather than copied into it. With the whole 22,060
+track library open the frontend holds 154 MB resident; a typical cover loaded
+takes that to 168 MB and the largest cover in the library to 192 MB, steady
+across repeated loads.
+
+The Releases pane deliberately shows **no** thumbnails. A pane load is a
+bounded 512-row page, and 512 covers is 512 file opens and something like
+150 MB of encoded image on a single scroll — the opposite of what a bounded
+page exists to achieve. It needs a per-Release cache and a lazily bound cell
+factory before it is worth doing; `OrcaRuntime.libraryReleaseArtwork` is
+already there for when it is.
+
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS Play/Pause/PlayPause/Stop methods invoke the same Player handle,
 and `PlaybackStatus` is read from and signaled from authoritative snapshots.

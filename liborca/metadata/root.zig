@@ -1,3 +1,4 @@
+pub const artwork = @import("artwork.zig");
 pub const id3v1 = @import("id3v1.zig");
 pub const id3v2 = @import("id3v2.zig");
 pub const file_mutation = @import("file_mutation.zig");
@@ -11,6 +12,7 @@ pub const EffectiveMetadata = model.EffectiveMetadata;
 pub const ObservedFileMetadata = model.ObservedFileMetadata;
 pub const ObservedTags = model.ObservedTags;
 pub const Artwork = model.Artwork;
+pub const EmbeddedImage = model.EmbeddedImage;
 pub const ArtworkKind = model.ArtworkKind;
 pub const OrcaMetadata = model.OrcaMetadata;
 pub const ResolutionPolicy = model.ResolutionPolicy;
@@ -20,6 +22,7 @@ pub const Value = model.Value;
 pub const resolve = model.resolve;
 
 test {
+    _ = @import("artwork.zig");
     _ = @import("id3v1.zig");
     _ = @import("id3v2.zig");
     _ = @import("file_mutation.zig");

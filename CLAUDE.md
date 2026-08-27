@@ -25,6 +25,39 @@ libraries. `sqlite3` is linked via pkg-config; PipeWire deliberately is not
 (its emitted flags break Zig's current pkg-config parser — see the comment in
 `build.zig`).
 
+### Snapshot facts that cost time to rediscover
+
+These are properties of this specific Zig snapshot, not of the project. Each one
+was found the expensive way.
+
+- **`std.Thread.Mutex`, `std.Thread.Condition` and `std.Thread.ResetEvent` do not
+  exist.** Use atomics plus `std.Thread.join`. `std.Io.Mutex` and
+  `std.Io.Condition` do exist, but need an `io` in scope.
+- **`@cImport` does not exist.** `b.addTranslateC` is the replacement, and it
+  fails outright on GTK4's headers.
+- **`std.Io.Dir` cannot fsync a directory.** Its `handle` is not an fsync-able fd
+  (`EBADF` under `std.Io.Threaded`); open the directory *path as a file* instead.
+  Durable renames depend on this.
+- **`{d:0>2}` on a signed integer emits a sign**, so a duration of six seconds
+  formats as `0:+6`. Convert to unsigned before formatting.
+- **`std.fmt.bufPrintZ` does not exist.** `std.fmt.bufPrint` does; for a
+  sentinel-terminated string known at compile time, `std.fmt.comptimePrint` is
+  usually what you actually wanted.
+- `std.crypto.hash.Blake3` is available.
+
+### Verifying a build
+
+Never write `zig build 2>&1 | tail -3 && echo OK`. In a pipeline `$?` is the
+status of `tail`, not of the compiler, so a failed build reports success and the
+"verification" that follows runs a stale binary. This masked a real compile
+failure for two rounds. Check `${PIPESTATUS[0]}`, or run `zig build` unpiped.
+
+`zig build` also **reinstalls the Debug binary over `zig-out/bin/`**. A
+ReleaseFast timing taken after any plain `zig build` is therefore silently
+measuring Debug — it reported 8.7× slow once and looked plausible. Re-run
+`zig build -Doptimize=ReleaseFast` immediately before timing anything, and
+treat a suspiciously slow number as a stale binary before believing it.
+
 ## Commands
 
 ```sh
@@ -39,17 +72,39 @@ zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
 
 ```sh
 zig build run -- demo
+zig build run -- devices
+
+# library
 zig build run -- scan DATABASE ROOT
-zig build run -- analyze DATABASE AUDIO
+zig build run -- project DATABASE
+zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]
+zig build run -- analyze DATABASE AUDIO
+zig build run -- analyze-library DATABASE [--batch=N] [--cancel-after=MS]
+
+# browse
+zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
+zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
+zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
+zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+
+# playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
+zig build run -- play-tracks DATABASE IDS --device=ID [--start N] [--repeat MODE] [--shuffle] [--replay-gain=off|track]
 ```
 
 Frontends:
 
 ```sh
 ORCA_LIBRARY=/path/to/library.db zig build run-linux   # GTK4 frontend
+
+# Pin the output so an automated run cannot reach the speakers. Unset, the app
+# uses the device dropdown, which defaults to the system default -- device 0.
+ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1) zig build run-linux
 ```
+
+The app opens an output on first play, not at launch, so an idle window does
+not hold the user's default sink.
 
 macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
 `zig-out/lib/liborca` through a systemLibrary modulemap.
@@ -62,6 +117,42 @@ zig build pipewire-live-smoke   # opens a short silent stream on the user's Pipe
 ```
 
 Ordinary tests require no audio server.
+
+### Testing playback without making noise
+
+This project is developed on somebody's desk, and playback verification used to
+mean audible test tones firing while they worked. Do not play test audio to real
+hardware.
+
+```sh
+device=$(scripts/silent-sink.sh)
+zig build run -- play fixtures/audio/tagged-reference.flac "$device"
+```
+
+`scripts/silent-sink.sh` creates (idempotently) a `support.null-audio-sink`
+PipeWire node and prints its orca device id. It is a *real* sink: it consumes
+audio in real time and discards it, so quantum negotiation, render callbacks,
+epoch handling, position anchoring, underrun accounting and drain all behave
+exactly as on hardware. Verified against `ffprobe` — frame counts match the
+source exactly and the negotiated quantum tracks the sample rate (256 at 48 kHz,
+235 at 44.1 kHz), so timing-sensitive measurement on it is trustworthy.
+
+The id it prints is **orca's** device id, which is not the PipeWire node id —
+liborca's enumeration numbers devices itself. Resolve it through the script or
+`orca-cli devices`, never through `pw-dump`.
+
+Pass an index for a second, distinct silent sink. Multi-zone and device-attach
+tests need two different outputs, and reaching for real hardware to get the
+second one defeats the purpose:
+
+```sh
+zone_a=$(scripts/silent-sink.sh 1)
+zone_b=$(scripts/silent-sink.sh 2)
+```
+
+Note that **omitting the device argument is not silent**: device id 0 means the
+system default sink, which is real hardware. Pass an explicit device on every
+invocation, including throwaway checks.
 
 ### Running a single test
 
@@ -76,6 +167,31 @@ Tests are run from the repository root and load fixtures by relative path
 (`fixtures/audio/...`). Do not make test working-directory assumptions.
 
 ## Architecture
+
+### The rule that matters most
+
+**A capability is not done until it is reachable from `orca-cli` or the GUI
+through the public runtime/ABI path.** No exit criterion may be closed by a
+unit test against an isolated component.
+
+This is not a style preference. It is the rule whose absence produced the state
+this repository had to be recovered from: ~12,000 lines of well-tested,
+genuinely good components, a tag claiming a working music player, and no way to
+play music. Every subsystem was an island. The scanner wrote only
+`observed_files`; the `tracks` table was empty in any real database; playback
+existed solely as a stack-local path in one CLI subcommand; the GTK window had
+no row-activation handler. Each piece had passing tests.
+
+The same pattern keeps surfacing as the seams get built. `Gain.setReplayGain`
+existed, was correct, and was called by nothing. `fingerprint.findDuplicates`
+existed, was correct, was called by nothing, and was O(n²) over a slice that
+cannot be constructed at the target scale. Both were found by asking "what
+calls this?", which is the question a test never asks.
+
+So: when you finish something, run it. Through `orca-cli`, against real data if
+any exists, and look at the output. A green `zig build test` means the parts
+work. It says nothing about whether they are connected, and this codebase's
+characteristic defect lives exactly there.
 
 ### The non-negotiable boundary
 
@@ -131,8 +247,13 @@ second SPSC queue for producer-side reclamation. Missing audio is zero-filled
 and counted as an underrun.
 
 Related invariants: transport state is independent of physical output (seeks
-publish a new generation, and stale-generation blocks are discarded rather than
-surgically removed from the queue); Players decode canonical PCM once and
+publish a new **epoch**, and stale-epoch blocks are discarded rather than
+surgically removed from the queue). Track identity travels separately, as
+`entry_serial`, because the two questions are incompatible: "is this audio
+stale after a seek" must be compared, while "which track is this" must not be,
+or gapless breaks. What is *audible* is resolved from the entry serial the
+render callback publishes, never from the decode cursor, which runs a whole
+entry ahead of the audio; Players decode canonical PCM once and
 fanout copies it into independently owned Zone pools so one Zone's failure
 cannot starve another; processing chains are fixed-capacity and triple-buffered
 so the control lane publishes a prepared chain that the render lane adopts only
@@ -167,7 +288,11 @@ dependencies) over C libraries.
 
 Scanning is incremental and restart-resumable: unchanged path + storage
 identity skips all format/metadata work, commits are bounded, and cancellation
-is checked before filesystem work and between entries. Filesystem watchers are
+is checked before filesystem work and between entries. Because only changed
+bytes are probed, a library scanned before probing existed keeps null
+properties for ever; `library/property_backfill.zig` repairs those rows by
+`files.id` with no walk, selected through a partial index over exactly the rows
+that are incomplete, and reprojects each batch it repairs. Filesystem watchers are
 an *acceleration only* — they emit bounded, coalescing, root-scoped hints and
 never directly insert, remove, or mutate observed state. See `docs/storage.md`.
 

@@ -21,8 +21,11 @@ zig build run -- --version
 zig build run -- demo
 zig build run -- scan /tmp/orca.db /path/to/music
 zig build run -- analyze /tmp/orca.db /path/to/audio
+zig build run -- analyze-library /tmp/orca.db
 zig build run -- health /tmp/orca.db
-zig build run -- play /path/to/audio
+# The device argument is optional and defaults to 0, the system default sink.
+# `scripts/silent-sink.sh` prints one that discards audio, for automated runs.
+zig build run -- play /path/to/audio [DEVICE_ID]
 ORCA_LIBRARY=/path/to/library.db zig build run-linux
 zig build bench
 zig build -Doptimize=ReleaseFast dsp-bench

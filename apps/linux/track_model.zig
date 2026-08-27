@@ -158,73 +158,43 @@ pub fn new(summary: liborca.database.TrackSummary) ?*TrackObject {
 }
 
 // ---------------------------------------------------------------- sorting
-//
-// These sort the rows currently loaded. `libraryTrackPage` orders by Track id
-// and takes no sort key, so column sorting is page-local by construction.
 
-fn compareOptional(left: ?i64, right: ?i64) c_int {
-    const a = left orelse return if (right == null) 0 else 1;
-    const b = right orelse return -1;
-    if (a < b) return -1;
-    return if (a > b) 1 else 0;
-}
+/// The columns the track list shows, and the engine sort key behind each one.
+///
+/// A header click re-queries liborca with that key and starts again at the
+/// first page. Nothing here reorders rows that are already loaded: a page is a
+/// window onto a total order the engine owns, and sorting the window would sort
+/// a screenful of a listing that is thousands of rows long.
+pub const Column = enum(usize) {
+    // Carried as the cell factory's user-data pointer, so zero — which is NULL
+    // — is not an available value.
+    number = 1,
+    title,
+    artist,
+    album,
+    duration,
 
-fn compareText(left: [:0]const u8, right: [:0]const u8) c_int {
-    // Empty sorts last so unknown values do not head the list.
-    if (left.len == 0 and right.len != 0) return 1;
-    if (right.len == 0 and left.len != 0) return -1;
-    return gtk.g_utf8_collate(left.ptr, right.ptr);
-}
+    /// Declaration order, which is also the order the headers appear in and the
+    /// order `App.sort_columns` records them in.
+    pub const all = [_]Column{ .number, .title, .artist, .album, .duration };
 
-fn rows(a: ?*const anyopaque, b: ?*const anyopaque) struct { *TrackObject, *TrackObject } {
-    return .{
-        @ptrCast(@alignCast(@constCast(a.?))),
-        @ptrCast(@alignCast(@constCast(b.?))),
-    };
-}
+    pub fn sortKey(self: Column) liborca.database.TrackSort {
+        return switch (self) {
+            .number => .track_number,
+            .title => .title,
+            .artist => .artist,
+            .album => .album,
+            .duration => .duration,
+        };
+    }
+};
 
-fn compareTitle(a: ?*const anyopaque, b: ?*const anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    const pair = rows(a, b);
-    return compareText(pair[0].title(), pair[1].title());
-}
-
-fn compareArtist(a: ?*const anyopaque, b: ?*const anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    const pair = rows(a, b);
-    return compareText(pair[0].artist(), pair[1].artist());
-}
-
-fn compareAlbum(a: ?*const anyopaque, b: ?*const anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    const pair = rows(a, b);
-    return compareText(pair[0].album(), pair[1].album());
-}
-
-fn compareDuration(a: ?*const anyopaque, b: ?*const anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    const pair = rows(a, b);
-    return compareOptional(pair[0].fields().duration_ms, pair[1].fields().duration_ms);
-}
-
-fn compareNumber(a: ?*const anyopaque, b: ?*const anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    const pair = rows(a, b);
-    const discs = compareOptional(
-        pair[0].fields().disc_number orelse 0,
-        pair[1].fields().disc_number orelse 0,
-    );
-    if (discs != 0) return discs;
-    return compareOptional(pair[0].fields().track_number, pair[1].fields().track_number);
-}
-
-pub fn sorterTitle() *gtk.Sorter {
-    return gtk.gtk_custom_sorter_new(compareTitle, null, null);
-}
-pub fn sorterArtist() *gtk.Sorter {
-    return gtk.gtk_custom_sorter_new(compareArtist, null, null);
-}
-pub fn sorterAlbum() *gtk.Sorter {
-    return gtk.gtk_custom_sorter_new(compareAlbum, null, null);
-}
-pub fn sorterDuration() *gtk.Sorter {
-    return gtk.gtk_custom_sorter_new(compareDuration, null, null);
-}
-pub fn sorterNumber() *gtk.Sorter {
-    return gtk.gtk_custom_sorter_new(compareNumber, null, null);
+/// A sorter that makes every row equal.
+///
+/// `GtkColumnView` treats a column with no sorter as unsortable and refuses to
+/// let its header be clicked, and the click is the whole point — it is what
+/// tells the frontend which key to re-query with. No sort model consumes this,
+/// so it is never actually asked to compare anything.
+pub fn headerSorter() *gtk.Sorter {
+    return gtk.gtk_custom_sorter_new(null, null, null);
 }

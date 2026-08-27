@@ -71,7 +71,62 @@ pub const Database = struct {
     pub fn lastInsertRowId(self: Database) i64 {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
+
+    /// Register a deterministic, one-argument text function on this connection.
+    ///
+    /// This exists so a migration can call Zig from SQL. The artist key is
+    /// computed by one function in one place (`text_key.zig`); a backfill that
+    /// reimplemented that folding in SQL would be free to drift from what the
+    /// projection writes, and a drifted key is an artist who exists twice.
+    /// `SQLITE_DETERMINISTIC` is honest here: the folding depends on nothing
+    /// but its argument.
+    pub fn createTextFunction(
+        self: Database,
+        name: [:0]const u8,
+        context: ?*anyopaque,
+        function: TextFunction,
+    ) Error!void {
+        if (c.sqlite3_create_function_v2(
+            self.handle,
+            name.ptr,
+            1,
+            c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC,
+            context,
+            function,
+            null,
+            null,
+            null,
+        ) != c.SQLITE_OK) return error.SqlFailed;
+    }
 };
+
+pub const TextFunction = *const fn (
+    ?*c.sqlite3_context,
+    c_int,
+    [*c]?*c.sqlite3_value,
+) callconv(.c) void;
+
+/// The argument of a one-argument text function, as UTF-8 bytes.
+pub fn valueText(value: ?*c.sqlite3_value) []const u8 {
+    const raw = c.sqlite3_value_text(value);
+    if (raw == null) return "";
+    const len: usize = @intCast(c.sqlite3_value_bytes(value));
+    return @as([*]const u8, @ptrCast(raw))[0..len];
+}
+
+/// Hand a caller-owned slice back to SQLite, which copies it.
+pub fn resultText(context: ?*c.sqlite3_context, value: []const u8) void {
+    c.sqlite3_result_text(
+        context,
+        value.ptr,
+        @intCast(value.len),
+        @ptrFromInt(@as(usize, @bitCast(@as(isize, -1)))),
+    );
+}
+
+pub fn resultError(context: ?*c.sqlite3_context, message: [:0]const u8) void {
+    c.sqlite3_result_error(context, message.ptr, -1);
+}
 
 pub const Statement = struct {
     handle: *c.sqlite3_stmt,

@@ -9,21 +9,15 @@ const app = @import("app.zig");
 const scan = @import("scan.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
+const browse = @import("browse.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
+const Column = track_model.Column;
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
-
-const Column = enum(usize) {
-    number = 1,
-    title,
-    artist,
-    album,
-    duration,
-};
 
 fn columnData(column: Column) ?*anyopaque {
     return @ptrFromInt(@backingInt(column));
@@ -53,28 +47,33 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     const model = gtk.cast(gtk.ListModel, selection);
     const chosen = gtk.gtk_selection_model_get_selection(selection);
 
-    // Activation is not selection. A double-click inside a multi-row selection
-    // plays that selection as a queue starting at the activated row; anywhere
-    // else it plays just the row that was activated.
+    // Activation is not selection. Activating a multi-row selection plays that
+    // selection as a queue, from its first row.
+    //
+    // It used to start at the activated row, which sounds reasonable and is
+    // wrong for the way a selection is actually made. Selecting track 1 and
+    // shift-clicking track 11 leaves the cursor on 11, so GTK reports 11 as
+    // the activated position and pressing Enter began at the last track and
+    // reported the end of the queue on the next skip. The row that happens to
+    // hold the cursor is not the row the user means; the top of what they
+    // highlighted is.
     if (gtk.gtk_bitset_get_size(chosen) > 1 and gtk.gtk_bitset_contains(chosen, position) != 0) {
         defer gtk.gtk_bitset_unref(chosen);
         var ids: std.ArrayList(i64) = .empty;
         defer ids.deinit(self.allocator);
-        var start: u32 = 0;
         var iter: gtk.BitsetIter = .{};
         var index: c_uint = 0;
         var valid = gtk.gtk_bitset_iter_init_first(&iter, chosen, &index);
+        // A bitset iterates ascending, so this is the order the rows are shown
+        // in, which is the order the user highlighted them in.
         while (valid != 0) : (valid = gtk.gtk_bitset_iter_next(&iter, &index)) {
             const item = gtk.g_list_model_get_item(model, index) orelse continue;
             const row: *TrackObject = @ptrCast(@alignCast(item));
-            if (row.hasFile()) {
-                if (index == position) start = @intCast(ids.items.len);
-                ids.append(self.allocator, row.id()) catch {};
-            }
+            if (row.hasFile()) ids.append(self.allocator, row.id()) catch {};
             gtk.g_object_unref(item);
         }
         if (ids.items.len != 0)
-            transport.playIds(self, ids.items, start)
+            transport.playIds(self, ids.items, 0)
         else
             self.setStatus("None of the selected tracks has a playable file");
         return;
@@ -133,7 +132,6 @@ fn makeColumn(
     column: Column,
     width: c_int,
     expand: bool,
-    sorter: *gtk.Sorter,
 ) *gtk.ColumnViewColumn {
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCell), columnData(column));
@@ -142,17 +140,47 @@ fn makeColumn(
     gtk.gtk_column_view_column_set_resizable(result, gtk.true_);
     gtk.gtk_column_view_column_set_expand(result, if (expand) gtk.true_ else gtk.false_);
     if (width > 0) gtk.gtk_column_view_column_set_fixed_width(result, width);
+    const sorter = track_model.headerSorter();
     gtk.gtk_column_view_column_set_sorter(result, sorter);
     gtk.g_object_unref(sorter);
     return result;
+}
+
+/// A header click, turned into a new engine query.
+///
+/// The whole result is re-ordered and the listing restarts at its first page,
+/// because the alternative — reordering the rows already loaded — sorts one
+/// screenful of a listing that is 22,060 rows long and calls it sorted.
+fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.suppress_browse_signals) return;
+    const column_sorter = gtk.cast(gtk.ColumnViewSorter, sorter);
+    const primary = gtk.gtk_column_view_sorter_get_primary_sort_column(column_sorter);
+    self.browse.sort = .id;
+    self.browse.direction = .ascending;
+    if (primary) |chosen| {
+        for (Column.all, self.sort_columns) |column, header| {
+            if (header == chosen) self.browse.sort = column.sortKey();
+        }
+        self.browse.direction =
+            if (gtk.gtk_column_view_sorter_get_primary_sort_order(column_sorter) ==
+            gtk.SORT_DESCENDING) .descending else .ascending;
+    }
+    self.reload();
 }
 
 // -------------------------------------------------------------------- chrome
 
 fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
+    if (self.suppress_browse_signals) return;
     const text = gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry));
-    self.setQuery(std.mem.span(text));
+    self.query.set(self.allocator, std.mem.span(text));
+    // A text match and a browse scope are alternatives to liborca, so a search
+    // takes the listing over rather than narrowing what a pane already chose.
+    // The Artist pane's filter is untouched: it says which Artists are listed,
+    // not which tracks, so it survives a search that clears the selection.
+    if (self.query.value.len != 0) browse.clearScope(self);
     self.reload();
 }
 
@@ -216,6 +244,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_header_bar_pack_start(gtk.cast(gtk.HeaderBar, header), add_folder);
 
     const search = gtk.gtk_search_entry_new();
+    self.search_entry = gtk.cast(gtk.Editable, search);
     gtk.gtk_widget_set_size_request(search, 320, -1);
     gtk.gtk_widget_set_tooltip_text(search, "Search the library");
     _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
@@ -256,35 +285,36 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_header_bar_pack_end(gtk.cast(gtk.HeaderBar, header), drop_down);
     gtk.gtk_window_set_titlebar(self.window.?, header);
 
-    // The model chain: an owned page store, sorted for the visible columns,
-    // multi-selectable so a run of tracks can be activated as a queue.
+    // The model chain: an owned page store, multi-selectable so a run of tracks
+    // can be activated as a queue. Deliberately *not* wrapped in a
+    // `GtkSortListModel` — the rows in the store are one page of an order the
+    // engine already decided, and a sort model would reshuffle that page.
     self.tracks = gtk.g_list_store_new(track_model.getType());
-    self.sorted = gtk.gtk_sort_list_model_new(
-        gtk.cast(gtk.ListModel, gtk.g_object_ref(self.tracks)),
-        null,
-    );
     self.selection = gtk.gtk_multi_selection_new(
-        gtk.cast(gtk.ListModel, gtk.g_object_ref(self.sorted)),
+        gtk.cast(gtk.ListModel, gtk.g_object_ref(self.tracks)),
     );
     const view = gtk.gtk_column_view_new(self.selection);
     self.column_view = gtk.cast(gtk.ColumnView, view);
     gtk.gtk_column_view_set_show_column_separators(self.column_view.?, gtk.false_);
     gtk.gtk_column_view_set_reorderable(self.column_view.?, gtk.true_);
-    gtk.gtk_sort_list_model_set_sorter(
-        self.sorted.?,
-        gtk.gtk_column_view_get_sorter(self.column_view.?),
-    );
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), self);
+    _ = gtk.signalConnect(
+        gtk.gtk_column_view_get_sorter(self.column_view.?),
+        "changed",
+        gtk.callback(sortChanged),
+        self,
+    );
 
-    const columns: [5]*gtk.ColumnViewColumn = .{
-        makeColumn("#", .number, 64, false, track_model.sorterNumber()),
-        makeColumn("Title", .title, 320, true, track_model.sorterTitle()),
-        makeColumn("Artist", .artist, 220, true, track_model.sorterArtist()),
-        makeColumn("Album", .album, 220, true, track_model.sorterAlbum()),
-        makeColumn("Length", .duration, 80, false, track_model.sorterDuration()),
+    const columns: [Column.all.len]*gtk.ColumnViewColumn = .{
+        makeColumn("#", .number, 64, false),
+        makeColumn("Title", .title, 320, true),
+        makeColumn("Artist", .artist, 220, true),
+        makeColumn("Album", .album, 220, true),
+        makeColumn("Length", .duration, 80, false),
     };
-    for (columns) |column| {
+    for (columns, 0..) |column, index| {
         gtk.gtk_column_view_append_column(self.column_view.?, column);
+        self.sort_columns[index] = column;
         gtk.g_object_unref(column);
     }
 
@@ -299,8 +329,19 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
         self,
     );
 
+    // Browser beside listing: the panes scope what the track list asks liborca
+    // for, and the divider is the user's to move.
+    const split = gtk.gtk_paned_new(gtk.ORIENTATION_HORIZONTAL);
+    gtk.gtk_paned_set_start_child(gtk.cast(gtk.Paned, split), browse.build(self));
+    gtk.gtk_paned_set_end_child(gtk.cast(gtk.Paned, split), scroller);
+    gtk.gtk_paned_set_position(gtk.cast(gtk.Paned, split), 300);
+    gtk.gtk_paned_set_resize_start_child(gtk.cast(gtk.Paned, split), gtk.false_);
+    gtk.gtk_paned_set_shrink_start_child(gtk.cast(gtk.Paned, split), gtk.false_);
+    gtk.gtk_paned_set_shrink_end_child(gtk.cast(gtk.Paned, split), gtk.false_);
+    gtk.gtk_widget_set_vexpand(split, gtk.true_);
+
     const layout = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), scroller);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), split);
     gtk.gtk_box_append(gtk.cast(gtk.Box, layout), scan.build(self));
 
     const status_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
@@ -345,30 +386,41 @@ fn queueShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         gtk.gtk_string_list_append(rows, "The queue is empty");
         return;
     };
-    var entries: [app.page_size]liborca.core.runtime.TrackRef = undefined;
-    const count = self.runtime.playerQueuePage(self.player, 0, &entries) catch 0;
-    if (count == 0) {
+    // The engine resolves the queue's rows. This used to search the loaded
+    // track model for each entry and print "Track 14732" when it missed --
+    // metadata resolution in the frontend, and a linear scan of every loaded
+    // row per queue entry, which on a fully scrolled library was over a
+    // million iterations with a ref/unref each.
+    var page = self.runtime.playerQueueTracks(
+        self.player,
+        self.allocator,
+        0,
+        app.page_size,
+    ) catch {
+        gtk.gtk_string_list_append(rows, "The queue is empty");
+        return;
+    };
+    defer page.deinit();
+    if (page.items.len == 0) {
         gtk.gtk_string_list_append(rows, "The queue is empty");
         return;
     }
     var buffer: [640]u8 = undefined;
-    for (entries[0..count], 0..) |entry, index| {
+    for (page.items, 0..) |entry, index| {
         const position: u32 = @intCast(index);
         const marker: []const u8 = if (position == status.queue_index) "▶ " else "";
-        // The queue carries a Track id and nothing else, so the title is
-        // resolved from rows already loaded. Ids outside the loaded page render
-        // as the id.
-        const line = if (self.knownTitle(entry.track_id)) |title|
+        const line = if (entry.artist.len == 0)
             strings.printZ(&buffer, "{s}{d}. {s}", .{
                 marker,
                 position + 1,
-                title,
+                entry.title,
             }) catch continue
         else
-            strings.printZ(&buffer, "{s}{d}. Track {d}", .{
+            strings.printZ(&buffer, "{s}{d}. {s} — {s}", .{
                 marker,
                 position + 1,
-                entry.track_id,
+                entry.title,
+                entry.artist,
             }) catch continue;
         gtk.gtk_string_list_append(rows, line.ptr);
     }

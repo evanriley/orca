@@ -1,11 +1,14 @@
 const std = @import("std");
+const analysis_service = @import("../analysis/service.zig");
 const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
 const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
+const metadata = @import("../metadata/root.zig");
 const object = @import("object.zig");
+const storage = @import("../storage/root.zig");
 const track_source = @import("track_source.zig");
 const work = @import("work.zig");
 
@@ -88,6 +91,28 @@ pub const ScanRequest = struct {
     batch_size: usize = 256,
 };
 
+pub const BackfillRequest = struct {
+    batch_size: usize = 256,
+    /// Re-probe rows that already declare properties. See
+    /// `library.PropertyBackfill.force` for why this is not the default.
+    force: bool = false,
+};
+
+pub const AnalysisRequest = struct {
+    /// Files per selected page and per bounded commit. Small on purpose: see
+    /// `library.LibraryAnalysis.batch_size`.
+    batch_size: usize = 32,
+};
+
+/// Everything a job worker needs that is not the Library or the kind. One
+/// struct rather than a widening parameter list, because every kind takes a
+/// bounded batch size and each takes at most one thing besides.
+const WorkerRequest = struct {
+    root_id: ?i64 = null,
+    batch_size: usize = 256,
+    force: bool = false,
+};
+
 /// What a scan job observed, mirroring `scanner.Result` plus what the
 /// projection made of it. A scan has no honest denominator until its walk
 /// finishes, so there is a count of files processed and no total.
@@ -156,6 +181,7 @@ const JobWorker = struct {
     kind: job.Kind,
     root_id: ?i64,
     batch_size: usize,
+    force: bool,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -178,6 +204,8 @@ const JobWorker = struct {
         switch (self.kind) {
             .scan => self.runScan(),
             .projection => self.runProjection(),
+            .property_backfill => self.runPropertyBackfill(),
+            .analysis => self.runAnalysis(),
             else => self.failed.store(true, .release),
         }
     }
@@ -196,6 +224,83 @@ const JobWorker = struct {
             return;
         };
         self.noteProjection(result);
+    }
+
+    /// Repairs `files` rows with missing properties and reprojects each batch.
+    ///
+    /// The reprojection is not optional and not the caller's to sequence:
+    /// `tracks.duration_ms` is *derived* from the file rows, so a backfill
+    /// that repaired the files and left the Tracks reading zero would have
+    /// fixed nothing a user can see. It is scoped to the repaired ids, exactly
+    /// as a scan batch is, so repairing 104 rows reprojects the handful of
+    /// folders they live in rather than the whole library.
+    fn runPropertyBackfill(self: *JobWorker) void {
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        var backfill: library_pass.PropertyBackfill = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .files = &self.database.files,
+            .health_issues = &self.database.health_issues,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+            .force = self.force,
+            .projection = &pass,
+        };
+        defer backfill.deinit();
+        const result = backfill.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.changed, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
+        self.noteProjection(result.projection);
+    }
+
+    /// Decodes every file the Library has not measured yet and stores the
+    /// result.
+    ///
+    /// Nothing is reprojected afterwards, and that is not an omission: a
+    /// backfill repairs `files` columns the projection derives Tracks from,
+    /// while this writes analysis results and an audio hash, which the
+    /// projection does not read. Reprojecting here would be work with no
+    /// output.
+    fn runAnalysis(self: *JobWorker) void {
+        var pass: library_pass.LibraryAnalysis = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .files = &self.database.files,
+            .analysis_cache = &self.database.analysis_cache,
+            .health_issues = &self.database.health_issues,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.changed, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
     }
 
     fn runScan(self: *JobWorker) void {
@@ -307,6 +412,25 @@ pub const PlayerStatus = struct {
 
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
+/// Open one file and read the cover image out of it.
+///
+/// A file the Library still lists but the filesystem no longer has is null,
+/// not an error. The Library's record of where a file is is only as fresh as
+/// the last scan, and reconciling that is the scanner's job — an artwork query
+/// is a read and must not start writing `missing` states from under it.
+fn readEmbeddedArtwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri: []const u8,
+) !?metadata.EmbeddedImage {
+    var local = storage.LocalFileSource.open(io, uri) catch |err| switch (err) {
+        error.FileNotFound, error.BadPathName, error.AccessDenied, error.IsDir => return null,
+        else => return err,
+    };
+    defer local.close();
+    return metadata.artwork.read(allocator, local.readable());
+}
+
 pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
     state: std.atomic.Value(State) = .init(.running),
@@ -486,11 +610,162 @@ pub const OrcaRuntime = struct {
         limit: u32,
         offset: u32,
     ) !database.TrackPage {
+        return self.libraryTrackQuery(library, query, .{ .limit = limit, .offset = offset });
+    }
+
+    /// The browse listing: a bounded page of Tracks in a caller-named order,
+    /// optionally scoped to one Artist or one Release.
+    ///
+    /// A full-text `query` and a relational filter are alternatives, not a
+    /// combination: FTS5 orders by relevance, which no sort key or `tracks.id`
+    /// tiebreaker can reconcile with. Asking for both is a caller bug rather
+    /// than a silently-ignored argument.
+    pub fn libraryTrackQuery(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        text_query: []const u8,
+        page_query: database.TrackQuery,
+    ) !database.TrackPage {
         const tracks = &(try self.libraryDatabase(library)).tracks;
-        return if (query.len == 0)
-            tracks.page(self.allocator, limit, offset)
-        else
-            tracks.search(self.allocator, query, limit, offset);
+        if (text_query.len == 0) return tracks.page(self.allocator, page_query);
+        if (page_query.artist_id != null or page_query.release_id != null)
+            return error.SearchDoesNotFilter;
+        return tracks.search(self.allocator, text_query, page_query.limit, page_query.offset);
+    }
+
+    pub fn libraryTrackMatchCount(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.TrackQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).tracks.countMatching(query);
+    }
+
+    pub fn libraryArtistCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).artists.count();
+    }
+
+    pub fn libraryArtistPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ArtistQuery,
+    ) !database.ArtistPage {
+        return (try self.libraryDatabase(library)).artists.page(self.allocator, query);
+    }
+
+    /// How many Artists `libraryArtistPage` would return for the same query.
+    /// A browser cannot show a total otherwise, and paging to exhaustion to
+    /// count is what a bounded page exists to avoid.
+    pub fn libraryArtistCountMatching(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ArtistQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).artists.countMatching(query);
+    }
+
+    /// How many Releases `libraryReleasePage` would return for the same query.
+    pub fn libraryReleaseCountMatching(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ReleaseQuery,
+    ) !u64 {
+        return (try self.libraryDatabase(library)).releases.countMatching(query);
+    }
+
+    pub fn libraryArtist(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        artist_id: i64,
+    ) !?database.ArtistSummary {
+        return (try self.libraryDatabase(library)).artists.byId(self.allocator, artist_id);
+    }
+
+    pub fn libraryReleaseCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).releases.count();
+    }
+
+    pub fn libraryReleasePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        query: database.ReleaseQuery,
+    ) !database.ReleasePage {
+        return (try self.libraryDatabase(library)).releases.page(self.allocator, query);
+    }
+
+    pub fn libraryRelease(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+    ) !?database.ReleaseSummary {
+        return (try self.libraryDatabase(library)).releases.byId(self.allocator, release_id);
+    }
+
+    /// The cover image embedded in a Track's file, or null when it has none.
+    ///
+    /// Caller-owned bytes plus the media type those bytes actually are; free
+    /// with `EmbeddedImage.deinit`. Read from the file on every call, and
+    /// deliberately not cached and deliberately not stored: see
+    /// `docs/metadata.md` for the measurements behind both decisions.
+    ///
+    /// A Track with no file, a file that has since gone, and a file with no
+    /// cover are all the same answer — null. None of them is a failure a host
+    /// should surface, and a missing cover is not a reason to fail a query the
+    /// caller made about a track it can still play.
+    pub fn libraryTrackArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        track_id: i64,
+    ) !?metadata.EmbeddedImage {
+        const tracks = &(try self.libraryDatabase(library)).tracks;
+        const resolved = (try tracks.playableLocation(self.allocator, track_id)) orelse
+            return null;
+        defer resolved.deinit();
+        return readEmbeddedArtwork(self.allocator, io, resolved.uri);
+    }
+
+    /// How many of a Release's Tracks are opened before it is reported as
+    /// having no usable cover.
+    ///
+    /// Only files the last scan observed artwork in are candidates at all, so
+    /// this bound is reached only when a Release's leading tracks each declare
+    /// a cover that no longer reads — a re-tagged file, a rejected image. Eight
+    /// is generous for that and still bounded; without a bound, one Release
+    /// with a hundred broken tracks would open a hundred files to answer "no".
+    pub const max_release_artwork_candidates: usize = 8;
+
+    /// The cover image for a Release, or null when none of its files has one.
+    ///
+    /// **A Release's artwork is its first track's, in listening order.** Real
+    /// tag data disagrees within an album — different sizes, different crops,
+    /// per-track covers on compilations — so the rule has to pick, and the
+    /// three properties that matter are that it be *stable* across runs,
+    /// *cheap*, and *the one a person would expect*. Ordering by disc, track
+    /// number and then id is the unique order `tracks_position` already
+    /// enforces, so the same Release yields the same cover every time; it costs
+    /// one indexed query plus one file open; and the front cover on track one
+    /// is the album cover in every collection anyone actually has.
+    ///
+    /// The alternatives were rejected for failing one of those: a majority vote
+    /// would have to read every file in the Release, and "the largest image"
+    /// would too, and both change their answer when one track is re-tagged.
+    pub fn libraryReleaseArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        release_id: i64,
+    ) !?metadata.EmbeddedImage {
+        const tracks = &(try self.libraryDatabase(library)).tracks;
+        var candidates: [max_release_artwork_candidates]i64 = undefined;
+        const count = try tracks.artworkCandidatesInto(release_id, &candidates);
+        for (candidates[0..count]) |track_id| {
+            // A candidate whose cover will not read is skipped rather than
+            // fatal: the next track's cover is the same album's.
+            const image = self.libraryTrackArtwork(library, io, track_id) catch continue;
+            if (image) |present| return present;
+        }
+        return null;
     }
 
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -541,9 +816,13 @@ pub const OrcaRuntime = struct {
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
         self.stopEngine(try self.players.get(player));
-        self.joinWorkersBeforeDestroy();
-        self.reapStoppedEngines();
-        self.finalizeDrainedJobWorkers();
+        // Join only the workers bound to this Player. This used to drain the
+        // whole registry, which cancelled every *other* Player's engine and
+        // every running scan job as a side effect of destroying one Player --
+        // the other engines respawned on their next load, so it read as a
+        // stutter rather than as the fault it was, and an in-flight scan was
+        // simply lost.
+        self.work_registry.drainOwner(playerOwnerTag(player));
         const removed = try self.players.remove(player);
         self.freePlayerObject(removed);
         // Detaching also closes each Zone's output: an OutputSession whose
@@ -926,6 +1205,16 @@ pub const OrcaRuntime = struct {
         engine.discardPending();
         const object_value = try self.players.get(player);
         try object_value.queue.replace(refs, start);
+        // `replace` has already destroyed whatever this Player was playing, so
+        // a start that cannot open its first entry has no consistent state to
+        // fall back to. Leaving the transport running would advertise a
+        // now-playing track that is not playing and cannot be made to play.
+        // Unwind to genuinely stopped instead.
+        errdefer {
+            object_value.player.stop();
+            object_value.player.releaseSources();
+            object_value.queue.clear();
+        }
         try loadCursor(object_value);
         object_value.player.play();
     }
@@ -1185,7 +1474,7 @@ pub const OrcaRuntime = struct {
             .player_processor = object_state.gain.processor(),
         });
         errdefer engine.destroy();
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(playerOwnerTag(player));
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         // `complete` waits for the worker, so a registration whose thread never
         // started has to be marked finished or the wait would never return.
@@ -1326,31 +1615,85 @@ pub const OrcaRuntime = struct {
         library: LibraryHandle,
         request: ScanRequest,
     ) !JobHandle {
-        return self.startJobWorker(library, .scan, request);
+        return self.startJobWorker(library, .scan, .{
+            .root_id = request.root_id,
+            .batch_size = request.batch_size,
+        });
     }
 
     pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
         return self.startJobWorker(library, .projection, .{});
     }
 
+    /// Starts the property backfill: probes the headers of `files` rows whose
+    /// declared audio properties are missing, and reprojects each repaired
+    /// batch so the Tracks derived from them stop reading zero.
+    ///
+    /// Unlike a scan this job has an honest denominator before it starts —
+    /// which rows still owe a probe is one indexed count — so its snapshot
+    /// carries a total and a host may show a fraction.
+    pub fn startLibraryPropertyBackfill(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: BackfillRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .property_backfill, .{
+            .batch_size = request.batch_size,
+            .force = request.force,
+        });
+    }
+
+    /// Starts the library-wide analysis: decodes every file the Library has
+    /// not measured yet and stores its loudness, peak, clipping, silence,
+    /// waveform and temporal fingerprint.
+    ///
+    /// Like the backfill and unlike a scan it has an honest denominator before
+    /// it starts, so its snapshot carries a total. Unlike either, one unit of
+    /// its work is a whole file decoded end to end, which is why it is
+    /// cancellable and resumable rather than merely interruptible: a host is
+    /// expected to stop it and start it again.
+    ///
+    /// There is no force mode, deliberately. A backfill needs one because a
+    /// re-probe writes the same numbers and so cannot be told apart from a
+    /// stale one; an analysis result carries its algorithm version, its
+    /// parameters and the identity of the bytes it was taken from, so every
+    /// reason to measure a file again is already a reason the selection sees.
+    pub fn startLibraryAnalysis(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: AnalysisRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .analysis, .{
+            .batch_size = request.batch_size,
+        });
+    }
+
     fn startJobWorker(
         self: *OrcaRuntime,
         library: LibraryHandle,
         kind: job.Kind,
-        request: ScanRequest,
+        request: WorkerRequest,
     ) !JobHandle {
         try self.requireRunning();
         if (request.batch_size == 0) return error.InvalidBatchSize;
         const library_database = try self.libraryDatabase(library);
         self.pruneRetiredJobWorkers();
 
+        const total_units: ?u64 = switch (kind) {
+            .property_backfill => try library_database.files
+                .incompletePropertiesCount(request.force),
+            .analysis => try library_database.files.unanalyzedCount(
+                analysis_service.diagnosticsSelector(.{}),
+            ),
+            else => null,
+        };
         const worker = try self.allocator.create(JobWorker);
         errdefer self.allocator.destroy(worker);
-        const job_handle = try self.jobs.create(kind, null);
+        const job_handle = try self.jobs.create(kind, total_units);
         errdefer self.jobs.finish(job_handle, .failed) catch {};
         try self.jobs.start(job_handle);
 
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(work.unowned);
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         errdefer {
             registration.finish();
@@ -1366,6 +1709,7 @@ pub const OrcaRuntime = struct {
             .kind = kind,
             .root_id = request.root_id,
             .batch_size = request.batch_size,
+            .force = request.force,
         };
         try self.job_workers.append(self.allocator, worker);
         errdefer _ = self.job_workers.pop();
@@ -1536,6 +1880,48 @@ pub const OrcaRuntime = struct {
         return count;
     }
 
+    /// One bounded page of the queue, as the rows a host displays.
+    ///
+    /// `playerQueuePage` hands back `TrackRef`s, which carry an id and nothing
+    /// a person can read. The GTK queue pane consequently resolved titles from
+    /// whichever library rows it happened to have loaded and printed
+    /// "Track 14732" for the rest -- a frontend growing its own metadata
+    /// resolution, which is the one thing frontends here must never do.
+    ///
+    /// Returned in queue order, so entry `n` of the result is queue position
+    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    pub fn playerQueueTracks(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        allocator: std.mem.Allocator,
+        offset: u32,
+        limit: u32,
+    ) !database.TrackPage {
+        try self.requireRunning();
+        if (limit == 0 or limit > database.repository.max_page)
+            return error.PageOutOfRange;
+        const object_value = try self.players.get(player);
+        const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
+        const library = opener.library;
+        const library_database = try self.libraryDatabase(library);
+
+        var rows: std.ArrayList(database.TrackSummary) = .empty;
+        errdefer {
+            for (rows.items) |item| item.deinit(allocator);
+            rows.deinit(allocator);
+        }
+        var index: u32 = 0;
+        while (index < limit) : (index += 1) {
+            const ref = object_value.queue.refAt(offset + index) orelse break;
+            // A queue entry whose Track has since been removed keeps its place
+            // rather than silently shortening the queue the host is showing.
+            const summary = try library_database.tracks.byId(allocator, ref.track_id) orelse
+                continue;
+            try rows.append(allocator, summary);
+        }
+        return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
+    }
+
     /// The Library this Player resolves its queue through, if it is bound.
     pub fn playerLibrary(self: *OrcaRuntime, player: PlayerHandle) !?LibraryHandle {
         try self.requireRunning();
@@ -1559,6 +1945,52 @@ pub const OrcaRuntime = struct {
     pub fn playerVolume(self: *OrcaRuntime, player: PlayerHandle) !f32 {
         try self.requireRunning();
         return (try self.players.get(player)).gain.linear.load(.acquire);
+    }
+
+    /// Whether entries are decoded with their own loudness correction.
+    ///
+    /// Takes effect as soon as the audio already decoded ahead of the listener
+    /// drains — a fraction of a second, not the rest of the track. The decode
+    /// lane reads the mode per canonical block, so a host that turns
+    /// correction off hears it happen rather than wondering whether the
+    /// control did anything. The level then steps rather than ramping: the
+    /// correction changes by however much the entry was being corrected, and
+    /// that step is the answer to an explicit request.
+    pub fn playerSetReplayGainMode(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        mode: audio.processing.ReplayGainMode,
+    ) !void {
+        try self.requireRunning();
+        (try self.players.get(player)).player.replay_gain_mode.store(mode, .release);
+    }
+
+    pub fn playerReplayGainMode(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+    ) !audio.processing.ReplayGainMode {
+        try self.requireRunning();
+        return (try self.players.get(player)).player.replay_gain_mode.load(.acquire);
+    }
+
+    /// What the audio currently audible is being multiplied by: user volume
+    /// times the loudness correction of the *audible* entry.
+    ///
+    /// The two halves come from two places because they are applied in two
+    /// places. Volume is one Player-scope node; the correction belongs to the
+    /// audio and is applied by the session that decoded it, which is what
+    /// makes a gapless transition correct. This resolves the correction
+    /// through the same audible entry serial that identity, duration and
+    /// position resolve through, so all four describe one entry.
+    ///
+    /// Distinct from `playerVolume` on purpose. A host shows the volume it was
+    /// given; this is what the audio is being multiplied by, and the two
+    /// differing is exactly what "ReplayGain is doing something" looks like.
+    pub fn playerEffectiveGain(self: *OrcaRuntime, player: PlayerHandle) !f32 {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        return object_value.gain.linear.load(.acquire) *
+            object_value.player.effectiveReplayGain();
     }
 
     /// Seek in wall-clock milliseconds. The frame conversion needs the loaded
@@ -1624,7 +2056,7 @@ pub const OrcaRuntime = struct {
     /// handle. The worker only ever touches its own `work.Registration`.
     pub fn startDummyWork(self: *OrcaRuntime) !WorkHandle {
         try self.requireRunning();
-        const work_handle = try self.work_registry.begin();
+        const work_handle = try self.work_registry.begin(work.unowned);
         const registration = self.work_registry.registration(work_handle) catch unreachable;
         registration.thread = std.Thread.spawn(
             .{},
@@ -1735,6 +2167,13 @@ pub const OrcaRuntime = struct {
     /// yet scoped per object, so a destroy conservatively cancels and joins
     /// every registered worker. Narrowing this to the workers that actually
     /// hold the destroyed object is a later refinement, never a relaxation.
+    /// Identifies a Player to the work registry. Generation is part of the
+    /// tag, so a registration left by a destroyed Player can never match the
+    /// later occupant of the same slot.
+    fn playerOwnerTag(player: PlayerHandle) u64 {
+        return (@as(u64, player.index) << 32) | @as(u64, player.generation);
+    }
+
     fn joinWorkersBeforeDestroy(self: *OrcaRuntime) void {
         self.cancelJobWorkers();
         self.work_registry.requestCancellation();
@@ -1877,7 +2316,7 @@ test "shutdown cannot return while a worker still uses a runtime object" {
     defer runtime.deinit();
 
     const player = try runtime.createPlayer();
-    const work_handle = try runtime.work_registry.begin();
+    const work_handle = try runtime.work_registry.begin(work.unowned);
     var worker: BlockingRuntimeWorker = .{
         .registration = try runtime.work_registry.registration(work_handle),
         .player = (try runtime.players.get(player)).player,
@@ -1897,12 +2336,43 @@ test "shutdown cannot return while a worker still uses a runtime object" {
     try std.testing.expectError(error.RuntimeNotRunning, runtime.playerSnapshot(player));
 }
 
+test "destroying one Player leaves other Players and unrelated work running" {
+    // Destroying a Player used to drain the entire work registry. Every other
+    // Player's engine thread was cancelled and joined as collateral, and any
+    // scan in flight was cancelled with them. The engines respawned on their
+    // next load, which is why this looked like a stutter instead of a fault.
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const keeper = try runtime.createPlayer();
+    const doomed = try runtime.createPlayer();
+    _ = try runtime.ensureEngine(keeper);
+    _ = try runtime.ensureEngine(doomed);
+    // Work unbound to any Player: a scan must outlive a Player being destroyed,
+    // because it never touches one.
+    const unrelated = try runtime.startDummyWork();
+    try std.testing.expectEqual(@as(usize, 3), runtime.inFlightWorkCount());
+
+    try runtime.destroyPlayer(doomed);
+
+    try std.testing.expectError(error.StaleHandle, runtime.players.get(doomed));
+    try std.testing.expect((try runtime.players.get(keeper)).engine != null);
+    // Exactly the destroyed Player's registration was retired.
+    try std.testing.expectEqual(@as(usize, 2), runtime.inFlightWorkCount());
+    try std.testing.expect(!try runtime.work_registry.cancellationRequested(unrelated));
+
+    try runtime.completeDummyWork(unrelated);
+}
+
 test "destroying a Player joins workers before freeing it" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
 
     const player = try runtime.createPlayer();
-    const work_handle = try runtime.work_registry.begin();
+    const work_handle = try runtime.work_registry.begin(OrcaRuntime.playerOwnerTag(player));
     var worker: BlockingRuntimeWorker = .{
         .registration = try runtime.work_registry.registration(work_handle),
         .player = (try runtime.players.get(player)).player,
@@ -2010,6 +2480,37 @@ test "runtime Zone policies and failures remain independent" {
     );
 }
 
+/// A wall-clock bound for a test that is waiting on another thread.
+///
+/// The waits here counted `std.Thread.yield()` calls, and a count of yields is
+/// not a duration. On a loaded machine 8,000 yields elapse in a small fraction
+/// of the time an engine needs to open an output, so
+/// "…actually renders" failed intermittently with `expected .active, found
+/// .closed` — the engine had not finished, not misbehaved. Load made it worse,
+/// which is the signature of this mistake and the reason it survived: it is
+/// green on an idle machine, and green is what people check.
+///
+/// Time is what these tests are waiting for, so time is what bounds them. The
+/// sleep also stops a spin-wait from competing with the very thread it is
+/// waiting for.
+const TestDeadline = struct {
+    remaining_ms: u64,
+
+    fn init(milliseconds: u64) TestDeadline {
+        return .{ .remaining_ms = milliseconds };
+    }
+
+    /// Sleeps a millisecond and reports whether there is time left. Written as
+    /// a loop condition: `while (!ready and deadline.tick()) {}`.
+    fn tick(self: *TestDeadline) bool {
+        if (self.remaining_ms == 0) return false;
+        self.remaining_ms -= 1;
+        const duration: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&duration, null);
+        return true;
+    }
+};
+
 test "a runtime Player and Zone form one object graph that actually renders" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
@@ -2030,9 +2531,9 @@ test "a runtime Player and Zone form one object graph that actually renders" {
 
     // The Zone's own OutputSession is what the engine opens — nothing about
     // playback lives on a caller frame any more.
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
     var waited: usize = 0;
-    while (try runtime.zoneOutputState(zone) != .active and waited < 8000) : (waited += 1)
-        std.Thread.yield() catch {};
     try std.testing.expectEqual(
         audio.zone.OutputState.active,
         try runtime.zoneOutputState(zone),
@@ -2116,9 +2617,8 @@ test "destroying a Zone is acknowledged by the engine before its path is freed" 
     try runtime.zoneRequestOutput(removed, 0);
     try runtime.playPlayer(player);
 
-    var waited: usize = 0;
-    while (try runtime.zoneOutputState(removed) != .active and waited < 8000) : (waited += 1)
-        std.Thread.yield() catch {};
+    var removed_deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(removed) != .active and removed_deadline.tick()) {}
     try std.testing.expectEqual(@as(usize, 2), backend.stream_count);
 
     // No global work drain here: removal is published to the engine and the
@@ -2183,7 +2683,7 @@ fn openFixtureLibrary(
             .title = try std.fmt.bufPrint(&title_buffer, "Entry {d}", .{index}),
             .preferred_file_id = file_id,
         }});
-        var page = try library_database.tracks.page(std.testing.allocator, 1, @intCast(index));
+        var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = @intCast(index) });
         defer page.deinit();
         ids[index] = page.items[0].id;
     }
@@ -2386,7 +2886,7 @@ test "a track with no file behind it fails typed through the command lane" {
     );
     const library_database = try runtime.libraryDatabase(library);
     try library_database.tracks.upsertTracks(&.{.{ .title = "Orphan" }});
-    var page = try library_database.tracks.page(std.testing.allocator, 1, 0);
+    var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = 0 });
     defer page.deinit();
     const player = try runtime.createPlayer();
     try runtime.playerBindLibrary(player, library, std.testing.io);
@@ -2442,4 +2942,159 @@ test "destroying a Library releases every Player bound to it" {
         @as(u32, 1),
         (try runtime.playerQueueSnapshot(player)).entries,
     );
+}
+
+// ----------------------------------------------------------- artwork tests
+
+/// A Release whose Tracks point at real fixture files and whose observed tags
+/// record what those files actually carry, so the candidate query is exercised
+/// against the same columns a scan writes.
+fn openArtworkLibrary(
+    runtime: *OrcaRuntime,
+    uri: [:0]const u8,
+    paths: []const []const u8,
+) !struct { library: LibraryHandle, release_id: i64, ids: [4]i64 } {
+    const library = try runtime.openLibrary(std.testing.io, uri);
+    const library_database = try runtime.libraryDatabase(library);
+    const volume_id = try library_database.volumes.ensure(.{
+        .stable_key = "uuid:artwork-fixture",
+        .label = "Fixtures",
+    });
+    const release_id = try library_database.releases.upsert(.{
+        .release_key = "artwork-fixture",
+        .title = "Covered",
+    });
+    var ids: [4]i64 = @splat(0);
+    for (paths, 0..) |path, index| {
+        const file_id = try library_database.files.create(.{
+            .audio_format = 1,
+            .size_bytes = 1024,
+        });
+        _ = try library_database.locations.upsert(.{
+            .file_id = file_id,
+            .volume_id = volume_id,
+            .uri = path,
+        });
+        // Exactly what a scan of this file would have observed.
+        var file = try storage.LocalFileSource.open(std.testing.io, path);
+        defer file.close();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        // Through the payload offset, as the scanner does: one of these
+        // fixtures is a FLAC stream behind an ID3v2 tag.
+        const detection = (try storage.format.detect(file.readable())).?;
+        var tag_view: storage.OffsetSource = .{
+            .inner = file.readable(),
+            .offset = detection.payload_offset,
+        };
+        const observed = try library_pass.tag_reader.read(
+            arena.allocator(),
+            detection.format,
+            if (detection.payload_offset == 0) file.readable() else tag_view.readable(),
+        );
+        try library_database.observed_tags.upsertBatch(&.{.{
+            .file_id = file_id,
+            .values = if (observed) |tags| tags.values else .{},
+        }});
+        if (observed) |tags| tags.deinit();
+
+        var title_buffer: [32]u8 = undefined;
+        try library_database.tracks.upsertTracks(&.{.{
+            .title = try std.fmt.bufPrint(&title_buffer, "Entry {d}", .{index}),
+            .release_id = release_id,
+            .track_number = @intCast(index + 1),
+            .preferred_file_id = file_id,
+        }});
+        var page = try library_database.tracks.page(
+            std.testing.allocator,
+            .{ .limit = 1, .offset = @intCast(index) },
+        );
+        defer page.deinit();
+        ids[index] = page.items[0].id;
+    }
+    return .{ .library = library, .release_id = release_id, .ids = ids };
+}
+
+test "a Track resolves to the cover embedded in its own file" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-track?mode=memory&cache=shared",
+        &.{ "fixtures/audio/covered-reference.flac", "fixtures/audio/tagged-reference.flac" },
+    );
+
+    const image = (try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0],
+    )).?;
+    defer image.deinit();
+    try std.testing.expectEqualStrings("image/png", image.mime_type);
+    try std.testing.expectEqual(@as(usize, 217), image.bytes.len);
+
+    // The second file carries no picture, and that is an answer, not a failure.
+    try std.testing.expect((try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[1],
+    )) == null);
+}
+
+test "a Track whose file has gone reports no cover rather than failing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-missing?mode=memory&cache=shared",
+        &.{"fixtures/audio/covered-reference.flac"},
+    );
+    // Repoint the Location at a path nothing is at, exactly as a moved file
+    // leaves the Library until the next scan reconciles it.
+    const library_database = try runtime.libraryDatabase(fixtures.library);
+    const volume_id = (try library_database.volumes.find("uuid:artwork-fixture")).?;
+    const location_id = (try library_database.locations.find(
+        volume_id,
+        "fixtures/audio/covered-reference.flac",
+    )).?;
+    try library_database.locations.move(location_id, "fixtures/audio/does-not-exist.flac");
+    try std.testing.expect((try runtime.libraryTrackArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.ids[0],
+    )) == null);
+}
+
+test "a Release takes its cover from its first track in listening order" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    // Track one carries no cover at all, so the rule is "the first track that
+    // has one" rather than "track one or nothing". Tracks two and three carry
+    // *different* covers, which is what makes the order observable: a Release
+    // whose tracks disagree must still answer the same way every time.
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-release?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/tagged-reference.flac",
+            "fixtures/audio/covered-reference.mp3",
+            "fixtures/audio/covered-alternate-reference.flac",
+        },
+    );
+    const image = (try runtime.libraryReleaseArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.release_id,
+    )).?;
+    defer image.deinit();
+    try std.testing.expectEqualStrings("image/png", image.mime_type);
+    // Track two's cover, not track three's 138-byte one.
+    try std.testing.expectEqual(@as(usize, 217), image.bytes.len);
+
+    // A Release nothing was filed under has no cover and opens no files.
+    try std.testing.expect((try runtime.libraryReleaseArtwork(
+        fixtures.library,
+        std.testing.io,
+        fixtures.release_id + 1,
+    )) == null);
 }

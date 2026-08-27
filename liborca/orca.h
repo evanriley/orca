@@ -92,6 +92,8 @@ typedef enum orca_job_state {
 typedef enum orca_job_kind {
     ORCA_JOB_KIND_SCAN = 0,
     ORCA_JOB_KIND_PROJECTION = 1,
+    ORCA_JOB_KIND_PROPERTY_BACKFILL = 2,
+    ORCA_JOB_KIND_ANALYSIS = 3,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -129,6 +131,68 @@ typedef struct orca_track_view {
 
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_track_callback)(void *context, const orca_track_view *track);
+
+typedef enum orca_track_sort {
+    /* Insertion order. The cheapest listing there is. */
+    ORCA_TRACK_SORT_ID = 0,
+    ORCA_TRACK_SORT_ARTIST = 1,
+    ORCA_TRACK_SORT_ALBUM = 2,
+    ORCA_TRACK_SORT_TITLE = 3,
+    /* Disc, then track number: the order an album is listened to. */
+    ORCA_TRACK_SORT_TRACK_NUMBER = 4,
+    ORCA_TRACK_SORT_DURATION = 5,
+    ORCA_TRACK_SORT_DATE_ADDED = 6,
+} orca_track_sort;
+
+/* One bounded, ordered, filtered request for a page of Tracks.
+ *
+ * `artist_id` and `release_id` are relational filters; pass -1 for "no
+ * filter". Every order this produces ends in the Track id, so paging is a
+ * total order: page N+1 continues exactly where page N stopped even when
+ * thousands of Tracks share a title. `limit` must be between 1 and 512. */
+typedef struct orca_track_query {
+    int64_t artist_id;
+    int64_t release_id;
+    uint8_t sort;
+    uint8_t descending;
+    uint8_t reserved[2];
+    uint32_t limit;
+    uint32_t offset;
+} orca_track_query;
+
+typedef struct orca_artist_view {
+    int64_t id;
+    uint32_t release_count;
+    uint32_t track_count;
+    orca_string_view name;
+    /* The folded key the listing is ordered by: lowercased, whitespace
+     * collapsed, a leading English article dropped. Display `name`. */
+    orca_string_view sort_name;
+} orca_artist_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_artist_callback)(void *context, const orca_artist_view *artist);
+
+typedef struct orca_release_view {
+    int64_t id;
+    int64_t album_artist_id;
+    int64_t disc_count;
+    /* Summed over the Tracks that declare a duration. */
+    int64_t total_duration_ms;
+    uint32_t track_count;
+    uint8_t has_album_artist_id;
+    uint8_t has_disc_count;
+    uint8_t is_compilation;
+    uint8_t reserved[3];
+    orca_string_view title;
+    orca_string_view album_artist;
+    /* Empty when the release has no date; a date is text, not a number, so it
+     * needs no has_* flag. */
+    orca_string_view release_date;
+} orca_release_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_release_callback)(void *context, const orca_release_view *release);
 
 typedef struct orca_health_issue_view {
     uint8_t kind;
@@ -230,7 +294,9 @@ typedef struct orca_job_snapshot {
     uint8_t kind;   /* orca_job_kind */
     uint8_t state;  /* orca_job_state */
     /* Zero for a scan. A filesystem walk has no honest denominator until it
-     * has finished walking, and Orca does not invent one. */
+     * has finished walking, and Orca does not invent one. A property backfill
+     * does have one before it starts - how many rows still owe a probe is one
+     * indexed count - so it reports a total and a host may show a fraction. */
     uint8_t has_total;
     uint8_t reserved[5];
     uint64_t completed_units;
@@ -258,6 +324,36 @@ typedef struct orca_scan_options {
     uint32_t batch_size;
     uint8_t reserved[4];
 } orca_scan_options;
+
+typedef struct orca_analysis_options {
+    /*
+     * Files per selected page and per bounded commit. Zero selects the
+     * default, which is far smaller than a scan's: one unit of this job's work
+     * is a whole file decoded end to end, and a batch is what an interrupted
+     * run throws away.
+     */
+    uint32_t batch_size;
+    uint8_t reserved[4];
+} orca_analysis_options;
+
+typedef struct orca_backfill_options {
+    /* Rows per selected page and per bounded commit. Zero selects the
+     * default. Capped at 512, the bound every repository page shares. */
+    uint32_t batch_size;
+    /*
+     * Nonzero re-probes rows that ALREADY declare properties.
+     *
+     * Off is the right default: a probe reads what a container declares, so
+     * running it again on a row that has an answer reads the same bytes and
+     * writes the same numbers. Force exists for the one case the default
+     * cannot serve - a probe implementation that got better, where a stored
+     * value is present but no longer what this build would compute. A forced
+     * run is NOT restart-resumable: a re-probed row still matches, so an
+     * interrupted one starts over rather than resuming.
+     */
+    uint8_t force;
+    uint8_t reserved[3];
+} orca_backfill_options;
 
 /* ---------------------------------------------------------------- events */
 
@@ -398,6 +494,80 @@ orca_status orca_library_query_health_issues(
     orca_health_issue_callback callback
 );
 
+
+/* ------------------------------------------------------------- browsing */
+
+/* The browse model: Artists, the Releases filed under one, and the Tracks on
+ * one Release or by one Artist. All three are bounded, caller-driven pages
+ * with an explicit, total order - liborca owns browse semantics, a frontend
+ * owns only how the rows look. */
+
+orca_status orca_library_artist_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+/* Artists in sort-name order. `limit` must be between 1 and 512. */
+orca_status orca_library_query_artists(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_artist_callback callback
+);
+/* Invokes the callback once, or not at all if no such Artist exists. */
+orca_status orca_library_artist_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t artist_id,
+    void *context,
+    orca_artist_callback callback
+);
+
+orca_status orca_library_release_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+/* Releases in title order. `album_artist_id` of -1 lists every Release;
+ * anything else lists that Artist's. `limit` must be between 1 and 512. */
+orca_status orca_library_query_releases(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t album_artist_id,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_release_callback callback
+);
+/* Invokes the callback once, or not at all if no such Release exists. */
+orca_status orca_library_release_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    void *context,
+    orca_release_callback callback
+);
+
+/* A sorted, filtered page of Tracks. This is what an album view and an artist
+ * view are built from. `query` may not be null. */
+orca_status orca_library_browse_tracks(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_track_query *query,
+    void *context,
+    orca_track_callback callback
+);
+/* How many Tracks the filters in `query` match, so a host can size a
+ * scrollbar without walking the listing. Sort, limit and offset are ignored. */
+orca_status orca_library_track_match_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_track_query *query,
+    uint64_t *output
+);
+
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(
@@ -441,6 +611,56 @@ orca_status orca_library_start_scan(
 orca_status orca_library_start_projection(
     orca_runtime *runtime,
     orca_handle library,
+    orca_handle *job
+);
+
+/*
+ * Starts the property backfill: re-reads the headers of `files` rows whose
+ * declared audio properties are missing, and reprojects each repaired batch.
+ *
+ * The reprojection is part of the job rather than a step the caller sequences:
+ * a Track's duration is DERIVED from its file row, so a backfill that repaired
+ * the files and left the Tracks reading zero would have fixed nothing anybody
+ * can see. `options` may be null.
+ *
+ * Progress and results are read through orca_job_snapshot_get and
+ * orca_library_scan_stats. In those stats `files_seen` counts rows examined,
+ * `changed` rows repaired, `errors` files that opened and would not decode,
+ * and `unsupported` files that are not reachable or are not audio - the last
+ * of which is not a failure of the pass.
+ */
+orca_status orca_library_start_property_backfill(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_backfill_options *options,
+    orca_handle *job
+);
+
+/*
+ * Starts the library-wide analysis: decodes every file the Library has not
+ * measured yet and stores its loudness, peak, clipping, silence, waveform and
+ * temporal fingerprint. This is what makes ReplayGain on playback possible;
+ * without it every track plays at unity. `options` may be null.
+ *
+ * It decodes whole files, so it is slow by nature and is expected to be
+ * stopped and started again: orca_job_cancel takes effect inside a file, the
+ * batch already measured is still committed, and a later run selects only what
+ * is left. There is no force mode - a stored result carries its algorithm
+ * version, its parameters and the identity of the bytes it was taken from, so
+ * every reason to measure a file again is already a reason it gets selected.
+ *
+ * Progress and results are read through orca_job_snapshot_get and
+ * orca_library_scan_stats. In those stats `files_seen` counts files carried to
+ * a commit, `changed` files that yielded a loudness figure, `unchanged` files
+ * measured with no gateable loudness, `errors` files that opened and would not
+ * decode, and `unsupported` files that are not reachable, are not audio, or
+ * whose recorded identity no longer matches the bytes on disk - the last of
+ * which is a scan's job to repair, not this pass's.
+ */
+orca_status orca_library_start_analysis(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_analysis_options *options,
     orca_handle *job
 );
 
@@ -515,6 +735,42 @@ orca_status orca_player_set_shuffle(orca_runtime *runtime, orca_handle player, u
  * hears the same level, and it survives a stop/start. */
 orca_status orca_player_set_volume(orca_runtime *runtime, orca_handle player, float linear);
 orca_status orca_player_volume(orca_runtime *runtime, orca_handle player, float *output);
+
+typedef enum orca_replay_gain_mode {
+    /* No loudness correction. Every entry plays at the volume set above. */
+    ORCA_REPLAY_GAIN_OFF = 0,
+    /* Each entry is corrected by its own measured loudness, when the Library
+     * holds a measurement that still describes the file. Album-level
+     * ReplayGain is not offered: it needs a release-scoped measurement Orca
+     * does not compute, and naming it here would apply track gain under an
+     * album label. */
+    ORCA_REPLAY_GAIN_TRACK = 1,
+} orca_replay_gain_mode;
+
+/* Takes effect as soon as the audio already decoded ahead of the listener
+ * drains -- a fraction of a second, not the rest of the track. The level steps
+ * rather than ramping when it does, which is the answer to an explicit
+ * request. Defaults to TRACK. */
+orca_status orca_player_set_replay_gain_mode(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t mode
+);
+orca_status orca_player_replay_gain_mode(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t *output
+);
+/* What the audio currently audible is being multiplied by: volume times the
+ * loudness correction of the entry actually being heard. Equal to the volume
+ * when there is no correction, so the two differing is what "ReplayGain is
+ * doing something" looks like. The correction is applied to the samples as the
+ * entry is decoded, so this reports rather than drives it. */
+orca_status orca_player_effective_gain(
+    orca_runtime *runtime,
+    orca_handle player,
+    float *output
+);
 
 orca_status orca_player_seek(
     orca_runtime *runtime,

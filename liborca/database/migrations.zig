@@ -1,7 +1,9 @@
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
+const repository = @import("repository.zig");
+const text_key = @import("text_key.zig");
 
-pub const current_version = 8;
+pub const current_version = 12;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -537,6 +539,351 @@ const migration_8 =
     \\    ON tracks(release_id, COALESCE(disc_number, 1), COALESCE(track_number, -id));
 ;
 
+/// Version 9: the browse model.
+///
+/// Until this migration the only artist reachable from a Track was the
+/// denormalized `tracks.artist` text, so nothing could ask "what else is by
+/// this artist" without a full table scan and a string comparison. It adds the
+/// two relational links a browse model needs, backfills them from the text
+/// that is already there, gives every artist a sort key, and creates the
+/// indexes the new queries order by.
+///
+/// **One artist per track, one album artist per release, deliberately.** The
+/// tag data this targets is single-valued on ARTIST and ALBUMARTIST in
+/// essentially every file, and splitting featured artists is a metadata
+/// problem (it needs a parser, a provenance story and a user-visible review
+/// step) rather than a schema one. The extension path, when that work happens,
+/// is a `track_artists(track_id, artist_id, ordinal, role)` join table
+/// alongside these columns: `artist_id` stays as the *primary* artist a
+/// listing sorts and files by, and the join table carries the rest. Nothing
+/// here has to be undone to get there.
+///
+/// The backfill runs the same two-step cascade `ArtistRepository.ensureLocked`
+/// runs, in the same order, because anything else would file 538 Tracks of the
+/// reference library differently from a fresh scan. A MusicBrainz artist id
+/// outranks the name — it is what recognizes "Cosmo's Midnight feat. Wave
+/// Racer" as Cosmo's Midnight — so the observed id on a Track's preferred file
+/// is tried first, and only what it cannot answer falls back to
+/// `orca_artist_key`, which is `text_key.normalizeKey`, the exact function
+/// `ArtistRepository` folds with. A migrated database and a freshly scanned one
+/// therefore agree row for row, which `library/projection.zig` asserts.
+///
+/// None of the new indexes names `id` explicitly. `id` is `INTEGER PRIMARY
+/// KEY`, so it *is* the rowid and SQLite already appends it to every index
+/// entry — which is why an `ORDER BY ... , tracks.id` that ends a listing's
+/// total order is satisfied straight from `tracks(title COLLATE NOCASE)` with
+/// no temp B-tree, and why spelling it out would only store the value twice.
+const migration_9_columns =
+    \\ALTER TABLE tracks ADD COLUMN artist_id INTEGER REFERENCES artists(id);
+    \\ALTER TABLE releases ADD COLUMN album_artist_id INTEGER REFERENCES artists(id);
+;
+
+/// The backfill on its own, so a test can null the three columns out of a
+/// freshly projected library, run exactly this, and prove the result is what
+/// the projection wrote. That equivalence is the whole promise of the
+/// migration; asserting it against the migration as a whole would also be
+/// asserting `CREATE INDEX`, which proves nothing about who an artist is.
+pub const artist_backfill =
+    \\UPDATE artists SET sort_name = orca_artist_sort_key(name);
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    JOIN observed_file_tags ON observed_file_tags.musicbrainz_artist_id =
+    \\        artists.musicbrainz_artist_id
+    \\    WHERE observed_file_tags.file_id = tracks.preferred_file_id
+    \\      AND COALESCE(observed_file_tags.musicbrainz_artist_id, '') <> ''
+    \\    ORDER BY artists.id LIMIT 1
+    \\) WHERE tracks.artist <> '';
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT artists.id FROM artists WHERE artists.key = orca_artist_key(tracks.artist)
+    \\) WHERE tracks.artist_id IS NULL AND tracks.artist <> '';
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    JOIN observed_file_tags ON observed_file_tags.musicbrainz_album_artist_id =
+    \\        artists.musicbrainz_artist_id
+    \\    JOIN tracks ON tracks.preferred_file_id = observed_file_tags.file_id
+    \\    WHERE tracks.release_id = releases.id
+    \\      AND COALESCE(observed_file_tags.musicbrainz_album_artist_id, '') <> ''
+    \\    ORDER BY artists.id LIMIT 1
+    \\) WHERE releases.album_artist <> '';
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    WHERE artists.key = orca_artist_key(releases.album_artist)
+    \\) WHERE releases.album_artist_id IS NULL AND releases.album_artist <> '';
+;
+
+const migration_9_indexes =
+    \\CREATE INDEX artists_sort ON artists(sort_name);
+    \\CREATE INDEX releases_by_artist
+    \\    ON releases(album_artist_id, title COLLATE NOCASE);
+    \\DROP INDEX tracks_album;
+    \\CREATE INDEX tracks_sort_artist ON tracks(
+    \\    artist COLLATE NOCASE, album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_album ON tracks(
+    \\    album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_title ON tracks(title COLLATE NOCASE);
+    \\CREATE INDEX tracks_sort_position ON tracks(
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_sort_duration ON tracks(duration_ms);
+    \\CREATE INDEX tracks_sort_added ON tracks(created_at);
+    \\CREATE INDEX tracks_by_artist ON tracks(
+    \\    artist_id, album COLLATE NOCASE,
+    \\    COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_by_artist_title ON tracks(artist_id, title COLLATE NOCASE);
+    \\CREATE INDEX tracks_by_artist_duration ON tracks(artist_id, duration_ms);
+    \\CREATE INDEX tracks_by_artist_added ON tracks(artist_id, created_at);
+    \\CREATE INDEX tracks_by_artist_position ON tracks(
+    \\    artist_id, COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_by_release ON tracks(
+    \\    release_id, COALESCE(disc_number, 1), COALESCE(track_number, 2147483647)
+    \\);
+    \\CREATE INDEX tracks_artist ON tracks(artist_id);
+    \\CREATE INDEX tracks_release ON tracks(release_id);
+;
+
+const migration_9 = migration_9_columns ++ artist_backfill ++ migration_9_indexes;
+
+/// Version 10: finding the files whose declared properties are still missing.
+///
+/// A library scanned before probing existed keeps null `duration_ms`,
+/// `sample_rate` and `channels` for ever, because only a file whose *bytes*
+/// change is ever re-probed and a music collection's bytes essentially never
+/// change. The repair pass that fixes that needs to ask "which rows still owe
+/// a probe" repeatedly, and asking it with a bare `WHERE ... IS NULL` would
+/// scan every row of the largest table in the schema each time.
+///
+/// A **partial** index answers it instead, and it is the right shape here for
+/// a reason that is not obvious: the index contains exactly the rows that are
+/// still broken, so it starts small on a healthy library, shrinks as the pass
+/// repairs rows, and reaches empty — at which point asking the question costs
+/// one B-tree probe rather than 500,000 row reads. A full index on the same
+/// columns would instead be largest precisely when there is nothing to do.
+///
+/// The predicate is `repository.incomplete_properties_predicate` verbatim.
+/// SQLite matches a partial index against a query by expression rather than by
+/// meaning, so the two must be the same string, which is why it has exactly
+/// one definition and both sides import it.
+const migration_10 =
+    "CREATE INDEX files_incomplete_properties ON files(id) WHERE " ++
+    repository.incomplete_properties_predicate ++ ";";
+
+/// Re-key artists once the fold learned typographic punctuation, merging the
+/// rows that were only ever distinct because of it.
+///
+/// This cannot be left to a reprojection. `ArtistRepository.ensure` upserts by
+/// key, so reprojecting would file the tracks under the merged artist and
+/// leave the old row behind as an orphan holding the releases -- the same
+/// split, one row further along. The merge has to happen here, where both rows
+/// are still visible.
+///
+/// Survivor choice is the row carrying a MusicBrainz artist id, falling back
+/// to the lowest id. A MusicBrainz id is the strongest statement about who an
+/// artist is that this library holds, and in the observed splits it is the
+/// typographic spelling that carries one -- which is also the better display
+/// name, since it is what a metadata service supplied rather than what
+/// somebody typed.
+///
+/// The unique index is dropped for the duration because a row's *new* key can
+/// equal another row's *old* key, which SQLite would reject row by row even
+/// though the finished state is unique.
+///
+/// It then **re-runs migration 9's key join**, and that is not belt-and-braces.
+/// Migration 9 linked tracks and releases to artists with
+/// `artists.key = orca_artist_key(...)`: the *current* fold compared against a
+/// key written by whichever fold was current when the row was projected. An
+/// artist stored under a pre-fold spelling never matched, and the link was left
+/// NULL. Re-keying here repairs the key and would otherwise walk away from the
+/// links that key was supposed to make.
+///
+/// On the real library that was two artists left holding nothing --
+/// `Eli “Paperboy” Reed` and `Tha Dogg Pound feat. Michel’le`, both keyed with
+/// typographic quotes -- one track and one release with a name and no link, and
+/// a browse listing showing "0 releases, 0 tracks" beside a real artist.
+///
+/// Anything that re-keys `artists` in future has to re-run the link in the same
+/// migration. They are one operation, not two that happen to be adjacent.
+const migration_11 =
+    \\DROP INDEX IF EXISTS artists_key;
+    \\CREATE TEMP TABLE artist_refold AS
+    \\    SELECT id, orca_artist_key(name) AS folded FROM artists;
+    \\CREATE TEMP TABLE artist_survivor AS
+    \\    SELECT r.folded AS folded,
+    \\           (SELECT a.id FROM artists a
+    \\              JOIN artist_refold r2 ON r2.id = a.id
+    \\             WHERE r2.folded = r.folded
+    \\             ORDER BY (a.musicbrainz_artist_id IS NULL), a.id
+    \\             LIMIT 1) AS keep_id
+    \\      FROM artist_refold r GROUP BY r.folded;
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT s.keep_id FROM artist_refold r
+    \\      JOIN artist_survivor s ON s.folded = r.folded
+    \\     WHERE r.id = tracks.artist_id)
+    \\  WHERE artist_id IS NOT NULL;
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT s.keep_id FROM artist_refold r
+    \\      JOIN artist_survivor s ON s.folded = r.folded
+    \\     WHERE r.id = releases.album_artist_id)
+    \\  WHERE album_artist_id IS NOT NULL;
+    \\DELETE FROM artists WHERE id NOT IN (SELECT keep_id FROM artist_survivor);
+    \\UPDATE artists
+    \\   SET key = orca_artist_key(name), sort_name = orca_artist_sort_key(name);
+    \\DROP TABLE artist_refold;
+    \\DROP TABLE artist_survivor;
+    \\CREATE UNIQUE INDEX artists_key ON artists(key);
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT artists.id FROM artists WHERE artists.key = orca_artist_key(tracks.artist)
+    \\) WHERE tracks.artist_id IS NULL AND tracks.artist <> '';
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT artists.id FROM artists
+    \\    WHERE artists.key = orca_artist_key(releases.album_artist)
+    \\) WHERE releases.album_artist_id IS NULL AND releases.album_artist <> '';
+;
+
+/// Re-key releases for the same reason as migration 11, which missed them.
+///
+/// `release_key` is folded text joined by 0x1f separators, so applying the
+/// current fold to the *stored* key yields exactly what composing it afresh
+/// would: the separators and a MusicBrainz id pass through untouched, and
+/// folding already-folded case and whitespace is a no-op. Only the newly
+/// folded punctuation moves.
+///
+/// Leaving these stale was a live corruption rather than an inconsistency.
+/// `ReleaseRepository.upsert` keys on `release_key`, so the next projection of
+/// an already-projected library -- a rescan, a metadata edit, or the property
+/// backfill's per-batch reprojection -- matched nothing and built a parallel
+/// release beside each stale one. Measured on the real library: 22,060 tracks
+/// and 2,637 releases became 23,271 and 2,760 after a single backfill, every
+/// duplicate pair differing only by an apostrophe.
+///
+/// Unlike artists, colliding rows are skipped rather than merged. Two releases
+/// that fold together are the same album spelled two ways, and their tracks
+/// share track numbers, so repointing them would violate `tracks_position` and
+/// fail the migration -- refusing to open the library over a duplicate album
+/// is far worse than leaving two rows for a projection to reconcile. The real
+/// library has no such collision.
+///
+/// The guard has to cover *both* shapes of collision, which the first version
+/// did not. Rejecting a row whose folded key already belongs to another row
+/// misses the case where **two** rows both need folding and fold to the same
+/// value: both pass the guard, both update, and the still-live `releases_key`
+/// unique index rejects the second, failing the migration and leaving the
+/// library unopenable at its old version. Two releases keyed with U+2019 and
+/// U+2018 reproduce it exactly, since both fold to an apostrophe.
+const migration_12 =
+    \\UPDATE releases
+    \\   SET release_key = orca_release_key(release_key)
+    \\ WHERE orca_release_key(release_key) <> release_key
+    \\   AND NOT EXISTS (
+    \\        SELECT 1 FROM releases other
+    \\         WHERE other.id <> releases.id
+    \\           AND (other.release_key = orca_release_key(releases.release_key)
+    \\                OR orca_release_key(other.release_key) =
+    \\                   orca_release_key(releases.release_key)));
+;
+
+/// How much stack the key functions fold a name in.
+///
+/// The folding never grows its input — fullwidth forms shrink, case folding is
+/// length-preserving — so this bounds the longest artist name the backfill can
+/// see. Overflow raises a SQL error and rolls the migration back rather than
+/// silently writing a truncated key, because a truncated key is an artist who
+/// exists twice.
+const key_scratch_bytes = 8 * 1024;
+
+fn foldInto(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+    comptime fold: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error![]const u8,
+) void {
+    if (argc != 1) return sqlite.resultError(context, "expected one argument");
+    var buffer: [key_scratch_bytes]u8 = undefined;
+    var scratch: std.heap.FixedBufferAllocator = .init(&buffer);
+    const folded = fold(scratch.allocator(), sqlite.valueText(argv[0])) catch
+        return sqlite.resultError(context, "artist name too long to fold");
+    sqlite.resultText(context, folded);
+}
+
+fn artistKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldInto(context, argc, argv, text_key.normalizeKey);
+}
+
+fn artistSortKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldInto(context, argc, argv, text_key.sortKey);
+}
+
+/// Re-folds a stored `release_key`, and *only the parts of it that were ever
+/// folded*.
+///
+/// `library/projection.zig` composes the key as
+/// `normalizeKey(album) 0x1f normalizeKey(album_artist) 0x1f (mbid | year)`,
+/// and appends `0x1f folder.path` **raw** when the album has no title. So the
+/// first two segments are folded and the rest are not.
+///
+/// Folding the whole string looked equivalent and is not. It lowercases and
+/// whitespace-collapses the folder path, so
+/// `…^_2001^_/mnt/Media/Music/Loose  Tracks` becomes
+/// `…^_2001^_/mnt/media/music/loose tracks`, the next projection composes the
+/// original form, `ON CONFLICT(release_key)` matches nothing, and a parallel
+/// release appears beside the first -- which is the exact corruption migration
+/// 12 exists to repair, reintroduced for every untitled album. It would
+/// lowercase an uppercase MusicBrainz id for the same reason.
+fn releaseKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    if (argc != 1) return sqlite.resultError(context, "expected one argument");
+    var buffer: [key_scratch_bytes]u8 = undefined;
+    var scratch: std.heap.FixedBufferAllocator = .init(&buffer);
+    const allocator = scratch.allocator();
+
+    var out: std.ArrayList(u8) = .empty;
+    var remaining = sqlite.valueText(argv[0]);
+    var segment: usize = 0;
+    while (true) {
+        const separator = std.mem.indexOfScalar(u8, remaining, 0x1f);
+        const piece = if (separator) |at| remaining[0..at] else remaining;
+        if (segment < 2) {
+            const folded = text_key.normalizeKey(allocator, piece) catch
+                return sqlite.resultError(context, "release key too long to fold");
+            out.appendSlice(allocator, folded) catch
+                return sqlite.resultError(context, "release key too long to fold");
+        } else {
+            out.appendSlice(allocator, piece) catch
+                return sqlite.resultError(context, "release key too long to fold");
+        }
+        const at = separator orelse break;
+        out.append(allocator, 0x1f) catch
+            return sqlite.resultError(context, "release key too long to fold");
+        remaining = remaining[at + 1 ..];
+        segment += 1;
+    }
+    sqlite.resultText(context, out.items);
+}
+
+/// Teach a connection the two foldings, so a migration can match the text a
+/// projection wrote without reimplementing the fold in SQL.
+pub fn registerKeyFunctions(db: sqlite.Database) sqlite.Error!void {
+    try db.createTextFunction("orca_artist_key", null, artistKeyFunction);
+    try db.createTextFunction("orca_artist_sort_key", null, artistSortKeyFunction);
+    try db.createTextFunction("orca_release_key", null, releaseKeyFunction);
+}
+
 /// The schema version at which `mutation_operations` exists. Startup journal
 /// recovery runs at exactly this point: the journal must be readable, and no
 /// later migration may rewrite tables a nonterminal operation depends on before
@@ -556,6 +903,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     };
     if (version > current_version) return error.SchemaVersionTooNew;
     if (version >= target_version) return;
+    try registerKeyFunctions(db);
 
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
@@ -571,6 +919,10 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
         try deriveLegacyRoot(db);
         try db.exec("DROP TABLE temp.legacy_scanned;");
     }
+    if (version < 9 and target_version >= 9) try db.exec(migration_9);
+    if (version < 10 and target_version >= 10) try db.exec(migration_10);
+    if (version < 11 and target_version >= 11) try db.exec(migration_11);
+    if (version < 12 and target_version >= 12) try db.exec(migration_12);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -751,7 +1103,7 @@ test "migrating the version-7 fixture preserves every path-keyed row" {
     defer db.close();
     try apply(db);
 
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     // Three scanned files plus the two orphan paths that only analysis and
     // health knew about.
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM files;"));
@@ -910,7 +1262,7 @@ test "migrating a database that is already current changes nothing" {
     defer std.testing.allocator.free(schema_again);
     try std.testing.expectEqualStrings(schema, schema_again);
     try std.testing.expectEqual(files, try scalar(db, "SELECT count(*) FROM files;"));
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
 }
 
 test "an empty database migrates straight to the current version" {
@@ -921,7 +1273,7 @@ test "an empty database migrates straight to the current version" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM files;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM locations;"));
     try std.testing.expectEqual(
@@ -939,6 +1291,248 @@ test "an unknown newer schema version is refused rather than opened" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try db.exec("PRAGMA user_version=9;");
+    // Derived from current_version rather than written out, because hardcoding
+    // it means this test silently stops testing anything the next time a
+    // migration lands -- which is exactly what happened at version 11.
+    try db.exec(std.fmt.comptimePrint(
+        "PRAGMA user_version={d};",
+        .{current_version + 1},
+    ));
     try std.testing.expectError(error.SchemaVersionTooNew, apply(db));
+}
+
+test "artists split only by typographic punctuation merge when the fold learns it" {
+    // The real shape this closes: the Release carries the typographic spelling
+    // a metadata service supplied, along with a MusicBrainz id; the Tracks
+    // carry what somebody typed. Under the version-10 fold they are two
+    // artists, one holding every release and the other every track, so
+    // browsing to either shows half the artist.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "refold.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 10);
+    try db.exec(
+        \\INSERT INTO artists(id, name, key, sort_name, musicbrainz_artist_id)
+        \\VALUES (1, 'El' || char(8208) || 'P', 'el' || char(8208) || 'p',
+        \\           'el' || char(8208) || 'p', 'mbid-el-p'),
+        \\       (2, 'El-P', 'el-p', 'el-p', NULL);
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id)
+        \\VALUES (1, 'Fantastic Damage', 'El' || char(8208) || 'P', 1);
+        \\INSERT INTO tracks(id, title, artist, artist_id, release_id, track_number)
+        \\VALUES (1, 'Deep Space 9mm', 'El-P', 2, 1, 1);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM artists;"));
+    // The row carrying a MusicBrainz id survives, which is also the better
+    // display name: supplied by a metadata service rather than typed.
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT id FROM artists;"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT artist_id FROM tracks WHERE id = 1;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT album_artist_id FROM releases WHERE id = 1;"),
+    );
+    // The unique index is dropped and rebuilt across the re-key; it has to
+    // come back, or the next projection could insert a duplicate artist.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(
+            db,
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='artists_key';",
+        ),
+    );
+    try checkForeignKeys(db);
+}
+
+test "artists that merely look alike are left alone by the re-key" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "distinct.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 10);
+    // Genuinely different artists, including the case the fold must not touch:
+    // a featured credit is not a spelling of the headline act.
+    try db.exec(
+        \\INSERT INTO artists(id, name, key, sort_name)
+        \\VALUES (1, 'Grayarea', 'grayarea', 'grayarea'),
+        \\       (2, 'Grayarea feat. Erik Shepard', 'grayarea feat. erik shepard',
+        \\           'grayarea feat. erik shepard'),
+        \\       (3, 'Gray Area', 'gray area', 'gray area');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM artists;"));
+}
+
+test "release keys are stable under the fold that is current" {
+    // A stale release key is not cosmetic: ReleaseRepository.upsert keys on it,
+    // so the next projection of an already-projected library builds a parallel
+    // release beside every stale one. On the real library a single property
+    // backfill turned 22,060 tracks and 2,637 releases into 23,271 and 2,760,
+    // every duplicate pair differing only by an apostrophe.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "rekey.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    // Keys as a pre-punctuation fold left them: the typographic apostrophe the
+    // tag carried survived into the stored key.
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'A Sailor''s Guide to Earth', 'Sturgill Simpson',
+        \\        'a sailor' || char(8217) || 's guide to earth');
+    );
+
+    try apply(db);
+
+    const stable = try scalar(
+        db,
+        "SELECT count(*) FROM releases WHERE release_key = orca_artist_key(release_key);",
+    );
+    try std.testing.expectEqual(@as(i64, 1), stable);
+    try checkForeignKeys(db);
+}
+
+test "a release key that would collide on re-keying is left as it is" {
+    // Two releases folding together are one album spelled two ways, and their
+    // tracks share track numbers. Repointing them would violate
+    // tracks_position and fail the migration -- refusing to open a library over
+    // a duplicate album is far worse than leaving a projection to reconcile it.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "collide.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'Ten', 'Pearl Jam', 'ten'),
+        \\       (2, 'Ten', 'Pearl Jam', 'ten' || char(8217));
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM releases;"));
+    try checkForeignKeys(db);
+}
+
+test "re-keying an artist relinks the rows its old key could not reach" {
+    // Migration 9 linked tracks and releases with
+    // `artists.key = orca_artist_key(...)`: the current fold compared against a
+    // key written by whichever fold was current when the row was projected. An
+    // artist stored under a pre-fold spelling never matched. Re-keying without
+    // re-linking left two artists in the real library holding nothing at all,
+    // beside a track and a release that named them.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "relink.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 10);
+    // `eli “paperboy” reed` is what the previous fold stored; the current fold
+    // produces straight quotes, so the join in migration 9 found nothing.
+    try db.exec(
+        \\INSERT INTO artists(id, name, key, sort_name)
+        \\VALUES (1, 'Eli ' || char(8220) || 'Paperboy' || char(8221) || ' Reed',
+        \\        'eli ' || char(8220) || 'paperboy' || char(8221) || ' reed',
+        \\        'eli ' || char(8220) || 'paperboy' || char(8221) || ' reed');
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'Come and Get It',
+        \\        'Eli ' || char(8220) || 'Paperboy' || char(8221) || ' Reed', 'come and get it');
+        \\INSERT INTO tracks(id, title, artist, release_id, track_number)
+        \\VALUES (1, 'Come and Get It',
+        \\        'Eli ' || char(8220) || 'Paperboy' || char(8221) || ' Reed', 1, 1);
+    );
+    // Exactly the state migration 9 leaves behind for such a row.
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try scalar(db, "SELECT count(*) FROM tracks WHERE artist_id IS NOT NULL;"),
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT artist_id FROM tracks WHERE id = 1;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT album_artist_id FROM releases WHERE id = 1;"),
+    );
+    try checkForeignKeys(db);
+}
+
+test "two release keys that fold onto each other are both left alone" {
+    // The first guard only rejected a row whose folded key already belonged to
+    // another row. Two rows that BOTH need folding and fold to the same value
+    // both passed it, both updated, and the live unique index rejected the
+    // second -- failing the migration and leaving the library unopenable at
+    // its old version. U+2019 and U+2018 both fold to an apostrophe.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "bothstale.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, 'Don''t Stop', 'X', 'don' || char(8217) || 't stop'),
+        \\       (2, 'Don''t Stop', 'X', 'don' || char(8216) || 't stop');
+    );
+
+    // The migration must complete rather than failing on the unique index.
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM releases;"));
+    try checkForeignKeys(db);
+}
+
+test "an untitled album keeps the folder path its key was built from" {
+    // The projection folds only the first two segments of a release key and
+    // appends the folder path raw. Folding the whole string lowercased and
+    // whitespace-collapsed that path, so the next projection composed the
+    // original, matched nothing, and built a parallel release -- the exact
+    // corruption this migration exists to repair.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "untitled.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 11);
+    // Typographic apostrophe in the album artist, so the row genuinely needs
+    // re-keying; mixed case and a double space in the path, so any folding of
+    // that segment shows up.
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key)
+        \\VALUES (1, '', 'Stray' || char(8217) || 's Files',
+        \\        '' || char(31) || 'stray' || char(8217) || 's files' || char(31) ||
+        \\        '2001' || char(31) || '/mnt/Media/Music/Loose  Tracks');
+    );
+
+    try apply(db);
+
+    const stored = try text(std.testing.allocator, db, "SELECT release_key FROM releases;");
+    defer std.testing.allocator.free(stored);
+    // The apostrophe folded; the path did not.
+    try std.testing.expect(std.mem.indexOf(u8, stored, "stray's files") != null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, stored, "/mnt/Media/Music/Loose  Tracks") != null,
+    );
 }

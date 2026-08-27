@@ -67,6 +67,56 @@ pub const TrackView = extern struct {
 
 pub const TrackCallback = *const fn (?*anyopaque, *const TrackView) callconv(.c) void;
 
+pub const TrackSortKey = enum(u8) {
+    id = 0,
+    artist = 1,
+    album = 2,
+    title = 3,
+    track_number = 4,
+    duration = 5,
+    date_added = 6,
+};
+
+/// The POD form of `database.TrackQuery`. Negative ids mean "no filter",
+/// because a filter is either present or absent and a nullable pointer per
+/// field would be worse for every caller.
+pub const TrackQueryView = extern struct {
+    artist_id: i64,
+    release_id: i64,
+    sort: u8,
+    descending: u8,
+    _reserved: [2]u8 = @splat(0),
+    limit: u32,
+    offset: u32,
+};
+
+pub const ArtistView = extern struct {
+    id: i64,
+    release_count: u32,
+    track_count: u32,
+    name: StringView,
+    sort_name: StringView,
+};
+
+pub const ArtistCallback = *const fn (?*anyopaque, *const ArtistView) callconv(.c) void;
+
+pub const ReleaseView = extern struct {
+    id: i64,
+    album_artist_id: i64,
+    disc_count: i64,
+    total_duration_ms: i64,
+    track_count: u32,
+    has_album_artist_id: u8,
+    has_disc_count: u8,
+    is_compilation: u8,
+    _reserved: [3]u8 = @splat(0),
+    title: StringView,
+    album_artist: StringView,
+    release_date: StringView,
+};
+
+pub const ReleaseCallback = *const fn (?*anyopaque, *const ReleaseView) callconv(.c) void;
+
 pub const HealthIssueView = extern struct {
     kind: u8,
     severity: u8,
@@ -168,6 +218,21 @@ pub const ScanStats = extern struct {
 pub const ScanOptions = extern struct {
     batch_size: u32,
     _reserved: [4]u8 = @splat(0),
+};
+
+pub const AnalysisOptions = extern struct {
+    /// Files per selected page and per bounded commit. Zero selects the
+    /// default, which is much smaller than a scan's because one unit of this
+    /// job's work is a whole file decoded end to end.
+    batch_size: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const BackfillOptions = extern struct {
+    batch_size: u32,
+    /// Nonzero re-probes rows that already declare properties.
+    force: u8 = 0,
+    _reserved: [3]u8 = @splat(0),
 };
 
 pub const EventKind = enum(u8) {
@@ -374,6 +439,159 @@ pub export fn orca_library_query_health_issues(
     return .ok;
 }
 
+pub export fn orca_library_artist_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.libraryArtistCount(importLibrary(library)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_library_query_artists(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?ArtistCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const visit = callback orelse return .invalid_argument;
+    if (limit == 0 or limit > max_page) return .invalid_argument;
+    var page = box.runtime.libraryArtistPage(importLibrary(library), .{
+        .limit = limit,
+        .offset = offset,
+    }) catch |err|
+        return mapError(err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = artistView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_artist_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    context: ?*anyopaque,
+    callback: ?ArtistCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const visit = callback orelse return .invalid_argument;
+    const found = box.runtime.libraryArtist(importLibrary(library), artist_id) catch |err|
+        return mapError(err);
+    const item = found orelse return .ok;
+    defer item.deinit(box.runtime.allocator);
+    const view = artistView(item);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_release_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.libraryReleaseCount(importLibrary(library)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_library_query_releases(
+    runtime: ?*Runtime,
+    library: Handle,
+    album_artist_id: i64,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?ReleaseCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const visit = callback orelse return .invalid_argument;
+    if (limit == 0 or limit > max_page) return .invalid_argument;
+    var page = box.runtime.libraryReleasePage(importLibrary(library), .{
+        .album_artist_id = optionalId(album_artist_id),
+        .limit = limit,
+        .offset = offset,
+    }) catch |err| return mapError(err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = releaseView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_release_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    context: ?*anyopaque,
+    callback: ?ReleaseCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const visit = callback orelse return .invalid_argument;
+    const found = box.runtime.libraryRelease(importLibrary(library), release_id) catch |err|
+        return mapError(err);
+    const item = found orelse return .ok;
+    defer item.deinit(box.runtime.allocator);
+    const view = releaseView(item);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_browse_tracks(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const TrackQueryView,
+    context: ?*anyopaque,
+    callback: ?TrackCallback,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const visit = callback orelse return .invalid_argument;
+    const request = importTrackQuery(query orelse return .invalid_argument) orelse
+        return .invalid_argument;
+    var page = box.runtime.libraryTrackQuery(importLibrary(library), "", request) catch |err|
+        return mapError(err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = trackView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_track_match_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const TrackQueryView,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    const request = importTrackQuery(query orelse return .invalid_argument) orelse
+        return .invalid_argument;
+    destination.* = box.runtime.libraryTrackMatchCount(importLibrary(library), request) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
 pub export fn orca_player_create(
     runtime: ?*Runtime,
     output: ?*Handle,
@@ -573,6 +791,61 @@ pub export fn orca_library_start_projection(
     const destination = job_output orelse return .invalid_argument;
     const started = box.runtime.startLibraryProjection(importLibrary(library)) catch |err|
         return mapError(err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+/// Starts the property backfill. `options` may be null.
+///
+/// Reachable from the ABI for the same reason a scan is: a capability only a
+/// unit test can invoke is not a capability the product has. The stats are
+/// read back through `orca_library_scan_stats`, whose fields carry the
+/// backfill's own meaning — see `orca_backfill_options` in the header.
+pub export fn orca_library_start_property_backfill(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const BackfillOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = job_output orelse return .invalid_argument;
+    var request: core.runtime.BackfillRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+        request.force = value.force != 0;
+    }
+    const started = box.runtime.startLibraryPropertyBackfill(
+        importLibrary(library),
+        request,
+    ) catch |err| return mapError(err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+/// Starts the library-wide analysis. `options` may be null.
+///
+/// Reachable from the ABI for the same reason a scan and a backfill are: a
+/// capability only a unit test can invoke is not a capability the product has.
+/// The stats come back through `orca_library_scan_stats` with this pass's own
+/// meaning — see `orca_analysis_options` in the header.
+pub export fn orca_library_start_analysis(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const AnalysisOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = job_output orelse return .invalid_argument;
+    var request: core.runtime.AnalysisRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+    }
+    const started = box.runtime.startLibraryAnalysis(
+        importLibrary(library),
+        request,
+    ) catch |err| return mapError(err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -783,6 +1056,56 @@ pub export fn orca_player_volume(
     if (box.foreignThread()) return .wrong_thread;
     const destination = output orelse return .invalid_argument;
     destination.* = box.runtime.playerVolume(importPlayer(player)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+/// 0 turns loudness correction off, 1 corrects each entry by its own measured
+/// loudness. Any other value is refused rather than treated as one of those.
+/// Takes effect once the audio decoded ahead of the listener drains.
+pub export fn orca_player_set_replay_gain_mode(
+    runtime: ?*Runtime,
+    player: Handle,
+    mode: u8,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const resolved: audio.processing.ReplayGainMode = switch (mode) {
+        0 => .off,
+        1 => .track,
+        else => return .invalid_argument,
+    };
+    box.runtime.playerSetReplayGainMode(importPlayer(player), resolved) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_player_replay_gain_mode(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*u8,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
+        return mapError(err);
+    destination.* = @backingInt(mode);
+    return .ok;
+}
+
+/// What the audio currently audible is being multiplied by: volume times the
+/// loudness correction of the entry actually being heard. Equal to the volume
+/// when there is no correction.
+pub export fn orca_player_effective_gain(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*f32,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.playerEffectiveGain(importPlayer(player)) catch |err|
         return mapError(err);
     return .ok;
 }
@@ -1032,6 +1355,61 @@ fn stringView(value: []const u8) StringView {
     return .{ .pointer = value.ptr, .length = value.len };
 }
 
+fn optionalId(value: i64) ?i64 {
+    return if (value < 0) null else value;
+}
+
+/// Reject a malformed query at the boundary rather than clamping it: a limit
+/// of zero or a sort byte this build does not know is a caller bug, and
+/// silently substituting a default would hide it behind plausible-looking
+/// rows.
+fn importTrackQuery(query: *const TrackQueryView) ?database.TrackQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    const sort = std.enums.fromInt(TrackSortKey, query.sort) orelse return null;
+    return .{
+        .artist_id = optionalId(query.artist_id),
+        .release_id = optionalId(query.release_id),
+        .sort = switch (sort) {
+            .id => .id,
+            .artist => .artist,
+            .album => .album,
+            .title => .title,
+            .track_number => .track_number,
+            .duration => .duration,
+            .date_added => .date_added,
+        },
+        .direction = if (query.descending != 0) .descending else .ascending,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+fn artistView(item: database.ArtistSummary) ArtistView {
+    return .{
+        .id = item.id,
+        .release_count = item.release_count,
+        .track_count = item.track_count,
+        .name = stringView(item.name),
+        .sort_name = stringView(item.sort_name),
+    };
+}
+
+fn releaseView(item: database.ReleaseSummary) ReleaseView {
+    return .{
+        .id = item.id,
+        .album_artist_id = item.album_artist_id orelse 0,
+        .disc_count = item.disc_count orelse 0,
+        .total_duration_ms = item.total_duration_ms,
+        .track_count = item.track_count,
+        .has_album_artist_id = @intFromBool(item.album_artist_id != null),
+        .has_disc_count = @intFromBool(item.disc_count != null),
+        .is_compilation = @intFromBool(item.is_compilation),
+        .title = stringView(item.title),
+        .album_artist = stringView(item.album_artist),
+        .release_date = stringView(item.release_date orelse ""),
+    };
+}
+
 fn trackView(item: database.TrackSummary) TrackView {
     return .{
         .id = item.id,
@@ -1078,6 +1456,8 @@ fn exportJobKind(kind: job.Kind) u8 {
     return switch (kind) {
         .scan => 0,
         .projection => 1,
+        .property_backfill => 2,
+        .analysis => 3,
         else => 255,
     };
 }

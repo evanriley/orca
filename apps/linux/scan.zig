@@ -9,6 +9,7 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
+const browse = @import("browse.zig");
 
 const App = app.App;
 
@@ -152,7 +153,9 @@ pub fn tick(self: *App) void {
     self.scanning = false;
     if (self.scan_bar) |bar| gtk.gtk_widget_set_visible(bar, gtk.false_);
     // A scan projects as it commits, so by the time it finishes the tracks are
-    // already browsable: reloading the page is all that is left to do.
+    // already browsable: refilling the browser and the page is all that is left
+    // to do. The scope resets because the shelves it named have just changed.
+    browse.reload(self);
     self.reload();
     if (snapshot.state == .succeeded) {
         if (self.runtime.jobScanStats(job)) |stats| {

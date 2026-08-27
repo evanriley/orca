@@ -15,6 +15,17 @@ decode cursor leads the audible cursor by the whole render-ahead depth, so
 now-playing is derived from that published serial rather than from the decoder's
 position.
 
+**Everything a transport shows resolves from that one serial.** Identity comes
+from mapping it back to a queue position, duration from a small serial-keyed
+ring of per-entry timeline shapes the Player records as it opens each entry, and
+position from the entry anchor below. Deriving any of the three from
+`SourceQueue.current` instead makes it describe the *next* track for the whole
+lookahead window — measured at 163 ms on a 96 kHz FLAC boundary — so identity,
+duration and position agree by construction rather than by coincidence. The
+serial is adopted only once the position published with it proves to belong to
+the current epoch: a serial published under a retired epoch describes audio a
+hard switch already discarded.
+
 A paused Player is honored inside the callback: it writes silence and returns
 without consuming prepared blocks, without advancing position, and without
 counting an underrun. Pausing therefore does not discard prepared audio.
@@ -36,9 +47,22 @@ tail and block constraints, reset behavior, and direct-RT safety. Prepared
 ordered chains are triple-buffered: the control lane writes an unclaimed slot
 and publishes it atomically, while the render lane adopts it only at a block
 boundary. Acknowledged publication makes old node-context reclamation explicit.
-Gain and ReplayGain changes use frame ramps; metering publishes peak/RMS
-snapshots without changing samples. Built-in processing also includes peaking
+Volume changes use frame ramps; metering publishes peak/RMS snapshots without
+changing samples. Built-in processing also includes peaking
 parametric EQ, stereo crossfeed, and a resettable DC blocker.
+
+User volume and loudness correction are applied in two different places
+because they are two different kinds of thing. Volume is one Player-scope
+ramped multiplier; the correction belongs to the *audio*, and is applied by the
+`SourceSession` that decodes it, from a figure attached to that session when
+the entry was opened. A Player-level correction cannot be right during a
+gapless transition — the pipe then holds prepared blocks belonging to two
+entries at once — and a per-block one cannot be right either, because one
+canonical block is filled from two decoders across the boundary. Per decode it
+always is. Every path that produces a session goes through one opener, so a
+hard load, an auto-advance, a format switch and a seek re-open all carry the
+right correction without any of them republishing anything. See
+`docs/analysis.md`.
 
 The resampler interface uses caller-owned input/output buffers and reports
 partial consumption. Its current linear implementation is a streaming scalar
@@ -183,8 +207,24 @@ transition advances one entry rather than two. Entry serials continue across a
 replaced `SourceQueue`, because a serial that repeated would resolve to the
 wrong entry.
 
+A seek also resolves against the audible entry rather than the decoded one. Once
+the producer has advanced onto the successor, the entry being heard no longer has
+a decoder to seek, and applying the seek to what *is* loaded drops the listener
+into the following song. The control lane therefore records the request against
+the audible serial, stamps the new position and publishes the epoch immediately —
+which is what retires the decode-ahead work for the successor — and the engine
+completes it on its next pass by re-opening the audible entry on the lane that is
+allowed to open files, seeking it, and returning both queue cursors to it. The
+transition into the following entry is then primed again from there, so a seek in
+the last moments of a track costs one re-open and one underrun rather than the
+next track. A seek inside the entry still being decoded takes the ordinary path
+and re-opens nothing.
+
 A user skip is a hard switch: the epoch bump makes the callback discard prepared
-audio, so it is immediate rather than waiting for the current entry to drain.
+audio, so it is immediate rather than waiting for the current entry to drain. A
+hard load also makes the entry it loaded the audible one at once: the callback
+republishes a serial only when the audible entry *changes*, so after the epoch
+bump the last serial it published names audio that no longer exists.
 `previous` restarts the current entry past three seconds and moves the cursor
 back before it. Shuffle generates a permutation and keeps the playing entry at
 the cursor, so toggling it does not restart the song and `previous` still has

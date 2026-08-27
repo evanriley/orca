@@ -121,6 +121,9 @@ pub const PlayerEngine = struct {
     format_switch_transitions: u64 = 0,
     open_failures: u64 = 0,
     decode_errors: u64 = 0,
+    /// How often a seek had to re-open the audible entry because the producer
+    /// had already run past it into the successor.
+    seek_reopens: u64 = 0,
 
     pub fn create(allocator: std.mem.Allocator, options: Options) !*PlayerEngine {
         const self = try allocator.create(PlayerEngine);
@@ -237,6 +240,7 @@ pub const PlayerEngine = struct {
             runtime_zone.pipe.reclaim(&runtime_zone.pool);
             runtime_zone.silenced.store(silenced, .release);
         }
+        self.serviceSeek();
         self.serviceQueue(zones);
         const format = self.player.format();
         // Closing a stream whose negotiated format no longer matches has to
@@ -262,7 +266,52 @@ pub const PlayerEngine = struct {
     /// by the epoch bump, and its queue position is no longer the one wanted.
     pub fn discardPending(self: *PlayerEngine) void {
         self.releasePending();
+        self.player.clearPendingSeek();
         self.consecutive_open_failures = 0;
+    }
+
+    /// Completes a seek the control lane could not apply itself.
+    ///
+    /// The producer runs an entry ahead, so a seek issued in the last moments of
+    /// a track arrives when the audible entry's decoder has already been
+    /// released and replaced by the successor's. `Player.seek` records the
+    /// request rather than applying it to the wrong source; here — on the lane
+    /// that is allowed to open files — the audible entry is re-opened and seeked
+    /// for real. The decode-ahead work for the following entry goes with it:
+    /// re-opening replaces the whole `SourceQueue`, and the epoch bump that
+    /// already happened is what discards the audio it had prepared.
+    fn serviceSeek(self: *PlayerEngine) void {
+        const request = self.player.takePendingSeek() orelse return;
+        const queue = self.queue orelse return self.seekLoadedSource(request.frame);
+        const opener = self.opener orelse return self.seekLoadedSource(request.frame);
+        // An entry the serial map has forgotten cannot be re-opened, and
+        // guessing a position would be worse than seeking what is loaded.
+        const position = queue.positionForSerial(request.serial) orelse
+            return self.seekLoadedSource(request.frame);
+        const ref = queue.refAt(position) orelse return self.seekLoadedSource(request.frame);
+        var session = opener.open(ref) catch {
+            self.noteOpenFailure(queue, position);
+            return;
+        };
+        // A held format-switch successor describes a transition that is no
+        // longer happening.
+        self.releasePending();
+        self.player.replaceSource(session);
+        session = undefined;
+        queue.seekTo(position);
+        queue.noteEntrySerial(self.player.entrySerial(), position);
+        self.seekLoadedSource(request.frame);
+        self.consecutive_open_failures = 0;
+        self.seek_reopens += 1;
+    }
+
+    fn seekLoadedSource(self: *PlayerEngine, frame: u64) void {
+        _ = self.player.seekCurrent(frame) catch {
+            // A decoder that cannot seek ends its entry rather than stalling the
+            // queue, exactly as one that fails mid-read does.
+            self.decode_errors += 1;
+            if (self.player.sources) |*sources| sources.current.eof = true;
+        };
     }
 
     /// The playback queue lane: start the queue when nothing is loaded, prime
@@ -599,10 +648,22 @@ pub const PlayerEngine = struct {
         const sample = clock_zone.position.load(.acquire);
         const serial = clock_zone.rendered_entry_serial.load(.monotonic);
         const anchor = clock_zone.entry_anchor.load(.monotonic);
-        // Now-playing follows the serial the callback actually rendered, not
-        // the decode cursor, which leads it by the whole render-ahead depth.
-        if (self.queue) |queue| queue.observeRenderedSerial(serial);
         if (render.positionEpoch(sample) != @as(u16, @truncate(epoch))) return;
+        // Now-playing follows the serial the callback actually rendered, not the
+        // decode cursor, which leads it by the whole render-ahead depth. It is
+        // adopted only once the position it came with proves to belong to the
+        // current epoch: a serial published under a retired epoch describes
+        // audio a hard switch has already thrown away, and adopting it would
+        // drag both cursors back onto the entry that switch left behind.
+        //
+        // Identity, duration and position all resolve from this one value —
+        // the queue maps it to the audible entry, the Player maps it to that
+        // entry's timeline shape — so the three agree by construction.
+        if (self.queue) |queue| queue.observeRenderedSerial(serial);
+        self.player.observeRenderedSerial(serial);
+        // Republish under the serial just adopted, so duration moves in the same
+        // pass the audible entry does rather than one pass behind it.
+        self.player.publishSourceInfo();
         // The anchor's stamp is the low half of the serial that owns it. A
         // mismatch means the two were read from different moments, so the pair
         // is discarded exactly as a mismatched epoch is.
@@ -684,6 +745,8 @@ const RampDecoder = struct {
     fn decoder(self: *RampDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
             .context = self,
+            // A test double still has to name its encoding: canonical float PCM.
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
             .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
             .format = .{
                 .sample_format = .float_32,
@@ -1025,7 +1088,26 @@ const TestOpener = struct {
     allocator: std.mem.Allocator,
     plans: []const TrackPlan,
     opens: usize = 0,
+    /// Opens per track id, so a test can prove that a *particular* entry was
+    /// re-opened rather than only that some open happened.
+    opens_by_id: [8]struct { track_id: i64 = 0, count: usize = 0 } = @splat(.{}),
     fail_ids: []const i64 = &.{},
+
+    fn opensOf(self: *const TestOpener, track_id: i64) usize {
+        for (self.opens_by_id) |record| {
+            if (record.track_id == track_id) return record.count;
+        }
+        return 0;
+    }
+
+    fn noteOpen(self: *TestOpener, track_id: i64) void {
+        for (&self.opens_by_id) |*record| {
+            if (record.track_id != track_id and record.track_id != 0) continue;
+            record.track_id = track_id;
+            record.count += 1;
+            return;
+        }
+    }
 
     const Backing = struct {
         allocator: std.mem.Allocator,
@@ -1052,6 +1134,7 @@ const TestOpener = struct {
         for (self.plans) |plan| {
             if (plan.track_id != ref.track_id) continue;
             self.opens += 1;
+            self.noteOpen(ref.track_id);
             const backing = try self.allocator.create(Backing);
             backing.* = .{
                 .allocator = self.allocator,
@@ -1190,6 +1273,126 @@ test "now playing reports the audible entry, not the decoded one" {
     harness.run(64, frames_per_block);
     try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
     try std.testing.expectEqual(epoch_before, harness.player.snapshot().epoch);
+}
+
+test "reported duration follows the audible entry, not the one being decoded" {
+    const allocator = std.testing.allocator;
+    // Deliberately different lengths: reporting the decoded entry's duration is
+    // exactly what made now-playing advertise the next track's length while the
+    // previous one was still audible.
+    const first_frames: u64 = 4 * frames_per_block;
+    const second_frames: u64 = 400 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = first_frames },
+        .{ .track_id = 11, .frames = second_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    // Decode until the producer is a whole entry ahead of the audio, which is
+    // the window the defect lived in.
+    var pass: usize = 0;
+    while (pass < 64 and harness.engine.gapless_transitions == 0) : (pass += 1)
+        harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+
+    // Render a little of the first entry and hold there. Identity, duration and
+    // position must all still describe entry 0.
+    harness.step(64);
+    harness.step(64);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(
+        first_frames,
+        harness.player.published_frame_count.load(.acquire),
+    );
+    try std.testing.expect(harness.player.snapshot().position_frames <= first_frames);
+
+    // Only when the callback crosses into the successor do all three move, in
+    // the same pass, together.
+    while (pass < 256 and harness.queue.cursorPosition() == 0) : (pass += 1)
+        harness.step(frames_per_block);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expectEqual(
+        second_frames,
+        harness.player.published_frame_count.load(.acquire),
+    );
+}
+
+test "a seek during a gapless transition re-opens the audible entry" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 64 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames },
+        .{ .track_id = 11, .frames = entry_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    // Reach the window where the producer has already moved on to entry 1 while
+    // entry 0's tail is still queued and audible. Priming the successor is not
+    // enough: the divergence begins when the decode cursor actually *advances*
+    // onto it and entry 0's decoder is released.
+    var pass: usize = 0;
+    while (pass < 512) : (pass += 1) {
+        harness.step(32);
+        if (harness.queue.cursorPosition() != 0) break;
+        if (harness.player.entrySerial() != harness.player.audible_entry_serial.load(.acquire))
+            break;
+    }
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(10));
+
+    // The user drags the seek bar. It names a point in the track being *heard*.
+    const target: u64 = 8 * frames_per_block;
+    _ = try harness.player.seek(target);
+    // The control lane could not apply it: entry 0's decoder is already gone.
+    try std.testing.expect(harness.player.pending_seek != null);
+    harness.step(0);
+    // The engine re-opened entry 0 and seeked *that*, and the decode-ahead work
+    // for entry 1 went with it rather than being played next.
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
+    try std.testing.expectEqual(@as(usize, 2), harness.test_opener.opensOf(10));
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+    try std.testing.expectEqual(target, harness.player.snapshot().position_frames);
+
+    // And the following entry still arrives afterwards, still gaplessly: a fix
+    // that corrected the seek but broke the next transition would not be one.
+    const gapless_before = harness.engine.gapless_transitions;
+    pass = 0;
+    while (pass < 1024 and harness.queue.cursorPosition() == 0) : (pass += 1)
+        harness.step(frames_per_block);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+    try std.testing.expect(harness.engine.gapless_transitions > gapless_before);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.format_switch_transitions);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.decode_errors);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.open_failures);
+}
+
+test "a seek inside the entry being decoded is applied without re-opening it" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 400 * frames_per_block },
+        .{ .track_id = 11, .frames = 400 * frames_per_block },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    harness.run(8, 128);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+
+    const target: u64 = 100 * frames_per_block;
+    _ = try harness.player.seek(target);
+    // Nothing deferred, nothing re-opened: the ordinary path is untouched.
+    try std.testing.expect(harness.player.pending_seek == null);
+    harness.step(128);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.seek_reopens);
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(10));
+    try std.testing.expect(harness.player.snapshot().position_frames >= target);
 }
 
 test "position restarts at zero for every entry a gapless advance reaches" {
@@ -1390,6 +1593,8 @@ const FailingDecoder = struct {
     fn decoder(self: *FailingDecoder) @import("../codec/decoder.zig").Decoder {
         return .{
             .context = self,
+            // A test double still has to name its encoding: canonical float PCM.
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
             .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
             .format = .{
                 .sample_format = .float_32,

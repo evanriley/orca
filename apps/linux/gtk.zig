@@ -45,6 +45,12 @@ pub const GAction = opaque {};
 pub const GSimpleAction = opaque {};
 pub const GActionMap = opaque {};
 pub const Label = opaque {};
+pub const Image = opaque {};
+pub const GdkPaintable = opaque {};
+pub const GdkTexture = opaque {};
+pub const GdkPixbuf = opaque {};
+pub const GBytes = opaque {};
+pub const GInputStream = opaque {};
 pub const Button = opaque {};
 pub const ToggleButton = opaque {};
 pub const MenuButton = opaque {};
@@ -64,10 +70,12 @@ pub const StringList = opaque {};
 pub const StringObject = opaque {};
 pub const ListStore = opaque {};
 pub const ListModel = opaque {};
-pub const SortListModel = opaque {};
 pub const SelectionModel = opaque {};
+pub const SingleSelection = opaque {};
 pub const ColumnView = opaque {};
 pub const ColumnViewColumn = opaque {};
+pub const ColumnViewSorter = opaque {};
+pub const Paned = opaque {};
 pub const ListItemFactory = opaque {};
 pub const ListItem = opaque {};
 pub const ListView = opaque {};
@@ -112,6 +120,9 @@ pub const MODIFIER_CONTROL: c_uint = 1 << 2;
 pub const MODIFIER_ALT: c_uint = 1 << 3;
 
 pub const INVALID_LIST_POSITION: c_uint = 0xffffffff;
+
+pub const SORT_ASCENDING: c_int = 0;
+pub const SORT_DESCENDING: c_int = 1;
 
 pub const APPLICATION_DEFAULT_FLAGS: c_uint = 0;
 pub const BUS_TYPE_SESSION: c_int = 2;
@@ -218,7 +229,6 @@ pub extern fn g_timeout_add(
     data: ?*anyopaque,
 ) c_uint;
 pub extern fn g_source_remove(tag: c_uint) gboolean;
-pub extern fn g_utf8_collate(str1: [*:0]const u8, str2: [*:0]const u8) c_int;
 pub extern fn g_clear_error(err: *?*GError) void;
 
 pub extern fn g_list_model_get_n_items(list: ?*ListModel) c_uint;
@@ -241,6 +251,34 @@ pub extern fn g_application_quit(application: *GApplication) void;
 pub extern fn g_application_activate(application: *GApplication) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
+
+// -------------------------------------------------------- images in memory
+//
+// A cover arrives from liborca as caller-owned encoded bytes, and has to
+// become something a widget can draw without ever touching the filesystem.
+// The stream and the *scaled* decode are what keep a pathological image from
+// turning a 12 MiB JPEG into hundreds of megabytes of pixels.
+
+/// Borrows `data` rather than copying it. The plain `g_bytes_new` copies, and
+/// on the largest cover in the reference library that second 11.3 MiB buffer
+/// was worth 12 MB of resident memory for the length of one decode. The borrow
+/// is sound only because the decode is synchronous and the GBytes is dropped
+/// before the borrowed buffer is.
+pub extern fn g_bytes_new_static(data: ?*const anyopaque, size: usize) *GBytes;
+pub extern fn g_bytes_unref(bytes: *GBytes) void;
+pub extern fn g_memory_input_stream_new_from_bytes(bytes: *GBytes) *GInputStream;
+
+/// Decodes at most `width` x `height` pixels. The scaling happens inside the
+/// loader, so the full-resolution image is never materialized.
+pub extern fn gdk_pixbuf_new_from_stream_at_scale(
+    stream: *GInputStream,
+    width: c_int,
+    height: c_int,
+    preserve_aspect_ratio: gboolean,
+    cancellable: ?*GCancellable,
+    err: *?*GError,
+) ?*GdkPixbuf;
+pub extern fn gdk_texture_new_for_pixbuf(pixbuf: *GdkPixbuf) *GdkTexture;
 
 // ---------------------------------------------------------------- GVariant
 //
@@ -393,6 +431,8 @@ pub extern fn gtk_widget_set_margin_bottom(widget: *Widget, margin: c_int) void;
 pub extern fn gtk_widget_add_css_class(widget: *Widget, css_class: [*:0]const u8) void;
 pub extern fn gtk_widget_remove_css_class(widget: *Widget, css_class: [*:0]const u8) void;
 pub extern fn gtk_widget_add_controller(widget: *Widget, controller: *EventController) void;
+pub extern fn gtk_widget_get_first_child(widget: *Widget) ?*Widget;
+pub extern fn gtk_widget_get_next_sibling(widget: *Widget) ?*Widget;
 
 pub extern fn gtk_header_bar_new() *Widget;
 pub extern fn gtk_header_bar_pack_start(bar: *HeaderBar, child: *Widget) void;
@@ -417,7 +457,17 @@ pub extern fn gtk_scale_button_set_value(button: *ScaleButton, value: f64) void;
 pub extern fn gtk_scale_button_get_value(button: *ScaleButton) f64;
 
 pub extern fn gtk_search_entry_new() *Widget;
+pub extern fn gtk_search_entry_set_placeholder_text(
+    entry: *SearchEntry,
+    text: ?[*:0]const u8,
+) void;
 pub extern fn gtk_editable_get_text(editable: *Editable) [*:0]const u8;
+pub extern fn gtk_editable_set_text(editable: *Editable, text: [*:0]const u8) void;
+
+pub extern fn gtk_image_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
+pub extern fn gtk_image_set_from_icon_name(image: *Image, icon_name: ?[*:0]const u8) void;
+pub extern fn gtk_image_set_from_paintable(image: *Image, paintable: ?*GdkPaintable) void;
+pub extern fn gtk_image_set_pixel_size(image: *Image, pixel_size: c_int) void;
 
 pub extern fn gtk_label_new(text: ?[*:0]const u8) *Widget;
 pub extern fn gtk_label_set_text(label: *Label, text: [*:0]const u8) void;
@@ -427,6 +477,14 @@ pub extern fn gtk_label_set_ellipsize(label: *Label, mode: c_int) void;
 pub extern fn gtk_box_new(orientation: c_int, spacing: c_int) *Widget;
 pub extern fn gtk_box_append(box: *Box, child: *Widget) void;
 pub extern fn gtk_separator_new(orientation: c_int) *Widget;
+
+pub extern fn gtk_paned_new(orientation: c_int) *Widget;
+pub extern fn gtk_paned_set_start_child(paned: *Paned, child: ?*Widget) void;
+pub extern fn gtk_paned_set_end_child(paned: *Paned, child: ?*Widget) void;
+pub extern fn gtk_paned_set_position(paned: *Paned, position: c_int) void;
+pub extern fn gtk_paned_set_resize_start_child(paned: *Paned, resize: gboolean) void;
+pub extern fn gtk_paned_set_shrink_start_child(paned: *Paned, shrink: gboolean) void;
+pub extern fn gtk_paned_set_shrink_end_child(paned: *Paned, shrink: gboolean) void;
 
 pub extern fn gtk_popover_new() *Widget;
 pub extern fn gtk_popover_set_child(popover: *Popover, child: ?*Widget) void;
@@ -470,9 +528,10 @@ pub extern fn gtk_drop_down_new(model: ?*ListModel, expression: ?*anyopaque) *Wi
 pub extern fn gtk_drop_down_get_selected(drop_down: *DropDown) c_uint;
 pub extern fn gtk_drop_down_set_selected(drop_down: *DropDown, position: c_uint) void;
 
-pub extern fn gtk_sort_list_model_new(model: ?*ListModel, sorter: ?*Sorter) *SortListModel;
-pub extern fn gtk_sort_list_model_set_sorter(model: *SortListModel, sorter: ?*Sorter) void;
 pub extern fn gtk_multi_selection_new(model: ?*ListModel) *SelectionModel;
+pub extern fn gtk_single_selection_new(model: ?*ListModel) *SingleSelection;
+pub extern fn gtk_single_selection_get_selected(selection: *SingleSelection) c_uint;
+pub extern fn gtk_single_selection_set_selected(selection: *SingleSelection, position: c_uint) void;
 pub extern fn gtk_no_selection_new(model: ?*ListModel) *SelectionModel;
 pub extern fn gtk_selection_model_get_selection(model: *SelectionModel) *Bitset;
 
@@ -505,6 +564,19 @@ pub extern fn gtk_column_view_column_set_resizable(column: *ColumnViewColumn, re
 pub extern fn gtk_column_view_column_set_expand(column: *ColumnViewColumn, expand: gboolean) void;
 pub extern fn gtk_column_view_column_set_fixed_width(column: *ColumnViewColumn, width: c_int) void;
 pub extern fn gtk_column_view_column_set_sorter(column: *ColumnViewColumn, sorter: ?*Sorter) void;
+pub extern fn gtk_column_view_sort_by_column(
+    view: *ColumnView,
+    column: ?*ColumnViewColumn,
+    direction: c_int,
+) void;
+
+/// The column view's own sorter, which is what a header click updates. Reading
+/// the primary column and order off it is how a header click becomes a new
+/// engine query rather than a re-sort of the loaded page.
+pub extern fn gtk_column_view_sorter_get_primary_sort_column(
+    sorter: *ColumnViewSorter,
+) ?*ColumnViewColumn;
+pub extern fn gtk_column_view_sorter_get_primary_sort_order(sorter: *ColumnViewSorter) c_int;
 
 pub extern fn gtk_signal_list_item_factory_new() *ListItemFactory;
 pub extern fn gtk_list_item_set_child(item: *ListItem, child: ?*Widget) void;
@@ -512,9 +584,10 @@ pub extern fn gtk_list_item_get_child(item: *ListItem) ?*Widget;
 pub extern fn gtk_list_item_get_item(item: *ListItem) ?*anyopaque;
 pub extern fn gtk_list_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 
-pub const CompareDataFunc = *const fn (?*const anyopaque, ?*const anyopaque, ?*anyopaque) callconv(.c) c_int;
+/// A NULL `sort_func` makes every element compare equal, which is what a column
+/// needs to be clickable without a sort model behind it.
 pub extern fn gtk_custom_sorter_new(
-    sort_func: ?CompareDataFunc,
+    sort_func: ?*const anyopaque,
     user_data: ?*anyopaque,
     user_destroy: ?*anyopaque,
 ) *Sorter;

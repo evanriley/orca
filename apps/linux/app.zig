@@ -18,6 +18,52 @@ pub const page_size: u32 = 512;
 /// One tick drives everything: pump, event drain, transport, scan.
 pub const tick_ms: c_uint = 100;
 
+/// Which shelf of the library the track list is showing, and in what order.
+///
+/// This is a *request* the engine answers, not a description of the rows on
+/// screen. Both halves matter: the filters are the relational ones liborca
+/// indexes, and the sort is the engine's, because every ORDER BY it generates
+/// ends in a unique tiebreaker and only a total order makes LIMIT/OFFSET paging
+/// exact. Re-ordering the loaded rows instead would sort one page of a listing
+/// the user is scrolling through thousands of.
+pub const Browse = struct {
+    artist_id: ?i64 = null,
+    release_id: ?i64 = null,
+    sort: liborca.database.TrackSort = .id,
+    direction: liborca.database.SortDirection = .ascending,
+
+    /// The order a newly entered scope is listed in. An album is listened to in
+    /// disc-then-track order, an artist's shelf reads album by album, and an
+    /// unscoped library has no natural order to claim, so it pays for none.
+    pub fn defaultSort(self: Browse) liborca.database.TrackSort {
+        if (self.release_id != null) return .track_number;
+        if (self.artist_id != null) return .album;
+        return .id;
+    }
+};
+
+/// A NUL-terminated string the frontend owns: a widget writes it and an engine
+/// query reads it. Empty means absent and allocates nothing, so the "no filter"
+/// case costs no allocation on any of the keystrokes that pass through it.
+pub const OwnedText = struct {
+    value: [:0]u8 = &empty_text,
+
+    /// Silently keeps the previous value if the copy cannot be allocated: a
+    /// search box is not a place to fail, and the listing simply does not
+    /// narrow.
+    pub fn set(self: *OwnedText, allocator: std.mem.Allocator, text: []const u8) void {
+        if (text.len == 0) return self.clear(allocator);
+        const replacement = allocator.dupeSentinel(u8, text, 0) catch return;
+        self.clear(allocator);
+        self.value = replacement;
+    }
+
+    pub fn clear(self: *OwnedText, allocator: std.mem.Allocator) void {
+        if (self.value.len != 0) allocator.free(self.value);
+        self.value = &empty_text;
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -31,20 +77,54 @@ pub const App = struct {
     scan_job: ?liborca.core.JobHandle = null,
     scanning: bool = false,
     library_path: ?[:0]u8 = null,
+    /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
+    /// Development affordance only: it exists so an automated run can be held to a
+    /// silent sink instead of device 0, which is the system default and therefore
+    /// somebody's speakers.
+    pinned_output_device: ?u64 = null,
     /// Correlates the last `play_track` submission with its completion event, so
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,
 
     // library list
     tracks: ?*gtk.ListStore = null,
-    sorted: ?*gtk.SortListModel = null,
     selection: ?*gtk.SelectionModel = null,
     column_view: ?*gtk.ColumnView = null,
     scroller: ?*gtk.Widget = null,
-    query: [:0]u8 = &empty_query,
+    query: OwnedText = .{},
     loaded_rows: u32 = 0,
     page_exhausted: bool = false,
     track_total: u64 = 0,
+    browse: Browse = .{},
+    /// The header widgets, in `track_model.Column.all` order, so the column a
+    /// header click reports can be turned back into a sort key.
+    sort_columns: [track_model.Column.all.len]?*gtk.ColumnViewColumn = @splat(null),
+
+    // browse panes
+    artists: ?*gtk.ListStore = null,
+    artist_selection: ?*gtk.SingleSelection = null,
+    artists_loaded: u32 = 0,
+    artists_exhausted: bool = false,
+    releases: ?*gtk.ListStore = null,
+    release_selection: ?*gtk.SingleSelection = null,
+    releases_loaded: u32 = 0,
+    releases_exhausted: bool = false,
+    search_entry: ?*gtk.Editable = null,
+    artist_header: ?*gtk.Label = null,
+    release_header: ?*gtk.Label = null,
+    /// What the Artist pane's search box says. Passed to liborca unfolded — the
+    /// engine folds it exactly as it folded `artists.key`, and a frontend that
+    /// folded it here would be keeping a second copy of that definition.
+    artist_filter: OwnedText = .{},
+    artist_search_entry: ?*gtk.Editable = null,
+    /// The name of the Artist the Releases pane is scoped to, for its header.
+    /// Kept rather than re-queried because the header is rewritten on every
+    /// release page load and the name cannot have changed between them.
+    artist_scope_name: OwnedText = .{},
+    /// Set while a widget is being brought back in line with state that has
+    /// already changed. Its "changed" signal still fires, and without this it
+    /// would re-enter as though the user had done it.
+    suppress_browse_signals: bool = false,
 
     // chrome
     application: ?*gtk.Application = null,
@@ -67,6 +147,11 @@ pub const App = struct {
     total_label: ?*gtk.Label = null,
     now_playing_title: ?*gtk.Label = null,
     now_playing_detail: ?*gtk.Label = null,
+    /// The now-playing cover. One widget in two states: a paintable when the
+    /// audible track's file carries a readable image, and a placeholder icon
+    /// when it does not, so there is no second widget to keep visible in step
+    /// with a nullable image.
+    now_playing_cover: ?*gtk.Image = null,
     volume_button: ?*gtk.Widget = null,
     device_drop_down: ?*gtk.DropDown = null,
     device_names: ?*gtk.StringList = null,
@@ -95,23 +180,71 @@ pub const App = struct {
         gtk.gtk_label_set_text(label, message.ptr);
     }
 
-    /// Resolves a Track id to a title using rows already loaded, or null. The
-    /// returned string is owned by the row and is valid only while that row
-    /// remains in the model.
-    pub fn knownTitle(self: *App, track_id: i64) ?[:0]const u8 {
-        const store = self.tracks orelse return null;
-        const model = gtk.cast(gtk.ListModel, store);
-        const count = gtk.g_list_model_get_n_items(model);
-        var index: c_uint = 0;
-        while (index < count) : (index += 1) {
-            const item = gtk.g_list_model_get_item(model, index) orelse continue;
-            const row: *track_model.TrackObject = @ptrCast(@alignCast(item));
-            const found = row.id() == track_id;
-            const text = row.title();
-            gtk.g_object_unref(item);
-            if (found) return text;
+    /// The one place the track listing is described to liborca.
+    ///
+    /// A full-text search and a relational filter are alternatives to the
+    /// engine, not a combination, and asking for both is refused rather than
+    /// half-honoured. Searching therefore leaves the scope out: the panes are
+    /// reset to "All" when a search starts, and this keeps that true even if a
+    /// caller forgets.
+    ///
+    /// The Artist pane's filter is *not* part of this. It narrows which Artists
+    /// are listed and never reaches a `TrackQuery`, so it and a track search are
+    /// free to hold text at the same time without either one being half applied.
+    pub fn trackRequest(self: *App, offset: u32) liborca.database.TrackQuery {
+        const searching = self.query.value.len != 0;
+        return .{
+            .artist_id = if (searching) null else self.browse.artist_id,
+            .release_id = if (searching) null else self.browse.release_id,
+            .sort = self.browse.sort,
+            .direction = self.browse.direction,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// The one place the Artist pane is described to liborca.
+    ///
+    /// The filter text is handed over exactly as typed. Folding it is the
+    /// engine's definition of artist identity — the same fold that produced
+    /// `artists.key` — and doing it here would be a second copy of that
+    /// definition, free to drift from the one the rows were keyed by.
+    pub fn artistRequest(self: *App, offset: u32) liborca.database.ArtistQuery {
+        return .{
+            .filter = self.artist_filter.value,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// The one place the Release pane is described to liborca. The Artist
+    /// filter above narrows which Artists are *listed*; this one is the Artist
+    /// the user picked, which is a different question and the only one a
+    /// Release listing can be scoped by.
+    pub fn releaseRequest(self: *App, offset: u32) liborca.database.ReleaseQuery {
+        return .{
+            .album_artist_id = self.browse.artist_id,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// Puts the listing in its scope's default order, and shows that on the
+    /// column headers so the view and the query cannot disagree.
+    pub fn applyScopeDefaultSort(self: *App) void {
+        self.browse.sort = self.browse.defaultSort();
+        self.browse.direction = .ascending;
+        const view = self.column_view orelse return;
+        var chosen: ?*gtk.ColumnViewColumn = null;
+        for (track_model.Column.all, self.sort_columns) |column, header| {
+            if (column.sortKey() == self.browse.sort) chosen = header;
         }
-        return null;
+        // Sorting the view is indistinguishable from a header click to GTK, and
+        // its "changed" signal would arrive back here as one.
+        const previous = self.suppress_browse_signals;
+        self.suppress_browse_signals = true;
+        defer self.suppress_browse_signals = previous;
+        gtk.gtk_column_view_sort_by_column(view, chosen, gtk.SORT_ASCENDING);
     }
 
     fn updateCountLabel(self: *App) void {
@@ -121,7 +254,7 @@ pub const App = struct {
             return;
         }
         var buffer: [96]u8 = undefined;
-        const text = if (self.query.len != 0)
+        const text = if (self.query.value.len != 0)
             strings.printZ(&buffer, "{d} matching", .{self.loaded_rows}) catch "…"
         else
             strings.printZ(&buffer, "{d} of {d} tracks", .{
@@ -137,11 +270,10 @@ pub const App = struct {
         const library = self.library orelse return;
         if (self.page_exhausted) return;
         const store = self.tracks orelse return;
-        var page = self.runtime.libraryTrackPage(
+        var page = self.runtime.libraryTrackQuery(
             library,
-            self.query,
-            page_size,
-            self.loaded_rows,
+            self.query.value,
+            self.trackRequest(self.loaded_rows),
         ) catch {
             self.page_exhausted = true;
             self.setStatus("Unable to query the library");
@@ -190,33 +322,37 @@ pub const App = struct {
             self.setStatus("Add a music folder to begin");
             return;
         };
-        self.track_total = self.runtime.libraryTrackCount(library) catch 0;
+        // A full-text match has no cheap total — FTS5 ranks rather than counts —
+        // so a search reports what it has loaded and nothing it has not.
+        self.track_total = if (self.query.value.len != 0)
+            0
+        else
+            self.runtime.libraryTrackMatchCount(library, self.trackRequest(0)) catch 0;
+        // A scroller left deep in the previous listing would page from the
+        // bottom of a list that is now one page long.
+        if (self.scroller) |scroller| gtk.gtk_adjustment_set_value(
+            gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
+            0.0,
+        );
         self.loadNextPage();
         if (self.loaded_rows != 0) {
             self.setStatus("Ready");
-        } else if (self.query.len != 0) {
+        } else if (self.query.value.len != 0) {
             self.setStatus("No tracks match that search");
+        } else if (self.browse.artist_id != null or self.browse.release_id != null) {
+            self.setStatus("Nothing on this shelf has a track");
         } else {
             self.setStatus("Library is empty - add a music folder");
         }
     }
 
-    pub fn setQuery(self: *App, text: []const u8) void {
-        const replacement = self.allocator.dupeSentinel(u8, text, 0) catch return;
-        self.freeQuery();
-        self.query = replacement;
-    }
-
-    fn freeQuery(self: *App) void {
-        if (self.query.len != 0) self.allocator.free(self.query);
-        self.query = &empty_query;
-    }
-
     pub fn deinit(self: *App) void {
-        self.freeQuery();
+        self.query.clear(self.allocator);
+        self.artist_filter.clear(self.allocator);
+        self.artist_scope_name.clear(self.allocator);
         self.device_ids.deinit(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };
 
-var empty_query: [0:0]u8 = .{};
+var empty_text: [0:0]u8 = .{};

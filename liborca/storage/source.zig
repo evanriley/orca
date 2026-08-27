@@ -144,6 +144,51 @@ pub const MemorySource = struct {
     };
 };
 
+/// Presents the bytes of another source from a fixed offset onward as if the
+/// stream began there.
+///
+/// A container prefix that belongs to no encoding — an ID3v2 tag in front of a
+/// FLAC stream — is a fact about the file, not about the codec, so the decoder
+/// is handed a view rather than taught to skip it. Reads and sizes shift;
+/// `identity` deliberately does **not**. Identity answers "which file is this
+/// and has it changed", which scanning compares against `observed_files`, and a
+/// view that reported a shortened size would make every tagged file look
+/// modified on the next scan.
+///
+/// The view borrows `inner` and must not outlive it, and whatever holds the
+/// view must outlive the decoder reading through it.
+pub const OffsetSource = struct {
+    inner: ReadableSource,
+    offset: u64,
+
+    pub fn readable(self: *OffsetSource) ReadableSource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn readAt(context: *anyopaque, offset: u64, buffer: []u8) !usize {
+        const self: *OffsetSource = @ptrCast(@alignCast(context));
+        const absolute = std.math.add(u64, self.offset, offset) catch return 0;
+        if (absolute >= self.inner.size()) return 0;
+        return self.inner.readAt(absolute, buffer);
+    }
+
+    fn getSize(context: *anyopaque) u64 {
+        const self: *OffsetSource = @ptrCast(@alignCast(context));
+        return self.inner.size() -| self.offset;
+    }
+
+    fn getIdentity(context: *anyopaque) StorageIdentity {
+        const self: *OffsetSource = @ptrCast(@alignCast(context));
+        return self.inner.identity();
+    }
+
+    const vtable = ReadableSource.VTable{
+        .read_at = readAt,
+        .size = getSize,
+        .identity = getIdentity,
+    };
+};
+
 pub const LocalFileSource = struct {
     io: std.Io,
     file: std.Io.File,
@@ -226,4 +271,32 @@ test "memory sources answer bounded reads past their end" {
     try std.testing.expectEqualStrings("ca", buffer[0..2]);
     try std.testing.expectEqual(@as(usize, 0), try readable.readAt(4, &buffer));
     try std.testing.expectEqual(@as(u64, 4), readable.size());
+}
+
+test "an offset view reads a suffix while still reporting the whole file's identity" {
+    var memory = MemorySource{ .bytes = "ID3-tag-bytesfLaCstream", .inode = 77 };
+    var view = OffsetSource{ .inner = memory.readable(), .offset = 13 };
+    const readable = view.readable();
+
+    var buffer: [10]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 10), try readable.readAt(0, &buffer));
+    try std.testing.expectEqualStrings("fLaCstream", &buffer);
+    try std.testing.expectEqual(@as(usize, 6), try readable.readAt(4, &buffer));
+    try std.testing.expectEqualStrings("stream", buffer[0..6]);
+    try std.testing.expectEqual(@as(u64, 10), readable.size());
+
+    // Change detection asks the file, not the view: a shortened size or a lost
+    // inode here would make every tagged file look modified on the next scan.
+    try std.testing.expectEqual(@as(u64, 23), readable.identity().size);
+    try std.testing.expectEqual(@as(std.Io.File.INode, 77), readable.identity().inode);
+}
+
+test "an offset view past the end of its source reads nothing rather than wrapping" {
+    var memory = MemorySource{ .bytes = "short" };
+    var view = OffsetSource{ .inner = memory.readable(), .offset = 64 };
+    const readable = view.readable();
+    var buffer: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try readable.readAt(0, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), try readable.readAt(std.math.maxInt(u64), &buffer));
+    try std.testing.expectEqual(@as(u64, 0), readable.size());
 }

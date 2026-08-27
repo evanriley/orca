@@ -7,6 +7,9 @@ pub const Kind = enum {
     /// Turning observed files into artists, releases and tracks. A pass of its
     /// own, because a metadata edit reprojects without walking a filesystem.
     projection,
+    /// Re-reading the headers of files whose declared audio properties are
+    /// missing. Neither a walk nor a resolution: a repair keyed on `files.id`.
+    property_backfill,
     analysis,
     conversion,
     ripping,

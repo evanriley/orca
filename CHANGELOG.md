@@ -2,6 +2,183 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Album art became reachable, and the player shows it
+
+- **Embedded cover art can be read, not just counted.** `observed_file_tags`
+  had recorded an artwork MIME type, size and kind since the scanner existed,
+  and nothing could obtain the image behind them. `metadata/artwork.zig` sniffs
+  the container and dispatches to `id3v2.readPicture` or
+  `vorbis_comment.readPicture`, which extract `APIC` and `PICTURE` payloads
+  through the *same* frame and block parsers the observation already used — so
+  an observation and a fetch cannot disagree about which bytes are the image.
+  Verified byte-for-byte against an independent extractor on a real FLAC
+  (254,372 bytes) and a real MP3 (422,564 bytes).
+- **A leading ID3v2 tag does not hide a cover.** Artwork resolves the payload
+  offset exactly as the codec registry does, so the reference library's 104
+  ID3-fronted FLACs give up their `PICTURE` block. The adversarial case — a
+  216,921-byte picture block behind a 219,663-byte tag — extracts to the exact
+  216,870 image bytes an independent tool reports.
+- **The media type is read from the bytes, not from the claim.** 93 files in
+  the reference library declare `image/jpg`, 24 declare nothing, and one
+  album's covers are 5.3 MB animated GIFs behind an empty declaration. A
+  payload that is not a recognised image is refused rather than handed to a
+  platform decoder, and the size bound — 12 MiB, below both containers'
+  ceilings so it can actually fire, above the library's largest real cover of
+  11.29 MiB — is checked against the declared length before anything is
+  allocated to honour it.
+- **Nothing is stored in the Library and nothing is cached.** 19,031 of the
+  22,060 files carry a readable cover, totalling 6.09 GB; that does not belong
+  in a SQLite file. Reading on demand costs one open per request, can never go
+  stale — a track whose observation predates the current reader still yields
+  its cover — and a whole-library audit of all 22,060 files took 6.3 seconds.
+  A bounded per-Release cache is the right next step and is deliberately not
+  here yet, because the one consumer loads a single image per track change.
+- **A Release's artwork is its first track's, in listening order, that has
+  one.** Real tag data disagrees within an album, so the rule is chosen to be
+  stable across runs (the unique `tracks_position` order), cheap (candidates
+  are pre-filtered by what the scan observed, so a coverless Release opens no
+  files at all, and at most eight are tried), and unsurprising.
+- **The GTK transport bar shows the now-playing cover.** One `GtkImage` in two
+  states, refreshed only when the audible Track changes. A missing cover, a
+  missing file, a refused image and an undecodable one all show the same
+  placeholder. Decoding is bounded to 128 pixels inside gdk-pixbuf's scaling
+  loader, because an 11.3 MiB JPEG is 3000 pixels square and encoded size says
+  nothing about pixel count. Driven through the real widgets on the real
+  library: 154 MB resident with all 22,060 tracks open and no cover shown,
+  168 MB with an ordinary cover, 192 MB with the largest cover in the library,
+  steady across eleven consecutive loads.
+- **The Releases pane deliberately shows no thumbnails.** 512 covers per page
+  load is 512 file opens and roughly 150 MB of encoded image on one scroll.
+  `libraryReleaseArtwork` exists for when a grid view and a cache do.
+- `orca-cli artwork DATABASE (--track=ID | --release=ID) [--out=PATH]`.
+
+### Analysis became a library job, and playback started using it
+
+- **`orca-cli analyze-library DATABASE` measures a whole Library.** Loudness,
+  peak, clipping, silence, waveform and temporal fingerprint were computed only
+  for one file a human named, so `Gain.setReplayGain` was called by nothing and
+  a quiet track stayed quiet. `library/analysis_pass.zig` runs the same
+  measurement over every file the Library has not measured yet, as a runtime
+  job on the shared `JobWorker` — reachable from the Zig API, the C ABI
+  (`orca_library_start_analysis`) and the CLI, with `files.audio_hash` written
+  for the first time.
+- **It is built to be stopped.** It decodes whole files, so a run is hours
+  rather than seconds: 50 real files measured in 27.2 s (0.545 s each,
+  ReleaseFast), which extrapolates to about 3.3 hours for the 22,060-file
+  reference library. Cancellation is honored inside a decode, the batch already
+  measured still commits, and the next run selects only the remainder — a pass
+  cancelled after 11 of 50 files was followed by one that measured exactly 39.
+- **"Already analyzed" is the analysis cache key, not a new flag.** The key
+  already encodes every reason a measurement stops describing a file — its
+  bytes, its algorithm version, its parameters — so selection is an anti-join
+  against `analysis_results`' own primary key rather than a marker column free
+  to disagree with the results it describes. The page query is
+  `SEARCH files USING INTEGER PRIMARY KEY` plus one full-prefix covering-index
+  probe per row; no new index, no table scan.
+- **ReplayGain reaches the audio, and stays right across a gapless
+  transition.** The correction is a property of the audio rather than of the
+  Player: the session that decodes an entry carries the figure measured from
+  those exact bytes and scales its own frames by it, so an entry with no
+  measurement plays at unity instead of inheriting the previous one's and a
+  file edited since the last scan loses a correction it no longer matches. A
+  Player-level multiplier could not be right during a gapless advance — the
+  pipe holds two entries' blocks at once — and neither could a per-block one,
+  because a canonical block is filled from two decoders across the boundary.
+  Attaching it at the single point where a queue entry becomes audio covers
+  the hard load, the auto-advance, the format switch and the seek re-open
+  together. On the reference corpus the loudest and quietest tracks went from
+  17.30 dB apart to 0.71 dB, gaplessly as well as on a skip, with the
+  transition's gapless, decode-error, open-failure and underrun counts
+  unchanged. `off` and `track` reach the ABI and `orca-cli play-tracks
+  --replay-gain=`, and now take effect as the decoded-ahead audio drains
+  rather than at the next track; album gain is out of scope.
+- **`orca-cli play-tracks` can move the volume.** `--volume=N` and
+  `--set-volume=MS:N` exist so that user volume and loudness correction being
+  independent is checkable from outside: changing one mid-track leaves the
+  other exactly where it was.
+
+### The library became browsable, and stopped losing 104 files
+
+- **Tracks are connected to artists.** The projection wrote 2,474 artists and
+  2,637 releases and nothing could read any of them back — no list, no page, no
+  lookup by id — and there was no relational link at all: `tracks` had no
+  `artist_id`, `recordings` no artist, `releases` no `album_artist_id`.
+  Migration 9 adds the links and 11 re-keys them; `ArtistPage`, `ReleasePage`
+  and a `TrackQuery` with seven sort keys, a direction and artist/release
+  filters expose them through the runtime, the C ABI and `orca-cli artists /
+  releases / tracks`. Paging is exact under ties: every `ORDER BY` ends with a
+  unique tiebreaker, without which `LIMIT`/`OFFSET` silently drops and
+  duplicates rows — 3,476 of 22,060 tracks share a title.
+- **An artist's tracks are the ones credited to them *or* on a release they are
+  the album artist of.** The narrow definition left 33 artists owning an album
+  and no songs, and those are not tag defects to normalize away: a featured
+  credit, a collaboration, an `&`-versus-`,` convention, or simply no `ARTIST`
+  tag. Widening the definition covers all of them and guesses at nothing.
+- **The key fold learned typographic punctuation.** `ALBUMARTIST` carries what
+  a metadata service supplied and `ARTIST` carries what somebody typed, so
+  `El‐P` (U+2010) and `El-P` were two artists — one holding every release, the
+  other every track. Migration 11 merges them; **migration 12 re-keys releases
+  for the same reason**, without which any reprojection built a parallel
+  release beside each stale one and turned 22,060 tracks into 23,271.
+- **An ID3 tag is not a format.** `sniff` answered `ID3` with `.mp3`, so 104
+  genuine FLAC files in a real library were handed to the MPEG decoder and were
+  **unplayable**. Detection now returns a payload offset and the codec registry
+  presents the decoder an `OffsetSource`; the scanner steps the tag reader over
+  it too, so those files stop scanning as untitled with no artist. MPEG
+  deliberately keeps offset 0, because its decoder is defined over the whole
+  file including trailing tags.
+- **A FLAC that stops inside its final block is finished, not broken.** Real
+  files end untidily — one of those 104 stops 2,620 frames short of the
+  11,979,324 its STREAMINFO declares. That raised `OutOfSync`, which failed
+  analysis outright and ended playback in a decode error. A shortfall smaller
+  than one maximum block is at most the final frame; anything larger still
+  errors.
+- **Destroying one Player no longer tears down every other one.** It drained
+  the whole work registry, cancelling every other Player's engine thread and
+  every scan in flight. Registrations carry an owner tag now.
+- **User volume and replay gain no longer overwrite each other.** They shared
+  one stored value, so applying a loudness correction would have moved the
+  host's volume slider.
+
+### Files declare what they are, and old rows can be repaired
+
+- **`files.codec` is written.** It was declared and then always stored as the
+  empty string, so every row in a real library recorded no encoding at all. A
+  probe already opens a decoder; the decoder now names its encoding through
+  `codec/decoder.zig`'s `codec_id` — `pcm`, `pcm_float`, `flac`, `qoa`, `mp1`,
+  `mp2`, `mp3` — and the scanner carries that into the row. It is deliberately
+  **not** a synonym for `audio_format`: that names the container, which decides
+  who opens a file, while `codec` names the encoding inside it, which decides
+  what the bytes cost. The two diverge wherever a container is a wrapper — a
+  WAV holding integer PCM or IEEE float, an MPEG stream's layer, and the
+  AAC-or-ALAC and Vorbis-or-Opus cases still to come. Lossy and lossless are
+  told apart by `codec_id.isLossless`, a function of the identifier rather than
+  a second column that could disagree with it.
+- **A property backfill, as a runtime job.** The scanner probes only files
+  whose bytes changed, which is what keeps a rescan of a large library nearly
+  free — and which means a library scanned before probing existed keeps null
+  `duration_ms` for ever, because a music collection's bytes never change.
+  `library/property_backfill.zig` repairs those rows by `files.id` with no
+  filesystem walk: `OrcaRuntime.startLibraryPropertyBackfill`,
+  `orca_library_start_property_backfill`, `orca-cli backfill`. Row selection is
+  a search over `files_incomplete_properties`, a **partial** index (migration
+  10) over exactly the incomplete rows, so it shrinks to nothing as the pass
+  works. Commits are bounded, cancellation is checked between rows, and a
+  cancelled run commits what it already probed — so a second run resumes with a
+  shorter list rather than starting over. **Unlike a scan the job publishes a
+  total**, because how many rows still owe a probe is one indexed count.
+- **The backfill reprojects what it repaired.** `tracks.duration_ms` is derived
+  from the file rows, so a pass that repaired `files` and left the Tracks
+  reading zero would have fixed nothing a transport bar can show. Each
+  committed batch is handed to the projection scoped to its own file ids,
+  exactly as a scan batch is.
+- **An unreadable file is not a failure of the pass.** A row whose file is gone
+  or is not audio is counted and passed over with no health issue, because
+  `locations.state` already models absence. A file that opens and then refuses
+  to decode raises the new `unreadable_file` health issue, a kind the backfill
+  owns outright so that clearing it cannot erase a `corrupt_audio` finding the
+  analyzer made by decoding audio this pass never read.
+
 ### The C ABI reaches the runtime (breaking)
 
 Until now `liborca/orca.h` exposed runtime create/destroy, library open/query,

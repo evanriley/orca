@@ -3,7 +3,9 @@ const diagnostics = @import("diagnostics.zig");
 
 const magic = "ORAD";
 const version: u16 = 1;
-const header_size = 64;
+/// Public because the playback path reads the header alone out of a row it
+/// deliberately never fully materializes, so it has to size its buffer.
+pub const header_size = 64;
 
 pub fn encode(allocator: std.mem.Allocator, result: diagnostics.Result) ![]u8 {
     const bytes = try allocator.alloc(u8, header_size + result.waveform.len * 8);
@@ -56,6 +58,36 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !diagnostics.Resu
         .leading_silence_frames = readInt(u64, bytes[40..48]),
         .trailing_silence_frames = readInt(u64, bytes[48..56]),
         .waveform = waveform,
+    };
+}
+
+/// The loudness half of an encoded diagnostics result.
+///
+/// Both values are needed together: a correction without its peak cannot be
+/// capped against clipping, so they are read as one thing rather than two.
+pub const Loudness = struct {
+    replay_gain_db: f32,
+    sample_peak: f32,
+};
+
+/// Reads the loudness figures out of an encoded result without materializing
+/// the waveform.
+///
+/// The playback path wants two floats from a blob whose bulk is a waveform it
+/// will never look at, and it wants them while loading a queue entry on the
+/// control lane. Reading them straight from the fixed header keeps a track
+/// load free of an allocation that is three orders of magnitude larger than
+/// what it uses. Null means the analysis ran but found no measurable loudness
+/// — a track too short or too quiet to gate — which is a different answer from
+/// "never analyzed" and must not become a correction of zero.
+pub fn decodeLoudness(bytes: []const u8) !?Loudness {
+    if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..4], magic))
+        return error.InvalidAnalysisResult;
+    if (readInt(u16, bytes[4..6]) != version) return error.UnsupportedAnalysisResultVersion;
+    if (readInt(u16, bytes[6..8]) & 1 == 0) return null;
+    return .{
+        .replay_gain_db = readFloat(bytes[12..16]),
+        .sample_peak = readFloat(bytes[16..20]),
     };
 }
 
@@ -115,4 +147,58 @@ test "diagnostic result encoding is versioned and portable" {
         original.waveform,
         restored.waveform,
     );
+}
+
+test "loudness is read from an encoded result without materializing its waveform" {
+    // The playback path reads this on the control lane while loading a queue
+    // entry. Decoding the whole result there would allocate a waveform three
+    // orders of magnitude larger than the two floats it actually wants.
+    const allocator = std.testing.allocator;
+    const waveform = try allocator.alloc(diagnostics.WaveformBucket, 1024);
+    const original: diagnostics.Result = .{
+        .allocator = allocator,
+        .integrated_lufs = -11.29,
+        .replay_gain_db = -6.71,
+        .sample_peak = 0.940_46,
+        .rms = 0.278_838,
+        .clipped_samples = 0,
+        .silent_frames = 0,
+        .leading_silence_frames = 0,
+        .trailing_silence_frames = 0,
+        .waveform = waveform,
+    };
+    defer original.deinit();
+    const bytes = try encode(allocator, original);
+    defer allocator.free(bytes);
+
+    const loudness = (try decodeLoudness(bytes)).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -6.71), loudness.replay_gain_db, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.940_46), loudness.sample_peak, 0.0001);
+}
+
+test "a result with no measurable loudness reads as absent rather than as no correction" {
+    const allocator = std.testing.allocator;
+    const original: diagnostics.Result = .{
+        .allocator = allocator,
+        .integrated_lufs = null,
+        .replay_gain_db = null,
+        .sample_peak = 0.5,
+        .rms = 0.1,
+        .clipped_samples = 0,
+        .silent_frames = 0,
+        .leading_silence_frames = 0,
+        .trailing_silence_frames = 0,
+        .waveform = try allocator.alloc(diagnostics.WaveformBucket, 4),
+    };
+    defer original.deinit();
+    const bytes = try encode(allocator, original);
+    defer allocator.free(bytes);
+    try std.testing.expectEqual(@as(?Loudness, null), try decodeLoudness(bytes));
+}
+
+test "a truncated or foreign blob is refused rather than read as a correction" {
+    try std.testing.expectError(error.InvalidAnalysisResult, decodeLoudness("ORAD"));
+    var foreign: [header_size]u8 = @splat(0);
+    @memcpy(foreign[0..4], "ORFP");
+    try std.testing.expectError(error.InvalidAnalysisResult, decodeLoudness(&foreign));
 }

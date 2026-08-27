@@ -5,7 +5,6 @@
 //! never adjusted, cached across tracks, or reconstructed from telemetry: that
 //! is engine state and it belongs to liborca.
 
-const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
@@ -40,7 +39,16 @@ fn isNotReady(err: anyerror) bool {
 
 const max_devices = 32;
 
+/// The output the next Zone should open.
+///
+/// `ORCA_OUTPUT_DEVICE` overrides the dropdown, naming an orca device id from
+/// `orca-cli devices`. It exists so an automated run can be pinned to a silent
+/// sink: device 0 means "system default", which on a developer's machine is
+/// their speakers, and a test that plays to them is unacceptable. It mirrors
+/// `ORCA_LIBRARY`, and like it is a development affordance rather than
+/// configuration -- a person picks their device from the dropdown.
 fn selectedDeviceId(self: *App) u64 {
+    if (self.pinned_output_device) |pinned| return pinned;
     const drop_down = self.device_drop_down orelse return 0;
     if (self.device_ids.items.len == 0) return 0;
     const selected = gtk.gtk_drop_down_get_selected(drop_down);
@@ -242,6 +250,79 @@ fn applySettledSeek(self: *App) void {
     self.mpris.notify();
 }
 
+// ---------------------------------------------------------------- cover art
+
+/// What the transport bar draws when the audible track has no usable cover.
+///
+/// A file that carries none, a file that has gone missing, an image liborca
+/// refused as unrecognizable or oversized, and one gdk-pixbuf could not decode
+/// all land here. A placeholder is the honest answer to all four, and none of
+/// them is worth interrupting somebody's listening with a dialog.
+const cover_placeholder_icon: [*:0]const u8 = "audio-x-generic-symbolic";
+
+/// How large the cover is drawn.
+const cover_display_pixels: c_int = 48;
+
+/// How large the cover is *decoded*, which is the bound that matters.
+///
+/// liborca refuses to read more than `metadata.max_image_bytes` of encoded
+/// image, but encoded size says almost nothing about pixel count: the largest
+/// cover in the reference library is an 11.3 MiB JPEG, and a JPEG that size is
+/// routinely 3000 pixels square — 36 MB of pixels for a widget 48 pixels wide.
+/// gdk-pixbuf scales inside the loader, so asking for a bounded size never
+/// materializes the full image. Twice the display size covers HiDPI scaling.
+const cover_decode_pixels: c_int = 128;
+
+/// Put the audible track's cover in the transport bar, or the placeholder.
+/// Called only when the audible Track changes, never on the 100 ms tick.
+fn refreshCover(self: *App, track_id: ?i64) void {
+    const image = self.now_playing_cover orelse return;
+    const texture = coverTexture(self, track_id) orelse {
+        gtk.gtk_image_set_from_icon_name(image, cover_placeholder_icon);
+        gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, image), "dim-label");
+        return;
+    };
+    defer gtk.g_object_unref(texture);
+    gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, image), "dim-label");
+    gtk.gtk_image_set_from_paintable(image, gtk.cast(gtk.GdkPaintable, texture));
+}
+
+fn coverTexture(self: *App, track_id: ?i64) ?*gtk.GdkTexture {
+    const id = track_id orelse return null;
+    const library = (self.runtime.playerLibrary(self.player) catch null) orelse return null;
+    const cover = (self.runtime.libraryTrackArtwork(library, self.io, id) catch
+        return null) orelse return null;
+    defer cover.deinit();
+    return decodeCover(cover.bytes);
+}
+
+/// Encoded bytes to a bounded-size texture, or null if the platform decoder
+/// will not have them.
+fn decodeCover(bytes: []const u8) ?*gtk.GdkTexture {
+    // Borrowed, not copied: the decode below is synchronous and both the
+    // stream and the GBytes are dropped before this returns, so liborca's
+    // buffer outlives every reader of it. Copying cost 12 MB of resident
+    // memory on this library's largest cover for no benefit at all.
+    const borrowed = gtk.g_bytes_new_static(bytes.ptr, bytes.len);
+    defer gtk.g_bytes_unref(borrowed);
+    const stream = gtk.g_memory_input_stream_new_from_bytes(borrowed);
+    defer gtk.g_object_unref(stream);
+    var err: ?*gtk.GError = null;
+    const pixbuf = gtk.gdk_pixbuf_new_from_stream_at_scale(
+        stream,
+        cover_decode_pixels,
+        cover_decode_pixels,
+        gtk.true_,
+        null,
+        &err,
+    ) orelse {
+        gtk.g_clear_error(&err);
+        return null;
+    };
+    defer gtk.g_object_unref(pixbuf);
+    return gtk.gdk_texture_new_for_pixbuf(pixbuf);
+}
+
 // -------------------------------------------------------------------- build
 
 const volume_icons: [5]?[*:0]const u8 = .{
@@ -277,6 +358,14 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(previous, "clicked", gtk.callback(previousClicked), self);
     _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), self);
     _ = gtk.signalConnect(next, "clicked", gtk.callback(nextClicked), self);
+
+    const cover = gtk.gtk_image_new_from_icon_name(cover_placeholder_icon);
+    self.now_playing_cover = gtk.cast(gtk.Image, cover);
+    gtk.gtk_image_set_pixel_size(self.now_playing_cover.?, cover_display_pixels);
+    gtk.gtk_widget_set_valign(cover, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(cover, "dim-label");
+    gtk.gtk_widget_set_tooltip_text(cover, "Cover art");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, bar), cover);
 
     const now = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_size_request(now, 220, -1);
@@ -434,6 +523,7 @@ pub fn tick(self: *App) void {
         }
         if (self.now_playing_title) |label| gtk.gtk_label_set_text(label, title.ptr);
         if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, detail.ptr);
+        refreshCover(self, status.track_id);
     }
     if (track_changed or status.transport != self.shown_transport) {
         self.shown_transport = status.transport;

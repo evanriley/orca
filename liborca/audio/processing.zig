@@ -107,7 +107,49 @@ pub fn Chain(comptime capacity: usize) type {
     };
 }
 
+/// How a Player chooses the loudness correction for the entry it loads.
+///
+/// Album-level ReplayGain is deliberately not a third value here. An album
+/// gain is one figure measured across a whole release, which needs both a
+/// release-scoped measurement `analysis/` does not compute and a notion of
+/// "the release this queue entry belongs to" the playback queue does not
+/// carry. Adding the name without either would apply track gain under an
+/// album label, which is worse than not offering it.
+pub const ReplayGainMode = enum(u8) {
+    /// No correction at all. Every entry plays at the volume the user set.
+    off,
+    /// Each entry is corrected by its own measured loudness, if the Library
+    /// holds one that still describes the file.
+    track,
+};
+
+/// The linear multiplier a stored ReplayGain figure asks for.
+///
+/// `peak` is the entry's measured sample peak. Boosting a track whose peak is
+/// already near full scale would clip it, so the gain is capped at `1 / peak`:
+/// quiet tracks come up only as far as their headroom allows. That is a
+/// deliberate quietening of the correction rather than a limiter, because a
+/// limiter would change the audio rather than its level.
+pub fn replayGainMultiplier(decibels: f32, peak: ?f32) f32 {
+    var linear = std.math.pow(f32, 10, decibels / 20);
+    if (peak) |value| {
+        if (value > 0) linear = @min(linear, 1 / value);
+    }
+    return linear;
+}
+
+/// User volume, as one ramped multiplier applied to canonical PCM.
+///
+/// Loudness correction deliberately does **not** live here. It was a second
+/// input to this node, multiplied into `linear` when the control lane loaded a
+/// queue entry — which cannot be right during a gapless transition, because the
+/// pipe then holds prepared blocks belonging to two entries at once and this is
+/// one value for the whole Player. The correction is a property of the audio,
+/// so it is applied by the `SourceSession` that decodes that audio and travels
+/// with it; see `source_session.SourceSession.replay_gain`. What is left here
+/// is what a host's volume control means, and nothing else can discard it.
 pub const Gain = struct {
+    /// The multiplier the render path applies. Ramped toward on a change.
     linear: std.atomic.Value(f32) = .init(1),
     ramp_frames: std.atomic.Value(u32) = .init(0),
     command_generation: std.atomic.Value(u64) = .init(0),
@@ -121,14 +163,6 @@ pub const Gain = struct {
         self.linear.store(linear, .release);
         self.ramp_frames.store(ramp_frames, .release);
         _ = self.command_generation.fetchAdd(1, .release);
-    }
-
-    pub fn setReplayGain(self: *Gain, decibels: f32, peak: ?f32, ramp_frames: u32) void {
-        var linear = std.math.pow(f32, 10, decibels / 20);
-        if (peak) |value| {
-            if (value > 0) linear = @min(linear, 1 / value);
-        }
-        self.setLinear(linear, ramp_frames);
     }
 
     pub fn processor(self: *Gain) Processor {
@@ -248,4 +282,42 @@ test "gain ramps without discontinuity and meter does not change samples" {
     var interrupted = [_]f32{1};
     chain.processor().process(&interrupted, 1, 1);
     try std.testing.expectEqual(@as(f32, 1), interrupted[0]);
+}
+
+test "a volume change is the only thing that moves the gain node" {
+    // Loudness correction used to be a second input here, and the two shared
+    // one stored value: whichever was written last silently discarded the
+    // other. It now travels with the audio instead (see `SourceSession`), so
+    // this node has exactly one input and a volume change cannot lose a
+    // correction it no longer holds.
+    var gain: Gain = .{};
+    gain.setLinear(0.5, 0);
+    try std.testing.expectEqual(@as(f32, 0.5), gain.linear.load(.acquire));
+
+    var samples = [_]f32{ 1, 1 };
+    gain.processor().process(&samples, 2, 1);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5 }, &samples);
+
+    gain.setLinear(1, 0);
+    try std.testing.expectEqual(@as(f32, 1), gain.linear.load(.acquire));
+}
+
+test "a boost is capped by the peak it would clip" {
+    // +6 dB on a track already peaking at 0.9 would drive it to 1.8. The gain
+    // is capped at 1/peak instead, so the correction is quietened rather than
+    // the audio being clipped or limited on the way out.
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 1.0 / 0.9),
+        replayGainMultiplier(6, 0.9),
+        0.0001,
+    );
+
+    // With headroom to spare the full correction applies.
+    try std.testing.expectApproxEqAbs(@as(f32, 1.9953), replayGainMultiplier(6, 0.2), 0.001);
+
+    // An attenuation is never capped: it cannot clip, and a measurement with
+    // no peak beside it has nothing to cap against.
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5012), replayGainMultiplier(-6, 0.9), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.9953), replayGainMultiplier(6, null), 0.001);
+    try std.testing.expectEqual(@as(f32, 1), replayGainMultiplier(0, null));
 }
