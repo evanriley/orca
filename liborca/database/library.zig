@@ -1061,4 +1061,33 @@ test "an artist's tracks include the ones on a release they are the album artist
         @as(u64, 1),
         try library.tracks.countMatching(.{ .artist_id = featured }),
     );
+
+    // ...but they do appear on the record, and the release listing has to say
+    // so. Defining an artist's tracks widely and their releases narrowly left
+    // 276 artists in a real library showing songs and an empty album list.
+    var featured_releases = try library.releases.page(
+        std.testing.allocator,
+        .{ .album_artist_id = featured },
+    );
+    defer featured_releases.deinit();
+    try std.testing.expectEqual(@as(usize, 1), featured_releases.items.len);
+    try std.testing.expectEqual(release, featured_releases.items[0].id);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.releases.countMatching(.{ .album_artist_id = featured }),
+    );
+
+    // The headliner is not double-counted for fronting it and appearing on it.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.releases.countMatching(.{ .album_artist_id = headliner }),
+    );
+
+    // The count beside an artist must agree with the pane it labels.
+    var listing = try library.artists.page(std.testing.allocator, 16, 0);
+    defer listing.deinit();
+    for (listing.items) |artist| {
+        if (artist.id != featured) continue;
+        try std.testing.expectEqual(@as(u64, 1), artist.release_count);
+    }
 }

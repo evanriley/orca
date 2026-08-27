@@ -937,6 +937,18 @@ const by_artist =
     "(tracks.artist_id = ?3 OR tracks.release_id IN " ++
     "(SELECT id FROM releases WHERE album_artist_id = ?3))";
 
+/// What it means for a Release to be an artist's, mirroring `by_artist`.
+///
+/// Theirs as album artist, *or* carrying a track credited to them. The strict
+/// definition made the two sides disagree: an artist's tracks already included
+/// everything on a release they front, so a featured-only artist showed tracks
+/// and an empty release list. Widening one side and not the other was an
+/// oversight, and the asymmetry was visible the moment a browser put the two
+/// lists next to each other.
+const by_release_artist =
+    "(releases.album_artist_id = ?3 OR releases.id IN " ++
+    "(SELECT release_id FROM tracks WHERE tracks.artist_id = ?3))";
+
 fn buildTrackQuery(
     comptime filter: TrackFilter,
     comptime sort: TrackSort,
@@ -1193,7 +1205,10 @@ pub const ArtistRepository = struct {
 /// table before the LIMIT could apply.
 const artist_columns =
     \\SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),
-    \\       (SELECT count(*) FROM releases WHERE releases.album_artist_id = artists.id),
+    \\       (SELECT count(*) FROM releases
+    \\         WHERE releases.album_artist_id = artists.id
+    \\            OR releases.id IN
+    \\               (SELECT release_id FROM tracks WHERE tracks.artist_id = artists.id)),
     \\       (SELECT count(*) FROM tracks
     \\         WHERE tracks.artist_id = artists.id
     \\            OR tracks.release_id IN
@@ -1366,16 +1381,29 @@ pub const ReleaseRepository = struct {
             )
         else
             try self.db.prepare(release_columns ++
-                \\FROM releases
-                \\WHERE releases.album_artist_id = ?3
-                \\ORDER BY releases.title COLLATE NOCASE, releases.id
-                \\LIMIT ?1 OFFSET ?2;
-            );
+                "FROM releases\nWHERE " ++ by_release_artist ++
+                "\nORDER BY releases.title COLLATE NOCASE, releases.id" ++
+                "\nLIMIT ?1 OFFSET ?2;");
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
         try statement.bindInt64(2, query.offset);
         if (query.album_artist_id) |artist_id| try statement.bindInt64(3, artist_id);
         return collectReleasePage(allocator, statement);
+    }
+
+    /// Counts what `page` would return. Shares `by_release_artist` with it
+    /// rather than restating the predicate: `TrackRepository.countMatching`
+    /// had its own copy and drifted from the page it counted the moment the
+    /// definition widened, so the list showed rows the count above it denied.
+    pub fn countMatching(self: *const ReleaseRepository, query: ReleaseQuery) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM releases\nWHERE ?3 IS NULL OR " ++
+                by_release_artist ++ ";",
+        );
+        defer statement.deinit();
+        try statement.bindOptionalInt64(3, query.album_artist_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     pub fn byId(
