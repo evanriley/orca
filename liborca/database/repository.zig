@@ -1288,17 +1288,29 @@ pub const ArtistRepository = struct {
 /// for a page of at most 512 rows, and a join would have to aggregate the whole
 /// table before the LIMIT could apply.
 const artist_columns =
-    \\SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),
-    \\       (SELECT count(*) FROM releases
-    \\         WHERE releases.album_artist_id = artists.id
-    \\            OR releases.id IN
-    \\               (SELECT release_id FROM tracks WHERE tracks.artist_id = artists.id)),
-    \\       (SELECT count(*) FROM tracks
-    \\         WHERE tracks.artist_id = artists.id
-    \\            OR tracks.release_id IN
-    \\               (SELECT id FROM releases WHERE album_artist_id = artists.id))
-    \\
-;
+    "SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),\n" ++
+    "       (SELECT count(*) FROM releases WHERE " ++ artistOwns(by_release_artist) ++ "),\n" ++
+    "       (SELECT count(*) FROM tracks WHERE " ++ artistOwns(by_artist) ++ ")\n";
+
+/// Rewrites one of the shared artist predicates from its bound-parameter form
+/// to the correlated form the artist listing needs.
+///
+/// The counts beside an artist's name had a third copy of both rules, written
+/// out with `artists.id` where the predicate has `?3`. They agreed, but the
+/// count beside a name and the pane it labels disagreeing is exactly the bug
+/// `countMatching` already produced once, and three copies is a worse position
+/// than the two that caused it.
+fn artistOwns(comptime predicate: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var rest = predicate;
+        while (std.mem.indexOf(u8, rest, "?3")) |at| {
+            out = out ++ rest[0..at] ++ "artists.id";
+            rest = rest[at + 2 ..];
+        }
+        return out ++ rest;
+    }
+}
 
 fn collectArtistPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !ArtistPage {
     var results: std.ArrayList(ArtistSummary) = .empty;

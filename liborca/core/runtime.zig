@@ -410,8 +410,6 @@ pub const PlayerStatus = struct {
     volume: f32,
 };
 
-/// Process-level root for liborca. Objects are invalidated in dependency order:
-/// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 /// Open one file and read the cover image out of it.
 ///
 /// A file the Library still lists but the filesystem no longer has is null,
@@ -431,6 +429,8 @@ fn readEmbeddedArtwork(
     return metadata.artwork.read(allocator, local.readable());
 }
 
+/// Process-level root for liborca. Objects are invalidated in dependency order:
+/// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 pub const OrcaRuntime = struct {
     allocator: std.mem.Allocator,
     state: std.atomic.Value(State) = .init(.running),

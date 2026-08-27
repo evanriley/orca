@@ -730,7 +730,12 @@ const migration_11 =
     \\      JOIN artist_survivor s ON s.folded = r.folded
     \\     WHERE r.id = releases.album_artist_id)
     \\  WHERE album_artist_id IS NOT NULL;
-    \\DELETE FROM artists WHERE id NOT IN (SELECT keep_id FROM artist_survivor);
+    \\-- NOT EXISTS rather than NOT IN: a single NULL keep_id would make
+    \\-- `NOT IN` evaluate to NULL for every row, delete nothing, and leave the
+    \\-- duplicate keys for CREATE UNIQUE INDEX below to fail on. It cannot be
+    \\-- NULL today; the trap is not worth keeping for the syntax.
+    \\DELETE FROM artists WHERE NOT EXISTS (
+    \\    SELECT 1 FROM artist_survivor WHERE artist_survivor.keep_id = artists.id);
     \\UPDATE artists
     \\   SET key = orca_artist_key(name), sort_name = orca_artist_sort_key(name);
     \\DROP TABLE artist_refold;
