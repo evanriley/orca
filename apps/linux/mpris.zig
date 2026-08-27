@@ -76,6 +76,15 @@ pub fn nowPlaying(
 
 pub const Mpris = struct {
     runtime: ?*liborca.OrcaRuntime = null,
+    /// The track whose cover is currently on disk, and the `file://` URL of
+    /// it. Remembered even when that track has no cover, so a metadata read —
+    /// which a controller may do often — does not re-open the audio file every
+    /// time to learn the same "no" again.
+    /// The `std.Io` its Library was opened with, needed to read a cover file.
+    io: std.Io = undefined,
+    art_track_id: ?i64 = null,
+    art_url: ?[:0]u8 = null,
+    art_path: ?[:0]u8 = null,
     player: liborca.core.PlayerHandle = .{ .index = 0, .generation = 0 },
     application: ?*gtk.GApplication = null,
     connection: ?*gtk.GDBusConnection = null,
@@ -104,8 +113,9 @@ pub const Mpris = struct {
         defer current.deinit();
         const summary = current.summary;
 
-        // Six keys at most: trackid, length, title, artist, album, albumArtist.
-        var children: [6]*gtk.GVariant = undefined;
+        // Seven at most: trackid, length, title, artist, album, albumArtist,
+        // artUrl.
+        var children: [7]*gtk.GVariant = undefined;
         var count: usize = 0;
 
         var path_buffer: [96]u8 = undefined;
@@ -139,7 +149,21 @@ pub const Mpris = struct {
             children[count] = entry("xesam:albumArtist", value);
             count += 1;
         }
+        if (self.artUrlFor(runtime, summary.id)) |url| {
+            children[count] = entry("mpris:artUrl", gtk.g_variant_new_string(url.ptr));
+            count += 1;
+        }
         return gtk.g_variant_new_array(gtk.variantType("{sv}"), &children, count);
+    }
+
+    /// From the sniffed MIME type, never from what a tag claimed: the reader
+    /// already refuses bytes it cannot identify, so this is the truth.
+    fn extensionFor(mime_type: []const u8) []const u8 {
+        if (std.mem.eql(u8, mime_type, "image/jpeg")) return ".jpg";
+        if (std.mem.eql(u8, mime_type, "image/png")) return ".png";
+        if (std.mem.eql(u8, mime_type, "image/gif")) return ".gif";
+        if (std.mem.eql(u8, mime_type, "image/webp")) return ".webp";
+        return ".img";
     }
 
     /// Emits PropertiesChanged for the properties a controller caches. Called
@@ -228,16 +252,88 @@ pub const Mpris = struct {
         self.emitSeeked();
     }
 
+    /// MPRIS carries a *URL*, not bytes, so a cover has to exist as a file for
+    /// any other client to read. One file at a time, replaced when the track
+    /// changes and removed on shutdown, in the user's cache directory where a
+    /// discardable derived artifact belongs.
+    ///
+    /// The name carries the track id so the URL changes with the track:
+    /// controllers cache by URL, and a stable path would leave the previous
+    /// cover on screen.
+    fn artUrlFor(self: *Mpris, runtime: *liborca.OrcaRuntime, track_id: i64) ?[:0]const u8 {
+        if (self.art_track_id) |cached| {
+            if (cached == track_id) return self.art_url;
+        }
+        self.releaseArt();
+        self.art_track_id = track_id;
+
+        const library = (runtime.playerLibrary(self.player) catch return null) orelse
+            return null;
+        const cover = (runtime.libraryTrackArtwork(library, self.io, track_id) catch
+            return null) orelse return null;
+        defer cover.deinit();
+
+        const allocator = runtime.allocator;
+        const directory = allocator.printSentinel(
+            "{s}/orca",
+            .{std.mem.span(gtk.g_get_user_cache_dir())},
+            0,
+        ) catch return null;
+        defer allocator.free(directory);
+        if (gtk.g_mkdir_with_parents(directory.ptr, 0o700) != 0) return null;
+
+        const path = allocator.printSentinel(
+            "{s}/now-playing-{d}{s}",
+            .{ directory, track_id, extensionFor(cover.mime_type) },
+            0,
+        ) catch return null;
+        var err: ?*gtk.GError = null;
+        if (gtk.g_file_set_contents(
+            path.ptr,
+            cover.bytes.ptr,
+            @intCast(cover.bytes.len),
+            &err,
+        ) == 0) {
+            gtk.g_clear_error(&err);
+            allocator.free(path);
+            return null;
+        }
+        const url = allocator.printSentinel("file://{s}", .{path}, 0) catch {
+            _ = gtk.g_unlink(path.ptr);
+            allocator.free(path);
+            return null;
+        };
+        self.art_path = path;
+        self.art_url = url;
+        return url;
+    }
+
+    fn releaseArt(self: *Mpris) void {
+        const runtime = self.runtime orelse return;
+        if (self.art_path) |path| {
+            _ = gtk.g_unlink(path.ptr);
+            runtime.allocator.free(path);
+            self.art_path = null;
+        }
+        if (self.art_url) |url| {
+            runtime.allocator.free(url);
+            self.art_url = null;
+        }
+        self.art_track_id = null;
+    }
+
     pub fn init(
         self: *Mpris,
         runtime: *liborca.OrcaRuntime,
         player: liborca.core.PlayerHandle,
         application: *gtk.GApplication,
+        io: std.Io,
     ) void {
         self.* = .{
             .runtime = runtime,
             .player = player,
             .application = application,
+            .io = io,
         };
         var err: ?*gtk.GError = null;
         self.connection = gtk.g_bus_get_sync(gtk.BUS_TYPE_SESSION, null, &err);
@@ -288,6 +384,9 @@ pub const Mpris = struct {
     }
 
     pub fn deinit(self: *Mpris) void {
+        // The cover file is a derived artifact of this process's now-playing
+        // state; leaving it in the cache directory would outlive its meaning.
+        self.releaseArt();
         if (self.owner_id != 0) gtk.g_bus_unown_name(self.owner_id);
         if (self.connection) |connection| {
             if (self.root_registration != 0)

@@ -222,6 +222,14 @@ pub extern fn g_free(memory: ?*anyopaque) void;
 pub extern fn g_strndup(str: [*]const u8, n: usize) ?[*:0]u8;
 pub extern fn g_get_user_data_dir() [*:0]const u8;
 pub extern fn g_mkdir_with_parents(pathname: [*:0]const u8, mode: c_int) c_int;
+pub extern fn g_get_user_cache_dir() [*:0]const u8;
+pub extern fn g_file_set_contents(
+    filename: [*:0]const u8,
+    contents: [*]const u8,
+    length: isize,
+    err: *?*GError,
+) c_int;
+pub extern fn g_unlink(filename: [*:0]const u8) c_int;
 pub extern fn g_get_monotonic_time() i64;
 pub extern fn g_timeout_add(
     interval: c_uint,
