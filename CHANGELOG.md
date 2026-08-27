@@ -2,6 +2,45 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Files declare what they are, and old rows can be repaired
+
+- **`files.codec` is written.** It was declared and then always stored as the
+  empty string, so every row in a real library recorded no encoding at all. A
+  probe already opens a decoder; the decoder now names its encoding through
+  `codec/decoder.zig`'s `codec_id` — `pcm`, `pcm_float`, `flac`, `qoa`, `mp1`,
+  `mp2`, `mp3` — and the scanner carries that into the row. It is deliberately
+  **not** a synonym for `audio_format`: that names the container, which decides
+  who opens a file, while `codec` names the encoding inside it, which decides
+  what the bytes cost. The two diverge wherever a container is a wrapper — a
+  WAV holding integer PCM or IEEE float, an MPEG stream's layer, and the
+  AAC-or-ALAC and Vorbis-or-Opus cases still to come. Lossy and lossless are
+  told apart by `codec_id.isLossless`, a function of the identifier rather than
+  a second column that could disagree with it.
+- **A property backfill, as a runtime job.** The scanner probes only files
+  whose bytes changed, which is what keeps a rescan of a large library nearly
+  free — and which means a library scanned before probing existed keeps null
+  `duration_ms` for ever, because a music collection's bytes never change.
+  `library/property_backfill.zig` repairs those rows by `files.id` with no
+  filesystem walk: `OrcaRuntime.startLibraryPropertyBackfill`,
+  `orca_library_start_property_backfill`, `orca-cli backfill`. Row selection is
+  a search over `files_incomplete_properties`, a **partial** index (migration
+  10) over exactly the incomplete rows, so it shrinks to nothing as the pass
+  works. Commits are bounded, cancellation is checked between rows, and a
+  cancelled run commits what it already probed — so a second run resumes with a
+  shorter list rather than starting over. **Unlike a scan the job publishes a
+  total**, because how many rows still owe a probe is one indexed count.
+- **The backfill reprojects what it repaired.** `tracks.duration_ms` is derived
+  from the file rows, so a pass that repaired `files` and left the Tracks
+  reading zero would have fixed nothing a transport bar can show. Each
+  committed batch is handed to the projection scoped to its own file ids,
+  exactly as a scan batch is.
+- **An unreadable file is not a failure of the pass.** A row whose file is gone
+  or is not audio is counted and passed over with no health issue, because
+  `locations.state` already models absence. A file that opens and then refuses
+  to decode raises the new `unreadable_file` health issue, a kind the backfill
+  owns outright so that clearing it cannot erase a `corrupt_audio` finding the
+  analyzer made by decoding audio this pass never read.
+
 ### The C ABI reaches the runtime (breaking)
 
 Until now `liborca/orca.h` exposed runtime create/destroy, library open/query,

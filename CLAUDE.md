@@ -63,10 +63,23 @@ zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
 
 ```sh
 zig build run -- demo
+zig build run -- devices
+
+# library
 zig build run -- scan DATABASE ROOT
-zig build run -- analyze DATABASE AUDIO
+zig build run -- project DATABASE
+zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]
+zig build run -- analyze DATABASE AUDIO
+
+# browse
+zig build run -- artists DATABASE [--limit N] [--offset N]
+zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
+zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
+
+# playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
+zig build run -- play-tracks DATABASE IDS --device=ID [--start N] [--repeat MODE] [--shuffle]
 ```
 
 Frontends:
@@ -232,7 +245,11 @@ dependencies) over C libraries.
 
 Scanning is incremental and restart-resumable: unchanged path + storage
 identity skips all format/metadata work, commits are bounded, and cancellation
-is checked before filesystem work and between entries. Filesystem watchers are
+is checked before filesystem work and between entries. Because only changed
+bytes are probed, a library scanned before probing existed keeps null
+properties for ever; `library/property_backfill.zig` repairs those rows by
+`files.id` with no walk, selected through a partial index over exactly the rows
+that are incomplete, and reprojects each batch it repairs. Filesystem watchers are
 an *acceleration only* — they emit bounded, coalescing, root-scoped hints and
 never directly insert, remove, or mutate observed state. See `docs/storage.md`.
 
