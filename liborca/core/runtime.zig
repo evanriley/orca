@@ -627,7 +627,7 @@ pub const OrcaRuntime = struct {
     pub fn libraryArtistPage(
         self: *OrcaRuntime,
         library: LibraryHandle,
-        query: database.repository.ArtistQuery,
+        query: database.ArtistQuery,
     ) !database.ArtistPage {
         return (try self.libraryDatabase(library)).artists.page(self.allocator, query);
     }
@@ -638,7 +638,7 @@ pub const OrcaRuntime = struct {
     pub fn libraryArtistCountMatching(
         self: *OrcaRuntime,
         library: LibraryHandle,
-        query: database.repository.ArtistQuery,
+        query: database.ArtistQuery,
     ) !u64 {
         return (try self.libraryDatabase(library)).artists.countMatching(query);
     }
@@ -647,7 +647,7 @@ pub const OrcaRuntime = struct {
     pub fn libraryReleaseCountMatching(
         self: *OrcaRuntime,
         library: LibraryHandle,
-        query: database.repository.ReleaseQuery,
+        query: database.ReleaseQuery,
     ) !u64 {
         return (try self.libraryDatabase(library)).releases.countMatching(query);
     }

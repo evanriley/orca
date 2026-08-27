@@ -601,7 +601,7 @@ fn listArtists(
     defer page.deinit();
     // The count of what matched, not of the library, or a filtered listing
     // reports a total it is not showing.
-    const query: liborca.database.repository.ArtistQuery = .{ .filter = options.filter };
+    const query: liborca.database.ArtistQuery = .{ .filter = options.filter };
     try stdout.print(
         "{d} artists {s}\n",
         .{

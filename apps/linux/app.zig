@@ -175,9 +175,6 @@ pub const App = struct {
         gtk.gtk_label_set_text(label, message.ptr);
     }
 
-    /// Resolves a Track id to a title using rows already loaded, or null. The
-    /// returned string is owned by the row and is valid only while that row
-    /// remains in the model.
     /// The one place the track listing is described to liborca.
     ///
     /// A full-text search and a relational filter are alternatives to the
@@ -207,7 +204,7 @@ pub const App = struct {
     /// engine's definition of artist identity — the same fold that produced
     /// `artists.key` — and doing it here would be a second copy of that
     /// definition, free to drift from the one the rows were keyed by.
-    pub fn artistRequest(self: *App, offset: u32) liborca.database.repository.ArtistQuery {
+    pub fn artistRequest(self: *App, offset: u32) liborca.database.ArtistQuery {
         return .{
             .filter = self.artist_filter.value,
             .limit = page_size,
