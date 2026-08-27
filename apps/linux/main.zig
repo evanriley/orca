@@ -15,6 +15,8 @@ const app = @import("app.zig");
 const mpris = @import("mpris.zig");
 const scan = @import("scan.zig");
 const track_model = @import("track_model.zig");
+const browse_model = @import("browse_model.zig");
+const browse = @import("browse.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
 
@@ -73,6 +75,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     // is activated. A machine with no audio server simply has no Zone, which the
     // play path reports honestly rather than pretending to play.
     _ = transport.ensureOutput(self);
+    browse.reload(self);
     self.reload();
     if (self.library != null) {
         if (self.library_path) |path| {
@@ -113,6 +116,7 @@ fn resolveLibraryPath(
 pub fn main(init: std.process.Init) !u8 {
     const allocator = init.arena.allocator();
     track_model.allocator = allocator;
+    browse_model.allocator = allocator;
 
     var runtime: liborca.OrcaRuntime = .init(allocator);
     var self: App = .{

@@ -18,6 +18,30 @@ pub const page_size: u32 = 512;
 /// One tick drives everything: pump, event drain, transport, scan.
 pub const tick_ms: c_uint = 100;
 
+/// Which shelf of the library the track list is showing, and in what order.
+///
+/// This is a *request* the engine answers, not a description of the rows on
+/// screen. Both halves matter: the filters are the relational ones liborca
+/// indexes, and the sort is the engine's, because every ORDER BY it generates
+/// ends in a unique tiebreaker and only a total order makes LIMIT/OFFSET paging
+/// exact. Re-ordering the loaded rows instead would sort one page of a listing
+/// the user is scrolling through thousands of.
+pub const Browse = struct {
+    artist_id: ?i64 = null,
+    release_id: ?i64 = null,
+    sort: liborca.database.TrackSort = .id,
+    direction: liborca.database.SortDirection = .ascending,
+
+    /// The order a newly entered scope is listed in. An album is listened to in
+    /// disc-then-track order, an artist's shelf reads album by album, and an
+    /// unscoped library has no natural order to claim, so it pays for none.
+    pub fn defaultSort(self: Browse) liborca.database.TrackSort {
+        if (self.release_id != null) return .track_number;
+        if (self.artist_id != null) return .album;
+        return .id;
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -37,7 +61,6 @@ pub const App = struct {
 
     // library list
     tracks: ?*gtk.ListStore = null,
-    sorted: ?*gtk.SortListModel = null,
     selection: ?*gtk.SelectionModel = null,
     column_view: ?*gtk.ColumnView = null,
     scroller: ?*gtk.Widget = null,
@@ -45,6 +68,27 @@ pub const App = struct {
     loaded_rows: u32 = 0,
     page_exhausted: bool = false,
     track_total: u64 = 0,
+    browse: Browse = .{},
+    /// The header widgets, in `track_model.Column.all` order, so the column a
+    /// header click reports can be turned back into a sort key.
+    sort_columns: [track_model.Column.all.len]?*gtk.ColumnViewColumn = @splat(null),
+
+    // browse panes
+    artists: ?*gtk.ListStore = null,
+    artist_selection: ?*gtk.SingleSelection = null,
+    artists_loaded: u32 = 0,
+    artists_exhausted: bool = false,
+    releases: ?*gtk.ListStore = null,
+    release_selection: ?*gtk.SingleSelection = null,
+    releases_loaded: u32 = 0,
+    releases_exhausted: bool = false,
+    search_entry: ?*gtk.Editable = null,
+    artist_header: ?*gtk.Label = null,
+    release_header: ?*gtk.Label = null,
+    /// Set while a widget is being brought back in line with state that has
+    /// already changed. Its "changed" signal still fires, and without this it
+    /// would re-enter as though the user had done it.
+    suppress_browse_signals: bool = false,
 
     // chrome
     application: ?*gtk.Application = null,
@@ -114,6 +158,43 @@ pub const App = struct {
         return null;
     }
 
+    /// The one place the track listing is described to liborca.
+    ///
+    /// A full-text search and a relational filter are alternatives to the
+    /// engine, not a combination, and asking for both is refused rather than
+    /// half-honoured. Searching therefore leaves the scope out: the panes are
+    /// reset to "All" when a search starts, and this keeps that true even if a
+    /// caller forgets.
+    pub fn trackRequest(self: *App, offset: u32) liborca.database.TrackQuery {
+        const searching = self.query.len != 0;
+        return .{
+            .artist_id = if (searching) null else self.browse.artist_id,
+            .release_id = if (searching) null else self.browse.release_id,
+            .sort = self.browse.sort,
+            .direction = self.browse.direction,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// Puts the listing in its scope's default order, and shows that on the
+    /// column headers so the view and the query cannot disagree.
+    pub fn applyScopeDefaultSort(self: *App) void {
+        self.browse.sort = self.browse.defaultSort();
+        self.browse.direction = .ascending;
+        const view = self.column_view orelse return;
+        var chosen: ?*gtk.ColumnViewColumn = null;
+        for (track_model.Column.all, self.sort_columns) |column, header| {
+            if (column.sortKey() == self.browse.sort) chosen = header;
+        }
+        // Sorting the view is indistinguishable from a header click to GTK, and
+        // its "changed" signal would arrive back here as one.
+        const previous = self.suppress_browse_signals;
+        self.suppress_browse_signals = true;
+        defer self.suppress_browse_signals = previous;
+        gtk.gtk_column_view_sort_by_column(view, chosen, gtk.SORT_ASCENDING);
+    }
+
     fn updateCountLabel(self: *App) void {
         const label = self.count_label orelse return;
         if (self.library == null) {
@@ -137,11 +218,10 @@ pub const App = struct {
         const library = self.library orelse return;
         if (self.page_exhausted) return;
         const store = self.tracks orelse return;
-        var page = self.runtime.libraryTrackPage(
+        var page = self.runtime.libraryTrackQuery(
             library,
             self.query,
-            page_size,
-            self.loaded_rows,
+            self.trackRequest(self.loaded_rows),
         ) catch {
             self.page_exhausted = true;
             self.setStatus("Unable to query the library");
@@ -190,18 +270,35 @@ pub const App = struct {
             self.setStatus("Add a music folder to begin");
             return;
         };
-        self.track_total = self.runtime.libraryTrackCount(library) catch 0;
+        // A full-text match has no cheap total — FTS5 ranks rather than counts —
+        // so a search reports what it has loaded and nothing it has not.
+        self.track_total = if (self.query.len != 0)
+            0
+        else
+            self.runtime.libraryTrackMatchCount(library, self.trackRequest(0)) catch 0;
+        // A scroller left deep in the previous listing would page from the
+        // bottom of a list that is now one page long.
+        if (self.scroller) |scroller| gtk.gtk_adjustment_set_value(
+            gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
+            0.0,
+        );
         self.loadNextPage();
         if (self.loaded_rows != 0) {
             self.setStatus("Ready");
         } else if (self.query.len != 0) {
             self.setStatus("No tracks match that search");
+        } else if (self.browse.artist_id != null or self.browse.release_id != null) {
+            self.setStatus("Nothing on this shelf has a track");
         } else {
             self.setStatus("Library is empty - add a music folder");
         }
     }
 
     pub fn setQuery(self: *App, text: []const u8) void {
+        if (text.len == 0) {
+            self.freeQuery();
+            return;
+        }
         const replacement = self.allocator.dupeSentinel(u8, text, 0) catch return;
         self.freeQuery();
         self.query = replacement;
