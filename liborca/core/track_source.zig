@@ -22,9 +22,11 @@ pub const OpenTrackError = error{
 
 /// Resolves `library track id -> decodable audio`.
 ///
-/// It holds its own **independent read-only connection**, per `docs/database.md`
-/// — the engine thread opens tracks on it while the Library's single write lane
-/// stays free. The connection and the codec registry are the only state, so the
+/// It holds its own **independent read-only connection**, per `docs/database.md`,
+/// so the engine thread opens tracks without waiting on the Library's single
+/// write lane. It does reach for that lane in one place — recording that a file
+/// it could not open is missing — and there it declines rather than waits, for
+/// the reason `markMissingIfLaneFree` gives. The connection and the codec registry are the only state, so the
 /// engine never reaches back into a `handle.Pool` to resolve anything.
 ///
 /// One opener is bound to one Library. A queue entry naming a different Library
@@ -118,7 +120,7 @@ pub const TrackSourceOpener = struct {
             error.FileNotFound, error.BadPathName => {
                 // The library still claims this file exists. Record what is
                 // actually true rather than failing the same way every time.
-                markLocationMissing(self.locations, resolved.file_id) catch {};
+                _ = self.locations.markMissingIfLaneFree(resolved.file_id) catch {};
                 return error.TrackFileMissing;
             },
             error.UnsupportedAudioFormat => return error.CodecUnavailable,
@@ -192,23 +194,6 @@ fn observedIdentity(io: std.Io, uri: []const u8) ?quick_hash.Digest {
 
 /// Marks every Location of a file as `missing`.
 ///
-/// This is a `LocationRepository` operation and belongs there next to `move`;
-/// it lives here only because `liborca/database/` is being edited concurrently.
-/// Move it when that lands — nothing else about it should change.
-fn markLocationMissing(
-    locations: *database.LocationRepository,
-    file_id: i64,
-) !void {
-    locations.write_lane.acquire();
-    defer locations.write_lane.release();
-    var statement = try locations.db.prepare(
-        \\UPDATE locations SET state='missing', missing_since=unixepoch()
-        \\WHERE file_id=?1 AND state<>'missing';
-    );
-    defer statement.deinit();
-    try statement.bindInt64(1, file_id);
-    if (try statement.step() != .done) return error.SqlFailed;
-}
 
 // ---------------------------------------------------------------------- tests
 

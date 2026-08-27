@@ -196,7 +196,7 @@ pub fn main(init: std.process.Init) !u8 {
         &folder_accelerators,
     );
 
-    self.mpris.init(&runtime, self.player, g_application);
+    self.mpris.init(&runtime, self.player, g_application, self.io);
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);
     const tick_source = gtk.g_timeout_add(app.tick_ms, tick, &self);
 

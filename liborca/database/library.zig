@@ -1148,3 +1148,41 @@ test "an artist search matches the spelling a person types, not the one stored" 
     defer wildcard.deinit();
     try std.testing.expectEqual(@as(usize, 0), wildcard.items.len);
 }
+
+test "recording a missing file declines the write lane rather than waiting for it" {
+    // The decode producer calls this when a track will not open. A job worker
+    // holds the write lane across an entire batch commit, so a producer that
+    // waited would stop feeding the render callback and turn an unplugged
+    // drive into underruns. Missing audio is a worse answer than a stale row.
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-missing-lane?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const volume_id = try library.volumes.ensure(.{
+        .stable_key = "uuid:lane",
+        .label = "Lane",
+    });
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 16 });
+    const location_id = try library.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = volume_id,
+        .uri = "/music/gone.flac",
+    });
+
+    // Exactly the contention the producer meets: somebody else is committing.
+    library.write_lane.acquire();
+    const wrote_while_held = try library.locations.markMissingIfLaneFree(file_id);
+    library.write_lane.release();
+    try std.testing.expect(!wrote_while_held);
+    // Declining means declining: the row is untouched, not half-written.
+    try std.testing.expect(try library.locations.stateOf(location_id) != .missing);
+
+    // With the lane free it does the write it skipped.
+    try std.testing.expect(try library.locations.markMissingIfLaneFree(file_id));
+    try std.testing.expectEqual(
+        repository.LocationState.missing,
+        try library.locations.stateOf(location_id),
+    );
+}

@@ -1,15 +1,47 @@
+//! FLAC decoding, over libFLAC behind `flac_shim.c`.
+//!
+//! The reference implementation is used rather than a pure-Zig one because
+//! FLAC's only promise is bit-exactness. The previously pinned pure-Zig
+//! package reconstructed mid-side stereo without restoring the low bit the
+//! format discards, which left roughly half of all decoded samples one LSB low
+//! on the majority of real files -- inaudible, but fatal to `files.audio_hash`,
+//! to fingerprints, and to the claim that the format is lossless at all. See
+//! `docs/codecs.md`.
+//!
+//! Nothing about libFLAC is visible here: the shim exposes an opaque handle
+//! driven by a positional read callback, so this file still sees only a
+//! `ReadableSource` and hands back only the Orca `Decoder` interface.
+
 const std = @import("std");
-const native_flac = @import("flac");
 const decoder_api = @import("decoder.zig");
 const storage = @import("../storage/root.zig");
 
+const ok: i32 = 0;
+const end_of_stream: i32 = 1;
+
+extern fn orca_flac_decoder_create(
+    context: ?*anyopaque,
+    read: *const fn (?*anyopaque, u64, [*]u8, u64) callconv(.c) i64,
+    size: u64,
+    max_block_frames: u32,
+    channels: u32,
+) ?*anyopaque;
+extern fn orca_flac_decoder_destroy(decoder: ?*anyopaque) void;
+extern fn orca_flac_decoder_read(
+    decoder: ?*anyopaque,
+    output: [*]f32,
+    output_frames: u32,
+    frames_written: *u32,
+) i32;
+extern fn orca_flac_decoder_seek(decoder: ?*anyopaque, frame: u64) i32;
+
 const Context = struct {
     allocator: std.mem.Allocator,
-    reader_buffer: [8192]u8,
-    source_reader: storage.BufferedSourceReader,
-    native: native_flac.Decoder,
+    source: storage.ReadableSource,
+    native: *anyopaque,
+    channels: u16,
     /// Set once the stream has been seeked. See `readFrames` for why end of
-    /// stream stops being an error after that point.
+    /// stream stops being reportable as damage after that point.
     sought: bool,
     /// Frames STREAMINFO declares the stream holds, or zero when it declines
     /// to say. This is the only thing that distinguishes "the audio ended and
@@ -30,25 +62,23 @@ pub fn openDecoder(
     const format = try readFormat(source);
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
-    context.sought = false;
-    context.declared_frames = format.frame_count;
-    context.frames_decoded = 0;
-    context.max_block_frames = format.max_block_frames;
-    context.source_reader = .init(source, &context.reader_buffer);
-    context.allocator = allocator;
-    context.native = try native_flac.Decoder.init(
-        allocator,
-        &context.source_reader.interface,
-        .{
-            .skip_metadata = true,
-            .seek_impl = .{ .virtual = .{
-                .context = context,
-                .seekTo = seekBytes,
-                .getPos = getBytePosition,
-                .getEndPos = getEndPosition,
-            } },
-        },
-    );
+    context.* = .{
+        .allocator = allocator,
+        .source = source,
+        .native = undefined,
+        .channels = format.channels,
+        .sought = false,
+        .declared_frames = format.frame_count,
+        .frames_decoded = 0,
+        .max_block_frames = format.max_block_frames,
+    };
+    context.native = orca_flac_decoder_create(
+        context,
+        readSource,
+        source.size(),
+        @intCast(format.max_block_frames),
+        format.channels,
+    ) orelse return error.InvalidFlac;
     return .{
         .context = context,
         .vtable = &vtable,
@@ -119,6 +149,20 @@ fn big64(bytes: *const [8]u8) u64 {
     return value;
 }
 
+/// Positional read handed to the shim. The source owns no cursor, so libFLAC's
+/// own byte position is the only cursor in play and it travels as `offset`.
+fn readSource(
+    opaque_context: ?*anyopaque,
+    offset: u64,
+    buffer: [*]u8,
+    length: u64,
+) callconv(.c) i64 {
+    const context: *Context = @ptrCast(@alignCast(opaque_context.?));
+    const wanted: usize = @intCast(@min(length, @as(u64, std.math.maxInt(usize))));
+    const read = context.source.readAt(offset, buffer[0..wanted]) catch return -1;
+    return @intCast(read);
+}
+
 /// Whether the stream has reached its declared end, give or take a final frame
 /// that will not decode.
 ///
@@ -126,8 +170,8 @@ fn big64(bytes: *const [8]u8) u64 {
 /// examined stops 2,620 frames short of the 11,979,324 STREAMINFO declares,
 /// inside its final 4,096-frame block: the last frame header is not where it
 /// should be. `ffmpeg` reports `invalid sync code` on the same file, resyncs,
-/// and returns the audio anyway; this decoder raised `OutOfSync` and lost the
-/// whole track, failing analysis outright and ending playback a breath early.
+/// and returns the audio anyway; treating that as damage lost the whole track,
+/// failing analysis outright and ending playback a breath early.
 ///
 /// A shortfall smaller than one maximum block is, by construction, at most the
 /// final frame -- there is nowhere else for it to hide. Accepting that is
@@ -143,44 +187,46 @@ fn reachedDeclaredEnd(context: *const Context) bool {
 
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    const samples = context.native.read(f32, output) catch |err| switch (err) {
-        // The frame reader found bytes that are not a frame header. If every
-        // declared frame has already been handed over, those bytes are a
-        // trailing tag rather than damage, and this is the clean end of the
-        // stream. 104 files in a real library end this way; without this they
-        // decode correctly and then fail on the last read, which ends playback
-        // of the track and fails analysis outright.
-        error.OutOfSync => if (reachedDeclaredEnd(context)) return 0 else return err,
-        // The decoder raises `EndOfStream` when it reaches the end of the
-        // stream having decoded a different number of frames than STREAMINFO
-        // declared. Unsought, that genuinely means the file is truncated and
-        // the caller should hear about it. After a seek it means nothing at
-        // all: the frames before the seek target were never decoded, so the
-        // running count cannot match the declared total and every correct
-        // stream ends this way.
+    const capacity = output.len / context.channels;
+    if (capacity == 0) return 0;
+    var produced: u32 = 0;
+    const status = orca_flac_decoder_read(
+        context.native,
+        output.ptr,
+        @intCast(@min(capacity, std.math.maxInt(u32))),
+        &produced,
+    );
+    switch (status) {
+        ok => {
+            context.frames_decoded += produced;
+            return produced;
+        },
+        // libFLAC ends a stream the same way whether the audio ran out where
+        // it was supposed to or well before, so the distinction is drawn here
+        // against STREAMINFO's declared total.
         //
-        // Reporting it as a decode failure ended playback of the track at the
-        // seek point, and because the Decoder contract signals end of input
-        // with zero frames rather than an error, the caller could not tell
-        // that apart from a corrupt file. Once sought, report the clean end.
+        // After a seek there is no distinction to draw: the frames before the
+        // seek target were never decoded, so the running count cannot reach
+        // the declared total and every correct stream would look truncated.
+        // Reporting that as a decode failure ended playback at the seek point,
+        // and because the `Decoder` contract signals end of input with zero
+        // frames rather than an error, the caller could not tell it apart from
+        // a corrupt file -- one album stalled with 8,266 underruns.
         //
         // The cost is that a truncated file seeked into ends quietly instead
         // of erroring. That is the right trade for playback, and the unsought
-        // path — every ordinary play from the beginning — still detects it.
-        error.EndOfStream => if (context.sought or reachedDeclaredEnd(context))
+        // path -- every ordinary play from the beginning -- still detects it.
+        end_of_stream => if (context.sought or reachedDeclaredEnd(context))
             return 0
         else
-            return err,
-        else => return err,
-    };
-    const frames = samples.len / context.native.channels;
-    context.frames_decoded += frames;
-    return frames;
+            return error.TruncatedFlac,
+        else => return error.FlacDecodeFailed,
+    }
 }
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    try context.native.seekTo(frame);
+    if (orca_flac_decoder_seek(context.native, frame) != ok) return error.FlacSeekFailed;
     context.sought = true;
     // Absolute, so the declared-total comparison survives a seek.
     context.frames_decoded = frame;
@@ -189,29 +235,8 @@ fn seek(context_ptr: *anyopaque, frame: u64) !void {
 fn deinit(context_ptr: *anyopaque) void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     const allocator = context.allocator;
-    context.native.deinit(allocator);
+    orca_flac_decoder_destroy(context.native);
     allocator.destroy(context);
-}
-
-fn seekBytes(
-    opaque_context: ?*anyopaque,
-    _: *std.Io.Reader,
-    offset: u64,
-) error{ SeekFailed, OutOfBounds }!void {
-    const context: *Context = @ptrCast(@alignCast(opaque_context.?));
-    context.source_reader.seekTo(offset) catch |err| switch (err) {
-        error.OutOfBounds => return error.OutOfBounds,
-    };
-}
-
-fn getBytePosition(opaque_context: ?*anyopaque, _: *std.Io.Reader) error{SeekFailed}!u64 {
-    const context: *Context = @ptrCast(@alignCast(opaque_context.?));
-    return context.source_reader.logicalPosition();
-}
-
-fn getEndPosition(opaque_context: ?*anyopaque, _: *std.Io.Reader) error{SeekFailed}!u64 {
-    const context: *Context = @ptrCast(@alignCast(opaque_context.?));
-    return context.source_reader.source.size();
 }
 
 const vtable: decoder_api.Decoder.VTable = .{
@@ -220,7 +245,7 @@ const vtable: decoder_api.Decoder.VTable = .{
     .deinit = deinit,
 };
 
-test "native Zig FLAC adapter decodes and seeks generated audio" {
+test "FLAC decoding reports stream facts and seeks generated audio" {
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/generated-reference.flac",
@@ -228,7 +253,10 @@ test "native Zig FLAC adapter decodes and seeks generated audio" {
     defer local.close();
     var decoder = try openDecoder(std.testing.allocator, local.readable());
     defer decoder.deinit();
-    try std.testing.expectEqual(@import("../audio/pcm.zig").SampleFormat.signed_16, decoder.source_format.?.sample_format);
+    try std.testing.expectEqual(
+        @import("../audio/pcm.zig").SampleFormat.signed_16,
+        decoder.source_format.?.sample_format,
+    );
     try std.testing.expectEqual(@as(u16, 2), decoder.format.channels);
     try std.testing.expectEqual(@as(u32, 48_000), decoder.format.sample_rate);
     try std.testing.expectEqual(@as(?u64, 480), decoder.frame_count);
@@ -260,13 +288,66 @@ test "malformed FLAC metadata fails before decoder allocation" {
     ));
 }
 
+/// One frame of `fixtures/audio/midside-reference.flac`, regenerated rather
+/// than read from a second fixture so the expectation cannot drift.
+///
+/// The two channels are near-opposites, which drives `mid` to a constant zero
+/// and makes mid-side by far the cheapest stereo decorrelation for an encoder
+/// to choose. `side` is `2 * amplitude - 1`, odd for every frame, and an odd
+/// side is exactly the case whose discarded low bit has to be restored. Every
+/// sample of this fixture therefore decodes wrongly if it is not.
+fn midSideProbeSample(index: u32) [2]i16 {
+    var state: u32 = index *% 2654435761 +% 1;
+    state ^= state >> 13;
+    state *%= 1274126177;
+    state ^= state >> 16;
+    const amplitude: i16 = @intCast(@as(i32, @intCast(state % 16000)) - 8000);
+    return .{ amplitude, 1 - amplitude };
+}
+
+test "mid-side stereo decodes bit-exactly rather than one LSB low" {
+    // Regression: the previously pinned pure-Zig FLAC package computed
+    // `left = mid + (side >> 1)` instead of restoring the low bit the encoder
+    // discarded, `left = ((mid << 1 | side & 1) + side) >> 1`. That is wrong by
+    // one LSB whenever `side` is odd -- half of all samples on real music, and
+    // every sample of this fixture. Inaudible, and fatal to `files.audio_hash`,
+    // to fingerprints, and to the format's only promise.
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/midside-reference.flac",
+    );
+    defer local.close();
+    var codec = try openDecoder(std.testing.allocator, local.readable());
+    defer codec.deinit();
+
+    const total = codec.frame_count orelse return error.MissingFrameCount;
+    var scratch: [2048]f32 = undefined;
+    var frame_index: u32 = 0;
+    while (frame_index < total) {
+        const frames = try codec.readFrames(&scratch);
+        try std.testing.expect(frames > 0);
+        for (0..frames) |offset| {
+            const expected = midSideProbeSample(frame_index + @as(u32, @intCast(offset)));
+            for (expected, 0..) |value, channel| {
+                const decoded = scratch[offset * 2 + channel] * 32768.0;
+                try std.testing.expectEqual(
+                    @as(i32, value),
+                    @as(i32, @intFromFloat(@round(decoded))),
+                );
+            }
+        }
+        frame_index += @intCast(frames);
+    }
+    try std.testing.expectEqual(@as(u32, @intCast(total)), frame_index);
+}
+
 test "reading to the end after a seek reports end of input rather than failing" {
     // Regression: playing a real FLAC album stalled on the first track with
-    // 8,266 underruns. The decoder raises `EndOfStream` when its frame count
-    // disagrees with STREAMINFO, which is unavoidable after a seek, so the
-    // engine saw a decode failure instead of the end of the track and never
-    // advanced. 90% of the target library is FLAC, so this path is the common
-    // one, not an edge case.
+    // 8,266 underruns. A stream that ends having decoded fewer frames than
+    // STREAMINFO declares is indistinguishable from a truncated one, which is
+    // unavoidable after a seek, so the engine saw a decode failure instead of
+    // the end of the track and never advanced. 90% of the target library is
+    // FLAC, so this path is the common one, not an edge case.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/generated-reference.flac",
@@ -294,6 +375,38 @@ test "reading to the end after a seek reports end of input rather than failing" 
     try std.testing.expectEqual(@as(usize, 0), try codec.readFrames(&scratch));
 }
 
+test "a truncated stream seeked into ends cleanly rather than reporting damage" {
+    // The other half of the same contract, and the half that is only reachable
+    // once a stream has been seeked. Frames before a seek target are never
+    // decoded, so the running count cannot reach the declared total and a
+    // shortfall says nothing about damage any more. The `Decoder` contract has
+    // no way to report "ended early but intact", and a caller that treated the
+    // end of a sought track as a decode failure stalled the queue.
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.flac",
+    );
+    const readable = local.readable();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(readable.size()));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(bytes.len, try readable.readAt(0, bytes));
+    local.close();
+
+    // Far more than any block size: unsought, this same stream is an error.
+    declareExtraFrames(bytes, 1_000_000);
+    var source: storage.MemorySource = .{ .bytes = bytes };
+    var codec = try openDecoder(std.testing.allocator, source.readable());
+    defer codec.deinit();
+
+    try codec.seek(1);
+    var scratch: [4096]f32 = undefined;
+    var guard: usize = 0;
+    while (guard < 4096) : (guard += 1) {
+        if (try codec.readFrames(&scratch) == 0) break;
+    }
+    try std.testing.expect(guard < 4096);
+}
+
 /// Rewrites STREAMINFO's declared total so a decode ends short by `shortfall`
 /// frames, which is how a real file that stops inside its last block behaves.
 fn declareExtraFrames(bytes: []u8, shortfall: u64) void {
@@ -310,8 +423,8 @@ test "a stream that stops inside its final block ends cleanly rather than failin
     // Real files end untidily. One of 104 ID3-carrying FLACs in a real library
     // stops 2,620 frames short of the 11,979,324 STREAMINFO declares, inside
     // its final 4,096-frame block. ffmpeg calls that an invalid sync code,
-    // resyncs, and returns the audio; this decoder raised `OutOfSync` and lost
-    // the track, which failed analysis outright and ended playback early.
+    // resyncs, and returns the audio; treating it as damage lost the track,
+    // which failed analysis outright and ended playback early.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/tagged-reference.flac",

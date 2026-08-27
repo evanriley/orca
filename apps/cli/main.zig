@@ -127,6 +127,42 @@ pub fn main(init: std.process.Init) !void {
                 liborca.analysis.service.diagnosticsSelector(.{}),
             ),
         });
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "duplicates")) {
+        // The question the analysis exists to answer, asked over the stored
+        // measurements rather than over the files. It opens nothing, so a run
+        // is seconds where the analysis behind it is hours.
+        var batch_size: usize = 0;
+        var cancel_after_ms: ?u64 = null;
+        for (args[3..]) |argument| {
+            if (std.mem.startsWith(u8, argument, "--batch=")) {
+                batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
+            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
+                cancel_after_ms = try std.fmt.parseInt(
+                    u64,
+                    argument["--cancel-after=".len..],
+                    10,
+                );
+            } else return error.UnknownOption;
+        }
+        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
+        // Not the process arena every other subcommand uses. This job's work
+        // is a long sequence of short-lived allocations -- a fingerprint per
+        // comparison, freed as soon as it has been compared -- and an arena
+        // never returns them, so the pass's bound of two resident fingerprints
+        // would become one per comparison: about 9 KB times 14,593 on the
+        // reference library today, and unbounded at the 500,000-file target.
+        // The pass frees correctly; it needs an allocator that honours it.
+        var runtime = liborca.OrcaRuntime.init(std.heap.smp_allocator);
+        defer runtime.deinit();
+        const library_handle = try runtime.openLibrary(init.io, database_path);
+        var request: liborca.core.runtime.DuplicateScanRequest = .{};
+        if (batch_size != 0) request.batch_size = batch_size;
+        const job_handle = try runtime.startLibraryDuplicateScan(library_handle, request);
+        const planned = try runtime.jobSnapshotSynced(job_handle);
+        try stdout.print("{d} files to examine\n", .{planned.total_units orelse 0});
+        try stdout.flush();
+        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
+        try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         var runtime = liborca.OrcaRuntime.init(allocator);
@@ -238,6 +274,7 @@ pub fn main(init: std.process.Init) !void {
             \\                 | backfill DATABASE [--force] [--cancel-after=MS]
             \\                 | analyze DATABASE AUDIO
             \\                 | analyze-library DATABASE [--batch=N] [--cancel-after=MS]
+            \\                 | duplicates DATABASE [--batch=N] [--cancel-after=MS]
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | artists DATABASE [OPTIONS]
@@ -274,6 +311,14 @@ pub fn main(init: std.process.Init) !void {
             \\be stopped and restarted: --cancel-after=MS interrupts it inside a file,
             \\the batch already measured is still committed, and the next run selects
             \\only what is left.
+            \\
+            \\duplicates reports every file whose audio the Library also holds
+            \\somewhere else, as health issues that `health` then lists. It compares
+            \\what analyze-library measured -- it opens no files -- so it is fast, and
+            \\it is only as complete as that analysis: the uncomparable count is how
+            \\many files it could say nothing about, and a zero-finding run over a
+            \\library with a large uncomparable count means "not measured", not "no
+            \\duplicates".
             \\
             \\backfill re-reads the headers of files whose declared audio properties
             \\are missing and reprojects the Tracks derived from them, without walking
@@ -802,6 +847,34 @@ fn printAnalysisStats(
             stats.errors,
             stats.batches_committed,
         },
+    );
+}
+
+/// The same counters, named for what a duplicate scan means by them.
+///
+/// `uncomparable` is printed on its own line rather than beside the rest,
+/// because it is the number that decides whether the finding counts mean
+/// anything: nothing can be said about a file no analysis has measured, and a
+/// report of "no duplicates" over a library full of them would be a lie of
+/// omission.
+fn printDuplicateStats(
+    stdout: *std.Io.Writer,
+    stats: liborca.core.runtime.ScanStats,
+) !void {
+    try stdout.print(
+        "examined={d} exact={d} likely={d} unique={d} unreadable={d} batches={d}\n",
+        .{
+            stats.files_seen,
+            stats.tracks_written,
+            stats.releases_written,
+            stats.unchanged,
+            stats.errors,
+            stats.batches_committed,
+        },
+    );
+    try stdout.print(
+        "uncomparable={d} comparisons={d} truncated_buckets={d}\n",
+        .{ stats.unsupported, stats.files_projected, stats.folders_visited },
     );
 }
 

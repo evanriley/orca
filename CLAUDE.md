@@ -20,10 +20,11 @@ Zig `0.17.0-dev.1770+5d7cf3f34` or a newer compatible snapshot (pinned in
 threaded through I/O call sites (`std.testing.io` in tests). Do not write code
 against the older `std.fs` / `std.io` APIs.
 
-Linux builds additionally need PipeWire, GTK4, and SQLite development
-libraries. `sqlite3` is linked via pkg-config; PipeWire deliberately is not
-(its emitted flags break Zig's current pkg-config parser — see the comment in
-`build.zig`).
+Builds need libFLAC and SQLite development libraries; Linux builds
+additionally need PipeWire and GTK4. `sqlite3` and `FLAC` are linked via
+pkg-config; PipeWire deliberately is not (its emitted flags break Zig's current
+pkg-config parser — see the comment in `build.zig`). The only Zig package
+dependency left is `audiophile/qoa`.
 
 ### Snapshot facts that cost time to rediscover
 
@@ -81,6 +82,7 @@ zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]
 zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--cancel-after=MS]
+zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
 zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
@@ -160,8 +162,8 @@ There is no test filter wired into `build.zig` — `zig build test` runs all ~10
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `flac`/`qoa` dependencies, libc, and the PipeWire shim, which is
-impractical to reconstruct on a bare `zig test` command line.
+SQLite, the `qoa` dependency, libFLAC, libc, and the MP3 and PipeWire shims,
+which is impractical to reconstruct on a bare `zig test` command line.
 
 Tests are run from the repository root and load fixtures by relative path
 (`fixtures/audio/...`). Do not make test working-directory assumptions.
@@ -283,8 +285,11 @@ honestly. Container detection sniffs bytes, never filename extensions.
 
 Codec-specific state never escapes `liborca/codec/`; playback sees only the
 Orca `Decoder` interface, and `SourceSession` owns the registered decoder.
-Prefer pure-Zig adapters (the pinned `audiophile/flac` and `audiophile/qoa`
-dependencies) over C libraries.
+Prefer pure-Zig adapters (the pinned `audiophile/qoa` dependency) over C
+libraries — but not at the price of correctness. FLAC decodes through libFLAC
+behind `codec/flac_shim.c` because the pure-Zig package that preceded it
+reconstructed mid-side stereo one LSB low, which made a lossless format lossy;
+see `docs/codecs.md`.
 
 Scanning is incremental and restart-resumable: unchanged path + storage
 identity skips all format/metadata work, commits are bounded, and cancellation

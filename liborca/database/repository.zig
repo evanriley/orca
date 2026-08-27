@@ -20,6 +20,14 @@ pub const WriteLane = struct {
         self.mutex.lockUncancelable(self.io);
     }
 
+    /// Takes the lane only if it is free. For a writer that would rather skip
+    /// its write than wait — the decode producer is the case this exists for,
+    /// since a job worker holds this lane across a whole batch commit and a
+    /// producer parked behind one starves the render callback into underruns.
+    pub fn tryAcquire(self: *WriteLane) bool {
+        return self.mutex.tryLock();
+    }
+
     pub fn release(self: *WriteLane) void {
         self.mutex.unlock(self.io);
     }
@@ -285,6 +293,42 @@ pub const AnalysisCandidatePage = struct {
 
     pub fn deinit(self: AnalysisCandidatePage) void {
         for (self.items) |item| self.allocator.free(item.uri);
+        self.allocator.free(self.items);
+    }
+};
+
+/// One file a duplicate scan will examine, and the two keys it can be
+/// bucketed by.
+///
+/// Both are nullable and both nulls mean something the scan must report rather
+/// than swallow: no `audio_hash` means the analysis pass has never decoded
+/// this file, so nothing can be said about what it sounds like; no
+/// `duration_ms` means no scan or probe has ever established how long it is,
+/// so it cannot be placed in a duration window.
+pub const DuplicateCandidate = struct {
+    id: i64,
+    audio_hash: ?[32]u8,
+    duration_ms: ?i64,
+    /// The identity the Library recorded, which is the key its stored
+    /// fingerprint is filed under. Null for a file no scan has hashed.
+    source_identity: ?quick_hash.Digest,
+};
+
+/// A file inside a duplicate scan's plausible bucket, with everything needed
+/// to compare against it: its stored fingerprint is keyed on
+/// `source_identity`, and `audio_hash` says whether the exact bucket has
+/// already accounted for it.
+pub const DuplicatePeer = struct {
+    id: i64,
+    source_identity: ?quick_hash.Digest,
+    audio_hash: ?[32]u8,
+};
+
+pub const DuplicateCandidatePage = struct {
+    allocator: std.mem.Allocator,
+    items: []DuplicateCandidate,
+
+    pub fn deinit(self: DuplicateCandidatePage) void {
         self.allocator.free(self.items);
     }
 };
@@ -1288,17 +1332,29 @@ pub const ArtistRepository = struct {
 /// for a page of at most 512 rows, and a join would have to aggregate the whole
 /// table before the LIMIT could apply.
 const artist_columns =
-    \\SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),
-    \\       (SELECT count(*) FROM releases
-    \\         WHERE releases.album_artist_id = artists.id
-    \\            OR releases.id IN
-    \\               (SELECT release_id FROM tracks WHERE tracks.artist_id = artists.id)),
-    \\       (SELECT count(*) FROM tracks
-    \\         WHERE tracks.artist_id = artists.id
-    \\            OR tracks.release_id IN
-    \\               (SELECT id FROM releases WHERE album_artist_id = artists.id))
-    \\
-;
+    "SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),\n" ++
+    "       (SELECT count(*) FROM releases WHERE " ++ artistOwns(by_release_artist) ++ "),\n" ++
+    "       (SELECT count(*) FROM tracks WHERE " ++ artistOwns(by_artist) ++ ")\n";
+
+/// Rewrites one of the shared artist predicates from its bound-parameter form
+/// to the correlated form the artist listing needs.
+///
+/// The counts beside an artist's name had a third copy of both rules, written
+/// out with `artists.id` where the predicate has `?3`. They agreed, but the
+/// count beside a name and the pane it labels disagreeing is exactly the bug
+/// `countMatching` already produced once, and three copies is a worse position
+/// than the two that caused it.
+fn artistOwns(comptime predicate: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "";
+        var rest = predicate;
+        while (std.mem.indexOf(u8, rest, "?3")) |at| {
+            out = out ++ rest[0..at] ++ "artists.id";
+            rest = rest[at + 2 ..];
+        }
+        return out ++ rest;
+    }
+}
 
 fn collectArtistPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !ArtistPage {
     var results: std.ArrayList(ArtistSummary) = .empty;
@@ -1927,6 +1983,107 @@ pub const FileRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
+    /// One bounded page of files for a duplicate scan, past `after_id`.
+    ///
+    /// Deliberately unfiltered. A scan that selected only files carrying an
+    /// `audio_hash` would report "no duplicates" on a library nobody has
+    /// analyzed, which is a lie of omission rather than an answer; and it
+    /// would never revisit a file to retire a finding that no longer holds.
+    /// Every row is examined, and the ones nothing can be said about are
+    /// counted.
+    pub fn duplicateCandidatePage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+    ) !DuplicateCandidatePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(
+            "SELECT id, audio_hash, duration_ms, quick_hash FROM files" ++
+                " WHERE id > ?1 ORDER BY id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+
+        var items: std.ArrayList(DuplicateCandidate) = .empty;
+        errdefer items.deinit(allocator);
+        while (try statement.step() == .row) try items.append(allocator, .{
+            .id = statement.columnInt64(0),
+            .audio_hash = audioHashColumn(statement, 1),
+            .duration_ms = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
+            .source_identity = digestColumn(statement, 3),
+        });
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// The other files whose decoded audio hashes to exactly this, into a
+    /// caller-owned buffer.
+    ///
+    /// This is the exact-duplicate bucket, and it is a search of
+    /// `files_audio_hash` rather than a comparison against anything: two files
+    /// whose decoded samples hash identically *are* the same audio, whatever
+    /// their containers, bitrates or tags say.
+    ///
+    /// The buffer is the caller's and the query is limited to its length, so
+    /// one pathological bucket cannot allocate without bound. A returned count
+    /// equal to `buffer.len` means the bucket was truncated.
+    pub fn audioHashPeersInto(
+        self: *const FileRepository,
+        buffer: []i64,
+        audio_hash: []const u8,
+        exclude_id: i64,
+    ) !usize {
+        if (buffer.len == 0) return 0;
+        var statement = try self.db.prepare(
+            "SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2 ORDER BY id LIMIT ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindBlob(1, audio_hash);
+        try statement.bindInt64(2, exclude_id);
+        try statement.bindInt64(3, @intCast(buffer.len));
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = statement.columnInt64(0);
+        return found;
+    }
+
+    /// The other files whose duration falls inside `[low, high]`, into a
+    /// caller-owned buffer.
+    ///
+    /// This is the *plausible* bucket, the one a temporal fingerprint is then
+    /// compared inside. Length is the cheapest necessary condition for two
+    /// files being the same recording and the only one an index can answer, so
+    /// it decides who is worth comparing; the fingerprint decides whether they
+    /// match. Served by `files_duration`, which covers both columns.
+    ///
+    /// Bounded exactly like `audioHashPeersInto`, and for the same reason.
+    pub fn durationPeersInto(
+        self: *const FileRepository,
+        buffer: []DuplicatePeer,
+        low: i64,
+        high: i64,
+        exclude_id: i64,
+    ) !usize {
+        if (buffer.len == 0) return 0;
+        var statement = try self.db.prepare(
+            "SELECT id, quick_hash, audio_hash FROM files" ++
+                " WHERE duration_ms >= ?1 AND duration_ms <= ?2" ++
+                " AND id <> ?3 ORDER BY duration_ms, id LIMIT ?4;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, low);
+        try statement.bindInt64(2, high);
+        try statement.bindInt64(3, exclude_id);
+        try statement.bindInt64(4, @intCast(buffer.len));
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = .{
+            .id = statement.columnInt64(0),
+            .source_identity = digestColumn(statement, 1),
+            .audio_hash = audioHashColumn(statement, 2),
+        };
+        return found;
+    }
+
     /// Tier 4 of the identity cascade, written by the analysis job rather than
     /// the scanner: a hash of the audio payload alone survives Orca's own tag
     /// writes, which change size, mtime and quick hash but not the audio.
@@ -2249,6 +2406,58 @@ pub const LocationRepository = struct {
         try statement.bindInt64(1, file_id);
         if (try statement.step() != .row) return null;
         return try allocator.dupe(u8, statement.columnText(0));
+    }
+
+    /// The second path at which Orca holds this file's bytes, when there is
+    /// one.
+    ///
+    /// A byte-identical copy never becomes a second `files` row: the scanner's
+    /// identity cascade resolves it by quick hash to the row that already
+    /// exists, so the Library models it as one file at two locations. That is
+    /// still the same audio stored twice, and it is what a person asking about
+    /// duplicates means, so the duplicate scan reads it here rather than
+    /// pretending the copy does not exist.
+    ///
+    /// Only `present` locations count. A file that *moved* leaves a `missing`
+    /// row behind and a `present` one ahead, and reporting that pair as a
+    /// duplicate would name a path that is not there.
+    pub fn secondPresentPath(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !?[]u8 {
+        var statement = try self.db.prepare(
+            "SELECT uri FROM locations WHERE file_id=?1 AND state='present'" ++
+                " ORDER BY id LIMIT 1 OFFSET 1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+        return try allocator.dupe(u8, statement.columnText(0));
+    }
+
+    /// Records that a file the Library still lists is not where it says.
+    ///
+    /// Called from the decode producer when a track will not open, so it
+    /// **declines the write rather than waiting for it**. A job worker holds
+    /// the write lane across an entire batch commit; a producer parked behind
+    /// one stops feeding the render callback, which zero-fills and counts
+    /// underruns. Missing audio is a worse answer than a stale row.
+    ///
+    /// Skipping costs nothing that matters: the scanner is the authority on
+    /// location state and reconciles it properly, and the next attempt on this
+    /// track tries again. Returns whether the row was written.
+    pub fn markMissingIfLaneFree(self: *LocationRepository, file_id: i64) !bool {
+        if (!self.write_lane.tryAcquire()) return false;
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET state='missing', missing_since=unixepoch()
+            \\WHERE file_id=?1 AND state<>'missing';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return true;
     }
 
     pub fn stateOf(self: *const LocationRepository, location_id: i64) !LocationState {
@@ -3326,6 +3535,18 @@ fn digestColumn(statement: sqlite.Statement, column: c_int) ?quick_hash.Digest {
     const bytes = statement.columnBlob(column);
     if (bytes.len != @typeInfo(quick_hash.Digest).array.len) return null;
     var digest: quick_hash.Digest = undefined;
+    @memcpy(&digest, bytes);
+    return digest;
+}
+
+/// A 32-byte BLAKE3 column, or null when the row has none or the stored blob
+/// is not one. A short blob is corruption rather than an answer, and treating
+/// it as null keeps a duplicate scan from bucketing files together on a
+/// truncated key.
+fn audioHashColumn(statement: sqlite.Statement, column: c_int) ?[32]u8 {
+    const bytes = statement.columnBlob(column);
+    if (bytes.len != 32) return null;
+    var digest: [32]u8 = undefined;
     @memcpy(&digest, bytes);
     return digest;
 }

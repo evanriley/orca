@@ -11,6 +11,10 @@ pub const Kind = enum {
     /// missing. Neither a walk nor a resolution: a repair keyed on `files.id`.
     property_backfill,
     analysis,
+    /// Finding the audio a Library holds more than once. Separate from the
+    /// analysis it depends on, because comparing measurements is seconds of
+    /// work over an index while taking them is hours of decoding.
+    duplicate_scan,
     conversion,
     ripping,
     metadata_lookup,

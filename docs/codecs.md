@@ -80,3 +80,103 @@ against the bytes that follow it.
 Free-format and reserved-field frames are refused. Streams that change channel
 count or sample rate mid-file are refused rather than silently reinterpreted.
 Truncated input ends the stream; input that never syncs fails at open.
+
+## FLAC
+
+`codec/flac.zig` parses STREAMINFO itself and drives **libFLAC** through
+`codec/flac_shim.c`. The shim is the containment boundary, on the same terms as
+`mp3_shim.c` and `pipewire_shim.c`: libFLAC's headers and its native decoder
+object live inside it, and no `FLAC__` type — no C type beyond fixed-width
+integers — is visible above it.
+
+libFLAC's stream decoder is push-shaped, pulling bytes through a read callback
+and pushing whole blocks back through a write callback. Orca's `ReadableSource`
+is positional and holds no cursor and no file handle, so the shim is
+initialized with `FLAC__stream_decoder_init_stream` and carries the byte cursor
+libFLAC believes it is at, feeding it from `readAt`. That is what lets a
+provider or permission-scoped source decode without ever materializing a path.
+Metadata blocks are ignored and MD5 verification is declined explicitly: the
+caller has already parsed STREAMINFO, and a whole-file checksum that only
+reports at finish is meaningless for a decoder that is routinely seeked and
+abandoned mid-track.
+
+Two behaviours of the end of a stream are deliberate, and both were learned
+from real files:
+
+- **A sought stream that ends is finished, not damaged.** Frames before a seek
+  target are never decoded, so a running count can never reach STREAMINFO's
+  declared total and every correct stream would look truncated. The `Decoder`
+  contract signals end of input with zero frames and has no way to say "ended
+  early but intact", so reporting the end of a sought track as an error was
+  indistinguishable from corruption: one album stalled with 8,266 underruns.
+  The cost is that a truncated file seeked into ends quietly; every ordinary
+  play from the beginning still detects it.
+- **A shortfall smaller than one maximum block is the final frame.** One of 104
+  ID3-carrying FLACs in the reference library stops 2,620 frames short of the
+  11,979,324 STREAMINFO declares, inside its final 4,096-frame block. `ffmpeg`
+  calls that an invalid sync code, resyncs and returns the audio; treating it
+  as damage lost the whole track. Accepting it is narrow on purpose — a file
+  missing more than its last block is still an error, and a stream that
+  declares no total is not covered at all.
+
+libFLAC's own error callback is ignored, because whether a stream ended early
+enough to count as damage is a question only the caller can answer: it is
+decided against the declared total, above the shim.
+
+### History: the pure-Zig package was not lossless
+
+Until this was replaced, FLAC decoding went through the pinned
+`audiophile/flac` package, which **reconstructed mid-side stereo incorrectly**.
+Roughly half of all decoded samples came back one LSB low, on the majority of
+real FLAC files, because mid-side is the stereo mode encoders usually choose.
+
+A FLAC encoder storing mid-side writes `mid = (left + right) >> 1` and
+`side = left - right`. The low bit of `mid` is discarded, and it is recoverable
+precisely because `left + right` and `left - right` always share parity — so
+the missing bit is `side & 1`. The specification's reconstruction restores it
+first:
+
+    restored = (mid << 1) | (side & 1)
+    left     = (restored + side) >> 1
+    right    = (restored - side) >> 1
+
+The package instead computed `left = mid + (side >> 1)` and
+`right = left - side`, dropping the restoration. For odd `side` the result is
+one too low and `right` inherits the error. Exhaustively over 208,208
+(left, right) pairs the specification formula round-trips exactly and that one
+is wrong for **50.0%** of them, always by exactly 1 LSB; the smallest
+counterexample is `left = 1, right = 0`, which decoded as `(0, -1)`.
+
+One LSB at 16 bits is −96 dBFS, so nothing about this was audible. What it broke
+was every use of decoded audio as an *identity*: `files.audio_hash` became
+encoding-dependent, so genuinely byte-identical files failed to match and were
+demoted to `likely_duplicate`, and loudness, peak and fingerprints varied with
+the encoding rather than with the music.
+
+The package ships no licence of any kind — no LICENSE file, no SPDX headers,
+nothing in its manifest — so vendoring a corrected copy was not available, and
+the decode path moved to libFLAC instead.
+
+`fixtures/audio/midside-reference.flac` exists so this cannot come back
+silently. Its two channels are near-opposites, which drives `mid` to a constant
+zero and makes mid-side by far the cheapest decorrelation for an encoder to
+choose, and its `side` is odd for every single frame — so a decoder that skips
+the low-bit restoration is wrong on 100% of samples rather than 50%. The test
+regenerates the expected PCM from the same integer sequence the fixture was
+built from, so there is no second fixture to drift.
+
+**Replacing the decoder invalidated every stored measurement.** Both
+`diagnostics_algorithm_version` and `fingerprint_algorithm_version` moved to 2,
+so an existing library re-selects every file rather than trusting figures taken
+through the old decoder. Bringing a library up to date is
+`orca-cli analyze-library DATABASE`, followed by `orca-cli duplicates DATABASE`
+if duplicate findings matter.
+
+## Known gap: WAVE_FORMAT_EXTENSIBLE is refused
+
+`wav.zig` rejects a `fmt ` chunk of 40 bytes with `UnsupportedWavEncoding`.
+That is `WAVE_FORMAT_EXTENSIBLE`, which ffmpeg emits by default for stereo
+`pcm_s16le`, so a WAV produced by the most obvious command line will not open.
+The real sample format is the SubFormat GUID's first two bytes, which map onto
+the same tags the 16-byte header uses. No file in the reference library is
+affected, since it contains no WAV at all.
