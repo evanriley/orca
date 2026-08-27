@@ -10,6 +10,9 @@ test "registered lossless and lossy codecs share SourceSession pipeline" {
     const paths = [_][]const u8{
         "fixtures/audio/generated-reference.flac",
         "fixtures/audio/generated-reference.qoa",
+        // The same FLAC stream behind an ID3v2 tag: detection resolves the
+        // container prefix, so the public path decodes it identically.
+        "fixtures/audio/id3-prefixed-reference.flac",
     };
     const codecs = liborca.codec.CodecRegistry.builtins();
     for (paths) |path| {

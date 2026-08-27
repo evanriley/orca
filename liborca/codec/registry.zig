@@ -37,7 +37,32 @@ pub const CodecRegistry = struct {
         self.count += 1;
     }
 
+    /// Opens `source` as `format`, skipping a container prefix if the bytes
+    /// carry one.
+    ///
+    /// Callers that already know the container — the scanner, which sniffed it
+    /// once and stored it — still reach a stream that begins behind an ID3v2
+    /// tag, so the prefix is resolved here as well as in `openDetected`.
+    /// Requiring every such caller to remember to detect again is how the 104
+    /// tagged FLACs in the reference library came to be sniffed correctly and
+    /// still fail to open.
     pub fn open(
+        self: *const CodecRegistry,
+        allocator: std.mem.Allocator,
+        format: storage.AudioFormat,
+        source: storage.ReadableSource,
+    ) !decoder.Decoder {
+        const detected = storage.format.detect(source) catch null;
+        if (detected) |resolved| {
+            if (resolved.format == format and resolved.payload_offset != 0)
+                return PrefixedDecoder.open(self, allocator, resolved, source);
+        }
+        return self.openExact(allocator, format, source);
+    }
+
+    /// Codec dispatch with no container inspection: the source is already
+    /// positioned at the start of the encoded stream.
+    fn openExact(
         self: *const CodecRegistry,
         allocator: std.mem.Allocator,
         format: storage.AudioFormat,
@@ -49,16 +74,25 @@ pub const CodecRegistry = struct {
         return error.CodecUnavailable;
     }
 
+    /// Opens whatever the bytes turn out to be, including a stream that sits
+    /// behind a container prefix.
+    ///
+    /// Detection can report that the encoded stream starts past byte zero — an
+    /// ID3v2 tag stapled in front of a FLAC file. Handing the codec the
+    /// original source would show it the tag and fail on the magic bytes, so
+    /// the decoder is opened over an offset view instead and the returned
+    /// Decoder owns that view for its whole life. No codec learns what a tag
+    /// is.
     pub fn openDetected(
         self: *const CodecRegistry,
         allocator: std.mem.Allocator,
         source: storage.ReadableSource,
     ) !decoder.Decoder {
-        var header: [64]u8 = undefined;
-        const read = try source.readAt(0, &header);
-        const format = storage.format.sniffBytes(header[0..read]) orelse
+        const detected = try storage.format.detect(source) orelse
             return error.UnsupportedAudioFormat;
-        return self.open(allocator, format, source);
+        if (detected.payload_offset == 0)
+            return self.openExact(allocator, detected.format, source);
+        return PrefixedDecoder.open(self, allocator, detected, source);
     }
 
     /// Audio properties for one already-sniffed encoding.
@@ -111,6 +145,64 @@ pub const CodecRegistry = struct {
         }) catch unreachable;
         return registry;
     }
+};
+
+/// A Decoder that owns the offset view its codec reads through.
+///
+/// The view must outlive the decoder, and nothing in the caller's frame can be
+/// relied on for that: `SourceSession` moves decoders between owners. So the
+/// view lives on the heap beside the decoder it feeds and is destroyed strictly
+/// after the codec is torn down, the same ordering `SourceSession` gives a
+/// `LoadedSource`. The underlying source stays the caller's to release, exactly
+/// as it is for an untagged file.
+const PrefixedDecoder = struct {
+    allocator: std.mem.Allocator,
+    view: storage.source.OffsetSource,
+    inner: decoder.Decoder,
+
+    fn open(
+        registry: *const CodecRegistry,
+        allocator: std.mem.Allocator,
+        detected: storage.format.Detection,
+        source: storage.ReadableSource,
+    ) !decoder.Decoder {
+        const self = try allocator.create(PrefixedDecoder);
+        errdefer allocator.destroy(self);
+        self.allocator = allocator;
+        self.view = .{ .inner = source, .offset = detected.payload_offset };
+        self.inner = try registry.openExact(allocator, detected.format, self.view.readable());
+        return .{
+            .context = self,
+            .vtable = &vtable,
+            .codec = self.inner.codec,
+            .source_format = self.inner.source_format,
+            .format = self.inner.format,
+            .frame_count = self.inner.frame_count,
+        };
+    }
+
+    fn readFrames(context: *anyopaque, output: []f32) !usize {
+        const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
+        return self.inner.readFrames(output);
+    }
+
+    fn seek(context: *anyopaque, frame: u64) !void {
+        const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
+        return self.inner.seek(frame);
+    }
+
+    fn deinit(context: *anyopaque) void {
+        const self: *PrefixedDecoder = @ptrCast(@alignCast(context));
+        const allocator = self.allocator;
+        self.inner.deinit();
+        allocator.destroy(self);
+    }
+
+    const vtable: decoder.Decoder.VTable = .{
+        .read_frames = readFrames,
+        .seek = seek,
+        .deinit = deinit,
+    };
 };
 
 /// Duration comes from the declared frame count and the canonical sample rate,
@@ -186,4 +278,93 @@ test "probing a file no codec can open fails rather than reporting zeroes" {
         error.TruncatedFlac,
         codecs.probeDetected(std.testing.allocator, local.readable()),
     );
+}
+
+const id3_prefixed_flac = "fixtures/audio/id3-prefixed-reference.flac";
+const id3_footer_prefixed_flac = "fixtures/audio/id3-footer-prefixed-reference.flac";
+const untagged_flac = "fixtures/audio/generated-reference.flac";
+
+/// Decodes `frames` frames starting at `from_frame`, through whatever container
+/// detection resolves the file to. Tests compare an ID3-prefixed stream against
+/// the identical untagged one, so any offset error shows up as different audio
+/// rather than as a decode failure that could be mistaken for a bad fixture.
+fn decodeWindow(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    from_frame: u64,
+    frames: usize,
+    output: []f32,
+) ![]f32 {
+    var local = try storage.LocalFileSource.open(std.testing.io, path);
+    defer local.close();
+    const codecs = CodecRegistry.builtins();
+    var opened = try codecs.openDetected(allocator, local.readable());
+    defer opened.deinit();
+    if (from_frame != 0) try opened.seek(from_frame);
+    const channels = opened.format.channels;
+    var filled: usize = 0;
+    while (filled < frames * channels) {
+        const read = try opened.readFrames(output[filled .. frames * channels]);
+        if (read == 0) break;
+        filled += read * channels;
+    }
+    return output[0..filled];
+}
+
+test "an ID3-prefixed FLAC decodes the same audio as the untagged stream" {
+    const allocator = std.testing.allocator;
+    const untagged = try allocator.alloc(f32, 480 * 2);
+    defer allocator.free(untagged);
+    const prefixed = try allocator.alloc(f32, 480 * 2);
+    defer allocator.free(prefixed);
+    const expected = try decodeWindow(allocator, untagged_flac, 0, 480, untagged);
+    const actual = try decodeWindow(allocator, id3_prefixed_flac, 0, 480, prefixed);
+    try std.testing.expectEqual(expected.len, actual.len);
+    try std.testing.expectEqualSlices(f32, expected, actual);
+}
+
+test "an ID3v2 footer is counted in the tag length an ID3-prefixed FLAC hides behind" {
+    const allocator = std.testing.allocator;
+    const untagged = try allocator.alloc(f32, 480 * 2);
+    defer allocator.free(untagged);
+    const prefixed = try allocator.alloc(f32, 480 * 2);
+    defer allocator.free(prefixed);
+    const expected = try decodeWindow(allocator, untagged_flac, 0, 480, untagged);
+    const actual = try decodeWindow(allocator, id3_footer_prefixed_flac, 0, 480, prefixed);
+    try std.testing.expectEqualSlices(f32, expected, actual);
+}
+
+test "seeking inside an ID3-prefixed FLAC lands on the frame that was asked for" {
+    const allocator = std.testing.allocator;
+    const untagged = try allocator.alloc(f32, 128 * 2);
+    defer allocator.free(untagged);
+    const prefixed = try allocator.alloc(f32, 128 * 2);
+    defer allocator.free(prefixed);
+    const expected = try decodeWindow(allocator, untagged_flac, 240, 128, untagged);
+    const actual = try decodeWindow(allocator, id3_prefixed_flac, 240, 128, prefixed);
+    try std.testing.expect(expected.len > 0);
+    try std.testing.expectEqualSlices(f32, expected, actual);
+}
+
+test "probing an ID3-prefixed FLAC reports the FLAC stream's own properties" {
+    const codecs = CodecRegistry.builtins();
+    var local = try storage.LocalFileSource.open(std.testing.io, id3_prefixed_flac);
+    defer local.close();
+    const probed = try codecs.probeDetected(std.testing.allocator, local.readable());
+    try std.testing.expectEqualStrings("flac", probed.codec.?);
+    try std.testing.expectEqual(@as(?u32, 48_000), probed.sample_rate);
+    try std.testing.expectEqual(@as(?u16, 2), probed.channels);
+    try std.testing.expectEqual(@as(?u64, 10), probed.duration_ms);
+}
+
+test "an ID3-tagged MPEG file still opens as MPEG audio" {
+    const codecs = CodecRegistry.builtins();
+    var local = try storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.mp3",
+    );
+    defer local.close();
+    const probed = try codecs.probeDetected(std.testing.allocator, local.readable());
+    try std.testing.expectEqualStrings("mp3", probed.codec.?);
+    try std.testing.expectEqual(@as(?u32, 44_100), probed.sample_rate);
 }

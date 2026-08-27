@@ -6,6 +6,7 @@ pub const AudioFormat = format.AudioFormat;
 pub const BufferedSourceReader = source.BufferedSourceReader;
 pub const LocalFileSource = source.LocalFileSource;
 pub const MemorySource = source.MemorySource;
+pub const OffsetSource = source.OffsetSource;
 pub const QuickHash = quick_hash.Digest;
 pub const ReadableSource = source.ReadableSource;
 pub const StorageIdentity = source.StorageIdentity;

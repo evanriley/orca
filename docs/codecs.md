@@ -3,6 +3,13 @@
 Codec implementations consume `ReadableSource` and expose Orca-owned PCM facts;
 container-specific state does not escape the codec module.
 
+The reverse also holds: a container concern does not enter a codec. A stream
+that sits behind a prefix belonging to no encoding — an ID3v2 tag stapled in
+front of a FLAC file — is resolved by `storage.format.detect`, and the registry
+opens the codec over an offset view of the suffix. No decoder skips tags, and
+the offset view is owned by the returned Decoder and released strictly after
+the codec it fed. See `docs/storage.md` for what detection guarantees.
+
 The initial WAV reader supports integer PCM at 8/16/24/32 bits and IEEE float
 at 32/64 bits. It walks RIFF chunks rather than assuming a fixed 44-byte header,
 rejects truncated or unsupported input, reports exact frame counts, and performs

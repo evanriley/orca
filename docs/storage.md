@@ -12,6 +12,49 @@ sources can implement the same contract without pretending to be local paths.
 Container sniffing uses source bytes rather than filename extensions. The first
 registry recognizes WAV, AIFF, FLAC, MP3, MP4, Opus, Vorbis, and WavPack magic.
 
+## What sniffing guarantees
+
+`format.detect` answers two questions together: **which container** the bytes
+are, and **where its encoded stream begins**. The second is not always zero. An
+ID3v2 tag says nothing about what follows it, and some taggers staple one to the
+front of a FLAC stream — 104 files in the 22,060-file reference library. Reading
+`ID3` as "this is MPEG audio" handed those files to the MPEG decoder, which
+failed on the magic bytes, so they would neither play nor probe.
+
+- **The tag is measured, not guessed.** The declared size is four syncsafe bytes
+  at offset 6, seven significant bits each, and excludes both the ten-byte
+  header and the optional ten-byte footer that flag `0x10` announces. An error
+  of ten bytes still "works" for MPEG audio, which resyncs on the next frame
+  header, and silently breaks every format whose magic must land on an exact
+  byte.
+- **Two reads, not one long one.** Detection reads 64 bytes at zero, and when
+  those are an ID3v2 header, 64 more at the first byte past the tag. A tag
+  carrying artwork routinely runs to hundreds of kilobytes, so the payload check
+  cannot be folded into a longer first read.
+- **MPEG audio stays byte zero.** If the bytes past the tag are unrecognizable,
+  or are an MPEG frame header, detection reports MPEG audio starting at zero.
+  That is what an ID3v2 tag fronts in all but a handful of files, and the MPEG
+  decoder owns tag and frame resync across the whole file, including the
+  trailing ID3v1, APEv2 and Lyrics3 tags it must exclude from the audio region.
+  `sniffBytes`, which is pure over a prefix and often cannot reach past the tag,
+  answers the same way.
+- **The decoder never sees the tag.** `CodecRegistry.open` and `openDetected`
+  hand the codec a `source.OffsetSource` view of the suffix when detection
+  reports a non-zero payload offset, and the returned Decoder owns that view for
+  its whole life, releasing it strictly after the codec. `open` resolves the
+  prefix as well as `openDetected` does, because the scanner opens with the
+  container it already sniffed. No codec learns what a tag is.
+- **Offsets do not change identity.** An `OffsetSource` shifts reads and size
+  but forwards `identity` unchanged. Identity answers "which file is this and
+  has it changed", which the scanner compares against `observed_files`; a view
+  that reported a shortened size would make every tagged file look modified on
+  every scan.
+- **Seeking is in stream frames.** Because the offset lives in the source view
+  rather than in a codec, every byte position a decoder computes — a FLAC
+  seektable entry, an MPEG frame index — is already relative to the start of the
+  stream, and a seek in a tagged file lands exactly where the same seek in the
+  untagged stream does.
+
 ## Incremental scanning
 
 The scanner recursively walks a configured root, opens candidate files through
@@ -86,11 +129,14 @@ projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
   re-probed row still matches the selection.
 
 On the 22,060-file reference library a full backfill takes about 2.8 seconds
-and a second run 0.05 seconds. It leaves 104 rows unrepaired: one FLAC whose
-STREAMINFO declares `total_samples = 0`, which is honestly unknown rather than
-missing, and 102 `.flac` files plus one `.mp3` that begin with an ID3v2 tag and
-are therefore sniffed as MPEG audio and refuse to decode — each of which now
-carries an `unreadable_file` issue naming the failure.
+and a second run 0.05 seconds. It used to leave 104 rows unrepaired: one FLAC
+whose STREAMINFO declares `total_samples = 0`, which is honestly unknown rather
+than missing, and files that begin with an ID3v2 tag in front of a stream that
+is not MPEG audio — 104 of the library's `.flac` files carry one — which were
+sniffed as MPEG audio and refused to decode. Container detection now resolves
+the tag, so those rows probe like any other; the `total_samples = 0` row is
+still honestly unknown, and a file that opens and then refuses to decode still
+raises `unreadable_file`.
 
 Platform watcher adapters submit root-scoped hints through a bounded channel.
 Unread storms coalesce to one hint per root, including explicit overflow hints;
