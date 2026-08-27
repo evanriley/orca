@@ -685,15 +685,21 @@ pub const TrackRepository = struct {
 
     /// How many Tracks a filtered listing has to page through, so a host can
     /// size a scrollbar without walking the listing.
+    /// Counts what `page` would return. It shares `by_artist` with the paged
+    /// query rather than restating the predicate, because it had its own copy
+    /// and the two drifted the moment the definition of an artist's tracks
+    /// widened: the list showed an artist's album tracks while the count above
+    /// it said zero. Parameter positions match `buildTrackQuery` for the same
+    /// reason.
     pub fn countMatching(self: *const TrackRepository, query: TrackQuery) !u64 {
         var statement = try self.db.prepare(
-            \\SELECT count(*) FROM tracks
-            \\WHERE (?1 IS NULL OR tracks.artist_id = ?1)
-            \\  AND (?2 IS NULL OR tracks.release_id = ?2);
+            "SELECT count(*) FROM tracks\n" ++
+                "WHERE (?3 IS NULL OR " ++ by_artist ++ ")\n" ++
+                "  AND (?4 IS NULL OR tracks.release_id = ?4);",
         );
         defer statement.deinit();
-        try statement.bindOptionalInt64(1, query.artist_id);
-        try statement.bindOptionalInt64(2, query.release_id);
+        try statement.bindOptionalInt64(3, query.artist_id);
+        try statement.bindOptionalInt64(4, query.release_id);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -819,6 +825,28 @@ fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) []con
     };
 }
 
+/// What it means for a Track to be an artist's.
+///
+/// Credited to them, *or* on a Release they are the album artist of. The
+/// narrow definition -- credit only -- leaves 26 artists in a real 2,468-artist
+/// library owning an album and no songs, and they are not tag defects that
+/// normalization should paper over:
+///
+///   Enschway              album, with tracks credited "Enschway, Jupe"
+///   Grayarea              album, with tracks credited "Grayarea feat. Erik ..."
+///   Jesu                  album, with tracks credited "Jesu / Sun Kil Moon"
+///   Eli "Paperboy" Reed   album artist quoted, track artist not
+///   Hearts & Colors       album artist "&", track artists ","
+///   Eddy Grant            33 files in this library carry no ARTIST tag at all
+///
+/// "Grayarea" and "Grayarea feat. Erik" genuinely are different credited
+/// artists; merging them would destroy information. Widening what counts as
+/// the artist's own shelf costs nothing and covers every case above, including
+/// the untagged files, without guessing at any tag.
+const by_artist =
+    "(tracks.artist_id = ?3 OR tracks.release_id IN " ++
+    "(SELECT id FROM releases WHERE album_artist_id = ?3))";
+
 fn buildTrackQuery(
     comptime filter: TrackFilter,
     comptime sort: TrackSort,
@@ -826,9 +854,9 @@ fn buildTrackQuery(
 ) [:0]const u8 {
     const where = switch (filter) {
         .none => "",
-        .artist => "WHERE tracks.artist_id = ?3\n",
+        .artist => "WHERE " ++ by_artist ++ "\n",
         .release => "WHERE tracks.release_id = ?4\n",
-        .artist_and_release => "WHERE tracks.artist_id = ?3 AND tracks.release_id = ?4\n",
+        .artist_and_release => "WHERE " ++ by_artist ++ " AND tracks.release_id = ?4\n",
     };
     return track_columns ++ "FROM tracks\n" ++ where ++
         "ORDER BY " ++ orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;";
@@ -1076,7 +1104,10 @@ pub const ArtistRepository = struct {
 const artist_columns =
     \\SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),
     \\       (SELECT count(*) FROM releases WHERE releases.album_artist_id = artists.id),
-    \\       (SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.id)
+    \\       (SELECT count(*) FROM tracks
+    \\         WHERE tracks.artist_id = artists.id
+    \\            OR tracks.release_id IN
+    \\               (SELECT id FROM releases WHERE album_artist_id = artists.id))
     \\
 ;
 

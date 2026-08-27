@@ -106,6 +106,17 @@ fn isSpace(point: u21) bool {
 fn fold(point: u21) u21 {
     return switch (point) {
         'A'...'Z' => point + 32,
+        // Typographic punctuation folds onto its ASCII spelling. Tag writers
+        // are inconsistent about this *within a single album*: ALBUMARTIST
+        // tends to carry the typographic form a metadata service supplied
+        // while ARTIST carries what somebody typed. Without this, `El‐P`
+        // (U+2010 HYPHEN) and `El-P` (ASCII hyphen-minus) are two artists --
+        // one holding every release and the other holding every track, so
+        // browsing to either shows you half the artist. Six artists in a
+        // 2,474-artist library were split exactly this way.
+        0x2010...0x2015, 0x2212 => '-',
+        0x2018...0x201b, 0x2032 => '\'',
+        0x201c...0x201f, 0x2033 => '"',
         // Fullwidth forms fold onto their ASCII equivalents, then onto case.
         0xff21...0xff3a => point - 0xfee0 + 32,
         0xff01...0xff20, 0xff3b...0xff5e => point - 0xfee0,
@@ -154,6 +165,24 @@ pub fn sortKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
 }
 
 const testing = std.testing;
+
+test "typographic and typed punctuation fold onto one key" {
+    // The real split this closes: the release carried U+2010, the tracks
+    // carried ASCII, and they became two artists.
+    const pairs = [_][2][]const u8{
+        .{ "El\u{2010}P", "El-P" },
+        .{ "The O\u{2019}Jays", "The O'Jays" },
+        .{ "Gabriel Garz\u{f3}n\u{2010}Montano", "Gabriel Garz\u{f3}n-Montano" },
+        .{ "\u{201c}Heavy\u{201d} Weather", "\"Heavy\" Weather" },
+    };
+    for (pairs) |pair| {
+        const left = try normalizeKey(testing.allocator, pair[0]);
+        defer testing.allocator.free(left);
+        const right = try normalizeKey(testing.allocator, pair[1]);
+        defer testing.allocator.free(right);
+        try testing.expectEqualStrings(left, right);
+    }
+}
 
 test "two spellings of one name fold onto one key" {
     const left = try normalizeKey(testing.allocator, "Sigur  Rós");

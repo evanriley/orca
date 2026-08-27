@@ -986,3 +986,79 @@ test "opening a version-7 library recovers its journal before the schema moves" 
     defer observed.deinit();
     try std.testing.expectEqualStrings("Northern Sky", observed.values.title.?);
 }
+
+test "an artist's tracks include the ones on a release they are the album artist of" {
+    // The narrow definition -- credit only -- leaves an artist owning an album
+    // and no songs whenever the track credit differs from the album credit,
+    // which real tags do constantly: a featured artist, a collaboration, a
+    // separator convention, or simply no ARTIST tag at all. Browsing to that
+    // artist showed the album and nothing in it.
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-artist-shelf?mode=memory&cache=shared",
+    );
+    defer library.close();
+
+    const headliner = (try library.artists.ensure(.{
+        .key = "grayarea",
+        .name = "Grayarea",
+        .sort_name = "grayarea",
+    })).?;
+    const featured = (try library.artists.ensure(.{
+        .key = "grayarea feat. erik shepard",
+        .name = "Grayarea feat. Erik Shepard",
+        .sort_name = "grayarea feat. erik shepard",
+    })).?;
+    // Deliberately two artists: a featured credit is not a spelling of the
+    // headline act, and merging them would destroy information.
+    try std.testing.expect(headliner != featured);
+
+    const release = try library.releases.upsert(.{
+        .release_key = "grayarea|gravity",
+        .title = "Gravity",
+        .album_artist = "Grayarea",
+        .album_artist_id = headliner,
+    });
+    try library.tracks.upsertTracks(&.{
+        .{
+            .title = "Gravity",
+            .artist = "Grayarea feat. Erik Shepard",
+            .artist_id = featured,
+            .release_id = release,
+            .track_number = 1,
+        },
+        .{
+            .title = "Gravity (Reprise)",
+            .artist = "Grayarea",
+            .artist_id = headliner,
+            .release_id = release,
+            .track_number = 2,
+        },
+    });
+
+    var page = try library.tracks.page(std.testing.allocator, .{ .artist_id = headliner });
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    // Credited once and on the album: counted once, not twice.
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try library.tracks.countMatching(.{ .artist_id = headliner }),
+    );
+
+    // The count and the page it counts must agree. They had separate copies of
+    // the predicate and drifted the moment this definition widened.
+    var artists = try library.artists.page(std.testing.allocator, 16, 0);
+    defer artists.deinit();
+    for (artists.items) |artist| {
+        if (artist.id != headliner) continue;
+        try std.testing.expectEqual(@as(u64, 2), artist.track_count);
+        try std.testing.expectEqual(@as(u64, 1), artist.release_count);
+    }
+
+    // The featured artist keeps their own credit and gains nothing.
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try library.tracks.countMatching(.{ .artist_id = featured }),
+    );
+}

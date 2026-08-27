@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 10;
+pub const current_version = 11;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -673,6 +673,55 @@ const migration_10 =
     "CREATE INDEX files_incomplete_properties ON files(id) WHERE " ++
     repository.incomplete_properties_predicate ++ ";";
 
+/// Re-key artists once the fold learned typographic punctuation, merging the
+/// rows that were only ever distinct because of it.
+///
+/// This cannot be left to a reprojection. `ArtistRepository.ensure` upserts by
+/// key, so reprojecting would file the tracks under the merged artist and
+/// leave the old row behind as an orphan holding the releases -- the same
+/// split, one row further along. The merge has to happen here, where both rows
+/// are still visible.
+///
+/// Survivor choice is the row carrying a MusicBrainz artist id, falling back
+/// to the lowest id. A MusicBrainz id is the strongest statement about who an
+/// artist is that this library holds, and in the observed splits it is the
+/// typographic spelling that carries one -- which is also the better display
+/// name, since it is what a metadata service supplied rather than what
+/// somebody typed.
+///
+/// The unique index is dropped for the duration because a row's *new* key can
+/// equal another row's *old* key, which SQLite would reject row by row even
+/// though the finished state is unique.
+const migration_11 =
+    \\DROP INDEX IF EXISTS artists_key;
+    \\CREATE TEMP TABLE artist_refold AS
+    \\    SELECT id, orca_artist_key(name) AS folded FROM artists;
+    \\CREATE TEMP TABLE artist_survivor AS
+    \\    SELECT r.folded AS folded,
+    \\           (SELECT a.id FROM artists a
+    \\              JOIN artist_refold r2 ON r2.id = a.id
+    \\             WHERE r2.folded = r.folded
+    \\             ORDER BY (a.musicbrainz_artist_id IS NULL), a.id
+    \\             LIMIT 1) AS keep_id
+    \\      FROM artist_refold r GROUP BY r.folded;
+    \\UPDATE tracks SET artist_id = (
+    \\    SELECT s.keep_id FROM artist_refold r
+    \\      JOIN artist_survivor s ON s.folded = r.folded
+    \\     WHERE r.id = tracks.artist_id)
+    \\  WHERE artist_id IS NOT NULL;
+    \\UPDATE releases SET album_artist_id = (
+    \\    SELECT s.keep_id FROM artist_refold r
+    \\      JOIN artist_survivor s ON s.folded = r.folded
+    \\     WHERE r.id = releases.album_artist_id)
+    \\  WHERE album_artist_id IS NOT NULL;
+    \\DELETE FROM artists WHERE id NOT IN (SELECT keep_id FROM artist_survivor);
+    \\UPDATE artists
+    \\   SET key = orca_artist_key(name), sort_name = orca_artist_sort_key(name);
+    \\DROP TABLE artist_refold;
+    \\DROP TABLE artist_survivor;
+    \\CREATE UNIQUE INDEX artists_key ON artists(key);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -756,6 +805,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     }
     if (version < 9 and target_version >= 9) try db.exec(migration_9);
     if (version < 10 and target_version >= 10) try db.exec(migration_10);
+    if (version < 11 and target_version >= 11) try db.exec(migration_11);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1124,6 +1174,85 @@ test "an unknown newer schema version is refused rather than opened" {
     const db = try sqlite.Database.open(path);
     defer db.close();
     try apply(db);
-    try db.exec("PRAGMA user_version=11;");
+    // Derived from current_version rather than written out, because hardcoding
+    // it means this test silently stops testing anything the next time a
+    // migration lands -- which is exactly what happened at version 11.
+    try db.exec(std.fmt.comptimePrint(
+        "PRAGMA user_version={d};",
+        .{current_version + 1},
+    ));
     try std.testing.expectError(error.SchemaVersionTooNew, apply(db));
+}
+
+test "artists split only by typographic punctuation merge when the fold learns it" {
+    // The real shape this closes: the Release carries the typographic spelling
+    // a metadata service supplied, along with a MusicBrainz id; the Tracks
+    // carry what somebody typed. Under the version-10 fold they are two
+    // artists, one holding every release and the other every track, so
+    // browsing to either shows half the artist.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "refold.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 10);
+    try db.exec(
+        \\INSERT INTO artists(id, name, key, sort_name, musicbrainz_artist_id)
+        \\VALUES (1, 'El' || char(8208) || 'P', 'el' || char(8208) || 'p',
+        \\           'el' || char(8208) || 'p', 'mbid-el-p'),
+        \\       (2, 'El-P', 'el-p', 'el-p', NULL);
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id)
+        \\VALUES (1, 'Fantastic Damage', 'El' || char(8208) || 'P', 1);
+        \\INSERT INTO tracks(id, title, artist, artist_id, release_id, track_number)
+        \\VALUES (1, 'Deep Space 9mm', 'El-P', 2, 1, 1);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM artists;"));
+    // The row carrying a MusicBrainz id survives, which is also the better
+    // display name: supplied by a metadata service rather than typed.
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT id FROM artists;"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT artist_id FROM tracks WHERE id = 1;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT album_artist_id FROM releases WHERE id = 1;"),
+    );
+    // The unique index is dropped and rebuilt across the re-key; it has to
+    // come back, or the next projection could insert a duplicate artist.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(
+            db,
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='artists_key';",
+        ),
+    );
+    try checkForeignKeys(db);
+}
+
+test "artists that merely look alike are left alone by the re-key" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "distinct.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 10);
+    // Genuinely different artists, including the case the fold must not touch:
+    // a featured credit is not a spelling of the headline act.
+    try db.exec(
+        \\INSERT INTO artists(id, name, key, sort_name)
+        \\VALUES (1, 'Grayarea', 'grayarea', 'grayarea'),
+        \\       (2, 'Grayarea feat. Erik Shepard', 'grayarea feat. erik shepard',
+        \\           'grayarea feat. erik shepard'),
+        \\       (3, 'Gray Area', 'gray area', 'gray area');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM artists;"));
 }
