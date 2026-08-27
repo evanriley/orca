@@ -202,6 +202,92 @@ pub const IncompleteFilePage = struct {
     }
 };
 
+/// Where a reader should open a file: a present location in preference to an
+/// unverified one, and a missing one only if there is nothing better, because
+/// a drive that is back should be read rather than skipped. Empty when no
+/// location on any known volume names the file.
+///
+/// One definition, because every pass that repairs `files` by id needs exactly
+/// this rule and two spellings of it would drift.
+const location_uri_column =
+    \\(SELECT locations.uri FROM locations WHERE locations.file_id = files.id
+    \\ ORDER BY CASE locations.state WHEN 'present' THEN 0
+    \\               WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
+    \\ LIMIT 1)
+;
+
+/// Which measurement a library-wide analysis is asking about.
+///
+/// Everything except the file and its identity: the caller supplies the
+/// algorithm it would run and the parameters it would run under, so a
+/// selection asks "which files lack *this* measurement" rather than "which
+/// files lack any measurement".
+pub const AnalysisSelector = struct {
+    kind: u8,
+    algorithm_id: []const u8,
+    algorithm_version: u32,
+    parameter_hash: [32]u8,
+};
+
+/// The `files` rows that still owe a library-wide analysis.
+///
+/// One string, shared by `FileRepository.unanalyzedPage`, `unanalyzedCount`
+/// and the plan test that proves neither is a table scan. Parameters ?3 to ?6
+/// are the `AnalysisSelector`; ?1 and ?2 stay the caller's cursor and limit,
+/// as they are for every other page in this file.
+///
+/// This is an anti-join against `analysis_results`' own primary key rather
+/// than a flag on `files`, because that key *is* the answer. It already
+/// encodes all three reasons a stored measurement stops counting — the bytes
+/// changed (`source_identity`), the algorithm changed (`algorithm_version`),
+/// the parameters changed (`parameter_hash`) — and a duplicate marker on
+/// `files` would be a second source of truth that could disagree with the
+/// results it claims to describe. `analysis_results` is `WITHOUT ROWID` with
+/// exactly those six columns as its primary key, so each row of `files` costs
+/// one full-prefix B-tree probe and no index has to be invented for this.
+///
+/// `source_identity = files.quick_hash` compares the measurement against the
+/// identity the *Library* recorded, not against the bytes on disk. A file
+/// whose bytes moved without a rescan therefore keeps being selected: that is
+/// correct — its stored measurement no longer describes it — and the pass
+/// declines to measure it until a scan has caught up, rather than filing a new
+/// measurement the selection would go on missing for ever.
+///
+/// The *playback* lookup is stricter, and deliberately asymmetric: it keys on
+/// the identity of the bytes it just opened, because adopting a correction for
+/// audio a file no longer contains is a wrong answer, while re-selecting a
+/// file for measurement is only wasted work.
+pub const unanalyzed_predicate =
+    \\NOT EXISTS (SELECT 1 FROM analysis_results
+    \\    WHERE analysis_results.file_id = files.id
+    \\      AND analysis_results.kind = ?3
+    \\      AND analysis_results.algorithm_id = ?4
+    \\      AND analysis_results.algorithm_version = ?5
+    \\      AND analysis_results.parameter_hash = ?6
+    \\      AND analysis_results.source_identity = files.quick_hash)
+;
+
+/// One file that still owes an analysis, where to read it, and what the
+/// Library believes its bytes are.
+pub const AnalysisCandidate = struct {
+    id: i64,
+    /// Empty when no location on any known volume names this file.
+    uri: []u8,
+    /// Null when the Library has never fingerprinted this file, which is a row
+    /// no measurement can be keyed against until a scan gives it an identity.
+    source_identity: ?quick_hash.Digest,
+};
+
+pub const AnalysisCandidatePage = struct {
+    allocator: std.mem.Allocator,
+    items: []AnalysisCandidate,
+
+    pub fn deinit(self: AnalysisCandidatePage) void {
+        for (self.items) |item| self.allocator.free(item.uri);
+        self.allocator.free(self.items);
+    }
+};
+
 pub const LocationState = enum {
     present,
     missing,
@@ -1623,17 +1709,11 @@ pub const FileRepository = struct {
         all: bool,
     ) !IncompleteFilePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        const uri_column =
-            \\(SELECT locations.uri FROM locations WHERE locations.file_id = files.id
-            \\ ORDER BY CASE locations.state WHEN 'present' THEN 0
-            \\               WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
-            \\ LIMIT 1)
-        ;
         var statement = try self.db.prepare(if (all)
-            "SELECT files.id, " ++ uri_column ++
+            "SELECT files.id, " ++ location_uri_column ++
                 " FROM files WHERE files.id > ?1 ORDER BY files.id LIMIT ?2;"
         else
-            "SELECT files.id, " ++ uri_column ++
+            "SELECT files.id, " ++ location_uri_column ++
                 " FROM files WHERE files.id > ?1 AND (" ++
                 incomplete_properties_predicate ++ ") ORDER BY files.id LIMIT ?2;");
         defer statement.deinit();
@@ -1666,12 +1746,87 @@ pub const FileRepository = struct {
         return @intCast(statement.columnInt64(0));
     }
 
+    /// One bounded page of files that still owe the measurement `selector`
+    /// names, past `after_id`.
+    ///
+    /// The cursor is the file id for the same reason the backfill's is: a row
+    /// this run declines to measure does not make the next page re-serve it,
+    /// and an interrupted run resumes from where it stopped with no checkpoint
+    /// of its own. Which rows still owe work is a property of the rows.
+    pub fn unanalyzedPage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+        selector: AnalysisSelector,
+    ) !AnalysisCandidatePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(
+            "SELECT files.id, files.quick_hash, " ++ location_uri_column ++
+                " FROM files WHERE files.id > ?1 AND (" ++ unanalyzed_predicate ++
+                ") ORDER BY files.id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+        try bindAnalysisSelector(statement, selector);
+
+        var items: std.ArrayList(AnalysisCandidate) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.uri);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const uri = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(uri);
+            try items.append(allocator, .{
+                .id = statement.columnInt64(0),
+                .source_identity = digestColumn(statement, 1),
+                .uri = uri,
+            });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// How many files still owe that measurement. Like the backfill and unlike
+    /// a filesystem walk, a library-wide analysis has an honest denominator
+    /// before it starts, so its job snapshot reports a fraction.
+    pub fn unanalyzedCount(
+        self: *const FileRepository,
+        selector: AnalysisSelector,
+    ) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM files WHERE " ++ unanalyzed_predicate ++ ";",
+        );
+        defer statement.deinit();
+        // The count asks the same question with no cursor and no limit, so ?1
+        // and ?2 are simply unbound; SQLite reads an unbound parameter as
+        // NULL, and neither appears in this statement.
+        try bindAnalysisSelector(statement, selector);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
     /// Tier 4 of the identity cascade, written by the analysis job rather than
     /// the scanner: a hash of the audio payload alone survives Orca's own tag
     /// writes, which change size, mtime and quick hash but not the audio.
     pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// The same write from inside a caller's transaction, so an analysis pass
+    /// can commit a file's identity, its results and its health together.
+    pub fn setAudioHashLocked(
+        self: *FileRepository,
+        file_id: i64,
+        digest: []const u8,
+    ) !void {
         var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
         defer statement.deinit();
         try statement.bindBlob(1, digest);
@@ -2547,26 +2702,69 @@ pub const AnalysisCacheRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
+    /// The full key, every column of it. `source_identity` is not optional
+    /// here and never should be: a stored measurement that is returned for
+    /// bytes it was not taken from is a wrong answer presented as a right one,
+    /// and both readers below exist to hand that answer to something that will
+    /// act on it.
+    const by_key =
+        \\SELECT result FROM analysis_results
+        \\WHERE file_id=?1 AND kind=?2 AND algorithm_id=?3
+        \\  AND algorithm_version=?4 AND parameter_hash=?5
+        \\  AND source_identity=?6;
+    ;
+
     pub fn get(
         self: *const AnalysisCacheRepository,
         allocator: std.mem.Allocator,
         key: AnalysisCacheKey,
     ) !?[]u8 {
-        var statement = try self.db.prepare(
-            \\SELECT result FROM analysis_results
-            \\WHERE file_id=?1 AND kind=?2 AND algorithm_id=?3
-            \\  AND algorithm_version=?4 AND parameter_hash=?5
-            \\  AND source_identity=?6;
-        );
+        var statement = try self.db.prepare(by_key);
         defer statement.deinit();
         try bindAnalysisKey(statement, &key);
         if (try statement.step() != .row) return null;
         return try allocator.dupe(u8, statement.columnBlob(0));
     }
 
+    /// The result stored under `key`, copied into a caller-owned buffer, or
+    /// null when there is none.
+    ///
+    /// The buffer is the caller's because the one caller that needs this is
+    /// loading a queue entry on the control lane and wants a fixed-size header
+    /// out of a blob whose bulk is a waveform it will never read. The returned
+    /// length is the row's full length and may exceed `buffer.len`, which is
+    /// how a caller learns it saw only a prefix. A caller that wants the whole
+    /// result uses `get`.
+    pub fn resultInto(
+        self: *const AnalysisCacheRepository,
+        key: AnalysisCacheKey,
+        buffer: []u8,
+    ) !?usize {
+        var statement = try self.db.prepare(by_key);
+        defer statement.deinit();
+        try bindAnalysisKey(statement, &key);
+        if (try statement.step() != .row) return null;
+        const stored = statement.columnBlob(0);
+        const copied = @min(stored.len, buffer.len);
+        @memcpy(buffer[0..copied], stored[0..copied]);
+        return stored.len;
+    }
+
     pub fn put(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        return self.putLocked(key, result);
+    }
+
+    /// The same write from inside a caller's transaction. A library-wide
+    /// analysis commits a whole batch of files at once — results, identity and
+    /// health together — so it holds the lane itself rather than taking it once
+    /// per row.
+    pub fn putLocked(
+        self: *AnalysisCacheRepository,
+        key: AnalysisCacheKey,
+        result: []const u8,
+    ) !void {
         var statement = try self.db.prepare(
             \\INSERT INTO analysis_results(
             \\    file_id, kind, algorithm_id, algorithm_version, parameter_hash,
@@ -2985,6 +3183,15 @@ pub const IdentificationProposalRepository = struct {
         try self.db.exec("COMMIT;");
     }
 };
+
+/// Binds ?3 to ?6 of `unanalyzed_predicate`. The cursor and limit stay ?1 and
+/// ?2 so the selector can be appended to any paged query without renumbering.
+fn bindAnalysisSelector(statement: sqlite.Statement, selector: AnalysisSelector) !void {
+    try statement.bindInt64(3, selector.kind);
+    try statement.bindText(4, selector.algorithm_id);
+    try statement.bindInt64(5, selector.algorithm_version);
+    try statement.bindBlob(6, &selector.parameter_hash);
+}
 
 fn bindAnalysisKey(statement: sqlite.Statement, key: *const AnalysisCacheKey) !void {
     try statement.bindInt64(1, key.file_id);

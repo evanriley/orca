@@ -367,6 +367,55 @@ int main(void) {
     if (backfill_stats.files_seen == 0) return 148;
     if (backfill_stats.changed == 0) return 149;
 
+    /* ---- the library-wide analysis as a job ---- */
+    /* Nothing has been measured yet, so this has an honest total before it
+     * starts and must measure every fixture. A second run must then find
+     * nothing left: the selection is keyed on the results themselves, so a
+     * file that has been measured stops being selected without any flag. */
+    orca_handle analysis_job;
+    orca_analysis_options analysis_options;
+    memset(&analysis_options, 0, sizeof analysis_options);
+    analysis_options.batch_size = 4;
+    if (orca_library_start_analysis(runtime, library, &analysis_options, &analysis_job) !=
+        ORCA_STATUS_OK)
+        return 150;
+    orca_job_snapshot analysis_planned;
+    if (orca_job_snapshot_get(runtime, analysis_job, &analysis_planned) != ORCA_STATUS_OK)
+        return 151;
+    if (analysis_planned.kind != ORCA_JOB_KIND_ANALYSIS) return 152;
+    if (analysis_planned.has_total == 0) return 153;
+    if (analysis_planned.total_units == 0) return 154;
+    uint8_t analysis_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 120000; elapsed += 10) {
+        settled = job_settled(runtime, analysis_job, &analysis_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 155;
+    if (analysis_state != ORCA_JOB_SUCCEEDED) return 156;
+    orca_scan_stats analysis_stats;
+    if (orca_library_scan_stats(runtime, analysis_job, &analysis_stats) != ORCA_STATUS_OK)
+        return 157;
+    if (analysis_stats.files_seen == 0) return 158;
+    if (analysis_stats.changed == 0) return 159;
+
+    if (orca_library_start_analysis(runtime, library, &analysis_options, &analysis_job) !=
+        ORCA_STATUS_OK)
+        return 160;
+    analysis_state = ORCA_JOB_RUNNING;
+    settled = 0;
+    for (int elapsed = 0; elapsed < 120000; elapsed += 10) {
+        settled = job_settled(runtime, analysis_job, &analysis_state, 1);
+        if (settled != 0) break;
+        sleep_ms(10);
+    }
+    if (settled != 1) return 161;
+    if (analysis_state != ORCA_JOB_SUCCEEDED) return 162;
+    if (orca_library_scan_stats(runtime, analysis_job, &analysis_stats) != ORCA_STATUS_OK)
+        return 163;
+    if (analysis_stats.files_seen != 0) return 164;
+
     /* ---- the extended track view ---- */
     struct track_capture capture;
     memset(&capture, 0, sizeof capture);
@@ -551,6 +600,22 @@ int main(void) {
     float volume = 0;
     if (orca_player_volume(runtime, player, &volume) != ORCA_STATUS_OK) return 44;
     if (volume < 0.24f || volume > 0.26f) return 45;
+    /* Loudness correction is on by default and a host can turn it off. An
+     * unrecognized mode is refused rather than silently taken for one of the
+     * two that exist. */
+    uint8_t replay_gain_mode = 255;
+    if (orca_player_replay_gain_mode(runtime, player, &replay_gain_mode) != ORCA_STATUS_OK)
+        return 165;
+    if (replay_gain_mode != ORCA_REPLAY_GAIN_TRACK) return 166;
+    if (orca_player_set_replay_gain_mode(runtime, player, 7) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 167;
+    if (orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_OFF) !=
+        ORCA_STATUS_OK)
+        return 168;
+    if (orca_player_replay_gain_mode(runtime, player, &replay_gain_mode) != ORCA_STATUS_OK)
+        return 169;
+    if (replay_gain_mode != ORCA_REPLAY_GAIN_OFF) return 170;
+
     if (orca_player_set_repeat(runtime, player, ORCA_REPEAT_ALL) != ORCA_STATUS_OK) return 46;
     if (orca_player_set_repeat(runtime, player, 9) != ORCA_STATUS_INVALID_ARGUMENT) return 47;
     if (orca_player_set_shuffle(runtime, player, 0) != ORCA_STATUS_OK) return 48;
@@ -582,6 +647,14 @@ int main(void) {
     }
     if (!completed) return 53;
     if (outcome != ORCA_OUTCOME_TRACK_PLAYING) return 54;
+
+    /* Correction is off for this Player, so the render lane's multiplier is
+     * exactly the volume the host set. Anything else here would mean an
+     * unrequested correction had reached the audio. */
+    float effective_gain = 0;
+    if (orca_player_effective_gain(runtime, player, &effective_gain) != ORCA_STATUS_OK)
+        return 171;
+    if (effective_gain < 0.2499f || effective_gain > 0.2501f) return 172;
 
     orca_player_status status;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 55;

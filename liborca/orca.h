@@ -93,6 +93,7 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_SCAN = 0,
     ORCA_JOB_KIND_PROJECTION = 1,
     ORCA_JOB_KIND_PROPERTY_BACKFILL = 2,
+    ORCA_JOB_KIND_ANALYSIS = 3,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -323,6 +324,17 @@ typedef struct orca_scan_options {
     uint32_t batch_size;
     uint8_t reserved[4];
 } orca_scan_options;
+
+typedef struct orca_analysis_options {
+    /*
+     * Files per selected page and per bounded commit. Zero selects the
+     * default, which is far smaller than a scan's: one unit of this job's work
+     * is a whole file decoded end to end, and a batch is what an interrupted
+     * run throws away.
+     */
+    uint32_t batch_size;
+    uint8_t reserved[4];
+} orca_analysis_options;
 
 typedef struct orca_backfill_options {
     /* Rows per selected page and per bounded commit. Zero selects the
@@ -624,6 +636,34 @@ orca_status orca_library_start_property_backfill(
     orca_handle *job
 );
 
+/*
+ * Starts the library-wide analysis: decodes every file the Library has not
+ * measured yet and stores its loudness, peak, clipping, silence, waveform and
+ * temporal fingerprint. This is what makes ReplayGain on playback possible;
+ * without it every track plays at unity. `options` may be null.
+ *
+ * It decodes whole files, so it is slow by nature and is expected to be
+ * stopped and started again: orca_job_cancel takes effect inside a file, the
+ * batch already measured is still committed, and a later run selects only what
+ * is left. There is no force mode - a stored result carries its algorithm
+ * version, its parameters and the identity of the bytes it was taken from, so
+ * every reason to measure a file again is already a reason it gets selected.
+ *
+ * Progress and results are read through orca_job_snapshot_get and
+ * orca_library_scan_stats. In those stats `files_seen` counts files carried to
+ * a commit, `changed` files that yielded a loudness figure, `unchanged` files
+ * measured with no gateable loudness, `errors` files that opened and would not
+ * decode, and `unsupported` files that are not reachable, are not audio, or
+ * whose recorded identity no longer matches the bytes on disk - the last of
+ * which is a scan's job to repair, not this pass's.
+ */
+orca_status orca_library_start_analysis(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_analysis_options *options,
+    orca_handle *job
+);
+
 orca_status orca_job_cancel(orca_runtime *runtime, orca_handle job);
 orca_status orca_job_snapshot_get(
     orca_runtime *runtime,
@@ -695,6 +735,39 @@ orca_status orca_player_set_shuffle(orca_runtime *runtime, orca_handle player, u
  * hears the same level, and it survives a stop/start. */
 orca_status orca_player_set_volume(orca_runtime *runtime, orca_handle player, float linear);
 orca_status orca_player_volume(orca_runtime *runtime, orca_handle player, float *output);
+
+typedef enum orca_replay_gain_mode {
+    /* No loudness correction. Every entry plays at the volume set above. */
+    ORCA_REPLAY_GAIN_OFF = 0,
+    /* Each entry is corrected by its own measured loudness, when the Library
+     * holds a measurement that still describes the file. Album-level
+     * ReplayGain is not offered: it needs a release-scoped measurement Orca
+     * does not compute, and naming it here would apply track gain under an
+     * album label. */
+    ORCA_REPLAY_GAIN_TRACK = 1,
+} orca_replay_gain_mode;
+
+/* Takes effect on the next entry loaded, not on the one already playing: the
+ * correction is published when an entry is opened, and re-publishing it
+ * mid-track would move the level under the listener. Defaults to TRACK. */
+orca_status orca_player_set_replay_gain_mode(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t mode
+);
+orca_status orca_player_replay_gain_mode(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t *output
+);
+/* The multiplier the render lane is applying: volume times the loaded entry's
+ * loudness correction. Equal to the volume when there is no correction, so the
+ * two differing is what "ReplayGain is doing something" looks like. */
+orca_status orca_player_effective_gain(
+    orca_runtime *runtime,
+    orca_handle player,
+    float *output
+);
 
 orca_status orca_player_seek(
     orca_runtime *runtime,

@@ -1,9 +1,12 @@
 const std = @import("std");
+const analysis = @import("../analysis/root.zig");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
 const object = @import("object.zig");
+const quick_hash = @import("../storage/quick_hash.zig");
 const sqlite = @import("../database/sqlite.zig");
+const storage = @import("../storage/root.zig");
 
 pub const TrackRef = audio.playback_queue.TrackRef;
 
@@ -35,6 +38,9 @@ pub const TrackSourceOpener = struct {
     /// The Library's write side, used only to mark a Location `missing` when a
     /// file the database still lists turns out not to be there.
     locations: *database.LocationRepository,
+    /// Read-only, on the opener's own connection: the stored loudness for the
+    /// file behind a queue entry, looked up while the entry is being loaded.
+    analysis_cache: database.AnalysisCacheRepository,
     codecs: codec.CodecRegistry,
 
     pub fn create(
@@ -54,6 +60,7 @@ pub const TrackSourceOpener = struct {
             .reader = reader,
             .tracks = .{ .db = reader, .write_lane = library_database.write_lane },
             .locations = &library_database.locations,
+            .analysis_cache = .{ .db = reader, .write_lane = library_database.write_lane },
             .codecs = codec.CodecRegistry.builtins(),
         };
         return self;
@@ -81,11 +88,24 @@ pub const TrackSourceOpener = struct {
         self: *TrackSourceOpener,
         ref: TrackRef,
     ) !audio.source_session.SourceSession {
+        return (try self.openTrackDetailed(ref)).session;
+    }
+
+    /// The same open, plus the `files` row the audio actually came from.
+    ///
+    /// A caller that only wants audio uses `openTrack`. The control lane wants
+    /// the file id as well, because everything else it must publish for the
+    /// entry — its loudness correction first — is keyed on the file, and
+    /// resolving the track a second time could resolve it to a different one.
+    pub fn openTrackDetailed(
+        self: *TrackSourceOpener,
+        ref: TrackRef,
+    ) !OpenedTrack {
         if (!ref.library.eql(self.library)) return error.TrackNotInBoundLibrary;
         const resolved = (try self.tracks.playableLocation(self.allocator, ref.track_id)) orelse
             return error.TrackHasNoPlayableFile;
         defer resolved.deinit();
-        return audio.loaded_source.LoadedSource.open(
+        const session = audio.loaded_source.LoadedSource.open(
             self.allocator,
             self.io,
             self.codecs,
@@ -97,11 +117,73 @@ pub const TrackSourceOpener = struct {
                 markLocationMissing(self.locations, resolved.file_id) catch {};
                 return error.TrackFileMissing;
             },
-            error.UnsupportedAudioFormat => error.CodecUnavailable,
-            else => err,
+            error.UnsupportedAudioFormat => return error.CodecUnavailable,
+            else => return err,
+        };
+        return .{
+            .session = session,
+            .file_id = resolved.file_id,
+            // Observed, not taken from the row. Everything keyed on the file's
+            // content — its loudness correction first — must be keyed on the
+            // content that is about to be decoded, not on what the Library
+            // last recorded about it. Null when it could not be read, which
+            // means only that nothing content-keyed can be adopted.
+            .source_identity = observedIdentity(self.io, resolved.uri),
         };
     }
+
+    /// The loudness correction measured from exactly these bytes, or null.
+    ///
+    /// Null covers four different situations on purpose — never analyzed,
+    /// analyzed under other parameters, analyzed under an older algorithm, and
+    /// analyzed from bytes this file no longer has — because a Player does the
+    /// same thing with all four: play at unity. A correction whose provenance
+    /// is not the file in front of us is worse than no correction, and only
+    /// this identity, taken from the file itself, can rule that out: the
+    /// Library's own record of a file's bytes is only as fresh as the last
+    /// scan.
+    ///
+    /// Reads only the fixed header of the stored result. The rest is a
+    /// waveform, and this runs on the control lane while a track is loading.
+    pub fn replayGain(
+        self: *const TrackSourceOpener,
+        file_id: i64,
+        source_identity: ?quick_hash.Digest,
+    ) !?analysis.encoding.Loudness {
+        const identity = source_identity orelse return null;
+        var header: [analysis.encoding.header_size]u8 = undefined;
+        const stored = (try self.analysis_cache.resultInto(
+            analysis.service.diagnosticsKey(file_id, identity, .{}),
+            &header,
+        )) orelse return null;
+        if (stored < header.len) return null;
+        return analysis.encoding.decodeLoudness(&header);
+    }
 };
+
+/// One opened queue entry: the audio, which file row it came from, and the
+/// identity of the bytes that were actually opened.
+pub const OpenedTrack = struct {
+    session: audio.source_session.SourceSession,
+    file_id: i64,
+    source_identity: ?quick_hash.Digest,
+};
+
+/// The quick hash of a file that has just been opened for playback.
+///
+/// A second open rather than a borrowed one: `SourceSession` deliberately
+/// hides the `ReadableSource` its decoder holds, because nothing downstream of
+/// the producer may reach it. Two 64 KiB positional reads against a file the
+/// decoder is about to read in full is not a cost worth breaking that for.
+///
+/// Failure is null rather than an error: an identity that cannot be read means
+/// nothing content-keyed can be adopted, which is the same answer as having no
+/// measurement, and it must never stop a playable track from playing.
+fn observedIdentity(io: std.Io, uri: []const u8) ?quick_hash.Digest {
+    var local = storage.LocalFileSource.open(io, uri) catch return null;
+    defer local.close();
+    return quick_hash.fromSource(local.readable()) catch null;
+}
 
 /// Marks every Location of a file as `missing`.
 ///

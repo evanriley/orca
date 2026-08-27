@@ -107,6 +107,22 @@ pub fn Chain(comptime capacity: usize) type {
     };
 }
 
+/// How a Player chooses the loudness correction for the entry it loads.
+///
+/// Album-level ReplayGain is deliberately not a third value here. An album
+/// gain is one figure measured across a whole release, which needs both a
+/// release-scoped measurement `analysis/` does not compute and a notion of
+/// "the release this queue entry belongs to" the playback queue does not
+/// carry. Adding the name without either would apply track gain under an
+/// album label, which is worse than not offering it.
+pub const ReplayGainMode = enum(u8) {
+    /// No correction at all. Every entry plays at the volume the user set.
+    off,
+    /// Each entry is corrected by its own measured loudness, if the Library
+    /// holds one that still describes the file.
+    track,
+};
+
 /// The render lane's single multiplier, and the two independent things that
 /// decide it.
 ///

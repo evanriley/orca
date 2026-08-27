@@ -1,4 +1,5 @@
 const std = @import("std");
+const analysis_service = @import("../analysis/service.zig");
 const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
@@ -33,6 +34,10 @@ const PlayerObject = struct {
     /// Player-scope volume. Lives beside the Player rather than inside the
     /// engine so the level survives an engine that is stopped and respawned.
     gain: *audio.processing.Gain,
+    /// Whether loading an entry publishes that entry's loudness correction.
+    /// On by default: a Library that has been analyzed exists to be listened
+    /// to at an even level, and a host that disagrees turns it off.
+    replay_gain_mode: audio.processing.ReplayGainMode = .track,
     /// Track references, cursor, repeat and shuffle. Lives beside the Player
     /// and outlives any individual `SourceQueue`: `stop` releases decoders but
     /// never the list the user assembled.
@@ -93,6 +98,12 @@ pub const BackfillRequest = struct {
     /// Re-probe rows that already declare properties. See
     /// `library.PropertyBackfill.force` for why this is not the default.
     force: bool = false,
+};
+
+pub const AnalysisRequest = struct {
+    /// Files per selected page and per bounded commit. Small on purpose: see
+    /// `library.LibraryAnalysis.batch_size`.
+    batch_size: usize = 32,
 };
 
 /// Everything a job worker needs that is not the Library or the kind. One
@@ -196,6 +207,7 @@ const JobWorker = struct {
             .scan => self.runScan(),
             .projection => self.runProjection(),
             .property_backfill => self.runPropertyBackfill(),
+            .analysis => self.runAnalysis(),
             else => self.failed.store(true, .release),
         }
     }
@@ -256,6 +268,41 @@ const JobWorker = struct {
         _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
         if (result.cancelled) self.stats.cancelled.store(true, .release);
         self.noteProjection(result.projection);
+    }
+
+    /// Decodes every file the Library has not measured yet and stores the
+    /// result.
+    ///
+    /// Nothing is reprojected afterwards, and that is not an omission: a
+    /// backfill repairs `files` columns the projection derives Tracks from,
+    /// while this writes analysis results and an audio hash, which the
+    /// projection does not read. Reprojecting here would be work with no
+    /// output.
+    fn runAnalysis(self: *JobWorker) void {
+        var pass: library_pass.LibraryAnalysis = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .files = &self.database.files,
+            .analysis_cache = &self.database.analysis_cache,
+            .health_issues = &self.database.health_issues,
+            .write_lane = self.database.write_lane,
+            .database_handle = self.database.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
+        _ = self.stats.changed.fetchAdd(result.changed, .acq_rel);
+        _ = self.stats.unchanged.fetchAdd(result.unchanged, .acq_rel);
+        _ = self.stats.unsupported.fetchAdd(result.unsupported, .acq_rel);
+        _ = self.stats.errors.fetchAdd(result.errors, .acq_rel);
+        _ = self.stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
+        if (result.cancelled) self.stats.cancelled.store(true, .release);
     }
 
     fn runScan(self: *JobWorker) void {
@@ -1294,17 +1341,70 @@ pub const OrcaRuntime = struct {
         const cursor = object_value.queue.cursorPosition();
         const ref = object_value.queue.current() orelse {
             object_value.player.releaseSources();
+            // Nothing is loaded, so no entry's correction is in force. Leaving
+            // the last one published would apply it to whatever loads next.
+            object_value.gain.clearReplayGain(0);
             return;
         };
-        var session = try opener.openTrack(ref);
+        const opened = try opener.openTrackDetailed(ref);
+        var session = opened.session;
         const format = session.decoder.format;
         if (format.channels == 0 or format.channels > audio.zone_runtime.max_channels) {
             session.deinit();
             return error.UnsupportedChannelCount;
         }
+        publishReplayGain(object_value, opener, opened);
         object_value.player.replaceSource(session);
         object_value.queue.seekTo(cursor);
         object_value.queue.noteEntrySerial(object_value.player.entrySerial(), cursor);
+    }
+
+    /// Publishes the loudness correction for the entry being loaded.
+    ///
+    /// This is a SQLite read, so it happens here — on the control lane, while
+    /// the entry is being opened — and never on the render lane, which may not
+    /// allocate, block or touch a database. What crosses to the render lane is
+    /// the two atomics `Gain` already exposes.
+    ///
+    /// An entry with no usable correction is published as unity rather than
+    /// left alone. Leaving the previous entry's figure in place would play one
+    /// track at another track's loudness, which is the specific failure this
+    /// whole feature exists to avoid, and it would be silent.
+    ///
+    /// "Usable" is keyed on the identity of the bytes that were just opened,
+    /// not on what the Library records about them, so a file edited since the
+    /// last scan plays at unity instead of at a correction measured from audio
+    /// it no longer contains.
+    ///
+    /// The change is immediate rather than ramped: every caller of
+    /// `loadCursor` is a hard load, whose epoch bump has already made the
+    /// callback discard the prepared audio the old correction applied to, so
+    /// there is nothing left to ramp between.
+    ///
+    /// Known gap: a *gapless* auto-advance runs on the engine thread and does
+    /// not come through here, so the successor entry keeps the correction of
+    /// the entry before it until the next hard load. Fixing that means
+    /// publishing a correction per entry serial and adopting it at a block
+    /// boundary, which is the same shape as a prepared processing chain and is
+    /// deliberately not built here.
+    fn publishReplayGain(
+        object_value: *PlayerObject,
+        opener: *track_source.TrackSourceOpener,
+        opened: track_source.OpenedTrack,
+    ) void {
+        if (object_value.replay_gain_mode == .off) {
+            object_value.gain.clearReplayGain(0);
+            return;
+        }
+        // A lookup that fails is a correction we cannot vouch for, which is
+        // the same answer as one that is absent. It must never fail the load:
+        // the track is playable either way.
+        const loudness = opener.replayGain(opened.file_id, opened.source_identity) catch null;
+        if (loudness) |value| {
+            object_value.gain.setReplayGain(value.replay_gain_db, value.sample_peak, 0);
+        } else {
+            object_value.gain.clearReplayGain(0);
+        }
     }
 
     /// Spawns the Player's single decode producer. Registered with
@@ -1493,6 +1593,31 @@ pub const OrcaRuntime = struct {
         });
     }
 
+    /// Starts the library-wide analysis: decodes every file the Library has
+    /// not measured yet and stores its loudness, peak, clipping, silence,
+    /// waveform and temporal fingerprint.
+    ///
+    /// Like the backfill and unlike a scan it has an honest denominator before
+    /// it starts, so its snapshot carries a total. Unlike either, one unit of
+    /// its work is a whole file decoded end to end, which is why it is
+    /// cancellable and resumable rather than merely interruptible: a host is
+    /// expected to stop it and start it again.
+    ///
+    /// There is no force mode, deliberately. A backfill needs one because a
+    /// re-probe writes the same numbers and so cannot be told apart from a
+    /// stale one; an analysis result carries its algorithm version, its
+    /// parameters and the identity of the bytes it was taken from, so every
+    /// reason to measure a file again is already a reason the selection sees.
+    pub fn startLibraryAnalysis(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: AnalysisRequest,
+    ) !JobHandle {
+        return self.startJobWorker(library, .analysis, .{
+            .batch_size = request.batch_size,
+        });
+    }
+
     fn startJobWorker(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -1504,10 +1629,14 @@ pub const OrcaRuntime = struct {
         const library_database = try self.libraryDatabase(library);
         self.pruneRetiredJobWorkers();
 
-        const total_units: ?u64 = if (kind == .property_backfill)
-            try library_database.files.incompletePropertiesCount(request.force)
-        else
-            null;
+        const total_units: ?u64 = switch (kind) {
+            .property_backfill => try library_database.files
+                .incompletePropertiesCount(request.force),
+            .analysis => try library_database.files.unanalyzedCount(
+                analysis_service.diagnosticsSelector(.{}),
+            ),
+            else => null,
+        };
         const worker = try self.allocator.create(JobWorker);
         errdefer self.allocator.destroy(worker);
         const job_handle = try self.jobs.create(kind, total_units);
@@ -1724,6 +1853,39 @@ pub const OrcaRuntime = struct {
     pub fn playerVolume(self: *OrcaRuntime, player: PlayerHandle) !f32 {
         try self.requireRunning();
         return (try self.players.get(player)).gain.volume.load(.acquire);
+    }
+
+    /// Whether entries are loaded with their own loudness correction.
+    ///
+    /// Takes effect on the next entry that is loaded, not on the one already
+    /// playing: the correction is published when an entry is opened, and
+    /// re-publishing it mid-track would change the level under the listener.
+    pub fn playerSetReplayGainMode(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        mode: audio.processing.ReplayGainMode,
+    ) !void {
+        try self.requireRunning();
+        (try self.players.get(player)).replay_gain_mode = mode;
+    }
+
+    pub fn playerReplayGainMode(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+    ) !audio.processing.ReplayGainMode {
+        try self.requireRunning();
+        return (try self.players.get(player)).replay_gain_mode;
+    }
+
+    /// The multiplier the render lane is actually applying: user volume times
+    /// the loudness correction of the entry that was loaded.
+    ///
+    /// Distinct from `playerVolume` on purpose. A host shows the volume it was
+    /// given; this is what the audio is being multiplied by, and the two
+    /// differing is exactly what "ReplayGain is doing something" looks like.
+    pub fn playerEffectiveGain(self: *OrcaRuntime, player: PlayerHandle) !f32 {
+        try self.requireRunning();
+        return (try self.players.get(player)).gain.linear.load(.acquire);
     }
 
     /// Seek in wall-clock milliseconds. The frame conversion needs the loaded

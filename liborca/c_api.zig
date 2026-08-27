@@ -220,6 +220,14 @@ pub const ScanOptions = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const AnalysisOptions = extern struct {
+    /// Files per selected page and per bounded commit. Zero selects the
+    /// default, which is much smaller than a scan's because one unit of this
+    /// job's work is a whole file decoded end to end.
+    batch_size: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
 pub const BackfillOptions = extern struct {
     batch_size: u32,
     /// Nonzero re-probes rows that already declare properties.
@@ -812,6 +820,33 @@ pub export fn orca_library_start_property_backfill(
     return .ok;
 }
 
+/// Starts the library-wide analysis. `options` may be null.
+///
+/// Reachable from the ABI for the same reason a scan and a backfill are: a
+/// capability only a unit test can invoke is not a capability the product has.
+/// The stats come back through `orca_library_scan_stats` with this pass's own
+/// meaning — see `orca_analysis_options` in the header.
+pub export fn orca_library_start_analysis(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const AnalysisOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = job_output orelse return .invalid_argument;
+    var request: core.runtime.AnalysisRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+    }
+    const started = box.runtime.startLibraryAnalysis(
+        importLibrary(library),
+        request,
+    ) catch |err| return mapError(err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
 pub export fn orca_job_cancel(runtime: ?*Runtime, job_handle: Handle) callconv(.c) Status {
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     if (box.foreignThread()) return .wrong_thread;
@@ -1018,6 +1053,54 @@ pub export fn orca_player_volume(
     if (box.foreignThread()) return .wrong_thread;
     const destination = output orelse return .invalid_argument;
     destination.* = box.runtime.playerVolume(importPlayer(player)) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+/// 0 turns loudness correction off, 1 corrects each entry by its own measured
+/// loudness. Any other value is refused rather than treated as one of those.
+pub export fn orca_player_set_replay_gain_mode(
+    runtime: ?*Runtime,
+    player: Handle,
+    mode: u8,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const resolved: audio.processing.ReplayGainMode = switch (mode) {
+        0 => .off,
+        1 => .track,
+        else => return .invalid_argument,
+    };
+    box.runtime.playerSetReplayGainMode(importPlayer(player), resolved) catch |err|
+        return mapError(err);
+    return .ok;
+}
+
+pub export fn orca_player_replay_gain_mode(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*u8,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
+        return mapError(err);
+    destination.* = @backingInt(mode);
+    return .ok;
+}
+
+/// The multiplier the render lane is applying: volume times the loaded entry's
+/// loudness correction. Equal to the volume when there is no correction.
+pub export fn orca_player_effective_gain(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*f32,
+) callconv(.c) Status {
+    const box = runtimeBox(runtime) orelse return .invalid_argument;
+    if (box.foreignThread()) return .wrong_thread;
+    const destination = output orelse return .invalid_argument;
+    destination.* = box.runtime.playerEffectiveGain(importPlayer(player)) catch |err|
         return mapError(err);
     return .ok;
 }
@@ -1369,6 +1452,7 @@ fn exportJobKind(kind: job.Kind) u8 {
         .scan => 0,
         .projection => 1,
         .property_backfill => 2,
+        .analysis => 3,
         else => 255,
     };
 }

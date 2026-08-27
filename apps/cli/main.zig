@@ -91,6 +91,42 @@ pub fn main(init: std.process.Init) !void {
         try stdout.flush();
         try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
         try printBackfillStats(stdout, try runtime.jobScanStats(job_handle));
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "analyze-library")) {
+        // The library-wide half of `analyze`. It decodes whole files, so a
+        // real run is measured in hours and `--cancel-after=MS` is not a test
+        // affordance but the ordinary way to use it: stop it, start it again,
+        // and it selects only what is left.
+        var batch_size: usize = 0;
+        var cancel_after_ms: ?u64 = null;
+        for (args[3..]) |argument| {
+            if (std.mem.startsWith(u8, argument, "--batch=")) {
+                batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
+            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
+                cancel_after_ms = try std.fmt.parseInt(
+                    u64,
+                    argument["--cancel-after=".len..],
+                    10,
+                );
+            } else return error.UnknownOption;
+        }
+        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
+        var runtime = liborca.OrcaRuntime.init(allocator);
+        defer runtime.deinit();
+        const library_handle = try runtime.openLibrary(init.io, database_path);
+        var request: liborca.core.runtime.AnalysisRequest = .{};
+        if (batch_size != 0) request.batch_size = batch_size;
+        const job_handle = try runtime.startLibraryAnalysis(library_handle, request);
+        const planned = try runtime.jobSnapshotSynced(job_handle);
+        try stdout.print("{d} files to analyze\n", .{planned.total_units orelse 0});
+        try stdout.flush();
+        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
+        try printAnalysisStats(stdout, try runtime.jobScanStats(job_handle));
+        const library_database = try runtime.libraryDatabase(library_handle);
+        try stdout.print("{d} files still to analyze\n", .{
+            try library_database.files.unanalyzedCount(
+                liborca.analysis.service.diagnosticsSelector(.{}),
+            ),
+        });
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         var runtime = liborca.OrcaRuntime.init(allocator);
@@ -199,6 +235,7 @@ pub fn main(init: std.process.Init) !void {
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
             \\                 | backfill DATABASE [--force] [--cancel-after=MS]
             \\                 | analyze DATABASE AUDIO
+            \\                 | analyze-library DATABASE [--batch=N] [--cancel-after=MS]
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | artists DATABASE [OPTIONS]
@@ -218,6 +255,7 @@ pub fn main(init: std.process.Init) !void {
             \\play-tracks plays a comma-separated list of Track ids as a playback
             \\queue. Options:
             \\  --device=ID        output device (0 = server default)
+            \\  --replay-gain=off|track   loudness correction per entry (default track)
             \\  --start=N          queue position to begin at
             \\  --repeat=off|all|one
             \\  --shuffle
@@ -225,6 +263,14 @@ pub fn main(init: std.process.Init) !void {
             \\  --skip-after=MS    issue next MS after each entry becomes audible
             \\  --previous-after=MS  issue previous once, MS after playback starts
             \\  --limit=MS         stop after MS of wall clock
+            \\
+            \\analyze-library decodes every file the Library has not measured yet and
+            \\stores its loudness, peak, clipping, silence and fingerprint. That
+            \\measurement is what ReplayGain on playback reads; without it every track
+            \\plays at unity. It decodes whole files, so it is slow, and it is meant to
+            \\be stopped and restarted: --cancel-after=MS interrupts it inside a file,
+            \\the batch already measured is still committed, and the next run selects
+            \\only what is left.
             \\
             \\backfill re-reads the headers of files whose declared audio properties
             \\are missing and reprojects the Tracks derived from them, without walking
@@ -243,6 +289,7 @@ pub fn main(init: std.process.Init) !void {
 
 const PlayTracksOptions = struct {
     device: u64 = 0,
+    replay_gain: liborca.audio.processing.ReplayGainMode = .track,
     start: u32 = 0,
     repeat: liborca.core.runtime.RepeatMode = .off,
     shuffle: bool = false,
@@ -264,6 +311,13 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
         options.device = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--start")) {
         options.start = try std.fmt.parseInt(u32, value, 10);
+    } else if (std.mem.eql(u8, name, "--replay-gain")) {
+        options.replay_gain = if (std.mem.eql(u8, value, "off"))
+            .off
+        else if (std.mem.eql(u8, value, "track"))
+            .track
+        else
+            return error.UnknownReplayGainMode;
     } else if (std.mem.eql(u8, name, "--repeat")) {
         options.repeat = if (std.mem.eql(u8, value, "all"))
             .all
@@ -320,6 +374,7 @@ fn playTracks(
     try runtime.attachZone(zone, player);
     try runtime.zoneRequestOutput(zone, options.device);
 
+    try runtime.playerSetReplayGainMode(player, options.replay_gain);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
     try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
@@ -339,13 +394,19 @@ fn playTracks(
             last_cursor = snapshot.cursor;
             entry_elapsed_ms = 0;
             const now_playing = try runtime.playerNowPlaying(player);
+            // volume and gain differing is what a loudness correction looks
+            // like from outside: the render lane multiplies by `gain`, and
+            // `volume` is only what the user asked for.
             try stdout.print(
-                "now-playing at={d}ms position={d} decode_position={d} track={?d}\n",
+                "now-playing at={d}ms position={d} decode_position={d} track={?d} " ++
+                    "volume={d:.6} gain={d:.6}\n",
                 .{
                     elapsed_ms,
                     snapshot.cursor,
                     snapshot.decode_position,
                     if (now_playing) |ref| ref.track_id else null,
+                    try runtime.playerVolume(player),
+                    try runtime.playerEffectiveGain(player),
                 },
             );
             try stdout.flush();
@@ -614,6 +675,24 @@ fn awaitJob(
         sleepMilliseconds(20);
         elapsed_ms += 20;
     }
+}
+
+/// The same counters, named for what a library-wide analysis means by them.
+fn printAnalysisStats(
+    stdout: *std.Io.Writer,
+    stats: liborca.core.runtime.ScanStats,
+) !void {
+    try stdout.print(
+        "examined={d} measured={d} no_loudness={d} declined={d} corrupt={d} batches={d}\n",
+        .{
+            stats.files_seen,
+            stats.changed,
+            stats.unchanged,
+            stats.unsupported,
+            stats.errors,
+            stats.batches_committed,
+        },
+    );
 }
 
 /// The same counters, named for what a repair pass means by them.

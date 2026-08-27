@@ -8,8 +8,68 @@ const diagnostics = @import("diagnostics.zig");
 const encoding = @import("encoding.zig");
 const fingerprint = @import("fingerprint.zig");
 
-const diagnostics_cache_kind: u8 = 1;
-const fingerprint_cache_kind: u8 = 2;
+pub const diagnostics_cache_kind: u8 = 1;
+pub const fingerprint_cache_kind: u8 = 2;
+pub const diagnostics_algorithm_id = "orca.audio-diagnostics";
+pub const diagnostics_algorithm_version: u32 = 1;
+pub const fingerprint_algorithm_id = "orca.temporal-fingerprint";
+pub const fingerprint_algorithm_version: u32 = 1;
+
+/// The cache key one diagnostics measurement is stored under.
+///
+/// Public because three callers must agree on it exactly: this Service, the
+/// library-wide pass that decides which files still owe an analysis, and the
+/// playback path that looks a correction up. Two of them derive the key from
+/// the *stored* identity of a file rather than from an open one, so the shape
+/// has to exist independently of a `Service`.
+pub fn diagnosticsKey(
+    file_id: i64,
+    source_identity: quick_hash.Digest,
+    parameters: diagnostics.Parameters,
+) database.AnalysisCacheKey {
+    return .{
+        .file_id = file_id,
+        .kind = diagnostics_cache_kind,
+        .algorithm_id = diagnostics_algorithm_id,
+        .algorithm_version = diagnostics_algorithm_version,
+        .parameter_hash = encoding.parameterHash(parameters),
+        .source_identity = source_identity,
+    };
+}
+
+/// The diagnostics measurement, without a file or an identity: what a
+/// library-wide pass selects on and what a Player looks a correction up under.
+///
+/// Same source as `diagnosticsKey`, so "which files still owe a measurement",
+/// "what was written" and "what playback adopts" cannot drift apart.
+pub fn diagnosticsSelector(
+    parameters: diagnostics.Parameters,
+) database.repository.AnalysisSelector {
+    return .{
+        .kind = diagnostics_cache_kind,
+        .algorithm_id = diagnostics_algorithm_id,
+        .algorithm_version = diagnostics_algorithm_version,
+        .parameter_hash = encoding.parameterHash(parameters),
+    };
+}
+
+/// The fingerprint's key. Its parameter hash is zero because the fingerprint
+/// analyzer takes no parameters: giving it a hash of the *diagnostics*
+/// parameters would invalidate a fingerprint whenever an unrelated waveform
+/// resolution changed.
+pub fn fingerprintKey(
+    file_id: i64,
+    source_identity: quick_hash.Digest,
+) database.AnalysisCacheKey {
+    return .{
+        .file_id = file_id,
+        .kind = fingerprint_cache_kind,
+        .algorithm_id = fingerprint_algorithm_id,
+        .algorithm_version = fingerprint_algorithm_version,
+        .parameter_hash = @splat(0),
+        .source_identity = source_identity,
+    };
+}
 
 pub const Progress = struct {
     completed_frames: u64,
@@ -25,6 +85,11 @@ pub const Analysis = struct {
     diagnostics: diagnostics.Result,
     fingerprint: fingerprint.Result,
     cache_hit: bool,
+    /// The identity of the bytes this measurement describes, as the Service
+    /// observed them. A caller that stores the result itself keys on this
+    /// rather than on what a database row claims, so a measurement can never
+    /// be filed under an identity it was not taken from.
+    source_identity: quick_hash.Digest,
 
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
@@ -60,22 +125,8 @@ pub const Service = struct {
         defer local.close();
         const initial_identity = local.readable().identity();
         const source_identity = try quick_hash.fromSource(local.readable());
-        const diagnostics_key: database.AnalysisCacheKey = .{
-            .file_id = file_id orelse 0,
-            .kind = diagnostics_cache_kind,
-            .algorithm_id = "orca.audio-diagnostics",
-            .algorithm_version = 1,
-            .parameter_hash = encoding.parameterHash(parameters),
-            .source_identity = source_identity,
-        };
-        const fingerprint_key: database.AnalysisCacheKey = .{
-            .file_id = file_id orelse 0,
-            .kind = fingerprint_cache_kind,
-            .algorithm_id = "orca.temporal-fingerprint",
-            .algorithm_version = 1,
-            .parameter_hash = @splat(0),
-            .source_identity = source_identity,
-        };
+        const diagnostics_key = diagnosticsKey(file_id orelse 0, source_identity, parameters);
+        const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
         if (if (file_id == null) null else self.cache) |cache| {
             const cached_diagnostics = try self.loadDiagnostics(cache, diagnostics_key);
             const cached_fingerprint = try self.loadFingerprint(cache, fingerprint_key);
@@ -88,6 +139,7 @@ pub const Service = struct {
                     .diagnostics = cached_diagnostics.?,
                     .fingerprint = cached_fingerprint.?,
                     .cache_hit = true,
+                    .source_identity = source_identity,
                 };
             }
             if (cached_diagnostics) |result| result.deinit();
@@ -147,6 +199,7 @@ pub const Service = struct {
             .diagnostics = result,
             .fingerprint = fingerprint_result,
             .cache_hit = false,
+            .source_identity = source_identity,
         };
     }
 
