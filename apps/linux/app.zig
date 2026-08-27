@@ -147,22 +147,6 @@ pub const App = struct {
     /// Resolves a Track id to a title using rows already loaded, or null. The
     /// returned string is owned by the row and is valid only while that row
     /// remains in the model.
-    pub fn knownTitle(self: *App, track_id: i64) ?[:0]const u8 {
-        const store = self.tracks orelse return null;
-        const model = gtk.cast(gtk.ListModel, store);
-        const count = gtk.g_list_model_get_n_items(model);
-        var index: c_uint = 0;
-        while (index < count) : (index += 1) {
-            const item = gtk.g_list_model_get_item(model, index) orelse continue;
-            const row: *track_model.TrackObject = @ptrCast(@alignCast(item));
-            const found = row.id() == track_id;
-            const text = row.title();
-            gtk.g_object_unref(item);
-            if (found) return text;
-        }
-        return null;
-    }
-
     /// The one place the track listing is described to liborca.
     ///
     /// A full-text search and a relational filter are alternatives to the

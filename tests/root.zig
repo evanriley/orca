@@ -783,3 +783,74 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
     try std.testing.expect(unanalyzed_entry.peak > 0.45 and unanalyzed_entry.peak < 0.55);
     try std.testing.expect(unanalyzed_entry.peak > 2 * analyzed_entry.peak);
 }
+
+test "the queue reports the rows a host displays, in the order it will play them" {
+    // The queue used to hand back Track ids and nothing readable, so the GTK
+    // pane searched whatever library rows it happened to have loaded and
+    // printed "Track 14732" for the rest. That is metadata resolution in a
+    // frontend, which this architecture forbids, and it was a linear scan of
+    // every loaded row per queue entry besides.
+    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    // Real bytes, because enqueueing into an idle Player loads the first
+    // entry and a row pointing at nothing cannot be opened.
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var fixture = try liborca.storage.LocalFileSource.open(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.flac",
+    );
+    const readable = fixture.readable();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(readable.size()));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(bytes.len, try readable.readAt(0, bytes));
+    fixture.close();
+    for ([_][]const u8{ "queue-a.flac", "queue-b.flac" }) |name|
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    var first_path: [128]u8 = undefined;
+    var second_path: [128]u8 = undefined;
+
+    var ids: [2]i64 = @splat(0);
+    const library = try openQueueLibrary(
+        &runtime,
+        "file:orca-queue-rows?mode=memory&cache=shared",
+        &.{
+            try std.fmt.bufPrint(&first_path, ".zig-cache/tmp/{s}/queue-a.flac", .{temporary.sub_path}),
+            try std.fmt.bufPrint(&second_path, ".zig-cache/tmp/{s}/queue-b.flac", .{temporary.sub_path}),
+        },
+        &ids,
+    );
+    const player = try runtime.createPlayer();
+    try runtime.playerBindLibrary(player, library, std.testing.io);
+
+    // Enqueued second-then-first, so a result in id order would pass by
+    // accident and a result in queue order is the only way through.
+    try runtime.playerEnqueueTracks(
+        player,
+        library,
+        std.testing.io,
+        &.{ ids[1], ids[0] },
+    );
+
+    var page = try runtime.playerQueueTracks(player, std.testing.allocator, 0, 16);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqualStrings("Entry 1", page.items[0].title);
+    try std.testing.expectEqualStrings("Entry 0", page.items[1].title);
+
+    // Bounded like every other page in this codebase.
+    try std.testing.expectError(
+        error.PageOutOfRange,
+        runtime.playerQueueTracks(player, std.testing.allocator, 0, 0),
+    );
+
+    // An offset walks the queue rather than restarting it.
+    var tail = try runtime.playerQueueTracks(player, std.testing.allocator, 1, 16);
+    defer tail.deinit();
+    try std.testing.expectEqual(@as(usize, 1), tail.items.len);
+    try std.testing.expectEqualStrings("Entry 0", tail.items[0].title);
+}

@@ -1792,6 +1792,48 @@ pub const OrcaRuntime = struct {
         return count;
     }
 
+    /// One bounded page of the queue, as the rows a host displays.
+    ///
+    /// `playerQueuePage` hands back `TrackRef`s, which carry an id and nothing
+    /// a person can read. The GTK queue pane consequently resolved titles from
+    /// whichever library rows it happened to have loaded and printed
+    /// "Track 14732" for the rest -- a frontend growing its own metadata
+    /// resolution, which is the one thing frontends here must never do.
+    ///
+    /// Returned in queue order, so entry `n` of the result is queue position
+    /// `offset + n`, and a shuffled queue reads as the order it will play.
+    pub fn playerQueueTracks(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        allocator: std.mem.Allocator,
+        offset: u32,
+        limit: u32,
+    ) !database.TrackPage {
+        try self.requireRunning();
+        if (limit == 0 or limit > database.repository.max_page)
+            return error.PageOutOfRange;
+        const object_value = try self.players.get(player);
+        const opener = object_value.opener orelse return error.PlayerHasNoLibrary;
+        const library = opener.library;
+        const library_database = try self.libraryDatabase(library);
+
+        var rows: std.ArrayList(database.TrackSummary) = .empty;
+        errdefer {
+            for (rows.items) |item| item.deinit(allocator);
+            rows.deinit(allocator);
+        }
+        var index: u32 = 0;
+        while (index < limit) : (index += 1) {
+            const ref = object_value.queue.refAt(offset + index) orelse break;
+            // A queue entry whose Track has since been removed keeps its place
+            // rather than silently shortening the queue the host is showing.
+            const summary = try library_database.tracks.byId(allocator, ref.track_id) orelse
+                continue;
+            try rows.append(allocator, summary);
+        }
+        return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
+    }
+
     /// The Library this Player resolves its queue through, if it is bound.
     pub fn playerLibrary(self: *OrcaRuntime, player: PlayerHandle) !?LibraryHandle {
         try self.requireRunning();

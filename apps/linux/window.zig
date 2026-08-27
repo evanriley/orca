@@ -379,30 +379,41 @@ fn queueShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         gtk.gtk_string_list_append(rows, "The queue is empty");
         return;
     };
-    var entries: [app.page_size]liborca.core.runtime.TrackRef = undefined;
-    const count = self.runtime.playerQueuePage(self.player, 0, &entries) catch 0;
-    if (count == 0) {
+    // The engine resolves the queue's rows. This used to search the loaded
+    // track model for each entry and print "Track 14732" when it missed --
+    // metadata resolution in the frontend, and a linear scan of every loaded
+    // row per queue entry, which on a fully scrolled library was over a
+    // million iterations with a ref/unref each.
+    var page = self.runtime.playerQueueTracks(
+        self.player,
+        self.allocator,
+        0,
+        app.page_size,
+    ) catch {
+        gtk.gtk_string_list_append(rows, "The queue is empty");
+        return;
+    };
+    defer page.deinit();
+    if (page.items.len == 0) {
         gtk.gtk_string_list_append(rows, "The queue is empty");
         return;
     }
     var buffer: [640]u8 = undefined;
-    for (entries[0..count], 0..) |entry, index| {
+    for (page.items, 0..) |entry, index| {
         const position: u32 = @intCast(index);
         const marker: []const u8 = if (position == status.queue_index) "▶ " else "";
-        // The queue carries a Track id and nothing else, so the title is
-        // resolved from rows already loaded. Ids outside the loaded page render
-        // as the id.
-        const line = if (self.knownTitle(entry.track_id)) |title|
+        const line = if (entry.artist.len == 0)
             strings.printZ(&buffer, "{s}{d}. {s}", .{
                 marker,
                 position + 1,
-                title,
+                entry.title,
             }) catch continue
         else
-            strings.printZ(&buffer, "{s}{d}. Track {d}", .{
+            strings.printZ(&buffer, "{s}{d}. {s} — {s}", .{
                 marker,
                 position + 1,
-                entry.track_id,
+                entry.title,
+                entry.artist,
             }) catch continue;
         gtk.gtk_string_list_append(rows, line.ptr);
     }
