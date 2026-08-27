@@ -107,8 +107,26 @@ pub fn Chain(comptime capacity: usize) type {
     };
 }
 
+/// The render lane's single multiplier, and the two independent things that
+/// decide it.
+///
+/// User volume and replay gain are separate inputs deliberately. They were one
+/// value, `linear`, which meant whichever was written last silently discarded
+/// the other: applying replay gain would have moved the host's volume slider,
+/// and the next volume change would have thrown the loudness correction away.
+/// The render lane still reads exactly one number, `linear`, which is their
+/// product, so nothing in the real-time path pays for the distinction.
 pub const Gain = struct {
+    /// The effective multiplier: `volume * replay_gain`. Read by the render
+    /// lane; written only by `republish`.
     linear: std.atomic.Value(f32) = .init(1),
+    /// What a host's volume control means. This is what `playerVolume`
+    /// reports, so replay gain never moves a slider the user set.
+    volume: std.atomic.Value(f32) = .init(1),
+    /// Loudness correction for the entry being played, already converted from
+    /// decibels and clamped against its peak. 1 when unknown, which is the
+    /// honest answer for a library that has not been analyzed.
+    replay_gain: std.atomic.Value(f32) = .init(1),
     ramp_frames: std.atomic.Value(u32) = .init(0),
     command_generation: std.atomic.Value(u64) = .init(0),
     current: f32 = 1,
@@ -117,18 +135,40 @@ pub const Gain = struct {
     step: f32 = 0,
     seen_generation: u64 = 0,
 
-    pub fn setLinear(self: *Gain, linear: f32, ramp_frames: u32) void {
-        self.linear.store(linear, .release);
+    fn republish(self: *Gain, ramp_frames: u32) void {
+        const effective = self.volume.load(.acquire) * self.replay_gain.load(.acquire);
+        self.linear.store(effective, .release);
         self.ramp_frames.store(ramp_frames, .release);
         _ = self.command_generation.fetchAdd(1, .release);
     }
 
+    pub fn setLinear(self: *Gain, linear: f32, ramp_frames: u32) void {
+        self.volume.store(linear, .release);
+        self.republish(ramp_frames);
+    }
+
+    /// Apply the loudness correction for one entry.
+    ///
+    /// `peak` is the entry's measured sample peak. Boosting a track whose peak
+    /// is already near full scale would clip it, so the gain is capped at
+    /// `1 / peak`: quiet tracks come up only as far as their headroom allows.
+    /// That is a deliberate quietening of the correction rather than a
+    /// limiter, because a limiter in the render lane would change the audio.
     pub fn setReplayGain(self: *Gain, decibels: f32, peak: ?f32, ramp_frames: u32) void {
         var linear = std.math.pow(f32, 10, decibels / 20);
         if (peak) |value| {
             if (value > 0) linear = @min(linear, 1 / value);
         }
-        self.setLinear(linear, ramp_frames);
+        self.replay_gain.store(linear, .release);
+        self.republish(ramp_frames);
+    }
+
+    /// Return to no loudness correction, for an entry that has never been
+    /// analyzed. Leaving the previous entry's correction in place would apply
+    /// one track's loudness to another.
+    pub fn clearReplayGain(self: *Gain, ramp_frames: u32) void {
+        self.replay_gain.store(1, .release);
+        self.republish(ramp_frames);
     }
 
     pub fn processor(self: *Gain) Processor {
@@ -248,4 +288,52 @@ test "gain ramps without discontinuity and meter does not change samples" {
     var interrupted = [_]f32{1};
     chain.processor().process(&interrupted, 1, 1);
     try std.testing.expectEqual(@as(f32, 1), interrupted[0]);
+}
+
+test "volume and replay gain survive each other" {
+    // They were one stored value, so whichever was written last discarded the
+    // other: applying a track's loudness correction would have moved the host's
+    // volume slider, and the next volume change would have thrown the
+    // correction away.
+    var gain: Gain = .{};
+
+    gain.setLinear(0.5, 0);
+    try std.testing.expectEqual(@as(f32, 0.5), gain.volume.load(.acquire));
+    try std.testing.expectEqual(@as(f32, 0.5), gain.linear.load(.acquire));
+
+    // -6 dB is a factor of about 0.501.
+    gain.setReplayGain(-6, null, 0);
+    try std.testing.expectEqual(@as(f32, 0.5), gain.volume.load(.acquire));
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 0.2509),
+        gain.linear.load(.acquire),
+        0.001,
+    );
+
+    // Changing the volume keeps the correction.
+    gain.setLinear(1, 0);
+    try std.testing.expectEqual(@as(f32, 1), gain.volume.load(.acquire));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5012), gain.linear.load(.acquire), 0.001);
+
+    // An entry with no analysis must not inherit the previous entry's gain.
+    gain.clearReplayGain(0);
+    try std.testing.expectEqual(@as(f32, 1), gain.linear.load(.acquire));
+    try std.testing.expectEqual(@as(f32, 1), gain.volume.load(.acquire));
+}
+
+test "a boost is capped by the peak it would clip" {
+    // +6 dB on a track already peaking at 0.9 would drive it to 1.8. The gain
+    // is capped at 1/peak instead, so the correction is quietened rather than
+    // the audio being clipped or limited in the render lane.
+    var gain: Gain = .{};
+    gain.setReplayGain(6, 0.9, 0);
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 1.0 / 0.9),
+        gain.linear.load(.acquire),
+        0.0001,
+    );
+
+    // With headroom to spare the full correction applies.
+    gain.setReplayGain(6, 0.2, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.9953), gain.linear.load(.acquire), 0.001);
 }

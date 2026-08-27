@@ -1679,7 +1679,7 @@ pub const OrcaRuntime = struct {
             .track_id = if (current) |ref| ref.track_id else null,
             .queue_length = queue_snapshot.entries,
             .queue_index = queue_snapshot.cursor,
-            .volume = object_value.gain.linear.load(.acquire),
+            .volume = object_value.gain.volume.load(.acquire),
         };
     }
 
@@ -1723,7 +1723,7 @@ pub const OrcaRuntime = struct {
 
     pub fn playerVolume(self: *OrcaRuntime, player: PlayerHandle) !f32 {
         try self.requireRunning();
-        return (try self.players.get(player)).gain.linear.load(.acquire);
+        return (try self.players.get(player)).gain.volume.load(.acquire);
     }
 
     /// Seek in wall-clock milliseconds. The frame conversion needs the loaded
