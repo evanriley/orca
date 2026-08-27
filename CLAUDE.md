@@ -52,6 +52,12 @@ status of `tail`, not of the compiler, so a failed build reports success and the
 "verification" that follows runs a stale binary. This masked a real compile
 failure for two rounds. Check `${PIPESTATUS[0]}`, or run `zig build` unpiped.
 
+`zig build` also **reinstalls the Debug binary over `zig-out/bin/`**. A
+ReleaseFast timing taken after any plain `zig build` is therefore silently
+measuring Debug — it reported 8.7× slow once and looked plausible. Re-run
+`zig build -Doptimize=ReleaseFast` immediately before timing anything, and
+treat a suspiciously slow number as a stale binary before believing it.
+
 ## Commands
 
 ```sh
@@ -74,6 +80,7 @@ zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]
 zig build run -- analyze DATABASE AUDIO
+zig build run -- analyze-library DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
 zig build run -- artists DATABASE [--limit N] [--offset N]
@@ -82,7 +89,7 @@ zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--de
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
-zig build run -- play-tracks DATABASE IDS --device=ID [--start N] [--repeat MODE] [--shuffle]
+zig build run -- play-tracks DATABASE IDS --device=ID [--start N] [--repeat MODE] [--shuffle] [--replay-gain=off|track]
 ```
 
 Frontends:
