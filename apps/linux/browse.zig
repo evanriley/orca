@@ -67,6 +67,36 @@ fn append(store: *gtk.ListStore, id: ?i64, name: []const u8, detail: []const u8)
     gtk.g_object_unref(row);
 }
 
+// ----------------------------------------------------------------- headers
+
+/// Each pane's header names the listing and says how big it is.
+///
+/// The number is the engine's count of exactly what the pane is listing, taken
+/// from the counting entry point that shares its predicate with the paging one.
+/// Counting the rows loaded so far would report the page size, and paging to
+/// exhaustion to get a total is the thing a bounded page exists to avoid.
+fn updateArtistHeader(self: *App, total: u64) void {
+    const header = self.artist_header orelse return;
+    var buffer: [64]u8 = undefined;
+    const text = strings.printZ(&buffer, "Artists — {d}", .{total}) catch "Artists";
+    gtk.gtk_label_set_text(header, text.ptr);
+}
+
+/// The count comes second to the pane's name and before the scoping Artist, so
+/// a long Artist name is what the ellipsis eats rather than the total.
+fn updateReleaseHeader(self: *App, total: u64) void {
+    const header = self.release_header orelse return;
+    var buffer: [192]u8 = undefined;
+    const text = if (self.browse.artist_id == null)
+        strings.printZ(&buffer, "Releases — {d}", .{total}) catch "Releases"
+    else
+        strings.printZ(&buffer, "Releases — {d} · {s}", .{
+            total,
+            self.artist_scope_name.value,
+        }) catch "Releases";
+    gtk.gtk_label_set_text(header, text.ptr);
+}
+
 // ---------------------------------------------------------------- artists
 
 pub fn reloadArtists(self: *App) void {
@@ -81,14 +111,13 @@ pub fn reloadArtists(self: *App) void {
     append(store, null, "All Artists", "");
     const library = self.library orelse {
         self.artists_exhausted = true;
+        updateArtistHeader(self, 0);
         return;
     };
-    const total = self.runtime.libraryArtistCount(library) catch 0;
-    if (self.artist_header) |header| {
-        var buffer: [64]u8 = undefined;
-        const text = strings.printZ(&buffer, "Artists — {d}", .{total}) catch "Artists";
-        gtk.gtk_label_set_text(header, text.ptr);
-    }
+    updateArtistHeader(self, self.runtime.libraryArtistCountMatching(
+        library,
+        self.artistRequest(0),
+    ) catch 0);
     loadNextArtistPage(self);
     if (self.artist_selection) |selection| gtk.gtk_single_selection_set_selected(selection, 0);
 }
@@ -97,10 +126,10 @@ pub fn loadNextArtistPage(self: *App) void {
     const store = self.artists orelse return;
     if (self.artists_exhausted) return;
     const library = self.library orelse return;
-    var page = self.runtime.libraryArtistPage(library, .{
-        .limit = app.page_size,
-        .offset = self.artists_loaded,
-    }) catch {
+    var page = self.runtime.libraryArtistPage(
+        library,
+        self.artistRequest(self.artists_loaded),
+    ) catch {
         self.artists_exhausted = true;
         return;
     };
@@ -129,7 +158,15 @@ pub fn reloadReleases(self: *App) void {
     self.releases_loaded = 0;
     self.releases_exhausted = false;
     append(store, null, "All Releases", "");
-    if (self.library == null) self.releases_exhausted = true;
+    const library = self.library orelse {
+        self.releases_exhausted = true;
+        updateReleaseHeader(self, 0);
+        return;
+    };
+    updateReleaseHeader(self, self.runtime.libraryReleaseCountMatching(
+        library,
+        self.releaseRequest(0),
+    ) catch 0);
     loadNextReleasePage(self);
     if (self.release_selection) |selection| gtk.gtk_single_selection_set_selected(selection, 0);
 }
@@ -138,11 +175,10 @@ pub fn loadNextReleasePage(self: *App) void {
     const store = self.releases orelse return;
     if (self.releases_exhausted) return;
     const library = self.library orelse return;
-    var page = self.runtime.libraryReleasePage(library, .{
-        .album_artist_id = self.browse.artist_id,
-        .limit = app.page_size,
-        .offset = self.releases_loaded,
-    }) catch {
+    var page = self.runtime.libraryReleasePage(
+        library,
+        self.releaseRequest(self.releases_loaded),
+    ) catch {
         self.releases_exhausted = true;
         return;
     };
@@ -182,8 +218,8 @@ fn selectedRow(selection: ?*gtk.SingleSelection) ?*BrowseObject {
 /// A search and a browse scope are alternatives — liborca refuses to combine a
 /// full-text match with a relational filter — so entering one leaves the other.
 fn clearSearch(self: *App) void {
-    if (self.query.len == 0) return;
-    self.setQuery("");
+    if (self.query.value.len == 0) return;
+    self.query.clear(self.allocator);
     const entry = self.search_entry orelse return;
     const previous = self.suppress_browse_signals;
     self.suppress_browse_signals = true;
@@ -199,9 +235,9 @@ pub fn clearScope(self: *App) void {
     defer self.suppress_browse_signals = previous;
     self.browse.artist_id = null;
     self.browse.release_id = null;
+    self.artist_scope_name.clear(self.allocator);
     if (self.artist_selection) |selection| gtk.gtk_single_selection_set_selected(selection, 0);
     reloadReleases(self);
-    if (self.release_header) |header| gtk.gtk_label_set_text(header, "Releases");
 }
 
 /// Repopulates both panes and returns the listing to the whole library, for
@@ -210,7 +246,7 @@ pub fn clearScope(self: *App) void {
 pub fn reload(self: *App) void {
     self.browse.artist_id = null;
     self.browse.release_id = null;
-    if (self.release_header) |header| gtk.gtk_label_set_text(header, "Releases");
+    self.artist_scope_name.clear(self.allocator);
     reloadArtists(self);
     reloadReleases(self);
     self.applyScopeDefaultSort();
@@ -222,16 +258,40 @@ fn artistSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
     const row = selectedRow(self.artist_selection) orelse return;
     self.browse.artist_id = row.id();
     self.browse.release_id = null;
-    if (self.release_header) |header| {
-        var buffer: [160]u8 = undefined;
-        const text = if (row.id() == null)
-            "Releases"
-        else
-            strings.printZ(&buffer, "Releases — {s}", .{row.name()}) catch "Releases";
-        gtk.gtk_label_set_text(header, text.ptr);
-    }
+    if (row.id() == null)
+        self.artist_scope_name.clear(self.allocator)
+    else
+        self.artist_scope_name.set(self.allocator, row.name());
     clearSearch(self);
     reloadReleases(self);
+    self.applyScopeDefaultSort();
+    self.reload();
+}
+
+/// The Artist pane's search box, on every change.
+///
+/// Filtering the shelf is not the same as choosing from it, so the pane returns
+/// to "All Artists" whenever the filter changes: in this browser the selection
+/// *is* the scope, and a scope whose row the filter has just hidden is one the
+/// user can neither see nor leave.
+///
+/// The track search box is left alone, and leaves this alone in return. They
+/// are different questions — this narrows which Artists are *listed*, that one
+/// replaces what the track list *is* — so unlike a browse scope they compose,
+/// and neither has to be half-applied for the other to work. The track list is
+/// only reloaded when this actually dropped a scope it was showing; with no
+/// scope in force — nothing selected, or a track search already in charge —
+/// there is nothing for it to drop, and re-querying on every keystroke would be
+/// work with no visible effect.
+fn artistFilterChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.suppress_browse_signals) return;
+    const text = gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry));
+    self.artist_filter.set(self.allocator, std.mem.span(text));
+    const had_scope = self.browse.artist_id != null or self.browse.release_id != null;
+    reloadArtists(self);
+    if (!had_scope) return;
+    clearScope(self);
     self.applyScopeDefaultSort();
     self.reload();
 }
@@ -273,13 +333,18 @@ const Pane = struct {
     store: *gtk.ListStore,
     selection: *gtk.SingleSelection,
     header: *gtk.Label,
+    search: ?*gtk.Editable = null,
 };
 
+/// `on_search` is optional because only the Artist pane has a search box: the
+/// Release pane is already scoped by the Artist above it, and liborca has no
+/// text filter for Releases to drive one with.
 fn buildPane(
     self: *App,
     title: [*:0]const u8,
     on_selection: gtk.GCallback,
     on_scroll: gtk.GCallback,
+    on_search: ?gtk.GCallback,
 ) Pane {
     const store = gtk.g_list_store_new(browse_model.getType()).?;
     const selection = gtk.gtk_single_selection_new(
@@ -312,12 +377,24 @@ fn buildPane(
 
     const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), header);
+    var search: ?*gtk.Editable = null;
+    if (on_search) |handler| {
+        const entry = gtk.gtk_search_entry_new();
+        gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), title);
+        gtk.gtk_widget_set_margin_start(entry, 6);
+        gtk.gtk_widget_set_margin_end(entry, 6);
+        gtk.gtk_widget_set_margin_bottom(entry, 4);
+        _ = gtk.signalConnect(entry, "search-changed", handler, self);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, box), entry);
+        search = gtk.cast(gtk.Editable, entry);
+    }
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), scroller);
     return .{
         .widget = box,
         .store = store,
         .selection = selection,
         .header = gtk.cast(gtk.Label, header),
+        .search = search,
     };
 }
 
@@ -328,16 +405,19 @@ pub fn build(self: *App) *gtk.Widget {
         "Artists",
         gtk.callback(artistSelected),
         gtk.callback(artistsScrolled),
+        gtk.callback(artistFilterChanged),
     );
     self.artists = artists.store;
     self.artist_selection = artists.selection;
     self.artist_header = artists.header;
+    self.artist_search_entry = artists.search;
 
     const releases = buildPane(
         self,
         "Releases",
         gtk.callback(releaseSelected),
         gtk.callback(releasesScrolled),
+        null,
     );
     self.releases = releases.store;
     self.release_selection = releases.selection;

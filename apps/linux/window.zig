@@ -170,10 +170,12 @@ fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
     const text = gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry));
-    self.setQuery(std.mem.span(text));
+    self.query.set(self.allocator, std.mem.span(text));
     // A text match and a browse scope are alternatives to liborca, so a search
     // takes the listing over rather than narrowing what a pane already chose.
-    if (self.query.len != 0) browse.clearScope(self);
+    // The Artist pane's filter is untouched: it says which Artists are listed,
+    // not which tracks, so it survives a search that clears the selection.
+    if (self.query.value.len != 0) browse.clearScope(self);
     self.reload();
 }
 

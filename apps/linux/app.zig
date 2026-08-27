@@ -42,6 +42,28 @@ pub const Browse = struct {
     }
 };
 
+/// A NUL-terminated string the frontend owns: a widget writes it and an engine
+/// query reads it. Empty means absent and allocates nothing, so the "no filter"
+/// case costs no allocation on any of the keystrokes that pass through it.
+pub const OwnedText = struct {
+    value: [:0]u8 = &empty_text,
+
+    /// Silently keeps the previous value if the copy cannot be allocated: a
+    /// search box is not a place to fail, and the listing simply does not
+    /// narrow.
+    pub fn set(self: *OwnedText, allocator: std.mem.Allocator, text: []const u8) void {
+        if (text.len == 0) return self.clear(allocator);
+        const replacement = allocator.dupeSentinel(u8, text, 0) catch return;
+        self.clear(allocator);
+        self.value = replacement;
+    }
+
+    pub fn clear(self: *OwnedText, allocator: std.mem.Allocator) void {
+        if (self.value.len != 0) allocator.free(self.value);
+        self.value = &empty_text;
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -69,7 +91,7 @@ pub const App = struct {
     selection: ?*gtk.SelectionModel = null,
     column_view: ?*gtk.ColumnView = null,
     scroller: ?*gtk.Widget = null,
-    query: [:0]u8 = &empty_query,
+    query: OwnedText = .{},
     loaded_rows: u32 = 0,
     page_exhausted: bool = false,
     track_total: u64 = 0,
@@ -90,6 +112,15 @@ pub const App = struct {
     search_entry: ?*gtk.Editable = null,
     artist_header: ?*gtk.Label = null,
     release_header: ?*gtk.Label = null,
+    /// What the Artist pane's search box says. Passed to liborca unfolded — the
+    /// engine folds it exactly as it folded `artists.key`, and a frontend that
+    /// folded it here would be keeping a second copy of that definition.
+    artist_filter: OwnedText = .{},
+    artist_search_entry: ?*gtk.Editable = null,
+    /// The name of the Artist the Releases pane is scoped to, for its header.
+    /// Kept rather than re-queried because the header is rewritten on every
+    /// release page load and the name cannot have changed between them.
+    artist_scope_name: OwnedText = .{},
     /// Set while a widget is being brought back in line with state that has
     /// already changed. Its "changed" signal still fires, and without this it
     /// would re-enter as though the user had done it.
@@ -154,13 +185,43 @@ pub const App = struct {
     /// half-honoured. Searching therefore leaves the scope out: the panes are
     /// reset to "All" when a search starts, and this keeps that true even if a
     /// caller forgets.
+    ///
+    /// The Artist pane's filter is *not* part of this. It narrows which Artists
+    /// are listed and never reaches a `TrackQuery`, so it and a track search are
+    /// free to hold text at the same time without either one being half applied.
     pub fn trackRequest(self: *App, offset: u32) liborca.database.TrackQuery {
-        const searching = self.query.len != 0;
+        const searching = self.query.value.len != 0;
         return .{
             .artist_id = if (searching) null else self.browse.artist_id,
             .release_id = if (searching) null else self.browse.release_id,
             .sort = self.browse.sort,
             .direction = self.browse.direction,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// The one place the Artist pane is described to liborca.
+    ///
+    /// The filter text is handed over exactly as typed. Folding it is the
+    /// engine's definition of artist identity — the same fold that produced
+    /// `artists.key` — and doing it here would be a second copy of that
+    /// definition, free to drift from the one the rows were keyed by.
+    pub fn artistRequest(self: *App, offset: u32) liborca.database.repository.ArtistQuery {
+        return .{
+            .filter = self.artist_filter.value,
+            .limit = page_size,
+            .offset = offset,
+        };
+    }
+
+    /// The one place the Release pane is described to liborca. The Artist
+    /// filter above narrows which Artists are *listed*; this one is the Artist
+    /// the user picked, which is a different question and the only one a
+    /// Release listing can be scoped by.
+    pub fn releaseRequest(self: *App, offset: u32) liborca.database.ReleaseQuery {
+        return .{
+            .album_artist_id = self.browse.artist_id,
             .limit = page_size,
             .offset = offset,
         };
@@ -191,7 +252,7 @@ pub const App = struct {
             return;
         }
         var buffer: [96]u8 = undefined;
-        const text = if (self.query.len != 0)
+        const text = if (self.query.value.len != 0)
             strings.printZ(&buffer, "{d} matching", .{self.loaded_rows}) catch "…"
         else
             strings.printZ(&buffer, "{d} of {d} tracks", .{
@@ -209,7 +270,7 @@ pub const App = struct {
         const store = self.tracks orelse return;
         var page = self.runtime.libraryTrackQuery(
             library,
-            self.query,
+            self.query.value,
             self.trackRequest(self.loaded_rows),
         ) catch {
             self.page_exhausted = true;
@@ -261,7 +322,7 @@ pub const App = struct {
         };
         // A full-text match has no cheap total — FTS5 ranks rather than counts —
         // so a search reports what it has loaded and nothing it has not.
-        self.track_total = if (self.query.len != 0)
+        self.track_total = if (self.query.value.len != 0)
             0
         else
             self.runtime.libraryTrackMatchCount(library, self.trackRequest(0)) catch 0;
@@ -274,7 +335,7 @@ pub const App = struct {
         self.loadNextPage();
         if (self.loaded_rows != 0) {
             self.setStatus("Ready");
-        } else if (self.query.len != 0) {
+        } else if (self.query.value.len != 0) {
             self.setStatus("No tracks match that search");
         } else if (self.browse.artist_id != null or self.browse.release_id != null) {
             self.setStatus("Nothing on this shelf has a track");
@@ -283,26 +344,13 @@ pub const App = struct {
         }
     }
 
-    pub fn setQuery(self: *App, text: []const u8) void {
-        if (text.len == 0) {
-            self.freeQuery();
-            return;
-        }
-        const replacement = self.allocator.dupeSentinel(u8, text, 0) catch return;
-        self.freeQuery();
-        self.query = replacement;
-    }
-
-    fn freeQuery(self: *App) void {
-        if (self.query.len != 0) self.allocator.free(self.query);
-        self.query = &empty_query;
-    }
-
     pub fn deinit(self: *App) void {
-        self.freeQuery();
+        self.query.clear(self.allocator);
+        self.artist_filter.clear(self.allocator);
+        self.artist_scope_name.clear(self.allocator);
         self.device_ids.deinit(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };
 
-var empty_query: [0:0]u8 = .{};
+var empty_text: [0:0]u8 = .{};

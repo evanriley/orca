@@ -423,6 +423,10 @@ pub extern fn gtk_scale_button_set_value(button: *ScaleButton, value: f64) void;
 pub extern fn gtk_scale_button_get_value(button: *ScaleButton) f64;
 
 pub extern fn gtk_search_entry_new() *Widget;
+pub extern fn gtk_search_entry_set_placeholder_text(
+    entry: *SearchEntry,
+    text: ?[*:0]const u8,
+) void;
 pub extern fn gtk_editable_get_text(editable: *Editable) [*:0]const u8;
 pub extern fn gtk_editable_set_text(editable: *Editable, text: [*:0]const u8) void;
 
