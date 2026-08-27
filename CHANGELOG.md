@@ -2,6 +2,33 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### FLAC decoding moved to libFLAC, because the pure-Zig package was not lossless
+
+- **The pinned `audiophile/flac` dependency is gone.** It reconstructed
+  mid-side stereo without restoring the low bit the encoder discards, so
+  roughly half of all decoded samples came back one LSB low on the majority of
+  real FLAC files. Exhaustively over 208,208 (left, right) pairs its formula is
+  wrong for 50.0% of them; on ten 20-second excerpts of real music it differed
+  from reference PCM on 10.2%–48.2% of samples. Inaudible at −96 dBFS, and
+  fatal to `files.audio_hash`, to fingerprints, and to the one promise the
+  format makes. The package ships no licence, so a corrected vendored copy was
+  not an option.
+- **`codec/flac_shim.c` contains libFLAC** on the same terms as `mp3_shim.c`
+  and `pipewire_shim.c`. It is driven from `ReadableSource` through
+  `FLAC__stream_decoder_init_stream`, so no path string or file handle is
+  needed and no `FLAC__` type is visible above the shim. The same ten excerpts
+  now decode bit-exactly — 0 differing samples, `max |delta| = 0` — and two
+  encodings of one PCM stream at compression levels 0 and 12 decode
+  identically to each other and to the WAV. Decoding is 2.7× faster: 15.7M
+  frames in 0.148 s against 0.403 s, ReleaseFast.
+- **`fixtures/audio/midside-reference.flac` is a regression fixture whose every
+  sample has an odd `side`,** so a decoder that skips the low-bit restoration
+  is wrong on 100% of them rather than 50%.
+- **Stored analysis is invalidated.** `diagnostics_algorithm_version` and
+  `fingerprint_algorithm_version` are both 2, so an existing library
+  re-measures rather than trusting figures taken through the old decoder. Run
+  `orca-cli analyze-library DATABASE`, then `orca-cli duplicates DATABASE`.
+
 ### Duplicate detection became reachable, indexed and bounded
 
 - **`orca-cli duplicates` reports the audio a Library holds twice.** A runtime

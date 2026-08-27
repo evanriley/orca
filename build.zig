@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const flac_dependency = b.dependency("flac", .{ .target = target, .optimize = optimize });
     const qoa_dependency = b.dependency("qoa", .{ .target = target, .optimize = optimize });
 
     const sqlite_translate = b.addTranslateC(.{
@@ -20,7 +19,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite_module },
-            .{ .name = "flac", .module = flac_dependency.module("flac") },
             .{ .name = "qoa", .module = qoa_dependency.module("qoa") },
         },
     });
@@ -31,6 +29,14 @@ pub fn build(b: *std.Build) void {
         .file = b.path("liborca/codec/mp3_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
+    // libFLAC behind a narrow shim. The reference implementation is used
+    // because FLAC's only promise is bit-exactness, and the pure-Zig package
+    // this replaced did not keep it -- see `docs/codecs.md`.
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/flac_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .yes });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),
