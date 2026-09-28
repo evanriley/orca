@@ -22,8 +22,8 @@ pub const Tags = struct {
 /// decode but not yet tag still scan; they simply observe no tags.
 pub fn supports(audio_format: storage.AudioFormat) bool {
     return switch (audio_format) {
-        .flac, .mp3, .mp4, .opus, .vorbis => true,
-        .wav, .aiff, .wavpack, .qoa => false,
+        .flac, .mp3, .aac, .mp4, .opus, .vorbis, .wav, .aiff => true,
+        .wavpack, .qoa => false,
     };
 }
 
@@ -59,8 +59,9 @@ fn readValues(
 ) !?metadata.ObservedTags {
     return switch (audio_format) {
         .flac => metadata.vorbis_comment.read(allocator, readable),
-        .mp3 => try readMpegTags(allocator, readable),
+        .mp3, .aac => try readMpegTags(allocator, readable),
         .mp4 => metadata.mp4_tags.read(allocator, readable),
+        .wav, .aiff => metadata.riff_tags.read(allocator, readable),
         .opus, .vorbis => metadata.ogg_comment.read(allocator, readable),
         else => null,
     };
@@ -191,6 +192,6 @@ test "untagged and unsupported files observe no tags rather than failing" {
     );
     defer wav.close();
     try std.testing.expect(try read(std.testing.allocator, .wav, wav.readable()) == null);
-    try std.testing.expect(!supports(.wav));
+    try std.testing.expect(!supports(.qoa));
     try std.testing.expect(supports(.flac) and supports(.mp3));
 }

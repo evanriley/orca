@@ -1,0 +1,248 @@
+//! AIFF and AIFC: Apple's uncompressed PCM containers.
+//!
+//! Big-endian `FORM` chunks; `COMM` states the layout and carries the sample
+//! rate as an 80-bit extended float, and `SSND` holds the samples. AIFC adds a
+//! compression type, of which only the uncompressed ones are PCM worth
+//! reading: `NONE` and `twos` (big-endian), `sowt` (little-endian, what macOS
+//! writes) and `fl32`/`fl64` (big-endian float).
+
+const std = @import("std");
+const audio_pcm = @import("../audio/pcm.zig");
+const decoder_api = @import("decoder.zig");
+const storage = @import("../storage/root.zig");
+
+const Encoding = enum { big_integer, little_integer, big_float };
+
+const Layout = struct {
+    format: audio_pcm.Format,
+    encoding: Encoding,
+    data_offset: u64,
+    frames: u64,
+};
+
+const Context = struct {
+    allocator: std.mem.Allocator,
+    source: storage.ReadableSource,
+    layout: Layout,
+    scratch: []u8,
+    position: u64 = 0,
+};
+
+const scratch_frames = 4096;
+
+pub fn openDecoder(allocator: std.mem.Allocator, source: storage.ReadableSource) !decoder_api.Decoder {
+    const layout = try readLayout(source);
+    const context = try allocator.create(Context);
+    errdefer allocator.destroy(context);
+    const scratch = try allocator.alloc(u8, try std.math.mul(usize, scratch_frames, layout.format.bytes_per_frame));
+    errdefer allocator.free(scratch);
+    context.* = .{ .allocator = allocator, .source = source, .layout = layout, .scratch = scratch };
+    return .{
+        .context = context,
+        .vtable = &vtable,
+        .codec = if (layout.encoding == .big_float) decoder_api.codec_id.pcm_float else decoder_api.codec_id.pcm,
+        .source_format = layout.format,
+        .format = .{
+            .sample_format = .float_32,
+            .channels = layout.format.channels,
+            .sample_rate = layout.format.sample_rate,
+            .bits_per_sample = 32,
+            .bytes_per_frame = try std.math.mul(u16, layout.format.channels, 4),
+        },
+        .frame_count = layout.frames,
+    };
+}
+
+fn readLayout(source: storage.ReadableSource) !Layout {
+    var form: [12]u8 = undefined;
+    if (try source.readAt(0, &form) != form.len) return error.TruncatedAiff;
+    if (!std.mem.eql(u8, form[0..4], "FORM")) return error.InvalidAiff;
+    const compressed = std.mem.eql(u8, form[8..12], "AIFC");
+    if (!compressed and !std.mem.eql(u8, form[8..12], "AIFF")) return error.InvalidAiff;
+
+    var common: ?struct { channels: u16, frames: u32, bits: u16, rate: u32, encoding: Encoding } = null;
+    var data_offset: ?u64 = null;
+    var data_bytes: u64 = 0;
+    var offset: u64 = 12;
+    while (offset + 8 <= source.size()) {
+        var header: [8]u8 = undefined;
+        if (try source.readAt(offset, &header) != header.len) return error.TruncatedAiff;
+        const size = std.mem.readInt(u32, header[4..8], .big);
+        const body = offset + 8;
+        if (body + size > source.size()) return error.TruncatedAiff;
+        if (std.mem.eql(u8, header[0..4], "COMM")) {
+            if (size < 18 or (compressed and size < 22)) return error.InvalidAiff;
+            var comm: [22]u8 = undefined;
+            const wanted: usize = if (compressed) 22 else 18;
+            if (try source.readAt(body, comm[0..wanted]) != wanted) return error.TruncatedAiff;
+            const bits = std.mem.readInt(u16, comm[6..8], .big);
+            common = .{
+                .channels = std.mem.readInt(u16, comm[0..2], .big),
+                .frames = std.mem.readInt(u32, comm[2..6], .big),
+                .bits = bits,
+                .rate = extendedToRate(comm[8..18]) orelse return error.InvalidAiff,
+                .encoding = if (compressed) try compression(comm[18..22], bits) else .big_integer,
+            };
+        } else if (std.mem.eql(u8, header[0..4], "SSND")) {
+            if (size < 8) return error.InvalidAiff;
+            var ssnd: [4]u8 = undefined;
+            if (try source.readAt(body, &ssnd) != ssnd.len) return error.TruncatedAiff;
+            const skip = std.mem.readInt(u32, &ssnd, .big);
+            if (skip > size - 8) return error.InvalidAiff;
+            data_offset = body + 8 + skip;
+            data_bytes = size - 8 - skip;
+        }
+        offset = body + size + (size & 1);
+    }
+
+    const stream = common orelse return error.MissingCommonChunk;
+    if (stream.channels == 0 or stream.rate == 0) return error.InvalidAiff;
+    const sample_format: audio_pcm.SampleFormat = switch (stream.encoding) {
+        .big_float => switch (stream.bits) {
+            32 => .float_32,
+            64 => .float_64,
+            else => return error.UnsupportedPcmFormat,
+        },
+        else => switch (stream.bits) {
+            8 => .unsigned_8,
+            16 => .signed_16,
+            24 => .signed_24,
+            32 => .signed_32,
+            else => return error.UnsupportedPcmFormat,
+        },
+    };
+    const bytes_per_frame = std.math.mul(u16, stream.channels, stream.bits / 8) catch return error.InvalidAiff;
+    const frames = @min(stream.frames, data_bytes / bytes_per_frame);
+    return .{
+        .format = .{
+            .sample_format = sample_format,
+            .channels = stream.channels,
+            .sample_rate = stream.rate,
+            .bits_per_sample = stream.bits,
+            .bytes_per_frame = bytes_per_frame,
+        },
+        .encoding = stream.encoding,
+        .data_offset = data_offset orelse if (frames == 0) 0 else return error.MissingSoundChunk,
+        .frames = if (data_offset == null) 0 else frames,
+    };
+}
+
+fn compression(tag: *const [4]u8, bits: u16) !Encoding {
+    if (std.mem.eql(u8, tag, "NONE") or std.mem.eql(u8, tag, "twos")) return .big_integer;
+    if (std.mem.eql(u8, tag, "sowt")) return if (bits == 8) .big_integer else .little_integer;
+    if (std.mem.eql(u8, tag, "fl32") or std.mem.eql(u8, tag, "FL32") or
+        std.mem.eql(u8, tag, "fl64") or std.mem.eql(u8, tag, "FL64")) return .big_float;
+    return error.UnsupportedAiffCompression;
+}
+
+/// An IEEE 754 80-bit extended value, as COMM stores the sample rate, rounded
+/// down to an integer rate. Null for zero, negative or absurd values.
+fn extendedToRate(bytes: *const [10]u8) ?u32 {
+    const sign_exponent = std.mem.readInt(u16, bytes[0..2], .big);
+    if (sign_exponent & 0x8000 != 0) return null;
+    const exponent: i32 = @as(i32, sign_exponent) - 16383;
+    const mantissa = std.mem.readInt(u64, bytes[2..10], .big);
+    if (mantissa == 0 or exponent < 0 or exponent > 31) return null;
+    return @intCast(mantissa >> @intCast(63 - exponent));
+}
+
+fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    const layout = context.layout;
+    const channels = layout.format.channels;
+    const remaining = layout.frames -| context.position;
+    const frames: usize = @intCast(@min(remaining, output.len / channels, scratch_frames));
+    if (frames == 0) return 0;
+    const bytes = context.scratch[0 .. frames * layout.format.bytes_per_frame];
+    const offset = layout.data_offset + context.position * layout.format.bytes_per_frame;
+    const read = try context.source.readAt(offset, bytes);
+    const whole = read / layout.format.bytes_per_frame;
+    const width = layout.format.bits_per_sample / 8;
+    for (output[0 .. whole * channels], 0..) |*sample, index| {
+        sample.* = decodeSample(layout.encoding, bytes[index * width ..][0..width]);
+    }
+    context.position += whole;
+    return whole;
+}
+
+fn decodeSample(encoding: Encoding, bytes: []const u8) f32 {
+    if (encoding == .big_float) return switch (bytes.len) {
+        4 => @bitCast(std.mem.readInt(u32, bytes[0..4], .big)),
+        else => @floatCast(@as(f64, @bitCast(std.mem.readInt(u64, bytes[0..8], .big)))),
+    };
+    const endian: std.builtin.Endian = if (encoding == .little_integer) .little else .big;
+    return switch (bytes.len) {
+        // AIFF's 8-bit samples are signed, unlike WAV's.
+        1 => @as(f32, @floatFromInt(@as(i8, @bitCast(bytes[0])))) / 128.0,
+        2 => @as(f32, @floatFromInt(std.mem.readInt(i16, bytes[0..2], endian))) / 32_768.0,
+        3 => @as(f32, @floatFromInt(std.mem.readInt(i24, bytes[0..3], endian))) / 8_388_608.0,
+        else => @floatCast(@as(f64, @floatFromInt(std.mem.readInt(i32, bytes[0..4], endian))) / 2_147_483_648.0),
+    };
+}
+
+fn seek(context_ptr: *anyopaque, frame: u64) !void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (frame > context.layout.frames) return error.SeekOutOfRange;
+    context.position = frame;
+}
+
+fn deinit(context_ptr: *anyopaque) void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    const allocator = context.allocator;
+    allocator.free(context.scratch);
+    allocator.destroy(context);
+}
+
+const vtable: decoder_api.Decoder.VTable = .{
+    .read_frames = readFrames,
+    .seek = seek,
+    .deinit = deinit,
+};
+
+fn decodeFile(path: []const u8, output: []f32) !struct { frames: usize, decoder_format: audio_pcm.Format } {
+    var file = try storage.LocalFileSource.open(std.testing.io, path);
+    defer file.close();
+    var decoder = try @import("registry.zig").CodecRegistry.builtins().openDetected(std.testing.allocator, file.readable());
+    defer decoder.deinit();
+    var frames: usize = 0;
+    while (true) {
+        const read = try decoder.readFrames(output[frames * decoder.format.channels ..]);
+        if (read == 0) break;
+        frames += read;
+    }
+    return .{ .frames = frames, .decoder_format = decoder.source_format.? };
+}
+
+test "AIFF, sowt AIFC and 24-bit AIFF decode to the samples of the FLAC they came from" {
+    var reference: [480 * 2]f32 = undefined;
+    const flac = try decodeFile("fixtures/audio/generated-reference.flac", &reference);
+    try std.testing.expectEqual(@as(usize, 480), flac.frames);
+    for ([_][]const u8{
+        "fixtures/audio/sowt-reference.aifc",
+        "fixtures/audio/generated-reference-24.aiff",
+    }) |path| {
+        var decoded: [480 * 2]f32 = undefined;
+        const result = try decodeFile(path, &decoded);
+        try std.testing.expectEqual(@as(usize, 480), result.frames);
+        try std.testing.expectEqual(@as(u32, 48_000), result.decoder_format.sample_rate);
+        try std.testing.expectEqualSlices(f32, &reference, &decoded);
+    }
+}
+
+test "a tagged AIFF reports its layout and length" {
+    var decoded: [9_000 * 2]f32 = undefined;
+    const result = try decodeFile("fixtures/audio/tagged-reference.aiff", &decoded);
+    try std.testing.expectEqual(@as(usize, 8_820), result.frames);
+    try std.testing.expectEqual(@as(u32, 44_100), result.decoder_format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 16), result.decoder_format.bits_per_sample);
+}
+
+test "the sample rate is read from an 80-bit extended float" {
+    try std.testing.expectEqual(@as(?u32, 44_100), extendedToRate("\x40\x0e\xac\x44\x00\x00\x00\x00\x00\x00"));
+    try std.testing.expectEqual(@as(?u32, 48_000), extendedToRate("\x40\x0e\xbb\x80\x00\x00\x00\x00\x00\x00"));
+    try std.testing.expectEqual(@as(?u32, null), extendedToRate("\x00" ** 10));
+}
+
+test "a compressed AIFC is refused rather than read as PCM" {
+    try std.testing.expectError(error.UnsupportedAiffCompression, compression("ima4", 16));
+}

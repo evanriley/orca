@@ -97,7 +97,7 @@ pub const Reader = struct {
                 if (chunk_size < 16) return error.InvalidWav;
                 var fmt: [16]u8 = undefined;
                 if (try source.readAt(payload_offset, &fmt) != fmt.len) return error.TruncatedWav;
-                const encoding = little16(fmt[0..2]);
+                const encoding = try formatTag(source, payload_offset, chunk_size, little16(fmt[0..2]));
                 const channels = little16(fmt[2..4]);
                 const sample_rate = little32(fmt[4..8]);
                 const block_align = little16(fmt[12..14]);
@@ -192,6 +192,23 @@ fn decodeSample(format: SampleFormat, bytes: []const u8) f32 {
     };
 }
 
+const wave_format_extensible: u16 = 0xfffe;
+/// Every KSDATAFORMAT SubFormat GUID for a classic format tag shares these
+/// twelve bytes after its leading two-byte tag.
+const subformat_guid_tail = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 };
+
+/// The format tag the samples are in. WAVE_FORMAT_EXTENSIBLE -- what FFmpeg
+/// and most DAWs write for anything past 16-bit stereo -- carries the real tag
+/// in the first two bytes of its SubFormat GUID, 24 bytes into the chunk.
+fn formatTag(source: storage.ReadableSource, fmt_offset: u64, fmt_size: u32, tag: u16) !u16 {
+    if (tag != wave_format_extensible) return tag;
+    if (fmt_size < 40) return error.InvalidWav;
+    var guid: [16]u8 = undefined;
+    if (try source.readAt(fmt_offset + 24, &guid) != guid.len) return error.TruncatedWav;
+    if (!std.mem.eql(u8, guid[2..], &subformat_guid_tail)) return error.UnsupportedWavEncoding;
+    return little16(guid[0..2]);
+}
+
 fn sampleFormat(encoding: u16, bits: u16) !SampleFormat {
     return switch (encoding) {
         1 => switch (bits) {
@@ -272,4 +289,25 @@ test "canonical conversion covers integer and floating WAV sample forms" {
         @as(f32, 0.5),
         decodeSample(.float_64, "\x00\x00\x00\x00\x00\x00\xe0\x3f"),
     );
+}
+
+test "a WAVE_FORMAT_EXTENSIBLE file decodes as the format its SubFormat names" {
+    var extensible_file = try storage.LocalFileSource.open(std.testing.io, "fixtures/audio/extensible-reference.wav");
+    defer extensible_file.close();
+    var extensible = try openDecoder(std.testing.allocator, extensible_file.readable());
+    defer extensible.deinit();
+    try std.testing.expectEqual(SampleFormat.signed_24, extensible.source_format.?.sample_format);
+    try std.testing.expectEqual(@as(?u64, 480), extensible.frame_count);
+
+    // Encoded from the 16-bit FLAC fixture, so it must decode to the same
+    // samples.
+    var flac_file = try storage.LocalFileSource.open(std.testing.io, "fixtures/audio/generated-reference.flac");
+    defer flac_file.close();
+    var flac = try @import("flac.zig").openDecoder(std.testing.allocator, flac_file.readable());
+    defer flac.deinit();
+    var from_wav: [480 * 2]f32 = undefined;
+    var from_flac: [480 * 2]f32 = undefined;
+    try std.testing.expectEqual(@as(usize, 480), try extensible.readFrames(&from_wav));
+    try std.testing.expectEqual(@as(usize, 480), try flac.readFrames(&from_flac));
+    try std.testing.expectEqualSlices(f32, &from_flac, &from_wav);
 }

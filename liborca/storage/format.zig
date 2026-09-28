@@ -10,6 +10,9 @@ pub const AudioFormat = enum(u8) {
     vorbis,
     wavpack,
     qoa,
+    /// Raw AAC in ADTS framing, as `.aac` files hold it. Appended, because
+    /// `files.audio_format` stores these values.
+    aac,
 };
 
 /// Where a container's encoded stream begins, and what it turned out to be.
@@ -42,6 +45,9 @@ pub fn detect(readable: source.ReadableSource) !?Detection {
     // I/O error here is a real failure and is not swallowed into a guess.
     const payload_count = try readable.readAt(payload_offset, &payload);
     if (identifyContainer(payload[0..payload_count])) |format| {
+        // An ID3v2 tag is native to MPEG audio and ADTS: their readers skip it
+        // and their tags live in it, so the stream is reported from byte zero.
+        if (format == .aac) return .{ .format = .aac };
         if (format != .mp3) return .{ .format = format, .payload_offset = payload_offset };
     }
     return .{ .format = .mp3 };
@@ -76,7 +82,9 @@ pub fn sniffBytes(bytes: []const u8) ?AudioFormat {
 /// footer. Counting either wrongly still "works" for MPEG audio, which resyncs
 /// on the next frame header, and silently breaks every format whose magic must
 /// land on an exact byte.
-fn id3v2PayloadOffset(bytes: []const u8) ?u64 {
+/// Bytes an ID3v2 tag at the start of `bytes` occupies, footer included, or
+/// null when `bytes` does not start with one.
+pub fn id3v2PayloadOffset(bytes: []const u8) ?u64 {
     const header_len = 10;
     if (bytes.len < header_len or !starts(bytes, "ID3")) return null;
     if (bytes[3] == 0xff or bytes[4] == 0xff) return null;
@@ -94,6 +102,9 @@ fn identifyContainer(bytes: []const u8) ?AudioFormat {
     if (starts(bytes, "fLaC")) return .flac;
     if (starts(bytes, "wvpk")) return .wavpack;
     if (starts(bytes, "qoaf")) return .qoa;
+    // ADTS and MPEG audio share the 12-bit sync word; ADTS always has the
+    // layer bits MPEG audio reserves as invalid.
+    if (bytes.len >= 2 and bytes[0] == 0xff and (bytes[1] & 0xf6) == 0xf0) return .aac;
     if (bytes.len >= 2 and bytes[0] == 0xff and (bytes[1] & 0xe0) == 0xe0) return .mp3;
     if (bytes.len >= 12 and starts(bytes, "RIFF") and equalAt(bytes, 8, "WAVE")) return .wav;
     if (bytes.len >= 12 and starts(bytes, "FORM") and
@@ -124,6 +135,8 @@ test "sniffs prioritized audio containers from magic bytes" {
     try @import("std").testing.expectEqual(AudioFormat.wav, sniffBytes("RIFFxxxxWAVEfmt ").?);
     try @import("std").testing.expectEqual(AudioFormat.opus, sniffBytes("OggSxxxxOpusHead").?);
     try @import("std").testing.expectEqual(AudioFormat.qoa, sniffBytes("qoaf\x00\x00\x00\x10").?);
+    try @import("std").testing.expectEqual(AudioFormat.aac, sniffBytes("\xff\xf1\x4c\x80").?);
+    try @import("std").testing.expectEqual(AudioFormat.mp3, sniffBytes("\xff\xfb\x90\x64").?);
     try @import("std").testing.expect(sniffBytes("not audio") == null);
 }
 

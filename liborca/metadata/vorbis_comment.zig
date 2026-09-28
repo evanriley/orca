@@ -84,6 +84,51 @@ pub fn readPicture(
     return try model.adoptImage(allocator, bytes, picture.kind);
 }
 
+/// The `KEY=value` entries of a bare Vorbis comment payload, in order.
+pub const Entries = struct {
+    payload: []const u8,
+    cursor: usize,
+    remaining: u32,
+
+    pub fn init(payload: []const u8) ReadError!Entries {
+        var cursor: usize = 0;
+        _ = try takeString(payload, &cursor);
+        const count = try takeU32(payload, &cursor);
+        return .{ .payload = payload, .cursor = cursor, .remaining = count };
+    }
+
+    pub fn next(self: *Entries) ReadError!?Entry {
+        if (self.remaining == 0) return null;
+        self.remaining -= 1;
+        return try parseEntry(try takeString(self.payload, &self.cursor));
+    }
+};
+
+/// A `PICTURE` block held in memory rather than in a FLAC stream: Ogg streams
+/// carry one base64-encoded in a `METADATA_BLOCK_PICTURE` comment. Parsed by
+/// the same code as a FLAC block, so the two cannot disagree about layout.
+pub const PictureView = struct {
+    kind: model.ArtworkKind,
+    mime_type: []const u8,
+    data: []const u8,
+};
+
+pub fn pictureFromBlock(block_bytes: []const u8) ?PictureView {
+    var memory = source.MemorySource{ .bytes = block_bytes };
+    const picture = (readPictureBlock(memory.readable(), .{
+        .block_type = 6,
+        .offset = 0,
+        .length = block_bytes.len,
+    }) catch return null) orelse return null;
+    const mime_start: usize = @intCast(picture.mime_offset);
+    const data_start: usize = @intCast(picture.data_offset);
+    return .{
+        .kind = picture.kind,
+        .mime_type = block_bytes[mime_start..][0..picture.mime_length],
+        .data = block_bytes[data_start..][0..picture.data_length],
+    };
+}
+
 /// One FLAC metadata block: what it is, and where its body lives in the file.
 const MetadataBlock = struct {
     block_type: u8,
@@ -444,7 +489,7 @@ pub fn create(
     return rewrite(allocator, &base, changes);
 }
 
-const Entry = struct { key: []const u8, value: []const u8 };
+pub const Entry = struct { key: []const u8, value: []const u8 };
 
 fn parseEntry(entry: []const u8) !Entry {
     const delimiter = std.mem.indexOfScalar(u8, entry, '=') orelse

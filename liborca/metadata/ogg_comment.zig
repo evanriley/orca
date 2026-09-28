@@ -35,6 +35,39 @@ const vorbis: Signature = .{ .identification = "\x01vorbis", .comment = "\x03vor
 /// Canonical tags from the comment header, or null when the stream is neither
 /// Ogg Opus nor Ogg Vorbis. Text lives in `allocator`; callers pass an arena.
 pub fn read(allocator: std.mem.Allocator, readable: source.ReadableSource) !?model.ObservedTags {
+    const comment = try readComment(allocator, readable) orelse return null;
+    defer allocator.free(comment.packet);
+    var tags = try vorbis_comment.parse(allocator, comment.payload);
+    if (try choosePicture(allocator, comment.payload)) |picture| {
+        defer allocator.free(picture.block);
+        tags.artwork = .{
+            .mime_type = try allocator.dupe(u8, picture.view.mime_type),
+            .byte_size = picture.view.data.len,
+            .kind = picture.view.kind,
+        };
+    }
+    return tags;
+}
+
+/// The cover image carried in a `METADATA_BLOCK_PICTURE` comment, or null.
+pub fn readPicture(allocator: std.mem.Allocator, readable: source.ReadableSource) !?model.EmbeddedImage {
+    const comment = try readComment(allocator, readable) orelse return null;
+    defer allocator.free(comment.packet);
+    const picture = try choosePicture(allocator, comment.payload) orelse return null;
+    defer allocator.free(picture.block);
+    if (picture.view.data.len > model.max_image_bytes) return error.ArtworkTooLarge;
+    const bytes = try allocator.dupe(u8, picture.view.data);
+    errdefer allocator.free(bytes);
+    return try model.adoptImage(allocator, bytes, picture.view.kind);
+}
+
+const Comment = struct {
+    packet: []u8,
+    /// The Vorbis comment payload inside `packet`, past the codec signature.
+    payload: []const u8,
+};
+
+fn readComment(allocator: std.mem.Allocator, readable: source.ReadableSource) !?Comment {
     var packets: PacketReader = .{ .readable = readable };
     const identification = try packets.next(allocator) orelse return null;
     defer allocator.free(identification);
@@ -45,10 +78,47 @@ pub fn read(allocator: std.mem.Allocator, readable: source.ReadableSource) !?mod
     else
         return null;
 
-    const comment = try packets.next(allocator) orelse return error.TruncatedOggStream;
-    defer allocator.free(comment);
-    if (!std.mem.startsWith(u8, comment, signature.comment)) return error.InvalidOggStream;
-    return try vorbis_comment.parse(allocator, comment[signature.comment.len..]);
+    const packet = try packets.next(allocator) orelse return error.TruncatedOggStream;
+    errdefer allocator.free(packet);
+    if (!std.mem.startsWith(u8, packet, signature.comment)) return error.InvalidOggStream;
+    return .{ .packet = packet, .payload = packet[signature.comment.len..] };
+}
+
+const Picture = struct {
+    block: []u8,
+    view: vorbis_comment.PictureView,
+};
+
+/// The first front cover among the `METADATA_BLOCK_PICTURE` entries, else the
+/// first usable picture: the same preference FLAC's `PICTURE` blocks get.
+fn choosePicture(allocator: std.mem.Allocator, payload: []const u8) !?Picture {
+    const decoder = std.base64.standard.Decoder;
+    var chosen: ?Picture = null;
+    errdefer if (chosen) |picture| allocator.free(picture.block);
+    var entries = try vorbis_comment.Entries.init(payload);
+    while (try entries.next()) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.key, "METADATA_BLOCK_PICTURE")) continue;
+        if (chosen) |existing| if (existing.view.kind == .front_cover) break;
+        const size = decoder.calcSizeForSlice(entry.value) catch continue;
+        const block = try allocator.alloc(u8, size);
+        decoder.decode(block, entry.value) catch {
+            allocator.free(block);
+            continue;
+        };
+        const view = vorbis_comment.pictureFromBlock(block) orelse {
+            allocator.free(block);
+            continue;
+        };
+        if (chosen) |existing| {
+            if (view.kind != .front_cover) {
+                allocator.free(block);
+                continue;
+            }
+            allocator.free(existing.block);
+        }
+        chosen = .{ .block = block, .view = view };
+    }
+    return chosen;
 }
 
 /// Reassembles packets of the first logical stream from its pages. Pages of
@@ -194,4 +264,28 @@ test "a stream of empty pages is abandoned after a bounded number of them" {
         @memcpy(pages[index * empty_page.len ..][0..empty_page.len], empty_page);
     var memory = source.MemorySource{ .bytes = pages };
     try std.testing.expectError(error.OggCommentNotFound, read(arena.allocator(), memory.readable()));
+}
+
+test "a METADATA_BLOCK_PICTURE comment is observed and read back as the same image" {
+    for ([_][]const u8{ "fixtures/audio/covered-reference.opus", "fixtures/audio/covered-reference.ogg" }) |path| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const tags = (try readFixture(arena.allocator(), path)).?;
+        try std.testing.expectEqualStrings("image/png", tags.artwork.?.mime_type);
+        try std.testing.expectEqual(@as(u64, 217), tags.artwork.?.byte_size);
+        try std.testing.expectEqual(model.ArtworkKind.front_cover, tags.artwork.?.kind);
+
+        var file = try source.LocalFileSource.open(std.testing.io, path);
+        defer file.close();
+        const image = (try readPicture(std.testing.allocator, file.readable())).?;
+        defer image.deinit();
+        try std.testing.expectEqual(@as(usize, 217), image.bytes.len);
+        try std.testing.expectEqualStrings("image/png", image.mime_type);
+    }
+}
+
+test "an Ogg stream without a picture comment has no cover" {
+    var file = try source.LocalFileSource.open(std.testing.io, "fixtures/audio/tagged-reference.opus");
+    defer file.close();
+    try std.testing.expect(try readPicture(std.testing.allocator, file.readable()) == null);
 }

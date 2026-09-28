@@ -42,3 +42,26 @@ in a `covr` atom. `audio/chirp-reference-aac.m4a` is 200 ms of a stereo chirp,
 `0.4 sin(2π(200t + 2000t²))` left and `0.4 sin(2π(300t + 1500t²))` right at
 48 kHz, encoded at 192 kb/s; tests regenerate the source from the formula to
 check alignment.
+
+`audio/extensible-reference.wav` is `audio/generated-reference.flac` written by
+FFmpeg as 24-bit PCM, which FFmpeg stores as `WAVE_FORMAT_EXTENSIBLE`.
+
+`audio/tagged-reference.aiff` is `audio/tagged-reference.flac` written by FFmpeg
+as 16-bit big-endian AIFF with its tags in an `ID3 ` chunk.
+`audio/sowt-reference.aifc` and `audio/generated-reference-24.aiff` are
+`audio/generated-reference.flac` as little-endian (`sowt`) AIFC and as 24-bit
+AIFF.
+
+`audio/tagged-reference.wav` is `audio/generated-reference.flac` as WAV with
+FFmpeg's `LIST`/`INFO` tags. `audio/id3-tagged-reference.wav` is the same file
+with the `ID3 ` chunk of `audio/tagged-reference.aiff` appended as an `id3 `
+chunk, so it carries two different tags. `audio/covered-reference.aiff` carries
+the 217-byte PNG cover in its `ID3 ` chunk.
+
+`audio/covered-reference.opus` and `audio/covered-reference.ogg` are the tagged
+Ogg fixtures with the 217-byte PNG cover added as a `METADATA_BLOCK_PICTURE`
+comment, by `opustags --set-cover` and `vorbiscomment` respectively.
+
+`audio/tagged-reference.aac` is the AAC frames of
+`audio/chirp-reference-aac.m4a` remuxed by FFmpeg into ADTS behind an ID3v2
+tag. ADTS keeps the 1,024 frames of priming the MP4's edit list trimmed.
