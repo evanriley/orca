@@ -1,7 +1,30 @@
 const std = @import("std");
 const liborca = @import("liborca");
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        var stderr_buffer: [256]u8 = undefined;
+        var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), init.io, &stderr_buffer);
+        const stderr = &stderr_file_writer.interface;
+        stderr.print("orca-cli: {s}\n", .{describe(err)}) catch {};
+        stderr.flush() catch {};
+        std.process.exit(1);
+    };
+}
+
+fn describe(err: anyerror) []const u8 {
+    return switch (err) {
+        error.TrackNotFound => "no track with that id",
+        error.UnknownRoot => "no folder with that id",
+        error.OpenFailed => "could not open the database",
+        error.InvalidCharacter, error.Overflow => "expected a number",
+        error.UnknownOption => "unknown option",
+        error.LibraryJobRunning => "a job is running on this library",
+        else => @errorName(err),
+    };
+}
+
+fn run(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
 

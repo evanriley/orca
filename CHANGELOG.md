@@ -9,6 +9,8 @@
   `equalizer_enabled` and `crossfeed_enabled`; older files still load.
 - **Album page rows can be selected.** A click or the arrow keys select a
   row and show it in the details panel; double-click or Enter plays from it.
+- **`orca-cli` reports errors as one line**, `orca-cli: no track with that id`,
+  instead of an error trace, and exits with status 1.
 
 ### Removing a folder forgets its tracks
 

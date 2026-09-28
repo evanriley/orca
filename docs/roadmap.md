@@ -91,32 +91,26 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Daily-use fixes.**
-   - A custom equalizer curve is not saved while the equalizer is off.
-   - Album page rows cannot be selected, so an album's details panel shows
-     only the track last played there.
-   - `orca-cli track` with an unknown id prints an error trace instead of a
-     message.
-2. **ListenBrainz scrobbling**, the first provider to connect. It needs the
+1. **ListenBrainz scrobbling**, the first provider to connect. It needs the
    HTTP fixes listed under [Built but not reachable](#built-but-not-reachable):
    request deadlines and cancellation, and leased scrobble queue rows. The
    token comes from secure storage and is set in Preferences.
-3. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
+2. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
    `orca-gtk`. Proposal acceptance must re-read the stored payload inside its
    transaction first. Last.fm follows.
-4. **Filesystem watching** as a scan accelerator, so new files appear without
+3. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
-5. **A fixed output rate with a band-limited resampler** (libsamplerate or
+4. **A fixed output rate with a band-limited resampler** (libsamplerate or
    speexdsp behind a shim), for gapless playback across sample-rate changes
    and for devices held at another rate. Playback at the source rate already
    covers the common case.
-6. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
    writable. The C ABI lacks tag writes, queue editing, DSP and track
    details.
-7. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-8. **Undecodable files are re-examined on every analysis run.** They are
+7. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
 
