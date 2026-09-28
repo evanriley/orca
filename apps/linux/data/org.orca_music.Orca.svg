@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f6fd6"/>
+      <stop offset="1" stop-color="#12346e"/>
+    </linearGradient>
+    <linearGradient id="fin" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2230"/>
+      <stop offset="1" stop-color="#0b0e15"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect x="8" y="8" width="112" height="112" rx="26"/>
+    </clipPath>
+  </defs>
+  <rect x="8" y="12" width="112" height="112" rx="26" fill="#0b1f45" opacity="0.35"/>
+  <g clip-path="url(#tile)">
+    <rect x="8" y="8" width="112" height="112" fill="url(#sea)"/>
+    <circle cx="96" cy="34" r="12" fill="#ffffff" opacity="0.18"/>
+    <path d="M30 98 C 50 80, 64 46, 76 18 C 74 46, 80 76, 100 98 Z" fill="url(#fin)"/>
+    <path d="M76 18 C 74 46, 80 76, 100 98 L 94 98 C 78 78, 72 50, 76 18 Z" fill="#ffffff" opacity="0.14"/>
+    <path d="M8 94 Q 26 84 44 94 T 80 94 T 120 94 V 120 H 8 Z" fill="#ffffff" opacity="0.92"/>
+    <path d="M8 104 Q 26 96 44 104 T 80 104 T 120 104 V 120 H 8 Z" fill="#9fc3f5"/>
+  </g>
+</svg>

@@ -10,6 +10,7 @@
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
+const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const mpris = @import("mpris.zig");
@@ -18,7 +19,10 @@ const track_model = @import("track_model.zig");
 const browse_model = @import("browse_model.zig");
 const browse = @import("browse.zig");
 const transport = @import("transport.zig");
+const queue = @import("queue.zig");
 const window = @import("window.zig");
+
+const stylesheet = @embedFile("style.css");
 
 const App = app.App;
 
@@ -48,10 +52,10 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     while (self.runtime.pollEvent()) |event| {
         if (self.pending_play_request != 0 and event.request_id == self.pending_play_request) {
             self.pending_play_request = 0;
-            self.setStatus(switch (event.outcome) {
-                .failed => |failure| failureText(failure),
-                else => "Playing",
-            });
+            switch (event.outcome) {
+                .failed => |failure| self.toast(failureText(failure)),
+                else => {},
+            }
         }
     }
     // Coalesced position and progress hints. Authoritative state is read from
@@ -59,6 +63,7 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     while (self.runtime.pollTelemetry()) |_| {}
 
     transport.tick(self);
+    queue.tick(self);
     scan.tick(self);
     return gtk.SOURCE_CONTINUE;
 }
@@ -68,6 +73,16 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (self.window) |existing| {
         gtk.gtk_window_present(existing);
         return;
+    }
+    if (gtk.gdk_display_get_default()) |display| {
+        const provider = gtk.gtk_css_provider_new();
+        gtk.gtk_css_provider_load_from_string(provider, stylesheet);
+        gtk.gtk_style_context_add_provider_for_display(
+            display,
+            provider,
+            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        gtk.g_object_unref(provider);
     }
     _ = window.build(self, gtk.cast(gtk.Application, application));
     transport.refreshDevices(self);
@@ -80,14 +95,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     // at the point a play is attempted rather than at startup.
     browse.reload(self);
     self.reload();
-    if (self.library != null) {
-        if (self.library_path) |path| {
-            var buffer: [1024]u8 = undefined;
-            if (strings.printZ(&buffer, "Orca — {s}", .{path})) |title| {
-                gtk.gtk_window_set_title(self.window.?, title.ptr);
-            } else |_| {}
-        }
-    }
+    if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
 }
 
@@ -97,6 +105,94 @@ fn activatePlayPause(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
 
 fn activateAddFolder(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     scan.chooseFolder(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateRescan(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    scan.rescan(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.focusSearch(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.showPage(@ptrCast(@alignCast(data.?)), .queue);
+}
+
+fn activateQuit(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const application = self.application orelse return;
+    gtk.g_application_quit(gtk.cast(gtk.GApplication, application));
+}
+
+fn activateAbout(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const dialog = adw.adw_about_dialog_new();
+    const about = gtk.cast(adw.AboutDialog, dialog);
+    var buffer: [64]u8 = undefined;
+    const version = liborca.version;
+    const text = strings.printZ(&buffer, "{d}.{d}.{d}{s}{s}", .{
+        version.major,
+        version.minor,
+        version.patch,
+        if (version.pre != null) "-" else "",
+        version.pre orelse "",
+    }) catch "";
+    adw.adw_about_dialog_set_application_name(about, "Orca");
+    adw.adw_about_dialog_set_application_icon(about, application_id);
+    adw.adw_about_dialog_set_version(about, text.ptr);
+    adw.adw_about_dialog_set_developer_name(about, "The Orca developers");
+    adw.adw_about_dialog_set_comments(about, "A music player for the files you own.");
+    adw.adw_about_dialog_set_license_type(about, gtk.LICENSE_MPL_2_0);
+    adw.adw_dialog_present(dialog, if (self.window) |w| gtk.cast(gtk.Widget, w) else null);
+}
+
+fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const dialog = adw.adw_shortcuts_dialog_new();
+    const shortcuts = gtk.cast(adw.ShortcutsDialog, dialog);
+    const sections = [_]struct { title: [*:0]const u8, items: []const [2][*:0]const u8 }{
+        .{ .title = "Playback", .items = &.{
+            .{ "Play / Pause", "space" },
+            .{ "Next Track", "<Control>Right" },
+            .{ "Previous Track", "<Control>Left" },
+        } },
+        .{ .title = "Library", .items = &.{
+            .{ "Search", "<Control>f" },
+            .{ "Show Queue", "<Control>l" },
+            .{ "Add Music Folder", "<Control>o" },
+        } },
+        .{ .title = "General", .items = &.{
+            .{ "Keyboard Shortcuts", "<Control>question" },
+            .{ "Quit", "<Control>q" },
+        } },
+    };
+    for (sections) |entry| {
+        const section = adw.adw_shortcuts_section_new(entry.title);
+        for (entry.items) |item| adw.adw_shortcuts_section_add(section, adw.adw_shortcuts_item_new(item[0], item[1]));
+        adw.adw_shortcuts_dialog_add(shortcuts, section);
+    }
+    adw.adw_dialog_present(dialog, if (self.window) |w| gtk.cast(gtk.Widget, w) else null);
+}
+
+const application_id = "org.orca_music.Orca";
+
+fn addAction(
+    application: *gtk.Application,
+    name: [*:0]const u8,
+    handler: *const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void,
+    accelerator: ?[*:0]const u8,
+    self: *App,
+) void {
+    const action = gtk.g_simple_action_new(name, null).?;
+    _ = gtk.signalConnect(action, "activate", gtk.callback(handler), self);
+    gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, application), gtk.cast(gtk.GAction, action));
+    gtk.g_object_unref(action);
+    const key = accelerator orelse return;
+    var detailed: [64]u8 = undefined;
+    const full = strings.printZ(&detailed, "app.{s}", .{std.mem.span(name)}) catch return;
+    const accelerators: [2]?[*:0]const u8 = .{ key, null };
+    gtk.gtk_application_set_accels_for_action(application, full.ptr, &accelerators);
 }
 
 /// The library lives in the platform data directory unless `ORCA_LIBRARY` names
@@ -157,44 +253,28 @@ pub fn main(init: std.process.Init) !u8 {
         } else |_| {}
     }
 
-    const application = gtk.gtk_application_new(
-        "org.orca_music.Orca",
+    const application: *gtk.Application = @ptrCast(adw.adw_application_new(
+        application_id,
         gtk.APPLICATION_DEFAULT_FLAGS,
     ) orelse {
         runtime.deinit();
         return 1;
-    };
+    });
     self.application = application;
     const g_application = gtk.cast(gtk.GApplication, application);
 
-    const play_pause = gtk.g_simple_action_new("play-pause", null).?;
-    _ = gtk.signalConnect(play_pause, "activate", gtk.callback(activatePlayPause), &self);
-    gtk.g_action_map_add_action(
-        gtk.cast(gtk.GActionMap, application),
-        gtk.cast(gtk.GAction, play_pause),
-    );
-    gtk.g_object_unref(play_pause);
-
-    const add_folder = gtk.g_simple_action_new("add-folder", null).?;
-    _ = gtk.signalConnect(add_folder, "activate", gtk.callback(activateAddFolder), &self);
-    gtk.g_action_map_add_action(
-        gtk.cast(gtk.GActionMap, application),
-        gtk.cast(gtk.GAction, add_folder),
-    );
-    gtk.g_object_unref(add_folder);
-
-    // Space is deliberately NOT an application accelerator. GTK matches those
-    // before the focused widget sees the key, so a bare `space` accel steals
-    // every space typed into the search entry. The window installs a
-    // bubble-phase key controller instead, which only runs if the focused widget
-    // declined the key — so typing works and space still toggles playback
-    // everywhere else.
-    const folder_accelerators: [2]?[*:0]const u8 = .{ "<Control>o", null };
-    gtk.gtk_application_set_accels_for_action(
-        application,
-        "app.add-folder",
-        &folder_accelerators,
-    );
+    // Space and Ctrl+arrows are deliberately NOT application accelerators.
+    // GTK matches those before the focused widget sees the key, so they would
+    // steal every space typed into a search box and its word movement. The
+    // window's bubble-phase key controller handles them instead.
+    addAction(application, "play-pause", activatePlayPause, null, &self);
+    addAction(application, "add-folder", activateAddFolder, "<Control>o", &self);
+    addAction(application, "rescan", activateRescan, null, &self);
+    addAction(application, "search", activateSearch, "<Control>f", &self);
+    addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);
+    addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
+    addAction(application, "about", activateAbout, null, &self);
+    addAction(application, "quit", activateQuit, "<Control>q", &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io);
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);

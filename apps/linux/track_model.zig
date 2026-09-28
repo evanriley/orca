@@ -157,6 +157,20 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     return self;
 }
 
+/// A second object with the same fields. A list view reuses the widget of an
+/// item it already shows, so swapping in a copy is how a row is made to bind
+/// again when only its presentation changed.
+pub fn clone(source: *TrackObject) ?*TrackObject {
+    const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
+    const self: *TrackObject = @ptrCast(object);
+    const from = source.fields();
+    self.fields().* = from.*;
+    self.fields().title = dupe(from.title);
+    self.fields().artist = dupe(from.artist);
+    self.fields().album = dupe(from.album);
+    return self;
+}
+
 // ---------------------------------------------------------------- sorting
 
 /// The columns the track list shows, and the engine sort key behind each one.

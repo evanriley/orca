@@ -140,12 +140,17 @@ Frontends:
 ORCA_LIBRARY=/path/to/library.db zig build run-linux   # GTK4 frontend
 
 # Pin the output so an automated run cannot reach the speakers. Unset, the app
-# uses the device dropdown, which defaults to the system default -- device 0.
+# uses the output menu, which defaults to the system default -- device 0.
 ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1) zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does
 not hold the user's default sink.
+
+To look at the GUI without putting a window on the user's desktop, run it in a
+headless sway session and screenshot it with `grim`; drive it with `wtype`,
+which reaches GTK where transient virtual pointers do not. Use
+`GSK_RENDERER=cairo` there.
 
 macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
 `zig-out/lib/liborca` through a systemLibrary modulemap.

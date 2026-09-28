@@ -78,7 +78,7 @@ fn append(store: *gtk.ListStore, id: ?i64, name: []const u8, detail: []const u8)
 fn updateArtistHeader(self: *App, total: u64) void {
     const header = self.artist_header orelse return;
     var buffer: [64]u8 = undefined;
-    const text = strings.printZ(&buffer, "Artists — {d}", .{total}) catch "Artists";
+    const text = strings.printZ(&buffer, "Artists  ·  {d}", .{total}) catch "Artists";
     gtk.gtk_label_set_text(header, text.ptr);
 }
 
@@ -88,9 +88,9 @@ fn updateReleaseHeader(self: *App, total: u64) void {
     const header = self.release_header orelse return;
     var buffer: [192]u8 = undefined;
     const text = if (self.browse.artist_id == null)
-        strings.printZ(&buffer, "Releases — {d}", .{total}) catch "Releases"
+        strings.printZ(&buffer, "Albums  ·  {d}", .{total}) catch "Albums"
     else
-        strings.printZ(&buffer, "Releases — {d} · {s}", .{
+        strings.printZ(&buffer, "Albums  ·  {d}  ·  {s}", .{
             total,
             self.artist_scope_name.value,
         }) catch "Releases";
@@ -137,9 +137,11 @@ pub fn loadNextArtistPage(self: *App) void {
     if (page.items.len < app.page_size) self.artists_exhausted = true;
     var buffer: [96]u8 = undefined;
     for (page.items) |artist| {
-        const detail = strings.printZ(&buffer, "{d} releases · {d} tracks", .{
+        const detail = strings.printZ(&buffer, "{d} {s} · {d} {s}", .{
             artist.release_count,
+            if (artist.release_count == 1) "album" else "albums",
             artist.track_count,
+            if (artist.track_count == 1) "track" else "tracks",
         }) catch "";
         append(store, artist.id, artist.name, detail);
     }
@@ -157,7 +159,7 @@ pub fn reloadReleases(self: *App) void {
     gtk.g_list_store_remove_all(store);
     self.releases_loaded = 0;
     self.releases_exhausted = false;
-    append(store, null, "All Releases", "");
+    append(store, null, "All Albums", "");
     const library = self.library orelse {
         self.releases_exhausted = true;
         updateReleaseHeader(self, 0);
@@ -194,9 +196,10 @@ pub fn loadNextReleasePage(self: *App) void {
                 discs,
             }) catch ""
         else
-            strings.printZ(&buffer, "{s} · {d} tracks", .{
+            strings.printZ(&buffer, "{s} · {d} {s}", .{
                 release.album_artist,
                 release.track_count,
+                if (release.track_count == 1) "track" else "tracks",
             }) catch "";
         append(store, release.id, release.title, detail);
     }
@@ -356,6 +359,7 @@ fn buildPane(
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupRow), null);
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindRow), null);
     const list = gtk.gtk_list_view_new(gtk.cast(gtk.SelectionModel, selection), factory);
+    gtk.gtk_widget_add_css_class(list, "navigation-sidebar");
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
@@ -370,10 +374,10 @@ fn buildPane(
     const header = gtk.gtk_label_new(title);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, header), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, header), gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(header, "heading");
-    gtk.gtk_widget_set_margin_start(header, 8);
-    gtk.gtk_widget_set_margin_top(header, 6);
-    gtk.gtk_widget_set_margin_bottom(header, 2);
+    gtk.gtk_widget_add_css_class(header, "pane-header");
+    gtk.gtk_widget_set_margin_start(header, 14);
+    gtk.gtk_widget_set_margin_top(header, 12);
+    gtk.gtk_widget_set_margin_bottom(header, 4);
 
     const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), header);
@@ -381,9 +385,9 @@ fn buildPane(
     if (on_search) |handler| {
         const entry = gtk.gtk_search_entry_new();
         gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), title);
-        gtk.gtk_widget_set_margin_start(entry, 6);
-        gtk.gtk_widget_set_margin_end(entry, 6);
-        gtk.gtk_widget_set_margin_bottom(entry, 4);
+        gtk.gtk_widget_set_margin_start(entry, 8);
+        gtk.gtk_widget_set_margin_end(entry, 8);
+        gtk.gtk_widget_set_margin_bottom(entry, 2);
         _ = gtk.signalConnect(entry, "search-changed", handler, self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), entry);
         search = gtk.cast(gtk.Editable, entry);
@@ -414,7 +418,7 @@ pub fn build(self: *App) *gtk.Widget {
 
     const releases = buildPane(
         self,
-        "Releases",
+        "Albums",
         gtk.callback(releaseSelected),
         gtk.callback(releasesScrolled),
         null,

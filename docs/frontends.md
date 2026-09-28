@@ -51,47 +51,53 @@ nothing renders is a defect, not a state.
 
 ## Linux GTK4
 
-`orca-gtk` consumes only the installed C boundary. Its `GtkListView` renders a
-bounded 256-row page, with explicit next/previous paging and bounded search
-queries, so a large library never becomes a giant frontend-owned model. Set
-`ORCA_LIBRARY` to an Orca SQLite library path before launching:
+`orca-gtk` is a Zig client of liborca's public Zig API, built on GTK 4 and
+libadwaita, both bound by hand in `apps/linux/gtk.zig` and `apps/linux/adw.zig`.
+Every liborca call happens on the GTK main thread, from a signal handler or the
+100 ms tick.
 
 ```sh
-ORCA_LIBRARY=/path/to/library.db zig build run-linux
+zig build run-linux                                   # library in $XDG_DATA_HOME/orca
+ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
 ```
 
-Transport buttons invoke the same authoritative Player operations and snapshots
-used by the CLI/control plane. GTK owns presentation only.
+The window is an `AdwNavigationSplitView`:
 
-The transport bar shows the **now-playing track's cover**, and only that one.
-It is loaded when the audible Track changes, never on the 100 ms tick. A track
-with no cover, a track whose file has gone, an image liborca refused and an
-image gdk-pixbuf could not decode all show the same placeholder icon: one
-`GtkImage` in two states, so there is no second widget to keep visible in step
-with a nullable image.
+- The sidebar (`AdwSidebar`) lists the pages, shows the queue length, and
+  shows scan progress at its foot while a scan runs.
+- **Tracks** is the Artist and Album browse panes beside the track list. The
+  list pages 512 rows at a time from liborca as it scrolls, and a header
+  click re-queries in the engine's order rather than sorting loaded rows. The
+  playing track is marked. A library with no tracks shows a welcome page with
+  Add Music Folder; a scan in progress shows there too.
+- **Queue** is the Player's queue as the engine resolves it, with the audible
+  entry marked.
+- The player bar spans the window: cover, title and artist; shuffle, previous,
+  play, next and repeat; the seek bar; volume, the output menu and the queue.
 
-Decoding is bounded independently of liborca's byte bound, because encoded size
-says nothing about pixel count — the reference library's largest cover is an
-11.3 MiB JPEG. `gdk_pixbuf_new_from_stream_at_scale` scales inside the loader,
-so a 128-pixel request never materializes the full image, and the encoded bytes
-are borrowed by the stream rather than copied into it. With the whole 22,060
-track library open the frontend holds 154 MB resident; a typical cover loaded
-takes that to 168 MB and the largest cover in the library to 192 MB, steady
-across repeated loads.
+Below 760sp the sidebar collapses behind a back button, the browse panes hide
+and the player bar tightens. Messages are toasts. Shortcuts are listed in the
+shortcuts dialog (Ctrl+?); Space and Ctrl+←/→ are handled by a bubble-phase key
+controller rather than application accelerators, so a focused search box keeps
+them.
 
-The Releases pane deliberately shows **no** thumbnails. A pane load is a
-bounded 512-row page, and 512 covers is 512 file opens and something like
-150 MB of encoded image on a single scroll — the opposite of what a bounded
-page exists to achieve. It needs a per-Release cache and a lazily bound cell
-factory before it is worth doing; `Runtime.libraryReleaseArtwork` is
-already there for when it is.
+The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
+to an orca device id, overriding the output menu; see
+[Testing playback without making noise](../CLAUDE.md).
+
+The player bar's cover is loaded when the audible Track changes, never on the
+tick, and decoded through `gdk_pixbuf_new_from_stream_at_scale` at 160 pixels,
+so an 11 MiB JPEG never materializes at full resolution. A track with no
+readable cover shows a placeholder. Album art in lists waits for an artwork
+worker in liborca: loading covers on the main thread for a scrolling grid
+would stall it.
 
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
-available. MPRIS Play/Pause/PlayPause/Stop methods invoke the same Player handle,
-and `PlaybackStatus` is read from and signaled from authoritative snapshots.
-Library selection uses a GTK file dialog or native file drop, successful opens
-raise a desktop notification, and the application action exposes a Space media
-shortcut. Standard GTK controls retain their native accessibility semantics.
+available. MPRIS methods invoke the same Player handle, and `PlaybackStatus` is
+read from and signaled from authoritative snapshots.
+
+`nix build` installs `share/applications/org.orca_music.Orca.desktop` and the
+icon, so the package can be installed like any desktop application.
 
 ## macOS SwiftUI
 

@@ -12,7 +12,7 @@ links each subsystem's contract.
 
 - Zig `0.16.0`
 - libFLAC, libopusfile, libvorbis and SQLite development libraries
-- Linux builds: PipeWire and GTK4 development libraries
+- Linux builds: PipeWire, GTK4 and libadwaita development libraries
 
 With Nix, `nix develop` (or direnv) provides all of these, and `nix build`
 builds the package.
@@ -51,7 +51,7 @@ Linux. `zig build pipewire-live-smoke` discovers the current user's output
 devices and opens a short silent native stream. PipeWire C headers and foreign
 types remain contained in the Linux adapter.
 
-Linux builds also install the GTK4 frontend, static/shared `liborca`, and the
+Linux builds also install the GTK4 frontend with its desktop entry, static/shared `liborca`, and the
 foreign-client header at `include/orca/orca.h`.
 
 Online identification and scrobbling are optional. Provider traffic passes

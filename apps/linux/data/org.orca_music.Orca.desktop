@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Orca
+GenericName=Music Player
+Comment=Play and organize the music files you own
+Exec=orca-gtk
+Icon=org.orca_music.Orca
+Terminal=false
+Categories=Audio;AudioVideo;Player;GTK;
+Keywords=music;player;library;flac;
+StartupNotify=true
+DBusActivatable=false

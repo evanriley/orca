@@ -156,6 +156,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         });
         linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
+        linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
         // Cover art is decoded at a bounded size through gdk-pixbuf's
         // scaling loader. GTK4 depends on it, but the frontend calls it
         // directly, so it has to be linked directly.
@@ -168,6 +169,8 @@ pub fn build(b: *std.Build) void {
             .root_module = linux_app_module,
         });
         b.installArtifact(linux_app);
+        b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
+        b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
         const run_linux_app = b.addRunArtifact(linux_app);
         const run_linux_step = b.step("run-linux", "Run the native GTK4 frontend");
         run_linux_step.dependOn(&run_linux_app.step);

@@ -2,6 +2,19 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### A designed GTK frontend
+
+- **`orca-gtk` is a libadwaita app.** A sidebar of pages, a full-width player
+  bar with the cover, centred transport and an output menu, a queue page,
+  scan progress in the sidebar, a welcome page for an empty library, toasts
+  instead of a status line, a shortcuts dialog (Ctrl+?) and an About dialog.
+  The window adapts below 760sp.
+- **The playing track is marked** in the track list and the queue.
+- **Enter in the search box plays the results.**
+- **Rescan Library** is in the main menu.
+- `nix build` installs a desktop entry and an icon.
+- The dev shell sets `XDG_DATA_DIRS` for the GSettings schemas GTK looks up.
+
 ### Tag write-back
 
 - **Library edits can be written into the files.** `Runtime.planTagWrite`

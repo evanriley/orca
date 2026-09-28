@@ -1,15 +1,17 @@
-//! The main window: header bar, the virtualized track list, the status row and
-//! the queue popover.
+//! The main window: a sidebar of pages beside the page itself, the player bar
+//! along the bottom, and toasts over both.
 
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
+const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const scan = @import("scan.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
 const browse = @import("browse.zig");
+const queue = @import("queue.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -75,7 +77,7 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
         if (ids.items.len != 0)
             transport.playIds(self, ids.items, 0)
         else
-            self.setStatus("None of the selected tracks has a playable file");
+            self.toast("None of the selected tracks has a playable file");
         return;
     }
     gtk.gtk_bitset_unref(chosen);
@@ -84,7 +86,7 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     defer gtk.g_object_unref(item);
     const row: *TrackObject = @ptrCast(@alignCast(item));
     if (!row.hasFile()) {
-        self.setStatus("That track has no playable file");
+        self.toast("That track has no playable file");
         return;
     }
     const id = row.id();
@@ -125,6 +127,36 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
         gtk.gtk_widget_remove_css_class(child, "dim-label")
     else
         gtk.gtk_widget_add_css_class(child, "dim-label");
+    if (playing_id != null and playing_id.? == row.id())
+        gtk.gtk_widget_add_css_class(child, "playing")
+    else
+        gtk.gtk_widget_remove_css_class(child, "playing");
+}
+
+/// The Track the list marks as playing. Presentation only: the engine's
+/// audible entry is read on the tick and handed to `markPlaying`.
+var playing_id: ?i64 = null;
+
+/// Moves the playing mark, replacing only the rows that gain or lose it.
+pub fn markPlaying(self: *App, track_id: ?i64) void {
+    const previous = playing_id;
+    playing_id = track_id;
+    const store = self.tracks orelse return;
+    const model = gtk.cast(gtk.ListModel, store);
+    const count = gtk.g_list_model_get_n_items(model);
+    var index: c_uint = 0;
+    while (index < count) : (index += 1) {
+        const item = gtk.g_list_model_get_item(model, index) orelse continue;
+        defer gtk.g_object_unref(item);
+        const row: *TrackObject = @ptrCast(@alignCast(item));
+        const was = previous != null and previous.? == row.id();
+        const is = track_id != null and track_id.? == row.id();
+        if (!was and !is) continue;
+        const copy = track_model.clone(row) orelse continue;
+        var replacement: [1]?*anyopaque = .{copy};
+        gtk.g_list_store_splice(store, index, 1, &replacement, 1);
+        gtk.g_object_unref(copy);
+    }
 }
 
 fn makeColumn(
@@ -184,31 +216,32 @@ fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.reload();
 }
 
+/// Enter in the search box plays what it found, in the order shown.
+fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const store = self.tracks orelse return;
+    const model = gtk.cast(gtk.ListModel, store);
+    var ids: std.ArrayList(i64) = .empty;
+    defer ids.deinit(self.allocator);
+    var index: c_uint = 0;
+    while (index < gtk.g_list_model_get_n_items(model)) : (index += 1) {
+        const item = gtk.g_list_model_get_item(model, index) orelse continue;
+        const row: *TrackObject = @ptrCast(@alignCast(item));
+        if (row.hasFile()) ids.append(self.allocator, row.id()) catch {};
+        gtk.g_object_unref(item);
+    }
+    if (ids.items.len != 0) transport.playIds(self, ids.items, 0);
+}
+
 fn addFolderClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     scan.chooseFolder(state(data));
 }
 
-fn setupQueueRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const label = gtk.gtk_label_new(null);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), label);
-}
-
-fn bindQueueRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const list_item = gtk.cast(gtk.ListItem, item);
-    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
-    const child = gtk.gtk_list_item_get_child(list_item) orelse return;
-    gtk.gtk_label_set_text(
-        gtk.cast(gtk.Label, child),
-        gtk.gtk_string_object_get_string(gtk.cast(gtk.StringObject, object)),
-    );
-}
-
 /// Returns true only when it actually consumed the key. Reached in the bubble
 /// phase, so the focused widget has already declined it — which is what lets a
-/// space typed into the search entry stay a space. A bare `space` application
-/// accelerator would be matched before the focused widget and would eat it.
+/// space typed into the search entry stay a space, and Ctrl+arrows keep moving
+/// by word there. An application accelerator would be matched before the
+/// focused widget and would eat them.
 fn windowKeyPressed(
     _: ?*anyopaque,
     keyval: c_uint,
@@ -216,75 +249,135 @@ fn windowKeyPressed(
     modifiers: c_uint,
     data: ?*anyopaque,
 ) callconv(.c) gtk.gboolean {
-    if (keyval != gtk.KEY_space) return gtk.false_;
-    const blocking = gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT;
-    if (modifiers & blocking != 0) return gtk.false_;
-    transport.toggle(state(data));
-    return gtk.true_;
+    const self = state(data);
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    if (keyval == gtk.KEY_space and held == 0) {
+        transport.toggle(self);
+        return gtk.true_;
+    }
+    if (held == gtk.MODIFIER_CONTROL and keyval == gtk.KEY_Right) {
+        transport.next(self);
+        return gtk.true_;
+    }
+    if (held == gtk.MODIFIER_CONTROL and keyval == gtk.KEY_Left) {
+        transport.previous(self);
+        return gtk.true_;
+    }
+    return gtk.false_;
 }
 
-pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
-    const window = gtk.gtk_application_window_new(application);
-    self.window = gtk.cast(gtk.Window, window);
+// --------------------------------------------------------------- navigation
 
-    const keys = gtk.gtk_event_controller_key_new();
-    gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
-    _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(windowKeyPressed), self);
-    gtk.gtk_widget_add_controller(window, keys);
-    gtk.gtk_window_set_title(self.window.?, "Orca");
-    gtk.gtk_window_set_default_size(self.window.?, 1100, 720);
+pub const Page = enum(c_uint) {
+    tracks,
+    queue,
 
-    const header = gtk.gtk_header_bar_new();
-    const add_folder = gtk.gtk_button_new_with_label("Add Music Folder…");
-    gtk.gtk_widget_set_tooltip_text(
-        add_folder,
-        "Register a folder as a library root and scan it",
-    );
-    _ = gtk.signalConnect(add_folder, "clicked", gtk.callback(addFolderClicked), self);
-    gtk.gtk_header_bar_pack_start(gtk.cast(gtk.HeaderBar, header), add_folder);
+    fn name(self: Page) [*:0]const u8 {
+        return switch (self) {
+            .tracks => "tracks",
+            .queue => "queue",
+        };
+    }
 
-    const search = gtk.gtk_search_entry_new();
-    self.search_entry = gtk.cast(gtk.Editable, search);
-    gtk.gtk_widget_set_size_request(search, 320, -1);
-    gtk.gtk_widget_set_tooltip_text(search, "Search the library");
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
-    gtk.gtk_header_bar_set_title_widget(gtk.cast(gtk.HeaderBar, header), search);
+    fn title(self: Page) [*:0]const u8 {
+        return switch (self) {
+            .tracks => "Tracks",
+            .queue => "Queue",
+        };
+    }
+};
 
-    // Queue pane: a popover over the Player's queue page.
-    self.queue_rows = gtk.gtk_string_list_new(null);
-    const queue_button = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, queue_button), "view-list-symbolic");
-    gtk.gtk_widget_set_tooltip_text(queue_button, "Play queue");
-    const queue_factory = gtk.gtk_signal_list_item_factory_new();
-    _ = gtk.signalConnect(queue_factory, "setup", gtk.callback(setupQueueRow), null);
-    _ = gtk.signalConnect(queue_factory, "bind", gtk.callback(bindQueueRow), null);
-    const queue_list = gtk.gtk_list_view_new(
-        gtk.gtk_no_selection_new(gtk.cast(
-            gtk.ListModel,
-            gtk.g_object_ref(self.queue_rows),
-        )),
-        queue_factory,
-    );
-    const queue_scroller = gtk.gtk_scrolled_window_new();
-    gtk.gtk_widget_set_size_request(queue_scroller, 340, 360);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, queue_scroller), queue_list);
-    self.queue_popover = gtk.gtk_popover_new();
-    gtk.gtk_popover_set_child(gtk.cast(gtk.Popover, self.queue_popover.?), queue_scroller);
-    _ = gtk.signalConnect(self.queue_popover, "show", gtk.callback(queueShown), self);
-    gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, queue_button), self.queue_popover);
-    gtk.gtk_header_bar_pack_end(gtk.cast(gtk.HeaderBar, header), queue_button);
+pub fn showPage(self: *App, page: Page) void {
+    if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
+    if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
+    if (self.sidebar) |sidebar| {
+        if (adw.adw_sidebar_get_selected(sidebar) != @intFromEnum(page))
+            adw.adw_sidebar_set_selected(sidebar, @intFromEnum(page));
+    }
+    if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
+    self.queue_visible = page == .queue;
+    if (self.queue_visible) {
+        queue.invalidate(self);
+        queue.tick(self);
+    }
+}
 
-    // Output device.
-    self.device_names = gtk.gtk_string_list_new(null);
-    const drop_down = gtk.gtk_drop_down_new(
-        gtk.cast(gtk.ListModel, gtk.g_object_ref(self.device_names)),
-        null,
-    );
-    self.device_drop_down = gtk.cast(gtk.DropDown, drop_down);
-    gtk.gtk_widget_set_tooltip_text(drop_down, "Output device");
-    gtk.gtk_header_bar_pack_end(gtk.cast(gtk.HeaderBar, header), drop_down);
-    gtk.gtk_window_set_titlebar(self.window.?, header);
+fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
+    if (index > @intFromEnum(Page.queue)) return;
+    showPage(state(data), @enumFromInt(index));
+}
 
+fn sidebarItem(section: *adw.SidebarSection, title: [*:0]const u8, icon: [*:0]const u8) *adw.SidebarItem {
+    const item = adw.adw_sidebar_item_new(title);
+    adw.adw_sidebar_item_set_icon_name(item, icon);
+    adw.adw_sidebar_section_append(section, item);
+    return item;
+}
+
+fn primaryMenu() *gtk.Widget {
+    const library = gtk.g_menu_new();
+    gtk.g_menu_append(library, "Add Music Folder…", "app.add-folder");
+    gtk.g_menu_append(library, "Rescan Library", "app.rescan");
+    const help = gtk.g_menu_new();
+    gtk.g_menu_append(help, "Keyboard Shortcuts", "app.shortcuts");
+    gtk.g_menu_append(help, "About Orca", "app.about");
+    const menu = gtk.g_menu_new();
+    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, library));
+    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, help));
+    gtk.g_object_unref(library);
+    gtk.g_object_unref(help);
+    const button = gtk.gtk_menu_button_new();
+    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "open-menu-symbolic");
+    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, menu));
+    gtk.gtk_menu_button_set_primary(gtk.cast(gtk.MenuButton, button), gtk.true_);
+    gtk.gtk_widget_set_tooltip_text(button, "Main Menu");
+    gtk.g_object_unref(menu);
+    return button;
+}
+
+fn buildSidebar(self: *App) *gtk.Widget {
+    const sidebar = adw.adw_sidebar_new();
+    self.sidebar = gtk.cast(adw.Sidebar, sidebar);
+    gtk.gtk_widget_set_vexpand(sidebar, gtk.true_);
+    const section = adw.adw_sidebar_section_new();
+    _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
+    const queue_item = sidebarItem(section, "Queue", "view-list-symbolic");
+    const count = gtk.gtk_label_new("");
+    self.queue_count = gtk.cast(gtk.Label, count);
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    gtk.gtk_widget_add_css_class(count, "dim-label");
+    adw.adw_sidebar_item_set_suffix(queue_item, count);
+    adw.adw_sidebar_append(self.sidebar.?, section);
+    _ = gtk.signalConnect(sidebar, "activated", gtk.callback(sidebarActivated), self);
+
+    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), sidebar);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), scan.build(self));
+
+    const header = adw.adw_header_bar_new();
+    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), adw.adw_window_title_new("Orca", ""));
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), primaryMenu());
+    const view = adw.adw_toolbar_view_new();
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    return view;
+}
+
+// -------------------------------------------------------------- tracks page
+
+fn browseToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const panes = self.browse_panes orelse return;
+    gtk.gtk_widget_set_visible(panes, gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)));
+}
+
+pub fn focusSearch(self: *App) void {
+    showPage(self, .tracks);
+    const entry = self.search_entry orelse return;
+    _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, entry));
+}
+
+fn buildTrackList(self: *App) *gtk.Widget {
     // The model chain: an owned page store, multi-selectable so a run of tracks
     // can be activated as a queue. Deliberately *not* wrapped in a
     // `GtkSortListModel` — the rows in the store are one page of an order the
@@ -295,6 +388,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     );
     const view = gtk.gtk_column_view_new(self.selection);
     self.column_view = gtk.cast(gtk.ColumnView, view);
+    gtk.gtk_widget_add_css_class(view, "track-list");
     gtk.gtk_column_view_set_show_column_separators(self.column_view.?, gtk.false_);
     gtk.gtk_column_view_set_reorderable(self.column_view.?, gtk.true_);
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), self);
@@ -321,6 +415,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const scroller = gtk.gtk_scrolled_window_new();
     self.scroller = scroller;
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
+    gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
     _ = gtk.signalConnect(
         gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
@@ -328,100 +423,150 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
         gtk.callback(scrolled),
         self,
     );
+    return scroller;
+}
 
-    // Browser beside listing: the panes scope what the track list asks liborca
-    // for, and the divider is the user's to move.
+fn buildWelcome(self: *App) *gtk.Widget {
+    const page = adw.adw_status_page_new();
+    self.welcome = gtk.cast(adw.StatusPage, page);
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 12);
+    gtk.gtk_widget_set_halign(actions, gtk.ALIGN_CENTER);
+    const button = gtk.gtk_button_new_with_label("Add Music Folder…");
+    self.welcome_button = button;
+    gtk.gtk_widget_add_css_class(button, "pill");
+    gtk.gtk_widget_add_css_class(button, "suggested-action");
+    gtk.gtk_actionable_set_action_name(gtk.cast(gtk.Actionable, button), "app.add-folder");
+    const spinner = adw.adw_spinner_new();
+    self.welcome_spinner = spinner;
+    gtk.gtk_widget_set_size_request(spinner, 32, 32);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), button);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), spinner);
+    adw.adw_status_page_set_child(self.welcome.?, actions);
+    self.updateWelcome();
+    return page;
+}
+
+fn buildTracksPage(self: *App) *gtk.Widget {
     const split = gtk.gtk_paned_new(gtk.ORIENTATION_HORIZONTAL);
-    gtk.gtk_paned_set_start_child(gtk.cast(gtk.Paned, split), browse.build(self));
-    gtk.gtk_paned_set_end_child(gtk.cast(gtk.Paned, split), scroller);
-    gtk.gtk_paned_set_position(gtk.cast(gtk.Paned, split), 300);
+    const panes = browse.build(self);
+    self.browse_panes = panes;
+    gtk.gtk_widget_add_css_class(panes, "browse-panes");
+    gtk.gtk_paned_set_start_child(gtk.cast(gtk.Paned, split), panes);
+    gtk.gtk_paned_set_end_child(gtk.cast(gtk.Paned, split), buildTrackList(self));
+    gtk.gtk_paned_set_position(gtk.cast(gtk.Paned, split), 280);
     gtk.gtk_paned_set_resize_start_child(gtk.cast(gtk.Paned, split), gtk.false_);
     gtk.gtk_paned_set_shrink_start_child(gtk.cast(gtk.Paned, split), gtk.false_);
     gtk.gtk_paned_set_shrink_end_child(gtk.cast(gtk.Paned, split), gtk.false_);
-    gtk.gtk_widget_set_vexpand(split, gtk.true_);
 
-    const layout = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), split);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), scan.build(self));
+    const no_results = adw.adw_status_page_new();
+    adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, no_results), "edit-find-symbolic");
+    adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, no_results), "No results");
+    adw.adw_status_page_set_description(gtk.cast(adw.StatusPage, no_results), "Try a different search.");
 
-    const status_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_set_margin_start(status_row, 12);
-    gtk.gtk_widget_set_margin_end(status_row, 12);
-    gtk.gtk_widget_set_margin_top(status_row, 4);
-    gtk.gtk_widget_set_margin_bottom(status_row, 4);
-    const status_label = gtk.gtk_label_new("");
-    self.status_label = gtk.cast(gtk.Label, status_label);
-    gtk.gtk_label_set_xalign(self.status_label.?, 0.0);
-    gtk.gtk_label_set_ellipsize(self.status_label.?, gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_hexpand(status_label, gtk.true_);
-    gtk.gtk_widget_add_css_class(status_label, "dim-label");
-    const count_label = gtk.gtk_label_new("");
-    self.count_label = gtk.cast(gtk.Label, count_label);
-    gtk.gtk_widget_add_css_class(count_label, "dim-label");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, status_row), status_label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, status_row), count_label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), status_row);
+    const body = gtk.gtk_stack_new();
+    self.tracks_body = gtk.cast(gtk.Stack, body);
+    gtk.gtk_stack_set_transition_type(self.tracks_body.?, gtk.STACK_TRANSITION_CROSSFADE);
+    _ = gtk.gtk_stack_add_named(self.tracks_body.?, split, "list");
+    _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
+    _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
 
-    gtk.gtk_box_append(
-        gtk.cast(gtk.Box, layout),
-        gtk.gtk_separator_new(gtk.ORIENTATION_HORIZONTAL),
-    );
-    gtk.gtk_box_append(gtk.cast(gtk.Box, layout), transport.build(self));
-    gtk.gtk_window_set_child(self.window.?, layout);
-    return window;
+    const header = adw.adw_header_bar_new();
+    const title = adw.adw_window_title_new("Tracks", "");
+    self.tracks_title = gtk.cast(adw.WindowTitle, title);
+    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), title);
+
+    const browse_toggle = gtk.gtk_toggle_button_new();
+    self.browse_toggle = browse_toggle;
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, browse_toggle), "view-dual-symbolic");
+    gtk.gtk_widget_set_tooltip_text(browse_toggle, "Show artists and albums");
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.true_);
+    _ = gtk.signalConnect(browse_toggle, "toggled", gtk.callback(browseToggled), self);
+    adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header), browse_toggle);
+
+    const search = gtk.gtk_search_entry_new();
+    self.search_entry = gtk.cast(gtk.Editable, search);
+    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search tracks");
+    gtk.gtk_widget_set_size_request(search, 260, -1);
+    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
+    _ = gtk.signalConnect(search, "activate", gtk.callback(searchActivated), self);
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), search);
+
+    const view = adw.adw_toolbar_view_new();
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    return view;
 }
 
-// ---------------------------------------------------------------- queue pane
+// ------------------------------------------------------------------- window
 
-fn queueShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const rows = self.queue_rows orelse return;
-    gtk.gtk_string_list_splice(
-        rows,
-        0,
-        gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, rows)),
-        null,
-    );
-    const status = self.runtime.playerStatus(self.player) catch {
-        gtk.gtk_string_list_append(rows, "The queue is empty");
-        return;
-    };
-    // The engine resolves the queue's rows. This used to search the loaded
-    // track model for each entry and print "Track 14732" when it missed --
-    // metadata resolution in the frontend, and a linear scan of every loaded
-    // row per queue entry, which on a fully scrolled library was over a
-    // million iterations with a ref/unref each.
-    var page = self.runtime.playerQueueTracks(
-        self.player,
-        self.allocator,
-        0,
-        app.page_size,
-    ) catch {
-        gtk.gtk_string_list_append(rows, "The queue is empty");
-        return;
-    };
-    defer page.deinit();
-    if (page.items.len == 0) {
-        gtk.gtk_string_list_append(rows, "The queue is empty");
-        return;
-    }
-    var buffer: [640]u8 = undefined;
-    for (page.items, 0..) |entry, index| {
-        const position: u32 = @intCast(index);
-        const marker: []const u8 = if (position == status.queue_index) "▶ " else "";
-        const line = if (entry.artist.len == 0)
-            strings.printZ(&buffer, "{s}{d}. {s}", .{
-                marker,
-                position + 1,
-                entry.title,
-            }) catch continue
-        else
-            strings.printZ(&buffer, "{s}{d}. {s} — {s}", .{
-                marker,
-                position + 1,
-                entry.title,
-                entry.artist,
-            }) catch continue;
-        gtk.gtk_string_list_append(rows, line.ptr);
-    }
+/// Below this width the sidebar folds away behind a back button, the browse
+/// panes give their room to the list, and the player bar tightens.
+const collapse_condition = "max-width: 760sp";
+
+fn setBoolean(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const u8, value: bool) void {
+    var boxed: gtk.GValue = .{};
+    _ = gtk.g_value_init(&boxed, gtk.G_TYPE_BOOLEAN);
+    gtk.g_value_set_boolean(&boxed, if (value) gtk.true_ else gtk.false_);
+    adw.adw_breakpoint_add_setter(breakpoint, object, property, &boxed);
+    gtk.g_value_unset(&boxed);
+}
+
+fn setInt(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const u8, value: c_int) void {
+    var boxed: gtk.GValue = .{};
+    _ = gtk.g_value_init(&boxed, gtk.G_TYPE_INT);
+    gtk.g_value_set_int(&boxed, value);
+    adw.adw_breakpoint_add_setter(breakpoint, object, property, &boxed);
+    gtk.g_value_unset(&boxed);
+}
+
+fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
+    const condition = adw.adw_breakpoint_condition_parse(collapse_condition) orelse return;
+    const breakpoint = adw.adw_breakpoint_new(condition);
+    setBoolean(breakpoint, split, "collapsed", true);
+    if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
+    if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
+    if (self.seek_scale) |scale| setInt(breakpoint, scale, "width-request", 120);
+    if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", 120);
+    adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
+}
+
+pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
+    const window = adw.adw_application_window_new(application);
+    self.window = gtk.cast(gtk.Window, window);
+
+    const keys = gtk.gtk_event_controller_key_new();
+    gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
+    _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(windowKeyPressed), self);
+    gtk.gtk_widget_add_controller(window, keys);
+    gtk.gtk_window_set_title(self.window.?, "Orca");
+    gtk.gtk_window_set_default_size(self.window.?, 1240, 800);
+
+    const pages = gtk.gtk_stack_new();
+    self.pages = gtk.cast(gtk.Stack, pages);
+    gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
+    _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
+
+    const content = adw.adw_navigation_page_new(pages, Page.tracks.title());
+    self.content_page = content;
+    const sidebar = adw.adw_navigation_page_new(buildSidebar(self), "Orca");
+
+    const split = adw.adw_navigation_split_view_new();
+    self.split_view = gtk.cast(adw.NavigationSplitView, split);
+    adw.adw_navigation_split_view_set_sidebar(self.split_view.?, sidebar);
+    adw.adw_navigation_split_view_set_content(self.split_view.?, content);
+    adw.adw_navigation_split_view_set_min_sidebar_width(self.split_view.?, 200);
+    adw.adw_navigation_split_view_set_max_sidebar_width(self.split_view.?, 240);
+
+    const root = adw.adw_toolbar_view_new();
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, root), split);
+    adw.adw_toolbar_view_add_bottom_bar(gtk.cast(adw.ToolbarView, root), transport.build(self));
+    adw.adw_toolbar_view_set_bottom_bar_style(gtk.cast(adw.ToolbarView, root), adw.TOOLBAR_RAISED_BORDER);
+
+    const overlay = adw.adw_toast_overlay_new();
+    self.toasts = gtk.cast(adw.ToastOverlay, overlay);
+    adw.adw_toast_overlay_set_child(self.toasts.?, root);
+    adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), overlay);
+    adaptWhenNarrow(self, window, split);
+    return window;
 }
