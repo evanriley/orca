@@ -5,6 +5,7 @@ pub const job = @import("job.zig");
 pub const object = @import("object.zig");
 pub const queue = @import("queue.zig");
 pub const runtime = @import("runtime.zig");
+pub const track_details = @import("track_details.zig");
 pub const track_source = @import("track_source.zig");
 pub const work = @import("work.zig");
 
@@ -23,6 +24,7 @@ test {
     _ = @import("object.zig");
     _ = @import("queue.zig");
     _ = @import("runtime.zig");
+    _ = @import("track_details.zig");
     _ = @import("track_source.zig");
     _ = @import("work.zig");
 }

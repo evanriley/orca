@@ -59,6 +59,10 @@ defer page.deinit();
   Player's ten-band `Equalizer` (or an `EqualizerPreset`) and stereo crossfeed;
   `playerSignalPath` returns a `SignalPath`: the source, ReplayGain, DSP, volume
   and output stream, and why the path is or is not bit-perfect.
+- `libraryTrackDetails` returns `TrackDetails` for one Track: codec, sample
+  rate, bit depth, channels, bitrate, duration, file size and path (or that
+  the file is missing), loudness when measured, and tags. The caller frees it
+  with `deinit`.
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
   back afterwards. An edit that moves a track to another album or position
   reprojects it under a new id.
