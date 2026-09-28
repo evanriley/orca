@@ -29,6 +29,7 @@
   skips one not yet started. `orca-cli covers` reads a page of covers this way.
 - **`ReleaseQuery.sort`** orders Releases by title, artist, year or recently
   added.
+- **`TrackSummary` carries `release_id` and `artist_id`.**
 - `core/root.zig` now lists its files in a test block, so their tests run.
 
 ### Tag write-back

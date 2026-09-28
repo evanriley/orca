@@ -55,6 +55,8 @@ defer page.deinit();
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
   (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`).
+- `TrackSummary` carries `release_id` and `artist_id`, so a host can link a
+  Track to its Release and Artist without a second query.
 - Cover art is read either on the caller's thread (`libraryTrackArtwork`,
   `libraryReleaseArtwork`) or off it: `libraryRequestArtwork` queues a lookup
   on the Library's artwork loader, at most 64 outstanding, and
