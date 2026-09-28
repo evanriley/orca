@@ -1945,7 +1945,7 @@ pub const FileRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, after_id);
         try statement.bindInt64(2, limit);
-        try bindAnalysisSelector(statement, selector);
+        try bindAnalysisSelector(statement, &selector);
 
         var items: std.ArrayList(AnalysisCandidate) = .empty;
         errdefer {
@@ -1978,7 +1978,7 @@ pub const FileRepository = struct {
         // The count asks the same question with no cursor and no limit, so ?1
         // and ?2 are simply unbound; SQLite reads an unbound parameter as
         // NULL, and neither appears in this statement.
-        try bindAnalysisSelector(statement, selector);
+        try bindAnalysisSelector(statement, &selector);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -3515,7 +3515,7 @@ pub const IdentificationProposalRepository = struct {
 
 /// Binds ?3 to ?6 of `unanalyzed_predicate`. The cursor and limit stay ?1 and
 /// ?2 so the selector can be appended to any paged query without renumbering.
-fn bindAnalysisSelector(statement: sqlite.Statement, selector: AnalysisSelector) !void {
+fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const AnalysisSelector) !void {
     try statement.bindInt64(3, selector.kind);
     try statement.bindText(4, selector.algorithm_id);
     try statement.bindInt64(5, selector.algorithm_version);
