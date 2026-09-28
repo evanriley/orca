@@ -57,3 +57,7 @@ FFmpeg's `LIST`/`INFO` tags. `audio/id3-tagged-reference.wav` is the same file
 with the `ID3 ` chunk of `audio/tagged-reference.aiff` appended as an `id3 `
 chunk, so it carries two different tags. `audio/covered-reference.aiff` carries
 the 217-byte PNG cover in its `ID3 ` chunk.
+
+`audio/covered-reference.opus` and `audio/covered-reference.ogg` are the tagged
+Ogg fixtures with the 217-byte PNG cover added as a `METADATA_BLOCK_PICTURE`
+comment, by `opustags --set-cover` and `vorbiscomment` respectively.

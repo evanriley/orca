@@ -17,6 +17,7 @@ const model = @import("model.zig");
 const id3v2 = @import("id3v2.zig");
 const mp4_tags = @import("mp4_tags.zig");
 const riff_tags = @import("riff_tags.zig");
+const ogg_comment = @import("ogg_comment.zig");
 const vorbis_comment = @import("vorbis_comment.zig");
 const format = @import("../storage/format.zig");
 const source = @import("../storage/source.zig");
@@ -48,10 +49,8 @@ pub fn read(
 /// read artwork from reports no cover rather than failing.
 pub fn supports(audio_format: format.AudioFormat) bool {
     return switch (audio_format) {
-        .flac, .mp3, .mp4, .wav, .aiff => true,
-        // Ogg's `METADATA_BLOCK_PICTURE` arrives as another branch of
-        // `readDetected`; no caller changes when it does.
-        .opus, .vorbis, .wavpack, .qoa => false,
+        .flac, .mp3, .mp4, .wav, .aiff, .opus, .vorbis => true,
+        .wavpack, .qoa => false,
     };
 }
 
@@ -67,6 +66,7 @@ pub fn readDetected(
         .mp3 => id3v2.readPicture(allocator, readable),
         .mp4 => mp4_tags.readPicture(allocator, readable),
         .wav, .aiff => riff_tags.readPicture(allocator, readable),
+        .opus, .vorbis => ogg_comment.readPicture(allocator, readable),
         else => null,
     };
 }
