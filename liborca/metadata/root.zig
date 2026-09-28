@@ -23,6 +23,7 @@ pub const Provenance = model.Provenance;
 pub const Field = model.Field;
 pub const Value = model.Value;
 pub const resolve = model.resolve;
+pub const resolveValue = model.resolveValue;
 
 test {
     _ = @import("artwork.zig");

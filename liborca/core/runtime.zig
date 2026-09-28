@@ -57,6 +57,31 @@ const ZoneObject = struct {
 
 /// Producer-side counters for the queue lane. Diagnostics, not transport
 /// state: an authoritative consumer reads snapshots.
+/// One field of `libraryEditTracks`: a value to set, or null to clear Orca's
+/// value so the file's own tag applies again.
+pub const TrackEdit = struct {
+    field: metadata.Field,
+    value: ?[]const u8,
+};
+
+pub const TrackEditPage = database.repository.FieldValuePage;
+
+const max_edit_bytes = 4096;
+
+fn validateEdit(field: metadata.Field, value: []const u8) !void {
+    if (value.len == 0 or value.len > max_edit_bytes or !std.unicode.utf8ValidateSlice(value))
+        return error.InvalidEditValue;
+    switch (field) {
+        .track_number, .disc_number => {
+            const number = std.fmt.parseUnsigned(u16, value, 10) catch return error.InvalidEditValue;
+            if (number == 0 or number > 9999) return error.InvalidEditValue;
+        },
+        .compilation => if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1"))
+            return error.InvalidEditValue,
+        .title, .artist, .album, .album_artist, .date => {},
+    }
+}
+
 /// One file's measurement from `libraryAnalyzeFile`.
 pub const FileAnalysis = analysis_service.Analysis;
 
@@ -1683,6 +1708,64 @@ pub const OrcaRuntime = struct {
         return (try self.libraryDatabase(library)).tracks.byId(self.allocator, track_id);
     }
 
+    /// Sets or clears Orca's own values for tracks, without touching their
+    /// files: a set value is stored as a locked user edit on every file each
+    /// track resolves to, so it outranks the files' tags and survives rescans,
+    /// and a cleared one lets the tags apply again. The affected files are
+    /// reprojected before this returns, on the caller's thread; a track may
+    /// get a new id if the edit moves it to another release.
+    pub fn libraryEditTracks(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+        edits: []const TrackEdit,
+    ) !void {
+        if (track_ids.len == 0 or track_ids.len > database.repository.max_page) return error.InvalidTrackSelection;
+        if (edits.len == 0) return error.NoTrackEdits;
+        for (edits) |edit| if (edit.value) |value| try validateEdit(edit.field, value);
+        const library_database = try self.libraryDatabase(library);
+
+        var files: std.ArrayList(i64) = .empty;
+        defer files.deinit(self.allocator);
+        for (track_ids) |track_id| {
+            const ids = try library_database.tracks.fileIds(self.allocator, track_id);
+            defer self.allocator.free(ids);
+            if (ids.len == 0) return error.TrackNotFound;
+            try files.appendSlice(self.allocator, ids);
+        }
+        for (files.items) |file_id| for (edits) |edit| {
+            if (edit.value) |value| {
+                try library_database.orca_metadata.upsert(.{
+                    .file_id = file_id,
+                    .field = edit.field,
+                    .value = value,
+                    .provenance = .user,
+                    .locked = true,
+                });
+            } else {
+                try library_database.orca_metadata.remove(file_id, edit.field);
+            }
+        };
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = library_database,
+        };
+        _ = try pass.run(.{ .files = files.items });
+    }
+
+    /// Orca's values for a track, read from its preferred file.
+    pub fn libraryTrackEdits(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_id: i64,
+    ) !TrackEditPage {
+        const library_database = try self.libraryDatabase(library);
+        const ids = try library_database.tracks.fileIds(self.allocator, track_id);
+        defer self.allocator.free(ids);
+        if (ids.len == 0) return error.TrackNotFound;
+        return library_database.orca_metadata.values(self.allocator, ids[0]);
+    }
+
     // ---------------------------------------------------------------- jobs
 
     /// Starts a filesystem scan on a registered `work.Registry` worker and
@@ -3199,4 +3282,62 @@ test "a Release takes its cover from its first track in listening order" {
         std.testing.io,
         fixtures.release_id + 1,
     )) == null);
+}
+
+test "a library edit regroups a track without touching its file, and clearing it reverts" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-runtime-edit?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = "/m/Artist/a.flac",
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Song",
+        .artist = "File Artist",
+        .album = "File Album",
+        .album_artist = "File Artist",
+        .track_number = 1,
+    } });
+    var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+    _ = try projection.run(.{ .files = &.{file_id} });
+
+    var before = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
+    const track_id = before.items[0].id;
+    before.deinit();
+
+    try std.testing.expectError(error.InvalidEditValue, runtime.libraryEditTracks(
+        library,
+        &.{track_id},
+        &.{.{ .field = .track_number, .value = "zero" }},
+    ));
+    try runtime.libraryEditTracks(library, &.{track_id}, &.{
+        .{ .field = .artist, .value = "Edited Artist" },
+        .{ .field = .album, .value = "Edited Album" },
+    });
+    var edited = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
+    try std.testing.expectEqual(@as(usize, 1), edited.items.len);
+    try std.testing.expectEqualStrings("Edited Artist", edited.items[0].artist);
+    try std.testing.expectEqualStrings("Edited Album", edited.items[0].album);
+    const edited_id = edited.items[0].id;
+    edited.deinit();
+
+    var values = try runtime.libraryTrackEdits(library, edited_id);
+    try std.testing.expectEqual(@as(usize, 2), values.items.len);
+    try std.testing.expect(values.items[0].locked);
+    values.deinit();
+
+    try runtime.libraryEditTracks(library, &.{edited_id}, &.{
+        .{ .field = .artist, .value = null },
+        .{ .field = .album, .value = null },
+    });
+    var reverted = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
+    defer reverted.deinit();
+    try std.testing.expectEqual(@as(usize, 1), reverted.items.len);
+    try std.testing.expectEqualStrings("File Artist", reverted.items[0].artist);
+    try std.testing.expectEqual(@as(u64, 1), try library_database.artists.count());
 }

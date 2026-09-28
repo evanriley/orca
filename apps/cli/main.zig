@@ -200,6 +200,8 @@ pub fn main(init: std.process.Init) !void {
         try listReleases(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "tracks")) {
         try listTracks(allocator, init.io, stdout, args[2], args[3..]);
+    } else if (args.len >= 4 and std.mem.eql(u8, args[1], "edit")) {
+        try editTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
         try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
@@ -264,7 +266,16 @@ pub fn main(init: std.process.Init) !void {
             \\                 | artists DATABASE [OPTIONS]
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
-            \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]]
+            \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+            \\                 | edit DATABASE IDS [EDITS]]
+            \\
+            \\edit sets Orca's own values for a comma-separated list of Track ids;
+            \\the files are not written. With no edits it lists the values held.
+            \\  --title= --artist= --album= --album-artist= --date=
+            \\  --track=N --disc=N --compilation=0|1
+            \\  --clear=FIELD      drop Orca's value so the file's tag applies again
+            \\                     (title|artist|album|album_artist|track_number|
+            \\                      disc_number|date|compilation)
             \\
             \\Browsing. artists lists Artists in sort order; releases lists Releases,
             \\optionally one Artist's; tracks lists Tracks in a named order, optionally
@@ -406,15 +417,8 @@ fn playTracks(
     var options: PlayTracksOptions = .{};
     for (option_arguments) |argument| try parseOption(&options, argument);
 
-    var ids: std.ArrayList(i64) = .empty;
+    var ids = try parseTrackIds(allocator, id_list);
     defer ids.deinit(allocator);
-    var walk = std.mem.splitScalar(u8, id_list, ',');
-    while (walk.next()) |item| {
-        const trimmed = std.mem.trim(u8, item, " ");
-        if (trimmed.len == 0) continue;
-        try ids.append(allocator, try std.fmt.parseInt(i64, trimmed, 10));
-    }
-    if (ids.items.len == 0) return error.NoTrackIds;
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
     var runtime = liborca.Runtime.init(allocator);
@@ -620,6 +624,80 @@ fn openBrowseLibrary(
 /// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
 /// be produced here cannot be produced anywhere. `--out` writes the exact bytes
 /// so they can be compared against what an independent tool extracts.
+fn parseTrackIds(allocator: std.mem.Allocator, id_list: []const u8) !std.ArrayList(i64) {
+    var ids: std.ArrayList(i64) = .empty;
+    errdefer ids.deinit(allocator);
+    var walk = std.mem.splitScalar(u8, id_list, ',');
+    while (walk.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " ");
+        if (trimmed.len == 0) continue;
+        try ids.append(allocator, try std.fmt.parseInt(i64, trimmed, 10));
+    }
+    if (ids.items.len == 0) return error.NoTrackIds;
+    return ids;
+}
+
+const edit_options = [_]struct { flag: []const u8, field: liborca.MetadataField }{
+    .{ .flag = "--title", .field = .title },
+    .{ .flag = "--artist", .field = .artist },
+    .{ .flag = "--album", .field = .album },
+    .{ .flag = "--album-artist", .field = .album_artist },
+    .{ .flag = "--track", .field = .track_number },
+    .{ .flag = "--disc", .field = .disc_number },
+    .{ .flag = "--date", .field = .date },
+    .{ .flag = "--compilation", .field = .compilation },
+};
+
+/// Library-only edits: Orca's own values, never written to the files.
+fn editTracks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_list: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var ids = try parseTrackIds(allocator, id_list);
+    defer ids.deinit(allocator);
+    var edits: std.ArrayList(liborca.TrackEdit) = .empty;
+    defer edits.deinit(allocator);
+    for (option_arguments) |argument| {
+        const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
+        const name = argument[0..split];
+        const value = argument[split + 1 ..];
+        if (std.mem.eql(u8, name, "--clear")) {
+            const field = std.meta.stringToEnum(liborca.MetadataField, value) orelse
+                return error.UnknownField;
+            try edits.append(allocator, .{ .field = field, .value = null });
+            continue;
+        }
+        for (edit_options) |option| {
+            if (std.mem.eql(u8, name, option.flag)) {
+                try edits.append(allocator, .{ .field = option.field, .value = value });
+                break;
+            }
+        } else return error.UnknownOption;
+    }
+
+    const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(io, database_path);
+    if (edits.items.len > 0) {
+        try runtime.libraryEditTracks(library, ids.items, edits.items);
+        try stdout.print("edited {d} tracks\n", .{ids.items.len});
+        return;
+    }
+    for (ids.items) |track_id| {
+        var page = try runtime.libraryTrackEdits(library, track_id);
+        defer page.deinit();
+        for (page.items) |value| try stdout.print(
+            "{d}\t{t}\t{s}\t{t}{s}\n",
+            .{ track_id, value.field, value.text, value.provenance, if (value.locked) "\tlocked" else "" },
+        );
+    }
+}
+
 fn showArtwork(
     allocator: std.mem.Allocator,
     io: std.Io,

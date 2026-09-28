@@ -112,6 +112,38 @@ const Entry = struct {
     title_from_filename: bool = false,
 };
 
+const ExtraOverrides = struct {
+    track_number: ?metadata.Value = null,
+    album_artist: ?metadata.Value = null,
+    disc_number: ?metadata.Value = null,
+    date: ?metadata.Value = null,
+    compilation: ?metadata.Value = null,
+};
+
+fn resolvedText(observed: ?[]const u8, orca: ?metadata.Value, policy: metadata.ResolutionPolicy) ?[]const u8 {
+    const observed_value: ?metadata.Value = if (observed) |text|
+        .{ .text = text, .provenance = .observed_file }
+    else
+        null;
+    const chosen = metadata.resolveValue(observed_value, orca, policy) orelse return null;
+    return chosen.text;
+}
+
+fn resolvedNumber(observed: ?i64, orca: ?metadata.Value, policy: metadata.ResolutionPolicy) ?i64 {
+    var buffer: [24]u8 = undefined;
+    const observed_text = if (observed) |number|
+        std.fmt.bufPrint(&buffer, "{d}", .{number}) catch unreachable
+    else
+        null;
+    const text = resolvedText(observed_text, orca, policy) orelse return null;
+    return std.fmt.parseInt(i64, text, 10) catch observed;
+}
+
+fn boolText(value: ?bool) ?[]const u8 {
+    const flag = value orelse return null;
+    return if (flag) "1" else "0";
+}
+
 /// A resolved Track: one position on a Release, and the files that encode it.
 const Position = struct {
     disc: i64,
@@ -243,6 +275,17 @@ pub const Projection = struct {
         }
     }
 
+    /// Orca values for the fields `metadata.resolve` does not cover, resolved
+    /// under the same rule: a locked value wins, the policy decides the rest.
+    fn applyExtraOverrides(self: *const Projection, entry: *Entry, extra: ExtraOverrides) void {
+        entry.album_artist = resolvedText(entry.album_artist, extra.album_artist, self.policy);
+        entry.date = resolvedText(entry.date, extra.date, self.policy);
+        entry.track_number = resolvedNumber(entry.track_number, extra.track_number, self.policy);
+        entry.disc_number = resolvedNumber(entry.disc_number, extra.disc_number, self.policy);
+        if (resolvedText(boolText(entry.compilation), extra.compilation, self.policy)) |text|
+            entry.compilation = std.mem.eql(u8, text, "1");
+    }
+
     /// The folders the scope touches, deduplicated and ordered.
     ///
     /// A changed file drags its whole folder in, because its siblings are what
@@ -370,7 +413,7 @@ pub const Projection = struct {
                 .album = observedValue(try dupeNullable(allocator, statement, 10)),
             };
             var orca: metadata.OrcaMetadata = .{};
-            var number_override: ?i64 = null;
+            var extra: ExtraOverrides = .{};
             try overrides.bindInt64(1, file_id);
             while (try overrides.step() == .row) {
                 const field = std.enums.fromInt(
@@ -389,8 +432,11 @@ pub const Projection = struct {
                     .title => orca.title = value,
                     .artist => orca.artist = value,
                     .album => orca.album = value,
-                    .track_number => number_override =
-                        std.fmt.parseInt(i64, value.text, 10) catch null,
+                    .track_number => extra.track_number = value,
+                    .album_artist => extra.album_artist = value,
+                    .disc_number => extra.disc_number = value,
+                    .date => extra.date = value,
+                    .compilation => extra.compilation = value,
                 }
             }
             try overrides.reset();
@@ -423,7 +469,7 @@ pub const Projection = struct {
                 .musicbrainz_release_id = try dupeNullable(allocator, statement, 16),
                 .musicbrainz_recording_id = try dupeNullable(allocator, statement, 17),
             };
-            if (number_override) |number| entry.track_number = number;
+            self.applyExtraOverrides(&entry, extra);
             // A blank row helps nobody find their music: 42 files in the
             // reference library carry no title and the filename carries it.
             if (entry.title.len == 0) {
@@ -2035,4 +2081,35 @@ test "a release that still has other tracks survives one of them moving away" {
     try testing.expectEqual(@as(u64, 0), result.artists_pruned);
     try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT count(*) FROM tracks;"));
     try testing.expectEqual(@as(i64, 3), try scalar(&library, "SELECT max(track_number) FROM tracks;"));
+}
+
+test "locked album artist, disc, date and compilation values reach the projected release" {
+    var library = try openTestLibrary("file:orca-projection-extra-overrides?mode=memory&cache=shared");
+    defer library.close();
+    const file_id = try observe(&library, "/m/Artist/a.flac", .flac, .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+        .date = "1999",
+    });
+    inline for (.{
+        .{ metadata.Field.album_artist, "Edited Artist" },
+        .{ metadata.Field.disc_number, "2" },
+        .{ metadata.Field.date, "2024" },
+    }) |edit| try library.orca_metadata.upsert(.{
+        .file_id = file_id,
+        .field = edit[0],
+        .value = edit[1],
+        .provenance = .user,
+        .locked = true,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{file_id} });
+    var page = try trackTitles(&library);
+    defer page.deinit();
+    try testing.expectEqualStrings("Edited Artist", page.items[0].album_artist);
+    try testing.expectEqual(@as(?i64, 2), page.items[0].disc_number);
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases WHERE release_date = '2024';"));
 }

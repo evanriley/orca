@@ -370,7 +370,10 @@ fn applyChanges(tag: *id3v1.Tag, changes: []const mutation.Change) !void {
             .title => tag.title,
             .artist => tag.artist,
             .album => tag.album,
+            .date => tag.year,
             .track_number => unreachable,
+            // ID3v1 has no slot for these.
+            .album_artist, .disc_number, .compilation => return error.UnsupportedTagField,
         };
         if (change.before) |before| {
             if (current == null or !std.mem.eql(u8, before, current.?))
@@ -381,7 +384,8 @@ fn applyChanges(tag: *id3v1.Tag, changes: []const mutation.Change) !void {
             .title => tag.title = after,
             .artist => tag.artist = after,
             .album => tag.album = after,
-            .track_number => unreachable,
+            .date => tag.year = after,
+            .track_number, .album_artist, .disc_number, .compilation => unreachable,
         }
     }
 }

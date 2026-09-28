@@ -413,6 +413,24 @@ pub const OrcaMetadataInput = struct {
     locked: bool = false,
 };
 
+pub const FieldValue = struct {
+    field: metadata.Field,
+    text: []u8,
+    provenance: metadata.Provenance,
+    locked: bool,
+};
+
+pub const FieldValuePage = struct {
+    allocator: std.mem.Allocator,
+    items: []FieldValue,
+
+    pub fn deinit(self: *FieldValuePage) void {
+        for (self.items) |item| self.allocator.free(item.text);
+        self.allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
 pub const StoredMetadataValue = struct {
     text: []u8,
     provenance: metadata.Provenance,
@@ -837,6 +855,25 @@ pub const TrackRepository = struct {
         try statement.bindOptionalInt64(4, query.release_id);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    /// The files a Track resolves to: its preferred file and every other
+    /// encoding of its recording. Bounded by `max_page`.
+    pub fn fileIds(self: *const TrackRepository, allocator: std.mem.Allocator, track_id: i64) ![]i64 {
+        var statement = try self.db.prepare(
+            \\SELECT preferred_file_id FROM tracks WHERE id=?1 AND preferred_file_id IS NOT NULL
+            \\UNION
+            \\SELECT f.id FROM files f JOIN tracks t ON f.recording_id = t.recording_id
+            \\WHERE t.id=?1
+            \\LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        try statement.bindInt64(2, max_page);
+        var ids: std.ArrayList(i64) = .empty;
+        errdefer ids.deinit(allocator);
+        while (try statement.step() == .row) try ids.append(allocator, statement.columnInt64(0));
+        return ids.toOwnedSlice(allocator);
     }
 
     /// One Track by id, for the "what is playing right now" question. Bounded
@@ -2770,6 +2807,52 @@ pub const OrcaMetadataRepository = struct {
         try statement.bindInt64(5, @intFromBool(input.locked));
         try statement.bindInt64(6, @intFromEnum(metadata.Provenance.user));
         if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Drops Orca's value for one field, so the file's own tag applies again.
+    pub fn remove(self: *OrcaMetadataRepository, file_id: i64, field: metadata.Field) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            "DELETE FROM orca_metadata_values WHERE file_id=?1 AND field=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, @intFromEnum(field));
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Every field Orca holds a value for on one file, in field order.
+    pub fn values(
+        self: *const OrcaMetadataRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !FieldValuePage {
+        var statement = try self.db.prepare(
+            \\SELECT field, value, provenance, locked FROM orca_metadata_values
+            \\WHERE file_id=?1 ORDER BY field;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        var items: std.ArrayList(FieldValue) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.text);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const field = std.enums.fromInt(metadata.Field, statement.columnInt64(0)) orelse continue;
+            const provenance = std.enums.fromInt(metadata.Provenance, statement.columnInt64(2)) orelse
+                return error.InvalidStoredProvenance;
+            const text = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(text);
+            try items.append(allocator, .{
+                .field = field,
+                .text = text,
+                .provenance = provenance,
+                .locked = statement.columnInt64(3) != 0,
+            });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     }
 
     pub fn get(

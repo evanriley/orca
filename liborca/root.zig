@@ -62,6 +62,10 @@ pub const LibraryRootPage = database.repository.LibraryRootPage;
 pub const RootBinding = database.RootBinding;
 pub const EmbeddedImage = internal.metadata.EmbeddedImage;
 pub const FileAnalysis = runtime.FileAnalysis;
+pub const TrackEdit = runtime.TrackEdit;
+pub const TrackEditPage = runtime.TrackEditPage;
+pub const MetadataField = internal.metadata.Field;
+pub const Provenance = internal.metadata.Provenance;
 
 // Playback.
 pub const PlayerStatus = runtime.PlayerStatus;
