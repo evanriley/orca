@@ -2784,11 +2784,10 @@ test "a queue of Library tracks plays through the real resolve-open-decode path"
     );
 
     var samples: [512]f32 = @splat(0);
-    var waited: usize = 0;
-    while (waited < 20_000) : (waited += 1) {
+    var started_deadline: TestDeadline = .init(5_000);
+    while (started_deadline.tick()) {
         if (backend.liveStream()) |stream| stream.pump(&samples, 256);
-        if ((try runtime.playerQueueStats(player)).entries_started > 0) break;
-        std.Thread.yield() catch {};
+        if ((try runtime.playerQueueSnapshot(player)).decode_position > 0) break;
     }
     // The engine resolved the *second* entry on its own, opened it, and primed
     // it behind the first: this is auto-advance through the database.
@@ -2798,11 +2797,10 @@ test "a queue of Library tracks plays through the real resolve-open-decode path"
     try std.testing.expectEqual(@as(u32, 1), (try runtime.playerQueueSnapshot(player)).decode_position);
 
     // And now-playing is the audible entry, resolvable back to a Track id.
-    waited = 0;
-    while (waited < 20_000) : (waited += 1) {
+    var audible_deadline: TestDeadline = .init(5_000);
+    while (audible_deadline.tick()) {
         if (backend.liveStream()) |stream| stream.pump(&samples, 256);
         if ((try runtime.playerQueueSnapshot(player)).cursor == 1) break;
-        std.Thread.yield() catch {};
     }
     const now_playing = (try runtime.playerNowPlaying(player)).?;
     try std.testing.expectEqual(fixtures.ids[1], now_playing.track_id);
