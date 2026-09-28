@@ -67,6 +67,14 @@ pub const TrackEditPage = runtime.TrackEditPage;
 pub const MetadataField = internal.metadata.Field;
 pub const Provenance = internal.metadata.Provenance;
 
+// Tag write-back: a sealed plan, previewed, then approved by its digest.
+pub const TagWritePlan = runtime.TagWritePlan;
+pub const TagWriteFile = runtime.TagWriteFile;
+pub const TagWriteChange = runtime.TagWriteChange;
+pub const TagWriteSkip = runtime.TagWriteSkip;
+pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
+pub const TagWriteDigest = internal.metadata.mutation.Digest;
+
 // Playback.
 pub const PlayerStatus = runtime.PlayerStatus;
 pub const PlayerSnapshot = audio.player.Snapshot;

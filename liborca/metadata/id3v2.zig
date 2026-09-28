@@ -1,6 +1,7 @@
 const std = @import("std");
 const id3v1 = @import("id3v1.zig");
 const model = @import("model.zig");
+const mutation = @import("mutation.zig");
 const source = @import("../storage/source.zig");
 
 /// An ID3v2 size field is syncsafe and therefore cannot exceed 256 MiB, but no
@@ -585,6 +586,293 @@ fn readExact(readable: source.ReadableSource, offset: u64, buffer: []u8) !usize 
     return filled;
 }
 
+// ------------------------------------------------------------------- writing
+
+/// Bytes of padding a rewritten tag carries, so another tagger can edit it in
+/// place.
+const write_padding: usize = 1024;
+
+pub const WriteError = error{
+    MetadataPreconditionChanged,
+    UnsupportedId3Layout,
+    InvalidTagValue,
+    Id3v2TagTooLarge,
+};
+
+/// A replacement for an MPEG or ADTS stream's tags: the new leading tag, the
+/// span of the original that is audio, and the trailer to end with.
+pub const Rewrite = struct {
+    allocator: std.mem.Allocator,
+    tag: []u8,
+    audio_start: u64,
+    audio_end: u64,
+    /// The ID3v1 trailer to write after the audio: the original one updated
+    /// with the fields it can hold, or null when the file had none.
+    trailer: ?[128]u8,
+
+    pub fn deinit(self: Rewrite) void {
+        self.allocator.free(self.tag);
+    }
+};
+
+/// Plans a tag rewrite of the stream in `readable` for `changes`.
+///
+/// Each change's `before` must equal what the file currently says, read the
+/// way the scanner reads it: the ID3v2 tag when it has values, the ID3v1
+/// trailer otherwise. The tag keeps its version -- 2.3 stays 2.3, 2.4 stays
+/// 2.4 -- and a stream with none gets 2.4. Only the frames for the changed
+/// fields are replaced; every other frame is copied byte for byte.
+pub fn rewrite(
+    allocator: std.mem.Allocator,
+    readable: source.ReadableSource,
+    changes: []const mutation.Change,
+) !Rewrite {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const loaded = try loadTag(scratch, readable);
+    var header: [10]u8 = undefined;
+    const has_header = try readExact(readable, 0, &header) == header.len and
+        std.mem.eql(u8, header[0..3], "ID3");
+    if (has_header and loaded == null) return error.UnsupportedId3Layout;
+    if (loaded) |tag| {
+        // Frame sizes under tag-level unsynchronization in 2.4 describe the
+        // unsynchronized bytes, so its frames cannot be copied verbatim.
+        if (tag.major == 4 and header[5] & 0x80 != 0) return error.UnsupportedId3Layout;
+    }
+    const major: u8 = if (loaded) |tag| tag.major else 4;
+
+    const size = readable.size();
+    var trailer_bytes: [128]u8 = undefined;
+    const trailer = if (size >= 128 and try readExact(readable, size - 128, &trailer_bytes) == 128)
+        id3v1.parse(&trailer_bytes)
+    else
+        null;
+
+    const current = try currentTags(scratch, loaded, trailer);
+    for (changes) |change| {
+        if (change.before) |expected| {
+            const value = try currentValue(scratch, current, change.field) orelse
+                return error.MetadataPreconditionChanged;
+            if (!std.mem.eql(u8, expected, value)) return error.MetadataPreconditionChanged;
+        }
+        if (change.after) |value| {
+            if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidTagValue;
+        }
+    }
+
+    var body: std.ArrayList(u8) = .empty;
+    if (loaded) |tag| try copyUnchangedFrames(scratch, &body, tag, changes);
+    for (changes) |change| {
+        const value = change.after orelse continue;
+        try appendChangedFrames(scratch, &body, major, change.field, value, current);
+    }
+    try body.appendNTimes(scratch, 0, write_padding);
+    if (body.items.len >= 1 << 28) return error.Id3v2TagTooLarge;
+
+    const tag = try allocator.alloc(u8, 10 + body.items.len);
+    errdefer allocator.free(tag);
+    @memcpy(tag[0..3], "ID3");
+    tag[3] = major;
+    tag[4] = 0;
+    tag[5] = 0;
+    writeSyncsafe(tag[6..10], @intCast(body.items.len));
+    @memcpy(tag[10..], body.items);
+
+    return .{
+        .allocator = allocator,
+        .tag = tag,
+        .audio_start = try prefixLength(readable),
+        .audio_end = if (trailer != null) size - 128 else size,
+        .trailer = if (trailer) |legacy| updatedTrailer(legacy, trailer_bytes, changes) else null,
+    };
+}
+
+fn currentTags(allocator: std.mem.Allocator, loaded: ?LoadedTag, trailer: ?id3v1.Tag) !model.ObservedTags {
+    if (loaded) |tag| {
+        const tags = try parseFrames(allocator, tag.span, tag.major);
+        if (!tags.isEmpty()) return tags;
+    }
+    const legacy = trailer orelse return .{};
+    return .{
+        .title = if (legacy.title.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.title) else null,
+        .artist = if (legacy.artist.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.artist) else null,
+        .album = if (legacy.album.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.album) else null,
+        .date = if (legacy.year.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.year) else null,
+        .track_number = if (legacy.track_number) |number| number else null,
+    };
+}
+
+/// A field's current value, as text in the form a `Change.before` states it.
+fn currentValue(allocator: std.mem.Allocator, tags: model.ObservedTags, field: mutation.Field) !?[]const u8 {
+    return switch (field) {
+        .title => tags.title,
+        .artist => tags.artist,
+        .album => tags.album,
+        .album_artist => tags.album_artist,
+        .date => tags.date,
+        .track_number => if (tags.track_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
+        .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
+        .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
+    };
+}
+
+/// The frames that carry `field` in `major`. v2.3 splits a date into a year
+/// frame and a day-month frame, and both are replaced together.
+fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
+    return switch (field) {
+        .title => &.{"TIT2"},
+        .artist => &.{"TPE1"},
+        .album => &.{"TALB"},
+        .album_artist => &.{"TPE2"},
+        .track_number => &.{"TRCK"},
+        .disc_number => &.{"TPOS"},
+        .compilation => &.{"TCMP"},
+        .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT", "TIME", "TRDA" },
+    };
+}
+
+fn replaced(identifier: *const [4]u8, major: u8, changes: []const mutation.Change) bool {
+    for (changes) |change| {
+        for (fieldFrames(change.field, major)) |frame| {
+            if (std.mem.eql(u8, identifier, frame)) return true;
+        }
+    }
+    return false;
+}
+
+/// Every frame no change replaces, header and payload as they were.
+fn copyUnchangedFrames(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    tag: LoadedTag,
+    changes: []const mutation.Change,
+) !void {
+    var position: usize = 0;
+    while (position + 10 <= tag.span.len) {
+        const identifier = tag.span[position..][0..4];
+        if (identifier[0] == 0 or !isFrameIdentifier(identifier)) break;
+        const size_bytes = tag.span[position + 4 ..][0..4].*;
+        const declared: usize = if (tag.major >= 4)
+            try syncsafe(size_bytes)
+        else
+            std.mem.readInt(u32, &size_bytes, .big);
+        if (declared > tag.span.len - position - 10) return error.TruncatedId3v2Tag;
+        const frame = tag.span[position .. position + 10 + declared];
+        position += frame.len;
+        if (replaced(identifier, tag.major, changes)) continue;
+        try body.appendSlice(allocator, frame);
+    }
+}
+
+fn appendChangedFrames(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    field: mutation.Field,
+    value: []const u8,
+    current: model.ObservedTags,
+) !void {
+    switch (field) {
+        .track_number => try appendTextFrame(allocator, body, major, "TRCK", try pair(allocator, value, current.track_total)),
+        .disc_number => try appendTextFrame(allocator, body, major, "TPOS", try pair(allocator, value, current.disc_total)),
+        .date => if (major >= 4) {
+            try appendTextFrame(allocator, body, major, "TDRC", value);
+        } else {
+            // v2.3 holds a year, and optionally a DDMM day and month.
+            if (value.len < 4 or !isAllDigits(value[0..4])) return error.InvalidTagValue;
+            try appendTextFrame(allocator, body, major, "TYER", value[0..4]);
+            if (value.len >= 10 and value[4] == '-' and value[7] == '-') {
+                const day_month = [4]u8{ value[8], value[9], value[5], value[6] };
+                if (isAllDigits(&day_month)) try appendTextFrame(allocator, body, major, "TDAT", &day_month);
+            }
+        },
+        else => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
+    }
+}
+
+/// `n/total` when the file stated a total, so editing a track number does not
+/// drop the album's track count.
+fn pair(allocator: std.mem.Allocator, value: []const u8, total: ?u32) ![]const u8 {
+    const count = total orelse return value;
+    return std.fmt.allocPrint(allocator, "{s}/{d}", .{ value, count });
+}
+
+/// A text frame: UTF-8 in 2.4, UTF-16 with a byte-order mark in 2.3, which has
+/// no UTF-8 encoding.
+fn appendTextFrame(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    identifier: *const [4]u8,
+    value: []const u8,
+) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    if (major >= 4) {
+        try payload.append(allocator, 3);
+        try payload.appendSlice(allocator, value);
+    } else {
+        try payload.appendSlice(allocator, &.{ 1, 0xff, 0xfe });
+        var units = (try std.unicode.Utf8View.init(value)).iterator();
+        while (units.nextCodepoint()) |codepoint| {
+            var encoded: [2]u16 = undefined;
+            const count: usize = if (codepoint < 0x10000) blk: {
+                encoded[0] = @intCast(codepoint);
+                break :blk 1;
+            } else blk: {
+                const offset = codepoint - 0x10000;
+                encoded[0] = @intCast(0xd800 + (offset >> 10));
+                encoded[1] = @intCast(0xdc00 + (offset & 0x3ff));
+                break :blk 2;
+            };
+            for (encoded[0..count]) |unit| {
+                var little: [2]u8 = undefined;
+                std.mem.writeInt(u16, &little, unit, .little);
+                try payload.appendSlice(allocator, &little);
+            }
+        }
+    }
+    try body.appendSlice(allocator, identifier);
+    var size: [4]u8 = undefined;
+    if (major >= 4)
+        writeSyncsafe(&size, @intCast(payload.items.len))
+    else
+        std.mem.writeInt(u32, &size, @intCast(payload.items.len), .big);
+    try body.appendSlice(allocator, &size);
+    try body.appendSlice(allocator, &.{ 0, 0 });
+    try body.appendSlice(allocator, payload.items);
+}
+
+fn writeSyncsafe(destination: *[4]u8, value: u32) void {
+    destination[0] = @intCast((value >> 21) & 0x7f);
+    destination[1] = @intCast((value >> 14) & 0x7f);
+    destination[2] = @intCast((value >> 7) & 0x7f);
+    destination[3] = @intCast(value & 0x7f);
+}
+
+/// The ID3v1 trailer with the changes it can hold applied. When a new value
+/// does not fit ID3v1 at all, the original trailer is kept: readers prefer the
+/// ID3v2 tag, and a half-updated trailer would be worse than a stale one.
+fn updatedTrailer(legacy: id3v1.Tag, original: [128]u8, changes: []const mutation.Change) [128]u8 {
+    var tag = legacy;
+    for (changes) |change| {
+        const value = change.after orelse "";
+        switch (change.field) {
+            .title => tag.title = value,
+            .artist => tag.artist = value,
+            .album => tag.album = value,
+            .date => tag.year = if (value.len >= 4) value[0..4] else value,
+            .track_number => tag.track_number = if (change.after) |text|
+                std.fmt.parseUnsigned(u8, text, 10) catch return original
+            else
+                null,
+            .album_artist, .disc_number, .compilation => {},
+        }
+    }
+    return id3v1.encode(tag) catch original;
+}
+
 fn expectTags(allocator: std.mem.Allocator, bytes: []const u8) !?model.ObservedTags {
     var memory = source.MemorySource{ .bytes = bytes };
     return read(allocator, memory.readable());
@@ -836,4 +1124,125 @@ test "tagged MP3 fixture reads its real ID3v2 frames" {
     try std.testing.expectEqualStrings("Fixtures", tags.album.?);
     try std.testing.expectEqual(@as(?u32, 1), tags.track_number);
     try std.testing.expect(try prefixLength(file.readable()) > 10);
+}
+
+/// Applies a planned rewrite to `original` in memory, as `stageMpeg` does on
+/// disk, so the result can be read back.
+fn applyRewrite(allocator: std.mem.Allocator, original: []const u8, changes: []const mutation.Change) ![]u8 {
+    var memory = source.MemorySource{ .bytes = original };
+    const planned = try rewrite(allocator, memory.readable(), changes);
+    defer planned.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, planned.tag);
+    try out.appendSlice(allocator, original[@intCast(planned.audio_start)..@intCast(planned.audio_end)]);
+    if (planned.trailer) |trailer| try out.appendSlice(allocator, &trailer);
+    return out.toOwnedSlice(allocator);
+}
+
+fn readFixtureBytes(path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(1 << 20));
+}
+
+test "a rewritten ID3v2.4 tag carries the edit, keeps the cover and every other frame, and leaves the audio alone" {
+    const original = try readFixtureBytes("fixtures/audio/covered-reference.mp3");
+    defer std.testing.allocator.free(original);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const before = (try expectTags(arena.allocator(), original)).?;
+
+    const written = try applyRewrite(std.testing.allocator, original, &.{
+        .{ .field = .title, .before = before.title, .after = "Rewritten Title" },
+        .{ .field = .album_artist, .before = before.album_artist, .after = "Rewritten Artist" },
+    });
+    defer std.testing.allocator.free(written);
+    try std.testing.expectEqual(@as(u8, 4), written[3]);
+    const after = (try expectTags(arena.allocator(), written)).?;
+    try std.testing.expectEqualStrings("Rewritten Title", after.title.?);
+    try std.testing.expectEqualStrings("Rewritten Artist", after.album_artist.?);
+    try std.testing.expectEqualDeep(before.artist, after.artist);
+    try std.testing.expectEqualDeep(before.album, after.album);
+    try std.testing.expectEqual(before.artwork.?.byte_size, after.artwork.?.byte_size);
+
+    var original_memory = source.MemorySource{ .bytes = original };
+    var written_memory = source.MemorySource{ .bytes = written };
+    const original_audio = original[@intCast(try prefixLength(original_memory.readable()))..];
+    const written_audio = written[@intCast(try prefixLength(written_memory.readable()))..];
+    try std.testing.expectEqualSlices(u8, original_audio, written_audio);
+}
+
+test "an ID3v2.3 tag stays 2.3, with non-Latin text written as UTF-16" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TIT2", 3, "\x00Old"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TRCK", 3, "\x002/9"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TYER", 3, "\x001999"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TDAT", 3, "\x000101"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "COMM", 3, "\x00engkept"));
+    const tag = try buildTag(allocator, 3, 0, frames.items);
+    const original = try std.mem.concat(allocator, u8, &.{ tag, "\xff\xfb\x90\x64audio" });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .title, .before = "Old", .after = "Ωμέγα" },
+        .{ .field = .track_number, .before = "2", .after = "5" },
+        .{ .field = .date, .before = "1999-01-01", .after = "2024-03-15" },
+    });
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings("Ωμέγα", after.title.?);
+    try std.testing.expectEqual(@as(?u32, 5), after.track_number);
+    try std.testing.expectEqual(@as(?u32, 9), after.track_total);
+    try std.testing.expectEqualStrings("2024-03-15", after.date.?);
+    try std.testing.expect(std.mem.indexOf(u8, written, "COMM") != null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+}
+
+test "a stream with no ID3v2 tag gets a 2.4 one, and its ID3v1 trailer is updated too" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try id3v1.encode(.{
+        .title = "Legacy",
+        .artist = "Artist",
+        .album = "Album",
+        .year = "2001",
+        .comment = "",
+        .track_number = 1,
+        .genre = 13,
+    });
+    const original = try std.mem.concat(allocator, u8, &.{ "\xff\xfb\x90\x64audio", &trailer });
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .title, .before = "Legacy", .after = "Modern" },
+    });
+    try std.testing.expectEqual(@as(u8, 4), written[3]);
+    try std.testing.expectEqualStrings("Modern", (try expectTags(allocator, written)).?.title.?);
+    try std.testing.expectEqualStrings("Modern", id3v1.parse(written[written.len - 128 ..][0..128]).?.title);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\xff\xfb\x90\x64audio") != null);
+}
+
+test "a rewrite refuses a change whose before no longer matches the file" {
+    const original = try readFixtureBytes("fixtures/audio/tagged-reference.mp3");
+    defer std.testing.allocator.free(original);
+    var memory = source.MemorySource{ .bytes = original };
+    try std.testing.expectError(error.MetadataPreconditionChanged, rewrite(
+        std.testing.allocator,
+        memory.readable(),
+        &.{.{ .field = .title, .before = "Not what the file says", .after = "New" }},
+    ));
+}
+
+test "clearing a field removes its frame" {
+    const original = try readFixtureBytes("fixtures/audio/tagged-reference.mp3");
+    defer std.testing.allocator.free(original);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const before = (try expectTags(arena.allocator(), original)).?;
+    const written = try applyRewrite(arena.allocator(), original, &.{
+        .{ .field = .album, .before = before.album, .after = null },
+    });
+    const after = (try expectTags(arena.allocator(), written)).?;
+    try std.testing.expect(after.album == null);
+    try std.testing.expectEqualStrings(before.title.?, after.title.?);
 }

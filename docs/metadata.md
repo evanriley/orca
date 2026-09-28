@@ -145,3 +145,41 @@ toward the original state. `rolled_back` is only recorded when the original file
 is provably back in place or when nothing was ever staged; otherwise, and
 whenever the target has changed externally, Orca retains every file, records
 `needs_reconciliation`, and refuses to claim that rollback succeeded.
+
+## Writing tags back
+
+`Runtime.planTagWrite` compares each Track file's Orca values with its observed
+tags and seals a `MutationPlan` of the fields that differ. It writes nothing.
+The returned `TagWritePlan` lists each file's changes, the files it left out
+and why, and the plan's ID and digest:
+
+- `missing`: no present location to write to.
+- `format_not_writable`: no writer for the sniffed format yet. FLAC, MP3 and
+  ADTS are written; M4A, Ogg, WAV and AIFF are not.
+- `changed_since_scan`: the file's identity no longer matches the last scan,
+  so the plan would describe tags the file no longer has. Rescan first.
+
+The runtime holds at most eight plans awaiting approval.
+`Runtime.startTagWrite` approves one by its ID and digest and executes it as a
+`mutation` Job; a digest that does not match leaves the plan unwritten.
+`Runtime.discardTagWrite` drops one. The Job cannot be cancelled once started,
+because a journaled group commits or rolls back as a whole. When it ends, every
+file in the plan is re-observed and reprojected, so the library reads what the
+files now say. The plan ID is the journal group, and
+`Runtime.undoTagWrite(group)` restores those files' previous bytes and
+re-observes them. Orca's values survive both directions: after a write the
+library still holds the locked edit, and after an undo it still shows it.
+
+Writers keep what they do not understand:
+
+- ID3v2 keeps the file's version (2.3 or 2.4), copies unchanged frames verbatim,
+  keeps a `n/total` total, and updates an existing ID3v1 trailer. A file with no
+  ID3v2 tag gets a 2.4 one.
+- Vorbis comments in FLAC match fields by the same aliases and canonical values
+  the reader uses, so a write never duplicates a field under another spelling.
+- The audio bytes are copied unchanged; only the tag region is rewritten.
+
+From the command line, `orca-cli write-tags DATABASE IDS` prints the plan and
+its digest, `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
+writes it if the digest still matches, and `orca-cli undo-tags DATABASE GROUP`
+undoes it.

@@ -429,13 +429,25 @@ pub fn rewrite(
                 const entry = try takeString(payload, &check_cursor);
                 const parsed = try parseEntry(entry);
                 if (fieldMatches(change.field, parsed.key) and
-                    std.mem.eql(u8, expected, parsed.value))
+                    valueMatches(change.field, expected, parsed.value))
                 {
                     found = true;
                     break;
                 }
             }
             if (!found) return error.MetadataPreconditionChanged;
+        }
+    }
+    // A stated total survives a new track or disc number, as it does in ID3.
+    var track_total: ?[]const u8 = null;
+    var disc_total: ?[]const u8 = null;
+    {
+        var total_cursor = cursor;
+        for (0..count) |_| {
+            const parsed = try parseEntry(try takeString(payload, &total_cursor));
+            const slash = std.mem.indexOfScalar(u8, parsed.value, '/') orelse continue;
+            if (fieldMatches(.track_number, parsed.key)) track_total = parsed.value[slash..];
+            if (fieldMatches(.disc_number, parsed.key)) disc_total = parsed.value[slash..];
         }
     }
 
@@ -464,12 +476,19 @@ pub fn rewrite(
     for (changes) |change| if (change.after) |value| {
         if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidMetadataText;
         const key = fieldKey(change.field);
-        const length = try std.math.add(usize, key.len + 1, value.len);
+        const total: []const u8 = switch (change.field) {
+            .track_number => track_total orelse "",
+            .disc_number => disc_total orelse "",
+            else => "",
+        };
+        const suffix = if (std.mem.indexOfScalar(u8, value, '/') == null) total else "";
+        const length = try std.math.add(usize, key.len + 1, value.len + suffix.len);
         try appendU32(&output, allocator, std.math.cast(u32, length) orelse
             return error.MetadataValueTooLong);
         try output.appendSlice(allocator, key);
         try output.append(allocator, '=');
         try output.appendSlice(allocator, value);
+        try output.appendSlice(allocator, suffix);
         output_count = try std.math.add(u32, output_count, 1);
     };
     std.mem.writeInt(u32, output.items[count_offset..][0..4], output_count, .little);
@@ -510,8 +529,34 @@ fn validateChanges(changes: []const mutation.Change) !void {
     }
 }
 
+/// Every key spelling the reader accepts for `field`, so a rewrite replaces
+/// the entry the reader took its value from rather than adding a second one.
 fn fieldMatches(field: mutation.Field, key: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(fieldKey(field), key);
+    const spellings: []const []const u8 = switch (field) {
+        .title => &.{"TITLE"},
+        .artist => &.{"ARTIST"},
+        .album => &.{"ALBUM"},
+        .album_artist => &.{ "ALBUMARTIST", "ALBUM ARTIST", "ALBUM_ARTIST" },
+        .track_number => &.{"TRACKNUMBER"},
+        .disc_number => &.{"DISCNUMBER"},
+        .date => &.{ "DATE", "YEAR" },
+        .compilation => &.{"COMPILATION"},
+    };
+    return matches(key, spellings);
+}
+
+/// Whether a stored comment value is `expected` as the reader interprets it:
+/// numbers before any `/total`, compilation as a truth value, text trimmed.
+fn valueMatches(field: mutation.Field, expected: []const u8, raw: []const u8) bool {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    return switch (field) {
+        .track_number, .disc_number => blk: {
+            const number = value[0 .. std.mem.indexOfScalar(u8, value, '/') orelse value.len];
+            break :blk std.mem.eql(u8, std.mem.trim(u8, number, " "), expected);
+        },
+        .compilation => std.mem.eql(u8, if (isTruthy(value)) "1" else "0", expected),
+        else => std.mem.eql(u8, value, expected),
+    };
 }
 
 fn fieldKey(field: mutation.Field) []const u8 {
@@ -834,4 +879,44 @@ fn appendU32Big(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, value, .big);
     try list.appendSlice(allocator, &bytes);
+}
+
+fn commentPayload(allocator: std.mem.Allocator, entries: []const []const u8) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    try appendString(&bytes, allocator, "test");
+    try appendU32(&bytes, allocator, @intCast(entries.len));
+    for (entries) |entry| try appendString(&bytes, allocator, entry);
+    return bytes.toOwnedSlice(allocator);
+}
+
+test "a rewrite matches what the reader saw: aliased keys, n/total numbers and truth values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const payload = try commentPayload(allocator, &.{
+        "ALBUM ARTIST=Old Artist",
+        "TRACKNUMBER=2/9",
+        "COMPILATION=true",
+        "YEAR=1999",
+        "COMMENT=kept",
+    });
+    const before = try parse(allocator, payload);
+    try std.testing.expectEqualStrings("Old Artist", before.album_artist.?);
+
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .album_artist, .before = "Old Artist", .after = "New Artist" },
+        .{ .field = .track_number, .before = "2", .after = "5" },
+        .{ .field = .compilation, .before = "1", .after = "0" },
+        .{ .field = .date, .before = "1999", .after = "2024" },
+    });
+    const after = try parse(allocator, rewritten);
+    try std.testing.expectEqualStrings("New Artist", after.album_artist.?);
+    try std.testing.expectEqual(@as(?u32, 5), after.track_number);
+    try std.testing.expectEqual(@as(?u32, 9), after.track_total);
+    try std.testing.expectEqual(@as(?bool, false), after.compilation);
+    try std.testing.expectEqualStrings("2024", after.date.?);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "ALBUM ARTIST=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "YEAR=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "COMMENT=kept") != null);
 }

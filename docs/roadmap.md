@@ -47,8 +47,8 @@ the rule in [architecture.md](architecture.md).
 
 ### Clients
 
-- `orca-cli`: scan, browse, search, library edits, analysis, duplicates,
-  artwork and queue playback.
+- `orca-cli`: scan, browse, search, library edits, tag write-back and undo,
+  analysis, duplicates, artwork and queue playback.
 - `orca-gtk`: library browsing and search, queue, transport, device picker,
   scan progress, MPRIS with cover art.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
@@ -58,8 +58,8 @@ the rule in [architecture.md](architecture.md).
 These exist with tests, but no client can use them yet. Each needs a runtime
 entry point and a client before it counts as working.
 
-- Tag writing and file moves through the journaled `MutationPlan` executor.
-  Library edits are reachable; writing them into files is not yet.
+- File moves through the journaled `MutationPlan` executor. Tag writes are
+  reachable; moves are not.
 - Providers: MusicBrainz, AcoustID, ListenBrainz and Last.fm adapters, match
   proposals and the scrobble queue. Before connecting them: HTTP requests need
   deadlines and cancellation, proposal acceptance must re-read the stored
@@ -71,12 +71,10 @@ entry point and a client before it counts as working.
 
 In priority order.
 
-1. **Writing tags back to files.** Library edits work (`orca-cli edit`); the
-   next step writes them into the files through the journaled `MutationPlan`
-   executor: preview, approval by digest, execution as a Job, and undo, through
-   the runtime and C ABI. FLAC and MP3/ADTS (a new ID3v2.4 writer replacing the
-   ID3v1 one) first, with the writer chosen by sniffed format rather than file
-   extension; M4A, Ogg, WAV and AIFF follow.
+1. **Tag writers for the remaining formats, and tag writes in the C ABI.**
+   FLAC, MP3 and ADTS are written through the runtime and `orca-cli
+   write-tags`; M4A, Ogg, WAV and AIFF are reported as not writable, and the C
+   ABI has no tag-write entry points yet.
 2. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
 3. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render

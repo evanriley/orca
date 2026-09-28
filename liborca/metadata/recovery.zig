@@ -118,7 +118,7 @@ const Harness = struct {
         errdefer allocator.free(database_path);
         try temporary.dir.writeFile(std.testing.io, .{
             .sub_path = "source.mp3",
-            .data = "generated audio payload" ++ (try id3v1.encode(.{
+            .data = "\xff\xfb\x90\x64generated audio payload" ++ (try id3v1.encode(.{
                 .title = "Original",
                 .artist = "Generated",
                 .album = "Generated",
@@ -408,7 +408,7 @@ test "recovery reconciles rather than claiming a rollback it cannot prove" {
             .expected_modified_ns = expected.modified_ns,
             .expected_quick_hash = expected.quick_hash,
         });
-        try file_mutation.stageId3v1(std.testing.io, harness.source, harness.stage, expected, &.{
+        try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, harness.stage, expected, &.{
             .{ .field = .title, .before = "Original", .after = "Replaced" },
         });
         const staged = try file_mutation.identity(std.testing.io, harness.stage);

@@ -431,6 +431,13 @@ pub const FieldValuePage = struct {
     }
 };
 
+pub const PresentLocation = struct {
+    uri: []u8,
+    volume_id: i64,
+    root_id: ?i64,
+    generation: i64,
+};
+
 pub const StoredMetadataValue = struct {
     text: []u8,
     provenance: metadata.Provenance,
@@ -2445,6 +2452,50 @@ pub const LocationRepository = struct {
         return try allocator.dupe(u8, statement.columnText(0));
     }
 
+    /// The present location at `uri` on any volume, for re-observing a path
+    /// the mutation journal names.
+    pub fn presentByUri(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+    ) !?PresentLocation {
+        var statement = try self.db.prepare(
+            \\SELECT uri, volume_id, root_id, last_seen_generation FROM locations
+            \\WHERE uri=?1 AND state='present' ORDER BY id LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, path);
+        if (try statement.step() != .row) return null;
+        return .{
+            .uri = try allocator.dupe(u8, statement.columnText(0)),
+            .volume_id = statement.columnInt64(1),
+            .root_id = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
+            .generation = if (statement.columnIsNull(3)) 0 else statement.columnInt64(3),
+        };
+    }
+
+    /// Where a file's bytes are now, with the root and generation a scanner
+    /// needs to re-observe it in place. Null when no location is present.
+    pub fn presentOf(
+        self: *const LocationRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !?PresentLocation {
+        var statement = try self.db.prepare(
+            \\SELECT uri, volume_id, root_id, last_seen_generation FROM locations
+            \\WHERE file_id=?1 AND state='present' ORDER BY id LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return null;
+        return .{
+            .uri = try allocator.dupe(u8, statement.columnText(0)),
+            .volume_id = statement.columnInt64(1),
+            .root_id = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
+            .generation = if (statement.columnIsNull(3)) 0 else statement.columnInt64(3),
+        };
+    }
+
     /// The second path at which Orca holds this file's bytes, when there is
     /// one.
     ///
@@ -3089,6 +3140,17 @@ pub const MutationJournalRepository = struct {
         while (try statement.step() == .row)
             try ids.append(allocator, @intCast(statement.columnInt64(0)));
         return ids.toOwnedSlice(allocator);
+    }
+
+    /// A group and plan id no journaled operation uses yet. Stage and backup
+    /// paths are named after the plan id, so it must not repeat.
+    pub fn nextGroupId(self: *const MutationJournalRepository) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT COALESCE(MAX(MAX(group_id), MAX(plan_id)), 0) + 1 FROM mutation_operations;",
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 
     pub fn groupOperationIds(

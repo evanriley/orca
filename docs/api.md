@@ -51,8 +51,9 @@ defer page.deinit();
 - Every type a `Runtime` method takes or returns is exported beside it: queries
   and pages (`TrackQuery`, `TrackPage`, `ArtistQuery`, ...), playback state
   (`PlayerStatus`, `RepeatMode`, `ReplayGainMode`, ...), outputs (`Device`,
-  `ZoneStats`, ...), jobs (`ScanRequest`, `JobSnapshot`, `ScanStats`, ...) and
-  the control lane (`Action`, `Event`, `Telemetry`, `Failure`).
+  `ZoneStats`, ...), jobs (`ScanRequest`, `JobSnapshot`, `ScanStats`, ...), tag
+  write-back (`TagWritePlan`, `TagWriteDigest`, ...) and the control lane
+  (`Action`, `Event`, `Telemetry`, `Failure`).
 - Pages and returned values are owned by the caller and released with their
   `deinit`.
 

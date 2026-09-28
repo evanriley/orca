@@ -91,6 +91,133 @@ pub fn databaseOf(runtime: *OrcaRuntime, library: LibraryHandle) !*database.Libr
     return runtime.libraryDatabase(library);
 }
 
+/// What `planTagWrite` would write, for a person to approve. Caller-owned.
+pub const TagWritePlan = struct {
+    arena: *std.heap.ArenaAllocator,
+    /// Zero when there is nothing to write; there is then nothing to start.
+    plan_id: u64,
+    digest: metadata.mutation.Digest,
+    files: []const TagWriteFile,
+    skipped: []const TagWriteSkip,
+
+    pub fn deinit(self: TagWritePlan) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
+
+pub const TagWriteFile = struct {
+    file_id: i64,
+    path: []const u8,
+    changes: []const TagWriteChange,
+};
+
+pub const TagWriteChange = struct {
+    field: metadata.Field,
+    before: ?[]const u8,
+    after: ?[]const u8,
+};
+
+pub const TagWriteSkip = struct {
+    file_id: i64,
+    /// Empty when the file has no present location.
+    path: []const u8,
+    reason: TagWriteSkipReason,
+};
+
+pub const TagWriteSkipReason = enum {
+    /// No location of the file is present to write to.
+    missing,
+    /// Orca has no tag writer for the file's format yet.
+    format_not_writable,
+    /// The bytes changed after the last scan; the scan must see them first, or
+    /// the plan would be computed against tags the file no longer has.
+    changed_since_scan,
+};
+
+/// Plans held between `planTagWrite` and `startTagWrite`. Few, because a plan
+/// waits on a person.
+const max_pending_tag_writes = 8;
+
+/// A sealed plan and where each of its files lives, owned by the runtime until
+/// a worker takes it.
+const PendingTagWrite = struct {
+    arena: std.heap.ArenaAllocator,
+    library: LibraryHandle,
+    plan: metadata.mutation.Plan,
+    /// Index-aligned with `plan.actions`, allocated in `arena`.
+    locations: []database.repository.PresentLocation,
+
+    fn destroy(self: *PendingTagWrite) void {
+        const allocator = self.arena.child_allocator;
+        self.plan.deinit();
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+};
+
+/// A field's observed value as text, the form a `Change.before` states it in.
+fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field: metadata.Field) !?[]const u8 {
+    return switch (field) {
+        .title => tags.title,
+        .artist => tags.artist,
+        .album => tags.album,
+        .album_artist => tags.album_artist,
+        .date => tags.date,
+        .track_number => if (tags.track_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
+        .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
+        .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
+    };
+}
+
+/// Why a file cannot be written now, or null when it can.
+fn tagWriteRefusal(
+    io: std.Io,
+    library_database: *database.LibraryDatabase,
+    location: database.repository.PresentLocation,
+) !?TagWriteSkipReason {
+    if (!(metadata.executor.canWriteTags(io, location.uri) catch return .missing)) return .format_not_writable;
+    var local = storage.LocalFileSource.open(io, location.uri) catch return .missing;
+    const observed = local.readable().identity();
+    local.close();
+    const key: database.StorageIdentityKey = .{
+        .volume_id = location.volume_id,
+        .native_inode = std.math.cast(i64, observed.inode) orelse return .changed_since_scan,
+        .size_bytes = std.math.cast(i64, observed.size) orelse return .changed_since_scan,
+        .modified_ns = std.math.cast(i64, observed.modified_ns) orelse return .changed_since_scan,
+    };
+    if (try library_database.locations.unchangedLocationId(location.volume_id, location.uri, key) == null)
+        return .changed_since_scan;
+    return null;
+}
+
+/// Re-reads one file Orca just rewrote, as a scan of its root would, and
+/// reprojects it.
+fn reobserve(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    library_database: *database.LibraryDatabase,
+    location: database.repository.PresentLocation,
+) !void {
+    var pass: library_pass.Projection = .{ .allocator = allocator, .library = library_database };
+    var scanner: library_pass.Scanner = .{
+        .allocator = allocator,
+        .io = io,
+        .files = &library_database.files,
+        .locations = &library_database.locations,
+        .observed_tags = &library_database.observed_tags,
+        .write_lane = library_database.write_lane,
+        .database_handle = library_database.database,
+        .volume_id = location.volume_id,
+        .root_id = location.root_id,
+        .generation = location.generation,
+        .projection = &pass,
+    };
+    defer scanner.deinit();
+    _ = try scanner.observeFiles(&.{location.uri});
+}
+
 pub const QueueStats = struct {
     entries_started: u64,
     gapless_transitions: u64,
@@ -150,6 +277,8 @@ const WorkerRequest = struct {
     root_id: ?i64 = null,
     batch_size: usize = 256,
     force: bool = false,
+    /// A `.mutation` worker's plan, which the worker owns once started.
+    tag_write: ?*PendingTagWrite = null,
 };
 
 /// What a scan job observed, mirroring `scanner.Result` plus what the
@@ -221,6 +350,7 @@ const JobWorker = struct {
     root_id: ?i64,
     batch_size: usize,
     force: bool,
+    tag_write: ?*PendingTagWrite,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -246,6 +376,7 @@ const JobWorker = struct {
             .property_backfill => self.runPropertyBackfill(),
             .analysis => self.runAnalysis(),
             .duplicate_scan => self.runDuplicateScan(),
+            .mutation => self.runTagWrite(),
             else => self.failed.store(true, .release),
         }
     }
@@ -465,6 +596,28 @@ const JobWorker = struct {
         self.noteProjection(result.projection);
     }
 
+    fn runTagWrite(self: *JobWorker) void {
+        const io = self.threaded.io();
+        const pending = self.tag_write.?;
+        _ = self.stats.files_seen.fetchAdd(pending.plan.actions.len, .acq_rel);
+        var executor: metadata.executor.Executor = .{
+            .allocator = self.allocator,
+            .io = io,
+            .journal = &self.database.mutation_journal,
+        };
+        if (executor.executePlan(&pending.plan, pending.plan.id)) {
+            _ = self.stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
+        } else |_| {
+            _ = self.stats.errors.fetchAdd(1, .acq_rel);
+            self.failed.store(true, .release);
+        }
+        for (pending.locations) |location| {
+            reobserve(self.allocator, io, self.database, location) catch {
+                _ = self.stats.errors.fetchAdd(1, .acq_rel);
+            };
+        }
+    }
+
     fn noteProjection(self: *JobWorker, result: library_pass.projection.Result) void {
         _ = self.stats.folders_visited.fetchAdd(result.folders_visited, .acq_rel);
         _ = self.stats.files_projected.fetchAdd(result.files_projected, .acq_rel);
@@ -537,6 +690,8 @@ pub const OrcaRuntime = struct {
     shuffle_counter: u64 = 0,
     /// Background job workers, live and recently retired. Control lane only.
     job_workers: std.ArrayList(*JobWorker) = .empty,
+    /// Tag-write plans awaiting approval. Control lane only.
+    pending_tag_writes: [max_pending_tag_writes]?*PendingTagWrite = @splat(null),
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -599,6 +754,7 @@ pub const OrcaRuntime = struct {
         self.work_registry.drain();
         self.finalizeDrainedJobWorkers();
         self.freeAllJobWorkers();
+        self.discardPendingTagWrites(null);
         self.jobs.cancelAndDrain();
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |zone| zone.zone.destroy();
@@ -648,6 +804,7 @@ pub const OrcaRuntime = struct {
         // every Player bound to it has to let go — with its engine stopped —
         // before the database is closed.
         self.unbindLibraryFromPlayers(library);
+        self.discardPendingTagWrites(library);
         var removed = try self.libraries.remove(library);
         self.closeLibraryDatabase(&removed);
     }
@@ -1766,6 +1923,174 @@ pub const OrcaRuntime = struct {
         return library_database.orca_metadata.values(self.allocator, ids[0]);
     }
 
+    /// Builds and seals a plan that writes Orca's values for `track_ids` into
+    /// their files, and returns it for approval. Nothing is written. A file is
+    /// left out when it has nothing to write, and reported in `skipped` when it
+    /// cannot be written now. The plan waits in the runtime for
+    /// `startTagWrite`; at most eight wait at once.
+    pub fn planTagWrite(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        track_ids: []const i64,
+    ) !TagWritePlan {
+        if (track_ids.len == 0 or track_ids.len > database.repository.max_page) return error.InvalidTrackSelection;
+        const library_database = try self.libraryDatabase(library);
+
+        const preview_arena = try self.allocator.create(std.heap.ArenaAllocator);
+        preview_arena.* = .init(self.allocator);
+        var preview: TagWritePlan = .{ .arena = preview_arena, .plan_id = 0, .digest = @splat(0), .files = &.{}, .skipped = &.{} };
+        errdefer preview.deinit();
+        const owned = preview_arena.allocator();
+
+        var scratch_arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch = scratch_arena.allocator();
+
+        var file_ids: std.ArrayList(i64) = .empty;
+        for (track_ids) |track_id| {
+            const ids = try library_database.tracks.fileIds(scratch, track_id);
+            if (ids.len == 0) return error.TrackNotFound;
+            for (ids) |id| if (std.mem.indexOfScalar(i64, file_ids.items, id) == null) try file_ids.append(scratch, id);
+        }
+
+        var actions: std.ArrayList(metadata.mutation.Action) = .empty;
+        var locations: std.ArrayList(database.repository.PresentLocation) = .empty;
+        var files: std.ArrayList(TagWriteFile) = .empty;
+        var skipped: std.ArrayList(TagWriteSkip) = .empty;
+        for (file_ids.items) |file_id| {
+            const location = try library_database.locations.presentOf(scratch, file_id) orelse {
+                try skipped.append(owned, .{ .file_id = file_id, .path = "", .reason = .missing });
+                continue;
+            };
+            const reason = try tagWriteRefusal(io, library_database, location);
+            if (reason) |refusal| {
+                try skipped.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .reason = refusal });
+                continue;
+            }
+
+            const values = try library_database.orca_metadata.values(scratch, file_id);
+            const observed = try library_database.observed_tags.get(scratch, file_id);
+            const tags: metadata.ObservedTags = if (observed) |stored| stored.values else .{};
+            var changes: std.ArrayList(metadata.mutation.Change) = .empty;
+            var shown: std.ArrayList(TagWriteChange) = .empty;
+            for (values.items) |value| {
+                const before = try observedText(scratch, tags, value.field);
+                if (before) |current| if (std.mem.eql(u8, current, value.text)) continue;
+                try changes.append(scratch, .{ .field = value.field, .before = before, .after = value.text });
+                try shown.append(owned, .{
+                    .field = value.field,
+                    .before = if (before) |text| try owned.dupe(u8, text) else null,
+                    .after = try owned.dupe(u8, value.text),
+                });
+            }
+            if (changes.items.len == 0) continue;
+            try actions.append(scratch, .{ .write_tags = .{
+                .path = location.uri,
+                .expected = try metadata.file_mutation.identity(io, location.uri),
+                .changes = changes.items,
+            } });
+            try locations.append(scratch, location);
+            try files.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .changes = shown.items });
+        }
+        preview.skipped = skipped.items;
+        if (actions.items.len == 0) return preview;
+
+        const slot = for (&self.pending_tag_writes) |*candidate| {
+            if (candidate.* == null) break candidate;
+        } else return error.TooManyPendingTagWrites;
+        var plan_id = try library_database.mutation_journal.nextGroupId();
+        for (self.pending_tag_writes) |held| if (held) |pending| {
+            plan_id = @max(plan_id, pending.plan.id + 1);
+        };
+
+        const pending = try self.allocator.create(PendingTagWrite);
+        errdefer self.allocator.destroy(pending);
+        pending.* = .{
+            .arena = .init(self.allocator),
+            .library = library,
+            .plan = try metadata.mutation.Plan.init(self.allocator, plan_id, actions.items),
+            .locations = &.{},
+        };
+        errdefer {
+            pending.plan.deinit();
+            pending.arena.deinit();
+        }
+        const held_locations = try pending.arena.allocator().alloc(database.repository.PresentLocation, locations.items.len);
+        for (held_locations, locations.items) |*held, location| {
+            held.* = location;
+            held.uri = try pending.arena.allocator().dupe(u8, location.uri);
+        }
+        pending.locations = held_locations;
+
+        preview.files = files.items;
+        preview.plan_id = plan_id;
+        preview.digest = pending.plan.approval().digest;
+        slot.* = pending;
+        return preview;
+    }
+
+    /// Approves a pending plan by its digest and starts writing it as a job.
+    /// A digest that does not match the plan leaves it pending and unwritten.
+    /// The job is not cancellable once started: a journaled group finishes or
+    /// rolls back as a whole. The files are re-observed and reprojected when
+    /// it ends.
+    pub fn startTagWrite(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        plan_id: u64,
+        digest: metadata.mutation.Digest,
+    ) !JobHandle {
+        const slot = for (&self.pending_tag_writes) |*candidate| {
+            const pending = candidate.* orelse continue;
+            if (pending.plan.id == plan_id and pending.library.eql(library)) break candidate;
+        } else return error.UnknownTagWritePlan;
+        const pending = slot.*.?;
+        try pending.plan.approve(.{ .plan_id = plan_id, .digest = digest });
+        const job_handle = try self.startJobWorker(library, .mutation, .{ .tag_write = pending });
+        slot.* = null;
+        return job_handle;
+    }
+
+    /// Drops a pending plan without writing anything.
+    pub fn discardTagWrite(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64) !void {
+        for (&self.pending_tag_writes) |*candidate| {
+            const pending = candidate.* orelse continue;
+            if (pending.plan.id != plan_id or !pending.library.eql(library)) continue;
+            pending.destroy();
+            candidate.* = null;
+            return;
+        }
+        return error.UnknownTagWritePlan;
+    }
+
+    /// Restores the files a tag write changed, on the caller's thread, and
+    /// re-observes them. Orca's values are kept, so the library still shows
+    /// the edit. A file changed again since the write is left alone and
+    /// recorded for reconciliation rather than overwritten.
+    pub fn undoTagWrite(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, group_id: u64) !void {
+        const library_database = try self.libraryDatabase(library);
+        for (self.job_workers.items) |worker| {
+            const pending = worker.tag_write orelse continue;
+            if (!worker.retired and pending.plan.id == group_id) return error.TagWriteInProgress;
+        }
+        var executor: metadata.executor.Executor = .{
+            .allocator = self.allocator,
+            .io = io,
+            .journal = &library_database.mutation_journal,
+        };
+        try executor.undoGroup(group_id);
+        const operations = try library_database.mutation_journal.groupOperationIds(self.allocator, group_id);
+        defer self.allocator.free(operations);
+        for (operations) |operation_id| {
+            var operation = try library_database.mutation_journal.get(self.allocator, operation_id);
+            defer operation.deinit();
+            const location = try library_database.locations.presentByUri(self.allocator, operation.source_path) orelse continue;
+            defer self.allocator.free(location.uri);
+            try reobserve(self.allocator, io, library_database, location);
+        }
+    }
+
     // ---------------------------------------------------------------- jobs
 
     /// Starts a filesystem scan on a registered `work.Registry` worker and
@@ -1872,6 +2197,7 @@ pub const OrcaRuntime = struct {
                 analysis_service.diagnosticsSelector(.{}),
             ),
             .duplicate_scan => try library_database.files.count(),
+            .mutation => (request.tag_write orelse return error.InvalidJobRequest).plan.actions.len,
             else => null,
         };
         const worker = try self.allocator.create(JobWorker);
@@ -1897,6 +2223,7 @@ pub const OrcaRuntime = struct {
             .root_id = request.root_id,
             .batch_size = request.batch_size,
             .force = request.force,
+            .tag_write = request.tag_write,
         };
         try self.job_workers.append(self.allocator, worker);
         errdefer _ = self.job_workers.pop();
@@ -2011,15 +2338,29 @@ pub const OrcaRuntime = struct {
                 continue;
             }
             _ = self.job_workers.orderedRemove(index);
-            self.allocator.destroy(worker);
+            self.destroyJobWorker(worker);
             to_drop -= 1;
         }
     }
 
     fn freeAllJobWorkers(self: *OrcaRuntime) void {
-        for (self.job_workers.items) |worker| self.allocator.destroy(worker);
+        for (self.job_workers.items) |worker| self.destroyJobWorker(worker);
         self.job_workers.deinit(self.allocator);
         self.job_workers = .empty;
+    }
+
+    fn destroyJobWorker(self: *OrcaRuntime, worker: *JobWorker) void {
+        if (worker.tag_write) |pending| pending.destroy();
+        self.allocator.destroy(worker);
+    }
+
+    fn discardPendingTagWrites(self: *OrcaRuntime, library: ?LibraryHandle) void {
+        for (&self.pending_tag_writes) |*slot| {
+            const pending = slot.* orelse continue;
+            if (library) |only| if (!pending.library.eql(only)) continue;
+            pending.destroy();
+            slot.* = null;
+        }
     }
 
     // ------------------------------------------------------- player status
@@ -3340,4 +3681,122 @@ test "a library edit regroups a track without touching its file, and clearing it
     try std.testing.expectEqual(@as(usize, 1), reverted.items.len);
     try std.testing.expectEqualStrings("File Artist", reverted.items[0].artist);
     try std.testing.expectEqual(@as(u64, 1), try library_database.artists.count());
+}
+
+fn copyFixtureInto(dir: std.Io.Dir, fixture: []const u8, name: []const u8) !void {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture, std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(bytes);
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+fn awaitJob(runtime: *OrcaRuntime, job_handle: JobHandle) !job.State {
+    var deadline: TestDeadline = .init(10_000);
+    while (deadline.tick()) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        switch (snapshot.state) {
+            .succeeded, .failed, .cancelled => return snapshot.state,
+            else => {},
+        }
+    }
+    return error.JobDidNotFinish;
+}
+
+fn scannedTempLibrary(runtime: *OrcaRuntime, temporary: *std.testing.TmpDir, name: [:0]const u8) !LibraryHandle {
+    try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.mp3", "a.mp3");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "c.m4a");
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const library = try runtime.openLibrary(std.testing.io, name);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    return library;
+}
+
+fn allTrackIds(runtime: *OrcaRuntime, library: LibraryHandle) ![]i64 {
+    var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+    defer page.deinit();
+    const ids = try std.testing.allocator.alloc(i64, page.items.len);
+    for (ids, page.items) |*id, item| id.* = item.id;
+    return ids;
+}
+
+test "an approved tag write rewrites the files, the rescan agrees, and undo restores their bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write?mode=memory&cache=shared");
+    const original_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original_mp3);
+
+    var ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }});
+    std.testing.allocator.free(ids);
+    ids = try allTrackIds(&runtime, library);
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    try std.testing.expectEqual(@as(usize, 1), preview.skipped.len);
+    try std.testing.expectEqual(TagWriteSkipReason.format_not_writable, preview.skipped[0].reason);
+    for (preview.files) |file| {
+        try std.testing.expectEqual(@as(usize, 1), file.changes.len);
+        try std.testing.expectEqualStrings("Written Album", file.changes[0].after.?);
+    }
+
+    var wrong = preview.digest;
+    wrong[0] ^= 1;
+    try std.testing.expectError(error.MutationApprovalMismatch, runtime.startTagWrite(library, preview.plan_id, wrong));
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, job_handle));
+    try std.testing.expectError(error.UnknownTagWritePlan, runtime.startTagWrite(library, preview.plan_id, preview.digest));
+
+    const after = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 0), after.files.len);
+    try std.testing.expectEqual(@as(u64, 0), after.plan_id);
+
+    const library_database = try runtime.libraryDatabase(library);
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+    const restored_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(restored_mp3);
+    try std.testing.expectEqualSlices(u8, original_mp3, restored_mp3);
+    const stored = (try library_database.observed_tags.get(std.testing.allocator, preview.files[0].file_id)).?;
+    defer stored.deinit();
+    try std.testing.expect(stored.values.album == null or !std.mem.eql(u8, stored.values.album.?, "Written Album"));
+
+    const again = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(usize, 2), again.files.len);
+    try runtime.discardTagWrite(library, again.plan_id);
+}
+
+test "a file changed since its scan is left out of a tag write" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-changed?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+
+    const bytes = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(bytes);
+    const grown = try std.mem.concat(std.testing.allocator, u8, &.{ bytes, "x" });
+    defer std.testing.allocator.free(grown);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "b.flac", .data = grown });
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    try std.testing.expect(std.mem.endsWith(u8, preview.files[0].path, "a.mp3"));
+    var changed = false;
+    for (preview.skipped) |skip| changed = changed or skip.reason == .changed_since_scan;
+    try std.testing.expect(changed);
+    // Left pending on purpose: shutdown must free it.
 }
