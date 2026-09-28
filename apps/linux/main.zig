@@ -21,6 +21,8 @@ const browse = @import("browse.zig");
 const transport = @import("transport.zig");
 const queue = @import("queue.zig");
 const window = @import("window.zig");
+const albums = @import("albums.zig");
+const art = @import("art.zig");
 
 const stylesheet = @embedFile("style.css");
 
@@ -62,6 +64,7 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     // snapshots below, so these are drained rather than interpreted.
     while (self.runtime.pollTelemetry()) |_| {}
 
+    art.tick(self);
     transport.tick(self);
     queue.tick(self);
     scan.tick(self);
@@ -95,6 +98,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     // at the point a play is attempted rather than at startup.
     browse.reload(self);
     self.reload();
+    albums.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
 }
@@ -227,7 +231,7 @@ fn resolvePinnedOutput(environ: *std.process.Environ.Map) ?u64 {
 }
 
 pub fn main(init: std.process.Init) !u8 {
-    const allocator = init.arena.allocator();
+    const allocator = std.heap.smp_allocator;
     track_model.allocator = allocator;
     browse_model.allocator = allocator;
 
@@ -280,8 +284,8 @@ pub fn main(init: std.process.Init) !u8 {
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);
     const tick_source = gtk.g_timeout_add(app.tick_ms, tick, &self);
 
-    const arguments = try init.minimal.args.toSlice(allocator);
-    var argv = try allocator.alloc(?[*:0]const u8, arguments.len + 1);
+    const arguments = try init.minimal.args.toSlice(init.arena.allocator());
+    var argv = try init.arena.allocator().alloc(?[*:0]const u8, arguments.len + 1);
     for (arguments, 0..) |argument, index| argv[index] = argument.ptr;
     argv[arguments.len] = null;
     const status = gtk.g_application_run(g_application, @intCast(arguments.len), argv.ptr);

@@ -12,6 +12,8 @@ const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
 const browse = @import("browse.zig");
 const queue = @import("queue.zig");
+const albums = @import("albums.zig");
+const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -268,20 +270,27 @@ fn windowKeyPressed(
 
 // --------------------------------------------------------------- navigation
 
+/// In sidebar order: `AdwSidebar` numbers items across sections.
 pub const Page = enum(c_uint) {
+    albums,
     tracks,
+    now_playing,
     queue,
 
     fn name(self: Page) [*:0]const u8 {
         return switch (self) {
+            .albums => "albums",
             .tracks => "tracks",
+            .now_playing => "now-playing",
             .queue => "queue",
         };
     }
 
     fn title(self: Page) [*:0]const u8 {
         return switch (self) {
+            .albums => "Albums",
             .tracks => "Tracks",
+            .now_playing => "Now Playing",
             .queue => "Queue",
         };
     }
@@ -304,6 +313,10 @@ pub fn showPage(self: *App, page: Page) void {
 
 fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
     if (index > @intFromEnum(Page.queue)) return;
+    const page: Page = @enumFromInt(index);
+    if (page == .albums) if (state(data).albums_navigation) |navigation| {
+        _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    };
     showPage(state(data), @enumFromInt(index));
 }
 
@@ -340,14 +353,19 @@ fn buildSidebar(self: *App) *gtk.Widget {
     self.sidebar = gtk.cast(adw.Sidebar, sidebar);
     gtk.gtk_widget_set_vexpand(sidebar, gtk.true_);
     const section = adw.adw_sidebar_section_new();
+    _ = sidebarItem(section, "Albums", "media-optical-symbolic");
     _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
-    const queue_item = sidebarItem(section, "Queue", "view-list-symbolic");
+    adw.adw_sidebar_append(self.sidebar.?, section);
+    const playback = adw.adw_sidebar_section_new();
+    adw.adw_sidebar_section_set_title(playback, "Playback");
+    _ = sidebarItem(playback, "Now Playing", "media-playback-start-symbolic");
+    const queue_item = sidebarItem(playback, "Queue", "view-list-symbolic");
     const count = gtk.gtk_label_new("");
     self.queue_count = gtk.cast(gtk.Label, count);
     gtk.gtk_widget_add_css_class(count, "numeric");
     gtk.gtk_widget_add_css_class(count, "dim-label");
     adw.adw_sidebar_item_set_suffix(queue_item, count);
-    adw.adw_sidebar_append(self.sidebar.?, section);
+    adw.adw_sidebar_append(self.sidebar.?, playback);
     _ = gtk.signalConnect(sidebar, "activated", gtk.callback(sidebarActivated), self);
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -544,10 +562,12 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const pages = gtk.gtk_stack_new();
     self.pages = gtk.cast(gtk.Stack, pages);
     gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
+    _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
 
-    const content = adw.adw_navigation_page_new(pages, Page.tracks.title());
+    const content = adw.adw_navigation_page_new(pages, Page.albums.title());
     self.content_page = content;
     const sidebar = adw.adw_navigation_page_new(buildSidebar(self), "Orca");
 

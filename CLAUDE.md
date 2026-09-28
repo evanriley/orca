@@ -151,7 +151,9 @@ not hold the user's default sink.
 To look at the GUI without putting a window on the user's desktop, run it in a
 headless sway session and screenshot it with `grim`; drive it with `wtype`,
 which reaches GTK where transient virtual pointers do not. Use
-`GSK_RENDERER=cairo` there.
+`GSK_RENDERER=cairo` there. Pointer input needs one long-lived virtual pointer
+(`zwlr_virtual_pointer_v1`): GTK does not bind a device that exists only for a
+single command, as `wlrctl`'s do.
 
 macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
 `zig-out/lib/liborca` through a systemLibrary modulemap.

@@ -11,6 +11,8 @@ const strings = @import("strings.zig");
 const app = @import("app.zig");
 const mpris = @import("mpris.zig");
 const window = @import("window.zig");
+const art = @import("art.zig");
+const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 
@@ -283,76 +285,22 @@ fn applySettledSeek(self: *App) void {
 
 // ---------------------------------------------------------------- cover art
 
-/// What the transport bar draws when the audible track has no usable cover.
-///
-/// A file that carries none, a file that has gone missing, an image liborca
-/// refused as unrecognizable or oversized, and one gdk-pixbuf could not decode
-/// all land here. A placeholder is the honest answer to all four, and none of
-/// them is worth interrupting somebody's listening with a dialog.
-const cover_placeholder_icon: [*:0]const u8 = "audio-x-generic-symbolic";
-
-/// How large the cover is drawn.
 const cover_display_pixels: c_int = 56;
 
-/// How large the cover is *decoded*, which is the bound that matters.
-///
-/// liborca refuses to read more than `metadata.max_image_bytes` of encoded
-/// image, but encoded size says almost nothing about pixel count: the largest
-/// cover in the reference library is an 11.3 MiB JPEG, and a JPEG that size is
-/// routinely 3000 pixels square — 36 MB of pixels for a widget 48 pixels wide.
-/// gdk-pixbuf scales inside the loader, so asking for a bounded size never
-/// materializes the full image. Twice the display size covers HiDPI scaling.
-const cover_decode_pixels: c_int = 160;
-
-/// Put the audible track's cover in the transport bar, or the placeholder.
-/// Called only when the audible Track changes, never on the 100 ms tick.
+/// Put the audible track's cover in the bar, or the placeholder. Called only
+/// when the audible Track changes, never on the 100 ms tick.
 fn refreshCover(self: *App, track_id: ?i64) void {
-    const picture = self.now_playing_cover orelse return;
-    const art = self.now_playing_art orelse return;
-    const texture = coverTexture(self, track_id) orelse {
-        gtk.gtk_image_set_from_paintable(picture, null);
-        gtk.gtk_stack_set_visible_child_name(art, "placeholder");
+    const cover = self.now_playing_art orelse return;
+    const id = track_id orelse {
+        art.forget(self, cover);
+        gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, cover), "placeholder");
         return;
     };
-    defer gtk.g_object_unref(texture);
-    gtk.gtk_image_set_from_paintable(picture, gtk.cast(gtk.GdkPaintable, texture));
-    gtk.gtk_stack_set_visible_child_name(art, "cover");
+    art.show(self, cover, art.Key.track(id, .thumb));
 }
 
-fn coverTexture(self: *App, track_id: ?i64) ?*gtk.GdkTexture {
-    const id = track_id orelse return null;
-    const library = (self.runtime.playerLibrary(self.player) catch null) orelse return null;
-    const cover = (self.runtime.libraryTrackArtwork(library, self.io, id) catch
-        return null) orelse return null;
-    defer cover.deinit();
-    return decodeCover(cover.bytes);
-}
-
-/// Encoded bytes to a bounded-size texture, or null if the platform decoder
-/// will not have them.
-fn decodeCover(bytes: []const u8) ?*gtk.GdkTexture {
-    // Borrowed, not copied: the decode below is synchronous and both the
-    // stream and the GBytes are dropped before this returns, so liborca's
-    // buffer outlives every reader of it. Copying cost 12 MB of resident
-    // memory on this library's largest cover for no benefit at all.
-    const borrowed = gtk.g_bytes_new_static(bytes.ptr, bytes.len);
-    defer gtk.g_bytes_unref(borrowed);
-    const stream = gtk.g_memory_input_stream_new_from_bytes(borrowed);
-    defer gtk.g_object_unref(stream);
-    var err: ?*gtk.GError = null;
-    const pixbuf = gtk.gdk_pixbuf_new_from_stream_at_scale(
-        stream,
-        cover_decode_pixels,
-        cover_decode_pixels,
-        gtk.true_,
-        null,
-        &err,
-    ) orelse {
-        gtk.g_clear_error(&err);
-        return null;
-    };
-    defer gtk.g_object_unref(pixbuf);
-    return gtk.gdk_texture_new_for_pixbuf(pixbuf);
+fn coverClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    window.showPage(state(data), .now_playing);
 }
 
 // -------------------------------------------------------------------- build
@@ -379,22 +327,14 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     self.now_playing_box = box;
     gtk.gtk_widget_set_size_request(box, 260, -1);
 
-    const art = gtk.gtk_stack_new();
-    self.now_playing_art = gtk.cast(gtk.Stack, art);
-    gtk.gtk_widget_add_css_class(art, "cover");
-    gtk.gtk_widget_set_overflow(art, gtk.OVERFLOW_HIDDEN);
-    gtk.gtk_widget_set_size_request(art, cover_display_pixels, cover_display_pixels);
-    gtk.gtk_widget_set_valign(art, gtk.ALIGN_CENTER);
-    const placeholder = gtk.gtk_image_new_from_icon_name(cover_placeholder_icon);
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, placeholder), 24);
-    gtk.gtk_widget_add_css_class(placeholder, "cover-placeholder");
-    const picture = gtk.gtk_image_new();
-    self.now_playing_cover = gtk.cast(gtk.Image, picture);
-    gtk.gtk_image_set_pixel_size(self.now_playing_cover.?, cover_display_pixels);
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, art), placeholder, "placeholder");
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, art), picture, "cover");
-    gtk.gtk_stack_set_transition_type(gtk.cast(gtk.Stack, art), gtk.STACK_TRANSITION_CROSSFADE);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), art);
+    const cover = art.newCover(self, art.iconPlaceholder(cover_display_pixels), cover_display_pixels);
+    self.now_playing_art = cover;
+    gtk.gtk_widget_set_tooltip_text(cover, "Now Playing");
+    gtk.gtk_widget_set_cursor_from_name(cover, "pointer");
+    const click = gtk.gtk_gesture_click_new();
+    _ = gtk.signalConnect(click, "released", gtk.callback(coverClicked), self);
+    gtk.gtk_widget_add_controller(cover, click);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), cover);
 
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
@@ -652,6 +592,7 @@ pub fn tick(self: *App) void {
         if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, detail.ptr);
         refreshCover(self, status.track_id);
         window.markPlaying(self, status.track_id);
+        nowplaying.update(self, status.track_id);
     }
     if (track_changed or status.transport != self.shown_transport) {
         self.shown_transport = status.transport;

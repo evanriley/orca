@@ -65,13 +65,21 @@ The window is an `AdwNavigationSplitView`:
 
 - The sidebar (`AdwSidebar`) lists the pages, shows the queue length, and
   shows scan progress at its foot while a scan runs.
+- **Albums** is a grid of covers, paged 512 Releases at a time and sorted by
+  artist, title, year or recently added. An album without a cover shows its
+  initials on a colour chosen from its title. Activating one opens its page:
+  the cover, title, artist, year, length, Play and Shuffle, and its tracks by
+  disc.
 - **Tracks** is the Artist and Album browse panes beside the track list. The
   list pages 512 rows at a time from liborca as it scrolls, and a header
   click re-queries in the engine's order rather than sorting loaded rows. The
   playing track is marked. A library with no tracks shows a welcome page with
   Add Music Folder; a scan in progress shows there too.
-- **Queue** is the Player's queue as the engine resolves it, with the audible
-  entry marked.
+- **Now Playing** is the audible track's cover, large, on a wash of the
+  cover's average colour, with the next five entries. Clicking the cover in
+  the player bar opens it.
+- **Queue** is the Player's queue as the engine resolves it, with thumbnails
+  and the audible entry marked.
 - The player bar spans the window: cover, title and artist; shuffle, previous,
   play, next and repeat; the seek bar; volume, the output menu and the queue.
 
@@ -85,12 +93,16 @@ The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the output menu; see
 [Testing playback without making noise](../CLAUDE.md).
 
-The player bar's cover is loaded when the audible Track changes, never on the
-tick, and decoded through `gdk_pixbuf_new_from_stream_at_scale` at 160 pixels,
-so an 11 MiB JPEG never materializes at full resolution. A track with no
-readable cover shows a placeholder. Album art in lists waits for an artwork
-worker in liborca: loading covers on the main thread for a scrolling grid
-would stall it.
+Covers go through `apps/linux/art.zig`. A widget asks for a cover while it is
+bound and forgets it when unbound; the frontend asks liborca's artwork loader
+(`Runtime.libraryRequestArtwork`) and collects results on its tick, then
+decodes each on a GTask thread through `gdk_pixbuf_new_from_stream_at_scale` at
+one of three sizes (128, 400 or 960 pixels), so an 11 MiB JPEG never
+materializes at full resolution and never decodes on the main thread. Up to
+600 decoded covers are kept, least recently used first out; a request for a
+widget that scrolled away is cancelled before liborca reads a file. The app
+allocates from `std.heap.smp_allocator`: covers are freed as they are
+replaced, which an arena would never do.
 
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS methods invoke the same Player handle, and `PlaybackStatus` is

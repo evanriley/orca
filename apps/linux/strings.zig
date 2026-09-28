@@ -17,3 +17,8 @@ pub fn formatMs(buffer: []u8, milliseconds: u64) [:0]const u8 {
     const total = milliseconds / 1000;
     return printZ(buffer, "{d}:{d:0>2}", .{ total / 60, total % 60 }) catch "";
 }
+
+/// `text` NUL-terminated in `buffer`, or empty if it does not fit.
+pub fn terminated(buffer: []u8, text: []const u8) [:0]const u8 {
+    return printZ(buffer, "{s}", .{text}) catch "";
+}

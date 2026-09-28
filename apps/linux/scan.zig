@@ -12,6 +12,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const browse = @import("browse.zig");
+const albums = @import("albums.zig");
 
 const App = app.App;
 
@@ -168,6 +169,7 @@ pub fn tick(self: *App) void {
         if (self.loaded_rows == 0 and stats.tracks_written != 0) {
             browse.reload(self);
             self.reload();
+            albums.reload(self);
         }
     } else |_| {}
 
@@ -183,6 +185,7 @@ pub fn tick(self: *App) void {
     // to do. The scope resets because the shelves it named have just changed.
     browse.reload(self);
     self.reload();
+    albums.reload(self);
     if (snapshot.state == .succeeded) {
         if (self.runtime.jobScanStats(job)) |stats| {
             var buffer: [160]u8 = undefined;
