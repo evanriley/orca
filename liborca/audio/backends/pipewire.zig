@@ -126,7 +126,7 @@ pub const OutputSession = struct {
     }
 
     pub fn status(self: *const OutputSession) Status {
-        return @fromBackingInt(@intCast(orca_pw_output_status(self.native)));
+        return @enumFromInt(@as(std.meta.Tag(Status), @intCast(orca_pw_output_status(self.native))));
     }
 
     pub fn latency(

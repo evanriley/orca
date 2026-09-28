@@ -20,11 +20,11 @@ fn state(data: ?*anyopaque) *App {
 }
 
 fn columnData(column: Column) ?*anyopaque {
-    return @ptrFromInt(@backingInt(column));
+    return @ptrFromInt(@intFromEnum(column));
 }
 
 fn columnOf(data: ?*anyopaque) Column {
-    return @fromBackingInt(@intCast(@intFromPtr(data)));
+    return @enumFromInt(@as(std.meta.Tag(Column), @intCast(@intFromPtr(data))));
 }
 
 // ----------------------------------------------------------------- scrolling

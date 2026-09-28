@@ -908,7 +908,7 @@ fn observe(
     values: metadata.ObservedTags,
 ) !i64 {
     const file_id = try library.files.create(.{
-        .audio_format = @backingInt(audio_format),
+        .audio_format = @intFromEnum(audio_format),
         .size_bytes = 1024,
     });
     _ = try library.locations.upsert(.{
@@ -929,7 +929,7 @@ fn observeEncoding(
     values: metadata.ObservedTags,
 ) !i64 {
     var upsert = properties;
-    upsert.audio_format = @backingInt(audio_format);
+    upsert.audio_format = @intFromEnum(audio_format);
     upsert.size_bytes = 1024;
     const file_id = try library.files.create(upsert);
     _ = try library.locations.upsert(.{
@@ -1486,7 +1486,7 @@ test "a higher bit depth wins over a lossless sibling of the same container" {
     const shallow: Entry = .{
         .file_id = 1,
         .uri = "/m/a.flac",
-        .audio_format = @backingInt(storage.AudioFormat.flac),
+        .audio_format = @intFromEnum(storage.AudioFormat.flac),
         .bit_depth = 16,
         .sample_rate = 44100,
         .duration_ms = 1000,
@@ -1526,7 +1526,7 @@ test "a higher bit depth wins over a lossless sibling of the same container" {
     // which is the only thing left that can separate them.
     var unprobed_mp3 = unprobed;
     unprobed_mp3.file_id = 4;
-    unprobed_mp3.audio_format = @backingInt(storage.AudioFormat.mp3);
+    unprobed_mp3.audio_format = @intFromEnum(storage.AudioFormat.mp3);
     try testing.expect(!preferredOver(unprobed_mp3, unprobed));
     try testing.expect(preferredOver(unprobed, unprobed_mp3));
 }
@@ -1539,7 +1539,7 @@ test "a reachable encoding is preferred over a better one that is missing" {
     const present_shallow: Entry = .{
         .file_id = 1,
         .uri = "/m/internal.flac",
-        .audio_format = @backingInt(storage.AudioFormat.flac),
+        .audio_format = @intFromEnum(storage.AudioFormat.flac),
         .bit_depth = 16,
         .sample_rate = 44100,
         .duration_ms = 1000,

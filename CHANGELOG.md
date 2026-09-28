@@ -2,6 +2,76 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### MP4: ALAC and AAC play, scan and tag
+
+- **ALAC decodes bit-identically** through Apple's reference decoder, built
+  from source behind a C++ shim: the ALAC fixture's samples equal those of the
+  FLAC it was encoded from, and seeks land on the exact frame.
+- **AAC (LC, HE-AAC v1/v2, xHE-AAC) decodes through libxaac**, AOSP's
+  Apache-2.0 decoder, built from its portable C sources. Against FFmpeg's decode
+  of the same file the output has zero lag, the exact length and differences at
+  16-bit quantization level. libxaac withholds 240 frames of the first access
+  unit after init; the packet loop restores them as silence so the timeline
+  stays where the sample table puts it.
+- **Gapless bounds come from the edit list**, with Apple's `iTunSMPB` as a
+  fallback, so a 200 ms AAC fixture carrying 1,024 frames of encoder priming
+  decodes to exactly 9,600 frames.
+- **iTunes tags and cover art** are read from `ilst`, including `----`
+  freeform atoms for MusicBrainz identifiers.
+- **Scanning MP4 costs what scanning FLAC does.** Properties come from the
+  movie box rather than from an AAC decoder whose setup costs about 6 ms: a
+  300-file AAC scan fell from 1.83 s to 0.14 s.
+- **Files without a decoder are no longer reported as corrupt.** The analysis
+  pass and property backfill filed AIFF, WavPack and any other sniffed but
+  undecodable file as `corrupt_audio` or `unreadable_file` on every run.
+- `zig build` installs the licence and notice files of the compiled-in
+  Apache-2.0 and CC0 code under `share/doc/orca/licenses`.
+
+### Ogg Opus and Ogg Vorbis play, scan and tag
+
+- **Opus and Vorbis decode through libopusfile and libvorbisfile**, each behind
+  a shim on the same terms as libFLAC. The libraries own the Ogg container,
+  pre-skip, end trimming and sample-exact seeking, so a 200 ms Opus fixture
+  whose container also carries 312 frames of encoder pre-skip decodes to
+  exactly 9,600 frames, and 30-second streams report exactly 30,000 ms.
+- **Tags come from the Ogg comment header** through a small page reader in
+  `metadata/ogg_comment.zig` and the existing Vorbis comment parser. A comment
+  packet spanning several pages is reassembled, bounded at 16 MiB.
+- Scanning records `codec` as `opus` or `vorbis`, the decode rate, and no bit
+  depth; analysis measures both formats and playback applies their
+  ReplayGain. Embedded Ogg artwork is not read yet.
+
+### Stable Zig, a Nix flake, and three defects the old snapshot hid
+
+- **Orca builds with Zig 0.16.0.** The previous pin, `0.17.0-dev.1770`, is no
+  longer downloadable, so the project could not be built reproducibly. The port
+  is mechanical: `@backingInt`/`@fromBackingInt` became
+  `@intFromEnum`/`@enumFromInt`, plus a handful of renamed `std` functions.
+- **`flake.nix` provides the dev shell and a package.** `nix develop` (or
+  direnv) supplies Zig, zls, pkg-config, SQLite, libFLAC, PipeWire and GTK4;
+  `nix build` produces `orca-cli`, `orca-gtk`, `liborca` and `orca.h`.
+- **`build.zig` no longer assumes `/usr/include`.** PipeWire and SQLite include
+  paths come from `pkg-config --cflags-only-I`, so the build works on NixOS and
+  on FHS distributions alike.
+- **Volumes on device-mapper storage now get a stable identity.** A mount
+  source such as `/dev/mapper/cryptroot` is a symlink to `/dev/dm-N`, and the
+  `/dev/disk/by-uuid` lookup compared the symlink's own name, so LUKS and LVM
+  volumes never matched their UUID and every Location on them was filed under
+  no volume.
+- **The analysis pass no longer re-measures every file.** The query selecting
+  unanalyzed files bound its parameter hash as an SQLite static blob from a
+  pointer into a by-value copy that died before the statement ran. The old
+  compiler passed that struct by reference, which hid the defect.
+- **A queue test stopped starving the engine it waited on.** It polled
+  `playerQueueStats`, which pauses the engine on every call; it now polls the
+  lock-free queue snapshot.
+
+### Planning documents replaced
+
+- `docs/architecture.md` and `docs/roadmap.md` replace the v1.0 implementation
+  plan, the v0.10.0 review and the integration-recovery design. The recovery
+  work those documents drove is complete; what remains is in the roadmap.
+
 ### FLAC decoding moved to libFLAC, because the pure-Zig package was not lossless
 
 - **The pinned `audiophile/flac` dependency is gone.** It reconstructed

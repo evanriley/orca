@@ -22,10 +22,8 @@ pub const Tags = struct {
 /// decode but not yet tag still scan; they simply observe no tags.
 pub fn supports(audio_format: storage.AudioFormat) bool {
     return switch (audio_format) {
-        .flac, .mp3 => true,
-        // MP4/iTunes atoms and the Ogg families arrive as additional branches of
-        // `read`; no caller changes when they do.
-        .mp4, .opus, .vorbis, .wav, .aiff, .wavpack, .qoa => false,
+        .flac, .mp3, .mp4, .opus, .vorbis => true,
+        .wav, .aiff, .wavpack, .qoa => false,
     };
 }
 
@@ -62,6 +60,8 @@ fn readValues(
     return switch (audio_format) {
         .flac => metadata.vorbis_comment.read(allocator, readable),
         .mp3 => try readMpegTags(allocator, readable),
+        .mp4 => metadata.mp4_tags.read(allocator, readable),
+        .opus, .vorbis => metadata.ogg_comment.read(allocator, readable),
         else => null,
     };
 }
@@ -131,6 +131,20 @@ test "MP3 files are routed to ID3v2 ahead of the legacy trailer" {
     try std.testing.expectEqualStrings("Orca Test", tags.values.artist.?);
     try std.testing.expectEqualStrings("Fixtures", tags.values.album.?);
     try std.testing.expectEqual(@as(?u32, 1), tags.values.track_number);
+}
+
+test "Ogg Opus and Ogg Vorbis files are routed to the Ogg comment reader" {
+    inline for (.{
+        .{ storage.AudioFormat.opus, "fixtures/audio/tagged-reference.opus", "Opus Reference" },
+        .{ storage.AudioFormat.vorbis, "fixtures/audio/tagged-reference.ogg", "Reference Tone" },
+    }) |case| {
+        var file = try storage.LocalFileSource.open(std.testing.io, case[1]);
+        defer file.close();
+        const tags = (try read(std.testing.allocator, case[0], file.readable())).?;
+        defer tags.deinit();
+        try std.testing.expectEqualStrings(case[2], tags.values.title.?);
+        try std.testing.expect(supports(case[0]));
+    }
 }
 
 test "MP3 files without ID3v2 fall back to the ID3v1 trailer" {

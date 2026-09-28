@@ -119,12 +119,17 @@ fn covers(mount_point: []const u8, path: []const u8) bool {
     return path[mount_point.len] == '/';
 }
 
-/// Map a mount source such as `/dev/sda2` onto a filesystem UUID by way of the
-/// `/dev/disk/by-uuid` symlink farm. Comparing link targets keeps this to
-/// string work: no device may be opened just to identify a volume.
+/// Map a mount source such as `/dev/sda2` or `/dev/mapper/cryptroot` onto a
+/// filesystem UUID by way of the `/dev/disk/by-uuid` symlink farm. Comparing
+/// link targets keeps this to string work: no device may be opened just to
+/// identify a volume.
 fn uuidForSource(allocator: std.mem.Allocator, io: std.Io, source: []const u8) !?[]u8 {
     if (!std.mem.startsWith(u8, source, "/dev/")) return null;
-    const device = std.fs.path.basename(source);
+    var source_link_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const device = if (std.Io.Dir.cwd().readLink(io, source, &source_link_buffer)) |length|
+        std.fs.path.basename(source_link_buffer[0..length])
+    else |_|
+        std.fs.path.basename(source);
     var directory = std.Io.Dir.cwd().openDir(io, "/dev/disk/by-uuid", .{ .iterate = true }) catch
         return null;
     defer directory.close(io);

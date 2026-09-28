@@ -8,42 +8,69 @@ Orca is a local-files-first music player and library-maintenance application,
 written in Zig. `liborca/` is a reusable headless engine; `apps/` holds thin
 native frontends that are *clients* of it.
 
-`Orca_Full_Implementation_Plan_v1.0.md` is the authoritative product and
-architecture specification. `docs/` holds per-subsystem contracts and is the
+`liborca` is the product, in the way libghostty is Ghostty's: GUIs, CLIs and
+TUIs are built on it. `docs/architecture.md` is the overview,
+`docs/roadmap.md` records what works, what is built but unreachable, and what
+comes next, and the other files in `docs/` are per-subsystem contracts: the
 fastest way to load a subsystem's invariants before editing it.
+
+## Licence
+
+Orca is MPL-2.0 (`LICENSE`): embedders may keep their own code closed, changes
+to Orca's files stay open, and App Store distribution stays possible.
+`liborca`'s dependencies, and anything it vendors or links statically, must
+be permissive (BSD, MIT, Apache-2.0, zlib, CC0, public domain): a GPL or LGPL
+dependency there would bind every embedder and rule out the App Stores. This is
+why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
+(FDK licence). A frontend dynamically linking its platform's own toolkit, as
+`orca-gtk` does with LGPL GTK4, is outside that rule.
 
 ## Toolchain
 
-Zig `0.17.0-dev.1770+5d7cf3f34` or a newer compatible snapshot (pinned in
-`build.zig.zon`). This is a **post-Writergate `std.Io` Zig**: `std.Io.File`,
-`std.Io.Dir`, `std.Io.Reader`/`Writer`, and an explicit `io: std.Io` parameter
-threaded through I/O call sites (`std.testing.io` in tests). Do not write code
-against the older `std.fs` / `std.io` APIs.
+Zig `0.16.0`, the stable release, provided by the flake's dev shell
+(`nix develop`, or direnv via `.envrc`). Development snapshots are not pinned:
+ziglang.org deletes old nightly tarballs, which is how the previous pin
+(`0.17.0-dev.1770`) became unbuildable. This is a **`std.Io` Zig**:
+`std.Io.File`, `std.Io.Dir`, `std.Io.Reader`/`Writer`, and an explicit
+`io: std.Io` parameter threaded through I/O call sites (`std.testing.io` in
+tests). Do not write code against the older `std.fs` / `std.io` APIs.
 
-Builds need libFLAC and SQLite development libraries; Linux builds
-additionally need PipeWire and GTK4. `sqlite3` and `FLAC` are linked via
-pkg-config; PipeWire deliberately is not (its emitted flags break Zig's current
-pkg-config parser — see the comment in `build.zig`). The only Zig package
-dependency left is `audiophile/qoa`.
+The dev shell supplies libFLAC, libopusfile, libvorbis and SQLite, plus
+PipeWire and GTK4 on Linux. `sqlite3`, `FLAC`, `opusfile`, `vorbisfile` and GTK
+are linked via pkg-config. PipeWire's include paths
+come from `pkg-config --cflags-only-I` (`pkgConfigIncludePaths` in `build.zig`)
+and its library is linked without pkg-config, because the rest of its `--cflags`
+breaks Zig's pkg-config parser. No path under `/usr` is assumed, so the same
+build works on NixOS and FHS distributions. The Zig package dependencies are
+`audiophile/qoa`, `alac` and `libxaac`; `nix build` fetches them through
+`zig.fetchDeps`. When `build.zig.zon` dependencies change, set that hash in
+`flake.nix` to `pkgs.lib.fakeHash` and rebuild to learn the new one: an
+unchanged hash makes Nix reuse the old dependency directory, and the sandboxed
+build then fails trying to fetch the new packages.
 
-### Snapshot facts that cost time to rediscover
+### Zig facts that cost time to rediscover
 
-These are properties of this specific Zig snapshot, not of the project. Each one
-was found the expensive way.
+Each one was found the expensive way.
 
+- **A by-value struct parameter is a copy.** A pointer to one of its fields
+  dangles once the function returns. The old snapshot happened to pass large
+  structs by reference, which hid exactly this: an SQLite `SQLITE_STATIC` blob
+  bound from `&selector.parameter_hash` in a helper read freed stack memory, and
+  the analysis pass re-measured every file. Take `*const T` when a pointer into
+  the argument must outlive the call.
 - **`std.Thread.Mutex`, `std.Thread.Condition` and `std.Thread.ResetEvent` do not
   exist.** Use atomics plus `std.Thread.join`. `std.Io.Mutex` and
   `std.Io.Condition` do exist, but need an `io` in scope.
-- **`@cImport` does not exist.** `b.addTranslateC` is the replacement, and it
-  fails outright on GTK4's headers.
+- **`translate-C` (`b.addTranslateC` or `@cImport`) fails outright on GTK4's
+  headers**, so GTK is bound by hand.
 - **`std.Io.Dir` cannot fsync a directory.** Its `handle` is not an fsync-able fd
   (`EBADF` under `std.Io.Threaded`); open the directory *path as a file* instead.
   Durable renames depend on this.
 - **`{d:0>2}` on a signed integer emits a sign**, so a duration of six seconds
   formats as `0:+6`. Convert to unsigned before formatting.
-- **`std.fmt.bufPrintZ` does not exist.** `std.fmt.bufPrint` does; for a
-  sentinel-terminated string known at compile time, `std.fmt.comptimePrint` is
-  usually what you actually wanted.
+- **`@enumFromInt(@intCast(x))` has no result type** for the inner cast. Write
+  `@enumFromInt(@as(std.meta.Tag(E), @intCast(x)))`.
+- Sentinel formatting is `std.fmt.bufPrintSentinel` / `std.fmt.allocPrintSentinel`.
 - `std.crypto.hash.Blake3` is available.
 
 ### Verifying a build
@@ -61,7 +88,14 @@ treat a suspiciously slow number as a stale binary before believing it.
 
 ## Commands
 
+Run these inside the dev shell (`nix develop`, or automatically with direnv).
+
 ```sh
+nix build                     # package: orca-cli, orca-gtk (Linux), liborca, orca.h
+nix flake check
+nix fmt                       # formats Nix files
+zig fmt --check liborca apps benchmarks tests build.zig
+
 zig build                     # static + shared liborca, orca-cli, headers; orca-gtk on Linux
 zig build test                # unit + integration + C ABI smoke (+ PipeWire link smoke on Linux)
 zig build run -- --version    # orca-cli
@@ -92,7 +126,9 @@ zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
-zig build run -- play-tracks DATABASE IDS --device=ID [--start N] [--repeat MODE] [--shuffle] [--replay-gain=off|track]
+zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
+    [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
+    [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
 ```
 
 Frontends:
@@ -158,12 +194,13 @@ invocation, including throwaway checks.
 
 ### Running a single test
 
-There is no test filter wired into `build.zig` — `zig build test` runs all ~109
+There is no test filter wired into `build.zig` — `zig build test` runs all ~400
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `qoa` dependency, libFLAC, libc, and the MP3 and PipeWire shims,
-which is impractical to reconstruct on a bare `zig test` command line.
+SQLite, the `qoa`, `alac` and `libxaac` packages, libFLAC, libopusfile,
+libvorbisfile, libc, libc++ and the C shims, which is impractical to
+reconstruct on a bare `zig test` command line.
 
 Tests are run from the repository root and load fixtures by relative path
 (`fixtures/audio/...`). Do not make test working-directory assumptions.
@@ -205,21 +242,22 @@ of transport state, library paging, or metadata resolution.
 
 **Frontend language is Zig wherever the platform permits it.** The project is
 Zig-first, and that applies to `apps/`, not only to `liborca`. `orca-cli` and
-`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly, per
-section 17.1 of the implementation plan. C appears in a frontend only where a
-platform genuinely forces it.
+`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly. C appears
+in a frontend only where a platform genuinely forces it.
 
 Non-Zig frontends reach the engine through `liborca/orca.h` (a C ABI of opaque
 runtime ownership, generational handles, POD snapshots, and **callback-scoped**
 query views). String views are valid only for the duration of their callback; no
-SQLite row, Zig container, or internal layout crosses the ABI. The SwiftUI
+SQLite row, Zig container, or internal layout crosses the ABI. All `orca_*` calls
+for one runtime must come from a single thread (Debug builds return
+`ORCA_STATUS_WRONG_THREAD`); see `docs/frontends.md`. The SwiftUI
 client uses that ABI because AppKit requires Swift; `tests/c_abi_smoke.c`
 exercises it end to end so it cannot rot while macOS is uncompiled.
 
 GTK4 is bound with hand-written `extern fn` declarations rather than generated
-bindings. `@cImport` no longer exists in this Zig, `translate-C` fails on GTK4's
-headers (glib's `_Pragma` macros produce thousands of errors), and
-`zig-gobject` does not build on this snapshot. Declare only the symbols the app
+bindings. `translate-C` fails on GTK4's headers (glib's `_Pragma` macros
+produce thousands of errors), and `zig-gobject` did not build on the snapshot
+this frontend was written against. Declare only the symbols the app
 actually uses.
 
 ### Runtime ownership
@@ -285,8 +323,10 @@ honestly. Container detection sniffs bytes, never filename extensions.
 
 Codec-specific state never escapes `liborca/codec/`; playback sees only the
 Orca `Decoder` interface, and `SourceSession` owns the registered decoder.
-Prefer pure-Zig adapters (the pinned `audiophile/qoa` dependency) over C
-libraries — but not at the price of correctness. FLAC decodes through libFLAC
+Codec sourcing order: an existing, correct Zig package (as `audiophile/qoa`),
+then the reference C library behind a narrow shim, and an Orca-written codec
+only when neither exists. The project is not an exercise in writing codecs, and
+correctness outranks purity. FLAC decodes through libFLAC
 behind `codec/flac_shim.c` because the pure-Zig package that preceded it
 reconstructed mid-side stereo one LSB low, which made a lossless format lossy;
 see `docs/codecs.md`.
@@ -352,7 +392,7 @@ into Orca metadata that preserves user locks and does **not** write media files.
   adapter (or C shim) for that platform and nowhere else.
 - **Test names are behavioral sentences** describing the invariant being
   protected, e.g. `test "removed handles stay stale when their slot is reused"`.
-- Bounded everything: fixed-capacity queues, 256-row query pages, bounded
+- Bounded everything: fixed-capacity queues, 512-row query pages, bounded
   commits, bounded retries. Prefer rejecting or applying backpressure over
   unbounded growth.
 - Update `CHANGELOG.md` and the `version` in both `build.zig.zon` and

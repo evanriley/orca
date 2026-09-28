@@ -251,10 +251,12 @@ pub const LibraryAnalysis = struct {
         var measured = service.analyzeFile(null, candidate.uri, self.parameters) catch |err|
             switch (err) {
                 error.Cancelled, error.OutOfMemory => return err,
-                // Nothing claims this container, the file went away between
-                // the identity check and the decode, or it changed underneath
-                // the analysis. None of those is a defect in the file.
+                // Nothing claims this container or can decode its encoding,
+                // the file went away between the identity check and the
+                // decode, or it changed underneath the analysis. None of those
+                // is a defect in the file.
                 error.UnsupportedAudioFormat,
+                error.CodecUnavailable,
                 error.SourceChangedDuringAnalysis,
                 error.FileNotFound,
                 error.AccessDenied,
@@ -558,6 +560,23 @@ test "a file that will not decode is reported as corrupt audio and keeps no resu
     try testing.expectEqual(@as(usize, 1), issues.items.len);
     try testing.expectEqual(file_id, issues.items[0].file_id);
     try testing.expectEqual(database.HealthIssueKind.corrupt_audio, issues.items[0].kind);
+}
+
+test "a file no registered codec can decode is declined, not reported as corrupt" {
+    var fixture = try Fixture.init("file:orca-analysis-no-codec?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("generated-reference.flac", "undecodable.flac");
+    _ = try fixture.record("undecodable.flac");
+
+    const no_codecs: codec.CodecRegistry = .{};
+    var pass = fixture.pass();
+    pass.codecs = &no_codecs;
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.unsupported);
+    try testing.expectEqual(@as(u64, 0), result.errors);
+    var issues = try fixture.library.health_issues.page(testing.allocator, 8, 0);
+    defer issues.deinit();
+    try testing.expectEqual(@as(usize, 0), issues.items.len);
 }
 
 test "a file that is not there is counted without being reported as a defect" {

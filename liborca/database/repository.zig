@@ -1945,7 +1945,7 @@ pub const FileRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, after_id);
         try statement.bindInt64(2, limit);
-        try bindAnalysisSelector(statement, selector);
+        try bindAnalysisSelector(statement, &selector);
 
         var items: std.ArrayList(AnalysisCandidate) = .empty;
         errdefer {
@@ -1978,7 +1978,7 @@ pub const FileRepository = struct {
         // The count asks the same question with no cursor and no limit, so ?1
         // and ?2 are simply unbound; SQLite reads an unbound parameter as
         // NULL, and neither appears in this statement.
-        try bindAnalysisSelector(statement, selector);
+        try bindAnalysisSelector(statement, &selector);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -2598,7 +2598,7 @@ pub const ObservedTagsRepository = struct {
             if (tags.artwork) |artwork| {
                 try statement.bindText(26, artwork.mime_type);
                 try statement.bindInt64(27, @intCast(artwork.byte_size));
-                try statement.bindInt64(28, @backingInt(artwork.kind));
+                try statement.bindInt64(28, @intFromEnum(artwork.kind));
             } else {
                 try statement.bindOptionalText(26, null);
                 try statement.bindOptionalInt64(27, null);
@@ -2764,11 +2764,11 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, input.file_id);
-        try statement.bindInt64(2, @backingInt(input.field));
+        try statement.bindInt64(2, @intFromEnum(input.field));
         try statement.bindText(3, input.value);
-        try statement.bindInt64(4, @backingInt(input.provenance));
+        try statement.bindInt64(4, @intFromEnum(input.provenance));
         try statement.bindInt64(5, @intFromBool(input.locked));
-        try statement.bindInt64(6, @backingInt(metadata.Provenance.user));
+        try statement.bindInt64(6, @intFromEnum(metadata.Provenance.user));
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -2784,7 +2784,7 @@ pub const OrcaMetadataRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @backingInt(field));
+        try statement.bindInt64(2, @intFromEnum(field));
         if (try statement.step() != .row) return null;
         const provenance = std.enums.fromInt(
             metadata.Provenance,
@@ -2833,14 +2833,14 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(1, @intCast(input.plan_id));
         try statement.bindInt64(2, @intCast(input.group_id));
         try statement.bindInt64(3, input.action_index);
-        try statement.bindInt64(4, @backingInt(input.kind));
+        try statement.bindInt64(4, @intFromEnum(input.kind));
         try statement.bindText(5, input.source_path);
         try statement.bindOptionalText(6, input.destination_path);
         try statement.bindOptionalText(7, input.stage_path);
         try statement.bindOptionalText(8, input.backup_path);
         try statement.bindInt64(9, @intCast(input.expected_size));
         try statement.bindInt64(10, input.expected_modified_ns);
-        try statement.bindInt64(11, @backingInt(MutationState.planned));
+        try statement.bindInt64(11, @intFromEnum(MutationState.planned));
         try statement.bindOptionalInt64(12, input.file_id);
         try statement.bindBlob(13, &input.expected_quick_hash);
         if (try statement.step() != .done) return error.SqlFailed;
@@ -2865,10 +2865,10 @@ pub const MutationJournalRepository = struct {
             \\WHERE id=?3 AND state=?4;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @backingInt(next));
+        try statement.bindInt64(1, @intFromEnum(next));
         try statement.bindOptionalText(2, message);
         try statement.bindInt64(3, operation_id);
-        try statement.bindInt64(4, @backingInt(expected));
+        try statement.bindInt64(4, @intFromEnum(expected));
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
@@ -2902,11 +2902,11 @@ pub const MutationJournalRepository = struct {
             \\WHERE id=?4 AND state=?5;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @backingInt(MutationState.committed));
+        try statement.bindInt64(1, @intFromEnum(MutationState.committed));
         try statement.bindInt64(2, @intCast(committed_size));
         try statement.bindInt64(3, committed_modified_ns);
         try statement.bindInt64(4, operation_id);
-        try statement.bindInt64(5, @backingInt(MutationState.staged));
+        try statement.bindInt64(5, @intFromEnum(MutationState.staged));
         try statement.bindBlob(6, &committed_quick_hash);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
@@ -2934,7 +2934,7 @@ pub const MutationJournalRepository = struct {
         try statement.bindInt64(1, @intCast(size));
         try statement.bindInt64(2, modified_ns);
         try statement.bindInt64(3, operation_id);
-        try statement.bindInt64(4, @backingInt(expected_state));
+        try statement.bindInt64(4, @intFromEnum(expected_state));
         try statement.bindBlob(5, &digest);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
@@ -2998,9 +2998,9 @@ pub const MutationJournalRepository = struct {
             \\WHERE state IN (?1, ?2, ?3) ORDER BY group_id;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, @backingInt(MutationState.planned));
-        try statement.bindInt64(2, @backingInt(MutationState.staged));
-        try statement.bindInt64(3, @backingInt(MutationState.failed));
+        try statement.bindInt64(1, @intFromEnum(MutationState.planned));
+        try statement.bindInt64(2, @intFromEnum(MutationState.staged));
+        try statement.bindInt64(3, @intFromEnum(MutationState.failed));
         var ids: std.ArrayList(u64) = .empty;
         errdefer ids.deinit(allocator);
         while (try statement.step() == .row)
@@ -3134,8 +3134,8 @@ pub const HealthIssueRepository = struct {
         defer insert.deinit();
         for (issues) |issue| {
             try insert.bindInt64(1, file_id);
-            try insert.bindInt64(2, @backingInt(issue.kind));
-            try insert.bindInt64(3, @backingInt(issue.severity));
+            try insert.bindInt64(2, @intFromEnum(issue.kind));
+            try insert.bindInt64(3, @intFromEnum(issue.severity));
             try insert.bindText(4, issue.details);
             if (try insert.step() != .done) return error.SqlFailed;
             try insert.reset();
@@ -3164,8 +3164,8 @@ pub const HealthIssueRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @backingInt(issue.kind));
-        try statement.bindInt64(3, @backingInt(issue.severity));
+        try statement.bindInt64(2, @intFromEnum(issue.kind));
+        try statement.bindInt64(3, @intFromEnum(issue.severity));
         try statement.bindText(4, issue.details);
         if (try statement.step() != .done) return error.SqlFailed;
     }
@@ -3182,7 +3182,7 @@ pub const HealthIssueRepository = struct {
         );
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
-        try statement.bindInt64(2, @backingInt(kind));
+        try statement.bindInt64(2, @intFromEnum(kind));
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
@@ -3503,9 +3503,9 @@ pub const IdentificationProposalRepository = struct {
         defer metadata_statement.deinit();
         for (values) |value| {
             try metadata_statement.bindInt64(1, file_id);
-            try metadata_statement.bindInt64(2, @backingInt(value.field));
+            try metadata_statement.bindInt64(2, @intFromEnum(value.field));
             try metadata_statement.bindText(3, value.value);
-            try metadata_statement.bindInt64(4, @backingInt(metadata.Provenance.provider));
+            try metadata_statement.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
             if (try metadata_statement.step() != .done) return error.SqlFailed;
             try metadata_statement.reset();
         }
@@ -3515,7 +3515,7 @@ pub const IdentificationProposalRepository = struct {
 
 /// Binds ?3 to ?6 of `unanalyzed_predicate`. The cursor and limit stay ?1 and
 /// ?2 so the selector can be appended to any paged query without renumbering.
-fn bindAnalysisSelector(statement: sqlite.Statement, selector: AnalysisSelector) !void {
+fn bindAnalysisSelector(statement: sqlite.Statement, selector: *const AnalysisSelector) !void {
     try statement.bindInt64(3, selector.kind);
     try statement.bindText(4, selector.algorithm_id);
     try statement.bindInt64(5, selector.algorithm_version);

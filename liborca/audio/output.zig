@@ -97,7 +97,7 @@ pub const TestBackend = struct {
         render: RenderFn,
         userdata: ?*anyopaque,
         request: contract.OpenRequest,
-        state: std.atomic.Value(u8) = .init(@backingInt(Status.active)),
+        state: std.atomic.Value(u8) = .init(@intFromEnum(Status.active)),
         closed: bool = false,
 
         /// Drives one render callback exactly as a backend RT thread would.
@@ -106,7 +106,7 @@ pub const TestBackend = struct {
         }
 
         pub fn markLost(self: *Stream) void {
-            self.state.store(@backingInt(Status.lost), .release);
+            self.state.store(@intFromEnum(Status.lost), .release);
         }
     };
 
@@ -180,7 +180,7 @@ pub const TestBackend = struct {
 
     fn streamStatus(context: ?*anyopaque) Status {
         const stream: *Stream = @ptrCast(@alignCast(context.?));
-        return @fromBackingInt(@intCast(stream.state.load(.acquire)));
+        return @enumFromInt(@as(std.meta.Tag(Status), @intCast(stream.state.load(.acquire))));
     }
 
     fn streamLatency(

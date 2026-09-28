@@ -312,7 +312,7 @@ const RuntimeBox = struct {
     /// builds never report a violation: the check exists to catch the mistake
     /// during development, not to make the boundary thread-safe.
     fn foreignThread(self: *const RuntimeBox) bool {
-        if (builtin.mode != .debug) return false;
+        if (builtin.mode != .Debug) return false;
         return std.Thread.getCurrentId() != self.owner_thread;
     }
 };
@@ -436,8 +436,8 @@ pub export fn orca_library_query_health_issues(
     defer page.deinit();
     for (page.items) |item| {
         const view: HealthIssueView = .{
-            .kind = @backingInt(item.kind),
-            .severity = @backingInt(item.severity),
+            .kind = @intFromEnum(item.kind),
+            .severity = @intFromEnum(item.severity),
             .path = stringView(item.path),
             .details = stringView(item.details),
         };
@@ -664,7 +664,7 @@ pub export fn orca_player_snapshot(
     const snapshot = box.runtime.playerSnapshot(importPlayer(player)) catch |err|
         return mapError(err);
     destination.* = .{
-        .state = @backingInt(snapshot.state),
+        .state = @intFromEnum(snapshot.state),
         .generation = snapshot.epoch,
         .position_frames = snapshot.position_frames,
     };
@@ -692,7 +692,7 @@ pub export fn orca_runtime_poll_event(
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     if (box.foreignThread()) return .wrong_thread;
     const destination = event orelse return .invalid_argument;
-    destination.* = .{ .kind = @backingInt(EventKind.none), .payload = undefined };
+    destination.* = .{ .kind = @intFromEnum(EventKind.none), .payload = undefined };
     // Lossless completions first, coalesced hints second: a host must never
     // learn that a job finished before it learns the command that started it
     // succeeded.
@@ -903,7 +903,7 @@ pub export fn orca_job_snapshot_get(
         return mapError(err);
     destination.* = .{
         .kind = exportJobKind(snapshot.kind),
-        .state = @backingInt(snapshot.state),
+        .state = @intFromEnum(snapshot.state),
         .has_total = @intFromBool(snapshot.total_units != null),
         .completed_units = snapshot.completed_units,
         .total_units = snapshot.total_units orelse 0,
@@ -1052,7 +1052,7 @@ pub export fn orca_player_set_repeat(
     if (mode > 2) return .invalid_argument;
     box.runtime.playerSetRepeat(
         importPlayer(player),
-        @fromBackingInt(@intCast(mode)),
+        @enumFromInt(mode),
     ) catch |err| return mapError(err);
     return .ok;
 }
@@ -1124,7 +1124,7 @@ pub export fn orca_player_replay_gain_mode(
     const destination = output orelse return .invalid_argument;
     const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
         return mapError(err);
-    destination.* = @backingInt(mode);
+    destination.* = @intFromEnum(mode);
     return .ok;
 }
 
@@ -1169,8 +1169,8 @@ pub export fn orca_player_status_get(
     const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
         return mapError(err);
     destination.* = .{
-        .transport = @backingInt(status.transport),
-        .repeat = @backingInt(status.repeat),
+        .transport = @intFromEnum(status.transport),
+        .repeat = @intFromEnum(status.repeat),
         .shuffle = @intFromBool(status.shuffle),
         .has_track = @intFromBool(status.track_id != null),
         .epoch = status.epoch,
@@ -1341,7 +1341,7 @@ pub export fn orca_zone_status_get(
     const destination = output orelse return .invalid_argument;
     const stats = box.runtime.zoneStats(importZone(zone)) catch |err| return mapError(err);
     destination.* = .{
-        .output_state = @backingInt(stats.output_state),
+        .output_state = @intFromEnum(stats.output_state),
         .recovery_attempts = stats.recovery_attempts,
         .backend_quantum_frames = stats.backend_quantum_frames,
         .rendered_entry_serial = stats.rendered_entry_serial,
@@ -1533,19 +1533,19 @@ fn exportCompletion(event: control.Event) Event {
             completed.object = exportHandle(value);
         },
         .job_finished => |value| return .{
-            .kind = @backingInt(EventKind.job_finished),
+            .kind = @intFromEnum(EventKind.job_finished),
             .payload = .{ .job_finished = .{
                 .job = exportJobHandle(value.job),
-                .state = @backingInt(value.state),
+                .state = @intFromEnum(value.state),
             } },
         },
         .failed => |failure| {
             completed.outcome = 255;
-            completed.failure = @backingInt(failure);
+            completed.failure = @intFromEnum(failure);
         },
     }
     return .{
-        .kind = @backingInt(EventKind.command_completed),
+        .kind = @intFromEnum(EventKind.command_completed),
         .payload = .{ .command_completed = completed },
     };
 }
@@ -1553,14 +1553,14 @@ fn exportCompletion(event: control.Event) Event {
 fn exportTelemetry(telemetry: control.Telemetry) Event {
     return switch (telemetry) {
         .player_position => |position| .{
-            .kind = @backingInt(EventKind.player_position),
+            .kind = @intFromEnum(EventKind.player_position),
             .payload = .{ .player_position = .{
                 .player = exportHandle(position.player),
                 .frames = position.frames,
             } },
         },
         .job_progress => |progress| .{
-            .kind = @backingInt(EventKind.job_progress),
+            .kind = @intFromEnum(EventKind.job_progress),
             .payload = .{ .job_progress = .{
                 .job = exportJobHandle(progress.job),
                 .has_total = @intFromBool(progress.total_units != null),

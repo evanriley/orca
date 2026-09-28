@@ -170,7 +170,7 @@ pub const StandardTransport = struct {
         if (buffered.len > request.max_response_bytes) return error.ResponseTooLarge;
         return .{
             .allocator = allocator,
-            .status = @backingInt(fetched.status),
+            .status = @intFromEnum(fetched.status),
             .body = try allocator.dupe(u8, buffered),
         };
     }

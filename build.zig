@@ -10,6 +10,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    for (pkgConfigIncludePaths(b, "sqlite3")) |include_path| {
+        sqlite_translate.addSystemIncludePath(include_path);
+    }
     const sqlite_module = sqlite_translate.createModule();
 
     const liborca_module = b.addModule("liborca", .{
@@ -37,17 +40,30 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .yes });
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/opus_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("opusfile", .{ .use_pkg_config = .yes });
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/vorbis_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
+    addAlac(b, liborca_module);
+    @import("build/libxaac.zig").addTo(b, liborca_module);
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/aac_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),
             .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-D_REENTRANT" },
         });
-        liborca_module.addSystemIncludePath(
-            b.graph.cwdRelativePath("/usr/include/pipewire-0.3"),
-        );
-        liborca_module.addSystemIncludePath(
-            b.graph.cwdRelativePath("/usr/include/spa-0.2"),
-        );
+        for (pkgConfigIncludePaths(b, "libpipewire-0.3")) |include_path| {
+            liborca_module.addSystemIncludePath(include_path);
+        }
         liborca_module.linkSystemLibrary("pipewire-0.3", .{ .use_pkg_config = .no });
     }
 
@@ -57,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .root_module = liborca_module,
     });
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
+    installLicenses(b);
     b.installArtifact(liborca);
 
     const liborca_shared = b.addLibrary(.{
@@ -79,7 +96,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());
-    run_cli.addPassthruArgs();
+    if (b.args) |args| run_cli.addArgs(args);
     const run_step = b.step("run", "Run orca-cli");
     run_step.dependOn(&run_cli.step);
 
@@ -196,7 +213,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_benchmark = b.addRunArtifact(benchmark);
-    run_benchmark.addPassthruArgs();
+    if (b.args) |args| run_benchmark.addArgs(args);
     const benchmark_step = b.step("bench", "Run Orca benchmarks");
     benchmark_step.dependOn(&run_benchmark.step);
 
@@ -210,7 +227,64 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_dsp_benchmark = b.addRunArtifact(dsp_benchmark);
-    run_dsp_benchmark.addPassthruArgs();
+    if (b.args) |args| run_dsp_benchmark.addArgs(args);
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
+}
+
+/// Only `-I` paths are taken from pkg-config: PipeWire's full `--cflags`
+/// contain flags that Zig's pkg-config integration rejects.
+fn pkgConfigIncludePaths(b: *std.Build, package: []const u8) []const std.Build.LazyPath {
+    const output = b.run(&.{ "pkg-config", "--cflags-only-I", package });
+    var include_paths: std.ArrayList(std.Build.LazyPath) = .empty;
+    var flags = std.mem.tokenizeAny(u8, output, " \n");
+    while (flags.next()) |flag| {
+        if (!std.mem.startsWith(u8, flag, "-I")) continue;
+        include_paths.append(b.allocator, .{ .cwd_relative = flag[2..] }) catch @panic("OOM");
+    }
+    return include_paths.items;
+}
+
+/// Apple's reference ALAC decoder, built from source. Only the decoding half
+/// is compiled, and only `alac_shim.cpp` sees its C++ interface. The
+/// reference left-shifts negative values, which two's-complement targets
+/// define, so the undefined-behaviour sanitizer is off for its files only.
+fn addAlac(b: *std.Build, module: *std.Build.Module) void {
+    const alac = b.dependency("alac", .{});
+    const codec = alac.path("codec");
+    module.addIncludePath(codec);
+    module.link_libcpp = true;
+    module.addCSourceFiles(.{
+        .root = codec,
+        .files = &.{
+            "ag_dec.c",
+            "ALACBitUtilities.c",
+            "dp_dec.c",
+            "EndianPortable.c",
+            "matrix_dec.c",
+        },
+        .flags = &.{ "-std=c99", "-DNDEBUG", "-w", "-fno-sanitize=undefined" },
+    });
+    module.addCSourceFiles(.{
+        .root = codec,
+        .files = &.{"ALACDecoder.cpp"},
+        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti", "-w", "-fno-sanitize=undefined" },
+    });
+    module.addCSourceFile(.{
+        .file = b.path("liborca/codec/alac_shim.cpp"),
+        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti" },
+    });
+}
+
+/// Apache-2.0 requires its licence and any NOTICE to travel with binaries that
+/// contain the code, and ALAC and libxaac are compiled into liborca.
+fn installLicenses(b: *std.Build) void {
+    const directory = "share/doc/orca/licenses";
+    b.installFile("LICENSE", directory ++ "/orca/LICENSE");
+    b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
+    const alac = b.dependency("alac", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(alac.path("LICENSE"), directory ++ "/alac/LICENSE").step);
+    const libxaac = b.dependency("libxaac", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("LICENSE"), directory ++ "/libxaac/LICENSE").step);
+    b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("NOTICE"), directory ++ "/libxaac/NOTICE").step);
 }

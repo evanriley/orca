@@ -110,10 +110,10 @@ fn resolveLibraryPath(
         if (configured.len != 0) return allocator.dupeSentinel(u8, configured, 0) catch null;
     }
     const data_dir = std.mem.span(gtk.g_get_user_data_dir());
-    const directory = allocator.printSentinel("{s}/orca", .{data_dir}, 0) catch return null;
+    const directory = std.fmt.allocPrintSentinel(allocator, "{s}/orca", .{data_dir}, 0) catch return null;
     defer allocator.free(directory);
     if (gtk.g_mkdir_with_parents(directory.ptr, 0o700) != 0) return null;
-    return allocator.printSentinel("{s}/library.db", .{directory}, 0) catch null;
+    return std.fmt.allocPrintSentinel(allocator, "{s}/library.db", .{directory}, 0) catch null;
 }
 
 /// `ORCA_OUTPUT_DEVICE` names an orca device id from `orca-cli devices`, and

@@ -24,3 +24,19 @@ FFmpeg `testsrc` frame — as a front cover, in a FLAC `PICTURE` block, an ID3v2
 the 64-byte prefix read. `audio/covered-alternate-reference.flac` carries a
 *different* 138-byte cover, so a test asserting which of a Release's tracks
 supplied its artwork can tell them apart. No fixture contains third-party media.
+
+`audio/tagged-reference.opus` is `audio/generated-reference.wav` encoded with
+FFmpeg's libopus encoder at 64 kb/s, tagged with title, artist, album, track,
+date and genre. `audio/tagged-reference.ogg` is `audio/tagged-reference.flac`
+encoded with FFmpeg's libvorbis encoder at quality 3, carrying the FLAC file's
+tags. Both are 200 ms long.
+
+`audio/tagged-reference-alac.m4a` is `audio/tagged-reference.flac` encoded with
+FFmpeg's ALAC encoder, carrying its tags. `audio/tagged-reference-aac.m4a` is
+`audio/generated-reference.wav` encoded with FFmpeg's AAC encoder at 128 kb/s
+with title, artist, album artist, album, track 2/5, disc 1/2, date and genre.
+`audio/covered-reference.m4a` is the same audio carrying the 217-byte PNG cover
+in a `covr` atom. `audio/chirp-reference-aac.m4a` is 200 ms of a stereo chirp,
+`0.4 sin(2π(200t + 2000t²))` left and `0.4 sin(2π(300t + 1500t²))` right at
+48 kHz, encoded at 192 kb/s; tests regenerate the source from the formula to
+check alignment.

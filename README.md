@@ -1,16 +1,21 @@
 # Orca
 
 Orca is a local-files-first music player and library-maintenance application.
-Its reusable Zig core, `liborca`, owns music-domain behavior while thin native
-frontends provide platform integration.
+Its engine, `liborca`, is a Zig library for everything music-related, and the
+native frontends are thin clients of it. The project is pre-release; the
+[roadmap](docs/roadmap.md) lists what works today.
 
-The authoritative product and architecture specification is
-[`Orca_Full_Implementation_Plan_v1.0.md`](Orca_Full_Implementation_Plan_v1.0.md).
+The [architecture overview](docs/architecture.md) describes the design and
+links each subsystem's contract.
 
 ## Requirements
 
-- Zig `0.17.0-dev.1770+5d7cf3f34` or newer compatible development snapshot
-- Linux builds: PipeWire development library
+- Zig `0.16.0`
+- libFLAC, libopusfile, libvorbis and SQLite development libraries
+- Linux builds: PipeWire and GTK4 development libraries
+
+With Nix, `nix develop` (or direnv) provides all of these, and `nix build`
+builds the package.
 
 ## Build and test
 
@@ -63,3 +68,15 @@ acceptance updates Orca metadata without writing media files.
 - `tests/` — integration, platform, recovery, and performance tests
 - `fixtures/` — checked-in test media and pathological inputs
 - `docs/` — architecture decisions and subsystem documentation
+
+## License
+
+Orca is licensed under the [Mozilla Public License 2.0](LICENSE). Applications
+of any licence may embed `liborca`; changes to Orca's own files are shared
+under the same terms.
+
+`liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac, both
+Apache-2.0, and a vendored CC0 minimp3. `zig build` installs their licence and
+notice files under `share/doc/orca/licenses`; distribute that directory with
+any binary. The system libraries Orca links (SQLite, libFLAC, libopusfile,
+libvorbis, PipeWire, GTK4) are distributed under their own licences.
