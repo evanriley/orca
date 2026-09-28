@@ -55,6 +55,10 @@ defer page.deinit();
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
   (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`).
+- `playerSetEqualizer` and `playerSetCrossfeed` (and their getters) set a
+  Player's ten-band `Equalizer` (or an `EqualizerPreset`) and stereo crossfeed;
+  `playerSignalPath` returns a `SignalPath`: the source, ReplayGain, DSP, volume
+  and output stream, and why the path is or is not bit-perfect.
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
   back afterwards. An edit that moves a track to another album or position
   reprojects it under a new id.

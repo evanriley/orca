@@ -2,6 +2,15 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Live DSP
+
+- **A ten-band equalizer, stereo crossfeed and a signal-path report.**
+  `Runtime.playerSetEqualizer`, `playerSetCrossfeed` and `playerSignalPath`
+  drive a per-Player DSP chain (preamp, equalizer, crossfeed, volume) that
+  runs on the engine thread and costs nothing when off;
+  `orca-cli play-tracks --eq=PRESET|G1,...,G10[:PREAMP] --crossfeed=AMOUNT`
+  applies it and prints the signal path.
+
 ### A designed GTK frontend
 
 - **`orca-gtk` is a libadwaita app.** A sidebar of pages, a full-width player

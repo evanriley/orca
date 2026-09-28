@@ -48,8 +48,22 @@ ordered chains are triple-buffered: the control lane writes an unclaimed slot
 and publishes it atomically, while the render lane adopts it only at a block
 boundary. Acknowledged publication makes old node-context reclamation explicit.
 Volume changes use frame ramps; metering publishes peak/RMS snapshots without
-changing samples. Built-in processing also includes peaking
-parametric EQ, stereo crossfeed, and a resettable DC blocker.
+changing samples.
+
+Every Player runs one built-in DSP chain, `PlayerDsp` in `audio/dsp.zig`:
+preamp, a ten-band peaking equalizer (31 Hz to 16 kHz, one octave apart,
+Q 1.41, up to 12 dB per band), stereo crossfeed, then the volume gain, in that
+order. It runs on the engine thread over canonical float32 PCM, after decoding
+and before fanout, never in the render callback. Before each pass the engine
+calls `prepare`, which rebuilds the filter coefficients when the settings or
+the canonical sample rate changed, leaving out bands at zero gain and bands at
+or above Nyquist, and clears filter history when the transport epoch or
+channel count changed, so a seek or a hard switch never rings with the old
+audio. The control lane writes the settings only while the engine is
+quiesced. Crossfeed applies to two-channel audio; other layouts pass through
+unchanged. With the equalizer and crossfeed off the chain is the volume gain
+and nothing else. The DC blocker, the ordered chains and the resampler are not
+part of it.
 
 User volume and loudness correction are applied in two different places
 because they are two different kinds of thing. Volume is one Player-scope
@@ -74,7 +88,10 @@ Signal-path reports list Player and Zone nodes, format/rate/layout conversions,
 direct-RT eligibility, and total algorithmic latency. They distinguish source
 PCM from canonical float32 working PCM and conservatively explain why a path is
 not bit-perfect. Eligibility is not an assertion that the current backend and
-device negotiated a bit-perfect native output path.
+device negotiated a bit-perfect native output path. `Runtime.playerSignalPath`
+reports the live path of one Player: the decoder's source format, the audible
+entry's ReplayGain, the equalizer, crossfeed and volume, and the format the
+clock Zone opened its stream with.
 
 A runtime Zone owns its whole private render path: `BlockPool`, `RenderPipe`,
 `RenderContext` and `OutputSession`, plus every atomic the render callback reads

@@ -132,6 +132,7 @@ zig build run -- undo-tags DATABASE GROUP
 zig build run -- play AUDIO [DEVICE_ID]
 zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
     [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
+    [--eq=PRESET|G1,...,G10[:PREAMP]] [--crossfeed=0..1]   # prints a `signal:` line
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
 ```
 

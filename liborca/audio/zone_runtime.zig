@@ -44,6 +44,19 @@ pub const Sink = fanout.ZoneSink(block_count);
 ///   they are all owned *here* — never by a Player. A Player can therefore be
 ///   destroyed or detached while an output is still open without the render
 ///   thread ever dereferencing freed memory.
+/// The format a Zone opens its stream with for a canonical `format`: float32
+/// at the canonical rate and channel count. `format.channels` must not exceed
+/// `max_channels`.
+pub fn streamFormat(format: pcm.Format) pcm.Format {
+    return .{
+        .sample_format = .float_32,
+        .channels = format.channels,
+        .sample_rate = format.sample_rate,
+        .bits_per_sample = 32,
+        .bytes_per_frame = format.channels * 4,
+    };
+}
+
 pub const ZoneRuntime = struct {
     allocator: std.mem.Allocator,
     zone: zone_model.Zone,
@@ -203,13 +216,7 @@ pub const ZoneRuntime = struct {
         self.context.channels = format.channels;
         const request: contract.OpenRequest = .{
             .device_id = device_id,
-            .format = .{
-                .sample_format = .float_32,
-                .channels = format.channels,
-                .sample_rate = format.sample_rate,
-                .bits_per_sample = 32,
-                .bytes_per_frame = try std.math.mul(u16, format.channels, 4),
-            },
+            .format = streamFormat(format),
             .policy = self.zone.policy,
             // Orca's own render-ahead is the Zone budget; absent an explicit
             // request the device is asked for one block, so the two do not

@@ -47,6 +47,8 @@ const EntryInfo = struct {
     /// audio it is hearing is being multiplied by. The correction is applied
     /// by the session that decodes the entry, not from here.
     replay_gain: f32 = 1,
+    source_format: ?pcm.Format = null,
+    codec: []const u8 = "",
 };
 
 /// Only the current and the one primed successor can be in flight, so this only
@@ -168,12 +170,7 @@ pub const Player = struct {
     /// while the previous one was still audible.
     pub fn publishSourceInfo(self: *Player) void {
         if (self.sources) |*sources| {
-            self.recordEntryInfo(.{
-                .serial = sources.current_entry_serial,
-                .sample_rate = sources.current.decoder.format.sample_rate,
-                .frame_count = sources.current.decoder.frame_count orelse 0,
-                .replay_gain = sources.current.replay_gain,
-            });
+            self.recordEntryInfo(decodingEntryInfo(sources));
         }
         const audible = self.audibleEntryInfo();
         self.published_sample_rate.store(audible.sample_rate, .release);
@@ -214,6 +211,17 @@ pub const Player = struct {
         self.entry_info_head = (self.entry_info_head + 1) % entry_info_len;
     }
 
+    fn decodingEntryInfo(sources: *const source_session.SourceQueue) EntryInfo {
+        return .{
+            .serial = sources.current_entry_serial,
+            .sample_rate = sources.current.decoder.format.sample_rate,
+            .frame_count = sources.current.decoder.frame_count orelse 0,
+            .replay_gain = sources.current.replay_gain,
+            .source_format = sources.sourceFormat(),
+            .codec = sources.codec(),
+        };
+    }
+
     fn forgetEntryInfo(self: *Player) void {
         self.entry_info = @splat(.{});
         self.entry_info_head = 0;
@@ -225,12 +233,7 @@ pub const Player = struct {
     /// available, and it is the correct one for the first case.
     fn audibleEntryInfo(self: *const Player) EntryInfo {
         const sources = if (self.sources) |*value| value else return .{};
-        const fallback: EntryInfo = .{
-            .serial = sources.current_entry_serial,
-            .sample_rate = sources.current.decoder.format.sample_rate,
-            .frame_count = sources.current.decoder.frame_count orelse 0,
-            .replay_gain = sources.current.replay_gain,
-        };
+        const fallback = decodingEntryInfo(sources);
         const serial = self.audible_entry_serial.load(.acquire);
         if (serial == 0 or serial == sources.current_entry_serial) return fallback;
         for (self.entry_info) |record| {
@@ -293,6 +296,14 @@ pub const Player = struct {
 
     pub fn sourceFormat(self: *const Player) ?pcm.Format {
         return if (self.sources) |*sources| sources.sourceFormat() else null;
+    }
+
+    /// The audible entry's source format and codec, resolved like its
+    /// duration. Read under the engine handshake.
+    pub fn audibleSource(self: *const Player) ?struct { format: pcm.Format, codec: []const u8 } {
+        const info = self.audibleEntryInfo();
+        const source = info.source_format orelse return null;
+        return .{ .format = source, .codec = info.codec };
     }
 
     pub fn decodeAndFanout(
