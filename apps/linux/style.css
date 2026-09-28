@@ -129,3 +129,123 @@ scale.seek:hover slider {
 .device-row {
   padding: 8px 10px;
 }
+
+.album-grid {
+  padding: 12px 18px;
+  background-color: transparent;
+}
+
+.album-grid > child {
+  padding: 10px;
+  border-radius: 14px;
+}
+
+.album-grid > child:hover {
+  background-color: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.album-cover {
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.22);
+}
+
+.hero-cover {
+  border-radius: 14px;
+  box-shadow: 0 6px 22px rgb(0 0 0 / 0.3);
+}
+
+.tile-title {
+  font-weight: 700;
+}
+
+.tile-artist {
+  font-size: 0.9em;
+  opacity: 0.65;
+}
+
+.cover-initials {
+  font-size: 2.4em;
+  font-weight: 800;
+  color: rgb(255 255 255 / 0.9);
+}
+
+.hero-cover .cover-initials {
+  font-size: 3.2em;
+}
+
+.tile-0 { background-image: linear-gradient(135deg, #5b7fde, #2e3f8f); }
+.tile-1 { background-image: linear-gradient(135deg, #e0735b, #8f2e3f); }
+.tile-2 { background-image: linear-gradient(135deg, #4fb58f, #1f6b5a); }
+.tile-3 { background-image: linear-gradient(135deg, #b77bd8, #5a2e8f); }
+.tile-4 { background-image: linear-gradient(135deg, #e0b24f, #9a5a1f); }
+.tile-5 { background-image: linear-gradient(135deg, #5bb8d8, #1f5a8f); }
+
+.album-page {
+  margin: 28px 24px 36px 24px;
+}
+
+.album-kind {
+  font-size: 0.75em;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  opacity: 0.55;
+}
+
+.album-title {
+  font-size: 2.1em;
+  font-weight: 800;
+}
+
+.album-artist {
+  font-size: 1.2em;
+  font-weight: 600;
+  color: var(--accent-color);
+}
+
+.album-meta {
+  opacity: 0.65;
+}
+
+.album-track {
+  padding: 8px 12px;
+}
+
+.queue-cover {
+  border-radius: 6px;
+}
+
+.now-cover {
+  border-radius: 18px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.35);
+}
+
+.now-page-title {
+  font-size: 2.4em;
+  font-weight: 800;
+}
+
+.now-page-artist {
+  font-size: 1.4em;
+  font-weight: 600;
+}
+
+.now-page-album {
+  font-size: 1.1em;
+  opacity: 0.7;
+}
+
+.now-up-next {
+  font-size: 0.8em;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  opacity: 0.55;
+}
+
+.now-up-next-list {
+  background-color: transparent;
+}
+
+.now-up-next-row {
+  padding: 6px 0;
+  opacity: 0.85;
+}

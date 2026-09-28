@@ -11,6 +11,7 @@ const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const mpris = @import("mpris.zig");
+const art = @import("art.zig");
 const track_model = @import("track_model.zig");
 
 /// One page. The list is filled a page at a time as the user scrolls rather
@@ -145,6 +146,26 @@ pub const App = struct {
     browse_panes: ?*gtk.Widget = null,
     browse_toggle: ?*gtk.Widget = null,
 
+    // albums
+    album_store: ?*gtk.ListStore = null,
+    albums_loaded: u32 = 0,
+    albums_exhausted: bool = false,
+    albums_title: ?*adw.WindowTitle = null,
+    albums_body: ?*gtk.Stack = null,
+    albums_navigation: ?*adw.NavigationView = null,
+    album_sort: liborca.ReleaseSort = .artist,
+
+    // now playing
+    now_cover: ?*gtk.Widget = null,
+    now_title: ?*gtk.Label = null,
+    now_artist: ?*gtk.Label = null,
+    now_album: ?*gtk.Label = null,
+    now_up_next: ?*gtk.ListBox = null,
+    now_up_next_heading: ?*gtk.Widget = null,
+    tint_provider: ?*gtk.CssProvider = null,
+
+    art: art.Cache = .{},
+
     // scan status, at the foot of the sidebar
     scan_revealer: ?*gtk.Revealer = null,
     scan_label: ?*gtk.Label = null,
@@ -164,8 +185,7 @@ pub const App = struct {
     /// audible track's file carries a readable image, and a placeholder icon
     /// when it does not, so there is no second widget to keep visible in step
     /// with a nullable image.
-    now_playing_cover: ?*gtk.Image = null,
-    now_playing_art: ?*gtk.Stack = null,
+    now_playing_art: ?*gtk.Widget = null,
     now_playing_box: ?*gtk.Widget = null,
     volume_button: ?*gtk.Widget = null,
     shuffle_button: ?*gtk.Widget = null,
@@ -411,6 +431,7 @@ pub const App = struct {
         self.artist_scope_name.clear(self.allocator);
         self.device_ids.deinit(self.allocator);
         self.device_checks.deinit(self.allocator);
+        self.art.deinit(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };

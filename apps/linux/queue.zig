@@ -8,6 +8,8 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const track_model = @import("track_model.zig");
+const art = @import("art.zig");
+const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -16,7 +18,10 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-fn setupRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+const thumb_pixels: c_int = 40;
+
+fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(row, "queue-row");
     const marker = gtk.gtk_stack_new();
@@ -46,7 +51,10 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void
     gtk.gtk_widget_add_css_class(duration, "numeric");
     gtk.gtk_widget_add_css_class(duration, "dim-label");
 
+    const cover = art.newCover(self, art.iconPlaceholder(thumb_pixels), thumb_pixels);
+    gtk.gtk_widget_add_css_class(cover, "queue-cover");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), marker);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), cover);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), labels);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), duration);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
@@ -59,7 +67,8 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     const track: *TrackObject = @ptrCast(@alignCast(object));
     const row = gtk.gtk_list_item_get_child(list_item) orelse return;
     const marker = gtk.gtk_widget_get_first_child(row) orelse return;
-    const labels = gtk.gtk_widget_get_next_sibling(marker) orelse return;
+    const cover = gtk.gtk_widget_get_next_sibling(marker) orelse return;
+    const labels = gtk.gtk_widget_get_next_sibling(cover) orelse return;
     const duration = gtk.gtk_widget_get_next_sibling(labels) orelse return;
     const title = gtk.gtk_widget_get_first_child(labels) orelse return;
     const artist = gtk.gtk_widget_get_next_sibling(title) orelse return;
@@ -78,6 +87,14 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, title), track.title().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, artist), track.artist().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&buffer).ptr);
+    art.show(self, cover, art.Key.track(track.id(), .thumb));
+}
+
+fn unbindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const row = gtk.gtk_list_item_get_child(gtk.cast(gtk.ListItem, item)) orelse return;
+    const marker = gtk.gtk_widget_get_first_child(row) orelse return;
+    const cover = gtk.gtk_widget_get_next_sibling(marker) orelse return;
+    art.forget(state(data), cover);
 }
 
 fn clearClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -92,6 +109,7 @@ pub fn build(self: *App) *gtk.Widget {
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupRow), self);
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindRow), self);
+    _ = gtk.signalConnect(factory, "unbind", gtk.callback(unbindRow), self);
     const list = gtk.gtk_list_view_new(
         gtk.gtk_no_selection_new(gtk.cast(gtk.ListModel, gtk.g_object_ref(store))),
         factory,
@@ -181,9 +199,9 @@ pub fn tick(self: *App) void {
             strings.printZ(&buffer, "{d}", .{status.queue_length}) catch "";
         gtk.gtk_label_set_text(label, text.ptr);
     }
-    if (!self.queue_visible) return;
     if (status.queue_length == self.shown_queue_length and status.queue_index == self.shown_queue_index) return;
     self.shown_queue_length = status.queue_length;
     self.shown_queue_index = status.queue_index;
-    refill(self, status);
+    if (self.queue_visible) refill(self, status);
+    nowplaying.refreshUpNext(self);
 }

@@ -123,6 +123,7 @@ zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
 zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
 zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
@@ -150,7 +151,9 @@ not hold the user's default sink.
 To look at the GUI without putting a window on the user's desktop, run it in a
 headless sway session and screenshot it with `grim`; drive it with `wtype`,
 which reaches GTK where transient virtual pointers do not. Use
-`GSK_RENDERER=cairo` there.
+`GSK_RENDERER=cairo` there. Pointer input needs one long-lived virtual pointer
+(`zwlr_virtual_pointer_v1`): GTK does not bind a device that exists only for a
+single command, as `wlrctl`'s do.
 
 macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
 `zig-out/lib/liborca` through a systemLibrary modulemap.

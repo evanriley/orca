@@ -106,6 +106,9 @@ pub const GdkDisplay = opaque {};
 pub const GMenu = opaque {};
 pub const GMenuModel = opaque {};
 pub const Actionable = opaque {};
+pub const GTask = opaque {};
+pub const GridView = opaque {};
+pub const Overlay = opaque {};
 
 // ------------------------------------------------------------- enum values
 //
@@ -329,6 +332,24 @@ pub extern fn gdk_pixbuf_new_from_stream_at_scale(
     err: *?*GError,
 ) ?*GdkPixbuf;
 pub extern fn gdk_texture_new_for_pixbuf(pixbuf: *GdkPixbuf) *GdkTexture;
+pub extern fn gdk_pixbuf_get_pixels(pixbuf: *GdkPixbuf) [*]u8;
+pub extern fn gdk_pixbuf_get_width(pixbuf: *GdkPixbuf) c_int;
+pub extern fn gdk_pixbuf_get_height(pixbuf: *GdkPixbuf) c_int;
+pub extern fn gdk_pixbuf_get_rowstride(pixbuf: *GdkPixbuf) c_int;
+pub extern fn gdk_pixbuf_get_n_channels(pixbuf: *GdkPixbuf) c_int;
+
+pub const TaskThreadFunc = *const fn (*GTask, ?*anyopaque, ?*anyopaque, ?*GCancellable) callconv(.c) void;
+pub extern fn g_task_new(
+    source_object: ?*anyopaque,
+    cancellable: ?*GCancellable,
+    callback: ?*const fn (?*GObject, *GAsyncResult, ?*anyopaque) callconv(.c) void,
+    callback_data: ?*anyopaque,
+) *GTask;
+pub extern fn g_task_set_task_data(task: *GTask, task_data: ?*anyopaque, destroy: ?*anyopaque) void;
+pub extern fn g_task_get_task_data(task: *GTask) ?*anyopaque;
+pub extern fn g_task_run_in_thread(task: *GTask, task_func: TaskThreadFunc) void;
+pub extern fn g_task_return_pointer(task: *GTask, result: ?*anyopaque, destroy: ?*anyopaque) void;
+pub extern fn g_task_propagate_pointer(task: *GTask, err: *?*GError) ?*anyopaque;
 
 // ---------------------------------------------------------------- GVariant
 //
@@ -472,6 +493,12 @@ pub extern fn gtk_widget_set_hexpand(widget: *Widget, expand: gboolean) void;
 pub extern fn gtk_widget_set_vexpand(widget: *Widget, expand: gboolean) void;
 pub extern fn gtk_widget_set_valign(widget: *Widget, alignment: c_int) void;
 pub extern fn gtk_widget_set_halign(widget: *Widget, alignment: c_int) void;
+pub extern fn gtk_widget_set_name(widget: *Widget, name: [*:0]const u8) void;
+pub extern fn gtk_widget_get_name(widget: *Widget) [*:0]const u8;
+pub extern fn gtk_list_box_row_new() *Widget;
+pub extern fn gtk_list_box_row_set_child(row: *ListBoxRow, child: ?*Widget) void;
+pub extern fn gtk_button_new() *Widget;
+pub extern fn gtk_button_set_child(button: *Button, child: ?*Widget) void;
 pub extern fn gtk_widget_set_overflow(widget: *Widget, overflow: c_int) void;
 pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
@@ -495,6 +522,16 @@ pub extern fn gtk_stack_new() *Widget;
 pub extern fn gtk_stack_add_named(stack: *Stack, child: *Widget, name: [*:0]const u8) ?*anyopaque;
 pub extern fn gtk_stack_set_visible_child_name(stack: *Stack, name: [*:0]const u8) void;
 pub extern fn gtk_stack_set_transition_type(stack: *Stack, transition: c_int) void;
+pub extern fn gtk_stack_get_child_by_name(stack: *Stack, name: [*:0]const u8) ?*Widget;
+pub extern fn gtk_stack_get_visible_child_name(stack: *Stack) ?[*:0]const u8;
+pub extern fn gtk_grid_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
+pub extern fn gtk_grid_view_set_max_columns(view: *GridView, columns: c_uint) void;
+pub extern fn gtk_grid_view_set_min_columns(view: *GridView, columns: c_uint) void;
+pub extern fn gtk_grid_view_set_single_click_activate(view: *GridView, single: gboolean) void;
+pub extern fn gtk_overlay_new() *Widget;
+pub extern fn gtk_overlay_set_child(overlay: *Overlay, child: ?*Widget) void;
+pub extern fn gtk_overlay_add_overlay(overlay: *Overlay, widget: *Widget) void;
+
 pub extern fn gtk_list_box_new() *Widget;
 pub extern fn gtk_list_box_append(box: *ListBox, child: *Widget) void;
 pub extern fn gtk_list_box_remove_all(box: *ListBox) void;
@@ -510,6 +547,11 @@ pub extern fn gtk_menu_button_set_menu_model(button: *MenuButton, menu_model: ?*
 pub extern fn gtk_menu_button_set_primary(button: *MenuButton, primary: gboolean) void;
 pub extern fn gtk_toggle_button_set_active(button: *ToggleButton, active: gboolean) void;
 pub extern fn gtk_label_set_wrap(label: *Label, wrap: gboolean) void;
+pub extern fn gtk_label_set_lines(label: *Label, lines: c_int) void;
+pub extern fn gtk_label_set_justify(label: *Label, justify: c_int) void;
+pub extern fn gtk_widget_set_cursor_from_name(widget: *Widget, name: ?[*:0]const u8) void;
+pub extern fn gtk_gesture_click_new() *EventController;
+pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;
@@ -615,6 +657,7 @@ pub extern fn gtk_string_list_splice(
 pub extern fn gtk_string_object_get_string(object: *StringObject) [*:0]const u8;
 
 pub extern fn gtk_drop_down_new(model: ?*ListModel, expression: ?*anyopaque) *Widget;
+pub extern fn gtk_drop_down_new_from_strings(strings: [*]const ?[*:0]const u8) *Widget;
 pub extern fn gtk_drop_down_get_selected(drop_down: *DropDown) c_uint;
 pub extern fn gtk_drop_down_set_selected(drop_down: *DropDown, position: c_uint) void;
 

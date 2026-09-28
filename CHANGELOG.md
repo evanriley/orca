@@ -9,11 +9,27 @@
   scan progress in the sidebar, a welcome page for an empty library, toasts
   instead of a status line, a shortcuts dialog (Ctrl+?) and an About dialog.
   The window adapts below 760sp.
+- **Albums**: a grid of covers sorted by artist, title, year or recently
+  added, and a page per album with Play, Shuffle and its tracks by disc.
+  Albums without covers show their initials on a colour of their own.
+- **Now Playing**: the cover, large, on a wash of its own colour, with what
+  comes next. Click the cover in the player bar to open it.
+- **Queue thumbnails**, and covers everywhere load and decode off the main
+  thread.
 - **The playing track is marked** in the track list and the queue.
 - **Enter in the search box plays the results.**
 - **Rescan Library** is in the main menu.
 - `nix build` installs a desktop entry and an icon.
 - The dev shell sets `XDG_DATA_DIRS` for the GSettings schemas GTK looks up.
+
+### Cover art off the caller's thread
+
+- **`Runtime.libraryRequestArtwork`** queues a cover lookup on the Library's
+  artwork loader, and `libraryTakeArtwork` collects it; `libraryCancelArtwork`
+  skips one not yet started. `orca-cli covers` reads a page of covers this way.
+- **`ReleaseQuery.sort`** orders Releases by title, artist, year or recently
+  added.
+- `core/root.zig` now lists its files in a test block, so their tests run.
 
 ### Tag write-back
 

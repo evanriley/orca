@@ -24,6 +24,8 @@ pub const AboutDialog = opaque {};
 pub const ShortcutsDialog = opaque {};
 pub const ShortcutsSection = opaque {};
 pub const ShortcutsItem = opaque {};
+pub const NavigationView = opaque {};
+pub const Clamp = opaque {};
 
 pub const TOOLBAR_FLAT: c_int = 0;
 pub const TOOLBAR_RAISED: c_int = 1;
@@ -54,8 +56,18 @@ pub extern fn adw_navigation_split_view_set_show_content(view: *NavigationSplitV
 pub extern fn adw_navigation_split_view_set_min_sidebar_width(view: *NavigationSplitView, width: f64) void;
 pub extern fn adw_navigation_split_view_set_max_sidebar_width(view: *NavigationSplitView, width: f64) void;
 
+pub extern fn adw_navigation_view_new() *gtk.Widget;
+pub extern fn adw_navigation_view_add(view: *NavigationView, page: *NavigationPage) void;
+pub extern fn adw_navigation_view_push(view: *NavigationView, page: *NavigationPage) void;
+pub extern fn adw_navigation_view_pop_to_tag(view: *NavigationView, tag: [*:0]const u8) gtk.gboolean;
+
+pub extern fn adw_clamp_new() *gtk.Widget;
+pub extern fn adw_clamp_set_maximum_size(clamp: *Clamp, size: c_int) void;
+pub extern fn adw_clamp_set_child(clamp: *Clamp, child: ?*gtk.Widget) void;
+
 pub extern fn adw_navigation_page_new(child: *gtk.Widget, title: [*:0]const u8) *NavigationPage;
 pub extern fn adw_navigation_page_set_title(page: *NavigationPage, title: [*:0]const u8) void;
+pub extern fn adw_navigation_page_set_tag(page: *NavigationPage, tag: ?[*:0]const u8) void;
 
 pub extern fn adw_toolbar_view_new() *gtk.Widget;
 pub extern fn adw_toolbar_view_set_content(view: *ToolbarView, content: ?*gtk.Widget) void;
@@ -91,6 +103,7 @@ pub extern fn adw_sidebar_get_selected(sidebar: *Sidebar) c_uint;
 pub extern fn adw_sidebar_set_selected(sidebar: *Sidebar, selected: c_uint) void;
 pub extern fn adw_sidebar_set_mode(sidebar: *Sidebar, mode: c_int) void;
 pub extern fn adw_sidebar_section_new() *SidebarSection;
+pub extern fn adw_sidebar_section_set_title(section: *SidebarSection, title: ?[*:0]const u8) void;
 pub extern fn adw_sidebar_section_append(section: *SidebarSection, item: *SidebarItem) void;
 pub extern fn adw_sidebar_item_new(title: [*:0]const u8) *SidebarItem;
 pub extern fn adw_sidebar_item_set_icon_name(item: *SidebarItem, icon_name: ?[*:0]const u8) void;

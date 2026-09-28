@@ -211,6 +211,8 @@ pub fn main(init: std.process.Init) !void {
         const group = try std.fmt.parseInt(u64, args[3], 10);
         try runtime.undoTagWrite(library, init.io, group);
         try stdout.print("undid group {d}\n", .{group});
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "covers")) {
+        try loadCovers(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
         try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
@@ -276,6 +278,7 @@ pub fn main(init: std.process.Init) !void {
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
             \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+            \\                 | covers DATABASE [--limit N] [--offset N]
             \\                 | edit DATABASE IDS [EDITS]
             \\                 | write-tags DATABASE IDS [--approve=DIGEST]
             \\                 | undo-tags DATABASE GROUP]
@@ -843,6 +846,55 @@ fn listArtists(
         "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]\n",
         .{ artist.id, artist.name, artist.release_count, artist.track_count, artist.sort_name },
     );
+}
+
+/// `orca-cli covers DATABASE [--limit N] [--offset N]`: a page of Releases'
+/// covers, read on the runtime's artwork loader the way a GUI grid asks for
+/// them, with how long the whole page took.
+fn loadCovers(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    const options = try parseBrowseOptions(option_arguments);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    var page = try runtime.libraryReleasePage(library, .{
+        .limit = @min(options.limit, 64),
+        .offset = options.offset,
+    });
+    defer page.deinit();
+    const started = std.Io.Clock.awake.now(io);
+    for (page.items) |release|
+        _ = try runtime.libraryRequestArtwork(library, io, .{ .release = release.id });
+    var remaining = page.items.len;
+    var covered: usize = 0;
+    var bytes: usize = 0;
+    while (remaining != 0) {
+        const result = runtime.libraryTakeArtwork(library) orelse {
+            sleepMilliseconds(1);
+            continue;
+        };
+        remaining -= 1;
+        const image = result.image orelse {
+            try stdout.print("{d}\tno cover\n", .{result.subject.release});
+            continue;
+        };
+        defer image.deinit();
+        covered += 1;
+        bytes += image.bytes.len;
+        try stdout.print("{d}\t{s}\t{d} bytes\n", .{ result.subject.release, image.mime_type, image.bytes.len });
+    }
+    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
+    try stdout.print("{d} of {d} releases have covers, {d} bytes, in {d} ms\n", .{
+        covered,
+        page.items.len,
+        bytes,
+        @divTrunc(elapsed.nanoseconds, std.time.ns_per_ms),
+    });
 }
 
 fn listReleases(

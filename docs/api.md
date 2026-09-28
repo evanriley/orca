@@ -52,8 +52,14 @@ defer page.deinit();
   and pages (`TrackQuery`, `TrackPage`, `ArtistQuery`, ...), playback state
   (`PlayerStatus`, `RepeatMode`, `ReplayGainMode`, ...), outputs (`Device`,
   `ZoneStats`, ...), jobs (`ScanRequest`, `JobSnapshot`, `ScanStats`, ...), tag
-  write-back (`TagWritePlan`, `TagWriteDigest`, ...) and the control lane
-  (`Action`, `Event`, `Telemetry`, `Failure`).
+  write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
+  (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
+  `Telemetry`, `Failure`).
+- Cover art is read either on the caller's thread (`libraryTrackArtwork`,
+  `libraryReleaseArtwork`) or off it: `libraryRequestArtwork` queues a lookup
+  on the Library's artwork loader, at most 64 outstanding, and
+  `libraryTakeArtwork` collects finished ones. `libraryCancelArtwork` skips a
+  request that has not started.
 - Pages and returned values are owned by the caller and released with their
   `deinit`.
 

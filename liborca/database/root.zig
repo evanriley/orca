@@ -25,6 +25,7 @@ pub const ReleaseSummary = repository.ReleaseSummary;
 pub const ReleasePage = repository.ReleasePage;
 pub const ArtistQuery = repository.ArtistQuery;
 pub const ReleaseQuery = repository.ReleaseQuery;
+pub const ReleaseSort = repository.ReleaseSort;
 pub const RecordingInput = repository.RecordingInput;
 pub const RecordingRepository = repository.RecordingRepository;
 pub const VolumeInput = repository.VolumeInput;
