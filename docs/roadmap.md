@@ -49,8 +49,9 @@ the rule in [architecture.md](architecture.md).
 
 - `orca-cli`: scan, browse, search, library edits, tag write-back and undo,
   analysis, duplicates, artwork and queue playback.
-- `orca-gtk`: library browsing and search, queue, transport, device picker,
-  scan progress, MPRIS with cover art.
+- `orca-gtk`: a libadwaita window with a sidebar, track browsing and search,
+  a queue page, a player bar with cover art and an output menu, scan progress,
+  a welcome page, toasts, a shortcuts dialog and MPRIS.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
 ## Built but not reachable
@@ -69,19 +70,26 @@ entry point and a client before it counts as working.
 
 ## Next
 
-In priority order.
+In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Tag writers for the remaining formats, and tag writes in the C ABI.**
-   FLAC, MP3 and ADTS are written through the runtime and `orca-cli
-   write-tags`; M4A, Ogg, WAV and AIFF are reported as not writable, and the C
-   ABI has no tag-write entry points yet.
-2. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
-   and history have no schema yet.
-3. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
+1. **A designed GTK frontend.** The libadwaita shell is done. Next:
+   - An artwork worker in liborca, so covers load off the main thread, then an
+     album grid, album pages and a Now Playing view.
+   - Artist pages, queue operations (jump to, play next, remove) and context
+     menus.
+   - Preferences (library folders, ReplayGain, output), an Edit Tags dialog
+     with write-back, and the health and duplicate lists.
+2. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
    path and report the signal path from the negotiated output.
-4. **Providers and scrobbling**, after the fixes listed above.
-5. **Filesystem watching** as a scan accelerator.
-6. **Undecodable files are re-examined on every analysis run.** They are
+3. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
+   Last.fm follows.
+4. **Filesystem watching** as a scan accelerator.
+5. **Tag writers for the remaining formats, and tag writes in the C ABI.**
+   FLAC, MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
+   writable.
+6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+   and history have no schema yet.
+7. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
 

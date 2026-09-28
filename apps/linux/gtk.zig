@@ -26,7 +26,10 @@ pub const false_: gboolean = 0;
 pub const GCallback = *const fn () callconv(.c) void;
 
 pub inline fn callback(handler: anytype) GCallback {
-    return @ptrCast(&handler);
+    return switch (@typeInfo(@TypeOf(handler))) {
+        .pointer => @ptrCast(handler),
+        else => @ptrCast(&handler),
+    };
 }
 
 /// GTK's `GTK_WIDGET()` and friends are checked casts around a plain pointer
@@ -92,6 +95,17 @@ pub const GError = opaque {};
 pub const GFile = opaque {};
 pub const GAsyncResult = opaque {};
 pub const GCancellable = opaque {};
+pub const CenterBox = opaque {};
+pub const Picture = opaque {};
+pub const Stack = opaque {};
+pub const ListBox = opaque {};
+pub const ListBoxRow = opaque {};
+pub const Revealer = opaque {};
+pub const CssProvider = opaque {};
+pub const GdkDisplay = opaque {};
+pub const GMenu = opaque {};
+pub const GMenuModel = opaque {};
+pub const Actionable = opaque {};
 
 // ------------------------------------------------------------- enum values
 //
@@ -128,6 +142,15 @@ pub const APPLICATION_DEFAULT_FLAGS: c_uint = 0;
 pub const BUS_TYPE_SESSION: c_int = 2;
 pub const BUS_NAME_OWNER_FLAGS_NONE: c_uint = 0;
 
+pub const OVERFLOW_HIDDEN: c_int = 1;
+pub const CONTENT_FIT_COVER: c_int = 2;
+pub const SELECTION_NONE: c_int = 0;
+pub const STACK_TRANSITION_CROSSFADE: c_int = 1;
+pub const REVEALER_TRANSITION_SLIDE_UP: c_int = 4;
+pub const STYLE_PROVIDER_PRIORITY_APPLICATION: c_uint = 600;
+pub const LICENSE_MPL_2_0: c_int = 17;
+pub const KEY_Left: c_uint = 0xff51;
+pub const KEY_Right: c_uint = 0xff53;
 pub const SOURCE_REMOVE: gboolean = 0;
 pub const SOURCE_CONTINUE: gboolean = 1;
 
@@ -216,6 +239,22 @@ pub inline fn signalConnect(
     return g_signal_connect_data(instance, signal, handler, data, null, 0);
 }
 
+/// `struct _GValue`: a type tag and two words of payload.
+pub const GValue = extern struct {
+    g_type: GType = 0,
+    data: [2]u64 = @splat(0),
+};
+
+/// `G_TYPE_BOOLEAN`, the fundamental type number 5 shifted by
+/// `G_TYPE_FUNDAMENTAL_SHIFT`.
+pub const G_TYPE_BOOLEAN: GType = 5 << 2;
+pub const G_TYPE_INT: GType = 6 << 2;
+
+pub extern fn g_value_init(value: *GValue, g_type: GType) *GValue;
+pub extern fn g_value_set_boolean(value: *GValue, v_boolean: gboolean) void;
+pub extern fn g_value_set_int(value: *GValue, v_int: c_int) void;
+pub extern fn g_value_unset(value: *GValue) void;
+
 // ------------------------------------------------------------------- GLib
 
 pub extern fn g_free(memory: ?*anyopaque) void;
@@ -259,6 +298,9 @@ pub extern fn g_application_quit(application: *GApplication) void;
 pub extern fn g_application_activate(application: *GApplication) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
+pub extern fn g_menu_new() *GMenu;
+pub extern fn g_menu_append(menu: *GMenu, label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) void;
+pub extern fn g_menu_append_section(menu: *GMenu, label: ?[*:0]const u8, section: *GMenuModel) void;
 
 // -------------------------------------------------------- images in memory
 //
@@ -429,6 +471,45 @@ pub extern fn gtk_widget_set_size_request(widget: *Widget, width: c_int, height:
 pub extern fn gtk_widget_set_hexpand(widget: *Widget, expand: gboolean) void;
 pub extern fn gtk_widget_set_vexpand(widget: *Widget, expand: gboolean) void;
 pub extern fn gtk_widget_set_valign(widget: *Widget, alignment: c_int) void;
+pub extern fn gtk_widget_set_halign(widget: *Widget, alignment: c_int) void;
+pub extern fn gtk_widget_set_overflow(widget: *Widget, overflow: c_int) void;
+pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
+pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
+pub extern fn gtk_css_provider_new() *CssProvider;
+pub extern fn gtk_css_provider_load_from_string(provider: *CssProvider, string: [*:0]const u8) void;
+pub extern fn gdk_display_get_default() ?*GdkDisplay;
+pub extern fn gtk_style_context_add_provider_for_display(
+    display: *GdkDisplay,
+    provider: *CssProvider,
+    priority: c_uint,
+) void;
+pub extern fn gtk_center_box_new() *Widget;
+pub extern fn gtk_center_box_set_start_widget(box: *CenterBox, child: ?*Widget) void;
+pub extern fn gtk_center_box_set_center_widget(box: *CenterBox, child: ?*Widget) void;
+pub extern fn gtk_center_box_set_end_widget(box: *CenterBox, child: ?*Widget) void;
+pub extern fn gtk_picture_new() *Widget;
+pub extern fn gtk_picture_set_paintable(picture: *Picture, paintable: ?*GdkPaintable) void;
+pub extern fn gtk_picture_set_content_fit(picture: *Picture, content_fit: c_int) void;
+pub extern fn gtk_picture_set_can_shrink(picture: *Picture, can_shrink: gboolean) void;
+pub extern fn gtk_stack_new() *Widget;
+pub extern fn gtk_stack_add_named(stack: *Stack, child: *Widget, name: [*:0]const u8) ?*anyopaque;
+pub extern fn gtk_stack_set_visible_child_name(stack: *Stack, name: [*:0]const u8) void;
+pub extern fn gtk_stack_set_transition_type(stack: *Stack, transition: c_int) void;
+pub extern fn gtk_list_box_new() *Widget;
+pub extern fn gtk_list_box_append(box: *ListBox, child: *Widget) void;
+pub extern fn gtk_list_box_remove_all(box: *ListBox) void;
+pub extern fn gtk_list_box_set_selection_mode(box: *ListBox, mode: c_int) void;
+pub extern fn gtk_list_box_row_get_index(row: *ListBoxRow) c_int;
+pub extern fn gtk_revealer_new() *Widget;
+pub extern fn gtk_revealer_set_child(revealer: *Revealer, child: ?*Widget) void;
+pub extern fn gtk_revealer_set_reveal_child(revealer: *Revealer, reveal: gboolean) void;
+pub extern fn gtk_revealer_set_transition_type(revealer: *Revealer, transition: c_int) void;
+pub extern fn gtk_actionable_set_action_name(actionable: *Actionable, action_name: ?[*:0]const u8) void;
+pub extern fn gtk_popover_popdown(popover: *Popover) void;
+pub extern fn gtk_menu_button_set_menu_model(button: *MenuButton, menu_model: ?*GMenuModel) void;
+pub extern fn gtk_menu_button_set_primary(button: *MenuButton, primary: gboolean) void;
+pub extern fn gtk_toggle_button_set_active(button: *ToggleButton, active: gboolean) void;
+pub extern fn gtk_label_set_wrap(label: *Label, wrap: gboolean) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;
@@ -472,6 +553,7 @@ pub extern fn gtk_search_entry_set_placeholder_text(
 pub extern fn gtk_editable_get_text(editable: *Editable) [*:0]const u8;
 pub extern fn gtk_editable_set_text(editable: *Editable, text: [*:0]const u8) void;
 
+pub extern fn gtk_image_new() *Widget;
 pub extern fn gtk_image_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
 pub extern fn gtk_image_set_from_icon_name(image: *Image, icon_name: ?[*:0]const u8) void;
 pub extern fn gtk_image_set_from_paintable(image: *Image, paintable: ?*GdkPaintable) void;
@@ -590,6 +672,7 @@ pub extern fn gtk_signal_list_item_factory_new() *ListItemFactory;
 pub extern fn gtk_list_item_set_child(item: *ListItem, child: ?*Widget) void;
 pub extern fn gtk_list_item_get_child(item: *ListItem) ?*Widget;
 pub extern fn gtk_list_item_get_item(item: *ListItem) ?*anyopaque;
+pub extern fn gtk_list_item_get_position(item: *ListItem) c_uint;
 pub extern fn gtk_list_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 
 /// A NULL `sort_func` makes every element compare equal, which is what a column
@@ -637,4 +720,5 @@ comptime {
     std.debug.assert(@offsetOf(GDBusNodeInfo, "interfaces") == 16);
     std.debug.assert(@sizeOf(GDBusInterfaceVTable) == 88);
     std.debug.assert(@sizeOf(BitsetIter) == 80);
+    std.debug.assert(@sizeOf(GValue) == 24);
 }

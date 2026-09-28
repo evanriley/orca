@@ -8,6 +8,7 @@
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
+const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const mpris = @import("mpris.zig");
 const track_model = @import("track_model.zig");
@@ -129,13 +130,25 @@ pub const App = struct {
     // chrome
     application: ?*gtk.Application = null,
     window: ?*gtk.Window = null,
-    count_label: ?*gtk.Label = null,
-    status_label: ?*gtk.Label = null,
+    toasts: ?*adw.ToastOverlay = null,
+    split_view: ?*adw.NavigationSplitView = null,
+    content_page: ?*adw.NavigationPage = null,
+    sidebar: ?*adw.Sidebar = null,
+    pages: ?*gtk.Stack = null,
+    tracks_title: ?*adw.WindowTitle = null,
+    /// The Tracks page's body: the browser and list, or a status page when
+    /// there is nothing to list.
+    tracks_body: ?*gtk.Stack = null,
+    welcome: ?*adw.StatusPage = null,
+    welcome_button: ?*gtk.Widget = null,
+    welcome_spinner: ?*gtk.Widget = null,
+    browse_panes: ?*gtk.Widget = null,
+    browse_toggle: ?*gtk.Widget = null,
 
-    // scan bar
-    scan_bar: ?*gtk.Widget = null,
-    scan_progress: ?*gtk.ProgressBar = null,
+    // scan status, at the foot of the sidebar
+    scan_revealer: ?*gtk.Revealer = null,
     scan_label: ?*gtk.Label = null,
+    scan_detail: ?*gtk.Label = null,
 
     // transport
     previous_button: ?*gtk.Widget = null,
@@ -152,10 +165,17 @@ pub const App = struct {
     /// when it does not, so there is no second widget to keep visible in step
     /// with a nullable image.
     now_playing_cover: ?*gtk.Image = null,
+    now_playing_art: ?*gtk.Stack = null,
+    now_playing_box: ?*gtk.Widget = null,
     volume_button: ?*gtk.Widget = null,
-    device_drop_down: ?*gtk.DropDown = null,
-    device_names: ?*gtk.StringList = null,
+    shuffle_button: ?*gtk.Widget = null,
+    repeat_button: ?*gtk.Widget = null,
+    device_list: ?*gtk.ListBox = null,
+    device_popover: ?*gtk.Popover = null,
     device_ids: std.ArrayList(u64) = .empty,
+    device_checks: std.ArrayList(*gtk.Widget) = .empty,
+    /// Index into `device_ids` of the output the next Zone opens on.
+    device_index: usize = 0,
     /// A drag in flight: the tick stops writing the slider, and the seek is
     /// applied once the value settles.
     seeking: bool = false,
@@ -169,15 +189,24 @@ pub const App = struct {
     shown_transport: liborca.TransportState = .stopped,
     repeat_mode: liborca.RepeatMode = .off,
 
-    // queue popover
-    queue_rows: ?*gtk.StringList = null,
-    queue_popover: ?*gtk.Widget = null,
+    // queue page
+    queue_store: ?*gtk.ListStore = null,
+    queue_title: ?*adw.WindowTitle = null,
+    queue_body: ?*gtk.Stack = null,
+    queue_count: ?*gtk.Label = null,
+    /// What the queue page last showed, so it is rebuilt only when the queue
+    /// or its position actually moved.
+    shown_queue_length: u32 = std.math.maxInt(u32),
+    shown_queue_index: u32 = std.math.maxInt(u32),
+    queue_visible: bool = false,
 
     mpris: mpris.Mpris = .{},
 
-    pub fn setStatus(self: *App, message: [:0]const u8) void {
-        const label = self.status_label orelse return;
-        gtk.gtk_label_set_text(label, message.ptr);
+    pub fn toast(self: *App, message: [:0]const u8) void {
+        const overlay = self.toasts orelse return;
+        const item = adw.adw_toast_new(message.ptr);
+        adw.adw_toast_set_timeout(item, 3);
+        adw.adw_toast_overlay_add_toast(overlay, item);
     }
 
     /// The one place the track listing is described to liborca.
@@ -248,20 +277,58 @@ pub const App = struct {
     }
 
     fn updateCountLabel(self: *App) void {
-        const label = self.count_label orelse return;
+        const title = self.tracks_title orelse return;
         if (self.library == null) {
-            gtk.gtk_label_set_text(label, "No library");
+            adw.adw_window_title_set_subtitle(title, "No library");
             return;
         }
         var buffer: [96]u8 = undefined;
         const text = if (self.query.value.len != 0)
-            strings.printZ(&buffer, "{d} matching", .{self.loaded_rows}) catch "…"
-        else
-            strings.printZ(&buffer, "{d} of {d} tracks", .{
+            strings.printZ(&buffer, "{d}{s} matching", .{
                 self.loaded_rows,
-                self.track_total,
-            }) catch "…";
-        gtk.gtk_label_set_text(label, text.ptr);
+                if (self.page_exhausted) "" else "+",
+            }) catch ""
+        else if (self.track_total == 1)
+            "1 track"
+        else
+            strings.printZ(&buffer, "{d} tracks", .{self.track_total}) catch "";
+        adw.adw_window_title_set_subtitle(title, text.ptr);
+    }
+
+    /// Chooses what the Tracks page shows: the listing, a welcome for a library
+    /// with nothing in it, or a note that a search found nothing.
+    pub fn updateTracksBody(self: *App) void {
+        const body = self.tracks_body orelse return;
+        const searching = self.query.value.len != 0;
+        const scoped = self.browse.artist_id != null or self.browse.release_id != null;
+        if (self.loaded_rows != 0 or scoped) {
+            gtk.gtk_stack_set_visible_child_name(body, "list");
+        } else if (searching) {
+            gtk.gtk_stack_set_visible_child_name(body, "no-results");
+        } else {
+            self.updateWelcome();
+            gtk.gtk_stack_set_visible_child_name(body, "welcome");
+        }
+    }
+
+    /// The welcome page doubles as progress for a first scan, so a new library
+    /// never shows an empty table while it is being read.
+    pub fn updateWelcome(self: *App) void {
+        const page = self.welcome orelse return;
+        if (self.scanning) {
+            adw.adw_status_page_set_icon_name(page, null);
+            adw.adw_status_page_set_title(page, "Reading your music…");
+            adw.adw_status_page_set_description(page, "Albums appear here as they are found.");
+        } else {
+            adw.adw_status_page_set_icon_name(page, "folder-music-symbolic");
+            adw.adw_status_page_set_title(page, "Welcome to Orca");
+            adw.adw_status_page_set_description(
+                page,
+                "Add the folder your music lives in. Orca reads it and never changes a file unless you ask.",
+            );
+        }
+        if (self.welcome_button) |button| gtk.gtk_widget_set_visible(button, if (self.scanning) gtk.false_ else gtk.true_);
+        if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (self.scanning) gtk.true_ else gtk.false_);
     }
 
     /// Fetches exactly one bounded page and appends it. The page is caller-owned
@@ -276,7 +343,7 @@ pub const App = struct {
             self.trackRequest(self.loaded_rows),
         ) catch {
             self.page_exhausted = true;
-            self.setStatus("Unable to query the library");
+            self.toast("Unable to query the library");
             return;
         };
         defer page.deinit();
@@ -289,7 +356,7 @@ pub const App = struct {
             self.allocator,
             page.items.len,
         ) catch {
-            self.setStatus("Out of memory building the track list");
+            self.toast("Out of memory building the track list");
             return;
         };
         defer additions.deinit(self.allocator);
@@ -319,7 +386,7 @@ pub const App = struct {
         self.track_total = 0;
         const library = self.library orelse {
             self.updateCountLabel();
-            self.setStatus("Add a music folder to begin");
+            self.updateTracksBody();
             return;
         };
         // A full-text match has no cheap total — FTS5 ranks rather than counts —
@@ -335,15 +402,7 @@ pub const App = struct {
             0.0,
         );
         self.loadNextPage();
-        if (self.loaded_rows != 0) {
-            self.setStatus("Ready");
-        } else if (self.query.value.len != 0) {
-            self.setStatus("No tracks match that search");
-        } else if (self.browse.artist_id != null or self.browse.release_id != null) {
-            self.setStatus("Nothing on this shelf has a track");
-        } else {
-            self.setStatus("Library is empty - add a music folder");
-        }
+        self.updateTracksBody();
     }
 
     pub fn deinit(self: *App) void {
@@ -351,6 +410,7 @@ pub const App = struct {
         self.artist_filter.clear(self.allocator);
         self.artist_scope_name.clear(self.allocator);
         self.device_ids.deinit(self.allocator);
+        self.device_checks.deinit(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };
