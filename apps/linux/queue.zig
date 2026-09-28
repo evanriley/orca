@@ -10,6 +10,7 @@ const app = @import("app.zig");
 const track_model = @import("track_model.zig");
 const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
+const menu = @import("menu.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -53,11 +54,52 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
 
     const cover = art.newCover(self, art.iconPlaceholder(thumb_pixels), thumb_pixels);
     gtk.gtk_widget_add_css_class(cover, "queue-cover");
+    const remove = gtk.gtk_button_new_from_icon_name("list-remove-symbolic");
+    gtk.gtk_widget_set_tooltip_text(remove, "Remove from queue");
+    gtk.gtk_widget_add_css_class(remove, "flat");
+    gtk.gtk_widget_add_css_class(remove, "circular");
+    gtk.gtk_widget_add_css_class(remove, "queue-remove");
+    gtk.gtk_widget_set_valign(remove, gtk.ALIGN_CENTER);
+    gtk.g_object_set_data(remove, "orca-list-item", item);
+    _ = gtk.signalConnect(remove, "clicked", gtk.callback(removeClicked), self);
+
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), marker);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), cover);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), labels);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), duration);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), remove);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
+    gtk.g_object_set_data(row, "orca-list-item", item);
+    menu.onSecondaryClick(row, rowMenu, self);
+}
+
+fn removeClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const item = gtk.g_object_get_data(button.?, "orca-list-item") orelse return;
+    self.context.reset(.queue);
+    self.context.queue_position = gtk.gtk_list_item_get_position(gtk.cast(gtk.ListItem, item));
+    menu.remove(self);
+}
+
+fn rowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const row = menu.gestureWidget(gesture);
+    const item = gtk.g_object_get_data(row, "orca-list-item") orelse return;
+    const list_item = gtk.cast(gtk.ListItem, item);
+    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
+    const track: *TrackObject = @ptrCast(@alignCast(object));
+    self.context.reset(.queue);
+    self.context.queue_position = gtk.gtk_list_item_get_position(list_item);
+    self.context.tracks.append(self.allocator, track.id()) catch return;
+    self.context.release_id = track.releaseId();
+    self.context.artist_id = track.artistId();
+    menu.popup(self, row, x, y);
+}
+
+fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.runtime.playerQueueJump(self.player, position) catch return;
+    self.mpris.notify();
 }
 
 fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -80,6 +122,8 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, number), number_text.ptr);
     const current = position == self.shown_queue_index;
     gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, marker), if (current) "playing" else "number");
+    if (gtk.gtk_widget_get_next_sibling(duration)) |remove|
+        gtk.gtk_widget_set_visible(remove, if (current) gtk.false_ else gtk.true_);
     if (current)
         gtk.gtk_widget_add_css_class(row, "now-playing")
     else
@@ -87,7 +131,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, title), track.title().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, artist), track.artist().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&buffer).ptr);
-    art.show(self, cover, art.Key.track(track.id(), .thumb));
+    art.show(self, cover, if (track.releaseId()) |release| art.Key.release(release, .thumb) else art.Key.track(track.id(), .thumb));
 }
 
 fn unbindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -115,6 +159,8 @@ pub fn build(self: *App) *gtk.Widget {
         factory,
     );
     gtk.gtk_widget_add_css_class(list, "queue-list");
+    gtk.gtk_list_view_set_single_click_activate(gtk.cast(gtk.ListView, list), gtk.true_);
+    _ = gtk.signalConnect(list, "activate", gtk.callback(rowActivated), self);
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), list);

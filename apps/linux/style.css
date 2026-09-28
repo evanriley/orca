@@ -249,3 +249,50 @@ scale.seek:hover slider {
   padding: 6px 0;
   opacity: 0.85;
 }
+
+.artist-list {
+  padding: 6px 12px;
+  background-color: transparent;
+}
+
+.artist-row {
+  padding: 8px 6px;
+}
+
+.artist-name {
+  font-weight: 600;
+}
+
+.artist-hero {
+  border-radius: 9999px;
+  box-shadow: 0 6px 22px rgb(0 0 0 / 0.25);
+}
+
+.section-heading {
+  font-size: 1.3em;
+  font-weight: 800;
+  margin-top: 8px;
+}
+
+.artist-albums > flowboxchild {
+  padding: 8px;
+  border-radius: 14px;
+}
+
+.artist-albums > flowboxchild:hover {
+  background-color: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+button.album-artist {
+  padding: 0 4px;
+  margin-left: -4px;
+  min-height: 0;
+}
+
+.queue-remove {
+  opacity: 0.35;
+}
+
+.queue-row:hover .queue-remove {
+  opacity: 1;
+}

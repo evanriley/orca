@@ -30,6 +30,8 @@ pub const Fields = struct {
     track_number: ?i64 = null,
     disc_number: ?i64 = null,
     has_file: bool = false,
+    release_id: ?i64 = null,
+    artist_id: ?i64 = null,
     title: [:0]u8 = &empty,
     artist: [:0]u8 = &empty,
     album: [:0]u8 = &empty,
@@ -63,6 +65,14 @@ pub const TrackObject = extern struct {
 
     pub fn hasFile(self: *TrackObject) bool {
         return self.fields().has_file;
+    }
+
+    pub fn releaseId(self: *TrackObject) ?i64 {
+        return self.fields().release_id;
+    }
+
+    pub fn artistId(self: *TrackObject) ?i64 {
+        return self.fields().artist_id;
     }
 
     /// Formatted for display. A Track with no known duration renders blank,
@@ -150,6 +160,8 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     values.track_number = summary.track_number;
     values.disc_number = summary.disc_number;
     values.has_file = summary.has_playable_file;
+    values.release_id = summary.release_id;
+    values.artist_id = summary.artist_id;
     values.title = dupe(summary.title);
     // Track artist first; the release artist is the fallback a browser wants.
     values.artist = dupe(if (summary.artist.len != 0) summary.artist else summary.album_artist);

@@ -16,6 +16,11 @@
   comes next. Click the cover in the player bar to open it.
 - **Queue thumbnails**, and covers everywhere load and decode off the main
   thread.
+- **Artists**: every Artist, searchable, and a page per artist with their
+  albums, Play and Shuffle.
+- **The queue is editable**: click an entry to play it, remove entries, and
+  Play Next or Add to Queue from a right-click menu on tracks, albums and
+  queue entries, which also offers Show Album and Show Artist.
 - **The playing track is marked** in the track list and the queue.
 - **Enter in the search box plays the results.**
 - **Rescan Library** is in the main menu.

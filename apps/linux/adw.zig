@@ -26,6 +26,7 @@ pub const ShortcutsSection = opaque {};
 pub const ShortcutsItem = opaque {};
 pub const NavigationView = opaque {};
 pub const Clamp = opaque {};
+pub const Avatar = opaque {};
 
 pub const TOOLBAR_FLAT: c_int = 0;
 pub const TOOLBAR_RAISED: c_int = 1;
@@ -96,6 +97,9 @@ pub extern fn adw_status_page_set_description(page: *StatusPage, description: ?[
 pub extern fn adw_status_page_set_child(page: *StatusPage, child: ?*gtk.Widget) void;
 
 pub extern fn adw_spinner_new() *gtk.Widget;
+
+pub extern fn adw_avatar_new(size: c_int, text: ?[*:0]const u8, show_initials: gtk.gboolean) *gtk.Widget;
+pub extern fn adw_avatar_set_text(avatar: *Avatar, text: ?[*:0]const u8) void;
 
 pub extern fn adw_sidebar_new() *gtk.Widget;
 pub extern fn adw_sidebar_append(sidebar: *Sidebar, section: *SidebarSection) void;

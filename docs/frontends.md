@@ -70,7 +70,11 @@ The window is an `AdwNavigationSplitView`:
   initials on a colour chosen from its title. Activating one opens its page:
   the cover, title, artist, year, length, Play and Shuffle, and its tracks by
   disc.
-- **Tracks** is the Artist and Album browse panes beside the track list. The
+- **Artists** is every Artist with an initials avatar, searchable. An artist
+  opens a page with their first album's cover as an avatar, Play and Shuffle,
+  and their albums; an album there opens its page in place.
+- **Tracks** is the track list, with the Artist and Album browse panes behind
+  the header's toggle. The
   list pages 512 rows at a time from liborca as it scrolls, and a header
   click re-queries in the engine's order rather than sorting loaded rows. The
   playing track is marked. A library with no tracks shows a welcome page with
@@ -79,7 +83,15 @@ The window is an `AdwNavigationSplitView`:
   cover's average colour, with the next five entries. Clicking the cover in
   the player bar opens it.
 - **Queue** is the Player's queue as the engine resolves it, with thumbnails
-  and the audible entry marked.
+  and the audible entry marked. Clicking an entry plays it; the button at the
+  end of a row removes it.
+
+Right-clicking a track, an album tile, an album's track or a queue entry opens
+a menu: Play, Play Next, Add to Queue, Show Album and Show Artist, or Play and
+Remove for queue entries. On a selected row in the track list it acts on the
+whole selection. Play Next and Remove go through `Runtime.playerQueueInsertNext`
+and `playerQueueRemove`, so an entry the engine has already lined up is never
+pulled out from under the output.
 - The player bar spans the window: cover, title and artist; shuffle, previous,
   play, next and repeat; the seek bar; volume, the output menu and the queue.
 

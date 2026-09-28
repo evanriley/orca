@@ -109,6 +109,11 @@ pub const Actionable = opaque {};
 pub const GTask = opaque {};
 pub const GridView = opaque {};
 pub const Overlay = opaque {};
+pub const FlowBox = opaque {};
+pub const FlowBoxChild = opaque {};
+pub const GestureSingle = opaque {};
+
+pub const Rectangle = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
 
 // ------------------------------------------------------------- enum values
 //
@@ -551,6 +556,31 @@ pub extern fn gtk_label_set_lines(label: *Label, lines: c_int) void;
 pub extern fn gtk_label_set_justify(label: *Label, justify: c_int) void;
 pub extern fn gtk_widget_set_cursor_from_name(widget: *Widget, name: ?[*:0]const u8) void;
 pub extern fn gtk_gesture_click_new() *EventController;
+pub extern fn gtk_gesture_single_set_button(gesture: *GestureSingle, button: c_uint) void;
+pub extern fn gtk_event_controller_get_widget(controller: *EventController) *Widget;
+pub extern fn gtk_popover_menu_new_from_model(model: ?*GMenuModel) *Widget;
+pub extern fn gtk_popover_set_pointing_to(popover: *Popover, rect: *const Rectangle) void;
+pub extern fn gtk_popover_set_has_arrow(popover: *Popover, has_arrow: gboolean) void;
+pub extern fn gtk_popover_popup(popover: *Popover) void;
+pub extern fn gtk_widget_set_parent(widget: *Widget, parent: *Widget) void;
+pub extern fn gtk_widget_unparent(widget: *Widget) void;
+pub extern fn gtk_widget_get_parent(widget: *Widget) ?*Widget;
+pub extern fn gtk_list_view_set_single_click_activate(view: *ListView, single: gboolean) void;
+pub extern fn gtk_selection_model_is_selected(model: *SelectionModel, position: c_uint) gboolean;
+pub extern fn gtk_selection_model_select_item(model: *SelectionModel, position: c_uint, unselect_rest: gboolean) gboolean;
+pub extern fn gtk_flow_box_new() *Widget;
+pub extern fn gtk_flow_box_append(box: *FlowBox, child: *Widget) void;
+pub extern fn gtk_flow_box_set_selection_mode(box: *FlowBox, mode: c_int) void;
+pub extern fn gtk_flow_box_set_homogeneous(box: *FlowBox, homogeneous: gboolean) void;
+pub extern fn gtk_flow_box_set_max_children_per_line(box: *FlowBox, count: c_uint) void;
+pub extern fn gtk_flow_box_set_min_children_per_line(box: *FlowBox, count: c_uint) void;
+pub extern fn gtk_flow_box_set_activate_on_single_click(box: *FlowBox, single: gboolean) void;
+pub extern fn gtk_flow_box_set_column_spacing(box: *FlowBox, spacing: c_uint) void;
+pub extern fn gtk_flow_box_set_row_spacing(box: *FlowBox, spacing: c_uint) void;
+pub extern fn gtk_flow_box_child_get_index(child: *FlowBoxChild) c_int;
+pub extern fn g_object_set_data(object: *anyopaque, key: [*:0]const u8, data: ?*anyopaque) void;
+pub extern fn g_object_get_data(object: *anyopaque, key: [*:0]const u8) ?*anyopaque;
+pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
