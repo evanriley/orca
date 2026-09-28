@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const qoa_dependency = b.dependency("qoa", .{ .target = target, .optimize = optimize });
 
     const sqlite_translate = b.addTranslateC(.{
         .root_source_file = b.path("liborca/database/sqlite_import.h"),
@@ -22,7 +21,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite_module },
-            .{ .name = "qoa", .module = qoa_dependency.module("qoa") },
         },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });
@@ -40,6 +38,11 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .yes });
+    // The reference QOA decoder, vendored like minimp3.
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/qoa_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/opus_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -282,6 +285,7 @@ fn installLicenses(b: *std.Build) void {
     const directory = "share/doc/orca/licenses";
     b.installFile("LICENSE", directory ++ "/orca/LICENSE");
     b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
+    b.installFile("liborca/codec/vendor/qoa/LICENSE", directory ++ "/qoa/LICENSE");
     const alac = b.dependency("alac", .{});
     b.getInstallStep().dependOn(&b.addInstallFile(alac.path("LICENSE"), directory ++ "/alac/LICENSE").step);
     const libxaac = b.dependency("libxaac", .{});
