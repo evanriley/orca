@@ -125,8 +125,25 @@ Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
 and the output device. Scans, measurement, duplicate finding and tag writes
 share the status card at the foot of the sidebar, one at a time. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)
-are saved in `$XDG_CONFIG_HOME/orca/settings.ini`. Removing a folder stops
-Orca scanning it; its tracks stay listed.
+are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
+settings below. Removing a folder stops Orca scanning it; its tracks stay
+listed.
+
+The **Sound** page drives the Player's DSP chain through
+`Runtime.playerSetEqualizer` and `playerSetCrossfeed`. The equalizer has ten
+bands from -12 to +12 dB, a preamp and presets (Flat, Bass, Treble, Vocal,
+Loudness); a curve that matches no preset reads Custom, and switching the
+equalizer off and on restores the last curve. Crossfeed has three amounts.
+Slider drags are coalesced into one apply about 60 ms after the last move,
+because applying pauses the engine briefly. Both are saved in `[sound]`
+(`equalizer=off|G1,...,G10:PREAMP`, `crossfeed=off|AMOUNT`) and applied at
+launch.
+
+The output menu ends with the **signal path**: the source format, then
+ReplayGain, equalizer, crossfeed, volume and the output format as they apply,
+and whether the path is bit-perfect, with the reasons when it is not. It comes
+from `Runtime.playerSignalPath` and is read only when the menu opens and when
+the track changes while it is open, never on the tick.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the output menu; see

@@ -17,6 +17,7 @@ const nowplaying = @import("nowplaying.zig");
 const albums = @import("albums.zig");
 const menu = @import("menu.zig");
 const settings = @import("settings.zig");
+const signal_path = @import("signal_path.zig");
 
 const App = app.App;
 
@@ -462,10 +463,27 @@ fn buildOutputs(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_margin_start(heading, 10);
     gtk.gtk_widget_set_margin_top(heading, 6);
     gtk.gtk_widget_set_margin_bottom(heading, 6);
+    const path_heading = gtk.gtk_label_new("Signal Path");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, path_heading), 0.0);
+    gtk.gtk_widget_add_css_class(path_heading, "heading");
+    gtk.gtk_widget_set_margin_start(path_heading, 10);
+    gtk.gtk_widget_set_margin_top(path_heading, 12);
+    gtk.gtk_widget_set_margin_bottom(path_heading, 6);
+    const path_label = gtk.gtk_label_new(signal_path.nothing_playing);
+    self.signal_path_label = gtk.cast(gtk.Label, path_label);
+    gtk.gtk_label_set_xalign(self.signal_path_label.?, 0.0);
+    gtk.gtk_label_set_wrap(self.signal_path_label.?, gtk.true_);
+    gtk.gtk_label_set_max_width_chars(self.signal_path_label.?, 36);
+    gtk.gtk_widget_add_css_class(path_label, "dim-label");
+    gtk.gtk_widget_set_margin_start(path_label, 10);
+    gtk.gtk_widget_set_margin_end(path_label, 10);
+    gtk.gtk_widget_set_margin_bottom(path_label, 10);
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_size_request(content, 280, -1);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), heading);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), list);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), path_heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), path_label);
     const popover = gtk.gtk_popover_new();
     self.device_popover = gtk.cast(gtk.Popover, popover);
     gtk.gtk_popover_set_child(self.device_popover.?, content);
@@ -485,6 +503,23 @@ fn buildOutputs(self: *App) *gtk.Widget {
     return box;
 }
 
+/// `playerSignalPath` stops the engine briefly to read it, so it is asked for
+/// only while the popover is open, never from the tick.
+fn refreshSignalPath(self: *App) void {
+    const label = self.signal_path_label orelse return;
+    var buffer: [1024]u8 = undefined;
+    const text = if (self.runtime.playerSignalPath(self.player)) |path|
+        signal_path.render(&buffer, path)
+    else |_|
+        "Signal path unavailable";
+    gtk.gtk_label_set_text(label, text.ptr);
+}
+
+fn popoverIsShown(self: *App) bool {
+    const popover = self.device_popover orelse return false;
+    return gtk.gtk_widget_get_visible(gtk.cast(gtk.Widget, popover)) != 0;
+}
+
 /// Devices come and go while the app runs, so the list is re-read each time
 /// it is opened rather than once at launch.
 fn outputsShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -495,6 +530,7 @@ fn outputsShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         if (id == chosen) self.device_index = index;
     }
     showSelectedDevice(self);
+    refreshSignalPath(self);
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -615,6 +651,7 @@ pub fn tick(self: *App) void {
         window.markPlaying(self, status.track_id);
         albums.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
+        if (popoverIsShown(self)) refreshSignalPath(self);
     }
     if (track_changed or status.transport != self.shown_transport) {
         self.shown_transport = status.transport;

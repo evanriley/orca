@@ -34,6 +34,7 @@ pub const PreferencesRow = opaque {};
 pub const ActionRow = opaque {};
 pub const SwitchRow = opaque {};
 pub const ComboRow = opaque {};
+pub const SpinRow = opaque {};
 pub const AlertDialog = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
@@ -42,6 +43,7 @@ pub const RESPONSE_DESTRUCTIVE: c_int = 2;
 
 pub extern fn adw_preferences_dialog_new() *Dialog;
 pub extern fn adw_preferences_dialog_add(dialog: *PreferencesDialog, page: *PreferencesPage) void;
+pub extern fn adw_preferences_dialog_add_toast(dialog: *PreferencesDialog, toast: *Toast) void;
 pub extern fn adw_preferences_page_new() *gtk.Widget;
 pub extern fn adw_preferences_page_add(page: *PreferencesPage, group: *PreferencesGroup) void;
 pub extern fn adw_preferences_page_set_title(page: *PreferencesPage, title: [*:0]const u8) void;
@@ -60,6 +62,10 @@ pub extern fn adw_entry_row_new() *gtk.Widget;
 pub extern fn adw_switch_row_new() *gtk.Widget;
 pub extern fn adw_switch_row_get_active(row: *SwitchRow) gtk.gboolean;
 pub extern fn adw_switch_row_set_active(row: *SwitchRow, active: gtk.gboolean) void;
+pub extern fn adw_spin_row_new_with_range(min: f64, max: f64, step: f64) *gtk.Widget;
+pub extern fn adw_spin_row_get_value(row: *SpinRow) f64;
+pub extern fn adw_spin_row_set_value(row: *SpinRow, value: f64) void;
+pub extern fn adw_spin_row_set_digits(row: *SpinRow, digits: c_uint) void;
 pub extern fn adw_combo_row_new() *gtk.Widget;
 pub extern fn adw_combo_row_set_model(row: *ComboRow, model: ?*gtk.ListModel) void;
 pub extern fn adw_combo_row_get_selected(row: *ComboRow) c_uint;
