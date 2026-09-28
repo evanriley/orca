@@ -71,27 +71,23 @@ In priority order.
 1. **Format gaps.** Ogg artwork (`METADATA_BLOCK_PICTURE`), AIFF and
    WavPack. HE-AAC and the `iTunSMPB` gapless fallback are implemented but have
    no fixture, because FFmpeg cannot write either.
-2. **macOS playback.** `liborca` has no CoreAudio backend, so it cannot play
-   on macOS, and the SwiftUI client has not been built since the C ABI changed.
-   A CoreAudio output behind the same backend contract, plus a SwiftUI client
-   that plays a track, proves the C ABI with a real host.
-3. **A deliberate public Zig API.** `liborca/root.zig` re-exports every
-   subsystem. Embedders need a documented, stable subset: the runtime, handles,
-   snapshots and queries.
-4. **Tag editing.** Expose `MutationPlan` preview, approval, execution and
+2. **Tag editing.** Expose `MutationPlan` preview, approval, execution and
    undo through the runtime and C ABI, then in `orca-cli` and `orca-gtk`.
-5. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+3. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-6. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
+4. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
    path and report the signal path from the negotiated output.
-7. **Providers and scrobbling**, after the fixes listed above.
-8. **Filesystem watching** as a scan accelerator.
-9. **Undecodable files are re-examined on every analysis run.** They are
+5. **Providers and scrobbling**, after the fixes listed above.
+6. **Filesystem watching** as a scan accelerator.
+7. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of AIFF files still pays two 64 KiB reads
    per file per run until AIFF is supported or declines are remembered.
 
 ## Later
 
+- macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
+  client rebuilt against the current C ABI. `liborca` cannot play on macOS
+  until then.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.

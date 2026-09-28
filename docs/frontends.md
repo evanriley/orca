@@ -83,7 +83,7 @@ The Releases pane deliberately shows **no** thumbnails. A pane load is a
 bounded 512-row page, and 512 covers is 512 file opens and something like
 150 MB of encoded image on a single scroll — the opposite of what a bounded
 page exists to achieve. It needs a per-Release cache and a lazily bound cell
-factory before it is worth doing; `OrcaRuntime.libraryReleaseArtwork` is
+factory before it is worth doing; `Runtime.libraryReleaseArtwork` is
 already there for when it is.
 
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is

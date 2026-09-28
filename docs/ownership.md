@@ -1,6 +1,6 @@
 # Runtime ownership and shutdown
 
-`OrcaRuntime` is liborca's process-level ownership root. The host supplies its
+`Runtime` is liborca's process-level ownership root. The host supplies its
 allocator and must call `deinit`; deinitialization is idempotent with respect to
 an earlier explicit `shutdown`.
 
