@@ -1,5 +1,6 @@
 const std = @import("std");
 const analysis_service = @import("../analysis/service.zig");
+const artwork = @import("artwork.zig");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
@@ -31,7 +32,17 @@ pub const State = enum(u8) {
 const RuntimeObject = struct {};
 const LibraryObject = struct {
     database: ?*database.LibraryDatabase = null,
+    /// Started on the first artwork request, and again after any drain.
+    artwork: ?*ArtworkLoader = null,
 };
+
+const ArtworkLoader = struct {
+    loader: artwork.Loader,
+    work_handle: WorkHandle,
+};
+
+pub const ArtworkSubject = artwork.Subject;
+pub const ArtworkResult = artwork.Result;
 const PlayerObject = struct {
     player: *audio.player.Player,
     /// Player-scope volume. Lives beside the Player rather than inside the
@@ -651,19 +662,6 @@ pub const PlayerStatus = struct {
 /// not an error. The Library's record of where a file is is only as fresh as
 /// the last scan, and reconciling that is the scanner's job — an artwork query
 /// is a read and must not start writing `missing` states from under it.
-fn readEmbeddedArtwork(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    uri: []const u8,
-) !?metadata.EmbeddedImage {
-    var local = storage.LocalFileSource.open(io, uri) catch |err| switch (err) {
-        error.FileNotFound, error.BadPathName, error.AccessDenied, error.IsDir => return null,
-        else => return err,
-    };
-    defer local.close();
-    return metadata.artwork.read(allocator, local.readable());
-}
-
 /// Process-level root for liborca. Objects are invalidated in dependency order:
 /// work, Zones, Players, then Libraries. `deinit` always performs shutdown.
 pub const OrcaRuntime = struct {
@@ -753,6 +751,7 @@ pub const OrcaRuntime = struct {
         self.work_registry.requestCancellation();
         self.work_registry.drain();
         self.finalizeDrainedJobWorkers();
+        self.releaseDrainedArtworkLoaders();
         self.freeAllJobWorkers();
         self.discardPendingTagWrites(null);
         self.jobs.cancelAndDrain();
@@ -979,60 +978,97 @@ pub const OrcaRuntime = struct {
     /// cover are all the same answer — null. None of them is a failure a host
     /// should surface, and a missing cover is not a reason to fail a query the
     /// caller made about a track it can still play.
+    /// The cover image for a Track's playable file, read on the caller's
+    /// thread. `libraryRequestArtwork` is the same lookup off it.
     pub fn libraryTrackArtwork(
         self: *OrcaRuntime,
         library: LibraryHandle,
         io: std.Io,
         track_id: i64,
     ) !?metadata.EmbeddedImage {
-        const tracks = &(try self.libraryDatabase(library)).tracks;
-        const resolved = (try tracks.playableLocation(self.allocator, track_id)) orelse
-            return null;
-        defer resolved.deinit();
-        return readEmbeddedArtwork(self.allocator, io, resolved.uri);
+        return artwork.trackArtwork(self.allocator, io, try self.libraryDatabase(library), track_id);
     }
 
-    /// How many of a Release's Tracks are opened before it is reported as
-    /// having no usable cover.
-    ///
-    /// Only files the last scan observed artwork in are candidates at all, so
-    /// this bound is reached only when a Release's leading tracks each declare
-    /// a cover that no longer reads — a re-tagged file, a rejected image. Eight
-    /// is generous for that and still bounded; without a bound, one Release
-    /// with a hundred broken tracks would open a hundred files to answer "no".
-    pub const max_release_artwork_candidates: usize = 8;
+    pub const max_release_artwork_candidates = artwork.max_release_candidates;
 
-    /// The cover image for a Release, or null when none of its files has one.
-    ///
-    /// **A Release's artwork is its first track's, in listening order.** Real
-    /// tag data disagrees within an album — different sizes, different crops,
-    /// per-track covers on compilations — so the rule has to pick, and the
-    /// three properties that matter are that it be *stable* across runs,
-    /// *cheap*, and *the one a person would expect*. Ordering by disc, track
-    /// number and then id is the unique order `tracks_position` already
-    /// enforces, so the same Release yields the same cover every time; it costs
-    /// one indexed query plus one file open; and the front cover on track one
-    /// is the album cover in every collection anyone actually has.
-    ///
-    /// The alternatives were rejected for failing one of those: a majority vote
-    /// would have to read every file in the Release, and "the largest image"
-    /// would too, and both change their answer when one track is re-tagged.
+    /// The cover image for a Release, or null when none of its files has one,
+    /// read on the caller's thread. See `artwork.releaseArtwork` for which
+    /// file's cover that is.
     pub fn libraryReleaseArtwork(
         self: *OrcaRuntime,
         library: LibraryHandle,
         io: std.Io,
         release_id: i64,
     ) !?metadata.EmbeddedImage {
-        const tracks = &(try self.libraryDatabase(library)).tracks;
-        var candidates: [max_release_artwork_candidates]i64 = undefined;
-        const count = try tracks.artworkCandidatesInto(release_id, &candidates);
-        for (candidates[0..count]) |track_id| {
-            // A candidate whose cover will not read is skipped rather than
-            // fatal: the next track's cover is the same album's.
-            const image = self.libraryTrackArtwork(library, io, track_id) catch continue;
-            if (image) |present| return present;
+        return artwork.releaseArtwork(self.allocator, io, try self.libraryDatabase(library), release_id);
+    }
+
+    /// Asks for a cover without waiting for it. The lookup runs on the
+    /// Library's artwork loader, and the result is collected with
+    /// `libraryTakeArtwork`. At most `artwork.capacity` requests are
+    /// outstanding per Library; beyond that this returns
+    /// `error.ArtworkQueueFull` and the host asks again later.
+    pub fn libraryRequestArtwork(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        subject: ArtworkSubject,
+    ) !u64 {
+        try self.requireRunning();
+        const object_value = try self.libraries.get(library);
+        const loader = object_value.artwork orelse try self.startArtworkLoader(object_value);
+        return loader.loader.request(io, subject);
+    }
+
+    /// A request that has not started is skipped without reading a file. One
+    /// that has finished still arrives from `libraryTakeArtwork`.
+    pub fn libraryCancelArtwork(self: *OrcaRuntime, library: LibraryHandle, request: u64) void {
+        const object_value = self.libraries.get(library) catch return;
+        const loader = object_value.artwork orelse return;
+        loader.loader.cancel(request);
+    }
+
+    /// The next finished artwork request, if any. The caller owns the image.
+    pub fn libraryTakeArtwork(self: *OrcaRuntime, library: LibraryHandle) ?ArtworkResult {
+        const object_value = self.libraries.get(library) catch return null;
+        const loader = object_value.artwork orelse return null;
+        return loader.loader.take();
+    }
+
+    fn startArtworkLoader(self: *OrcaRuntime, object_value: *LibraryObject) !*ArtworkLoader {
+        const library_database = object_value.database orelse return error.LibraryHasNoDatabase;
+        const loader = try self.allocator.create(ArtworkLoader);
+        errdefer self.allocator.destroy(loader);
+        const work_handle = try self.work_registry.begin(work.unowned);
+        const registration = self.work_registry.registration(work_handle) catch unreachable;
+        errdefer {
+            registration.finish();
+            self.work_registry.complete(work_handle) catch {};
         }
-        return null;
+        loader.* = .{
+            .loader = .{
+                .allocator = self.allocator,
+                .database = library_database,
+                .registration = registration,
+            },
+            .work_handle = work_handle,
+        };
+        registration.thread = try std.Thread.spawn(.{}, artwork.Loader.run, .{&loader.loader});
+        object_value.artwork = loader;
+        return loader;
+    }
+
+    /// Control lane, immediately after `work_registry.drain()`: the loaders'
+    /// threads have been joined and their registrations freed, so each is
+    /// released here and restarts on its Library's next request.
+    fn releaseDrainedArtworkLoaders(self: *OrcaRuntime) void {
+        for (self.libraries.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const loader = object_value.artwork orelse continue;
+            loader.loader.discardResults();
+            self.allocator.destroy(loader);
+            object_value.artwork = null;
+        }
     }
 
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -2706,6 +2742,7 @@ pub const OrcaRuntime = struct {
         self.cancelJobWorkers();
         self.work_registry.requestCancellation();
         self.work_registry.drain();
+        self.releaseDrainedArtworkLoaders();
     }
 
     fn closeLibraryDatabase(self: *OrcaRuntime, library: *LibraryObject) void {
@@ -3799,6 +3836,67 @@ test "a file changed since its scan is left out of a tag write" {
     for (preview.skipped) |skip| changed = changed or skip.reason == .changed_since_scan;
     try std.testing.expect(changed);
     // Left pending on purpose: shutdown must free it.
+}
+
+fn collectArtwork(runtime: *OrcaRuntime, library: LibraryHandle, results: []?ArtworkResult, first_request: u64, wanted: usize) !usize {
+    var deadline: TestDeadline = .init(10_000);
+    var collected: usize = 0;
+    while (collected < wanted and deadline.tick()) {
+        while (runtime.libraryTakeArtwork(library)) |result| {
+            results[@intCast(result.request - first_request)] = result;
+            collected += 1;
+        }
+    }
+    return collected;
+}
+
+test "requested covers arrive off the caller's thread and match the synchronous lookup" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artwork-async?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+
+    var releases = try runtime.libraryReleasePage(library, .{ .limit = 32 });
+    defer releases.deinit();
+    try std.testing.expect(releases.items.len > 1);
+
+    var results: [32]?ArtworkResult = @splat(null);
+    defer for (results) |entry| if (entry) |result| if (result.image) |image| image.deinit();
+    const first = try runtime.libraryRequestArtwork(library, std.testing.io, .{ .release = releases.items[0].id });
+    for (releases.items[1..]) |release|
+        _ = try runtime.libraryRequestArtwork(library, std.testing.io, .{ .release = release.id });
+    try std.testing.expectEqual(releases.items.len, try collectArtwork(&runtime, library, &results, first, releases.items.len));
+
+    var covered: usize = 0;
+    for (releases.items, results[0..releases.items.len]) |release, entry| {
+        const result = entry.?;
+        try std.testing.expectEqual(release.id, result.subject.release);
+        const expected = try runtime.libraryReleaseArtwork(library, std.testing.io, release.id);
+        defer if (expected) |image| image.deinit();
+        try std.testing.expectEqual(expected == null, result.image == null);
+        if (expected) |image| {
+            covered += 1;
+            try std.testing.expectEqualSlices(u8, image.bytes, result.image.?.bytes);
+        }
+    }
+    try std.testing.expect(covered > 0);
+}
+
+test "closing a library frees covers nobody took" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artwork-shutdown?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    var releases = try runtime.libraryReleasePage(library, .{ .limit = 8 });
+    defer releases.deinit();
+    for (releases.items) |release|
+        _ = try runtime.libraryRequestArtwork(library, std.testing.io, .{ .release = release.id });
+    var deadline: TestDeadline = .init(5_000);
+    const loader = &(try runtime.libraries.get(library)).artwork.?.loader;
+    while (loader.results.len() != releases.items.len and deadline.tick()) {}
+    try runtime.destroyLibrary(library);
 }
 
 test "every release order lists the same releases, each in its own order" {

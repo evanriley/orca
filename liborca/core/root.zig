@@ -1,3 +1,4 @@
+pub const artwork = @import("artwork.zig");
 pub const control = @import("control.zig");
 pub const handle = @import("handle.zig");
 pub const job = @import("job.zig");
@@ -13,3 +14,15 @@ pub const PlayerHandle = runtime.PlayerHandle;
 pub const ZoneHandle = runtime.ZoneHandle;
 pub const JobHandle = runtime.JobHandle;
 pub const WorkHandle = runtime.WorkHandle;
+
+test {
+    _ = @import("artwork.zig");
+    _ = @import("control.zig");
+    _ = @import("handle.zig");
+    _ = @import("job.zig");
+    _ = @import("object.zig");
+    _ = @import("queue.zig");
+    _ = @import("runtime.zig");
+    _ = @import("track_source.zig");
+    _ = @import("work.zig");
+}

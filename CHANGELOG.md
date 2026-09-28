@@ -15,6 +15,15 @@
 - `nix build` installs a desktop entry and an icon.
 - The dev shell sets `XDG_DATA_DIRS` for the GSettings schemas GTK looks up.
 
+### Cover art off the caller's thread
+
+- **`Runtime.libraryRequestArtwork`** queues a cover lookup on the Library's
+  artwork loader, and `libraryTakeArtwork` collects it; `libraryCancelArtwork`
+  skips one not yet started. `orca-cli covers` reads a page of covers this way.
+- **`ReleaseQuery.sort`** orders Releases by title, artist, year or recently
+  added.
+- `core/root.zig` now lists its files in a test block, so their tests run.
+
 ### Tag write-back
 
 - **Library edits can be written into the files.** `Runtime.planTagWrite`
