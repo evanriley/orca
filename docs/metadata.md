@@ -21,6 +21,22 @@ Scanner observations are persisted in `observed_file_metadata`, keyed to the
 physical observed file record and updated in the same bounded transaction. They
 do not update Track metadata and never cause a source-file write.
 
+## Library edits
+
+`Runtime.libraryEditTracks` sets or clears Orca's own values for Tracks without
+touching their files. A set value is a locked `user` value in
+`orca_metadata_values` on every file the Track resolves to (its preferred file
+and every other encoding of its recording), so it outranks the files' tags and
+survives rescans; a cleared value lets the tags apply again. The edited files
+are reprojected before the call returns, which moves a Track to another Release
+or Artist when the edit says so. Editable fields are title, artist, album,
+album artist, track number, disc number, date and compilation, the fields the
+projection groups and orders by; `metadata.Field` appends new ones, because
+`orca_metadata_values.field` stores them by number. `orca-cli edit` drives it.
+
+Writing those values back into the files is a separate, explicit mutation; see
+below.
+
 ## Cover art
 
 Artwork is two questions, and they are answered in two places.

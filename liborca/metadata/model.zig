@@ -8,11 +8,17 @@ pub const Provenance = enum {
     analysis,
 };
 
+/// Fields Orca can hold its own value for. Stored by number in
+/// `orca_metadata_values.field`, so new fields are appended.
 pub const Field = enum {
     title,
     artist,
     album,
     track_number,
+    album_artist,
+    disc_number,
+    date,
+    compilation,
 };
 
 pub const Value = struct {
@@ -56,7 +62,9 @@ pub fn resolve(
     };
 }
 
-fn resolveValue(observed: ?Value, orca: ?Value, policy: ResolutionPolicy) ?Value {
+/// One field's resolution: a locked Orca value outranks everything, and the
+/// policy decides between the rest. `resolve` applies it to each text field.
+pub fn resolveValue(observed: ?Value, orca: ?Value, policy: ResolutionPolicy) ?Value {
     if (orca) |value| if (value.locked) return value;
     return switch (policy) {
         .prefer_file => observed orelse orca,

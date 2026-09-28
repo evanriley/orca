@@ -123,6 +123,7 @@ zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
 zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
 zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
+zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]

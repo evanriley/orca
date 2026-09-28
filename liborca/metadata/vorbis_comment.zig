@@ -520,6 +520,10 @@ fn fieldKey(field: mutation.Field) []const u8 {
         .artist => "ARTIST",
         .album => "ALBUM",
         .track_number => "TRACKNUMBER",
+        .album_artist => "ALBUMARTIST",
+        .disc_number => "DISCNUMBER",
+        .date => "DATE",
+        .compilation => "COMPILATION",
     };
 }
 

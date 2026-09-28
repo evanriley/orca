@@ -2,6 +2,17 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Library edits, and a projection that cleans up after itself
+
+- **Tracks can be edited in the library.** `Runtime.libraryEditTracks` and
+  `orca-cli edit` set title, artist, album, album artist, track, disc, date and
+  compilation as locked user values; the files are never written, rescans keep
+  the edit, and `--clear` returns a field to the file's own tag.
+- **Retagged files no longer leave ghost tracks.** Reprojection created a new
+  Track when a file's tags moved it to another album or position and left the
+  old row, its Release and its Artist listed with nothing behind them. They are
+  now pruned; migration 14 adds the index that keeps this cheap.
+
 ### The common formats are complete; the rest wait until after 1.0
 
 - **WAV files written as `WAVE_FORMAT_EXTENSIBLE` open**, which is what FFmpeg
