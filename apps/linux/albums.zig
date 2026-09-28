@@ -268,6 +268,7 @@ pub const AlbumPage = struct {
     ids: []i64,
     artists: []?i64,
     rows: []?*gtk.Widget,
+    disc_lists: std.ArrayList(*gtk.Widget) = .empty,
     release_id: i64,
     album_artist_id: ?i64,
     details: ?*details.Panel = null,
@@ -281,6 +282,7 @@ fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const allocator = page.self.allocator;
     unregisterPage(page);
+    page.disc_lists.deinit(allocator);
     allocator.free(page.ids);
     allocator.free(page.artists);
     allocator.free(page.rows);
@@ -359,11 +361,21 @@ fn shuffleClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     transport.playIds(page.self, page.ids, 0);
 }
 
+fn trackSelected(box: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const selected = row orelse return;
+    const page = pageData(data);
+    for (page.disc_lists.items) |other| {
+        if (@as(?*anyopaque, other) != box) gtk.gtk_list_box_unselect_all(gtk.cast(gtk.ListBox, other));
+    }
+    const position = rowPosition(gtk.cast(gtk.Widget, selected)) orelse return;
+    if (position >= page.ids.len) return;
+    if (page.details) |panel| details.choose(panel, page.ids[position]);
+}
+
 fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const start = rowPosition(gtk.cast(gtk.Widget, row)) orelse return;
     if (start >= page.ids.len) return;
-    if (page.details) |panel| details.choose(panel, page.ids[start]);
     transport.playIds(page.self, page.ids, @intCast(start));
 }
 
@@ -546,9 +558,12 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
                 gtk.gtk_box_append(gtk.cast(gtk.Box, content), heading);
             }
             const box = gtk.gtk_list_box_new();
-            gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, box), gtk.SELECTION_NONE);
+            gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, box), gtk.SELECTION_SINGLE);
+            gtk.gtk_list_box_set_activate_on_single_click(gtk.cast(gtk.ListBox, box), gtk.false_);
             gtk.gtk_widget_add_css_class(box, "boxed-list");
+            _ = gtk.signalConnect(box, "row-selected", gtk.callback(trackSelected), page);
             _ = gtk.signalConnect(box, "row-activated", gtk.callback(trackActivated), page);
+            page.disc_lists.append(self.allocator, box) catch {};
             gtk.gtk_box_append(gtk.cast(gtk.Box, content), box);
             list = box;
         }

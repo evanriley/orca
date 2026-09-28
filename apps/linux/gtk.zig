@@ -170,6 +170,7 @@ pub const POLICY_AUTOMATIC: c_int = 1;
 pub const POLICY_NEVER: c_int = 2;
 
 pub const SELECTION_NONE: c_int = 0;
+pub const SELECTION_SINGLE: c_int = 1;
 pub const STACK_TRANSITION_CROSSFADE: c_int = 1;
 pub const REVEALER_TRANSITION_SLIDE_UP: c_int = 4;
 pub const STYLE_PROVIDER_PRIORITY_APPLICATION: c_uint = 600;
@@ -561,6 +562,8 @@ pub extern fn gtk_list_box_append(box: *ListBox, child: *Widget) void;
 pub extern fn gtk_list_box_remove_all(box: *ListBox) void;
 pub extern fn gtk_list_box_set_selection_mode(box: *ListBox, mode: c_int) void;
 pub extern fn gtk_list_box_row_get_index(row: *ListBoxRow) c_int;
+pub extern fn gtk_list_box_set_activate_on_single_click(box: *ListBox, single: gboolean) void;
+pub extern fn gtk_list_box_unselect_all(box: *ListBox) void;
 pub extern fn gtk_revealer_new() *Widget;
 pub extern fn gtk_revealer_set_child(revealer: *Revealer, child: ?*Widget) void;
 pub extern fn gtk_revealer_set_reveal_child(revealer: *Revealer, reveal: gboolean) void;

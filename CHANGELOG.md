@@ -7,6 +7,8 @@
 - **`orca-gtk` keeps the equalizer curve and crossfeed amount while they are
   off.** `settings.ini` saves `equalizer` and `crossfeed` as values and adds
   `equalizer_enabled` and `crossfeed_enabled`; older files still load.
+- **Album page rows can be selected.** A click or the arrow keys select a
+  row and show it in the details panel; double-click or Enter plays from it.
 
 ### Removing a folder forgets its tracks
 
