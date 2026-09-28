@@ -76,7 +76,8 @@ of any licence may embed `liborca`; changes to Orca's own files are shared
 under the same terms.
 
 `liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac, both
-Apache-2.0, and a vendored CC0 minimp3. `zig build` installs their licence and
+Apache-2.0, a vendored CC0 minimp3, and the vendored MIT reference QOA
+decoder. `zig build` installs their licence and
 notice files under `share/doc/orca/licenses`; distribute that directory with
 any binary. The system libraries Orca links (SQLite, libFLAC, libopusfile,
 libvorbis, PipeWire, GTK4) are distributed under their own licences.

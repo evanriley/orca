@@ -179,11 +179,8 @@ read, seek, and lifetime); WAV parser state and conversion scratch remain
 private to its adapter. `SourceSession` therefore owns any registered Decoder
 and primes the same pool/queue path without codec-specific types.
 
-The built-in registry prioritizes pure Zig adapters: Orca pins
-`audiophile/flac` 1.0.2 for lossless decoding and `audiophile/qoa` 1.0.0 for
-the first lossy decoder. Both receive an Orca `ReadableSource` through a stable
-buffered-reader bridge. FLAC keeps checksum validation enabled; QOA receives a
-bounded whole-stream structural pass before its native decoder is entered.
+Every registered codec reads an Orca `ReadableSource` behind its own adapter;
+`docs/codecs.md` records which library each one wraps and why.
 
 Player owns the active `SourceQueue`: one current SourceSession and one prepared
 successor. When decoding reaches the current source's end, it appends compatible

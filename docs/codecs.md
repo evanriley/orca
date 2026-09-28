@@ -81,6 +81,15 @@ Free-format and reserved-field frames are refused. Streams that change channel
 count or sample rate mid-file are refused rather than silently reinterpreted.
 Truncated input ends the stream; input that never syncs fails at open.
 
+## QOA
+
+QOA decodes through the reference `qoa.h`, vendored under
+`codec/vendor/qoa` with its MIT licence and contained by `codec/qoa_shim.c`.
+The pure-Zig package it replaced shipped no licence and could not seek. Every
+QOA frame carries its own predictor state and every frame but the last holds
+5,120 frames of audio, which the adapter's structural pass enforces, so a seek
+is an offset computation and a skip inside one frame.
+
 ## MP4: ALAC and AAC
 
 MP4 is split three ways. `storage/iso_bmff.zig` frames boxes and finds the

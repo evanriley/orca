@@ -86,12 +86,9 @@ In priority order.
    path and report the signal path from the negotiated output.
 7. **Providers and scrobbling**, after the fixes listed above.
 8. **Filesystem watching** as a scan accelerator.
-9. **Licence of the QOA decoder.** The pinned `audiophile/qoa` package ships
-   no licence. Either upstream adds one, or QOA moves to the MIT-licensed
-   reference `qoa.h` behind a shim.
-10. **Undecodable files are re-examined on every analysis run.** They are
-    declined cheaply, but a library of AIFF files still pays two 64 KiB reads
-    per file per run until AIFF is supported or declines are remembered.
+9. **Undecodable files are re-examined on every analysis run.** They are
+   declined cheaply, but a library of AIFF files still pays two 64 KiB reads
+   per file per run until AIFF is supported or declines are remembered.
 
 ## Later
 

@@ -1,16 +1,52 @@
+//! QOA decoding, over the vendored reference decoder behind `qoa_shim.c`.
+//!
+//! Every QOA frame carries its own predictor state, and every frame but the
+//! last holds exactly 5,120 frames of audio, so a seek is an offset
+//! computation and a skip inside one frame.
+
 const std = @import("std");
-const native_qoa = @import("qoa");
 const decoder_api = @import("decoder.zig");
 const storage = @import("../storage/root.zig");
 
-const NativeDecoder = native_qoa.Decoder(8);
+const frame_frames: u64 = 5120;
+const file_header_bytes: u64 = 8;
+const max_channels = 8;
+
+const Info = extern struct {
+    channels: u32,
+    sample_rate: u32,
+    frames: u32,
+    max_frame_bytes: u32,
+};
+
+extern fn orca_qoa_decoder_create(header: [*]const u8, header_size: u32, info: *Info) ?*anyopaque;
+extern fn orca_qoa_decoder_destroy(decoder: ?*anyopaque) void;
+extern fn orca_qoa_decoder_decode_frame(
+    decoder: ?*anyopaque,
+    bytes: [*]const u8,
+    size: u32,
+    output: [*]f32,
+    frames_written: *u32,
+) u32;
 
 const Context = struct {
     allocator: std.mem.Allocator,
-    reader_buffer: [8192]u8,
-    source_reader: storage.BufferedSourceReader,
-    native: NativeDecoder,
-    scratch: [4096]i16,
+    source: storage.ReadableSource,
+    native: *anyopaque,
+    channels: u16,
+    total_frames: u64,
+    full_frame_bytes: u64,
+    frame: [max_frame_bytes]u8,
+    pcm: [frame_frames * max_channels]f32,
+    pending_start: usize = 0,
+    pending_end: usize = 0,
+    /// Byte offset of the next frame to decode.
+    offset: u64 = file_header_bytes,
+    /// Frames to discard from the next decoded frame, after a seek.
+    skip_frames: u64 = 0,
+    remaining_frames: u64 = 0,
+
+    const max_frame_bytes = 8 + 16 * max_channels + 256 * 8 * max_channels;
 };
 
 pub fn openDecoder(
@@ -18,11 +54,26 @@ pub fn openDecoder(
     source: storage.ReadableSource,
 ) !decoder_api.Decoder {
     const format = try validateSource(source);
+    var header: [16]u8 = undefined;
+    if (try source.readAt(0, &header) != header.len) return error.TruncatedQoa;
+    var info: Info = undefined;
+    const native = orca_qoa_decoder_create(&header, header.len, &info) orelse return error.InvalidQoa;
+    errdefer orca_qoa_decoder_destroy(native);
+    if (info.max_frame_bytes > Context.max_frame_bytes) return error.InvalidQoa;
+
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
-    context.allocator = allocator;
-    context.source_reader = .init(source, &context.reader_buffer);
-    context.native = try NativeDecoder.init(&context.source_reader.interface);
+    context.* = .{
+        .allocator = allocator,
+        .source = source,
+        .native = native,
+        .channels = format.channels,
+        .total_frames = format.frames,
+        .full_frame_bytes = info.max_frame_bytes,
+        .frame = undefined,
+        .pcm = undefined,
+        .remaining_frames = format.frames,
+    };
     return .{
         .context = context,
         .vtable = &vtable,
@@ -39,7 +90,7 @@ pub fn openDecoder(
             .channels = format.channels,
             .sample_rate = format.sample_rate,
             .bits_per_sample = 32,
-            .bytes_per_frame = try std.math.mul(u16, context.native.channels, 4),
+            .bytes_per_frame = try std.math.mul(u16, format.channels, 4),
         },
         .frame_count = format.frames,
     };
@@ -84,6 +135,8 @@ fn validateSource(source: storage.ReadableSource) !StreamFormat {
         }
         decoded_frames += samples;
         if (decoded_frames > expected_frames) return error.InvalidQoa;
+        // Seeking computes frame offsets, so a short frame is only legal last.
+        if (samples != frame_frames and decoded_frames != expected_frames) return error.InvalidQoa;
         offset += size;
     }
     if (decoded_frames != expected_frames or offset != source.size()) return error.InvalidQoa;
@@ -101,33 +154,63 @@ fn big64(bytes: *const [8]u8) u64 {
     return (@as(u64, big32(bytes[0..4])) << 32) | big32(bytes[4..8]);
 }
 
+fn decodeNext(context: *Context) !bool {
+    while (context.remaining_frames > 0) {
+        const available = context.source.size() -| context.offset;
+        const wanted: usize = @intCast(@min(available, context.full_frame_bytes));
+        if (wanted == 0) return false;
+        const bytes = context.frame[0..wanted];
+        if (try context.source.readAt(context.offset, bytes) != bytes.len) return error.TruncatedQoa;
+        var frames: u32 = 0;
+        const consumed = orca_qoa_decoder_decode_frame(
+            context.native,
+            bytes.ptr,
+            @intCast(bytes.len),
+            &context.pcm,
+            &frames,
+        );
+        if (consumed == 0) return error.InvalidQoa;
+        context.offset += consumed;
+        const dropped = @min(frames, context.skip_frames);
+        context.skip_frames -= dropped;
+        if (frames == dropped) continue;
+        context.pending_start = @intCast(dropped * context.channels);
+        context.pending_end = @as(usize, frames) * context.channels;
+        return true;
+    }
+    return false;
+}
+
 fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    const channels = context.native.channels;
-    var output_offset: usize = 0;
-    while (output_offset < output.len) {
-        const wanted = @min(output.len - output_offset, context.scratch.len);
-        const aligned = wanted - wanted % channels;
-        if (aligned == 0) break;
-        const samples = try context.native.read(context.scratch[0..aligned]);
-        for (output[output_offset..][0..samples.len], samples) |*destination, sample| {
-            destination.* = @as(f32, @floatFromInt(sample)) / 32768.0;
-        }
-        output_offset += samples.len;
-        if (samples.len < aligned) break;
-    }
-    return output_offset / channels;
+    const channels = context.channels;
+    if (context.remaining_frames == 0) return 0;
+    if (context.pending_start == context.pending_end and !try decodeNext(context)) return 0;
+    const pending = (context.pending_end - context.pending_start) / channels;
+    const frames = @min(pending, output.len / channels, context.remaining_frames);
+    const samples = frames * channels;
+    @memcpy(output[0..samples], context.pcm[context.pending_start..][0..samples]);
+    context.pending_start += samples;
+    context.remaining_frames -= frames;
+    return frames;
 }
 
 fn seek(context_ptr: *anyopaque, frame: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    if (frame == context.native.current_frame) return;
-    return error.UnsupportedSeek;
+    if (frame > context.total_frames) return error.SeekOutOfRange;
+    const index = frame / frame_frames;
+    context.offset = file_header_bytes + index * context.full_frame_bytes;
+    context.skip_frames = frame - index * frame_frames;
+    context.remaining_frames = context.total_frames - frame;
+    context.pending_start = 0;
+    context.pending_end = 0;
 }
 
 fn deinit(context_ptr: *anyopaque) void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    context.allocator.destroy(context);
+    const allocator = context.allocator;
+    orca_qoa_decoder_destroy(context.native);
+    allocator.destroy(context);
 }
 
 const vtable: decoder_api.Decoder.VTable = .{
@@ -136,7 +219,7 @@ const vtable: decoder_api.Decoder.VTable = .{
     .deinit = deinit,
 };
 
-test "native Zig QOA adapter decodes generated lossy audio" {
+test "a QOA stream decodes to the length its header declares" {
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/generated-reference.qoa",
@@ -153,7 +236,7 @@ test "native Zig QOA adapter decodes generated lossy audio" {
     for (samples) |sample| try std.testing.expect(std.math.isFinite(sample));
 }
 
-test "malformed QOA frame size fails without entering native decoder" {
+test "a malformed QOA frame size fails before the decoder is created" {
     const malformed = "qoaf\x00\x00\x00\x01" ++
         "\x01\x00\xbb\x80\x00\x01\x00\x01";
     var temporary = std.testing.tmpDir(.{});
@@ -174,4 +257,66 @@ test "malformed QOA frame size fails without entering native decoder" {
         std.testing.allocator,
         local.readable(),
     ));
+}
+
+fn decodeAll(decoder: *decoder_api.Decoder, output: []f32) !usize {
+    var frames: usize = 0;
+    while (true) {
+        const read = try decoder.readFrames(output[frames * decoder.format.channels ..]);
+        if (read == 0) return frames;
+        frames += read;
+    }
+}
+
+fn openFixture(file: *storage.LocalFileSource, path: []const u8) !decoder_api.Decoder {
+    file.* = try storage.LocalFileSource.open(std.testing.io, path);
+    return openDecoder(std.testing.allocator, file.readable());
+}
+
+test "a two-frame stereo QOA stream decodes close to the audio it was encoded from" {
+    var file: storage.LocalFileSource = undefined;
+    var decoder = try openFixture(&file, "fixtures/audio/stereo-reference.qoa");
+    defer file.close();
+    defer decoder.deinit();
+    const decoded = try std.testing.allocator.alloc(f32, 10_000 * 2);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqual(@as(usize, 9_600), try decodeAll(&decoder, decoded));
+
+    var reference_file = try storage.LocalFileSource.open(std.testing.io, "fixtures/audio/generated-reference.wav");
+    defer reference_file.close();
+    var reference = try @import("wav.zig").openDecoder(std.testing.allocator, reference_file.readable());
+    defer reference.deinit();
+    const source = try std.testing.allocator.alloc(f32, 10_000 * 2);
+    defer std.testing.allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 9_600), try decodeAll(&reference, source));
+    var sum: f64 = 0;
+    for (decoded[0 .. 9_600 * 2], source[0 .. 9_600 * 2]) |a, b| {
+        const difference: f64 = a - b;
+        sum += difference * difference;
+    }
+    try std.testing.expect(sum / (9_600 * 2) < 1e-5);
+}
+
+test "seeking into either frame of a QOA stream decodes exactly what a sequential read does" {
+    var file: storage.LocalFileSource = undefined;
+    var decoder = try openFixture(&file, "fixtures/audio/stereo-reference.qoa");
+    defer file.close();
+    defer decoder.deinit();
+    const whole = try std.testing.allocator.alloc(f32, 10_000 * 2);
+    defer std.testing.allocator.free(whole);
+    _ = try decodeAll(&decoder, whole);
+
+    const tail = try std.testing.allocator.alloc(f32, 10_000 * 2);
+    defer std.testing.allocator.free(tail);
+    for ([_]u64{ 0, 4_999, 5_120, 7_000, 9_600 }) |target| {
+        try decoder.seek(target);
+        const frames = try decodeAll(&decoder, tail);
+        try std.testing.expectEqual(@as(usize, @intCast(9_600 - target)), frames);
+        try std.testing.expectEqualSlices(
+            f32,
+            whole[@intCast(target * 2)..][0 .. frames * 2],
+            tail[0 .. frames * 2],
+        );
+    }
+    try std.testing.expectError(error.SeekOutOfRange, decoder.seek(9_601));
 }
