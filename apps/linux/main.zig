@@ -19,6 +19,7 @@ const track_model = @import("track_model.zig");
 const browse_model = @import("browse_model.zig");
 const browse = @import("browse.zig");
 const transport = @import("transport.zig");
+const details = @import("details.zig");
 const queue = @import("queue.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
@@ -132,6 +133,10 @@ fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     window.showPage(@ptrCast(@alignCast(data.?)), .queue);
 }
 
+fn activateDetails(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    details.toggle(@ptrCast(@alignCast(data.?)));
+}
+
 fn activateBack(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     window.back(@ptrCast(@alignCast(data.?)));
 }
@@ -216,6 +221,7 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
         .{ .title = "Library", .items = &.{
             .{ "Search", "<Control>f" },
             .{ "Show Queue", "<Control>l" },
+            .{ "Track Details", "<Control>i" },
             .{ "Back", "<Alt>Left" },
             .{ "Add Music Folder", "<Control>o" },
         } },
@@ -331,6 +337,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "rescan", activateRescan, null, &self);
     addAction(application, "search", activateSearch, "<Control>f", &self);
     addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);
+    addAction(application, "details", activateDetails, "<Control>i", &self);
     addAction(application, "back", activateBack, null, &self);
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);

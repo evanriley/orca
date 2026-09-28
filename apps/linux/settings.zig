@@ -88,6 +88,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         loadCrossfeed(self, std.mem.span(value));
     } else gtk.g_clear_error(&err);
+    if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
+        defer gtk.g_free(value);
+        self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
+    } else gtk.g_clear_error(&err);
 }
 
 pub fn save(self: *App) void {
@@ -107,6 +111,7 @@ pub fn save(self: *App) void {
     else
         "off";
     gtk.g_key_file_set_string(keys, "sound", "crossfeed", crossfeed.ptr);
+    gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

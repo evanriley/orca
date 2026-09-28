@@ -113,6 +113,7 @@ pub const FlowBox = opaque {};
 pub const FlowBoxChild = opaque {};
 pub const GestureSingle = opaque {};
 pub const Gesture = opaque {};
+pub const GdkClipboard = opaque {};
 
 pub const GKeyFile = opaque {};
 pub extern fn g_key_file_new() *GKeyFile;
@@ -165,6 +166,9 @@ pub const BUS_NAME_OWNER_FLAGS_NONE: c_uint = 0;
 
 pub const OVERFLOW_HIDDEN: c_int = 1;
 pub const CONTENT_FIT_COVER: c_int = 2;
+pub const POLICY_AUTOMATIC: c_int = 1;
+pub const POLICY_NEVER: c_int = 2;
+
 pub const SELECTION_NONE: c_int = 0;
 pub const STACK_TRANSITION_CROSSFADE: c_int = 1;
 pub const REVEALER_TRANSITION_SLIDE_UP: c_int = 4;
@@ -280,6 +284,7 @@ pub extern fn g_value_unset(value: *GValue) void;
 // ------------------------------------------------------------------- GLib
 
 pub extern fn g_free(memory: ?*anyopaque) void;
+pub extern fn g_format_size(size: u64) [*:0]u8;
 pub extern fn g_strndup(str: [*]const u8, n: usize) ?[*:0]u8;
 pub extern fn g_get_user_data_dir() [*:0]const u8;
 pub extern fn g_mkdir_with_parents(pathname: [*:0]const u8, mode: c_int) c_int;
@@ -601,6 +606,8 @@ pub extern fn g_object_get_data(object: *anyopaque, key: [*:0]const u8) ?*anyopa
 pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
+pub extern fn gtk_widget_get_clipboard(widget: *Widget) *GdkClipboard;
+pub extern fn gdk_clipboard_set_text(clipboard: *GdkClipboard, text: [*:0]const u8) void;
 pub extern fn gtk_widget_get_visible(widget: *Widget) gboolean;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;
@@ -674,6 +681,7 @@ pub extern fn gtk_popover_set_child(popover: *Popover, child: ?*Widget) void;
 
 pub extern fn gtk_scrolled_window_new() *Widget;
 pub extern fn gtk_scrolled_window_set_child(window: *ScrolledWindow, child: ?*Widget) void;
+pub extern fn gtk_scrolled_window_set_policy(window: *ScrolledWindow, hscrollbar_policy: c_int, vscrollbar_policy: c_int) void;
 pub extern fn gtk_scrolled_window_set_propagate_natural_height(window: *ScrolledWindow, propagate: gboolean) void;
 pub extern fn gtk_scrolled_window_set_max_content_height(window: *ScrolledWindow, height: c_int) void;
 pub extern fn gtk_scrolled_window_get_vadjustment(window: *ScrolledWindow) *Adjustment;

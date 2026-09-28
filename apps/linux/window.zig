@@ -10,6 +10,7 @@ const app = @import("app.zig");
 const jobs = @import("jobs.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
+const details = @import("details.zig");
 const browse = @import("browse.zig");
 const queue = @import("queue.zig");
 const albums = @import("albums.zig");
@@ -546,6 +547,7 @@ fn buildTrackList(self: *App) *gtk.Widget {
     gtk.gtk_column_view_set_show_column_separators(self.column_view.?, gtk.false_);
     gtk.gtk_column_view_set_reorderable(self.column_view.?, gtk.true_);
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), self);
+    _ = gtk.signalConnect(self.selection.?, "selection-changed", gtk.callback(details.selectionChanged), self);
     _ = gtk.signalConnect(
         gtk.gtk_column_view_get_sorter(self.column_view.?),
         "changed",
@@ -648,7 +650,7 @@ fn buildTracksPage(self: *App) *gtk.Widget {
 
     const view = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, body, .selection).widget);
     return view;
 }
 
@@ -682,7 +684,17 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
     if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
     if (self.seek_scale) |scale| setInt(breakpoint, scale, "width-request", 120);
     if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", 120);
+    _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(narrowed), self);
+    _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(widened), self);
     adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
+}
+
+fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    details.setNarrow(@ptrCast(@alignCast(data.?)), true);
+}
+
+fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    details.setNarrow(@ptrCast(@alignCast(data.?)), false);
 }
 
 pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {

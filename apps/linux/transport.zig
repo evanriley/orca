@@ -18,6 +18,7 @@ const albums = @import("albums.zig");
 const menu = @import("menu.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
+const details = @import("details.zig");
 
 const App = app.App;
 
@@ -651,6 +652,7 @@ pub fn tick(self: *App) void {
         window.markPlaying(self, status.track_id);
         albums.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
+        details.trackChanged(self);
         if (popoverIsShown(self)) refreshSignalPath(self);
     }
     if (track_changed or status.transport != self.shown_transport) {

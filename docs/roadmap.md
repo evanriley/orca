@@ -41,6 +41,8 @@ the rule in [architecture.md](architecture.md).
   report of the source, each processing stage, the output stream and whether
   the path could be bit-perfect (`orca-cli play-tracks --eq --crossfeed`).
 - Output device selection.
+- Track details: format, file, loudness and tags for one Track
+  (`orca-cli track`), and a details panel in `orca-gtk`.
 
 ### Analysis
 
@@ -81,24 +83,19 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Track details.** A `libraryTrackDetails` query (codec, sample rate, bit
-   depth, channels, bitrate, duration, size, path, loudness, tags), an
-   `orca-cli track` command, and an optional details panel in `orca-gtk`
-   beside the track list and on album pages, with the live signal path for
-   the playing track.
-2. **A fixed output rate with a band-limited resampler** (libsamplerate or
+1. **A fixed output rate with a band-limited resampler** (libsamplerate or
    speexdsp behind a shim), for gapless playback across sample rates.
-3. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
+2. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
    Last.fm follows.
-4. **Filesystem watching** as a scan accelerator.
-5. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
+3. **Filesystem watching** as a scan accelerator.
+4. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
    folder, but its files and tracks stay in the library, listed.
-6. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
    writable. The C ABI has neither tag writes nor queue editing.
-7. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-8. **Undecodable files are re-examined on every analysis run.** They are
+7. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
 
