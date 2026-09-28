@@ -1464,8 +1464,32 @@ pub const ArtistQuery = struct {
 
 pub const ReleaseQuery = struct {
     album_artist_id: ?i64 = null,
+    sort: ReleaseSort = .title,
     limit: u32 = max_page,
     offset: u32 = 0,
+};
+
+/// The orders a Release listing comes in. Each ends in `releases.id`, so it is
+/// total and LIMIT/OFFSET paging is exact.
+pub const ReleaseSort = enum {
+    title,
+    /// Album artist, then oldest first within an artist: a shelf.
+    artist,
+    /// Newest first; undated Releases last.
+    year,
+    /// Most recently created first.
+    recently_added,
+
+    fn terms(comptime self: ReleaseSort) []const u8 {
+        return switch (self) {
+            .title => "releases.title COLLATE NOCASE, releases.id",
+            .artist => "releases.album_artist COLLATE NOCASE, releases.release_date IS NULL, " ++
+                "releases.release_date, releases.title COLLATE NOCASE, releases.id",
+            .year => "releases.release_date IS NULL, releases.release_date DESC, " ++
+                "releases.title COLLATE NOCASE, releases.id",
+            .recently_added => "releases.id DESC",
+        };
+    }
 };
 
 const release_columns =
@@ -1565,17 +1589,15 @@ pub const ReleaseRepository = struct {
         query: ReleaseQuery,
     ) !ReleasePage {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
-        var statement = if (query.album_artist_id == null)
-            try self.db.prepare(release_columns ++
-                \\FROM releases
-                \\ORDER BY releases.title COLLATE NOCASE, releases.id
-                \\LIMIT ?1 OFFSET ?2;
-            )
-        else
-            try self.db.prepare(release_columns ++
-                "FROM releases\nWHERE " ++ by_release_artist ++
-                "\nORDER BY releases.title COLLATE NOCASE, releases.id" ++
-                "\nLIMIT ?1 OFFSET ?2;");
+        var statement = switch (query.sort) {
+            inline else => |sort| if (query.album_artist_id == null)
+                try self.db.prepare(release_columns ++
+                    "FROM releases\nORDER BY " ++ comptime sort.terms() ++ "\nLIMIT ?1 OFFSET ?2;")
+            else
+                try self.db.prepare(release_columns ++
+                    "FROM releases\nWHERE " ++ by_release_artist ++
+                    "\nORDER BY " ++ comptime sort.terms() ++ "\nLIMIT ?1 OFFSET ?2;"),
+        };
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
         try statement.bindInt64(2, query.offset);

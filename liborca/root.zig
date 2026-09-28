@@ -55,6 +55,7 @@ pub const ArtistQuery = database.ArtistQuery;
 pub const ArtistPage = database.ArtistPage;
 pub const ArtistSummary = database.ArtistSummary;
 pub const ReleaseQuery = database.ReleaseQuery;
+pub const ReleaseSort = database.ReleaseSort;
 pub const ReleasePage = database.ReleasePage;
 pub const ReleaseSummary = database.ReleaseSummary;
 pub const HealthIssuePage = database.HealthIssuePage;

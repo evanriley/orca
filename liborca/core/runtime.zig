@@ -3800,3 +3800,33 @@ test "a file changed since its scan is left out of a tag write" {
     try std.testing.expect(changed);
     // Left pending on purpose: shutdown must free it.
 }
+
+test "every release order lists the same releases, each in its own order" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-sorts?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+
+    var by_title = try runtime.libraryReleasePage(library, .{ .sort = .title });
+    defer by_title.deinit();
+    try std.testing.expect(by_title.items.len > 2);
+    inline for (.{ database.ReleaseSort.artist, .year, .recently_added }) |sort| {
+        var page = try runtime.libraryReleasePage(library, .{ .sort = sort });
+        defer page.deinit();
+        try std.testing.expectEqual(by_title.items.len, page.items.len);
+        for (by_title.items) |expected| {
+            for (page.items) |item| {
+                if (item.id == expected.id) break;
+            } else return error.ReleaseMissing;
+        }
+        for (page.items[0 .. page.items.len - 1], page.items[1..]) |a, b| switch (sort) {
+            .artist => try std.testing.expect(std.ascii.orderIgnoreCase(a.album_artist, b.album_artist) != .gt),
+            .year => if (b.release_date) |later| try std.testing.expect(
+                a.release_date != null and std.mem.order(u8, a.release_date.?, later) != .lt,
+            ),
+            .recently_added => try std.testing.expect(a.id > b.id),
+            else => {},
+        };
+    }
+}
