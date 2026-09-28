@@ -25,6 +25,7 @@
         ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.pipewire
           pkgs.gtk4
+          pkgs.libadwaita
         ];
     in
     {
@@ -62,6 +63,9 @@
             pkgs.pkg-config
           ];
           buildInputs = libraries pkgs;
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            export XDG_DATA_DIRS=${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}
+          '';
         };
       });
 
