@@ -1,8 +1,10 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const id3v1 = @import("id3v1.zig");
+const id3v2 = @import("id3v2.zig");
 const mutation = @import("mutation.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
+const storage_source = @import("../storage/source.zig");
 const vorbis_comment = @import("vorbis_comment.zig");
 
 const max_flac_metadata_block_size = (1 << 24) - 1;
@@ -60,62 +62,6 @@ fn syncContainingDirectories(io: std.Io, paths: []const []const u8) !void {
         }
         if (!already_synced) try syncContainingDirectory(io, path);
     }
-}
-
-/// Create and fsync a complete ID3v1 replacement without changing `source_path`.
-/// The stage path must not exist and should reside on the same filesystem.
-pub fn stageId3v1(
-    io: std.Io,
-    source_path: []const u8,
-    stage_path: []const u8,
-    expected: mutation.FileIdentity,
-    changes: []const mutation.Change,
-) !void {
-    const source = try std.Io.Dir.cwd().openFile(io, source_path, .{});
-    defer source.close(io);
-    const stat = try source.stat(io);
-    try requireIdentity(io, source, stat, expected);
-
-    var existing_bytes: [128]u8 = undefined;
-    const existing = if (stat.size >= existing_bytes.len and
-        try source.readPositionalAll(io, &existing_bytes, stat.size - existing_bytes.len) == existing_bytes.len)
-        id3v1.parse(&existing_bytes)
-    else
-        null;
-    var tag: id3v1.Tag = existing orelse .{
-        .title = "",
-        .artist = "",
-        .album = "",
-        .year = "",
-        .comment = "",
-        .track_number = null,
-        .genre = 255,
-    };
-    try applyChanges(&tag, changes);
-    const encoded = try id3v1.encode(tag);
-    const payload_size = stat.size - if (existing != null) @as(u64, existing_bytes.len) else 0;
-
-    const stage = try std.Io.Dir.cwd().createFile(io, stage_path, .{
-        .exclusive = true,
-        .permissions = stat.permissions,
-    });
-    errdefer {
-        stage.close(io);
-        std.Io.Dir.cwd().deleteFile(io, stage_path) catch {};
-    }
-    var offset: u64 = 0;
-    var buffer: [64 * 1024]u8 = undefined;
-    while (offset < payload_size) {
-        const requested: usize = @intCast(@min(payload_size - offset, buffer.len));
-        const read_count = try source.readPositional(io, &.{buffer[0..requested]}, offset);
-        if (read_count == 0) return error.UnexpectedEndOfFile;
-        try stage.writeStreamingAll(io, buffer[0..read_count]);
-        offset += read_count;
-    }
-    try stage.writeStreamingAll(io, &encoded);
-    try stage.sync(io);
-    stage.close(io);
-    try syncContainingDirectory(io, stage_path);
 }
 
 /// Create and fsync a complete FLAC replacement with rewritten Vorbis comments.
@@ -190,6 +136,45 @@ pub fn stageFlac(
         }
     }
     try copyRange(source, stage, io, offset, stat.size - offset);
+    try stage.sync(io);
+    stage.close(io);
+    try syncContainingDirectory(io, stage_path);
+}
+
+/// Create and fsync a complete MPEG-audio or ADTS replacement whose leading
+/// ID3v2 tag carries `changes`. The audio between the old tag and any ID3v1
+/// trailer is copied byte for byte; see `id3v2.rewrite` for what the tag keeps.
+pub fn stageMpeg(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    source_path: []const u8,
+    stage_path: []const u8,
+    expected: mutation.FileIdentity,
+    changes: []const mutation.Change,
+) !void {
+    const source = try std.Io.Dir.cwd().openFile(io, source_path, .{});
+    defer source.close(io);
+    const stat = try source.stat(io);
+    try requireIdentity(io, source, stat, expected);
+
+    var readable = try storage_source.LocalFileSource.open(io, source_path);
+    defer readable.close();
+    const planned = try id3v2.rewrite(allocator, readable.readable(), changes);
+    defer planned.deinit();
+    if (planned.audio_start > planned.audio_end or planned.audio_end > stat.size)
+        return error.InvalidMpegStream;
+
+    const stage = try std.Io.Dir.cwd().createFile(io, stage_path, .{
+        .exclusive = true,
+        .permissions = stat.permissions,
+    });
+    errdefer {
+        stage.close(io);
+        std.Io.Dir.cwd().deleteFile(io, stage_path) catch {};
+    }
+    try stage.writeStreamingAll(io, planned.tag);
+    try copyRange(source, stage, io, planned.audio_start, planned.audio_end - planned.audio_start);
+    if (planned.trailer) |trailer| try stage.writeStreamingAll(io, &trailer);
     try stage.sync(io);
     stage.close(io);
     try syncContainingDirectory(io, stage_path);
@@ -351,45 +336,6 @@ fn writeMetadataHeader(
     try file.writeStreamingAll(io, &header);
 }
 
-fn applyChanges(tag: *id3v1.Tag, changes: []const mutation.Change) !void {
-    for (changes) |change| {
-        if (change.field == .track_number) {
-            if (change.before) |before| {
-                const parsed = std.fmt.parseInt(u8, before, 10) catch
-                    return error.MetadataPreconditionChanged;
-                if (tag.track_number == null or parsed != tag.track_number.?)
-                    return error.MetadataPreconditionChanged;
-            }
-            tag.track_number = if (change.after) |text|
-                try std.fmt.parseInt(u8, text, 10)
-            else
-                null;
-            continue;
-        }
-        const current: ?[]const u8 = switch (change.field) {
-            .title => tag.title,
-            .artist => tag.artist,
-            .album => tag.album,
-            .date => tag.year,
-            .track_number => unreachable,
-            // ID3v1 has no slot for these.
-            .album_artist, .disc_number, .compilation => return error.UnsupportedTagField,
-        };
-        if (change.before) |before| {
-            if (current == null or !std.mem.eql(u8, before, current.?))
-                return error.MetadataPreconditionChanged;
-        }
-        const after = change.after orelse "";
-        switch (change.field) {
-            .title => tag.title = after,
-            .artist => tag.artist = after,
-            .album => tag.album = after,
-            .date => tag.year = after,
-            .track_number, .album_artist, .disc_number, .compilation => unreachable,
-        }
-    }
-}
-
 test "ID3v1 replacement stages, commits, and rolls back generated bytes" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -416,10 +362,10 @@ test "ID3v1 replacement stages, commits, and rolls back generated bytes" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated audio payload" ++ original_tag,
+        .data = "\xff\xfb\x90\x64generated audio payload" ++ original_tag,
     });
     const expected = try identity(std.testing.io, source_path);
-    try stageId3v1(std.testing.io, source_path, stage_path, expected, &.{.{
+    try stageMpeg(std.testing.allocator, std.testing.io, source_path, stage_path, expected, &.{.{
         .field = .title,
         .before = "Old title",
         .after = "New title",
@@ -566,12 +512,13 @@ test "staging rejects a same-size edit that preserved the modification time" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated audio payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated audio payload" ++ tag,
     });
     const expected = try identity(std.testing.io, source_path);
     try forgeInPlaceEdit(source_path, 0, "GENERATED");
     try std.testing.expect(!expected.eql(try identity(std.testing.io, source_path)));
-    try std.testing.expectError(error.FileIdentityChanged, stageId3v1(
+    try std.testing.expectError(error.FileIdentityChanged, stageMpeg(
+        std.testing.allocator,
         std.testing.io,
         source_path,
         stage_path,
@@ -606,10 +553,10 @@ test "commit refuses to replace a source edited between staging and rename" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated audio payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated audio payload" ++ tag,
     });
     const expected = try identity(std.testing.io, source_path);
-    try stageId3v1(std.testing.io, source_path, stage_path, expected, &.{.{
+    try stageMpeg(std.testing.allocator, std.testing.io, source_path, stage_path, expected, &.{.{
         .field = .title,
         .before = "Old title",
         .after = "New title",

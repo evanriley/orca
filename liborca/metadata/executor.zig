@@ -1,4 +1,5 @@
 const std = @import("std");
+const storage = @import("../storage/root.zig");
 const database = @import("../database/repository.zig");
 const file_mutation = @import("file_mutation.zig");
 const mutation = @import("mutation.zig");
@@ -63,7 +64,7 @@ pub const Executor = struct {
     pub fn executePlan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
         for (plan.actions) |action| switch (action) {
-            .write_tags => |write| _ = tagFormat(write.path) orelse
+            .write_tags => |write| _ = try tagFormat(self.io, write.path) orelse
                 return error.UnsupportedTagWriter,
             .move => {},
         };
@@ -151,9 +152,10 @@ pub const Executor = struct {
                 const operation = prepared.items[action_index].id;
                 const stage_path = prepared.items[action_index].stage_path.?;
                 const backup_path = prepared.items[action_index].backup_path.?;
-                const format = tagFormat(write.path).?;
+                const format = (try tagFormat(self.io, write.path)).?;
                 (switch (format) {
-                    .id3v1 => file_mutation.stageId3v1(
+                    .mpeg => file_mutation.stageMpeg(
+                        self.allocator,
                         self.io,
                         write.path,
                         stage_path,
@@ -629,17 +631,20 @@ fn expectedIdentity(operation: database.MutationOperation) !mutation.FileIdentit
     };
 }
 
-const TagFormat = enum { id3v1, flac };
+const TagFormat = enum { mpeg, flac };
 
-fn tagFormat(path: []const u8) ?TagFormat {
-    if (hasExtension(path, ".mp3")) return .id3v1;
-    if (hasExtension(path, ".flac")) return .flac;
-    return null;
-}
-
-fn hasExtension(path: []const u8, extension: []const u8) bool {
-    return path.len >= extension.len and
-        std.ascii.eqlIgnoreCase(path[path.len - extension.len ..], extension);
+/// Which writer a file takes, decided by its bytes as every reader decides,
+/// never by its name. Null for a format Orca cannot write tags into yet.
+fn tagFormat(io: std.Io, path: []const u8) !?TagFormat {
+    var local = try storage.LocalFileSource.open(io, path);
+    defer local.close();
+    const detected = try storage.format.detect(local.readable()) orelse return null;
+    if (detected.payload_offset != 0) return null;
+    return switch (detected.format) {
+        .flac => .flac,
+        .mp3, .aac => .mpeg,
+        else => null,
+    };
 }
 
 fn deleteIfPresent(io: std.Io, path: []const u8) !void {
@@ -690,7 +695,7 @@ test "approved plan commits through journal and undo detects external edits" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated payload" ++ tag,
     });
     const expected = try file_mutation.identity(std.testing.io, source_path);
     const actions = [_]mutation.Action{.{ .write_tags = .{
@@ -783,7 +788,7 @@ test "recovery restores original after replacement before journal commit" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "crash.mp3",
-        .data = "generated payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated payload" ++ tag,
     });
     const expected = try file_mutation.identity(std.testing.io, source);
     var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
@@ -800,7 +805,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_modified_ns = expected.modified_ns,
         .expected_quick_hash = expected.quick_hash,
     });
-    try file_mutation.stageId3v1(std.testing.io, source, stage, expected, &.{.{
+    try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected, &.{.{
         .field = .title,
         .before = "Before crash",
         .after = "Interrupted",
@@ -841,7 +846,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_modified_ns = expected_again.modified_ns,
         .expected_quick_hash = expected_again.quick_hash,
     });
-    try file_mutation.stageId3v1(std.testing.io, source, stage, expected_again, &.{.{
+    try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected_again, &.{.{
         .field = .title,
         .before = "Before crash",
         .after = "Staged only",
@@ -889,7 +894,7 @@ test "recovery restores original after replacement before journal commit" {
         .expected_modified_ns = expected_again.modified_ns,
         .expected_quick_hash = expected_again.quick_hash,
     });
-    try file_mutation.stageId3v1(std.testing.io, source, stage, expected_again, &.{.{
+    try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, source, stage, expected_again, &.{.{
         .field = .title,
         .before = "Before crash",
         .after = "Interrupted again",
@@ -955,7 +960,7 @@ test "approved move supports undo and rejects an externally edited destination" 
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated payload" ++ tag,
     });
     var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
     defer library.close();
@@ -1116,7 +1121,7 @@ test "failed move rolls back an earlier tag write in the same group" {
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "source.mp3",
-        .data = "generated payload" ++ tag,
+        .data = "\xff\xfb\x90\x64generated payload" ++ tag,
     });
     try temporary.dir.writeFile(std.testing.io, .{
         .sub_path = "collision.mp3",
