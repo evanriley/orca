@@ -189,8 +189,10 @@ pub const PropertyBackfill = struct {
         const detection = storage.format.detect(local.readable()) catch null;
         const properties = codecs.probeDetected(self.allocator, local.readable()) catch |err| {
             // Sniffing decides who opens a file, so a container nothing claims
-            // is a row that is not audio rather than a file that is broken.
-            if (err == error.UnsupportedAudioFormat) return .skipped;
+            // is a row that is not audio, and one no registered codec decodes
+            // is audio Orca cannot read yet. Neither is a broken file.
+            if (err == error.UnsupportedAudioFormat or err == error.CodecUnavailable)
+                return .skipped;
             return .{ .unreadable = @errorName(err) };
         };
         return .{ .probed = .{
@@ -457,6 +459,26 @@ test "a lossy row and a lossless row are told apart by the codec the backfill wr
     try testing.expectEqualStrings("mp3", lossy);
     try testing.expect(codec.decoder.codec_id.isLossless(lossless));
     try testing.expect(!codec.decoder.codec_id.isLossless(lossy));
+}
+
+test "a file no registered codec can decode is skipped, not reported as unreadable" {
+    var fixture = try Fixture.init("file:orca-backfill-no-codec?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("generated-reference.flac");
+    _ = try fixture.record("generated-reference.flac", .{
+        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+    }, reference_tags);
+
+    const no_codecs: codec.CodecRegistry = .{};
+    var pass = fixture.backfill();
+    defer pass.deinit();
+    pass.codecs = &no_codecs;
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.unsupported);
+    try testing.expectEqual(@as(u64, 0), result.errors);
+    var issues = try fixture.library.health_issues.page(testing.allocator, 8, 0);
+    defer issues.deinit();
+    try testing.expectEqual(@as(usize, 0), issues.items.len);
 }
 
 test "a file that will not decode leaves its row alone and is reported as unreadable" {
