@@ -22,10 +22,8 @@ pub const Tags = struct {
 /// decode but not yet tag still scan; they simply observe no tags.
 pub fn supports(audio_format: storage.AudioFormat) bool {
     return switch (audio_format) {
-        .flac, .mp3, .opus, .vorbis => true,
-        // MP4/iTunes atoms arrive as another branch of `read`; no caller
-        // changes when they do.
-        .mp4, .wav, .aiff, .wavpack, .qoa => false,
+        .flac, .mp3, .mp4, .opus, .vorbis => true,
+        .wav, .aiff, .wavpack, .qoa => false,
     };
 }
 
@@ -62,6 +60,7 @@ fn readValues(
     return switch (audio_format) {
         .flac => metadata.vorbis_comment.read(allocator, readable),
         .mp3 => try readMpegTags(allocator, readable),
+        .mp4 => metadata.mp4_tags.read(allocator, readable),
         .opus, .vorbis => metadata.ogg_comment.read(allocator, readable),
         else => null,
     };
