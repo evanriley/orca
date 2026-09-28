@@ -21,9 +21,11 @@ the rule in [architecture.md](architecture.md).
 ### Formats
 
 - Decoding: WAV, FLAC (libFLAC), MP3 (vendored minimp3 with Xing/LAME gapless
-  trimming), Ogg Opus (libopusfile), Ogg Vorbis (libvorbisfile), QOA.
-- Tags: ID3v1, ID3v2.3/2.4, Vorbis comments in FLAC and Ogg, embedded pictures
-  in FLAC and MP3.
+  trimming), ALAC and AAC in MP4 (Apple's reference decoder and libxaac, with
+  edit-list gapless trimming), Ogg Opus (libopusfile), Ogg Vorbis
+  (libvorbisfile), QOA.
+- Tags: ID3v1, ID3v2.3/2.4, Vorbis comments in FLAC and Ogg, iTunes atoms in
+  MP4, embedded pictures in FLAC, MP3 and MP4.
 
 ### Playback
 
@@ -66,12 +68,9 @@ entry point and a client before it counts as working.
 
 In priority order.
 
-1. **Formats: MP4 (ALAC and AAC).** No Zig implementation exists for any of
-   these, so they come from reference C libraries: Apple's ALAC decoder and
-   Ittiam's libxaac for AAC-LC, HE-AAC v1/v2 and xHE-AAC, both Apache-2.0 and
-   both built from source by `build.zig`. MP4 also needs a demuxer and an
-   iTunes-atom tag reader. Ogg artwork (`METADATA_BLOCK_PICTURE`) is also
-   still unread.
+1. **Format gaps.** Ogg artwork (`METADATA_BLOCK_PICTURE`), AIFF and
+   WavPack. HE-AAC and the `iTunSMPB` gapless fallback are implemented but have
+   no fixture, because FFmpeg cannot write either.
 2. **macOS playback.** `liborca` has no CoreAudio backend, so it cannot play
    on macOS, and the SwiftUI client has not been built since the C ABI changed.
    A CoreAudio output behind the same backend contract, plus a SwiftUI client
@@ -87,6 +86,12 @@ In priority order.
    path and report the signal path from the negotiated output.
 7. **Providers and scrobbling**, after the fixes listed above.
 8. **Filesystem watching** as a scan accelerator.
+9. **Licence of the QOA decoder.** The pinned `audiophile/qoa` package ships
+   no licence. Either upstream adds one, or QOA moves to the MIT-licensed
+   reference `qoa.h` behind a shim.
+10. **Undecodable files are re-examined on every analysis run.** They are
+    declined cheaply, but a library of AIFF files still pays two 64 KiB reads
+    per file per run until AIFF is supported or declines are remembered.
 
 ## Later
 

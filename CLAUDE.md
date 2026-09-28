@@ -41,9 +41,12 @@ are linked via pkg-config. PipeWire's include paths
 come from `pkg-config --cflags-only-I` (`pkgConfigIncludePaths` in `build.zig`)
 and its library is linked without pkg-config, because the rest of its `--cflags`
 breaks Zig's pkg-config parser. No path under `/usr` is assumed, so the same
-build works on NixOS and FHS distributions. The only Zig package dependency is
-`audiophile/qoa`; `nix build` fetches it through `zig.fetchDeps`, whose hash in
-`flake.nix` must be updated when `build.zig.zon` dependencies change.
+build works on NixOS and FHS distributions. The Zig package dependencies are
+`audiophile/qoa`, `alac` and `libxaac`; `nix build` fetches them through
+`zig.fetchDeps`. When `build.zig.zon` dependencies change, set that hash in
+`flake.nix` to `pkgs.lib.fakeHash` and rebuild to learn the new one: an
+unchanged hash makes Nix reuse the old dependency directory, and the sandboxed
+build then fails trying to fetch the new packages.
 
 ### Zig facts that cost time to rediscover
 
@@ -191,12 +194,13 @@ invocation, including throwaway checks.
 
 ### Running a single test
 
-There is no test filter wired into `build.zig` — `zig build test` runs all ~375
+There is no test filter wired into `build.zig` — `zig build test` runs all ~400
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `qoa` dependency, libFLAC, libopusfile, libvorbisfile, libc and the
-C shims, which is impractical to reconstruct on a bare `zig test` command line.
+SQLite, the `qoa`, `alac` and `libxaac` packages, libFLAC, libopusfile,
+libvorbisfile, libc, libc++ and the C shims, which is impractical to
+reconstruct on a bare `zig test` command line.
 
 Tests are run from the repository root and load fixtures by relative path
 (`fixtures/audio/...`). Do not make test working-directory assumptions.

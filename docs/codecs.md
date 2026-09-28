@@ -25,7 +25,7 @@ property the container does not state comes back null rather than zero.
 
 A probe also reports **which encoding** the container turned out to hold, as a
 stable lowercase identifier from `decoder.codec_id`: `pcm`, `pcm_float`,
-`flac`, `qoa`, `mp1`, `mp2`, `mp3`, `opus`, `vorbis`. The scanner stores it in `files.codec` and
+`flac`, `qoa`, `mp1`, `mp2`, `mp3`, `alac`, `aac`, `opus`, `vorbis`. The scanner stores it in `files.codec` and
 the property backfill repairs it for rows written before it existed.
 
 **It is not a synonym for `audio_format`.** `audio_format` names the container
@@ -80,6 +80,55 @@ against the bytes that follow it.
 Free-format and reserved-field frames are refused. Streams that change channel
 count or sample rate mid-file are refused rather than silently reinterpreted.
 Truncated input ends the stream; input that never syncs fails at open.
+
+## MP4: ALAC and AAC
+
+MP4 is split three ways. `storage/iso_bmff.zig` frames boxes and finds the
+movie box by header alone, so a `moov` stored after the media data costs a
+handful of reads; the movie box is bounded at 64 MiB. `codec/mp4.zig` reads the
+first sound track whose sample entry is `alac` or `mp4a` with an MPEG-4 or
+MPEG-2 AAC `esds`, builds its packet table (bounded at 4M packets), and runs the
+packet loop. The engines behind `codec/engine.zig` turn one packet into float
+frames and know nothing about the container.
+
+- **ALAC** decodes through Apple's reference decoder, built from source from
+  the `alac` package. It is C++, and `alac_shim.cpp` is the only file that sees
+  it. The configuration is copied to aligned memory before `Init`, which reads
+  it through a struct pointer. ALAC is lossless and reports its bit depth.
+- **AAC** (AAC-LC, HE-AAC v1/v2, xHE-AAC) decodes through Ittiam's libxaac,
+  AOSP's decoder, built from source by `build/libxaac.zig` using its portable C
+  paths on every target. libxaac writes 16-bit PCM for AAC-LC and HE-AAC
+  whatever width is requested, so the shim requests 16. Plain AAC completes
+  init only after parsing the first access unit, which init does not consume;
+  the shim hands it over at open and decodes it normally afterwards. A seek
+  re-initializes the decoder and pre-rolls two packets. libxaac's peak limiter
+  is on by default and is switched off.
+- Both vendored decoders compile with the undefined-behaviour sanitizer off;
+  they rely on two's-complement behaviour of shifts that every target defines.
+
+Gapless playback follows the track's edit list: the first presented edit gives
+the encoder priming to skip and the audible length. Files without an edit list
+fall back to Apple's `iTunSMPB` tag, and failing that every packet plays. The
+fallback to `iTunSMPB` has no fixture yet.
+
+A decoder that withholds the start of a packet shifts every later frame
+earlier than the sample table places it. libxaac withholds 240 frames of the
+first access unit after init, so the packet loop pads any packet shorter than
+its sample-table duration with silence at the front. Those frames are
+priming or seek pre-roll and are skipped. Measured against FFmpeg's decode of
+the same file, the result has zero lag, the exact length, and differences at
+16-bit quantization level.
+
+`probe` answers from the container: setting up libxaac costs about 6 ms, which
+made a 300-file AAC scan 12 times slower than FLAC's. Duration uses the
+decoder's own gapless arithmetic, rate and channels come from the ALAC
+configuration or the AudioSpecificConfig, and a test holds the probe to what
+the decoder reports for every fixture.
+
+Tags come from `moov/udta/meta/ilst` through `metadata/mp4_tags.zig`: the
+standard text atoms, `trkn`, `disk`, `cpil`, `gnre` (an ID3v1 number) and
+`----` freeform atoms for MusicBrainz identifiers, ISRC and label. The first
+`covr` image is the cover.
 
 ## Ogg Opus and Ogg Vorbis
 

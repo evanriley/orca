@@ -73,7 +73,10 @@ acceptance updates Orca metadata without writing media files.
 
 Orca is licensed under the [Mozilla Public License 2.0](LICENSE). Applications
 of any licence may embed `liborca`; changes to Orca's own files are shared
-under the same terms. Vendored and linked libraries keep their own licences:
-`liborca/codec/vendor/minimp3` is CC0, and the system libraries Orca links
-(SQLite, libFLAC, libopusfile, libvorbis, PipeWire, GTK4) are distributed under
-theirs.
+under the same terms.
+
+`liborca` compiles in Apple's ALAC decoder and Ittiam's libxaac, both
+Apache-2.0, and a vendored CC0 minimp3. `zig build` installs their licence and
+notice files under `share/doc/orca/licenses`; distribute that directory with
+any binary. The system libraries Orca links (SQLite, libFLAC, libopusfile,
+libvorbis, PipeWire, GTK4) are distributed under their own licences.

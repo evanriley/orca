@@ -2,6 +2,31 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### MP4: ALAC and AAC play, scan and tag
+
+- **ALAC decodes bit-identically** through Apple's reference decoder, built
+  from source behind a C++ shim: the ALAC fixture's samples equal those of the
+  FLAC it was encoded from, and seeks land on the exact frame.
+- **AAC (LC, HE-AAC v1/v2, xHE-AAC) decodes through libxaac**, AOSP's
+  Apache-2.0 decoder, built from its portable C sources. Against FFmpeg's decode
+  of the same file the output has zero lag, the exact length and differences at
+  16-bit quantization level. libxaac withholds 240 frames of the first access
+  unit after init; the packet loop restores them as silence so the timeline
+  stays where the sample table puts it.
+- **Gapless bounds come from the edit list**, with Apple's `iTunSMPB` as a
+  fallback, so a 200 ms AAC fixture carrying 1,024 frames of encoder priming
+  decodes to exactly 9,600 frames.
+- **iTunes tags and cover art** are read from `ilst`, including `----`
+  freeform atoms for MusicBrainz identifiers.
+- **Scanning MP4 costs what scanning FLAC does.** Properties come from the
+  movie box rather than from an AAC decoder whose setup costs about 6 ms: a
+  300-file AAC scan fell from 1.83 s to 0.14 s.
+- **Files without a decoder are no longer reported as corrupt.** The analysis
+  pass and property backfill filed AIFF, WavPack and any other sniffed but
+  undecodable file as `corrupt_audio` or `unreadable_file` on every run.
+- `zig build` installs the licence and notice files of the compiled-in
+  Apache-2.0 and CC0 code under `share/doc/orca/licenses`.
+
 ### Ogg Opus and Ogg Vorbis play, scan and tag
 
 - **Opus and Vorbis decode through libopusfile and libvorbisfile**, each behind

@@ -17,7 +17,7 @@ frontends, no frontend owning behaviour.
                                            |
    library · database · storage · codec · metadata · audio · analysis · jobs
                                            |
-  SQLite · libFLAC · minimp3 · libopusfile · libvorbisfile · PipeWire (Linux)
+  SQLite · libFLAC · minimp3 · ALAC · libxaac · Xiph libraries · PipeWire
 ```
 
 - **Zig clients** import the `liborca` module and call its Zig API directly.
