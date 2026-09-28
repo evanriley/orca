@@ -734,7 +734,7 @@ pub export fn orca_library_remove_root(
 ) callconv(.c) Status {
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     if (box.foreignThread()) return .wrong_thread;
-    box.runtime.libraryRemoveRoot(importLibrary(library), root_id) catch |err|
+    _ = box.runtime.libraryRemoveRoot(importLibrary(library), root_id) catch |err|
         return mapError(err);
     return .ok;
 }
@@ -1585,8 +1585,8 @@ fn mapError(err: anyerror) Status {
         error.InvalidJobTransition,
         error.JobAlreadyFinished,
         => .invalid_state,
-        error.TrackHasNoPlayableFile, error.TrackFileMissing => .not_found,
-        error.PlaybackQueueFull => .busy,
+        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot => .not_found,
+        error.PlaybackQueueFull, error.LibraryJobRunning => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,

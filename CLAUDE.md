@@ -111,6 +111,8 @@ zig build run -- devices
 
 # library
 zig build run -- scan DATABASE ROOT
+zig build run -- roots DATABASE
+zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]

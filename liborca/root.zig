@@ -63,6 +63,7 @@ pub const ReleaseSummary = database.ReleaseSummary;
 pub const HealthIssuePage = database.HealthIssuePage;
 pub const LibraryRootPage = database.repository.LibraryRootPage;
 pub const RootBinding = database.RootBinding;
+pub const RemovedRoot = runtime.RemovedRoot;
 pub const EmbeddedImage = internal.metadata.EmbeddedImage;
 pub const ArtworkSubject = runtime.ArtworkSubject;
 pub const ArtworkResult = runtime.ArtworkResult;

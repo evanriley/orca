@@ -92,8 +92,6 @@ entry point and a client before it counts as working.
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Daily-use fixes.**
-   - Forgetting a removed folder: `libraryRemoveRoot` stops scanning a folder,
-     but its files and tracks stay in the library, listed.
    - A custom equalizer curve is not saved while the equalizer is off.
    - Album page rows cannot be selected, so an album's details panel shows
      only the track last played there.

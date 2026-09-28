@@ -2,6 +2,22 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Removing a folder forgets its tracks
+
+- **`Runtime.libraryRemoveRoot` forgets everything that exists only under the
+  root**: its files, their tags and Orca values, the Tracks they backed, and
+  the Releases and Artists nothing else references. It returns `RemovedRoot`
+  with the counts. Files on disk are not touched; a file also located under
+  another root stays and is reprojected; the tag-write undo journal keeps its
+  rows. It returns `error.LibraryJobRunning` while any job on the Library runs,
+  and `error.UnknownRoot` for an unregistered id. (Breaking: it returned
+  nothing.)
+- **`orca-cli roots` and `orca-cli remove-root`** list the registered folders
+  and forget one. `orca-gtk` asks first, then reports how many tracks left.
+- `orca_library_remove_root` keeps its signature and now reports
+  `ORCA_STATUS_NOT_FOUND` for an unknown root and `ORCA_STATUS_BUSY` while a
+  job is running.
+
 ### Live DSP
 
 - **A ten-band equalizer, stereo crossfeed and a signal-path report.**

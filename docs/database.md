@@ -37,6 +37,16 @@ uncancelled scan run marks locations it did not reach as `missing`; nothing
 deletes a location implicitly, because an unmounted drive must not empty a
 library.
 
+Removing a root is the one explicit path that forgets. In one transaction it
+deletes the root's locations, the files that were located only under it (with
+their tags, Orca values, analysis and health rows), the Tracks those files
+backed, and the Releases and Artists nothing else references. Nothing on disk
+is touched. A file also located under another root or volume survives, and
+the projection is rerun over it. Undo journal rows keep their paths and lose
+only their `file_id`, so a tag write can still be undone. Every Library job
+writes rows keyed by `files.id`, so the removal fails with `LibraryJobRunning`
+while any job on that Library runs.
+
 ## Observation, Orca metadata, projection
 
 `observed_file_tags` (plus `observed_file_genres`, since genre is multi-valued

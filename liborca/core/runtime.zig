@@ -83,6 +83,12 @@ pub const TrackEdit = struct {
 
 pub const TrackEditPage = database.repository.FieldValuePage;
 
+/// What forgetting a Library root removed.
+pub const RemovedRoot = struct {
+    files_forgotten: u64,
+    tracks_removed: u64,
+};
+
 /// The Tracks an edit's files back once it is applied. An edit that moves a
 /// track to another album or position reprojects it as a new Track, so the
 /// ids a caller passed in may no longer exist. Caller-owned.
@@ -1962,13 +1968,32 @@ pub const OrcaRuntime = struct {
         return library_database.ensureRoot(io, path, .{ .allow_persist = true });
     }
 
+    /// Forgets a root and everything that exists only under it: its files,
+    /// their tags and Orca values, and the Tracks, Releases and Artists they
+    /// backed. Nothing on disk is touched. A file also located under another
+    /// root stays and is reprojected. Refused while any job on the Library
+    /// runs, since each of them writes rows keyed by the files this deletes.
     pub fn libraryRemoveRoot(
         self: *OrcaRuntime,
         library: LibraryHandle,
         root_id: i64,
-    ) !void {
+    ) !RemovedRoot {
         try self.requireRunning();
-        try (try self.libraryDatabase(library)).library_roots.remove(root_id);
+        const library_database = try self.libraryDatabase(library);
+        for (self.job_workers.items) |worker| {
+            if (!worker.retired and worker.library.eql(library)) return error.LibraryJobRunning;
+        }
+        const removal = try library_database.library_roots.remove(self.allocator, root_id);
+        defer removal.deinit();
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = library_database,
+        };
+        _ = try pass.run(.{ .files = removal.surviving_file_ids });
+        return .{
+            .files_forgotten = removal.files_forgotten,
+            .tracks_removed = removal.tracks_removed,
+        };
     }
 
     pub fn libraryRootPage(
@@ -4420,4 +4445,42 @@ test "queue edits from the host jump, insert after the playing entry and refuse 
     try std.testing.expectEqual(@as(u32, 2), status.queue_index);
     try std.testing.expectEqual(ids[2], status.track_id.?);
     try std.testing.expectError(error.PositionOutOfRange, runtime.playerQueueJump(player, 3));
+}
+
+test "a root cannot be removed while a job runs on its library, and afterwards its tracks leave the library" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.mp3", "a.mp3");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-runtime-remove-root?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+
+    const scan_of_root = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    try std.testing.expectError(error.LibraryJobRunning, runtime.libraryRemoveRoot(library, binding.root_id));
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan_of_root));
+
+    const scan_of_all = try runtime.startLibraryScan(library, .{});
+    try std.testing.expectError(error.LibraryJobRunning, runtime.libraryRemoveRoot(library, binding.root_id));
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan_of_all));
+
+    var before = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+    const tracks_before = before.items.len;
+    before.deinit();
+    try std.testing.expect(tracks_before != 0);
+
+    const removed = try runtime.libraryRemoveRoot(library, binding.root_id);
+    try std.testing.expectEqual(@as(u64, 2), removed.files_forgotten);
+    try std.testing.expectEqual(@as(u64, tracks_before), removed.tracks_removed);
+    var after = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+    defer after.deinit();
+    try std.testing.expectEqual(@as(usize, 0), after.items.len);
+    var roots = try runtime.libraryRootPage(library, 16, 0);
+    defer roots.deinit();
+    try std.testing.expectEqual(@as(usize, 0), roots.items.len);
+    try std.testing.expectError(error.UnknownRoot, runtime.libraryRemoveRoot(library, binding.root_id));
+    try std.Io.Dir.cwd().access(std.testing.io, root, .{});
 }

@@ -43,21 +43,63 @@ fn suffixButton(row: *gtk.Widget, label: ?[*:0]const u8, icon: ?[*:0]const u8, h
 
 // ------------------------------------------------------------------ library
 
+const PendingRemoval = struct {
+    self: *App,
+    root_id: i64,
+    row: ?*gtk.Widget,
+};
+
 fn removeRootClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const library = self.library orelse return;
     const name = gtk.gtk_widget_get_name(gtk.cast(gtk.Widget, button));
     const root_id = std.fmt.parseInt(i64, std.mem.span(name), 10) catch return;
-    self.runtime.libraryRemoveRoot(library, root_id) catch return self.toast("Could not remove that folder");
-    const row = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, button));
-    var ancestor = row;
-    while (ancestor) |widget| : (ancestor = gtk.gtk_widget_get_parent(widget)) {
-        if (gtk.g_object_get_data(widget, "orca-root-row") != null) {
-            gtk.gtk_widget_set_visible(widget, gtk.false_);
-            break;
-        }
-    }
-    self.toast("Orca won't scan that folder again. Its tracks stay listed for now.");
+    var roots = self.runtime.libraryRootPage(library, app.page_size, 0) catch return self.toast("Could not remove that folder");
+    defer roots.deinit();
+    const path = for (roots.items) |root| {
+        if (root.id == root_id) break root.path;
+    } else return;
+
+    var ancestor = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, button));
+    const row = while (ancestor) |widget| : (ancestor = gtk.gtk_widget_get_parent(widget)) {
+        if (gtk.g_object_get_data(widget, "orca-root-row") != null) break widget;
+    } else null;
+
+    const trimmed = std.mem.trimEnd(u8, path, "/");
+    const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/');
+    const folder = if (slash) |index| trimmed[index + 1 ..] else trimmed;
+    var buffer: [1024]u8 = undefined;
+    const heading = strings.printZ(&buffer, "Remove “{s}”?", .{if (folder.len == 0) path else folder}) catch "Remove this folder?";
+    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks leave the library. The files on disk are not touched.");
+    const alert = gtk.cast(adw.AlertDialog, dialog);
+    adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
+    adw.adw_alert_dialog_add_response(alert, "remove", "Remove");
+    adw.adw_alert_dialog_set_response_appearance(alert, "remove", adw.RESPONSE_DESTRUCTIVE);
+    adw.adw_alert_dialog_set_default_response(alert, "cancel");
+    adw.adw_alert_dialog_set_close_response(alert, "cancel");
+    const pending = self.allocator.create(PendingRemoval) catch return;
+    pending.* = .{ .self = self, .root_id = root_id, .row = row };
+    _ = gtk.signalConnect(dialog, "response", gtk.callback(removeRootResponse), pending);
+    adw.adw_dialog_present(dialog, gtk.cast(gtk.Widget, button));
+}
+
+fn removeRootResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
+    const pending: *PendingRemoval = @ptrCast(@alignCast(data.?));
+    const self = pending.self;
+    defer self.allocator.destroy(pending);
+    if (!std.mem.eql(u8, std.mem.span(response), "remove")) return;
+    const library = self.library orelse return;
+    const removed = self.runtime.libraryRemoveRoot(library, pending.root_id) catch |err| return self.toast(switch (err) {
+        error.LibraryJobRunning => "Wait for the running job to finish, then remove the folder",
+        else => "Could not remove that folder",
+    });
+    if (pending.row) |row| gtk.gtk_widget_set_visible(row, gtk.false_);
+    var buffer: [64]u8 = undefined;
+    self.toast(strings.format(&buffer, "Removed {d} {s}", .{
+        removed.tracks_removed,
+        if (removed.tracks_removed == 1) "track" else "tracks",
+    }));
+    jobs.reloadLibraryViews(self);
 }
 
 fn addFolderActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

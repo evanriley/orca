@@ -586,6 +586,9 @@ orca_status orca_library_add_root(
     const char *path,
     int64_t *root_id
 );
+/* Forgets a root and every file, Track, Release and Artist that exists only
+ * under it; files on disk are untouched. NOT_FOUND for an unknown root, BUSY
+ * while a job is running on the library. */
 orca_status orca_library_remove_root(
     orca_runtime *runtime,
     orca_handle library,

@@ -194,6 +194,26 @@ pub fn main(init: std.process.Init) !void {
             "{s}\t{s}\t{s}\t{s}\n",
             .{ @tagName(issue.severity), @tagName(issue.kind), issue.path, issue.details },
         );
+    } else if (args.len == 3 and std.mem.eql(u8, args[1], "roots")) {
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library_handle = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
+        var page = try runtime.libraryRootPage(library_handle, 512, 0);
+        defer page.deinit();
+        for (page.items) |root| try stdout.print(
+            "{d}\t{s}\t{s}\n",
+            .{ root.id, if (root.enabled) "enabled" else "disabled", root.path },
+        );
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "remove-root")) {
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library_handle = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
+        const root_id = try std.fmt.parseInt(i64, args[3], 10);
+        const removed = try runtime.libraryRemoveRoot(library_handle, root_id);
+        try stdout.print(
+            "removed root {d}: {d} files, {d} tracks\n",
+            .{ root_id, removed.files_forgotten, removed.tracks_removed },
+        );
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artists")) {
         try listArtists(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "releases")) {
@@ -274,6 +294,7 @@ pub fn main(init: std.process.Init) !void {
             \\                 | analyze DATABASE AUDIO
             \\                 | analyze-library DATABASE [--batch=N] [--cancel-after=MS]
             \\                 | duplicates DATABASE [--batch=N] [--cancel-after=MS]
+            \\                 | roots DATABASE | remove-root DATABASE ID
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | artists DATABASE [OPTIONS]
@@ -285,6 +306,10 @@ pub fn main(init: std.process.Init) !void {
             \\                 | edit DATABASE IDS [EDITS]
             \\                 | write-tags DATABASE IDS [--approve=DIGEST]
             \\                 | undo-tags DATABASE GROUP]
+            \\
+            \\roots lists the registered folders. remove-root forgets one and every
+            \\file, Track, Release and Artist that exists only under it; a file also
+            \\located under another root stays. Files on disk are not touched.
             \\
             \\edit sets Orca's own values for a comma-separated list of Track ids;
             \\the files are not written. With no edits it lists the values held.

@@ -126,8 +126,8 @@ and the output device. Scans, measurement, duplicate finding and tag writes
 share the status card at the foot of the sidebar, one at a time. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)
 are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
-settings below. Removing a folder stops Orca scanning it; its tracks stay
-listed.
+settings below. Removing a folder asks first, then forgets its tracks; the
+files on disk are not touched, and it is refused while a job is running.
 
 The **Sound** page drives the Player's DSP chain through
 `Runtime.playerSetEqualizer` and `playerSetCrossfeed`. The equalizer has ten

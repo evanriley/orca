@@ -232,47 +232,14 @@ pub const Projection = struct {
                 result.tracks_pruned += 1;
             }
         }
-        if (releases.items.len == 0) return;
-
-        var release_in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
-        defer release_in_use.deinit();
-        var release_artist = try db.prepare("SELECT album_artist_id FROM releases WHERE id = ?1;");
-        defer release_artist.deinit();
-        var delete_release = try db.prepare("DELETE FROM releases WHERE id = ?1;");
-        defer delete_release.deinit();
-        for (releases.items) |release_id| {
-            try release_in_use.bindInt64(1, release_id);
-            const in_use = try release_in_use.step() == .row;
-            try release_in_use.reset();
-            if (in_use) continue;
-            try release_artist.bindInt64(1, release_id);
-            const found = try release_artist.step() == .row;
-            if (found and !release_artist.columnIsNull(0)) try artists.append(allocator, release_artist.columnInt64(0));
-            try release_artist.reset();
-            if (!found) continue;
-            try delete_release.bindInt64(1, release_id);
-            if (try delete_release.step() != .done) return error.SqlFailed;
-            try delete_release.reset();
-            result.releases_pruned += 1;
-        }
-
-        var artist_in_use = try db.prepare(
-            \\SELECT 1 WHERE EXISTS (SELECT 1 FROM tracks WHERE artist_id = ?1)
-            \\   OR EXISTS (SELECT 1 FROM releases WHERE album_artist_id = ?1);
+        const pruned = try database.repository.pruneOrphanedReleasesAndArtists(
+            db,
+            allocator,
+            releases.items,
+            artists.items,
         );
-        defer artist_in_use.deinit();
-        var delete_artist = try db.prepare("DELETE FROM artists WHERE id = ?1;");
-        defer delete_artist.deinit();
-        for (artists.items) |artist_id| {
-            try artist_in_use.bindInt64(1, artist_id);
-            const in_use = try artist_in_use.step() == .row;
-            try artist_in_use.reset();
-            if (in_use) continue;
-            try delete_artist.bindInt64(1, artist_id);
-            if (try delete_artist.step() != .done) return error.SqlFailed;
-            try delete_artist.reset();
-            if (db.changes() == 1) result.artists_pruned += 1;
-        }
+        result.releases_pruned += pruned.releases;
+        result.artists_pruned += pruned.artists;
     }
 
     /// Orca values for the fields `metadata.resolve` does not cover, resolved
@@ -2112,4 +2079,151 @@ test "locked album artist, disc, date and compilation values reach the projected
     try testing.expectEqualStrings("Edited Artist", page.items[0].album_artist);
     try testing.expectEqual(@as(?i64, 2), page.items[0].disc_number);
     try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases WHERE release_date = '2024';"));
+}
+
+fn observeUnderRoot(
+    library: *database.LibraryDatabase,
+    root_id: i64,
+    uri: []const u8,
+    values: metadata.ObservedTags,
+) !i64 {
+    const file_id = try library.files.create(.{
+        .audio_format = @intFromEnum(storage.AudioFormat.flac),
+        .size_bytes = 1024,
+    });
+    try locateUnderRoot(library, root_id, file_id, uri);
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = values });
+    return file_id;
+}
+
+fn locateUnderRoot(library: *database.LibraryDatabase, root_id: i64, file_id: i64, uri: []const u8) !void {
+    _ = try library.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .root_id = root_id,
+        .uri = uri,
+        .state = .present,
+    });
+}
+
+fn expectNoForeignKeyViolations(library: *database.LibraryDatabase) !void {
+    var statement = try library.database.prepare("PRAGMA foreign_key_check;");
+    defer statement.deinit();
+    try testing.expectEqual(database.sqlite.Step.done, try statement.step());
+}
+
+fn singleArtistTags(artist: []const u8, title: []const u8, track_number: u32) metadata.ObservedTags {
+    return .{
+        .title = title,
+        .artist = artist,
+        .album = artist,
+        .album_artist = artist,
+        .track_number = track_number,
+    };
+}
+
+test "removing a root forgets its tracks, releases and artists" {
+    var library = try openTestLibrary("file:orca-projection-remove-root?mode=memory&cache=shared");
+    defer library.close();
+    const removed_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Old");
+    const kept_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Kept");
+    _ = try observeUnderRoot(&library, removed_root, "/m/Old/1.flac", singleArtistTags("Old Artist", "One", 1));
+    _ = try observeUnderRoot(&library, removed_root, "/m/Old/2.flac", singleArtistTags("Old Artist", "Two", 2));
+    _ = try observeUnderRoot(&library, kept_root, "/m/Kept/1.flac", singleArtistTags("Kept Artist", "Three", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 3), try scalar(&library, "SELECT count(*) FROM tracks;"));
+
+    const removal = try library.library_roots.remove(testing.allocator, removed_root);
+    defer removal.deinit();
+    try testing.expectEqual(@as(u64, 2), removal.files_forgotten);
+    try testing.expectEqual(@as(u64, 2), removal.tracks_removed);
+    try testing.expectEqual(@as(usize, 0), removal.surviving_file_ids.len);
+
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM artists;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM files;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM observed_file_tags;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM library_roots;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM artists WHERE name = 'Old Artist';"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM track_search WHERE track_search MATCH 'Three';"));
+    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM track_search WHERE track_search MATCH 'One';"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "removing a root keeps a file that another root still locates" {
+    var library = try openTestLibrary("file:orca-projection-remove-root-shared?mode=memory&cache=shared");
+    defer library.close();
+    const removed_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Old");
+    const kept_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Kept");
+    const shared = try observeUnderRoot(&library, removed_root, "/m/Old/1.flac", singleArtistTags("Artist", "One", 1));
+    try locateUnderRoot(&library, kept_root, shared, "/m/Kept/1.flac");
+    const only_under_removed = try observeUnderRoot(&library, removed_root, "/m/Old/2.flac", singleArtistTags("Artist", "Two", 2));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    const removal = try library.library_roots.remove(testing.allocator, removed_root);
+    defer removal.deinit();
+    try testing.expectEqual(@as(u64, 1), removal.files_forgotten);
+    try testing.expectEqualSlices(i64, &.{shared}, removal.surviving_file_ids);
+    _ = try projection.run(.{ .files = removal.surviving_file_ids });
+
+    var statement = try library.database.prepare("SELECT (SELECT count(*) FROM files WHERE id = ?1), (SELECT count(*) FROM files WHERE id = ?2);");
+    defer statement.deinit();
+    try statement.bindInt64(1, shared);
+    try statement.bindInt64(2, only_under_removed);
+    try testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    try testing.expectEqual(@as(i64, 1), statement.columnInt64(0));
+    try testing.expectEqual(@as(i64, 0), statement.columnInt64(1));
+
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations WHERE uri = '/m/Kept/1.flac';"));
+    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM locations WHERE uri LIKE '/m/Old/%';"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "removing a root keeps the undo journal of its files" {
+    var library = try openTestLibrary("file:orca-projection-remove-root-journal?mode=memory&cache=shared");
+    defer library.close();
+    const root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Old");
+    const file_id = try observeUnderRoot(&library, root, "/m/Old/1.flac", singleArtistTags("Artist", "One", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const operation_id = try library.mutation_journal.prepare(.{
+        .plan_id = 1,
+        .group_id = 1,
+        .action_index = 0,
+        .kind = .write_tags,
+        .file_id = file_id,
+        .source_path = "/m/Old/1.flac",
+        .expected_size = 1024,
+        .expected_modified_ns = 0,
+        .expected_quick_hash = std.mem.zeroes(storage.QuickHash),
+    });
+
+    const removal = try library.library_roots.remove(testing.allocator, root);
+    defer removal.deinit();
+    try testing.expectEqual(@as(u64, 1), removal.files_forgotten);
+
+    var operation = try library.mutation_journal.get(testing.allocator, operation_id);
+    defer operation.deinit();
+    try testing.expectEqual(@as(?i64, null), operation.file_id);
+    try testing.expectEqualStrings("/m/Old/1.flac", operation.source_path);
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "removing an unknown root is refused" {
+    var library = try openTestLibrary("file:orca-projection-remove-root-unknown?mode=memory&cache=shared");
+    defer library.close();
+    const root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Kept");
+    _ = try observeUnderRoot(&library, root, "/m/Kept/1.flac", singleArtistTags("Artist", "One", 1));
+    try testing.expectError(
+        error.UnknownRoot,
+        library.library_roots.remove(testing.allocator, root + 1000),
+    );
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM library_roots;"));
 }
