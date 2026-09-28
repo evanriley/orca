@@ -42,7 +42,7 @@ come from `pkg-config --cflags-only-I` (`pkgConfigIncludePaths` in `build.zig`)
 and its library is linked without pkg-config, because the rest of its `--cflags`
 breaks Zig's pkg-config parser. No path under `/usr` is assumed, so the same
 build works on NixOS and FHS distributions. The Zig package dependencies are
-`audiophile/qoa`, `alac` and `libxaac`; `nix build` fetches them through
+`alac` and `libxaac`; `nix build` fetches them through
 `zig.fetchDeps`. When `build.zig.zon` dependencies change, set that hash in
 `flake.nix` to `pkgs.lib.fakeHash` and rebuild to learn the new one: an
 unchanged hash makes Nix reuse the old dependency directory, and the sandboxed
@@ -198,7 +198,7 @@ There is no test filter wired into `build.zig` — `zig build test` runs all ~40
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `qoa`, `alac` and `libxaac` packages, libFLAC, libopusfile,
+SQLite, the `alac` and `libxaac` packages, libFLAC, libopusfile,
 libvorbisfile, libc, libc++ and the C shims, which is impractical to
 reconstruct on a bare `zig test` command line.
 
@@ -323,9 +323,9 @@ honestly. Container detection sniffs bytes, never filename extensions.
 
 Codec-specific state never escapes `liborca/codec/`; playback sees only the
 Orca `Decoder` interface, and `SourceSession` owns the registered decoder.
-Codec sourcing order: an existing, correct Zig package (as `audiophile/qoa`),
-then the reference C library behind a narrow shim, and an Orca-written codec
-only when neither exists. The project is not an exercise in writing codecs, and
+Codec sourcing order: an existing, correct, licensed Zig package, then the
+reference C library behind a narrow shim, and an Orca-written codec only when
+neither exists. The project is not an exercise in writing codecs, and
 correctness outranks purity. FLAC decodes through libFLAC
 behind `codec/flac_shim.c` because the pure-Zig package that preceded it
 reconstructed mid-side stereo one LSB low, which made a lossless format lossy;

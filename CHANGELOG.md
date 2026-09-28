@@ -2,6 +2,15 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### QOA decodes through the reference decoder, and seeks
+
+- **The `audiophile/qoa` package is gone.** It shipped no licence, which left
+  Orca redistributing code it had no right to, and it could not seek. The
+  reference `qoa.h` (MIT) is vendored behind `codec/qoa_shim.c`, as minimp3 is.
+- **QOA seeks exactly.** Frames are independent and all but the last are
+  full, so a seek lands on its frame by arithmetic; a sought decode equals a
+  sequential one sample for sample, across a frame boundary included.
+
 ### MP4: ALAC and AAC play, scan and tag
 
 - **ALAC decodes bit-identically** through Apple's reference decoder, built

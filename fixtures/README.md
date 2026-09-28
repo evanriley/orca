@@ -7,7 +7,9 @@ Git.
 `audio/generated-reference.flac` is 480 stereo frames generated from a
 deterministic 16-bit ramp and encoded with FFmpeg's FLAC encoder.
 `audio/generated-reference.qoa` is a hand-built, single-channel 20-frame QOA
-stream with zeroed predictor state. Neither fixture contains third-party media.
+stream with zeroed predictor state. `audio/stereo-reference.qoa` is
+`audio/generated-reference.wav` encoded with the reference `qoa.h` encoder:
+two frames, 5,120 and 4,480 frames long, so seeks cross a frame boundary. Neither fixture contains third-party media.
 
 `audio/id3-prefixed-reference.flac` and `audio/id3-footer-prefixed-reference.flac`
 are `audio/generated-reference.flac` behind a synthetic ID3v2.4 tag — 210 bytes
