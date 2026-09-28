@@ -40,6 +40,16 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("FLAC", .{ .use_pkg_config = .yes });
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/opus_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("opusfile", .{ .use_pkg_config = .yes });
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/vorbis_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),

@@ -24,3 +24,9 @@ FFmpeg `testsrc` frame — as a front cover, in a FLAC `PICTURE` block, an ID3v2
 the 64-byte prefix read. `audio/covered-alternate-reference.flac` carries a
 *different* 138-byte cover, so a test asserting which of a Release's tracks
 supplied its artwork can tell them apart. No fixture contains third-party media.
+
+`audio/tagged-reference.opus` is `audio/generated-reference.wav` encoded with
+FFmpeg's libopus encoder at 64 kb/s, tagged with title, artist, album, track,
+date and genre. `audio/tagged-reference.ogg` is `audio/tagged-reference.flac`
+encoded with FFmpeg's libvorbis encoder at quality 3, carrying the FLAC file's
+tags. Both are 200 ms long.

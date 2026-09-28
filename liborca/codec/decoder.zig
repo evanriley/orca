@@ -64,6 +64,8 @@ pub const codec_id = struct {
     pub const mp1 = "mp1";
     pub const mp2 = "mp2";
     pub const mp3 = "mp3";
+    pub const opus = "opus";
+    pub const vorbis = "vorbis";
 
     /// Whether an identifier names an encoding that reproduces its input
     /// exactly. This is the lossy/lossless split callers ask `files.codec`
@@ -85,6 +87,8 @@ test "every codec identifier is classified as lossy or lossless exactly once" {
     try std.testing.expect(!codec_id.isLossless(codec_id.mp1));
     try std.testing.expect(!codec_id.isLossless(codec_id.mp2));
     try std.testing.expect(!codec_id.isLossless(codec_id.mp3));
+    try std.testing.expect(!codec_id.isLossless(codec_id.opus));
+    try std.testing.expect(!codec_id.isLossless(codec_id.vorbis));
     // An unwritten row is neither, and must not read as lossless by default.
     try std.testing.expect(!codec_id.isLossless(""));
 }

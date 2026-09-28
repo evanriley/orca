@@ -17,6 +17,10 @@
         [
           pkgs.sqlite
           pkgs.flac
+          pkgs.libogg
+          pkgs.libopus
+          pkgs.opusfile
+          pkgs.libvorbis
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.pipewire
