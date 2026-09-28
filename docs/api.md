@@ -55,6 +55,10 @@ defer page.deinit();
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
   (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`).
+- The queue can be edited in place: `playerQueueJump` plays an entry now,
+  `playerQueueInsertNext` queues Tracks after the current one, and
+  `playerQueueRemove` removes an entry. The entry playing, and one the engine
+  has already lined up after it, are refused with `error.QueueEntryInUse`.
 - `TrackSummary` carries `release_id` and `artist_id`, so a host can link a
   Track to its Release and Artist without a second query.
 - Cover art is read either on the caller's thread (`libraryTrackArtwork`,

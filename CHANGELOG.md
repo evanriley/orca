@@ -29,6 +29,10 @@
   skips one not yet started. `orca-cli covers` reads a page of covers this way.
 - **`ReleaseQuery.sort`** orders Releases by title, artist, year or recently
   added.
+- **The queue can be edited in place**: `Runtime.playerQueueJump`,
+  `playerQueueInsertNext` and `playerQueueRemove`. Play Next lands after the
+  entry the engine has already lined up, if it has, and neither that entry nor
+  the playing one can be removed.
 - **`TrackSummary` carries `release_id` and `artist_id`.**
 - `core/root.zig` now lists its files in a test block, so their tests run.
 
