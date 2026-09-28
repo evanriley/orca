@@ -14,6 +14,8 @@ const mpris = @import("mpris.zig");
 const window = @import("window.zig");
 const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
+const albums = @import("albums.zig");
+const menu = @import("menu.zig");
 const settings = @import("settings.zig");
 
 const App = app.App;
@@ -352,6 +354,7 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     const click = gtk.gtk_gesture_click_new();
     _ = gtk.signalConnect(click, "released", gtk.callback(coverClicked), self);
     gtk.gtk_widget_add_controller(cover, click);
+    menu.onSecondaryClick(cover, menu.playingMenu, self);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), cover);
 
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
@@ -610,6 +613,7 @@ pub fn tick(self: *App) void {
         if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, detail.ptr);
         refreshCover(self, status.track_id);
         window.markPlaying(self, status.track_id);
+        albums.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
     }
     if (track_changed or status.transport != self.shown_transport) {

@@ -261,11 +261,12 @@ pub fn build(self: *App) *gtk.Widget {
 
 /// What an open album page plays: its tracks in listening order, and whose
 /// they are, index-aligned.
-const AlbumPage = struct {
+pub const AlbumPage = struct {
     self: *App,
     navigation: *adw.NavigationView,
     ids: []i64,
     artists: []?i64,
+    rows: []?*gtk.Widget,
     release_id: i64,
     album_artist_id: ?i64,
 };
@@ -277,9 +278,47 @@ fn pageData(data: ?*anyopaque) *AlbumPage {
 fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const allocator = page.self.allocator;
+    unregisterPage(page);
     allocator.free(page.ids);
     allocator.free(page.artists);
+    allocator.free(page.rows);
     allocator.destroy(page);
+}
+
+fn registerPage(page: *AlbumPage) void {
+    const self = page.self;
+    if (self.open_album_page_count == self.open_album_pages.len) return;
+    self.open_album_pages[self.open_album_page_count] = page;
+    self.open_album_page_count += 1;
+}
+
+fn unregisterPage(page: *AlbumPage) void {
+    const self = page.self;
+    for (self.open_album_pages[0..self.open_album_page_count], 0..) |open, index| {
+        if (open != page) continue;
+        self.open_album_page_count -= 1;
+        self.open_album_pages[index] = self.open_album_pages[self.open_album_page_count];
+        return;
+    }
+}
+
+fn markRows(page: *AlbumPage, track_id: ?i64) void {
+    for (page.ids, page.rows) |id, maybe_row| {
+        const row = maybe_row orelse continue;
+        if (track_id == id)
+            gtk.gtk_widget_add_css_class(row, "now-playing")
+        else
+            gtk.gtk_widget_remove_css_class(row, "now-playing");
+    }
+}
+
+pub fn markPlaying(self: *App, track_id: ?i64) void {
+    for (self.open_album_pages[0..self.open_album_page_count]) |page| markRows(page, track_id);
+}
+
+fn heroMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    if (setAlbumContext(page.self, page.release_id)) menu.popup(page.self, menu.gestureWidget(gesture), x, y);
 }
 
 fn rowPosition(row: *gtk.Widget) ?usize {
@@ -327,6 +366,7 @@ fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(
 
 fn trackRow(summary: liborca.TrackSummary, album_artist: []const u8, position: usize) ?*gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
+    gtk.gtk_widget_add_css_class(row, "album-track-row");
     var name_buffer: [24]u8 = undefined;
     const name = strings.printZ(&name_buffer, "{d}", .{position}) catch return null;
     gtk.gtk_widget_set_name(row, name.ptr);
@@ -350,6 +390,7 @@ fn trackRow(summary: liborca.TrackSummary, album_artist: []const u8, position: u
     const title = gtk.gtk_label_new(title_text.ptr);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
+    gtk.gtk_widget_add_css_class(title, "album-track-title");
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
     if (summary.artist.len != 0 and !std.mem.eql(u8, summary.artist, album_artist)) {
         const artist_text = strings.printZ(&buffer, "{s}", .{summary.artist}) catch "";
@@ -410,6 +451,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
         .navigation = navigation,
         .ids = &.{},
         .artists = &.{},
+        .rows = &.{},
         .release_id = release_id,
         .album_artist_id = release.album_artist_id,
     };
@@ -422,9 +464,16 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
         self.allocator.destroy(page);
         return;
     };
-    for (page.ids, page.artists, tracks.items) |*id, *artist_id, item| {
+    page.rows = self.allocator.alloc(?*gtk.Widget, tracks.items.len) catch {
+        self.allocator.free(page.ids);
+        self.allocator.free(page.artists);
+        self.allocator.destroy(page);
+        return;
+    };
+    for (page.ids, page.artists, page.rows, tracks.items) |*id, *artist_id, *row, item| {
         id.* = item.id;
         artist_id.* = item.artist_id;
+        row.* = null;
     }
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 24);
@@ -434,6 +483,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     const cover = art.newCover(self, art.initialsPlaceholder(), hero_pixels);
     gtk.gtk_widget_add_css_class(cover, "album-cover");
     gtk.gtk_widget_add_css_class(cover, "hero-cover");
+    menu.onSecondaryClick(cover, heroMenu, page);
     art.setInitials(cover, release.title);
     art.show(self, cover, art.Key.release(release_id, .tile));
     gtk.gtk_box_append(gtk.cast(gtk.Box, hero), cover);
@@ -446,6 +496,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     const title = gtk.gtk_label_new(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr);
     gtk.gtk_widget_add_css_class(title, "album-title");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, title), gtk.true_);
+    menu.onSecondaryClick(title, heroMenu, page);
     const artist = gtk.gtk_button_new_with_label(strings.terminated(&buffer, release.album_artist).ptr);
     gtk.gtk_widget_add_css_class(artist, "album-artist");
     gtk.gtk_widget_add_css_class(artist, "flat");
@@ -501,7 +552,9 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
         const row = trackRow(summary, release.album_artist, position) orelse continue;
         menu.onSecondaryClick(row, trackMenu, page);
         gtk.gtk_list_box_append(gtk.cast(gtk.ListBox, list.?), row);
+        page.rows[position] = row;
     }
+    markRows(page, self.shown_track_id);
 
     const clamp = adw.adw_clamp_new();
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), 880);
@@ -510,6 +563,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), clamp);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(pageDestroyed), page);
+    registerPage(page);
 
     const view = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), adw.adw_header_bar_new());

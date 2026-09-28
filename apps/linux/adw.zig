@@ -114,7 +114,9 @@ pub extern fn adw_navigation_split_view_set_max_sidebar_width(view: *NavigationS
 pub extern fn adw_navigation_view_new() *gtk.Widget;
 pub extern fn adw_navigation_view_add(view: *NavigationView, page: *NavigationPage) void;
 pub extern fn adw_navigation_view_push(view: *NavigationView, page: *NavigationPage) void;
+pub extern fn adw_navigation_view_pop(view: *NavigationView) gtk.gboolean;
 pub extern fn adw_navigation_view_pop_to_tag(view: *NavigationView, tag: [*:0]const u8) gtk.gboolean;
+pub extern fn adw_navigation_view_get_visible_page_tag(view: *NavigationView) ?[*:0]const u8;
 
 pub extern fn adw_clamp_new() *gtk.Widget;
 pub extern fn adw_clamp_set_maximum_size(clamp: *Clamp, size: c_int) void;

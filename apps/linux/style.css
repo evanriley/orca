@@ -91,7 +91,15 @@ scale.seek:hover slider {
   background-color: var(--view-bg-color);
 }
 
-.track-list label.playing {
+.track-list row.playing {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 16%, transparent);
+}
+
+.track-list row.playing:selected {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 30%, transparent);
+}
+
+.track-list row.playing label {
   color: var(--accent-color);
   font-weight: 700;
 }
@@ -208,6 +216,15 @@ scale.seek:hover slider {
 
 .album-track {
   padding: 8px 12px;
+}
+
+.album-track-row.now-playing {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 16%, transparent);
+}
+
+.album-track-row.now-playing .album-track-title {
+  color: var(--accent-color);
+  font-weight: 700;
 }
 
 .queue-cover {

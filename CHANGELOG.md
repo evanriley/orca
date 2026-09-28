@@ -18,6 +18,13 @@
   thread.
 - **Artists**: every Artist, searchable, and a page per artist with their
   albums, Play and Shuffle.
+- **Back goes back**: the mouse back button and Alt+← return to the page shown
+  before, including from Now Playing.
+- **Right-click menus on artists, album covers and titles, and the playing
+  track's cover**, besides tracks, album tiles and queue entries. The track
+  list's menu no longer opens a row short.
+- **The playing track is marked on album pages**, and on its whole row
+  wherever tracks are listed.
 - **Edit Tags** from any right-click menu: one track or many, saved to the
   library, then optionally written to the files after a preview, with Undo.
 - **Preferences** (Ctrl+,): music folders, loudness measurement, duplicate

@@ -11,6 +11,7 @@ const art = @import("art.zig");
 const albums = @import("albums.zig");
 const browse_model = @import("browse_model.zig");
 const transport = @import("transport.zig");
+const menu = @import("menu.zig");
 
 const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
@@ -25,7 +26,7 @@ fn state(data: ?*anyopaque) *App {
 
 // --------------------------------------------------------------------- list
 
-fn setupRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
     gtk.gtk_widget_add_css_class(row, "artist-row");
     const avatar = adw.adw_avatar_new(avatar_pixels, null, gtk.true_);
@@ -45,6 +46,36 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), avatar);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), labels);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
+    gtk.g_object_set_data(row, "orca-list-item", item);
+    menu.onSecondaryClick(row, rowMenu, state(data));
+}
+
+/// Everything a menu needs to act on an Artist: their playable tracks, album
+/// by album.
+pub fn setArtistContext(self: *App, artist_id: i64) bool {
+    const library = self.library orelse return false;
+    self.context.reset(.artist);
+    self.context.artist_id = artist_id;
+    var tracks = self.runtime.libraryTrackQuery(library, "", .{
+        .artist_id = artist_id,
+        .sort = .album,
+        .limit = app.page_size,
+    }) catch return false;
+    defer tracks.deinit();
+    for (tracks.items) |item| {
+        if (item.has_playable_file) self.context.tracks.append(self.allocator, item.id) catch return false;
+    }
+    return true;
+}
+
+fn rowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const row = menu.gestureWidget(gesture);
+    const item = gtk.g_object_get_data(row, "orca-list-item") orelse return;
+    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
+    const artist: *BrowseObject = @ptrCast(@alignCast(object));
+    const id = artist.id() orelse return;
+    if (setArtistContext(self, id)) menu.popup(self, row, x, y);
 }
 
 fn bindRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
@@ -197,6 +228,7 @@ pub fn build(self: *App) *gtk.Widget {
 const ArtistPage = struct {
     self: *App,
     navigation: *adw.NavigationView,
+    artist_id: i64,
     tracks: []i64,
     releases: []i64,
 };
@@ -232,7 +264,22 @@ fn albumActivated(_: ?*anyopaque, child: ?*anyopaque, data: ?*anyopaque) callcon
     albums.openAlbum(page.self, page.navigation, page.releases[@intCast(index)]);
 }
 
-fn albumTile(self: *App, release: liborca.ReleaseSummary) *gtk.Widget {
+fn heroMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    if (setArtistContext(page.self, page.artist_id)) menu.popup(page.self, menu.gestureWidget(gesture), x, y);
+}
+
+fn albumMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    const tile = menu.gestureWidget(gesture);
+    const child = gtk.gtk_widget_get_parent(tile) orelse return;
+    const index = gtk.gtk_flow_box_child_get_index(gtk.cast(gtk.FlowBoxChild, child));
+    if (index < 0 or @as(usize, @intCast(index)) >= page.releases.len) return;
+    if (albums.setAlbumContext(page.self, page.releases[@intCast(index)])) menu.popup(page.self, tile, x, y);
+}
+
+fn albumTile(page: *ArtistPage, release: liborca.ReleaseSummary) *gtk.Widget {
+    const self = page.self;
     const tile = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
     gtk.gtk_widget_add_css_class(tile, "album-tile");
     const cover = art.newCover(self, art.initialsPlaceholder(), tile_pixels);
@@ -254,6 +301,7 @@ fn albumTile(self: *App, release: liborca.ReleaseSummary) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, tile), cover);
     gtk.gtk_box_append(gtk.cast(gtk.Box, tile), title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, tile), detail);
+    menu.onSecondaryClick(tile, albumMenu, page);
     return tile;
 }
 
@@ -275,7 +323,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     defer tracks.deinit();
 
     const page = self.allocator.create(ArtistPage) catch return;
-    page.* = .{ .self = self, .navigation = navigation, .tracks = &.{}, .releases = &.{} };
+    page.* = .{ .self = self, .navigation = navigation, .artist_id = artist_id, .tracks = &.{}, .releases = &.{} };
     page.tracks = self.allocator.alloc(i64, tracks.items.len) catch {
         self.allocator.destroy(page);
         return;
@@ -302,6 +350,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     const name = strings.terminated(&name_buffer, if (artist.name.len != 0) artist.name else "Unknown Artist");
     const avatar = art.newCover(self, adw.adw_avatar_new(hero_pixels, name.ptr, gtk.true_), hero_pixels);
     gtk.gtk_widget_add_css_class(avatar, "artist-hero");
+    menu.onSecondaryClick(avatar, heroMenu, page);
     if (releases.items.len != 0) art.show(self, avatar, art.Key.release(releases.items[0].id, .tile));
     gtk.gtk_box_append(gtk.cast(gtk.Box, hero), avatar);
 
@@ -352,7 +401,7 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
         gtk.gtk_flow_box_set_activate_on_single_click(box, gtk.true_);
         gtk.gtk_widget_add_css_class(flow, "artist-albums");
         _ = gtk.signalConnect(flow, "child-activated", gtk.callback(albumActivated), page);
-        for (releases.items) |release| gtk.gtk_flow_box_append(box, albumTile(self, release));
+        for (releases.items) |release| gtk.gtk_flow_box_append(box, albumTile(page, release));
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), flow);
     }
 
