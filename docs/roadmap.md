@@ -66,14 +66,12 @@ entry point and a client before it counts as working.
 
 In priority order.
 
-1. **Formats: MP4 (ALAC and AAC).** Sourcing order: a correct Zig package,
-   then the reference C library behind a narrow shim, then an Orca
-   implementation only when neither exists; no Zig package exists for any of
-   these. MP4 needs a demuxer and an iTunes-atom tag reader as well as the
-   decoders. Apple's ALAC reference is Apache-licensed. AAC needs a licensing
-   decision: libfdk-aac carries its own FDK licence and libfaad2 is GPL, and
-   the repository has no licence of its own yet to weigh them against.
-   Ogg artwork (`METADATA_BLOCK_PICTURE`) is also still unread.
+1. **Formats: MP4 (ALAC and AAC).** No Zig implementation exists for any of
+   these, so they come from reference C libraries: Apple's ALAC decoder and
+   Ittiam's libxaac for AAC-LC, HE-AAC v1/v2 and xHE-AAC, both Apache-2.0 and
+   both built from source by `build.zig`. MP4 also needs a demuxer and an
+   iTunes-atom tag reader. Ogg artwork (`METADATA_BLOCK_PICTURE`) is also
+   still unread.
 2. **macOS playback.** `liborca` has no CoreAudio backend, so it cannot play
    on macOS, and the SwiftUI client has not been built since the C ABI changed.
    A CoreAudio output behind the same backend contract, plus a SwiftUI client
