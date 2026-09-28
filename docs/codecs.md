@@ -10,8 +10,9 @@ opens the codec over an offset view of the suffix. No decoder skips tags, and
 the offset view is owned by the returned Decoder and released strictly after
 the codec it fed. See `docs/storage.md` for what detection guarantees.
 
-The initial WAV reader supports integer PCM at 8/16/24/32 bits and IEEE float
-at 32/64 bits. It walks RIFF chunks rather than assuming a fixed 44-byte header,
+The WAV reader supports integer PCM at 8/16/24/32 bits and IEEE float at
+32/64 bits, in the classic `fmt ` chunk or in `WAVE_FORMAT_EXTENSIBLE`, whose
+SubFormat GUID carries the real format tag. It walks RIFF chunks rather than assuming a fixed 44-byte header,
 rejects truncated or unsupported input, reports exact frame counts, and performs
 bounded positional frame reads. It does not allocate while reading frames.
 
@@ -254,12 +255,3 @@ so an existing library re-selects every file rather than trusting figures taken
 through the old decoder. Bringing a library up to date is
 `orca-cli analyze-library DATABASE`, followed by `orca-cli duplicates DATABASE`
 if duplicate findings matter.
-
-## Known gap: WAVE_FORMAT_EXTENSIBLE is refused
-
-`wav.zig` rejects a `fmt ` chunk of 40 bytes with `UnsupportedWavEncoding`.
-That is `WAVE_FORMAT_EXTENSIBLE`, which ffmpeg emits by default for stereo
-`pcm_s16le`, so a WAV produced by the most obvious command line will not open.
-The real sample format is the SubFormat GUID's first two bytes, which map onto
-the same tags the 16-byte header uses. No file in the reference library is
-affected, since it contains no WAV at all.

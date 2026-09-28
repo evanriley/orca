@@ -42,3 +42,6 @@ in a `covr` atom. `audio/chirp-reference-aac.m4a` is 200 ms of a stereo chirp,
 `0.4 sin(2π(200t + 2000t²))` left and `0.4 sin(2π(300t + 1500t²))` right at
 48 kHz, encoded at 192 kb/s; tests regenerate the source from the formula to
 check alignment.
+
+`audio/extensible-reference.wav` is `audio/generated-reference.flac` written by
+FFmpeg as 24-bit PCM, which FFmpeg stores as `WAVE_FORMAT_EXTENSIBLE`.
