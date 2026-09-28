@@ -51,3 +51,9 @@ as 16-bit big-endian AIFF with its tags in an `ID3 ` chunk.
 `audio/sowt-reference.aifc` and `audio/generated-reference-24.aiff` are
 `audio/generated-reference.flac` as little-endian (`sowt`) AIFC and as 24-bit
 AIFF.
+
+`audio/tagged-reference.wav` is `audio/generated-reference.flac` as WAV with
+FFmpeg's `LIST`/`INFO` tags. `audio/id3-tagged-reference.wav` is the same file
+with the `ID3 ` chunk of `audio/tagged-reference.aiff` appended as an `id3 `
+chunk, so it carries two different tags. `audio/covered-reference.aiff` carries
+the 217-byte PNG cover in its `ID3 ` chunk.

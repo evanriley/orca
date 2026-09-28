@@ -8,6 +8,7 @@ pub const mp4_tags = @import("mp4_tags.zig");
 pub const mutation = @import("mutation.zig");
 pub const ogg_comment = @import("ogg_comment.zig");
 pub const recovery = @import("recovery.zig");
+pub const riff_tags = @import("riff_tags.zig");
 pub const vorbis_comment = @import("vorbis_comment.zig");
 
 pub const EffectiveMetadata = model.EffectiveMetadata;
@@ -34,5 +35,6 @@ test {
     _ = @import("mutation.zig");
     _ = @import("ogg_comment.zig");
     _ = @import("recovery.zig");
+    _ = @import("riff_tags.zig");
     _ = @import("vorbis_comment.zig");
 }
