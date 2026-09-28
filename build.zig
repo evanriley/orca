@@ -50,6 +50,12 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
+    addAlac(b, liborca_module);
+    @import("build/libxaac.zig").addTo(b, liborca_module);
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/codec/aac_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
     if (target.result.os.tag == .linux) {
         liborca_module.addCSourceFile(.{
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),
@@ -67,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .root_module = liborca_module,
     });
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
+    installLicenses(b);
     b.installArtifact(liborca);
 
     const liborca_shared = b.addLibrary(.{
@@ -236,4 +243,48 @@ fn pkgConfigIncludePaths(b: *std.Build, package: []const u8) []const std.Build.L
         include_paths.append(b.allocator, .{ .cwd_relative = flag[2..] }) catch @panic("OOM");
     }
     return include_paths.items;
+}
+
+/// Apple's reference ALAC decoder, built from source. Only the decoding half
+/// is compiled, and only `alac_shim.cpp` sees its C++ interface. The
+/// reference left-shifts negative values, which two's-complement targets
+/// define, so the undefined-behaviour sanitizer is off for its files only.
+fn addAlac(b: *std.Build, module: *std.Build.Module) void {
+    const alac = b.dependency("alac", .{});
+    const codec = alac.path("codec");
+    module.addIncludePath(codec);
+    module.link_libcpp = true;
+    module.addCSourceFiles(.{
+        .root = codec,
+        .files = &.{
+            "ag_dec.c",
+            "ALACBitUtilities.c",
+            "dp_dec.c",
+            "EndianPortable.c",
+            "matrix_dec.c",
+        },
+        .flags = &.{ "-std=c99", "-DNDEBUG", "-w", "-fno-sanitize=undefined" },
+    });
+    module.addCSourceFiles(.{
+        .root = codec,
+        .files = &.{"ALACDecoder.cpp"},
+        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti", "-w", "-fno-sanitize=undefined" },
+    });
+    module.addCSourceFile(.{
+        .file = b.path("liborca/codec/alac_shim.cpp"),
+        .flags = &.{ "-std=c++11", "-DNDEBUG", "-fno-exceptions", "-fno-rtti" },
+    });
+}
+
+/// Apache-2.0 requires its licence and any NOTICE to travel with binaries that
+/// contain the code, and ALAC and libxaac are compiled into liborca.
+fn installLicenses(b: *std.Build) void {
+    const directory = "share/doc/orca/licenses";
+    b.installFile("LICENSE", directory ++ "/orca/LICENSE");
+    b.installFile("liborca/codec/vendor/minimp3/LICENSE", directory ++ "/minimp3/LICENSE");
+    const alac = b.dependency("alac", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(alac.path("LICENSE"), directory ++ "/alac/LICENSE").step);
+    const libxaac = b.dependency("libxaac", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("LICENSE"), directory ++ "/libxaac/LICENSE").step);
+    b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("NOTICE"), directory ++ "/libxaac/NOTICE").step);
 }

@@ -7,9 +7,18 @@
             .url = "git+https://codeberg.org/audiophile/qoa#v1.0.0",
             .hash = "qoa-0.0.0-EMWmDEE9AAD24gzKmkmgueh_4ov-JByKTwgtNXnrYZYL",
         },
+        .alac = .{
+            .url = "git+https://github.com/macosforge/alac#c38887c5c5e64a4b31108733bd79ca9b2496d987",
+            .hash = "N-V-__8AABtVBABBmL_sIsyNHC_aXadx9hMhk7rn5XjXq5nc",
+        },
+        .libxaac = .{
+            .url = "git+https://github.com/ittiam-systems/libxaac?ref=v0.1.13#55af74f9ce7cadb99fbd7870c6487c8a12d75689",
+            .hash = "N-V-__8AADdaEgEjrBn3etD0SrajY3dLtLZFN45mpMYLPNsW",
+        },
     },
     .paths = .{
         "build.zig",
+        "build",
         "build.zig.zon",
         "liborca",
         "apps",

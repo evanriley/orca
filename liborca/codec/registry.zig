@@ -6,7 +6,12 @@ pub const Descriptor = struct {
     name: []const u8,
     format: storage.AudioFormat,
     open: decoder.OpenFn,
+    /// Answers `probe` from the container alone, for codecs whose decoder is
+    /// costly to set up. Must report what `open` would.
+    probe: ?ProbeFn = null,
 };
+
+pub const ProbeFn = *const fn (std.mem.Allocator, storage.ReadableSource) anyerror!Properties;
 
 /// What a container declares about one encoding, without decoding any audio.
 ///
@@ -106,6 +111,7 @@ pub const CodecRegistry = struct {
         format: storage.AudioFormat,
         source: storage.ReadableSource,
     ) !Properties {
+        if (try self.probeContainer(allocator, format, source)) |declared| return declared;
         var opened = try self.open(allocator, format, source);
         defer opened.deinit();
         return properties(opened);
@@ -116,9 +122,33 @@ pub const CodecRegistry = struct {
         allocator: std.mem.Allocator,
         source: storage.ReadableSource,
     ) !Properties {
+        if (try storage.format.detect(source)) |detected| {
+            if (try self.probeContainer(allocator, detected.format, source)) |declared|
+                return declared;
+        }
         var opened = try self.openDetected(allocator, source);
         defer opened.deinit();
         return properties(opened);
+    }
+
+    /// The descriptor's own container probe, when it has one and the stream
+    /// starts at byte zero.
+    fn probeContainer(
+        self: *const CodecRegistry,
+        allocator: std.mem.Allocator,
+        format: storage.AudioFormat,
+        source: storage.ReadableSource,
+    ) !?Properties {
+        for (self.entries[0..self.count]) |entry| {
+            if (entry.format != format) continue;
+            const container_probe = entry.probe orelse return null;
+            const detected = storage.format.detect(source) catch return null;
+            if (detected) |resolved| {
+                if (resolved.payload_offset != 0) return null;
+            }
+            return try container_probe(allocator, source);
+        }
+        return null;
     }
 
     pub fn builtins() CodecRegistry {
@@ -137,6 +167,12 @@ pub const CodecRegistry = struct {
             .name = "MPEG Audio",
             .format = .mp3,
             .open = @import("mp3.zig").openDecoder,
+        }) catch unreachable;
+        registry.register(.{
+            .name = "MP4 audio",
+            .format = .mp4,
+            .open = @import("mp4.zig").openDecoder,
+            .probe = @import("mp4.zig").probe,
         }) catch unreachable;
         registry.register(.{
             .name = "Ogg Opus",
@@ -218,7 +254,7 @@ const PrefixedDecoder = struct {
 /// Duration comes from the declared frame count and the canonical sample rate,
 /// so it is exact wherever the container is honest about its length and absent
 /// rather than guessed wherever it is not.
-fn properties(opened: decoder.Decoder) Properties {
+pub fn properties(opened: decoder.Decoder) Properties {
     const rate = opened.format.sample_rate;
     return .{
         .codec = opened.codec,
@@ -234,7 +270,7 @@ fn properties(opened: decoder.Decoder) Properties {
 
 test "builtin registry rejects duplicate codec ownership" {
     var codecs = CodecRegistry.builtins();
-    try std.testing.expectEqual(@as(usize, 6), codecs.count);
+    try std.testing.expectEqual(@as(usize, 7), codecs.count);
     try std.testing.expectError(error.CodecAlreadyRegistered, codecs.register(codecs.entries[0]));
 }
 
