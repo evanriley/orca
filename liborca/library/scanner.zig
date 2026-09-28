@@ -131,102 +131,145 @@ pub const Scanner = struct {
                 "{s}/{s}",
                 .{ root_path, entry.path },
             );
-            var owned_path = true;
-            defer if (owned_path) self.allocator.free(path);
-            var local = storage.LocalFileSource.open(self.io, path) catch {
-                result.errors += 1;
-                continue;
-            };
-            defer local.close();
-            const storage_identity = local.readable().identity();
-            const identity = database.StorageIdentityKey{
-                .volume_id = self.volume_id,
-                .native_inode = std.math.cast(i64, storage_identity.inode) orelse {
-                    result.errors += 1;
-                    continue;
-                },
-                .size_bytes = std.math.cast(i64, storage_identity.size) orelse {
-                    result.errors += 1;
-                    continue;
-                },
-                .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse {
-                    result.errors += 1;
-                    continue;
-                },
-            };
-            if (try self.locations.unchangedLocationId(self.volume_id, path, identity)) |location_id| {
-                // Skipping the work is not the same as not having seen it. The
-                // sweep marks anything below this run's generation `missing`,
-                // so an unstamped skip would report every unchanged file as
-                // absent on the second scan of an untouched library.
-                try self.seen.append(self.allocator, location_id);
-                if (self.seen.items.len >= self.batch_size) try self.flushSeen();
-                result.unchanged += 1;
-                continue;
-            }
-            const detection = (try storage.format.detect(local.readable())) orelse {
-                result.unsupported += 1;
-                continue;
-            };
-            const audio_format = detection.format;
-            // A tag reader is defined over the container it is handed, so an
-            // ID3v2 tag in front of a FLAC stream has to be stepped over before
-            // asking for Vorbis comments. Without this the reader looks at byte
-            // zero, finds a tag rather than `fLaC`, and the file is filed under
-            // a filename with no artist and no album -- present in the library
-            // and invisible to every browse of it. 104 files in a real 20,000
-            // track library are shaped this way, and they carry complete
-            // Vorbis comments behind the tag.
-            //
-            // `codecs.probe` needs no such help: the registry resolves the
-            // prefix itself for every decoder it opens.
-            var tag_view: storage.OffsetSource = .{
-                .inner = local.readable(),
-                .offset = detection.payload_offset,
-            };
-            const tag_source = if (detection.payload_offset == 0)
-                local.readable()
-            else
-                tag_view.readable();
-            // Unreadable tags leave the file observed but untagged: a corrupt
-            // tag is not a reason to drop a playable file from the library.
-            const tags = tag_reader.read(
-                self.allocator,
-                audio_format,
-                tag_source,
-            ) catch null;
-            errdefer if (tags) |owned| owned.deinit();
-            // Only changed bytes are probed: the unchanged fast path above is
-            // what keeps a rescan of a large library nearly free, and opening a
-            // decoder there would throw that away. A file that will not open is
-            // recorded with no properties rather than failing the scan —
-            // truncated and malformed audio is normal in a real library.
-            const properties = codecs.probe(
-                self.allocator,
-                audio_format,
-                local.readable(),
-            ) catch codec.registry.Properties{};
-            try pending.append(self.allocator, .{
-                .path = path,
-                .audio_format = audio_format,
-                .identity = identity,
-                .quick_hash = try storage.quick_hash.fromSource(local.readable()),
-                .properties = properties,
-                .tags = tags,
-            });
-            owned_path = false;
-            result.changed += 1;
-            if (pending.items.len >= self.batch_size) {
-                try self.flush(&pending);
-                result.batches_committed += 1;
-                try self.project(&result);
-            }
+            try self.examine(path, codecs, &pending, &result, .skip_unchanged);
         }
         if (pending.items.len > 0) {
             try self.flush(&pending);
             result.batches_committed += 1;
         }
         try self.flushSeen();
+        try self.project(&result);
+        return result;
+    }
+
+    const Unchanged = enum { skip_unchanged, observe_always };
+
+    /// Observes one file: identity, container, tags and declared properties,
+    /// queued for the next committed batch. Takes ownership of `path`.
+    fn examine(
+        self: *Scanner,
+        path: []u8,
+        codecs: *const codec.CodecRegistry,
+        pending: *std.ArrayList(PendingEntry),
+        result: *Result,
+        unchanged_policy: Unchanged,
+    ) !void {
+        var owned_path = true;
+        defer if (owned_path) self.allocator.free(path);
+        var local = storage.LocalFileSource.open(self.io, path) catch {
+            result.errors += 1;
+            return;
+        };
+        defer local.close();
+        const storage_identity = local.readable().identity();
+        const identity = database.StorageIdentityKey{
+            .volume_id = self.volume_id,
+            .native_inode = std.math.cast(i64, storage_identity.inode) orelse {
+                result.errors += 1;
+                return;
+            },
+            .size_bytes = std.math.cast(i64, storage_identity.size) orelse {
+                result.errors += 1;
+                return;
+            },
+            .modified_ns = std.math.cast(i64, storage_identity.modified_ns) orelse {
+                result.errors += 1;
+                return;
+            },
+        };
+        const unchanged = if (unchanged_policy == .skip_unchanged)
+            try self.locations.unchangedLocationId(self.volume_id, path, identity)
+        else
+            null;
+        if (unchanged) |location_id| {
+            // Skipping the work is not the same as not having seen it. The
+            // sweep marks anything below this run's generation `missing`,
+            // so an unstamped skip would report every unchanged file as
+            // absent on the second scan of an untouched library.
+            try self.seen.append(self.allocator, location_id);
+            if (self.seen.items.len >= self.batch_size) try self.flushSeen();
+            result.unchanged += 1;
+            return;
+        }
+        const detection = (try storage.format.detect(local.readable())) orelse {
+            result.unsupported += 1;
+            return;
+        };
+        const audio_format = detection.format;
+        // A tag reader is defined over the container it is handed, so an
+        // ID3v2 tag in front of a FLAC stream has to be stepped over before
+        // asking for Vorbis comments. Without this the reader looks at byte
+        // zero, finds a tag rather than `fLaC`, and the file is filed under
+        // a filename with no artist and no album -- present in the library
+        // and invisible to every browse of it. 104 files in a real 20,000
+        // track library are shaped this way, and they carry complete
+        // Vorbis comments behind the tag.
+        //
+        // `codecs.probe` needs no such help: the registry resolves the
+        // prefix itself for every decoder it opens.
+        var tag_view: storage.OffsetSource = .{
+            .inner = local.readable(),
+            .offset = detection.payload_offset,
+        };
+        const tag_source = if (detection.payload_offset == 0)
+            local.readable()
+        else
+            tag_view.readable();
+        // Unreadable tags leave the file observed but untagged: a corrupt
+        // tag is not a reason to drop a playable file from the library.
+        const tags = tag_reader.read(
+            self.allocator,
+            audio_format,
+            tag_source,
+        ) catch null;
+        errdefer if (tags) |owned| owned.deinit();
+        // Only changed bytes are probed: the unchanged fast path above is
+        // what keeps a rescan of a large library nearly free, and opening a
+        // decoder there would throw that away. A file that will not open is
+        // recorded with no properties rather than failing the scan —
+        // truncated and malformed audio is normal in a real library.
+        const properties = codecs.probe(
+            self.allocator,
+            audio_format,
+            local.readable(),
+        ) catch codec.registry.Properties{};
+        try pending.append(self.allocator, .{
+            .path = path,
+            .audio_format = audio_format,
+            .identity = identity,
+            .quick_hash = try storage.quick_hash.fromSource(local.readable()),
+            .properties = properties,
+            .tags = tags,
+        });
+        owned_path = false;
+        result.changed += 1;
+        if (pending.items.len >= self.batch_size) {
+            try self.flush(pending);
+            result.batches_committed += 1;
+            try self.project(result);
+        }
+    }
+
+    /// Re-observes specific files of this scanner's root, as a scan would,
+    /// and projects them. For files Orca itself just rewrote: their bytes are
+    /// known to have changed, so the unchanged fast path is not consulted.
+    pub fn observeFiles(self: *Scanner, paths: []const []const u8) !Result {
+        var builtin_codecs = codec.CodecRegistry.builtins();
+        const codecs = self.codecs orelse &builtin_codecs;
+        var pending: std.ArrayList(PendingEntry) = .empty;
+        defer {
+            for (pending.items) |entry| entry.deinit(self.allocator);
+            pending.deinit(self.allocator);
+        }
+        var result: Result = .{};
+        for (paths) |path| {
+            result.files_seen += 1;
+            try self.examine(try self.allocator.dupe(u8, path), codecs, &pending, &result, .observe_always);
+        }
+        if (pending.items.len > 0) {
+            try self.flush(&pending);
+            result.batches_committed += 1;
+        }
         try self.project(&result);
         return result;
     }
