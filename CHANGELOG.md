@@ -39,6 +39,9 @@
   entry the engine has already lined up, if it has, and neither that entry nor
   the playing one can be removed.
 - **`TrackSummary` carries `release_id` and `artist_id`.**
+- **`libraryEditTracks` returns `EditedTracks`**, the Tracks the edited files
+  back afterwards, since moving a track to another album gives it a new id.
+  `orca-cli edit` prints them. (Breaking: it returned nothing.)
 - `core/root.zig` now lists its files in a test block, so their tests run.
 
 ### Tag write-back

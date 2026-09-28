@@ -67,6 +67,7 @@ pub const ArtworkResult = runtime.ArtworkResult;
 pub const FileAnalysis = runtime.FileAnalysis;
 pub const TrackEdit = runtime.TrackEdit;
 pub const TrackEditPage = runtime.TrackEditPage;
+pub const EditedTracks = runtime.EditedTracks;
 pub const MetadataField = internal.metadata.Field;
 pub const Provenance = internal.metadata.Provenance;
 

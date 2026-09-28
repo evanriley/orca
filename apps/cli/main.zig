@@ -698,8 +698,11 @@ fn editTracks(
     defer runtime.deinit();
     const library = try runtime.openLibrary(io, database_path);
     if (edits.items.len > 0) {
-        try runtime.libraryEditTracks(library, ids.items, edits.items);
-        try stdout.print("edited {d} tracks\n", .{ids.items.len});
+        const edited = try runtime.libraryEditTracks(library, ids.items, edits.items);
+        defer edited.deinit();
+        try stdout.print("edited {d} tracks, now", .{ids.items.len});
+        for (edited.ids, 0..) |id, index| try stdout.print("{s}{d}", .{ if (index == 0) " " else ",", id });
+        try stdout.writeAll("\n");
         return;
     }
     for (ids.items) |track_id| {
