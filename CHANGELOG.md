@@ -2,6 +2,21 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Tag write-back
+
+- **Library edits can be written into the files.** `Runtime.planTagWrite`
+  previews the changes as a sealed plan, `Runtime.startTagWrite` writes it as a
+  Job once approved by its digest, and `Runtime.undoTagWrite` restores the
+  files' previous bytes. `orca-cli write-tags` and `orca-cli undo-tags` reach
+  them. FLAC, MP3 and ADTS are written; other formats are reported as not
+  writable, and files changed since their scan are left out.
+- **MP3 and ADTS tags are written as ID3v2**, in the file's existing version,
+  with every other frame, the cover art and the audio bytes kept. The ID3v1
+  writer is gone; an existing ID3v1 trailer is updated to match.
+- **FLAC comment writes match the reader.** A write used to compare field names
+  and values literally, so an `ALBUMARTIST` field or a `3/12` track number was
+  duplicated or refused instead of replaced.
+
 ### Library edits, and a projection that cleans up after itself
 
 - **Tracks can be edited in the library.** `Runtime.libraryEditTracks` and

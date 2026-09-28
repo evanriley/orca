@@ -631,6 +631,11 @@ fn expectedIdentity(operation: database.MutationOperation) !mutation.FileIdentit
     };
 }
 
+/// Whether Orca can write tags into the file at `path`.
+pub fn canWriteTags(io: std.Io, path: []const u8) !bool {
+    return try tagFormat(io, path) != null;
+}
+
 const TagFormat = enum { mpeg, flac };
 
 /// Which writer a file takes, decided by its bytes as every reader decides,

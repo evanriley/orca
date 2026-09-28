@@ -202,6 +202,15 @@ pub fn main(init: std.process.Init) !void {
         try listTracks(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len >= 4 and std.mem.eql(u8, args[1], "edit")) {
         try editTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
+    } else if ((args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "write-tags")) {
+        try writeTags(allocator, init.io, stdout, args[2], args[3], args[4..]);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "undo-tags")) {
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
+        const group = try std.fmt.parseInt(u64, args[3], 10);
+        try runtime.undoTagWrite(library, init.io, group);
+        try stdout.print("undid group {d}\n", .{group});
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
         try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
@@ -267,7 +276,9 @@ pub fn main(init: std.process.Init) !void {
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
             \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
-            \\                 | edit DATABASE IDS [EDITS]]
+            \\                 | edit DATABASE IDS [EDITS]
+            \\                 | write-tags DATABASE IDS [--approve=DIGEST]
+            \\                 | undo-tags DATABASE GROUP]
             \\
             \\edit sets Orca's own values for a comma-separated list of Track ids;
             \\the files are not written. With no edits it lists the values held.
@@ -276,6 +287,12 @@ pub fn main(init: std.process.Init) !void {
             \\  --clear=FIELD      drop Orca's value so the file's tag applies again
             \\                     (title|artist|album|album_artist|track_number|
             \\                      disc_number|date|compilation)
+            \\
+            \\write-tags writes Orca's values for the Tracks into their files. Without
+            \\--approve it prints the plan and its digest and writes nothing; run it
+            \\again with --approve=DIGEST to write exactly that plan. A digest from a
+            \\plan that no longer matches the library is refused. It prints the group
+            \\to pass to undo-tags, which restores the files' previous bytes.
             \\
             \\Browsing. artists lists Artists in sort order; releases lists Releases,
             \\optionally one Artist's; tracks lists Tracks in a named order, optionally
@@ -618,12 +635,6 @@ fn openBrowseLibrary(
     return runtime.openLibrary(io, database_path);
 }
 
-/// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]`.
-///
-/// The reachability check for embedded cover art: it goes through the same
-/// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
-/// be produced here cannot be produced anywhere. `--out` writes the exact bytes
-/// so they can be compared against what an independent tool extracts.
 fn parseTrackIds(allocator: std.mem.Allocator, id_list: []const u8) !std.ArrayList(i64) {
     var ids: std.ArrayList(i64) = .empty;
     errdefer ids.deinit(allocator);
@@ -698,6 +709,61 @@ fn editTracks(
     }
 }
 
+/// Tag write-back through the runtime's plan, approve and undo path.
+fn writeTags(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_list: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var ids = try parseTrackIds(allocator, id_list);
+    defer ids.deinit(allocator);
+    var approved: ?liborca.TagWriteDigest = null;
+    for (option_arguments) |argument| {
+        if (!std.mem.startsWith(u8, argument, "--approve=")) return error.UnknownOption;
+        var digest: liborca.TagWriteDigest = undefined;
+        const hex = argument["--approve=".len..];
+        if (hex.len != digest.len * 2) return error.InvalidDigest;
+        _ = std.fmt.hexToBytes(&digest, hex) catch return error.InvalidDigest;
+        approved = digest;
+    }
+
+    const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(io, database_path);
+    const plan = try runtime.planTagWrite(library, io, ids.items);
+    defer plan.deinit();
+    for (plan.skipped) |skip| try stdout.print("skip\t{d}\t{t}\t{s}\n", .{ skip.file_id, skip.reason, skip.path });
+    for (plan.files) |file| {
+        try stdout.print("file\t{d}\t{s}\n", .{ file.file_id, file.path });
+        for (file.changes) |change| try stdout.print(
+            "\t{t}\t{s} -> {s}\n",
+            .{ change.field, change.before orelse "(none)", change.after orelse "(none)" },
+        );
+    }
+    if (plan.files.len == 0) {
+        try stdout.print("nothing to write\n", .{});
+        return;
+    }
+    const digest = approved orelse {
+        try stdout.print("digest {x}\n", .{&plan.digest});
+        return;
+    };
+    const job_handle = try runtime.startTagWrite(library, plan.plan_id, digest);
+    try awaitJob(&runtime, stdout, job_handle, null);
+    const stats = try runtime.jobScanStats(job_handle);
+    try stdout.print("wrote {d} files as group {d}\n", .{ stats.changed, plan.plan_id });
+}
+
+/// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]`.
+///
+/// The reachability check for embedded cover art: it goes through the same
+/// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
+/// be produced here cannot be produced anywhere. `--out` writes the exact bytes
+/// so they can be compared against what an independent tool extracts.
 fn showArtwork(
     allocator: std.mem.Allocator,
     io: std.Io,
