@@ -48,6 +48,9 @@ const PlayerObject = struct {
     /// Player-scope volume. Lives beside the Player rather than inside the
     /// engine so the level survives an engine that is stopped and respawned.
     gain: *audio.processing.Gain,
+    /// Equalizer and crossfeed settings and state, wrapping `gain`. Lives
+    /// beside the Player for the same reason: the settings outlive the engine.
+    dsp: *audio.dsp.PlayerDsp,
     /// Track references, cursor, repeat and shuffle. Lives beside the Player
     /// and outlives any individual `SourceQueue`: `stop` releases decoders but
     /// never the list the user assembled.
@@ -1112,7 +1115,15 @@ pub const OrcaRuntime = struct {
         const gain = try self.allocator.create(audio.processing.Gain);
         errdefer self.allocator.destroy(gain);
         gain.* = .{};
-        return self.players.insert(.{ .player = player, .queue = queue, .gain = gain });
+        const dsp = try self.allocator.create(audio.dsp.PlayerDsp);
+        errdefer self.allocator.destroy(dsp);
+        dsp.* = .init(gain);
+        return self.players.insert(.{
+            .player = player,
+            .queue = queue,
+            .gain = gain,
+            .dsp = dsp,
+        });
     }
 
     /// Shuffle must be reproducible when a test asks for it and different
@@ -1416,6 +1427,7 @@ pub const OrcaRuntime = struct {
 
     fn freePlayerObject(self: *OrcaRuntime, object_value: PlayerObject) void {
         if (object_value.opener) |opener| opener.destroy();
+        self.allocator.destroy(object_value.dsp);
         self.allocator.destroy(object_value.gain);
         object_value.queue.deinit();
         self.allocator.destroy(object_value.queue);
@@ -1850,7 +1862,7 @@ pub const OrcaRuntime = struct {
             .factory = factory,
             .queue = object_state.queue,
             .opener = if (object_state.opener) |opener| opener.opener() else null,
-            .player_processor = object_state.gain.processor(),
+            .dsp = object_state.dsp,
         });
         errdefer engine.destroy();
         const work_handle = try self.work_registry.begin(playerOwnerTag(player));
@@ -2644,6 +2656,72 @@ pub const OrcaRuntime = struct {
             object_value.player.effectiveReplayGain();
     }
 
+    /// Turns the ten-band equalizer on with `equalizer`, or off with null. The
+    /// engine is stopped while the settings are written, so it never reads a
+    /// half-written equalizer; it rebuilds its filters on its next pass.
+    pub fn playerSetEqualizer(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        equalizer: ?audio.dsp.Equalizer,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        try object_value.dsp.setEqualizer(equalizer);
+    }
+
+    pub fn playerEqualizer(self: *OrcaRuntime, player: PlayerHandle) !?audio.dsp.Equalizer {
+        try self.requireRunning();
+        return (try self.players.get(player)).dsp.settings.equalizer;
+    }
+
+    /// Turns stereo crossfeed on with an `amount` in [0, 1], or off with null.
+    /// Applies to two-channel audio only; other layouts pass through.
+    pub fn playerSetCrossfeed(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        amount: ?f32,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        try object_value.dsp.setCrossfeed(amount);
+    }
+
+    pub fn playerCrossfeed(self: *OrcaRuntime, player: PlayerHandle) !?f32 {
+        try self.requireRunning();
+        return (try self.players.get(player)).dsp.settings.crossfeed;
+    }
+
+    /// What the audio being decoded passes through on its way to the output,
+    /// and whether that path could be bit-perfect.
+    ///
+    /// The source format and codec are the decode cursor's, which leads the
+    /// audible entry by the render-ahead depth; the ReplayGain figure is the
+    /// audible entry's. The engine is stopped while they are read, because the
+    /// decoder and the Zone's open format are engine-thread state.
+    pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.SignalPath {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        const audible = object_value.player.audibleSource();
+        return .describe(.{
+            .source = if (audible) |value| value.format else null,
+            .codec = if (audible) |value| value.codec else null,
+            .replay_gain = object_value.player.effectiveReplayGain(),
+            .equalizer = object_value.dsp.settings.equalizer,
+            .crossfeed = object_value.dsp.settings.crossfeed,
+            .volume = object_value.gain.linear.load(.acquire),
+            .output = if (engine) |value| value.outputFormat() else null,
+        });
+    }
+
     /// Seek in wall-clock milliseconds. The frame conversion needs the loaded
     /// source's rate, which is why a Player with nothing loaded is refused
     /// rather than silently seeking to frame zero.
@@ -3215,6 +3293,97 @@ test "a runtime Player and Zone form one object graph that actually renders" {
         std.Thread.yield() catch {};
     }
     try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(player);
+}
+
+test "the equalizer and crossfeed reject out-of-range values and keep the last valid setting" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const player = try runtime.createPlayer();
+
+    var too_loud: audio.dsp.Equalizer = .{};
+    too_loud.gains_db[4] = 12.5;
+    try std.testing.expectError(
+        error.EqualizerGainOutOfRange,
+        runtime.playerSetEqualizer(player, too_loud),
+    );
+    try std.testing.expectError(
+        error.EqualizerPreampOutOfRange,
+        runtime.playerSetEqualizer(player, .{ .preamp_db = -30 }),
+    );
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, null), try runtime.playerEqualizer(player));
+
+    const bass = audio.dsp.Equalizer.preset(.bass);
+    try runtime.playerSetEqualizer(player, bass);
+    try std.testing.expectError(
+        error.EqualizerGainOutOfRange,
+        runtime.playerSetEqualizer(player, too_loud),
+    );
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, bass), try runtime.playerEqualizer(player));
+
+    try std.testing.expectError(error.CrossfeedAmountOutOfRange, runtime.playerSetCrossfeed(player, 1.5));
+    try std.testing.expectEqual(@as(?f32, null), try runtime.playerCrossfeed(player));
+    try runtime.playerSetCrossfeed(player, 0.3);
+    try std.testing.expectEqual(@as(?f32, 0.3), try runtime.playerCrossfeed(player));
+    try runtime.playerSetCrossfeed(player, null);
+    try std.testing.expectEqual(@as(?f32, null), try runtime.playerCrossfeed(player));
+}
+
+fn hasReason(path: audio.dsp.SignalPath, reason: audio.signal_path.Reason) bool {
+    return std.mem.indexOfScalar(audio.signal_path.Reason, path.reasonList(), reason) != null;
+}
+
+test "a Player's signal path reports sample processing only while DSP or volume is in effect" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(
+        player,
+        std.testing.io,
+        "fixtures/audio/generated-reference.wav",
+    );
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+
+    var samples: [512]f32 = @splat(0);
+    var path = try runtime.playerSignalPath(player);
+    var deadline: TestDeadline = .init(5_000);
+    while (path.output == null and deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expect(path.source != null);
+    const output = path.output orelse return error.OutputNeverOpened;
+    try std.testing.expectEqual(audio.pcm.SampleFormat.float_32, output.sample_format);
+    try std.testing.expectEqual(path.source.?.sample_rate, output.sample_rate);
+    try std.testing.expectEqual(path.source.?.channels, output.channels);
+    try std.testing.expect(!hasReason(path, .sample_processing));
+    try std.testing.expectEqual(@as(f32, 1), path.volume);
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, null), path.equalizer);
+
+    try runtime.playerSetEqualizer(player, audio.dsp.Equalizer.preset(.bass));
+    path = try runtime.playerSignalPath(player);
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(hasReason(path, .sample_processing));
+    try std.testing.expectEqual(@as(?audio.dsp.Equalizer, audio.dsp.Equalizer.preset(.bass)), path.equalizer);
+    try std.testing.expect(path.output != null);
+
+    try runtime.playerSetEqualizer(player, null);
+    path = try runtime.playerSignalPath(player);
+    try std.testing.expect(!hasReason(path, .sample_processing));
+
+    try runtime.playerSetVolume(player, 0.5);
+    path = try runtime.playerSignalPath(player);
+    try std.testing.expect(hasReason(path, .sample_processing));
+    try std.testing.expectEqual(@as(f32, 0.5), path.volume);
 
     try runtime.destroyZone(zone);
     try runtime.destroyPlayer(player);

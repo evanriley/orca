@@ -313,3 +313,7 @@ button.album-artist {
 .queue-row:hover .queue-remove {
   opacity: 1;
 }
+
+.eq-bands {
+  padding: 12px 6px;
+}

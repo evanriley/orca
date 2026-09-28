@@ -36,6 +36,9 @@ the rule in [architecture.md](architecture.md).
   volume. A format change between entries reopens the output at the new
   format.
 - Per-entry ReplayGain from analysis results.
+- A ten-band equalizer with presets, stereo crossfeed, and a signal-path
+  report of the source, each processing stage, the output stream and whether
+  the path could be bit-perfect (`orca-cli play-tracks --eq --crossfeed`).
 - Output device selection.
 
 ### Analysis
@@ -67,15 +70,18 @@ entry point and a client before it counts as working.
   proposals and the scrobble queue. Before connecting them: HTTP requests need
   deadlines and cancellation, proposal acceptance must re-read the stored
   payload inside its transaction, and scrobble delivery must lease queue rows.
-- The ordered DSP graph, the resampler and the signal-path inspector.
+- The ordered DSP graph (`Chain`, `PublishedChain`) and the resampler. The
+  Player's equalizer, crossfeed and volume run through `PlayerDsp` instead, and
+  the signal-path inspector is reachable through `playerSignalPath`, but
+  neither uses the graph, and nothing resamples.
 - The Linux filesystem watcher.
 
 ## Next
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
-   path and report the signal path from the negotiated output.
+1. **A fixed output rate with a band-limited resampler** (libsamplerate or
+   speexdsp behind a shim), for gapless playback across sample rates.
 2. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
    Last.fm follows.
 3. **Filesystem watching** as a scan accelerator.

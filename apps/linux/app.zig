@@ -71,6 +71,20 @@ pub const OwnedText = struct {
     }
 };
 
+pub const equalizer_band_count = @typeInfo(@FieldType(liborca.Equalizer, "gains_db")).array.len;
+pub const crossfeed_amounts = [_]f32{ 0.2, 0.35, 0.5 };
+
+/// The widgets of Preferences' Sound page that its handlers reach back to.
+/// Reset when the dialog closes, since GTK destroys them with it.
+pub const SoundControls = struct {
+    preset_row: ?*gtk.Widget = null,
+    preset_names: ?*gtk.StringList = null,
+    bands: ?*gtk.Widget = null,
+    band_scales: [equalizer_band_count]?*gtk.Widget = @splat(null),
+    preamp_row: ?*gtk.Widget = null,
+    crossfeed_amount_row: ?*gtk.Widget = null,
+};
+
 pub const Task = enum { scan, analysis, duplicates, tag_write };
 
 pub const App = struct {
@@ -195,6 +209,19 @@ pub const App = struct {
 
     preferences_dialog: ?*adw.Dialog = null,
 
+    // sound
+    sound_controls: SoundControls = .{},
+    /// The curve the equalizer had when last on or being edited, so switching
+    /// it off and on again restores it.
+    equalizer_curve: liborca.Equalizer = .{},
+    /// GLib source that applies `equalizer_curve` once a slider drag settles;
+    /// zero when none is pending.
+    equalizer_apply_timer: c_uint = 0,
+    crossfeed_amount: f32 = crossfeed_amounts[1],
+    /// Set while the Sound page's widgets are being brought in line with state
+    /// that has already changed, so their signals do not re-enter as edits.
+    suppress_sound_signals: bool = false,
+
     // artists page
     artist_list_store: ?*gtk.ListStore = null,
     artist_list_loaded: u32 = 0,
@@ -230,6 +257,7 @@ pub const App = struct {
     repeat_button: ?*gtk.Widget = null,
     device_list: ?*gtk.ListBox = null,
     device_popover: ?*gtk.Popover = null,
+    signal_path_label: ?*gtk.Label = null,
     device_ids: std.ArrayList(u64) = .empty,
     device_checks: std.ArrayList(*gtk.Widget) = .empty,
     /// Names in `device_ids` order, as the output menu shows them.
@@ -466,6 +494,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
         self.query.clear(self.allocator);
         self.artist_filter.clear(self.allocator);
         self.artist_scope_name.clear(self.allocator);

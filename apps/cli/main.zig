@@ -311,6 +311,11 @@ pub fn main(init: std.process.Init) !void {
             \\queue. Options:
             \\  --device=ID        output device (0 = server default)
             \\  --replay-gain=off|track   loudness correction per entry (default track)
+            \\  --eq=PRESET        equalizer preset: flat|bass|treble|vocal|loudness
+            \\  --eq=G1,...,G10[:PREAMP]   ten band gains in dB (31 Hz to 16 kHz, each
+            \\                     within 12) and a preamp in dB (default: minus the
+            \\                     largest boost)
+            \\  --crossfeed=AMOUNT stereo crossfeed for headphones, 0 to 1
             \\  --start=N          queue position to begin at
             \\  --repeat=off|all|one
             \\  --shuffle
@@ -318,6 +323,10 @@ pub fn main(init: std.process.Init) !void {
             \\  --skip-after=MS    issue next MS after each entry becomes audible
             \\  --previous-after=MS  issue previous once, MS after playback starts
             \\  --limit=MS         stop after MS of wall clock
+            \\
+            \\play-tracks prints one `signal:` line once playback is a second in: the
+            \\source, each stage that changes the samples, the output stream, and
+            \\whether the path could be bit-perfect.
             \\
             \\analyze-library decodes every file the Library has not measured yet and
             \\stores its loudness, peak, clipping, silence and fingerprint. That
@@ -363,6 +372,8 @@ const PlayTracksOptions = struct {
     volume: f32 = 1,
     set_volume: ?ScheduledVolume = null,
     replay_gain: liborca.ReplayGainMode = .track,
+    equalizer: ?liborca.Equalizer = null,
+    crossfeed: ?f32 = null,
     start: u32 = 0,
     repeat: liborca.RepeatMode = .off,
     shuffle: bool = false,
@@ -400,6 +411,10 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
             .track
         else
             return error.UnknownReplayGainMode;
+    } else if (std.mem.eql(u8, name, "--eq")) {
+        options.equalizer = try parseEqualizer(value);
+    } else if (std.mem.eql(u8, name, "--crossfeed")) {
+        options.crossfeed = try std.fmt.parseFloat(f32, value);
     } else if (std.mem.eql(u8, name, "--repeat")) {
         options.repeat = if (std.mem.eql(u8, value, "all"))
             .all
@@ -418,6 +433,72 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     } else if (std.mem.eql(u8, name, "--limit")) {
         options.limit_ms = try std.fmt.parseInt(u64, value, 10);
     } else return error.UnknownOption;
+}
+
+/// A preset name, or ten comma-separated band gains in dB with an optional
+/// `:PREAMP`. The preamp defaults to what the largest boost needs, so a bare
+/// list of gains cannot clip on its own.
+fn parseEqualizer(value: []const u8) !liborca.Equalizer {
+    if (std.meta.stringToEnum(liborca.EqualizerPreset, value)) |preset|
+        return .preset(preset);
+    var equalizer: liborca.Equalizer = .{};
+    const preamp_separator = std.mem.indexOfScalar(u8, value, ':');
+    const gain_list = value[0 .. preamp_separator orelse value.len];
+    var gains = std.mem.splitScalar(u8, gain_list, ',');
+    for (&equalizer.gains_db) |*gain_db| {
+        const text = gains.next() orelse return error.EqualizerNeedsTenGains;
+        gain_db.* = try std.fmt.parseFloat(f32, text);
+    }
+    if (gains.next() != null) return error.EqualizerNeedsTenGains;
+    equalizer.preamp_db = if (preamp_separator) |separator|
+        try std.fmt.parseFloat(f32, value[separator + 1 ..])
+    else
+        liborca.Equalizer.defaultPreamp(equalizer.gains_db);
+    return equalizer;
+}
+
+fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
+    try stdout.writeAll("signal: ");
+    if (path.source) |source| {
+        if (path.codec) |codec| {
+            var upper: [16]u8 = undefined;
+            const name = if (codec.len <= upper.len) std.ascii.upperString(&upper, codec) else codec;
+            try stdout.print("{s} ", .{name});
+        }
+        try stdout.print(
+            "{d}-bit {d} Hz {d} ch",
+            .{ source.bits_per_sample, source.sample_rate, source.channels },
+        );
+    } else try stdout.writeAll("no source");
+    if (path.replay_gain_db) |decibels| try stdout.print(" -> replay gain {d:.1} dB", .{decibels});
+    if (path.equalizer != null) try stdout.writeAll(" -> eq");
+    if (path.crossfeed) |amount| try stdout.print(" -> crossfeed {d:.2}", .{amount});
+    try stdout.print(" -> volume {d:.2}", .{path.volume});
+    if (path.output) |output| {
+        try stdout.print(
+            " -> output {s} {d} Hz {d} ch",
+            .{ formatName(output.sample_format), output.sample_rate, output.channels },
+        );
+    } else try stdout.writeAll(" -> no output");
+    try stdout.print("; bit-perfect: {s}", .{if (path.bit_perfect_eligible) "yes" else "no"});
+    for (path.reasonList(), 0..) |reason, index| {
+        try stdout.writeAll(if (index == 0) " (" else ", ");
+        for (@tagName(reason)) |character|
+            try stdout.writeByte(if (character == '_') ' ' else character);
+    }
+    if (path.reasonList().len > 0) try stdout.writeByte(')');
+    try stdout.writeByte('\n');
+}
+
+fn formatName(sample_format: liborca.SampleFormat) []const u8 {
+    return switch (sample_format) {
+        .unsigned_8 => "uint8",
+        .signed_16 => "int16",
+        .signed_24 => "int24",
+        .signed_32 => "int32",
+        .float_32 => "float32",
+        .float_64 => "float64",
+    };
 }
 
 /// The queue driven from the outside, exactly as a frontend would drive it.
@@ -451,6 +532,8 @@ fn playTracks(
 
     try runtime.playerSetVolume(player, options.volume);
     try runtime.playerSetReplayGainMode(player, options.replay_gain);
+    try runtime.playerSetEqualizer(player, options.equalizer);
+    try runtime.playerSetCrossfeed(player, options.crossfeed);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
     try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
@@ -460,6 +543,7 @@ fn playTracks(
     var last_cursor: ?u32 = null;
     var took_previous = options.previous_after_ms == null;
     var set_volume = options.set_volume == null;
+    var printed_signal_path = false;
     // How often the producer was observed a whole entry ahead of the audio.
     // Nonzero is the proof that now-playing is derived from rendered audio
     // rather than from the decode cursor.
@@ -521,6 +605,14 @@ fn playTracks(
                 if (!moved) break;
                 last_cursor = null;
                 continue;
+            }
+        }
+        if (!printed_signal_path and elapsed_ms >= 1000) {
+            const path = try runtime.playerSignalPath(player);
+            if (path.output != null) {
+                printed_signal_path = true;
+                try printSignalPath(stdout, path);
+                try stdout.flush();
             }
         }
         if (try runtime.playerDrained(player)) break;

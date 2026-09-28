@@ -27,3 +27,9 @@ pub fn terminated(buffer: []u8, text: []const u8) [:0]const u8 {
 pub fn format(buffer: []u8, comptime pattern: []const u8, args: anytype) [:0]const u8 {
     return printZ(buffer, pattern, args) catch "";
 }
+
+/// `-0.0` formats as `-0`, which is never what a gain label or a settings file
+/// should say.
+pub fn withoutNegativeZero(value: f32) f32 {
+    return if (value == 0) 0 else value;
+}

@@ -308,9 +308,9 @@ pub fn main(init: std.process.Init) !u8 {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
             runtime.playerBindLibrary(self.player, library, init.io) catch {};
-            settings.load(&self);
         } else |_| {}
     }
+    settings.load(&self);
 
     const application: *gtk.Application = @ptrCast(adw.adw_application_new(
         application_id,

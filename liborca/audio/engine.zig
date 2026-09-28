@@ -2,6 +2,7 @@ const std = @import("std");
 const control = @import("../core/control.zig");
 const object = @import("../core/object.zig");
 const work = @import("../core/work.zig");
+const dsp_api = @import("dsp.zig");
 const output_api = @import("output.zig");
 const pcm = @import("pcm.zig");
 const playback_queue = @import("playback_queue.zig");
@@ -41,9 +42,9 @@ pub const Options = struct {
     queue: ?*playback_queue.PlaybackQueue = null,
     opener: ?playback_queue.TrackOpener = null,
     /// Player-scope processing applied to canonical PCM once, before fanout.
-    /// The runtime uses it for the Player's volume gain, whose control block
-    /// outlives the engine so a restart keeps the level the user set.
-    player_processor: ?processing.Processor = null,
+    /// The runtime owns it, and the volume gain it wraps, so a restart of the
+    /// engine keeps the level and the DSP settings the user set.
+    dsp: ?*dsp_api.PlayerDsp = null,
 };
 
 /// The one decode producer for a Player.
@@ -67,7 +68,7 @@ pub const PlayerEngine = struct {
     telemetry: ?*control.TelemetryChannel,
     factory: ?output_api.Factory,
     registration: ?*work.Registration = null,
-    player_processor: ?processing.Processor = null,
+    dsp: ?*dsp_api.PlayerDsp = null,
     /// The playback queue that sits above the decode queue. Plain state, owned
     /// jointly by this thread and the control lane under the
     /// `quiesce`/`release` handshake — the render callback never touches it.
@@ -135,7 +136,7 @@ pub const PlayerEngine = struct {
             .factory = options.factory,
             .queue = options.queue,
             .opener = options.opener,
-            .player_processor = options.player_processor,
+            .dsp = options.dsp,
         };
         self.adopted = self.slots[0][0..0];
         return self;
@@ -192,6 +193,13 @@ pub const PlayerEngine = struct {
     pub fn release(self: *PlayerEngine) void {
         self.suspend_requested.store(false, .release);
         self.wakeUp();
+    }
+
+    /// Control lane, under `quiesce`. The format the clock Zone's stream was
+    /// opened with, or null while no Zone has an active output.
+    pub fn outputFormat(self: *const PlayerEngine) ?pcm.Format {
+        const open = (self.clock_zone orelse return null).open_format orelse return null;
+        return zone_runtime.streamFormat(open);
     }
 
     pub fn isDrained(self: *const PlayerEngine) bool {
@@ -472,6 +480,9 @@ pub const PlayerEngine = struct {
         const epoch = self.player.epoch.load(.acquire);
         for (zones) |runtime_zone| runtime_zone.epoch.store(epoch, .release);
         const scratch = self.scratch[0 .. frames_per_block * format_value.channels];
+        if (self.dsp) |dsp|
+            dsp.prepare(format_value.sample_rate, format_value.channels, epoch);
+        const player_processor: ?processing.Processor = if (self.dsp) |dsp| dsp.processor() else null;
 
         var produced: usize = 0;
         while (produced < block_count) {
@@ -483,7 +494,7 @@ pub const PlayerEngine = struct {
             const result = self.player.decodeProcessAndFanoutUnderEpoch(
                 block_count,
                 scratch,
-                self.player_processor,
+                player_processor,
                 storage[0..count],
                 epoch,
             ) catch {

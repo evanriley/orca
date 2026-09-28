@@ -174,6 +174,10 @@ pub const SourceQueue = struct {
         return self.current.decoder.format;
     }
 
+    pub fn codec(self: *const SourceQueue) []const u8 {
+        return self.current.decoder.codec;
+    }
+
     pub fn sourceFormat(self: *const SourceQueue) @import("pcm.zig").Format {
         return self.current.decoder.source_format orelse self.current.decoder.format;
     }

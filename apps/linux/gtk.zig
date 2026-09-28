@@ -152,6 +152,8 @@ pub const MODIFIER_SHIFT: c_uint = 1 << 0;
 pub const MODIFIER_CONTROL: c_uint = 1 << 2;
 pub const MODIFIER_ALT: c_uint = 1 << 3;
 
+pub const POS_RIGHT: c_int = 1;
+
 pub const INVALID_LIST_POSITION: c_uint = 0xffffffff;
 
 pub const SORT_ASCENDING: c_int = 0;
@@ -599,6 +601,7 @@ pub extern fn g_object_get_data(object: *anyopaque, key: [*:0]const u8) ?*anyopa
 pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
+pub extern fn gtk_widget_get_visible(widget: *Widget) gboolean;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;
 pub extern fn gtk_widget_set_margin_start(widget: *Widget, margin: c_int) void;
@@ -651,9 +654,11 @@ pub extern fn gtk_label_new(text: ?[*:0]const u8) *Widget;
 pub extern fn gtk_label_set_text(label: *Label, text: [*:0]const u8) void;
 pub extern fn gtk_label_set_xalign(label: *Label, xalign: f32) void;
 pub extern fn gtk_label_set_ellipsize(label: *Label, mode: c_int) void;
+pub extern fn gtk_label_set_max_width_chars(label: *Label, n_chars: c_int) void;
 
 pub extern fn gtk_box_new(orientation: c_int, spacing: c_int) *Widget;
 pub extern fn gtk_box_append(box: *Box, child: *Widget) void;
+pub extern fn gtk_box_set_homogeneous(box: *Box, homogeneous: gboolean) void;
 pub extern fn gtk_separator_new(orientation: c_int) *Widget;
 
 pub extern fn gtk_paned_new(orientation: c_int) *Widget;
@@ -689,6 +694,10 @@ pub extern fn gtk_adjustment_set_value(adjustment: *Adjustment, value: f64) void
 
 pub extern fn gtk_scale_new(orientation: c_int, adjustment: ?*Adjustment) *Widget;
 pub extern fn gtk_scale_set_draw_value(scale: *Scale, draw_value: gboolean) void;
+pub extern fn gtk_scale_add_mark(scale: *Scale, value: f64, position: c_int, markup: ?[*:0]const u8) void;
+pub extern fn gtk_range_set_inverted(range: *Range, setting: gboolean) void;
+pub extern fn gtk_range_set_value(range: *Range, value: f64) void;
+pub extern fn gtk_range_get_value(range: *Range) f64;
 
 pub extern fn gtk_progress_bar_new() *Widget;
 pub extern fn gtk_progress_bar_set_fraction(bar: *ProgressBar, fraction: f64) void;

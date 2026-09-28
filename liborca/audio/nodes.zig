@@ -1,8 +1,8 @@
 const std = @import("std");
 const processing = @import("processing.zig");
 
-/// Simple symmetric stereo crossfeed for headphone listening. Configuration is
-/// immutable after publication, avoiding unsmoothed RT parameter changes.
+/// Simple symmetric stereo crossfeed for headphone listening. `amount` is
+/// changed only between blocks by the lane that processes it.
 pub const StereoCrossfeed = struct {
     amount: f32,
 
