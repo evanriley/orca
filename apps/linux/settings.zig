@@ -34,30 +34,47 @@ fn parseEqualizer(text: []const u8) ?liborca.Equalizer {
     return curve;
 }
 
-fn formatEqualizer(buffer: []u8, equalizer: ?liborca.Equalizer) [:0]const u8 {
-    const curve = equalizer orelse return "off";
+fn formatEqualizer(buffer: []u8, curve: liborca.Equalizer) ?[:0]const u8 {
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     for (curve.gains_db, 0..) |gain_db, index| {
         writer.print("{s}{d}", .{
             if (index == 0) "" else ",",
             strings.withoutNegativeZero(gain_db),
-        }) catch return "off";
+        }) catch return null;
     }
-    writer.print(":{d}", .{strings.withoutNegativeZero(curve.preamp_db)}) catch return "off";
+    writer.print(":{d}", .{strings.withoutNegativeZero(curve.preamp_db)}) catch return null;
     buffer[writer.end] = 0;
     return buffer[0..writer.end :0];
 }
 
-fn loadEqualizer(self: *App, text: []const u8) void {
-    const curve = parseEqualizer(text) orelse return;
-    self.runtime.playerSetEqualizer(self.player, curve) catch return;
-    self.equalizer_curve = curve;
+fn parseCrossfeed(text: []const u8) ?f32 {
+    return std.fmt.parseFloat(f32, std.mem.trim(u8, text, " ")) catch null;
 }
 
-fn loadCrossfeed(self: *App, text: []const u8) void {
-    const amount = std.fmt.parseFloat(f32, std.mem.trim(u8, text, " ")) catch return;
-    self.runtime.playerSetCrossfeed(self.player, amount) catch return;
+fn loadEqualizer(self: *App, text: []const u8, enabled: ?[]const u8) void {
+    const curve = parseEqualizer(text) orelse return;
+    self.equalizer_curve = curve;
+    if (!isEnabled(enabled)) return;
+    self.runtime.playerSetEqualizer(self.player, curve) catch {};
+}
+
+fn loadCrossfeed(self: *App, text: []const u8, enabled: ?[]const u8) void {
+    const amount = parseCrossfeed(text) orelse return;
     self.crossfeed_amount = amount;
+    if (!isEnabled(enabled)) return;
+    self.runtime.playerSetCrossfeed(self.player, amount) catch {};
+}
+
+fn isEnabled(flag: ?[]const u8) bool {
+    return std.mem.eql(u8, flag orelse return true, "true");
+}
+
+fn getString(keys: *gtk.GKeyFile, group: [:0]const u8, key: [:0]const u8) ?[*:0]u8 {
+    var err: ?*gtk.GError = null;
+    return gtk.g_key_file_get_string(keys, group.ptr, key.ptr, &err) orelse {
+        gtk.g_clear_error(&err);
+        return null;
+    };
 }
 
 /// Applies saved choices to a newly started app.
@@ -80,14 +97,18 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.preferred_output.set(self.allocator, std.mem.span(value));
     } else gtk.g_clear_error(&err);
-    if (gtk.g_key_file_get_string(keys, "sound", "equalizer", &err)) |value| {
+    if (getString(keys, "sound", "equalizer")) |value| {
         defer gtk.g_free(value);
-        loadEqualizer(self, std.mem.span(value));
-    } else gtk.g_clear_error(&err);
-    if (gtk.g_key_file_get_string(keys, "sound", "crossfeed", &err)) |value| {
+        const enabled = getString(keys, "sound", "equalizer_enabled");
+        defer if (enabled) |flag| gtk.g_free(flag);
+        loadEqualizer(self, std.mem.span(value), if (enabled) |flag| std.mem.span(flag) else null);
+    }
+    if (getString(keys, "sound", "crossfeed")) |value| {
         defer gtk.g_free(value);
-        loadCrossfeed(self, std.mem.span(value));
-    } else gtk.g_clear_error(&err);
+        const enabled = getString(keys, "sound", "crossfeed_enabled");
+        defer if (enabled) |flag| gtk.g_free(flag);
+        loadCrossfeed(self, std.mem.span(value), if (enabled) |flag| std.mem.span(flag) else null);
+    }
     if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
         defer gtk.g_free(value);
         self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
@@ -103,14 +124,14 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "playback", "replay_gain", @tagName(mode));
     gtk.g_key_file_set_string(keys, "playback", "output_device", self.preferred_output.value.ptr);
     var equalizer_buffer: [256]u8 = undefined;
-    const equalizer = self.runtime.playerEqualizer(self.player) catch null;
-    gtk.g_key_file_set_string(keys, "sound", "equalizer", formatEqualizer(&equalizer_buffer, equalizer).ptr);
+    if (formatEqualizer(&equalizer_buffer, self.equalizer_curve)) |curve|
+        gtk.g_key_file_set_string(keys, "sound", "equalizer", curve.ptr);
+    const equalizer_on = (self.runtime.playerEqualizer(self.player) catch null) != null;
+    gtk.g_key_file_set_string(keys, "sound", "equalizer_enabled", if (equalizer_on) "true" else "false");
     var crossfeed_buffer: [32]u8 = undefined;
-    const crossfeed = if (self.runtime.playerCrossfeed(self.player) catch null) |amount|
-        strings.format(&crossfeed_buffer, "{d}", .{amount})
-    else
-        "off";
-    gtk.g_key_file_set_string(keys, "sound", "crossfeed", crossfeed.ptr);
+    gtk.g_key_file_set_string(keys, "sound", "crossfeed", strings.format(&crossfeed_buffer, "{d}", .{self.crossfeed_amount}).ptr);
+    const crossfeed_on = (self.runtime.playerCrossfeed(self.player) catch null) != null;
+    gtk.g_key_file_set_string(keys, "sound", "crossfeed_enabled", if (crossfeed_on) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

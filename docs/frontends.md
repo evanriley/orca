@@ -136,8 +136,11 @@ Loudness); a curve that matches no preset reads Custom, and switching the
 equalizer off and on restores the last curve. Crossfeed has three amounts.
 Slider drags are coalesced into one apply about 60 ms after the last move,
 because applying pauses the engine briefly. Both are saved in `[sound]`
-(`equalizer=off|G1,...,G10:PREAMP`, `crossfeed=off|AMOUNT`) and applied at
-launch.
+(`equalizer=G1,...,G10:PREAMP`, `equalizer_enabled=true|false`,
+`crossfeed=AMOUNT`, `crossfeed_enabled=true|false`), so the curve and amount
+survive while the effect is off, and applied at launch when enabled. A file
+that predates the `*_enabled` keys and holds `off` leaves the effect off with
+the default curve or amount.
 
 The output menu ends with the **signal path**: the source format, then
 ReplayGain, equalizer, crossfeed, volume and the output format as they apply,

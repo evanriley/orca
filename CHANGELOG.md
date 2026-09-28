@@ -2,6 +2,12 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Daily-use fixes
+
+- **`orca-gtk` keeps the equalizer curve and crossfeed amount while they are
+  off.** `settings.ini` saves `equalizer` and `crossfeed` as values and adds
+  `equalizer_enabled` and `crossfeed_enabled`; older files still load.
+
 ### Removing a folder forgets its tracks
 
 - **`Runtime.libraryRemoveRoot` forgets everything that exists only under the
