@@ -1,6 +1,7 @@
 const std = @import("std");
 const analysis_service = @import("../analysis/service.zig");
 const audio = @import("../audio/root.zig");
+const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
@@ -56,6 +57,15 @@ const ZoneObject = struct {
 
 /// Producer-side counters for the queue lane. Diagnostics, not transport
 /// state: an authoritative consumer reads snapshots.
+/// One file's measurement from `libraryAnalyzeFile`.
+pub const FileAnalysis = analysis_service.Analysis;
+
+/// The Library's database, for liborca's own C ABI and tests. Clients use the
+/// runtime's methods; the database is not part of the API.
+pub fn databaseOf(runtime: *OrcaRuntime, library: LibraryHandle) !*database.LibraryDatabase {
+    return runtime.libraryDatabase(library);
+}
+
 pub const QueueStats = struct {
     entries_started: u64,
     gapless_transitions: u64,
@@ -638,12 +648,40 @@ pub const OrcaRuntime = struct {
         }
     }
 
-    pub fn libraryDatabase(
+    fn libraryDatabase(
         self: *OrcaRuntime,
         library: LibraryHandle,
     ) !*database.LibraryDatabase {
         try self.requireRunning();
         return (try self.libraries.get(library)).database orelse error.LibraryHasNoDatabase;
+    }
+
+    /// Files that still owe the default loudness and fingerprint measurement.
+    pub fn libraryUnanalyzedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).files.unanalyzedCount(
+            analysis_service.diagnosticsSelector(.{}),
+        );
+    }
+
+    /// Measures one file on the caller's thread and records the result in the
+    /// Library's analysis cache, registering the file if no scan has seen it.
+    /// The caller owns the returned analysis.
+    pub fn libraryAnalyzeFile(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        path: []const u8,
+    ) !FileAnalysis {
+        const library_database = try self.libraryDatabase(library);
+        const codecs = codec.CodecRegistry.builtins();
+        const service: analysis_service.Service = .{
+            .allocator = self.allocator,
+            .io = io,
+            .codecs = &codecs,
+            .cache = &library_database.analysis_cache,
+        };
+        const binding = try library_database.resolveOrCreateFile(io, path, .{});
+        return service.analyzeFile(binding.file_id, path, .{});
     }
 
     pub fn libraryTrackCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -1018,7 +1056,7 @@ pub const OrcaRuntime = struct {
         };
     }
 
-    pub fn markZoneOutputLost(self: *OrcaRuntime, zone: ZoneHandle) !void {
+    fn markZoneOutputLost(self: *OrcaRuntime, zone: ZoneHandle) !void {
         try self.requireRunning();
         const object_value = try self.zones.get(zone);
         try self.requireZoneIdle(object_value);
@@ -1026,7 +1064,7 @@ pub const OrcaRuntime = struct {
         object_value.zone.publishState();
     }
 
-    pub fn beginZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
+    fn beginZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
         try self.requireRunning();
         const object_value = try self.zones.get(zone);
         try self.requireZoneIdle(object_value);
@@ -1034,7 +1072,7 @@ pub const OrcaRuntime = struct {
         object_value.zone.publishState();
     }
 
-    pub fn failZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
+    fn failZoneRecovery(self: *OrcaRuntime, zone: ZoneHandle) !void {
         try self.requireRunning();
         const object_value = try self.zones.get(zone);
         try self.requireZoneIdle(object_value);
@@ -2120,7 +2158,7 @@ pub const OrcaRuntime = struct {
     /// starts a real worker thread that observes cancellation, so shutdown and
     /// destroy paths are exercised against a live worker rather than a bare
     /// handle. The worker only ever touches its own `work.Registration`.
-    pub fn startDummyWork(self: *OrcaRuntime) !WorkHandle {
+    fn startDummyWork(self: *OrcaRuntime) !WorkHandle {
         try self.requireRunning();
         const work_handle = try self.work_registry.begin(work.unowned);
         const registration = self.work_registry.registration(work_handle) catch unreachable;
@@ -2141,12 +2179,12 @@ pub const OrcaRuntime = struct {
         registration.finish();
     }
 
-    pub fn completeDummyWork(self: *OrcaRuntime, work_handle: WorkHandle) !void {
+    fn completeDummyWork(self: *OrcaRuntime, work_handle: WorkHandle) !void {
         try self.requireRunning();
         try self.work_registry.complete(work_handle);
     }
 
-    pub fn inFlightWorkCount(self: *const OrcaRuntime) usize {
+    fn inFlightWorkCount(self: *const OrcaRuntime) usize {
         return self.work_registry.count();
     }
 
@@ -2174,7 +2212,7 @@ pub const OrcaRuntime = struct {
         return self.events.poll();
     }
 
-    pub fn publishTelemetry(self: *OrcaRuntime, telemetry: control.Telemetry) !void {
+    fn publishTelemetry(self: *OrcaRuntime, telemetry: control.Telemetry) !void {
         try self.requireRunning();
         try self.telemetry.publish(telemetry);
     }

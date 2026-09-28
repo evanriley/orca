@@ -135,6 +135,11 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all unit and integration tests");
     test_step.dependOn(&run_unit_tests.step);
+    // Built as its own project, so the documented way to embed liborca as a
+    // Zig package dependency is exercised rather than asserted.
+    const embed_example = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+    embed_example.setCwd(b.path("examples/embed"));
+    test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
 

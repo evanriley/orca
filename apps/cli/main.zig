@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 1 and std.mem.eql(u8, args[1], "--version")) {
         try stdout.print("orca-cli {f}\n", .{liborca.version});
     } else if (args.len > 1 and std.mem.eql(u8, args[1], "demo")) {
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
 
         const request_id = try runtime.submit(.create_player);
@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
         // a runtime job on a registered worker, and poll it. The scan projects
         // as it commits, which is why there is no separate projection step here.
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
         // Adding a root is an explicit user action, so this is the one place
@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         // library after a metadata edit or a provider acceptance, and it is why
         // the projection is a pass of its own rather than part of the scanner.
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
         const job_handle = try runtime.startLibraryProjection(library_handle);
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
             } else return error.UnknownOption;
         }
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
         const job_handle = try runtime.startLibraryPropertyBackfill(library_handle, .{
@@ -110,10 +110,10 @@ pub fn main(init: std.process.Init) !void {
             } else return error.UnknownOption;
         }
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        var request: liborca.core.runtime.AnalysisRequest = .{};
+        var request: liborca.AnalysisRequest = .{};
         if (batch_size != 0) request.batch_size = batch_size;
         const job_handle = try runtime.startLibraryAnalysis(library_handle, request);
         const planned = try runtime.jobSnapshotSynced(job_handle);
@@ -121,11 +121,8 @@ pub fn main(init: std.process.Init) !void {
         try stdout.flush();
         try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
         try printAnalysisStats(stdout, try runtime.jobScanStats(job_handle));
-        const library_database = try runtime.libraryDatabase(library_handle);
         try stdout.print("{d} files still to analyze\n", .{
-            try library_database.files.unanalyzedCount(
-                liborca.analysis.service.diagnosticsSelector(.{}),
-            ),
+            try runtime.libraryUnanalyzedCount(library_handle),
         });
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "duplicates")) {
         // The question the analysis exists to answer, asked over the stored
@@ -152,10 +149,10 @@ pub fn main(init: std.process.Init) !void {
         // would become one per comparison: about 9 KB times 14,593 on the
         // reference library today, and unbounded at the 500,000-file target.
         // The pass frees correctly; it needs an allocator that honours it.
-        var runtime = liborca.OrcaRuntime.init(std.heap.smp_allocator);
+        var runtime = liborca.Runtime.init(std.heap.smp_allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        var request: liborca.core.runtime.DuplicateScanRequest = .{};
+        var request: liborca.DuplicateScanRequest = .{};
         if (batch_size != 0) request.batch_size = batch_size;
         const job_handle = try runtime.startLibraryDuplicateScan(library_handle, request);
         const planned = try runtime.jobSnapshotSynced(job_handle);
@@ -165,22 +162,10 @@ pub fn main(init: std.process.Init) !void {
         try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        const library_database = try runtime.libraryDatabase(library_handle);
-        const codecs = liborca.codec.CodecRegistry.builtins();
-        const service: liborca.analysis.service.Service = .{
-            .allocator = allocator,
-            .io = init.io,
-            .codecs = &codecs,
-            .cache = &library_database.analysis_cache,
-        };
-        // Analysis caches against file identity, so an analyze of a file no
-        // scan has seen still records it as an unverified location rather than
-        // losing the result.
-        const binding = try library_database.resolveOrCreateFile(init.io, args[3], .{});
-        const result = try service.analyzeFile(binding.file_id, args[3], .{});
+        const result = try runtime.libraryAnalyzeFile(library_handle, init.io, args[3]);
         defer result.deinit();
         try stdout.print(
             "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d}\n",
@@ -200,11 +185,10 @@ pub fn main(init: std.process.Init) !void {
     } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "health")) {
         const database_path = try allocator.dupeSentinel(u8, args[2], 0);
         const offset = if (args.len == 4) try std.fmt.parseInt(u32, args[3], 10) else 0;
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const library_handle = try runtime.openLibrary(init.io, database_path);
-        const library_database = try runtime.libraryDatabase(library_handle);
-        var page = try library_database.health_issues.page(allocator, 256, offset);
+        var page = try runtime.libraryHealthIssuePage(library_handle, 256, offset);
         defer page.deinit();
         for (page.items) |issue| try stdout.print(
             "{s}\t{s}\t{s}\t{s}\n",
@@ -219,9 +203,9 @@ pub fn main(init: std.process.Init) !void {
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
         try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
-        var devices: [32]liborca.audio.backend.Device = undefined;
+        var devices: [32]liborca.Device = undefined;
         const count = try runtime.enumerateOutputDevices(&devices);
         for (devices[0..count]) |device|
             try stdout.print("{d}\t{s}\n", .{ device.id, device.nameSlice() });
@@ -233,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
         // The one object graph: a runtime Player owns the source and the single
         // decode producer, and a runtime Zone owns the pool, pipe, render
         // context and OutputSession. Nothing about playback lives in this frame.
-        var runtime = liborca.OrcaRuntime.init(allocator);
+        var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
         const player = try runtime.createPlayer();
         const zone = try runtime.createZone();
@@ -347,9 +331,9 @@ const PlayTracksOptions = struct {
     device: u64 = 0,
     volume: f32 = 1,
     set_volume: ?ScheduledVolume = null,
-    replay_gain: liborca.audio.processing.ReplayGainMode = .track,
+    replay_gain: liborca.ReplayGainMode = .track,
     start: u32 = 0,
-    repeat: liborca.core.runtime.RepeatMode = .off,
+    repeat: liborca.RepeatMode = .off,
     shuffle: bool = false,
     tail_ms: ?u64 = null,
     skip_after_ms: ?u64 = null,
@@ -433,7 +417,7 @@ fn playTracks(
     if (ids.items.len == 0) return error.NoTrackIds;
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
-    var runtime = liborca.OrcaRuntime.init(allocator);
+    var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(io, database_path);
     const player = try runtime.createPlayer();
@@ -552,7 +536,7 @@ const BrowseOptions = struct {
     /// `--filter el-p` finds the one spelled with a U+2010 hyphen.
     filter: []const u8 = "",
     release_id: ?i64 = null,
-    sort: liborca.database.TrackSort = .id,
+    sort: liborca.TrackSort = .id,
     descending: bool = false,
     limit: u32 = 50,
     offset: u32 = 0,
@@ -623,9 +607,9 @@ fn writeDuration(stdout: *std.Io.Writer, duration_ms: ?i64) !void {
 fn openBrowseLibrary(
     allocator: std.mem.Allocator,
     io: std.Io,
-    runtime: *liborca.OrcaRuntime,
+    runtime: *liborca.Runtime,
     database_path_argument: []const u8,
-) !liborca.core.LibraryHandle {
+) !liborca.LibraryHandle {
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
     return runtime.openLibrary(io, database_path);
 }
@@ -661,7 +645,7 @@ fn showArtwork(
     // image come from" unanswerable from the output.
     if ((track_id == null) == (release_id == null)) return error.MissingSubject;
 
-    var runtime = liborca.OrcaRuntime.init(allocator);
+    var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const image = if (track_id) |id|
@@ -692,7 +676,7 @@ fn listArtists(
     option_arguments: []const []const u8,
 ) !void {
     const options = try parseBrowseOptions(option_arguments);
-    var runtime = liborca.OrcaRuntime.init(allocator);
+    var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     var page = try runtime.libraryArtistPage(library, .{
@@ -703,7 +687,7 @@ fn listArtists(
     defer page.deinit();
     // The count of what matched, not of the library, or a filtered listing
     // reports a total it is not showing.
-    const query: liborca.database.ArtistQuery = .{ .filter = options.filter };
+    const query: liborca.ArtistQuery = .{ .filter = options.filter };
     try stdout.print(
         "{d} artists {s}\n",
         .{
@@ -725,7 +709,7 @@ fn listReleases(
     option_arguments: []const []const u8,
 ) !void {
     const options = try parseBrowseOptions(option_arguments);
-    var runtime = liborca.OrcaRuntime.init(allocator);
+    var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     var page = try runtime.libraryReleasePage(library, .{
@@ -757,10 +741,10 @@ fn listTracks(
     option_arguments: []const []const u8,
 ) !void {
     const options = try parseBrowseOptions(option_arguments);
-    var runtime = liborca.OrcaRuntime.init(allocator);
+    var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
-    const query: liborca.database.TrackQuery = .{
+    const query: liborca.TrackQuery = .{
         .artist_id = options.artist_id,
         .release_id = options.release_id,
         .sort = options.sort,
@@ -797,9 +781,9 @@ fn sleepMilliseconds(milliseconds: u32) void {
 /// Drives the runtime pump until a job reaches a terminal state, exactly as a
 /// frontend event loop would. Nothing about the scan happens on this thread.
 fn awaitJob(
-    runtime: *liborca.OrcaRuntime,
+    runtime: *liborca.Runtime,
     stdout: *std.Io.Writer,
-    job_handle: liborca.core.JobHandle,
+    job_handle: liborca.JobHandle,
     cancel_after_ms: ?u64,
 ) !void {
     var elapsed_ms: u64 = 0;
@@ -835,7 +819,7 @@ fn awaitJob(
 /// The same counters, named for what a library-wide analysis means by them.
 fn printAnalysisStats(
     stdout: *std.Io.Writer,
-    stats: liborca.core.runtime.ScanStats,
+    stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
         "examined={d} measured={d} no_loudness={d} declined={d} corrupt={d} batches={d}\n",
@@ -859,7 +843,7 @@ fn printAnalysisStats(
 /// omission.
 fn printDuplicateStats(
     stdout: *std.Io.Writer,
-    stats: liborca.core.runtime.ScanStats,
+    stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
         "examined={d} exact={d} likely={d} unique={d} unreadable={d} batches={d}\n",
@@ -881,7 +865,7 @@ fn printDuplicateStats(
 /// The same counters, named for what a repair pass means by them.
 fn printBackfillStats(
     stdout: *std.Io.Writer,
-    stats: liborca.core.runtime.ScanStats,
+    stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
         "examined={d} repaired={d} still_unknown={d} unreachable={d} unreadable={d} batches={d}\n",
@@ -907,7 +891,7 @@ fn printBackfillStats(
 
 fn printScanStats(
     stdout: *std.Io.Writer,
-    stats: liborca.core.runtime.ScanStats,
+    stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
         "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d}\n",

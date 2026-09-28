@@ -29,13 +29,13 @@ pub const tick_ms: c_uint = 100;
 pub const Browse = struct {
     artist_id: ?i64 = null,
     release_id: ?i64 = null,
-    sort: liborca.database.TrackSort = .id,
-    direction: liborca.database.SortDirection = .ascending,
+    sort: liborca.TrackSort = .id,
+    direction: liborca.SortDirection = .ascending,
 
     /// The order a newly entered scope is listed in. An album is listened to in
     /// disc-then-track order, an artist's shelf reads album by album, and an
     /// unscoped library has no natural order to claim, so it pays for none.
-    pub fn defaultSort(self: Browse) liborca.database.TrackSort {
+    pub fn defaultSort(self: Browse) liborca.TrackSort {
         if (self.release_id != null) return .track_number;
         if (self.artist_id != null) return .album;
         return .id;
@@ -67,14 +67,14 @@ pub const OwnedText = struct {
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    runtime: *liborca.OrcaRuntime,
+    runtime: *liborca.Runtime,
 
     /// Optionals rather than `has_*` flags: an absent Library is `null`, and
     /// there is no second field to keep in step with it.
-    library: ?liborca.core.LibraryHandle = null,
-    player: liborca.core.PlayerHandle = undefined,
-    zone: ?liborca.core.ZoneHandle = null,
-    scan_job: ?liborca.core.JobHandle = null,
+    library: ?liborca.LibraryHandle = null,
+    player: liborca.PlayerHandle = undefined,
+    zone: ?liborca.ZoneHandle = null,
+    scan_job: ?liborca.JobHandle = null,
     scanning: bool = false,
     library_path: ?[:0]u8 = null,
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
@@ -166,8 +166,8 @@ pub const App = struct {
     /// What the now-playing labels currently show, so the resolve query only
     /// runs when the audible entry actually changes.
     shown_track_id: ?i64 = null,
-    shown_transport: liborca.audio.player.TransportState = .stopped,
-    repeat_mode: liborca.core.runtime.RepeatMode = .off,
+    shown_transport: liborca.TransportState = .stopped,
+    repeat_mode: liborca.RepeatMode = .off,
 
     // queue popover
     queue_rows: ?*gtk.StringList = null,
@@ -191,7 +191,7 @@ pub const App = struct {
     /// The Artist pane's filter is *not* part of this. It narrows which Artists
     /// are listed and never reaches a `TrackQuery`, so it and a track search are
     /// free to hold text at the same time without either one being half applied.
-    pub fn trackRequest(self: *App, offset: u32) liborca.database.TrackQuery {
+    pub fn trackRequest(self: *App, offset: u32) liborca.TrackQuery {
         const searching = self.query.value.len != 0;
         return .{
             .artist_id = if (searching) null else self.browse.artist_id,
@@ -209,7 +209,7 @@ pub const App = struct {
     /// engine's definition of artist identity — the same fold that produced
     /// `artists.key` — and doing it here would be a second copy of that
     /// definition, free to drift from the one the rows were keyed by.
-    pub fn artistRequest(self: *App, offset: u32) liborca.database.ArtistQuery {
+    pub fn artistRequest(self: *App, offset: u32) liborca.ArtistQuery {
         return .{
             .filter = self.artist_filter.value,
             .limit = page_size,
@@ -221,7 +221,7 @@ pub const App = struct {
     /// filter above narrows which Artists are *listed*; this one is the Artist
     /// the user picked, which is a different question and the only one a
     /// Release listing can be scoped by.
-    pub fn releaseRequest(self: *App, offset: u32) liborca.database.ReleaseQuery {
+    pub fn releaseRequest(self: *App, offset: u32) liborca.ReleaseQuery {
         return .{
             .album_artist_id = self.browse.artist_id,
             .limit = page_size,

@@ -32,16 +32,9 @@ frontends, no frontend owning behaviour.
 
 ## Using liborca from Zig
 
-`build.zig` exports the module as `liborca`. A dependent project adds Orca to
-its `build.zig.zon` and imports the module:
-
-```zig
-const orca = b.dependency("orca", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("liborca", orca.module("liborca"));
-```
-
-The module links SQLite, libFLAC, libopusfile and libvorbisfile, plus PipeWire
-on Linux, through the host's pkg-config.
+The public API is the top level of the `liborca` module: `Runtime` and the
+types its methods use. [api.md](api.md) covers embedding liborca as a Zig
+package dependency and what the surface contains.
 
 ## Rules that hold everywhere
 
@@ -70,6 +63,7 @@ on Linux, through the host's pkg-config.
 | Storage and scanning | [storage.md](storage.md) |
 | Metadata and file mutation | [metadata.md](metadata.md) |
 | Analysis and duplicates | [analysis.md](analysis.md) |
+| Public Zig API | [api.md](api.md) |
 | Frontends and the C ABI | [frontends.md](frontends.md) |
 
 What exists, what is next and what is deferred: [roadmap.md](roadmap.md).

@@ -1646,7 +1646,7 @@ test "C ABI library query is bounded and callback-scoped" {
         &library,
     ));
     const box = runtimeBox(runtime).?;
-    try (try box.runtime.libraryDatabase(importLibrary(library))).tracks.upsertTracks(&.{
+    try (try core.runtime.databaseOf(&box.runtime, importLibrary(library))).tracks.upsertTracks(&.{
         .{ .title = "First", .album = "Generated", .album_artist = "Orca" },
         .{ .title = "Second", .album = "Generated", .album_artist = "Orca" },
     });
@@ -1665,7 +1665,7 @@ test "C ABI library query is bounded and callback-scoped" {
         countTrack,
     ));
     try std.testing.expectEqual(@as(usize, 1), visited);
-    const library_database = try box.runtime.libraryDatabase(importLibrary(library));
+    const library_database = try core.runtime.databaseOf(&box.runtime, importLibrary(library));
     const file_id = try library_database.files.create(.{ .size_bytes = 1024 });
     _ = try library_database.locations.upsert(.{
         .file_id = file_id,

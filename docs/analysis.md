@@ -14,7 +14,7 @@ Neither can use a measurement that does not exist, which is what
 ## The pass
 
 `library/analysis_pass.zig` measures every file in a Library that has not been
-measured yet. It is a runtime job (`OrcaRuntime.startLibraryAnalysis`,
+measured yet. It is a runtime job (`Runtime.startLibraryAnalysis`,
 `orca_library_start_analysis`, `orca-cli analyze-library`) built on exactly the
 machinery the property backfill uses: the shared `JobWorker`, the same
 cancellation token, the same job snapshot, bounded commits, and row selection
@@ -233,7 +233,7 @@ produced when the successor was still inheriting its predecessor's figure.
 ## Duplicate detection
 
 `library/duplicate_pass.zig` reports every file whose audio the Library also
-holds somewhere else. It is a runtime job (`OrcaRuntime.startLibraryDuplicateScan`,
+holds somewhere else. It is a runtime job (`Runtime.startLibraryDuplicateScan`,
 `orca_library_start_duplicate_scan`, `orca-cli duplicates`) on the same
 `JobWorker` machinery as the scan, the projection, the property backfill and
 the analysis pass: the same cancellation token, the same job snapshot, bounded

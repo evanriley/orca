@@ -141,7 +141,7 @@ fn dupe(text: []const u8) [:0]u8 {
 
 /// Copies everything out of the summary: the page that produced it is
 /// caller-owned and is released as soon as the page has been appended.
-pub fn new(summary: liborca.database.TrackSummary) ?*TrackObject {
+pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
     const self: *TrackObject = @ptrCast(object);
     const values = self.fields();
@@ -178,7 +178,7 @@ pub const Column = enum(usize) {
     /// order `App.sort_columns` records them in.
     pub const all = [_]Column{ .number, .title, .artist, .album, .duration };
 
-    pub fn sortKey(self: Column) liborca.database.TrackSort {
+    pub fn sortKey(self: Column) liborca.TrackSort {
         return switch (self) {
             .number => .track_number,
             .title => .title,

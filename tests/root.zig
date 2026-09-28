@@ -2,8 +2,8 @@ const std = @import("std");
 const liborca = @import("liborca");
 
 test "public module identifies the host platform" {
-    try std.testing.expect(liborca.platform.current.supported);
-    try std.testing.expect(liborca.platform.current.name.len > 0);
+    try std.testing.expect(liborca.internal.platform.current.supported);
+    try std.testing.expect(liborca.internal.platform.current.name.len > 0);
 }
 
 test "registered lossless and lossy codecs share SourceSession pipeline" {
@@ -14,24 +14,24 @@ test "registered lossless and lossy codecs share SourceSession pipeline" {
         // container prefix, so the public path decodes it identically.
         "fixtures/audio/id3-prefixed-reference.flac",
     };
-    const codecs = liborca.codec.CodecRegistry.builtins();
+    const codecs = liborca.internal.codec.CodecRegistry.builtins();
     for (paths) |path| {
-        var local = try liborca.storage.LocalFileSource.open(std.testing.io, path);
+        var local = try liborca.internal.storage.LocalFileSource.open(std.testing.io, path);
         defer local.close();
-        var source = liborca.audio.source_session.SourceSession.init(
+        var source = liborca.internal.audio.source_session.SourceSession.init(
             try codecs.openDetected(std.testing.allocator, local.readable()),
         );
         defer source.deinit();
         const frames: usize = @intCast(source.decoder.frame_count.?);
         const channels = source.decoder.format.channels;
-        var pool = try liborca.audio.buffer.BlockPool.init(
+        var pool = try liborca.internal.audio.buffer.BlockPool.init(
             std.testing.allocator,
             2,
             1024,
             channels,
         );
         defer pool.deinit();
-        var pipe: liborca.audio.render.RenderPipe(2) = .{};
+        var pipe: liborca.internal.audio.render.RenderPipe(2) = .{};
         try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, true));
         const output = try std.testing.allocator.alloc(f32, frames * channels);
         defer std.testing.allocator.free(output);
@@ -51,13 +51,13 @@ fn sleepMilliseconds(ms: u64) void {
 /// exercised through the same `playableLocation` -> `LocalFileSource` ->
 /// `CodecRegistry` path a projected corpus uses.
 fn openQueueLibrary(
-    runtime: *liborca.OrcaRuntime,
+    runtime: *liborca.Runtime,
     uri: [:0]const u8,
     paths: []const []const u8,
     ids: []i64,
-) !liborca.core.object.LibraryHandle {
+) !liborca.internal.core.object.LibraryHandle {
     const library = try runtime.openLibrary(std.testing.io, uri);
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(runtime, library);
     const volume_id = try database.volumes.ensure(.{
         .stable_key = "uuid:integration-queue",
         .label = "Fixtures",
@@ -86,9 +86,9 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     // critical path for most of a lossless library, and the FLAC decoder's
     // post-seek end-of-stream behaviour is not reproducible with a synthetic
     // decoder.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -98,7 +98,7 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     // would be one File with two Tracks rather than a queue of two.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    var fixture = try liborca.storage.LocalFileSource.open(
+    var fixture = try liborca.internal.storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/tagged-reference.flac",
     );
@@ -218,9 +218,9 @@ test "a play that cannot open its first track leaves nothing advertised as playi
     // defect was that the new queue survived the failure: a host polling
     // now-playing saw a track id and rendered a now-playing state for audio
     // that was not playing and could not be made to play.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -293,12 +293,12 @@ fn writeSineWav(
 /// A `files` row plus its Location and Track, carrying the quick hash a scan
 /// would have recorded — which is what an analysis is keyed against.
 fn recordAnalyzableTrack(
-    database: *liborca.database.LibraryDatabase,
+    database: *liborca.internal.database.LibraryDatabase,
     volume_id: i64,
     uri: []const u8,
     title: []const u8,
 ) !struct { file_id: i64, track_id: i64 } {
-    const digest = try liborca.storage.quick_hash.fromPath(std.testing.io, uri);
+    const digest = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, uri);
     const file_id = try database.files.create(.{ .audio_format = 1, .quick_hash = &digest });
     _ = try database.locations.upsert(.{
         .file_id = file_id,
@@ -319,24 +319,24 @@ fn recordAnalyzableTrack(
 /// The loudness the library-wide analysis stored for one file, read the way
 /// the playback path reads it.
 fn storedLoudness(
-    database: *liborca.database.LibraryDatabase,
+    database: *liborca.internal.database.LibraryDatabase,
     file_id: i64,
     uri: []const u8,
-) !?liborca.analysis.encoding.Loudness {
-    const identity = try liborca.storage.quick_hash.fromPath(std.testing.io, uri);
-    var header: [liborca.analysis.encoding.header_size]u8 = undefined;
+) !?liborca.internal.analysis.encoding.Loudness {
+    const identity = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, uri);
+    var header: [liborca.internal.analysis.encoding.header_size]u8 = undefined;
     const length = (try database.analysis_cache.resultInto(
-        liborca.analysis.service.diagnosticsKey(file_id, identity, .{}),
+        liborca.internal.analysis.service.diagnosticsKey(file_id, identity, .{}),
         &header,
     )) orelse return null;
     if (length < header.len) return null;
-    return liborca.analysis.encoding.decodeLoudness(&header);
+    return liborca.internal.analysis.encoding.decodeLoudness(&header);
 }
 
 fn runLibraryAnalysis(
-    database: *liborca.database.LibraryDatabase,
-) !liborca.library.analysis_pass.Result {
-    var pass: liborca.library.LibraryAnalysis = .{
+    database: *liborca.internal.database.LibraryDatabase,
+) !liborca.internal.library.analysis_pass.Result {
+    var pass: liborca.internal.library.LibraryAnalysis = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .files = &database.files,
@@ -351,9 +351,9 @@ fn runLibraryAnalysis(
 test "an analyzed entry plays corrected and an unanalyzed entry plays at unity" {
     // The whole seam this feature is: `Gain.setReplayGain` was called by
     // nothing, so a Library full of measurements changed no audio at all.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -378,7 +378,7 @@ test "an analyzed entry plays corrected and an unanalyzed entry plays at unity" 
         std.testing.io,
         "file:orca-replay-gain-applied?mode=memory&cache=shared",
     );
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
     const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain" });
     const measured = try recordAnalyzableTrack(database, volume_id, measured_uri, "Measured");
 
@@ -394,7 +394,7 @@ test "an analyzed entry plays corrected and an unanalyzed entry plays at unity" 
         "Unmeasured",
     );
     try std.testing.expectEqual(
-        @as(?liborca.analysis.encoding.Loudness, null),
+        @as(?liborca.internal.analysis.encoding.Loudness, null),
         try storedLoudness(database, unmeasured.file_id, unmeasured_uri),
     );
     const loudness = (try storedLoudness(database, measured.file_id, measured_uri)).?;
@@ -444,9 +444,9 @@ test "a loud track and a quiet track play closer in level after correction than 
     // The only test that catches the correction being applied with the wrong
     // sign, which would drive them 40 dB further apart while every other
     // assertion in this file still passed.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -463,7 +463,7 @@ test "a loud track and a quiet track play closer in level after correction than 
         std.testing.io,
         "file:orca-replay-gain-levels?mode=memory&cache=shared",
     );
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
     const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-levels" });
     const loud_uri = try std.fmt.bufPrint(
         &loud_path,
@@ -488,7 +488,7 @@ test "a loud track and a quiet track play closer in level after correction than 
     // Measured loudness, and the multiplier the render lane actually applies
     // to it. `replay_gain_db` is the target minus the measurement, so the
     // measurement itself is recoverable from it.
-    const target = liborca.analysis.diagnostics.Parameters{};
+    const target = liborca.internal.analysis.diagnostics.Parameters{};
     var levels: [2]f32 = undefined;
     var uncorrected: [2]f32 = undefined;
     const uris = [_][]const u8{ loud_uri, quiet_uri };
@@ -521,9 +521,9 @@ test "an entry whose bytes changed since it was measured plays at unity" {
     // last scan therefore loses its correction rather than being played at one
     // measured from audio it no longer contains — and the Library cannot help
     // here, because its record is only as fresh as the last scan.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -541,7 +541,7 @@ test "an entry whose bytes changed since it was measured plays at unity" {
         std.testing.io,
         "file:orca-replay-gain-stale?mode=memory&cache=shared",
     );
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
     const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-stale" });
     const edited = try recordAnalyzableTrack(database, volume_id, edited_uri, "Edited");
     try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
@@ -576,9 +576,9 @@ const EntryObservation = struct {
 /// entry ends because its audio ran out, so the successor arrives on the engine
 /// thread and never passes through the control lane's hard-load path.
 fn observeEntry(
-    runtime: *liborca.OrcaRuntime,
-    backend: *liborca.audio.output.TestBackend,
-    player: liborca.core.object.PlayerHandle,
+    runtime: *liborca.Runtime,
+    backend: *liborca.internal.audio.output.TestBackend,
+    player: liborca.internal.core.object.PlayerHandle,
     target: u32,
     measured_blocks: usize,
 ) !EntryObservation {
@@ -624,8 +624,8 @@ fn observeEntry(
 /// The multiplier a correction of `loudness` produces, computed the way the
 /// engine computes it so the expectation is the contract rather than a
 /// transcribed constant.
-fn expectedGain(loudness: liborca.analysis.encoding.Loudness) f32 {
-    return liborca.audio.processing.replayGainMultiplier(
+fn expectedGain(loudness: liborca.internal.analysis.encoding.Loudness) f32 {
+    return liborca.internal.audio.processing.replayGainMultiplier(
         loudness.replay_gain_db,
         loudness.sample_peak,
     );
@@ -637,9 +637,9 @@ test "a gapless auto-advance adopts the successor's own loudness correction" {
     // stayed on the *previous* entry's figure for the whole of the next track.
     // Within one album — the normal case for this library — that applies track
     // one's correction to every track after it.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -657,7 +657,7 @@ test "a gapless auto-advance adopts the successor's own loudness correction" {
         std.testing.io,
         "file:orca-replay-gain-gapless?mode=memory&cache=shared",
     );
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
     const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-gapless" });
     const loud_uri = try std.fmt.bufPrint(
         &loud_path,
@@ -716,9 +716,9 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
     // The same defect in its quieter form: inheritance across the transition
     // is silent when the successor has no measurement of its own, because
     // nothing about the audio says it is being played at another track's level.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -733,7 +733,7 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
         std.testing.io,
         "file:orca-replay-gain-gapless-unity?mode=memory&cache=shared",
     );
-    const database = try runtime.libraryDatabase(library);
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
     const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:replay-gain-unity" });
     const analyzed_uri = try std.fmt.bufPrint(
         &analyzed_path,
@@ -756,7 +756,7 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
         "Unanalyzed",
     );
     try std.testing.expectEqual(
-        @as(?liborca.analysis.encoding.Loudness, null),
+        @as(?liborca.internal.analysis.encoding.Loudness, null),
         try storedLoudness(database, unanalyzed.file_id, unanalyzed_uri),
     );
 
@@ -790,9 +790,9 @@ test "the queue reports the rows a host displays, in the order it will play them
     // printed "Track 14732" for the rest. That is metadata resolution in a
     // frontend, which this architecture forbids, and it was a linear scan of
     // every loaded row per queue entry besides.
-    var backend: liborca.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
-    var runtime = liborca.OrcaRuntime.init(std.testing.allocator);
+    var runtime = liborca.Runtime.init(std.testing.allocator);
     defer runtime.deinit();
     runtime.setOutputFactory(backend.factory());
 
@@ -800,7 +800,7 @@ test "the queue reports the rows a host displays, in the order it will play them
     // entry and a row pointing at nothing cannot be opened.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    var fixture = try liborca.storage.LocalFileSource.open(
+    var fixture = try liborca.internal.storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/tagged-reference.flac",
     );

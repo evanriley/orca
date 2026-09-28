@@ -91,8 +91,8 @@ be stable, cheap and unsurprising:
 A majority vote or "the largest image" would both have to open every file in
 the Release, and both would change their answer when one track is re-tagged.
 
-Reachable as `OrcaRuntime.libraryTrackArtwork` and
-`OrcaRuntime.libraryReleaseArtwork`, and from `orca-cli artwork DATABASE
+Reachable as `Runtime.libraryTrackArtwork` and
+`Runtime.libraryReleaseArtwork`, and from `orca-cli artwork DATABASE
 (--track=ID | --release=ID) [--out=PATH]`.
 
 ## File mutation

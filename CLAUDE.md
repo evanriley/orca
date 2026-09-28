@@ -242,7 +242,10 @@ of transport state, library paging, or metadata resolution.
 
 **Frontend language is Zig wherever the platform permits it.** The project is
 Zig-first, and that applies to `apps/`, not only to `liborca`. `orca-cli` and
-`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly. C appears
+`orca-gtk` are Zig and consume liborca's **public Zig API** directly: the
+top level of `liborca/root.zig`, never `liborca.internal` (see `docs/api.md`).
+A frontend that needs something only `internal` has is missing a `Runtime`
+method; add the method. C appears
 in a frontend only where a platform genuinely forces it.
 
 Non-Zig frontends reach the engine through `liborca/orca.h` (a C ABI of opaque
@@ -262,7 +265,7 @@ actually uses.
 
 ### Runtime ownership
 
-`core.OrcaRuntime` is the process-level root. Every runtime-visible object is a
+`Runtime` (`core.OrcaRuntime` inside liborca) is the process-level root. Every runtime-visible object is a
 typed generational handle (`handle.Pool`), so destroying an object bumps its
 slot generation and a stale handle can never resolve to a later occupant of the
 same slot. Shutdown is strictly dependency-ordered — work → Zones → Players →
@@ -377,6 +380,8 @@ into Orca metadata that preserves user locks and does **not** write media files.
 
 ## Conventions
 
+- **Public API.** A new `Runtime` method's parameter and return types are
+  exported at the top of `liborca/root.zig`; test-only hooks stay private.
 - **Subsystem roots.** Each `liborca/<subsystem>/root.zig` re-exports every file
   as a `pub const` and mirrors that list in a `test { _ = @import(...); }`
   block. Add new files to both.

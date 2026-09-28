@@ -2,6 +2,20 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### A deliberate public Zig API (breaking)
+
+- **`liborca`'s top level is the API.** It exports `Runtime`, its handles and
+  every type its methods take or return. The twelve subsystem namespaces moved
+  under `liborca.internal`, which is for liborca's own tests and benchmarks.
+- **`OrcaRuntime` is `Runtime`** from outside the library.
+- **`Runtime.libraryDatabase` is no longer public.** The CLI used it to reach
+  the database directly; `libraryUnanalyzedCount`, `libraryAnalyzeFile` and the
+  existing `libraryHealthIssuePage` replace those uses. Seven test-only hooks
+  (`startDummyWork`, `markZoneOutputLost`, ...) are private too.
+- **`examples/embed`** depends on Orca as a Zig package and lists a library's
+  tracks; `zig build test` builds it. `docs/api.md` documents embedding and the
+  surface.
+
 ### QOA decodes through the reference decoder, and seeks
 
 - **The `audiophile/qoa` package is gone.** It shipped no licence, which left

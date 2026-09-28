@@ -11,18 +11,18 @@ fn silence(
 }
 
 pub fn main() !void {
-    var backend: liborca.audio.backends.native.Backend = .{};
+    var backend: liborca.internal.audio.backends.native.Backend = .{};
     backend.init();
     defer backend.deinit();
 
-    var devices: [16]liborca.audio.backend.Device = undefined;
+    var devices: [16]liborca.internal.audio.backend.Device = undefined;
     const device_count = try backend.discover(&devices);
     if (device_count == 0) return error.NoPipeWireOutputs;
     for (devices[0..device_count]) |*device| {
         std.debug.print("PipeWire output {d}: {s}\n", .{ device.id, device.nameSlice() });
     }
 
-    var output = try liborca.audio.backends.native.OutputSession.open(
+    var output = try liborca.internal.audio.backends.native.OutputSession.open(
         .{
             .device_id = devices[0].id,
             .format = .{

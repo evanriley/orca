@@ -13,11 +13,11 @@ pub fn main(init: std.process.Init) !void {
     else
         try allocator.dupeSentinel(u8, "file:orca-benchmark?mode=memory&cache=shared", 0);
 
-    var library = try liborca.database.LibraryDatabase.open(allocator, init.io, path);
+    var library = try liborca.internal.database.LibraryDatabase.open(allocator, init.io, path);
     defer library.close();
     try library.database.exec("DELETE FROM tracks;");
 
-    var batch: [1000]liborca.database.TrackInput = undefined;
+    var batch: [1000]liborca.internal.database.TrackInput = undefined;
     for (&batch, 0..) |*track, index| track.* = .{
         .title = "Synthetic benchmark track",
         .album = "Synthetic benchmark album",
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len > 2) {
         library.close();
         const open_start = std.Io.Clock.awake.now(init.io);
-        library = try liborca.database.LibraryDatabase.open(allocator, init.io, path);
+        library = try liborca.internal.database.LibraryDatabase.open(allocator, init.io, path);
         open_ns = open_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     }
 

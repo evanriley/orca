@@ -97,7 +97,7 @@ against and shows no length in a listing.
 
 `library/property_backfill.zig` is the repair, and it is the same shape as the
 projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
-(`OrcaRuntime.startLibraryPropertyBackfill`,
+(`Runtime.startLibraryPropertyBackfill`,
 `orca_library_start_property_backfill`, `orca-cli backfill`).
 
 - **Selection is one indexed search.** `SELECT ... WHERE files.id > ? AND

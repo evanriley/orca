@@ -2,7 +2,7 @@
 
 Each `LibraryDatabase` owns one SQLite database and one serialized logical write
 lane. Paths are copied at open time so the Library owns all state needed to open
-independent read connections. `OrcaRuntime.openLibrary` associates that database
+independent read connections. `Runtime.openLibrary` associates that database
 with a typed generational `LibraryHandle` and closes it during explicit removal
 or ordered runtime shutdown.
 
