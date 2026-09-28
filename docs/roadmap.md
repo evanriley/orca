@@ -4,6 +4,14 @@ What Orca does today, what comes next, and what is deferred. "Works" means
 reachable from `orca-cli` or `orca-gtk` through the public runtime path, per
 the rule in [architecture.md](architecture.md).
 
+## Status
+
+Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
+designed libadwaita frontend, gapless playback at each source's sample rate,
+live equalizer and crossfeed, tag editing with undo, and track details.
+Providers and filesystem watching are built but not connected; macOS has no
+audio output yet.
+
 ## Works today
 
 ### Library
@@ -83,21 +91,46 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **A fixed output rate with a band-limited resampler** (libsamplerate or
-   speexdsp behind a shim), for gapless playback across sample rates.
-2. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
-   Last.fm follows.
-3. **Filesystem watching** as a scan accelerator.
-4. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
-   folder, but its files and tracks stay in the library, listed.
-5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+1. **Daily-use fixes.**
+   - Forgetting a removed folder: `libraryRemoveRoot` stops scanning a folder,
+     but its files and tracks stay in the library, listed.
+   - A custom equalizer curve is not saved while the equalizer is off.
+   - Album page rows cannot be selected, so an album's details panel shows
+     only the track last played there.
+   - `orca-cli track` with an unknown id prints an error trace instead of a
+     message.
+2. **ListenBrainz scrobbling**, the first provider to connect. It needs the
+   HTTP fixes listed under [Built but not reachable](#built-but-not-reachable):
+   request deadlines and cancellation, and leased scrobble queue rows. The
+   token comes from secure storage and is set in Preferences.
+3. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
+   `orca-gtk`. Proposal acceptance must re-read the stored payload inside its
+   transaction first. Last.fm follows.
+4. **Filesystem watching** as a scan accelerator, so new files appear without
+   a manual rescan.
+5. **A fixed output rate with a band-limited resampler** (libsamplerate or
+   speexdsp behind a shim), for gapless playback across sample-rate changes
+   and for devices held at another rate. Playback at the source rate already
+   covers the common case.
+6. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
-   writable. The C ABI has neither tag writes nor queue editing.
-6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+   writable. The C ABI lacks tag writes, queue editing, DSP and track
+   details.
+7. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-7. **Undecodable files are re-examined on every analysis run.** They are
+8. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
+
+## Known issues
+
+Small defects that are not yet scheduled:
+
+- A lossy source reports a bit-perfect signal path when no processing
+  applies: the decoded output is unchanged, but the source was not lossless.
+- `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
+  it on change, never on a tick.
+- `ZoneRuntime.published_device_delay_frames` is written but never read.
 
 ## Deferred formats
 
