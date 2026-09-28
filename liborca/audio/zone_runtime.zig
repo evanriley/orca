@@ -69,7 +69,7 @@ pub const ZoneRuntime = struct {
     requested_device_id: std.atomic.Value(u64) = .init(0),
 
     // ---- Engine -> control lane published state ----
-    published_output_state: std.atomic.Value(u8) = .init(@backingInt(zone_model.OutputState.closed)),
+    published_output_state: std.atomic.Value(u8) = .init(@intFromEnum(zone_model.OutputState.closed)),
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
     published_device_delay_frames: std.atomic.Value(u64) = .init(0),
@@ -141,11 +141,11 @@ pub const ZoneRuntime = struct {
     }
 
     pub fn outputState(self: *const ZoneRuntime) zone_model.OutputState {
-        return @fromBackingInt(@intCast(self.published_output_state.load(.acquire)));
+        return @enumFromInt(@as(std.meta.Tag(zone_model.OutputState), @intCast(self.published_output_state.load(.acquire))));
     }
 
     pub fn publishState(self: *ZoneRuntime) void {
-        self.published_output_state.store(@backingInt(self.zone.output_state), .release);
+        self.published_output_state.store(@intFromEnum(self.zone.output_state), .release);
         self.published_recovery_attempts.store(self.zone.recovery_attempts, .release);
         self.published_quantum_frames.store(self.zone.latency.backend_quantum_frames, .release);
     }

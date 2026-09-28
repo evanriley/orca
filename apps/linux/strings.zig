@@ -9,7 +9,7 @@ const std = @import("std");
 /// `std.fmt.bufPrint` with a NUL sentinel: the form every `gtk_*_set_text` call
 /// needs.
 pub fn printZ(buffer: []u8, comptime format: []const u8, args: anytype) ![:0]u8 {
-    return std.mem.printSentinel(buffer, format, args, 0);
+    return std.fmt.bufPrintSentinel(buffer, format, args, 0);
 }
 
 /// Formats milliseconds as `m:ss`, the transport's only time format.

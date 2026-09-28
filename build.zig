@@ -10,6 +10,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    for (pkgConfigIncludePaths(b, "sqlite3")) |include_path| {
+        sqlite_translate.addSystemIncludePath(include_path);
+    }
     const sqlite_module = sqlite_translate.createModule();
 
     const liborca_module = b.addModule("liborca", .{
@@ -42,12 +45,9 @@ pub fn build(b: *std.Build) void {
             .file = b.path("liborca/audio/backends/pipewire_shim.c"),
             .flags = &.{ "-std=c11", "-D_GNU_SOURCE", "-D_REENTRANT" },
         });
-        liborca_module.addSystemIncludePath(
-            b.graph.cwdRelativePath("/usr/include/pipewire-0.3"),
-        );
-        liborca_module.addSystemIncludePath(
-            b.graph.cwdRelativePath("/usr/include/spa-0.2"),
-        );
+        for (pkgConfigIncludePaths(b, "libpipewire-0.3")) |include_path| {
+            liborca_module.addSystemIncludePath(include_path);
+        }
         liborca_module.linkSystemLibrary("pipewire-0.3", .{ .use_pkg_config = .no });
     }
 
@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());
-    run_cli.addPassthruArgs();
+    if (b.args) |args| run_cli.addArgs(args);
     const run_step = b.step("run", "Run orca-cli");
     run_step.dependOn(&run_cli.step);
 
@@ -196,7 +196,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_benchmark = b.addRunArtifact(benchmark);
-    run_benchmark.addPassthruArgs();
+    if (b.args) |args| run_benchmark.addArgs(args);
     const benchmark_step = b.step("bench", "Run Orca benchmarks");
     benchmark_step.dependOn(&run_benchmark.step);
 
@@ -210,7 +210,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_dsp_benchmark = b.addRunArtifact(dsp_benchmark);
-    run_dsp_benchmark.addPassthruArgs();
+    if (b.args) |args| run_dsp_benchmark.addArgs(args);
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
+}
+
+/// Only `-I` paths are taken from pkg-config: PipeWire's full `--cflags`
+/// contain flags that Zig's pkg-config integration rejects.
+fn pkgConfigIncludePaths(b: *std.Build, package: []const u8) []const std.Build.LazyPath {
+    const output = b.run(&.{ "pkg-config", "--cflags-only-I", package });
+    var include_paths: std.ArrayList(std.Build.LazyPath) = .empty;
+    var flags = std.mem.tokenizeAny(u8, output, " \n");
+    while (flags.next()) |flag| {
+        if (!std.mem.startsWith(u8, flag, "-I")) continue;
+        include_paths.append(b.allocator, .{ .cwd_relative = flag[2..] }) catch @panic("OOM");
+    }
+    return include_paths.items;
 }

@@ -272,7 +272,7 @@ pub const Scanner = struct {
         errdefer self.database_handle.exec("ROLLBACK;") catch {};
         for (pending.items) |entry| {
             const upsert = database.FileUpsert{
-                .audio_format = @backingInt(entry.audio_format),
+                .audio_format = @intFromEnum(entry.audio_format),
                 // Empty only for a file that sniffed as audio and then refused
                 // to open: the container is known, the encoding inside it is
                 // not, and an invented identifier would be worse than none.

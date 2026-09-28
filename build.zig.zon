@@ -1,7 +1,7 @@
 .{
     .name = .orca,
     .version = "0.2.0-alpha",
-    .minimum_zig_version = "0.17.0-dev.1770+5d7cf3f34",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .qoa = .{
             .url = "git+https://codeberg.org/audiophile/qoa#v1.0.0",

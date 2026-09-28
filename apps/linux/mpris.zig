@@ -274,7 +274,8 @@ pub const Mpris = struct {
         defer cover.deinit();
 
         const allocator = runtime.allocator;
-        const directory = allocator.printSentinel(
+        const directory = std.fmt.allocPrintSentinel(
+            allocator,
             "{s}/orca",
             .{std.mem.span(gtk.g_get_user_cache_dir())},
             0,
@@ -282,7 +283,8 @@ pub const Mpris = struct {
         defer allocator.free(directory);
         if (gtk.g_mkdir_with_parents(directory.ptr, 0o700) != 0) return null;
 
-        const path = allocator.printSentinel(
+        const path = std.fmt.allocPrintSentinel(
+            allocator,
             "{s}/now-playing-{d}{s}",
             .{ directory, track_id, extensionFor(cover.mime_type) },
             0,
@@ -298,7 +300,7 @@ pub const Mpris = struct {
             allocator.free(path);
             return null;
         }
-        const url = allocator.printSentinel("file://{s}", .{path}, 0) catch {
+        const url = std.fmt.allocPrintSentinel(allocator, "file://{s}", .{path}, 0) catch {
             _ = gtk.g_unlink(path.ptr);
             allocator.free(path);
             return null;
