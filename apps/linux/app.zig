@@ -16,6 +16,7 @@ const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
+const details = @import("details.zig");
 
 /// One page. The list is filled a page at a time as the user scrolls rather
 /// than all at once, so a 22,060-track library stays virtualized.
@@ -175,6 +176,13 @@ pub const App = struct {
     welcome_spinner: ?*gtk.Widget = null,
     browse_panes: ?*gtk.Widget = null,
     browse_toggle: ?*gtk.Widget = null,
+
+    // track details
+    /// The one on/off choice the details panels share, restored from settings.
+    details_visible: bool = false,
+    /// Set while the window is below the breakpoint that hides the panels.
+    window_narrow: bool = false,
+    details_panels: [details.panel_limit]?*details.Panel = @splat(null),
 
     // albums
     album_store: ?*gtk.ListStore = null,
@@ -491,6 +499,7 @@ pub const App = struct {
         );
         self.loadNextPage();
         self.updateTracksBody();
+        details.invalidate(self);
     }
 
     pub fn deinit(self: *App) void {

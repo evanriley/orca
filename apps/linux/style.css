@@ -317,3 +317,16 @@ button.album-artist {
 .eq-bands {
   padding: 12px 6px;
 }
+
+.details-panel {
+  border-left: 1px solid alpha(currentColor, 0.12);
+}
+
+.details-body {
+  padding: 18px;
+}
+
+.details-title {
+  font-weight: 800;
+  font-size: 1.2em;
+}

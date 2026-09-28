@@ -66,6 +66,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !diagnostics.Resu
 /// Both values are needed together: a correction without its peak cannot be
 /// capped against clipping, so they are read as one thing rather than two.
 pub const Loudness = struct {
+    integrated_lufs: f32,
     replay_gain_db: f32,
     sample_peak: f32,
 };
@@ -86,6 +87,7 @@ pub fn decodeLoudness(bytes: []const u8) !?Loudness {
     if (readInt(u16, bytes[4..6]) != version) return error.UnsupportedAnalysisResultVersion;
     if (readInt(u16, bytes[6..8]) & 1 == 0) return null;
     return .{
+        .integrated_lufs = readFloat(bytes[8..12]),
         .replay_gain_db = readFloat(bytes[12..16]),
         .sample_peak = readFloat(bytes[16..20]),
     };
@@ -172,6 +174,7 @@ test "loudness is read from an encoded result without materializing its waveform
     defer allocator.free(bytes);
 
     const loudness = (try decodeLoudness(bytes)).?;
+    try std.testing.expectApproxEqAbs(@as(f32, -11.29), loudness.integrated_lufs, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, -6.71), loudness.replay_gain_db, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.940_46), loudness.sample_peak, 0.0001);
 }

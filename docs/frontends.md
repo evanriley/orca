@@ -145,6 +145,16 @@ and whether the path is bit-perfect, with the reasons when it is not. It comes
 from `Runtime.playerSignalPath` and is read only when the menu opens and when
 the track changes while it is open, never on the tick.
 
+The **details panel** sits right of the Tracks list and of each album page.
+The header toggle or `Ctrl+I` shows or hides every panel at once, and the
+choice is saved as `[view] details`; it starts hidden and is hidden below the
+760sp breakpoint. The Tracks panel shows the first selected track, otherwise
+the playing one; an album page's panel shows the track last activated there,
+otherwise the playing track when it belongs to the album. It is filled from
+`Runtime.libraryTrackDetails` when the shown track changes and when the
+library changes. The playing track also gets its signal path, read when the
+track changes, never on the tick.
+
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the output menu; see
 [Testing playback without making noise](../CLAUDE.md).

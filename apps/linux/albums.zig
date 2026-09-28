@@ -10,6 +10,7 @@ const art = @import("art.zig");
 const browse_model = @import("browse_model.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
+const details = @import("details.zig");
 const menu = @import("menu.zig");
 const artists = @import("artists.zig");
 
@@ -269,6 +270,7 @@ pub const AlbumPage = struct {
     rows: []?*gtk.Widget,
     release_id: i64,
     album_artist_id: ?i64,
+    details: ?*details.Panel = null,
 };
 
 fn pageData(data: ?*anyopaque) *AlbumPage {
@@ -361,6 +363,7 @@ fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(
     const page = pageData(data);
     const start = rowPosition(gtk.cast(gtk.Widget, row)) orelse return;
     if (start >= page.ids.len) return;
+    if (page.details) |panel| details.choose(panel, page.ids[start]);
     transport.playIds(page.self, page.ids, @intCast(start));
 }
 
@@ -565,9 +568,12 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(pageDestroyed), page);
     registerPage(page);
 
+    const header = adw.adw_header_bar_new();
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), adw.adw_header_bar_new());
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), scroller);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
+    const beside = details.besideContent(self, header, scroller, .{ .ids = page.ids });
+    page.details = beside.panel;
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), beside.widget);
     const title_text = strings.printZ(&buffer, "{s}", .{if (release.title.len != 0) release.title else "Album"}) catch "Album";
     adw.adw_navigation_view_push(navigation, adw.adw_navigation_page_new(view, title_text.ptr));
 }

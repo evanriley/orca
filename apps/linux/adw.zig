@@ -53,6 +53,7 @@ pub extern fn adw_preferences_group_add(group: *PreferencesGroup, child: *gtk.Wi
 pub extern fn adw_preferences_group_set_title(group: *PreferencesGroup, title: [*:0]const u8) void;
 pub extern fn adw_preferences_group_set_description(group: *PreferencesGroup, description: ?[*:0]const u8) void;
 pub extern fn adw_preferences_row_set_title(row: *PreferencesRow, title: [*:0]const u8) void;
+pub extern fn adw_preferences_row_set_use_markup(row: *PreferencesRow, use_markup: gtk.gboolean) void;
 pub extern fn adw_action_row_new() *gtk.Widget;
 pub extern fn adw_action_row_add_suffix(row: *ActionRow, widget: *gtk.Widget) void;
 pub extern fn adw_action_row_add_prefix(row: *ActionRow, widget: *gtk.Widget) void;

@@ -158,6 +158,7 @@ test "signal path explains bit-perfect eligibility" {
         .render_ahead_frames = 128,
         .dsp_frames = 0,
         .hardware_frames = 64,
+        .graph_rate_hz = null,
     };
     resampled.applyAlgorithmicLatency(&latency);
     try std.testing.expectEqual(@as(u32, 1), latency.dsp_frames);

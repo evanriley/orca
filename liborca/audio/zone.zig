@@ -47,6 +47,7 @@ pub const Latency = struct {
     render_ahead_frames: u32,
     dsp_frames: u32,
     hardware_frames: ?u32,
+    graph_rate_hz: ?u32,
 
     pub fn knownTotalFrames(self: Latency) u64 {
         return @as(u64, self.render_ahead_frames) +
@@ -104,6 +105,7 @@ test "Zone device recovery is isolated state" {
         .render_ahead_frames = 0,
         .dsp_frames = 0,
         .hardware_frames = null,
+        .graph_rate_hz = null,
     };
     var healthy: Zone = .{ .policy = .robust, .latency = empty_latency };
     var failed: Zone = .{ .policy = .interactive, .latency = empty_latency };

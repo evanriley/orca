@@ -381,6 +381,36 @@ pub const ResolvedLocation = struct {
     }
 };
 
+/// What the Library recorded about the file a Track resolves to, read in one
+/// row so a host can describe a Track without one query per fact.
+pub const TrackFileFacts = struct {
+    allocator: std.mem.Allocator,
+    file_id: i64,
+    codec: []u8,
+    size_bytes: i64,
+    sample_rate: ?i64,
+    bit_depth: ?i64,
+    channels: ?i64,
+    duration_ms: ?i64,
+    quick_hash: ?quick_hash.Digest,
+    /// The uri of the best location that is not missing, or null when every
+    /// location is.
+    path: ?[]u8,
+    /// Whether the last scan observed a non-empty cover in the file.
+    has_artwork: bool,
+    /// The Release's date and compilation flag, as the projection resolved them
+    /// from every file of the Release and any user edits. Null without a
+    /// Release.
+    release_date: ?[]u8,
+    compilation: ?bool,
+
+    pub fn deinit(self: TrackFileFacts) void {
+        self.allocator.free(self.codec);
+        if (self.path) |value| self.allocator.free(value);
+        if (self.release_date) |value| self.allocator.free(value);
+    }
+};
+
 /// Observed tags as the readers produce them, addressed by file identity.
 ///
 /// The tag set is `metadata.ObservedTags` verbatim: anything a reader can
@@ -965,6 +995,64 @@ pub const TrackRepository = struct {
             .uri = uri,
             .audio_format = std.math.cast(u8, statement.columnInt64(3)) orelse
                 return error.InvalidStoredAudioFormat,
+        };
+    }
+
+    /// The recorded facts of the file a Track resolves to, or null when the
+    /// Track does not exist or has no file. One row: nothing on disk is read.
+    pub fn fileFacts(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?TrackFileFacts {
+        var statement = try self.db.prepare(
+            \\SELECT files.id, files.codec, files.size_bytes, files.sample_rate,
+            \\       files.bit_depth, files.channels, files.duration_ms, files.quick_hash,
+            \\       (SELECT locations.uri FROM locations
+            \\        WHERE locations.file_id = files.id AND locations.state <> 'missing'
+            \\        ORDER BY CASE locations.state WHEN 'present' THEN 0 ELSE 1 END, locations.id
+            \\        LIMIT 1),
+            \\       COALESCE(observed_file_tags.artwork_byte_size, 0) > 0
+            \\           AND observed_file_tags.artwork_mime_type IS NOT NULL,
+            \\       releases.release_date, releases.is_compilation
+            \\FROM tracks
+            \\JOIN files ON files.id = COALESCE(
+            \\    tracks.preferred_file_id,
+            \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1)
+            \\)
+            \\LEFT JOIN observed_file_tags ON observed_file_tags.file_id = files.id
+            \\LEFT JOIN releases ON releases.id = tracks.release_id
+            \\WHERE tracks.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return null;
+        const codec = try allocator.dupe(u8, statement.columnText(1));
+        errdefer allocator.free(codec);
+        const path: ?[]u8 = if (statement.columnIsNull(8))
+            null
+        else
+            try allocator.dupe(u8, statement.columnText(8));
+        errdefer if (path) |value| allocator.free(value);
+        const release_date: ?[]u8 = if (statement.columnIsNull(10))
+            null
+        else
+            try allocator.dupe(u8, statement.columnText(10));
+        errdefer if (release_date) |value| allocator.free(value);
+        return .{
+            .allocator = allocator,
+            .file_id = statement.columnInt64(0),
+            .codec = codec,
+            .size_bytes = statement.columnInt64(2),
+            .sample_rate = optionalInt64(statement, 3),
+            .bit_depth = optionalInt64(statement, 4),
+            .channels = optionalInt64(statement, 5),
+            .duration_ms = optionalInt64(statement, 6),
+            .quick_hash = digestColumn(statement, 7),
+            .path = path,
+            .has_artwork = statement.columnInt64(9) != 0,
+            .release_date = release_date,
+            .compilation = if (statement.columnIsNull(11)) null else statement.columnInt64(11) != 0,
         };
     }
 

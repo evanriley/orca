@@ -213,6 +213,8 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("undid group {d}\n", .{group});
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "covers")) {
         try loadCovers(allocator, init.io, stdout, args[2], args[3..]);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "track")) {
+        try showTrack(allocator, init.io, stdout, args[2], args[3]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
         try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
@@ -277,6 +279,7 @@ pub fn main(init: std.process.Init) !void {
             \\                 | artists DATABASE [OPTIONS]
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
+            \\                 | track DATABASE ID
             \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
             \\                 | covers DATABASE [--limit N] [--offset N]
             \\                 | edit DATABASE IDS [EDITS]
@@ -306,6 +309,10 @@ pub fn main(init: std.process.Init) !void {
             \\  --desc             reverse the order
             \\  --limit N          page size, 1 to 512 (default 50)
             \\  --offset N         rows to skip
+            \\
+            \\track prints what the Library recorded about one Track and its file: tags,
+            \\format, size, path, stored loudness and whether the file carries a cover.
+            \\It opens no file.
             \\
             \\play-tracks plays a comma-separated list of Track ids as a playback
             \\queue. Options:
@@ -479,6 +486,10 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             " -> output {s} {d} Hz {d} ch",
             .{ formatName(output.sample_format), output.sample_rate, output.channels },
         );
+        if (path.device_rate) |device_rate| {
+            try stdout.print(" -> device {d} Hz", .{device_rate});
+            if (device_rate != output.sample_rate) try stdout.writeAll(" (PipeWire resamples)");
+        }
     } else try stdout.writeAll(" -> no output");
     try stdout.print("; bit-perfect: {s}", .{if (path.bit_perfect_eligible) "yes" else "no"});
     for (path.reasonList(), 0..) |reason, index| {
@@ -854,6 +865,76 @@ fn writeTags(
     try awaitJob(&runtime, stdout, job_handle, null);
     const stats = try runtime.jobScanStats(job_handle);
     try stdout.print("wrote {d} files as group {d}\n", .{ stats.changed, plan.plan_id });
+}
+
+/// `orca-cli track DATABASE ID`: the details view's query, printed.
+fn showTrack(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_argument: []const u8,
+) !void {
+    const track_id = try std.fmt.parseInt(i64, id_argument, 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const details = (try runtime.libraryTrackDetails(library, track_id)) orelse
+        return error.TrackNotFound;
+    defer details.deinit();
+
+    try printDetail(stdout, "title", "{s}", .{details.title});
+    try printDetail(stdout, "artist", "{s}", .{details.artist});
+    try printDetail(stdout, "album", "{s}", .{details.album});
+    try printDetail(stdout, "album artist", "{s}", .{details.album_artist});
+    try printOptionalDetail(stdout, "date", "{s}", details.date);
+    try printOptionalDetail(stdout, "track", "{d}", details.track_number);
+    try printOptionalDetail(stdout, "disc", "{d}", details.disc_number);
+    try printDetail(stdout, "codec", "{s}", .{if (details.codec.len == 0) "-" else details.codec});
+    try printOptionalDetail(stdout, "sample rate", "{d} Hz", details.sample_rate);
+    if (!details.lossy) try printOptionalDetail(stdout, "bit depth", "{d}-bit", details.bit_depth);
+    try printOptionalDetail(stdout, "channels", "{d}", details.channels);
+    try printOptionalDetail(stdout, "bitrate", "{d} kbps", details.bitrate_kbps);
+    try writeDetailKey(stdout, "duration");
+    try writeDuration(stdout, details.duration_ms);
+    try stdout.writeAll("\n");
+    try printOptionalDetail(stdout, "size", "{d} bytes", details.size_bytes);
+    if (details.path) |path| {
+        try printDetail(stdout, "path", "{s}", .{path});
+    } else try printDetail(stdout, "path", "{s}", .{"(file missing)"});
+    if (details.loudness) |loudness| {
+        try printDetail(
+            stdout,
+            "loudness",
+            "{d:.1} LUFS, peak {d:.1} dBFS, ReplayGain {d:.1} dB",
+            .{ loudness.integrated_lufs, 20 * @log10(loudness.sample_peak), loudness.replay_gain_db },
+        );
+    } else try printDetail(stdout, "loudness", "{s}", .{"not measured"});
+    try printDetail(stdout, "artwork", "{s}", .{if (details.has_artwork) "yes" else "no"});
+}
+
+fn writeDetailKey(stdout: *std.Io.Writer, comptime key: []const u8) !void {
+    try stdout.print("{s: <14}", .{key ++ ":"});
+}
+
+fn printDetail(
+    stdout: *std.Io.Writer,
+    comptime key: []const u8,
+    comptime format: []const u8,
+    arguments: anytype,
+) !void {
+    try writeDetailKey(stdout, key);
+    try stdout.print(format ++ "\n", arguments);
+}
+
+fn printOptionalDetail(
+    stdout: *std.Io.Writer,
+    comptime key: []const u8,
+    comptime format: []const u8,
+    value: anytype,
+) !void {
+    if (value) |present| return printDetail(stdout, key, format, .{present});
+    return printDetail(stdout, key, "{s}", .{"-"});
 }
 
 /// `orca-cli artwork DATABASE (--track ID | --release ID) [--out PATH]`.

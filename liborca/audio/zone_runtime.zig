@@ -86,6 +86,7 @@ pub const ZoneRuntime = struct {
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
     published_device_delay_frames: std.atomic.Value(u64) = .init(0),
+    published_graph_rate_hz: std.atomic.Value(u32) = .init(0),
 
     // ---- Engine-thread-only state ----
     output: ?output_api.Output = null,
@@ -121,6 +122,7 @@ pub const ZoneRuntime = struct {
                     .render_ahead_frames = 0,
                     .dsp_frames = 0,
                     .hardware_frames = null,
+                    .graph_rate_hz = null,
                 },
             },
             .pool = try buffer.BlockPool.init(
@@ -161,6 +163,11 @@ pub const ZoneRuntime = struct {
         self.published_output_state.store(@intFromEnum(self.zone.output_state), .release);
         self.published_recovery_attempts.store(self.zone.recovery_attempts, .release);
         self.published_quantum_frames.store(self.zone.latency.backend_quantum_frames, .release);
+        const graph_rate_hz = if (self.zone.output_state == .active)
+            self.zone.latency.graph_rate_hz orelse 0
+        else
+            0;
+        self.published_graph_rate_hz.store(graph_rate_hz, .release);
     }
 
     /// Producer-side view of this Zone for one fanout pass. The render-ahead

@@ -11,6 +11,7 @@ const job = @import("job.zig");
 const metadata = @import("../metadata/root.zig");
 const object = @import("object.zig");
 const storage = @import("../storage/root.zig");
+const track_details = @import("track_details.zig");
 const track_source = @import("track_source.zig");
 const work = @import("work.zig");
 
@@ -22,6 +23,8 @@ pub const WorkHandle = work.WorkHandle;
 pub const TrackRef = audio.playback_queue.TrackRef;
 pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
+pub const TrackDetails = track_details.TrackDetails;
+pub const TrackLoudness = track_details.Loudness;
 
 pub const State = enum(u8) {
     running,
@@ -1989,6 +1992,19 @@ pub const OrcaRuntime = struct {
         return (try self.libraryDatabase(library)).tracks.byId(self.allocator, track_id);
     }
 
+    /// What the Library recorded about a Track and the file it plays: tags,
+    /// format, size, location, stored loudness and whether the file carries a
+    /// cover, or null when the Track does not exist. Read from the database
+    /// alone: the file is neither opened nor hashed, so it describes the file
+    /// as the last scan saw it.
+    pub fn libraryTrackDetails(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_id: i64,
+    ) !?TrackDetails {
+        return track_details.load(self.allocator, try self.libraryDatabase(library), track_id);
+    }
+
     /// Sets or clears Orca's own values for tracks, without touching their
     /// files: a set value is stored as a locked user edit on every file each
     /// track resolves to, so it outranks the files' tags and survives rescans,
@@ -2719,6 +2735,7 @@ pub const OrcaRuntime = struct {
             .crossfeed = object_value.dsp.settings.crossfeed,
             .volume = object_value.gain.linear.load(.acquire),
             .output = if (engine) |value| value.outputFormat() else null,
+            .device_rate = if (engine) |value| value.deviceRate() else null,
         });
     }
 
@@ -2993,6 +3010,179 @@ test "a completed scan projects what it observed" {
     // browsable, which is why the projection runs inside the scan job.
     try std.testing.expect(stats.tracks_written > 0);
     try std.testing.expect(try runtime.libraryTrackCount(library) > 0);
+}
+
+/// Scans `fixtures/audio` to completion and returns the details of the Track
+/// whose file is named `file_name`.
+fn scannedFixtureDetails(
+    runtime: *OrcaRuntime,
+    library: LibraryHandle,
+    file_name: []const u8,
+) !TrackDetails {
+    var page = try runtime.libraryTrackQuery(library, "", .{ .limit = database.repository.max_page });
+    defer page.deinit();
+    for (page.items) |item| {
+        const details = (try runtime.libraryTrackDetails(library, item.id)).?;
+        if (details.path) |path| if (std.mem.endsWith(u8, path, file_name)) return details;
+        details.deinit();
+    }
+    return error.FixtureNotScanned;
+}
+
+fn scanFixtureLibrary(runtime: *OrcaRuntime, uri: [:0]const u8) !LibraryHandle {
+    const library = try runtime.openLibrary(std.testing.io, uri);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    while (true) {
+        runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        if (snapshot.state == .succeeded) return library;
+        if (snapshot.state == .failed or snapshot.state == .cancelled)
+            return error.ScanDidNotSucceed;
+        std.Thread.yield() catch {};
+    }
+}
+
+test "a scanned track's details match the format of its file" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-track-details-scan?mode=memory&cache=shared");
+
+    const flac = try scannedFixtureDetails(&runtime, library, "covered-reference.flac");
+    defer flac.deinit();
+    try std.testing.expectEqualStrings("flac", flac.codec);
+    try std.testing.expect(!flac.lossy);
+    try std.testing.expectEqual(@as(?u32, 48_000), flac.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 16), flac.bit_depth);
+    try std.testing.expectEqual(@as(?u32, 2), flac.channels);
+    try std.testing.expectEqual(@as(?i64, 9_483), flac.size_bytes);
+    try std.testing.expectEqual(@as(?i64, 10), flac.duration_ms);
+    try std.testing.expectEqual(@as(?u32, 7_586), flac.bitrate_kbps);
+    try std.testing.expect(flac.has_artwork);
+    try std.testing.expect(!flac.file_missing);
+    try std.testing.expect(flac.loudness == null);
+
+    const mp3 = try scannedFixtureDetails(&runtime, library, "covered-reference.mp3");
+    defer mp3.deinit();
+    try std.testing.expectEqualStrings("mp3", mp3.codec);
+    try std.testing.expect(mp3.lossy);
+    try std.testing.expectEqual(@as(?u32, 44_100), mp3.sample_rate);
+    try std.testing.expectEqual(@as(?u32, null), mp3.bit_depth);
+    try std.testing.expectEqual(@as(?u32, 2), mp3.channels);
+}
+
+test "a scanned track's details carry its tags and its release's date" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-track-details-tags?mode=memory&cache=shared");
+
+    const aac = try scannedFixtureDetails(&runtime, library, "tagged-reference-aac.m4a");
+    defer aac.deinit();
+    try std.testing.expectEqualStrings("AAC Reference", aac.title);
+    try std.testing.expectEqualStrings("Orca Fixtures", aac.artist);
+    try std.testing.expectEqualStrings("Codec References", aac.album);
+    try std.testing.expectEqualStrings("Orca Fixtures", aac.album_artist);
+    try std.testing.expectEqualStrings("2026", aac.date.?);
+    try std.testing.expectEqual(@as(?i64, 2), aac.track_number);
+    try std.testing.expectEqual(@as(?i64, 1), aac.disc_number);
+    try std.testing.expectEqual(@as(?bool, false), aac.compilation);
+    try std.testing.expect(aac.lossy);
+    try std.testing.expect(!aac.has_artwork);
+}
+
+test "details of a track that does not exist are null" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-track-details-none?mode=memory&cache=shared",
+    );
+    try std.testing.expect((try runtime.libraryTrackDetails(library, 1)) == null);
+}
+
+test "details report a track whose file has gone as missing, without a path" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-track-details-missing?mode=memory&cache=shared",
+    );
+    const library_database = try runtime.libraryDatabase(library);
+    const volume_id = try library_database.volumes.ensure(.{ .stable_key = "uuid:details", .label = "Details" });
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 0 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = volume_id,
+        .uri = "fixtures/audio/gone.flac",
+        .state = .missing,
+    });
+    try library_database.tracks.upsertTracks(&.{.{ .title = "Gone", .preferred_file_id = file_id }});
+    var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = 0 });
+    defer page.deinit();
+
+    const details = (try runtime.libraryTrackDetails(library, page.items[0].id)).?;
+    defer details.deinit();
+    try std.testing.expectEqualStrings("Gone", details.title);
+    try std.testing.expect(details.file_missing);
+    try std.testing.expect(details.path == null);
+    try std.testing.expect(details.size_bytes == null);
+    try std.testing.expect(details.bitrate_kbps == null);
+    try std.testing.expect(details.duration_ms == null);
+}
+
+test "details carry the loudness stored for the file's recorded bytes and no other" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scanFixtureLibrary(&runtime, "file:orca-track-details-loudness?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+
+    const before = try scannedFixtureDetails(&runtime, library, "covered-reference.flac");
+    defer before.deinit();
+    try std.testing.expect(before.loudness == null);
+
+    const analysis = @import("../analysis/root.zig");
+    const result: analysis.diagnostics.Result = .{
+        .allocator = std.testing.allocator,
+        .integrated_lufs = -9.1,
+        .replay_gain_db = -8.9,
+        .sample_peak = 0.966,
+        .rms = 0.1,
+        .clipped_samples = 0,
+        .silent_frames = 0,
+        .leading_silence_frames = 0,
+        .trailing_silence_frames = 0,
+        .waveform = &.{},
+    };
+    const encoded = try analysis.encoding.encode(std.testing.allocator, result);
+    defer std.testing.allocator.free(encoded);
+
+    const facts = (try library_database.tracks.fileFacts(std.testing.allocator, before.track_id)).?;
+    defer facts.deinit();
+    try library_database.analysis_cache.put(
+        analysis_service.diagnosticsKey(facts.file_id, facts.quick_hash.?, .{}),
+        encoded,
+    );
+
+    const mp3 = try scannedFixtureDetails(&runtime, library, "covered-reference.mp3");
+    defer mp3.deinit();
+    const mp3_facts = (try library_database.tracks.fileFacts(std.testing.allocator, mp3.track_id)).?;
+    defer mp3_facts.deinit();
+    const stale_identity: storage.quick_hash.Digest = @splat(7);
+    try library_database.analysis_cache.put(
+        analysis_service.diagnosticsKey(mp3_facts.file_id, stale_identity, .{}),
+        encoded,
+    );
+
+    const after = try scannedFixtureDetails(&runtime, library, "covered-reference.flac");
+    defer after.deinit();
+    const loudness = after.loudness.?;
+    try std.testing.expectApproxEqAbs(@as(f32, -9.1), loudness.integrated_lufs, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, -8.9), loudness.replay_gain_db, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.966), loudness.sample_peak, 0.0001);
+
+    const stale = try scannedFixtureDetails(&runtime, library, "covered-reference.mp3");
+    defer stale.deinit();
+    try std.testing.expect(stale.loudness == null);
 }
 
 test "runtime can repeatedly start and stop without leaking" {

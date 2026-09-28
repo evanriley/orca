@@ -168,6 +168,14 @@ on the control side. Run `zig build pipewire-live-smoke` to verify a short
 silent stream against the current user's server; normal tests require no live
 audio service.
 
+Each stream requests `node.rate` at the entry's source rate, and a format
+change between entries reopens it at the new one. PipeWire honours the request
+only when the graph's `clock.allowed-rates` permits it and no other stream
+holds the device at another rate; otherwise it resamples. The rate the device
+runs at is read back from the stream's timing, published by the Zone, and
+reported in the signal path as `device_rate`, which adds the
+`sample_rate_conversion` reason when it differs from the stream's rate.
+
 PipeWire stream-state changes are translated into an atomic Orca status. A lost
 output is closed and reopened with bounded attempts while its Player epoch and
 prepared render path remain intact. Recovery state belongs to each Zone;
