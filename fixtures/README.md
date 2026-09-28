@@ -45,3 +45,9 @@ check alignment.
 
 `audio/extensible-reference.wav` is `audio/generated-reference.flac` written by
 FFmpeg as 24-bit PCM, which FFmpeg stores as `WAVE_FORMAT_EXTENSIBLE`.
+
+`audio/tagged-reference.aiff` is `audio/tagged-reference.flac` written by FFmpeg
+as 16-bit big-endian AIFF with its tags in an `ID3 ` chunk.
+`audio/sowt-reference.aifc` and `audio/generated-reference-24.aiff` are
+`audio/generated-reference.flac` as little-endian (`sowt`) AIFC and as 24-bit
+AIFF.

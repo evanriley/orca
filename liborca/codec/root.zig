@@ -1,4 +1,5 @@
 pub const aac = @import("aac.zig");
+pub const aiff = @import("aiff.zig");
 pub const alac = @import("alac.zig");
 pub const decoder = @import("decoder.zig");
 pub const engine = @import("engine.zig");
@@ -17,6 +18,7 @@ pub const Decoder = decoder.Decoder;
 
 test {
     _ = @import("aac.zig");
+    _ = @import("aiff.zig");
     _ = @import("alac.zig");
     _ = @import("decoder.zig");
     _ = @import("engine.zig");
