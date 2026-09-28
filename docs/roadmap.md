@@ -20,12 +20,14 @@ the rule in [architecture.md](architecture.md).
 
 ### Formats
 
-- Decoding: WAV, FLAC (libFLAC), MP3 (vendored minimp3 with Xing/LAME gapless
+- Decoding: FLAC (libFLAC), MP3 (vendored minimp3 with Xing/LAME gapless
   trimming), ALAC and AAC in MP4 (Apple's reference decoder and libxaac, with
-  edit-list gapless trimming), Ogg Opus (libopusfile), Ogg Vorbis
-  (libvorbisfile), QOA.
-- Tags: ID3v1, ID3v2.3/2.4, Vorbis comments in FLAC and Ogg, iTunes atoms in
-  MP4, embedded pictures in FLAC, MP3 and MP4.
+  edit-list gapless trimming), raw AAC in ADTS, Ogg Opus (libopusfile), Ogg
+  Vorbis (libvorbisfile), WAV including `WAVE_FORMAT_EXTENSIBLE`, AIFF and
+  uncompressed AIFC, QOA (the reference decoder).
+- Tags and cover art: ID3v1 and ID3v2 (MP3, ADTS, and the ID3 chunk of WAV and
+  AIFF), WAV `LIST`/`INFO`, Vorbis comments and pictures in FLAC and Ogg, and
+  iTunes atoms in MP4.
 
 ### Playback
 
@@ -68,20 +70,30 @@ entry point and a client before it counts as working.
 
 In priority order.
 
-1. **Format gaps.** Ogg artwork (`METADATA_BLOCK_PICTURE`), AIFF and
-   WavPack. HE-AAC and the `iTunSMPB` gapless fallback are implemented but have
-   no fixture, because FFmpeg cannot write either.
-2. **Tag editing.** Expose `MutationPlan` preview, approval, execution and
+1. **Tag editing.** Expose `MutationPlan` preview, approval, execution and
    undo through the runtime and C ABI, then in `orca-cli` and `orca-gtk`.
-3. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+2. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-4. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
+3. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
    path and report the signal path from the negotiated output.
-5. **Providers and scrobbling**, after the fixes listed above.
-6. **Filesystem watching** as a scan accelerator.
-7. **Undecodable files are re-examined on every analysis run.** They are
-   declined cheaply, but a library of AIFF files still pays two 64 KiB reads
-   per file per run until AIFF is supported or declines are remembered.
+4. **Providers and scrobbling**, after the fixes listed above.
+5. **Filesystem watching** as a scan accelerator.
+6. **Undecodable files are re-examined on every analysis run.** They are
+   declined cheaply, but a library of WavPack or APE files still pays two
+   64 KiB reads per file per run until declines are remembered.
+
+## Deferred formats
+
+The formats above cover nearly every library. These wait until after 1.0, and
+are sniffed or not recognized until then:
+
+- WavPack, Monkey's Audio (APE), TTA and Musepack.
+- DSD (DSF and DFF), which also needs DSD-to-PCM conversion or native DSD
+  output.
+- WMA.
+- FLAC in Ogg, Matroska and WebM audio, and FLAC or Opus inside MP4.
+- Fixtures for HE-AAC and for the `iTunSMPB` gapless fallback, which are
+  implemented but cannot be produced with FFmpeg; they wait for real files.
 
 ## Later
 

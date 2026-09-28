@@ -2,6 +2,20 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### The common formats are complete; the rest wait until after 1.0
+
+- **WAV files written as `WAVE_FORMAT_EXTENSIBLE` open**, which is what FFmpeg
+  and most DAWs write past 16-bit stereo.
+- **AIFF and uncompressed AIFC decode**, including `sowt`, bit-identically to
+  the FLAC they were written from.
+- **WAV and AIFF carry tags and cover art** from their ID3 chunk, and WAV from
+  `LIST`/`INFO` as well.
+- **Ogg Opus and Vorbis files show their cover art** from
+  `METADATA_BLOCK_PICTURE`.
+- **Raw `.aac` (ADTS) files play** instead of being mistaken for MP3.
+- WavPack, APE, TTA, Musepack, DSD, WMA and less common containers are
+  deferred; `docs/roadmap.md` lists them.
+
 ### A deliberate public Zig API (breaking)
 
 - **`liborca`'s top level is the API.** It exports `Runtime`, its handles and
