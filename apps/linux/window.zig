@@ -14,6 +14,8 @@ const browse = @import("browse.zig");
 const queue = @import("queue.zig");
 const albums = @import("albums.zig");
 const nowplaying = @import("nowplaying.zig");
+const artists = @import("artists.zig");
+const menu = @import("menu.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -106,6 +108,48 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     );
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), label);
+    gtk.g_object_set_data(label, "orca-list-item", item);
+    menu.onSecondaryClick(label, cellMenu, null);
+}
+
+/// The cell factories carry their column as user data, so the right-click
+/// handler reaches the app through this. There is one window.
+var cells_app: ?*App = null;
+
+/// A right-click on a selected row acts on the whole selection, as it does in
+/// every file manager; on any other row it selects that row alone first.
+fn cellMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, _: ?*anyopaque) callconv(.c) void {
+    const self = cells_app orelse return;
+    const selection = self.selection orelse return;
+    const label = menu.gestureWidget(gesture);
+    const item = gtk.g_object_get_data(label, "orca-list-item") orelse return;
+    const list_item = gtk.cast(gtk.ListItem, item);
+    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
+    const clicked: *TrackObject = @ptrCast(@alignCast(object));
+    const position = gtk.gtk_list_item_get_position(list_item);
+    if (gtk.gtk_selection_model_is_selected(selection, position) == 0)
+        _ = gtk.gtk_selection_model_select_item(selection, position, gtk.true_);
+
+    self.context.reset(.tracks);
+    self.context.release_id = clicked.releaseId();
+    self.context.artist_id = clicked.artistId();
+    const chosen = gtk.gtk_selection_model_get_selection(selection);
+    defer gtk.gtk_bitset_unref(chosen);
+    const model = gtk.cast(gtk.ListModel, selection);
+    var iter: gtk.BitsetIter = .{};
+    var index: c_uint = 0;
+    var valid = gtk.gtk_bitset_iter_init_first(&iter, chosen, &index);
+    while (valid != 0) : (valid = gtk.gtk_bitset_iter_next(&iter, &index)) {
+        const row_item = gtk.g_list_model_get_item(model, index) orelse continue;
+        defer gtk.g_object_unref(row_item);
+        const row: *TrackObject = @ptrCast(@alignCast(row_item));
+        if (row.hasFile()) self.context.tracks.append(self.allocator, row.id()) catch {};
+    }
+    if (self.context.tracks.items.len > 1) {
+        self.context.release_id = null;
+        self.context.artist_id = null;
+    }
+    menu.popup(self, label, x, y);
 }
 
 fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -273,6 +317,7 @@ fn windowKeyPressed(
 /// In sidebar order: `AdwSidebar` numbers items across sections.
 pub const Page = enum(c_uint) {
     albums,
+    artists,
     tracks,
     now_playing,
     queue,
@@ -280,6 +325,7 @@ pub const Page = enum(c_uint) {
     fn name(self: Page) [*:0]const u8 {
         return switch (self) {
             .albums => "albums",
+            .artists => "artists",
             .tracks => "tracks",
             .now_playing => "now-playing",
             .queue => "queue",
@@ -289,6 +335,7 @@ pub const Page = enum(c_uint) {
     fn title(self: Page) [*:0]const u8 {
         return switch (self) {
             .albums => "Albums",
+            .artists => "Artists",
             .tracks => "Tracks",
             .now_playing => "Now Playing",
             .queue => "Queue",
@@ -311,11 +358,28 @@ pub fn showPage(self: *App, page: Page) void {
     }
 }
 
+pub fn showAlbum(self: *App, release_id: i64) void {
+    showPage(self, .albums);
+    const navigation = self.albums_navigation orelse return;
+    _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    albums.openAlbum(self, navigation, release_id);
+}
+
+pub fn showArtist(self: *App, artist_id: i64) void {
+    showPage(self, .artists);
+    const navigation = self.artists_navigation orelse return;
+    _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
+    artists.openArtist(self, navigation, artist_id);
+}
+
 fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
     if (index > @intFromEnum(Page.queue)) return;
     const page: Page = @enumFromInt(index);
     if (page == .albums) if (state(data).albums_navigation) |navigation| {
         _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    };
+    if (page == .artists) if (state(data).artists_navigation) |navigation| {
+        _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
     };
     showPage(state(data), @enumFromInt(index));
 }
@@ -334,17 +398,17 @@ fn primaryMenu() *gtk.Widget {
     const help = gtk.g_menu_new();
     gtk.g_menu_append(help, "Keyboard Shortcuts", "app.shortcuts");
     gtk.g_menu_append(help, "About Orca", "app.about");
-    const menu = gtk.g_menu_new();
-    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, library));
-    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, help));
+    const model = gtk.g_menu_new();
+    gtk.g_menu_append_section(model, null, gtk.cast(gtk.GMenuModel, library));
+    gtk.g_menu_append_section(model, null, gtk.cast(gtk.GMenuModel, help));
     gtk.g_object_unref(library);
     gtk.g_object_unref(help);
     const button = gtk.gtk_menu_button_new();
     gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "open-menu-symbolic");
-    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, menu));
+    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
     gtk.gtk_menu_button_set_primary(gtk.cast(gtk.MenuButton, button), gtk.true_);
     gtk.gtk_widget_set_tooltip_text(button, "Main Menu");
-    gtk.g_object_unref(menu);
+    gtk.g_object_unref(model);
     return button;
 }
 
@@ -354,6 +418,7 @@ fn buildSidebar(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_vexpand(sidebar, gtk.true_);
     const section = adw.adw_sidebar_section_new();
     _ = sidebarItem(section, "Albums", "media-optical-symbolic");
+    _ = sidebarItem(section, "Artists", "avatar-default-symbolic");
     _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
     adw.adw_sidebar_append(self.sidebar.?, section);
     const playback = adw.adw_sidebar_section_new();
@@ -497,7 +562,8 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     self.browse_toggle = browse_toggle;
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, browse_toggle), "view-dual-symbolic");
     gtk.gtk_widget_set_tooltip_text(browse_toggle, "Show artists and albums");
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.true_);
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.false_);
+    gtk.gtk_widget_set_visible(panes, gtk.false_);
     _ = gtk.signalConnect(browse_toggle, "toggled", gtk.callback(browseToggled), self);
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header), browse_toggle);
 
@@ -551,6 +617,7 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
 pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const window = adw.adw_application_window_new(application);
     self.window = gtk.cast(gtk.Window, window);
+    cells_app = self;
 
     const keys = gtk.gtk_event_controller_key_new();
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
@@ -563,6 +630,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.pages = gtk.cast(gtk.Stack, pages);
     gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());

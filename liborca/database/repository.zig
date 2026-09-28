@@ -631,6 +631,9 @@ pub const TrackSummary = struct {
     /// Whether the Track resolves to a file with a location, so a host can grey
     /// out a row without asking a second question per Track.
     has_playable_file: bool,
+    release_id: ?i64 = null,
+    /// The credited Artist, when the projection resolved one.
+    artist_id: ?i64 = null,
 
     pub fn deinit(self: TrackSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -1016,7 +1019,8 @@ const track_columns =
     \\           SELECT 1 FROM locations
     \\           WHERE locations.file_id = tracks.preferred_file_id
     \\             AND locations.state <> 'missing'
-    \\       )
+    \\       ),
+    \\       tracks.release_id, tracks.artist_id
     \\
 ;
 
@@ -1147,6 +1151,8 @@ fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !
             .track_number = optionalInt64(statement, 6),
             .disc_number = optionalInt64(statement, 7),
             .has_playable_file = statement.columnInt64(8) != 0,
+            .release_id = optionalInt64(statement, 9),
+            .artist_id = optionalInt64(statement, 10),
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };

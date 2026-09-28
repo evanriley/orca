@@ -22,6 +22,8 @@ const transport = @import("transport.zig");
 const queue = @import("queue.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
+const artists = @import("artists.zig");
+const menu = @import("menu.zig");
 const art = @import("art.zig");
 
 const stylesheet = @embedFile("style.css");
@@ -99,6 +101,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     browse.reload(self);
     self.reload();
     albums.reload(self);
+    artists.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
 }
@@ -121,6 +124,32 @@ fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
 
 fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     window.showPage(@ptrCast(@alignCast(data.?)), .queue);
+}
+
+fn activateContextPlay(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.play(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextPlayNext(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.playNext(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextEnqueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.enqueue(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextRemove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.remove(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextShowAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    window.showAlbum(self, self.context.release_id orelse return);
+}
+
+fn activateContextShowArtist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    window.showArtist(self, self.context.artist_id orelse return);
 }
 
 fn activateQuit(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -279,6 +308,12 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);
     addAction(application, "quit", activateQuit, "<Control>q", &self);
+    addAction(application, "ctx-play", activateContextPlay, null, &self);
+    addAction(application, "ctx-play-next", activateContextPlayNext, null, &self);
+    addAction(application, "ctx-enqueue", activateContextEnqueue, null, &self);
+    addAction(application, "ctx-remove", activateContextRemove, null, &self);
+    addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
+    addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io);
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);

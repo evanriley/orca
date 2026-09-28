@@ -12,6 +12,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const mpris = @import("mpris.zig");
 const art = @import("art.zig");
+const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
 
 /// One page. The list is filled a page at a time as the user scrolls rather
@@ -165,6 +166,17 @@ pub const App = struct {
     tint_provider: ?*gtk.CssProvider = null,
 
     art: art.Cache = .{},
+    /// What the open right-click menu acts on.
+    context: menu.Context = .{},
+
+    // artists page
+    artist_list_store: ?*gtk.ListStore = null,
+    artist_list_loaded: u32 = 0,
+    artist_list_exhausted: bool = false,
+    artist_list_filter: OwnedText = .{},
+    artist_list_title: ?*adw.WindowTitle = null,
+    artist_list_search: ?*gtk.Widget = null,
+    artists_navigation: ?*adw.NavigationView = null,
 
     // scan status, at the foot of the sidebar
     scan_revealer: ?*gtk.Revealer = null,
@@ -432,6 +444,8 @@ pub const App = struct {
         self.device_ids.deinit(self.allocator);
         self.device_checks.deinit(self.allocator);
         self.art.deinit(self.allocator);
+        self.context.deinit(self.allocator);
+        self.artist_list_filter.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };

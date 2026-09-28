@@ -1561,6 +1561,70 @@ pub const OrcaRuntime = struct {
         object_value.player.play();
     }
 
+    /// Plays the queue entry at playback position `position` now: a hard
+    /// switch, like a skip.
+    pub fn playerQueueJump(self: *OrcaRuntime, player: PlayerHandle, position: u32) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        if (position >= object_value.queue.len()) return error.PositionOutOfRange;
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        if (engine) |value| value.discardPending();
+        object_value.queue.seekTo(position);
+        try loadCursor(object_value);
+        object_value.player.play();
+    }
+
+    /// Queues `track_ids` to play after the current entry, without
+    /// interrupting it. If the engine has already lined up the entry after
+    /// the current one — it does so when the current one finishes decoding,
+    /// a few seconds before its end — they follow that entry instead, since
+    /// its audio may already be on its way to the output. An empty queue is
+    /// simply filled, as `playerEnqueueTracksBound` does.
+    pub fn playerQueueInsertNext(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        track_ids: []const i64,
+    ) !void {
+        try self.requireRunning();
+        try self.requireBoundLibrary(player, library);
+        if ((try self.players.get(player)).queue.isEmpty())
+            return self.playerEnqueueTracksBound(player, library, track_ids);
+        const refs = try self.trackRefs(library, track_ids);
+        defer self.allocator.free(refs);
+        const engine = try self.ensureEngine(player);
+        engine.quiesce();
+        defer engine.release();
+        const queue = (try self.players.get(player)).queue;
+        const committed = if (engine.pending_source != null) engine.pending_position else queue.decodePosition();
+        const pending: ?*u32 = if (engine.pending_source != null) &engine.pending_position else null;
+        try queue.insertAfter(committed, refs, pending);
+    }
+
+    /// Removes the queue entry at playback position `position`. The entry
+    /// playing and one the engine has already lined up are refused with
+    /// `error.QueueEntryInUse`; skip past them first.
+    pub fn playerQueueRemove(self: *OrcaRuntime, player: PlayerHandle, position: u32) !void {
+        try self.requireRunning();
+        const object_value = try self.players.get(player);
+        const queue = object_value.queue;
+        if (position >= queue.len()) return error.PositionOutOfRange;
+        const engine = object_value.engine;
+        if (engine) |value| value.quiesce();
+        defer if (engine) |value| value.release();
+        const pending: ?*u32 = if (engine) |value|
+            (if (value.pending_source != null) &value.pending_position else null)
+        else
+            null;
+        const holds_audio = object_value.player.sources != null;
+        if (holds_audio and (position == queue.cursorPosition() or position == queue.decodePosition()))
+            return error.QueueEntryInUse;
+        if (pending) |value| if (value.* == position) return error.QueueEntryInUse;
+        try queue.removeAt(position, pending);
+    }
+
     /// A user skip is a **hard** switch: the epoch bump makes the callback
     /// discard everything already prepared, so it is immediate rather than
     /// waiting for the current track to drain. Returns false at the end of a
@@ -3927,4 +3991,48 @@ test "every release order lists the same releases, each in its own order" {
             else => {},
         };
     }
+}
+
+test "queue edits from the host jump, insert after the playing entry and refuse to remove it" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-queue-edits?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 6, .sort = .id });
+    defer page.deinit();
+    var ids: [6]i64 = undefined;
+    var playable: usize = 0;
+    for (page.items) |item| {
+        if (!item.has_playable_file) continue;
+        ids[playable] = item.id;
+        playable += 1;
+    }
+    try std.testing.expect(playable >= 4);
+
+    const player = try runtime.createPlayer();
+    try runtime.playerBindLibrary(player, library, std.testing.io);
+    try runtime.playerPlayTracksBound(player, library, ids[0..3], 0);
+    try runtime.pausePlayer(player);
+
+    try runtime.playerQueueInsertNext(player, library, ids[3..4]);
+    var queued = try runtime.playerQueueTracks(player, std.testing.allocator, 0, 8);
+    defer queued.deinit();
+    try std.testing.expectEqual(@as(usize, 4), queued.items.len);
+    try std.testing.expectEqual(ids[0], queued.items[0].id);
+    try std.testing.expectEqual(ids[3], queued.items[1].id);
+    try std.testing.expectEqual(ids[1], queued.items[2].id);
+
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueRemove(player, 0));
+    try runtime.playerQueueRemove(player, 2);
+    try std.testing.expectEqual(@as(u32, 3), (try runtime.playerStatus(player)).queue_length);
+
+    try runtime.playerQueueJump(player, 2);
+    const status = try runtime.playerStatus(player);
+    try std.testing.expectEqual(@as(u32, 2), status.queue_index);
+    try std.testing.expectEqual(ids[2], status.track_id.?);
+    try std.testing.expectError(error.PositionOutOfRange, runtime.playerQueueJump(player, 3));
 }

@@ -199,6 +199,58 @@ pub const PlaybackQueue = struct {
         }
     }
 
+    /// Inserts `refs` to play straight after playback position `after`.
+    /// Every position past it — the cursors, recorded serials, and `pending`
+    /// if the caller holds one — moves with the entries it named.
+    pub fn insertAfter(self: *PlaybackQueue, after: u32, refs: []const TrackRef, pending: ?*u32) !void {
+        if (refs.len == 0) return;
+        if (self.entries.items.len + refs.len > capacity) return error.PlaybackQueueFull;
+        if (after >= self.entries.items.len) return error.PositionOutOfRange;
+        const count: u32 = @intCast(refs.len);
+        if (self.order.items.len != 0) {
+            const first_new: u32 = @intCast(self.entries.items.len);
+            try self.order.ensureUnusedCapacity(self.allocator, refs.len);
+            try self.entries.appendSlice(self.allocator, refs);
+            var index: u32 = 0;
+            while (index < count) : (index += 1)
+                self.order.insertAssumeCapacity(after + 1 + index, first_new + index);
+        } else {
+            try self.entries.insertSlice(self.allocator, after + 1, refs);
+        }
+        self.publishCount();
+        self.shiftPositions(after + 1, count, .up, pending);
+    }
+
+    /// Removes the entry at playback position `position`. The caller refuses
+    /// positions the engine has committed to; everything after moves back.
+    pub fn removeAt(self: *PlaybackQueue, position: u32, pending: ?*u32) !void {
+        const index = self.entryIndex(position) orelse return error.PositionOutOfRange;
+        _ = self.entries.orderedRemove(index);
+        if (self.order.items.len != 0) {
+            _ = self.order.orderedRemove(position);
+            for (self.order.items) |*entry| {
+                if (entry.* > index) entry.* -= 1;
+            }
+        }
+        self.publishCount();
+        self.shiftPositions(position + 1, 1, .down, pending);
+    }
+
+    fn shiftPositions(self: *PlaybackQueue, from: u32, by: u32, direction: enum { up, down }, pending: ?*u32) void {
+        const shift = struct {
+            fn apply(value: u32, start: u32, amount: u32, way: @TypeOf(direction)) u32 {
+                if (value < start) return value;
+                return if (way == .up) value + amount else value - amount;
+            }
+        }.apply;
+        self.setCursor(shift(self.cursorPosition(), from, by, direction));
+        self.decode_position.store(shift(self.decodePosition(), from, by, direction), .release);
+        for (&self.serials) |*record| {
+            if (record.serial != 0) record.position = shift(record.position, from, by, direction);
+        }
+        if (pending) |value| value.* = shift(value.*, from, by, direction);
+    }
+
     pub fn clear(self: *PlaybackQueue) void {
         self.entries.clearRetainingCapacity();
         self.publishCount();
@@ -458,4 +510,71 @@ test "stopping retains entries and cursor while clearing empties the queue" {
     queue.clear();
     try testing.expect(queue.isEmpty());
     try testing.expect(queue.current() == null);
+}
+
+fn trackIdsInOrder(queue: *const PlaybackQueue, out: []i64) []i64 {
+    var position: u32 = 0;
+    while (queue.refAt(position)) |ref| : (position += 1) out[position] = ref.track_id;
+    return out[0..position];
+}
+
+test "play next lands after the committed entry and carries later positions along" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 1);
+    queue.noteEntrySerial(7, 3);
+    var pending: u32 = 2;
+    const next = try makeRefs(testing.allocator, &.{ 10, 11 });
+    defer testing.allocator.free(next);
+    try queue.insertAfter(1, next, &pending);
+
+    var buffer: [8]i64 = undefined;
+    try testing.expectEqualSlices(i64, &.{ 1, 2, 10, 11, 3, 4 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(u32, 1), queue.cursorPosition());
+    try testing.expectEqual(@as(u32, 4), pending);
+    try testing.expectEqual(@as(?u32, 5), queue.positionForSerial(7));
+}
+
+test "under shuffle, play next and remove edit the order without moving what plays" {
+    var queue = PlaybackQueue.init(testing.allocator, 42);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4, 5 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 0);
+    try queue.setShuffle(true);
+    const playing = queue.current().?.track_id;
+    const cursor = queue.cursorPosition();
+    const next = try makeRefs(testing.allocator, &.{99});
+    defer testing.allocator.free(next);
+    try queue.insertAfter(cursor, next, null);
+    try testing.expectEqual(playing, queue.current().?.track_id);
+    try testing.expectEqual(@as(i64, 99), queue.refAt(cursor + 1).?.track_id);
+
+    const removed = queue.refAt(cursor + 2).?.track_id;
+    try queue.removeAt(cursor + 2, null);
+    try testing.expectEqual(@as(u32, 5), queue.len());
+    try testing.expectEqual(playing, queue.current().?.track_id);
+    var buffer: [8]i64 = undefined;
+    const ids = trackIdsInOrder(&queue, &buffer);
+    try testing.expectEqual(@as(usize, 5), ids.len);
+    for (ids) |id| try testing.expect(id != removed);
+    var seen: [6]bool = @splat(false);
+    for (ids) |id| {
+        const slot: usize = if (id == 99) 0 else @intCast(id);
+        try testing.expect(!seen[slot]);
+        seen[slot] = true;
+    }
+}
+
+test "removing an entry before the cursor keeps the cursor on the same track" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 2);
+    try queue.removeAt(0, null);
+    try testing.expectEqual(@as(u32, 1), queue.cursorPosition());
+    try testing.expectEqual(@as(i64, 3), queue.current().?.track_id);
 }

@@ -13,6 +13,7 @@ const strings = @import("strings.zig");
 const app = @import("app.zig");
 const browse = @import("browse.zig");
 const albums = @import("albums.zig");
+const artists = @import("artists.zig");
 
 const App = app.App;
 
@@ -170,6 +171,7 @@ pub fn tick(self: *App) void {
             browse.reload(self);
             self.reload();
             albums.reload(self);
+            artists.reload(self);
         }
     } else |_| {}
 
@@ -186,6 +188,7 @@ pub fn tick(self: *App) void {
     browse.reload(self);
     self.reload();
     albums.reload(self);
+    artists.reload(self);
     if (snapshot.state == .succeeded) {
         if (self.runtime.jobScanStats(job)) |stats| {
             var buffer: [160]u8 = undefined;
