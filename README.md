@@ -1,11 +1,12 @@
 # Orca
 
 Orca is a local-files-first music player and library-maintenance application.
-Its reusable Zig core, `liborca`, owns music-domain behavior while thin native
-frontends provide platform integration.
+Its engine, `liborca`, is a Zig library for everything music-related, and the
+native frontends are thin clients of it. The project is pre-release; the
+[roadmap](docs/roadmap.md) lists what works today.
 
-The authoritative product and architecture specification is
-[`Orca_Full_Implementation_Plan_v1.0.md`](Orca_Full_Implementation_Plan_v1.0.md).
+The [architecture overview](docs/architecture.md) describes the design and
+links each subsystem's contract.
 
 ## Requirements
 

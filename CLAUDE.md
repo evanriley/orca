@@ -8,8 +8,10 @@ Orca is a local-files-first music player and library-maintenance application,
 written in Zig. `liborca/` is a reusable headless engine; `apps/` holds thin
 native frontends that are *clients* of it.
 
-`Orca_Full_Implementation_Plan_v1.0.md` is the authoritative product and
-architecture specification. `docs/` holds per-subsystem contracts and is the
+`liborca` is the product, in the way libghostty is Ghostty's: GUIs, CLIs and
+TUIs are built on it. `docs/architecture.md` is the overview,
+`docs/roadmap.md` records what works, what is built but unreachable, and what
+comes next, and the other files in `docs/` are per-subsystem contracts: the
 fastest way to load a subsystem's invariants before editing it.
 
 ## Toolchain
@@ -205,9 +207,8 @@ of transport state, library paging, or metadata resolution.
 
 **Frontend language is Zig wherever the platform permits it.** The project is
 Zig-first, and that applies to `apps/`, not only to `liborca`. `orca-cli` and
-`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly, per
-section 17.1 of the implementation plan. C appears in a frontend only where a
-platform genuinely forces it.
+`orca-gtk` are Zig and consume liborca's **Zig-facing API** directly. C appears
+in a frontend only where a platform genuinely forces it.
 
 Non-Zig frontends reach the engine through `liborca/orca.h` (a C ABI of opaque
 runtime ownership, generational handles, POD snapshots, and **callback-scoped**
@@ -285,8 +286,10 @@ honestly. Container detection sniffs bytes, never filename extensions.
 
 Codec-specific state never escapes `liborca/codec/`; playback sees only the
 Orca `Decoder` interface, and `SourceSession` owns the registered decoder.
-Prefer pure-Zig adapters (the pinned `audiophile/qoa` dependency) over C
-libraries — but not at the price of correctness. FLAC decodes through libFLAC
+Codec sourcing order: an existing, correct Zig package (as `audiophile/qoa`),
+then the reference C library behind a narrow shim, and an Orca-written codec
+only when neither exists. The project is not an exercise in writing codecs, and
+correctness outranks purity. FLAC decodes through libFLAC
 behind `codec/flac_shim.c` because the pure-Zig package that preceded it
 reconstructed mid-side stereo one LSB low, which made a lossless format lossy;
 see `docs/codecs.md`.
