@@ -49,7 +49,7 @@ pub fn read(
 /// read artwork from reports no cover rather than failing.
 pub fn supports(audio_format: format.AudioFormat) bool {
     return switch (audio_format) {
-        .flac, .mp3, .mp4, .wav, .aiff, .opus, .vorbis => true,
+        .flac, .mp3, .aac, .mp4, .wav, .aiff, .opus, .vorbis => true,
         .wavpack, .qoa => false,
     };
 }
@@ -63,7 +63,7 @@ pub fn readDetected(
 ) !?model.EmbeddedImage {
     return switch (audio_format) {
         .flac => vorbis_comment.readPicture(allocator, readable),
-        .mp3 => id3v2.readPicture(allocator, readable),
+        .mp3, .aac => id3v2.readPicture(allocator, readable),
         .mp4 => mp4_tags.readPicture(allocator, readable),
         .wav, .aiff => riff_tags.readPicture(allocator, readable),
         .opus, .vorbis => ogg_comment.readPicture(allocator, readable),

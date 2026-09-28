@@ -61,3 +61,7 @@ the 217-byte PNG cover in its `ID3 ` chunk.
 `audio/covered-reference.opus` and `audio/covered-reference.ogg` are the tagged
 Ogg fixtures with the 217-byte PNG cover added as a `METADATA_BLOCK_PICTURE`
 comment, by `opustags --set-cover` and `vorbiscomment` respectively.
+
+`audio/tagged-reference.aac` is the AAC frames of
+`audio/chirp-reference-aac.m4a` remuxed by FFmpeg into ADTS behind an ID3v2
+tag. ADTS keeps the 1,024 frames of priming the MP4's edit list trimmed.

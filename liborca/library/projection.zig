@@ -801,7 +801,7 @@ fn preferredOver(candidate: Entry, incumbent: Entry) bool {
 /// encodings whose declared properties are identical — two 16/44100 files in
 /// different containers — and short of decoding both, nothing else can.
 fn formatRank(audio_format: u8) u8 {
-    const known = std.enums.fromInt(storage.AudioFormat, audio_format) orelse return 9;
+    const known = std.enums.fromInt(storage.AudioFormat, audio_format) orelse return 10;
     return switch (known) {
         .flac => 0,
         .wavpack => 1,
@@ -809,9 +809,11 @@ fn formatRank(audio_format: u8) u8 {
         .aiff => 3,
         .qoa => 4,
         .mp4 => 5,
-        .opus => 6,
-        .vorbis => 7,
-        .mp3 => 8,
+        // The same codec as MP4's, without the edit list that makes it gapless.
+        .aac => 6,
+        .opus => 7,
+        .vorbis => 8,
+        .mp3 => 9,
     };
 }
 

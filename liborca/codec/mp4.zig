@@ -424,6 +424,11 @@ fn iTunesGaplessInfo(movie: []const u8) !?GaplessInfo {
 pub fn probe(allocator: std.mem.Allocator, source: storage.ReadableSource) !@import("registry.zig").Properties {
     var track = try readTrack(allocator, source);
     defer track.deinit();
+    return probeTrack(&track);
+}
+
+/// `probe` for a track from any container that yields one.
+pub fn probeTrack(track: *const Track) !@import("registry.zig").Properties {
     const output: Output = switch (track.codec) {
         .alac => |config| .{
             .codec = decoder_api.codec_id.alac,
@@ -431,7 +436,7 @@ pub fn probe(allocator: std.mem.Allocator, source: storage.ReadableSource) !@imp
             .channels = config[9],
             .bit_depth = config[5],
         },
-        .aac => |config| aacOutput(config, &track),
+        .aac => |config| aacOutput(config, track),
     };
     if (output.sample_rate == 0 or output.channels == 0) return error.InvalidMp4;
     const start = @as(u128, track.start_time) * output.sample_rate / track.timescale;
@@ -456,7 +461,7 @@ const Output = struct {
     bit_depth: ?u16 = null,
 };
 
-const sampling_rates = [_]u32{ 96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000, 7_350 };
+pub const sampling_rates = [_]u32{ 96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000, 7_350 };
 
 /// Output rate and channels from an AudioSpecificConfig. Explicitly signalled
 /// SBR doubles the rate and PS makes the output stereo; implicit SBR is only
@@ -527,12 +532,22 @@ const max_packet_bytes: u32 = 4 * 1024 * 1024;
 /// Opens the sound track as an Orca `Decoder`. The engine is chosen by the
 /// sample entry; the timeline is trimmed to the gapless bounds.
 pub fn openDecoder(allocator: std.mem.Allocator, source: storage.ReadableSource) !decoder_api.Decoder {
-    const context = try allocator.create(Context);
+    return openTrack(allocator, source, try readTrack(allocator, source));
+}
+
+/// The packet-loop decoder over a track from any container that yields one.
+/// Takes ownership of `track`, including on failure.
+pub fn openTrack(allocator: std.mem.Allocator, source: storage.ReadableSource, track: Track) !decoder_api.Decoder {
+    var owned = track;
+    const context = allocator.create(Context) catch |err| {
+        owned.deinit();
+        return err;
+    };
     errdefer allocator.destroy(context);
     context.* = .{
         .allocator = allocator,
         .source = source,
-        .track = try readTrack(allocator, source),
+        .track = owned,
         .engine = undefined,
         .packet = &.{},
         .pcm = &.{},

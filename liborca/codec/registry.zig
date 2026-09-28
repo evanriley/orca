@@ -159,6 +159,12 @@ pub const CodecRegistry = struct {
             .open = @import("wav.zig").openDecoder,
         }) catch unreachable;
         registry.register(.{
+            .name = "AAC (ADTS)",
+            .format = .aac,
+            .open = @import("adts.zig").openDecoder,
+            .probe = @import("adts.zig").probe,
+        }) catch unreachable;
+        registry.register(.{
             .name = "AIFF",
             .format = .aiff,
             .open = @import("aiff.zig").openDecoder,
@@ -275,7 +281,7 @@ pub fn properties(opened: decoder.Decoder) Properties {
 
 test "builtin registry rejects duplicate codec ownership" {
     var codecs = CodecRegistry.builtins();
-    try std.testing.expectEqual(@as(usize, 8), codecs.count);
+    try std.testing.expectEqual(@as(usize, 9), codecs.count);
     try std.testing.expectError(error.CodecAlreadyRegistered, codecs.register(codecs.entries[0]));
 }
 
