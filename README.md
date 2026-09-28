@@ -10,8 +10,12 @@ links each subsystem's contract.
 
 ## Requirements
 
-- Zig `0.17.0-dev.1770+5d7cf3f34` or newer compatible development snapshot
-- Linux builds: PipeWire development library
+- Zig `0.16.0`
+- libFLAC and SQLite development libraries
+- Linux builds: PipeWire and GTK4 development libraries
+
+With Nix, `nix develop` (or direnv) provides all of these, and `nix build`
+builds the package.
 
 ## Build and test
 

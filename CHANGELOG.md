@@ -2,6 +2,37 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Stable Zig, a Nix flake, and three defects the old snapshot hid
+
+- **Orca builds with Zig 0.16.0.** The previous pin, `0.17.0-dev.1770`, is no
+  longer downloadable, so the project could not be built reproducibly. The port
+  is mechanical: `@backingInt`/`@fromBackingInt` became
+  `@intFromEnum`/`@enumFromInt`, plus a handful of renamed `std` functions.
+- **`flake.nix` provides the dev shell and a package.** `nix develop` (or
+  direnv) supplies Zig, zls, pkg-config, SQLite, libFLAC, PipeWire and GTK4;
+  `nix build` produces `orca-cli`, `orca-gtk`, `liborca` and `orca.h`.
+- **`build.zig` no longer assumes `/usr/include`.** PipeWire and SQLite include
+  paths come from `pkg-config --cflags-only-I`, so the build works on NixOS and
+  on FHS distributions alike.
+- **Volumes on device-mapper storage now get a stable identity.** A mount
+  source such as `/dev/mapper/cryptroot` is a symlink to `/dev/dm-N`, and the
+  `/dev/disk/by-uuid` lookup compared the symlink's own name, so LUKS and LVM
+  volumes never matched their UUID and every Location on them was filed under
+  no volume.
+- **The analysis pass no longer re-measures every file.** The query selecting
+  unanalyzed files bound its parameter hash as an SQLite static blob from a
+  pointer into a by-value copy that died before the statement ran. The old
+  compiler passed that struct by reference, which hid the defect.
+- **A queue test stopped starving the engine it waited on.** It polled
+  `playerQueueStats`, which pauses the engine on every call; it now polls the
+  lock-free queue snapshot.
+
+### Planning documents replaced
+
+- `docs/architecture.md` and `docs/roadmap.md` replace the v1.0 implementation
+  plan, the v0.10.0 review and the integration-recovery design. The recovery
+  work those documents drove is complete; what remains is in the roadmap.
+
 ### FLAC decoding moved to libFLAC, because the pure-Zig package was not lossless
 
 - **The pinned `audiophile/flac` dependency is gone.** It reconstructed
