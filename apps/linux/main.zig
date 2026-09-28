@@ -71,6 +71,7 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     while (self.runtime.pollTelemetry()) |_| {}
 
     art.tick(self);
+    menu.tick();
     transport.tick(self);
     queue.tick(self);
     jobs.tick(self);
@@ -129,6 +130,10 @@ fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
 
 fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     window.showPage(@ptrCast(@alignCast(data.?)), .queue);
+}
+
+fn activateBack(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.back(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateContextPlay(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -211,6 +216,7 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
         .{ .title = "Library", .items = &.{
             .{ "Search", "<Control>f" },
             .{ "Show Queue", "<Control>l" },
+            .{ "Back", "<Alt>Left" },
             .{ "Add Music Folder", "<Control>o" },
         } },
         .{ .title = "General", .items = &.{
@@ -316,7 +322,7 @@ pub fn main(init: std.process.Init) !u8 {
     self.application = application;
     const g_application = gtk.cast(gtk.GApplication, application);
 
-    // Space and Ctrl+arrows are deliberately NOT application accelerators.
+    // Space, Ctrl+arrows and Alt+Left are deliberately NOT application accelerators.
     // GTK matches those before the focused widget sees the key, so they would
     // steal every space typed into a search box and its word movement. The
     // window's bubble-phase key controller handles them instead.
@@ -325,6 +331,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "rescan", activateRescan, null, &self);
     addAction(application, "search", activateSearch, "<Control>f", &self);
     addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);
+    addAction(application, "back", activateBack, null, &self);
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);
     addAction(application, "quit", activateQuit, "<Control>q", &self);

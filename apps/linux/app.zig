@@ -14,12 +14,16 @@ const mpris = @import("mpris.zig");
 const art = @import("art.zig");
 const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
+const window = @import("window.zig");
+const albums = @import("albums.zig");
 
 /// One page. The list is filled a page at a time as the user scrolls rather
 /// than all at once, so a 22,060-track library stays virtualized.
 pub const page_size: u32 = 512;
 /// One tick drives everything: pump, event drain, transport, jobs.
 pub const tick_ms: c_uint = 100;
+pub const page_history_depth = 16;
+pub const open_album_page_limit = 32;
 
 /// Which shelf of the library the track list is showing, and in what order.
 ///
@@ -145,6 +149,9 @@ pub const App = struct {
     content_page: ?*adw.NavigationPage = null,
     sidebar: ?*adw.Sidebar = null,
     pages: ?*gtk.Stack = null,
+    current_page: window.Page = .albums,
+    page_history: [page_history_depth]window.Page = undefined,
+    page_history_len: usize = 0,
     tracks_title: ?*adw.WindowTitle = null,
     /// The Tracks page's body: the browser and list, or a status page when
     /// there is nothing to list.
@@ -163,6 +170,8 @@ pub const App = struct {
     albums_body: ?*gtk.Stack = null,
     albums_navigation: ?*adw.NavigationView = null,
     album_sort: liborca.ReleaseSort = .artist,
+    open_album_pages: [open_album_page_limit]*albums.AlbumPage = undefined,
+    open_album_page_count: usize = 0,
 
     // now playing
     now_cover: ?*gtk.Widget = null,

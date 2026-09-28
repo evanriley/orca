@@ -174,10 +174,23 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
         gtk.gtk_widget_remove_css_class(child, "dim-label")
     else
         gtk.gtk_widget_add_css_class(child, "dim-label");
+    const row_widget = rowWidget(child) orelse return;
     if (playing_id != null and playing_id.? == row.id())
-        gtk.gtk_widget_add_css_class(child, "playing")
+        gtk.gtk_widget_add_css_class(row_widget, "playing")
     else
-        gtk.gtk_widget_remove_css_class(child, "playing");
+        gtk.gtk_widget_remove_css_class(row_widget, "playing");
+}
+
+fn hasCssName(widget: *gtk.Widget, name: []const u8) bool {
+    return std.mem.eql(u8, std.mem.span(gtk.gtk_widget_get_css_name(widget)), name);
+}
+
+fn rowWidget(child: *gtk.Widget) ?*gtk.Widget {
+    const cell = gtk.gtk_widget_get_parent(child) orelse return null;
+    if (!hasCssName(cell, "cell")) return null;
+    const row = gtk.gtk_widget_get_parent(cell) orelse return null;
+    if (!hasCssName(row, "row")) return null;
+    return row;
 }
 
 /// The Track the list marks as playing. Presentation only: the engine's
@@ -310,10 +323,16 @@ fn windowKeyPressed(
         transport.previous(self);
         return gtk.true_;
     }
+    if (held == gtk.MODIFIER_ALT and keyval == gtk.KEY_Left) {
+        back(self);
+        return gtk.true_;
+    }
     return gtk.false_;
 }
 
 // --------------------------------------------------------------- navigation
+
+const mouse_back_button: c_uint = 8;
 
 /// In sidebar order: `AdwSidebar` numbers items across sections.
 pub const Page = enum(c_uint) {
@@ -348,6 +367,47 @@ pub const Page = enum(c_uint) {
 };
 
 pub fn showPage(self: *App, page: Page) void {
+    switchTo(self, page, true);
+}
+
+fn remember(self: *App, page: Page) void {
+    if (self.page_history_len == self.page_history.len) {
+        @memmove(self.page_history[0 .. self.page_history_len - 1], self.page_history[1..self.page_history_len]);
+        self.page_history_len -= 1;
+    }
+    self.page_history[self.page_history_len] = page;
+    self.page_history_len += 1;
+}
+
+fn popPushedPage(self: *App) bool {
+    const navigation = switch (self.current_page) {
+        .albums => self.albums_navigation,
+        .artists => self.artists_navigation,
+        else => null,
+    } orelse return false;
+    const at_root = if (adw.adw_navigation_view_get_visible_page_tag(navigation)) |tag|
+        std.mem.eql(u8, std.mem.span(tag), std.mem.span(self.current_page.name()))
+    else
+        false;
+    if (at_root) return false;
+    return adw.adw_navigation_view_pop(navigation) != 0;
+}
+
+pub fn back(self: *App) void {
+    if (popPushedPage(self)) return;
+    if (self.page_history_len == 0) return;
+    self.page_history_len -= 1;
+    switchTo(self, self.page_history[self.page_history_len], false);
+}
+
+fn backPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    _ = gtk.gtk_gesture_set_state(gtk.cast(gtk.Gesture, gesture), gtk.EVENT_SEQUENCE_CLAIMED);
+    back(state(data));
+}
+
+fn switchTo(self: *App, page: Page, remember_previous: bool) void {
+    if (remember_previous and page != self.current_page) remember(self, self.current_page);
+    self.current_page = page;
     if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     if (self.sidebar) |sidebar| {
@@ -634,6 +694,11 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(windowKeyPressed), self);
     gtk.gtk_widget_add_controller(window, keys);
+    const back_button = gtk.gtk_gesture_click_new();
+    gtk.gtk_gesture_single_set_button(gtk.cast(gtk.GestureSingle, back_button), mouse_back_button);
+    gtk.gtk_event_controller_set_propagation_phase(back_button, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(back_button, "pressed", gtk.callback(backPressed), self);
+    gtk.gtk_widget_add_controller(window, back_button);
     gtk.gtk_window_set_title(self.window.?, "Orca");
     gtk.gtk_window_set_default_size(self.window.?, 1240, 800);
 

@@ -1,4 +1,4 @@
-//! Right-click menus for tracks, albums and queue entries.
+//! Right-click menus for tracks, albums, artists and queue entries.
 //!
 //! A menu acts on the thing it was opened on, which is recorded here before
 //! it pops up; its items are parameterless `app.ctx-*` actions that read that
@@ -11,10 +11,11 @@ const std = @import("std");
 const gtk = @import("gtk.zig");
 const app = @import("app.zig");
 const transport = @import("transport.zig");
+const mpris = @import("mpris.zig");
 
 const App = app.App;
 
-pub const Kind = enum { tracks, album, queue };
+pub const Kind = enum { tracks, album, artist, queue };
 
 pub const Context = struct {
     kind: Kind = .tracks,
@@ -39,7 +40,7 @@ pub const Context = struct {
 fn model(context: *const Context) *gtk.GMenu {
     const playback = gtk.g_menu_new();
     switch (context.kind) {
-        .tracks, .album => {
+        .tracks, .album, .artist => {
             gtk.g_menu_append(playback, "Play", "app.ctx-play");
             gtk.g_menu_append(playback, "Play Next", "app.ctx-play-next");
             gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
@@ -49,8 +50,6 @@ fn model(context: *const Context) *gtk.GMenu {
             gtk.g_menu_append(playback, "Remove from Queue", "app.ctx-remove");
         },
     }
-    const editing = gtk.g_menu_new();
-    gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
     const navigation = gtk.g_menu_new();
     if (context.kind != .album and context.release_id != null)
         gtk.g_menu_append(navigation, "Show Album", "app.ctx-show-album");
@@ -58,9 +57,13 @@ fn model(context: *const Context) *gtk.GMenu {
         gtk.g_menu_append(navigation, "Show Artist", "app.ctx-show-artist");
     const menu = gtk.g_menu_new();
     gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
-    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
+    if (context.kind != .artist) {
+        const editing = gtk.g_menu_new();
+        gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
+        gtk.g_object_unref(editing);
+    }
     gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, navigation));
-    gtk.g_object_unref(editing);
     gtk.g_object_unref(playback);
     gtk.g_object_unref(navigation);
     return menu;
@@ -72,7 +75,21 @@ fn unparentLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     return gtk.SOURCE_REMOVE;
 }
 
+var unsized_popover: ?*gtk.Popover = null;
+
+/// A popover sends its size as it opens, before its menu has laid out, and
+/// only a parent that re-presents it on allocation corrects that; a column
+/// view cell does not, so the menu stayed a row short. `gtk_popover_present`
+/// re-sends the size only while an allocation is pending.
+pub fn tick() void {
+    const popover = unsized_popover orelse return;
+    unsized_popover = null;
+    gtk.gtk_widget_queue_resize(gtk.cast(gtk.Widget, popover));
+    gtk.gtk_popover_present(popover);
+}
+
 fn closed(popover: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    if (unsized_popover == gtk.cast(gtk.Popover, popover.?)) unsized_popover = null;
     _ = gtk.g_idle_add(unparentLater, popover);
 }
 
@@ -87,6 +104,7 @@ pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
     gtk.gtk_popover_set_pointing_to(gtk.cast(gtk.Popover, popover), &point);
     _ = gtk.signalConnect(popover, "closed", gtk.callback(closed), null);
     gtk.gtk_popover_popup(gtk.cast(gtk.Popover, popover));
+    unsized_popover = gtk.cast(gtk.Popover, popover);
 }
 
 /// A right-button click gesture on `widget`, calling `handler` with the
@@ -100,6 +118,17 @@ pub fn onSecondaryClick(
     gtk.gtk_gesture_single_set_button(gtk.cast(gtk.GestureSingle, gesture), 3);
     _ = gtk.signalConnect(gesture, "pressed", gtk.callback(handler), data);
     gtk.gtk_widget_add_controller(widget, gesture);
+}
+
+pub fn playingMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const current = mpris.nowPlaying(self.runtime, self.player) orelse return;
+    defer current.deinit();
+    self.context.reset(.tracks);
+    self.context.tracks.append(self.allocator, current.summary.id) catch return;
+    self.context.release_id = current.summary.release_id;
+    self.context.artist_id = current.summary.artist_id;
+    popup(self, gestureWidget(gesture), x, y);
 }
 
 pub fn gestureWidget(gesture: ?*anyopaque) *gtk.Widget {

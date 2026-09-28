@@ -9,6 +9,7 @@ const strings = @import("strings.zig");
 const app = @import("app.zig");
 const art = @import("art.zig");
 const mpris = @import("mpris.zig");
+const menu = @import("menu.zig");
 
 const App = app.App;
 
@@ -19,6 +20,7 @@ pub fn build(self: *App) *gtk.Widget {
     const cover = art.newCover(self, art.iconPlaceholder(cover_pixels), cover_pixels);
     self.now_cover = cover;
     gtk.gtk_widget_add_css_class(cover, "now-cover");
+    menu.onSecondaryClick(cover, menu.playingMenu, self);
 
     const facts = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
     gtk.gtk_widget_set_valign(facts, gtk.ALIGN_CENTER);
@@ -30,6 +32,7 @@ pub fn build(self: *App) *gtk.Widget {
     self.now_artist = gtk.cast(gtk.Label, artist);
     self.now_album = gtk.cast(gtk.Label, album);
     gtk.gtk_widget_add_css_class(title, "now-page-title");
+    menu.onSecondaryClick(title, menu.playingMenu, self);
     gtk.gtk_widget_add_css_class(artist, "now-page-artist");
     gtk.gtk_widget_add_css_class(album, "now-page-album");
     for ([_]*gtk.Widget{ title, artist, album }) |label| {

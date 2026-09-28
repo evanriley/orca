@@ -89,9 +89,16 @@ The window is an `AdwNavigationSplitView`:
 - **Health** lists what liborca found wrong with the library, with a count in
   the sidebar and a Find Duplicates button.
 
-Right-clicking a track, an album tile, an album's track or a queue entry opens
-a menu: Play, Play Next, Add to Queue, Edit Tags…, Show Album and Show Artist,
-or Play and Remove for queue entries. On a selected row in the track list it acts on the
+Right-clicking a track, an album (tile, cover or title), an artist (row or
+avatar), a queue entry, or the playing track's cover in Now Playing and the
+player bar opens a menu: Play, Play Next, Add to Queue, Edit Tags…, Show Album
+and Show Artist, as far as they apply; queue entries offer Play and Remove.
+The playing track is marked across its whole row in the track list, on album
+pages and in the queue.
+
+Back (the mouse back button, or Alt+←) leaves an album or artist page first,
+then returns to the page shown before, across the sidebar's pages: Albums, an
+album, Now Playing, then Back returns to that album. On a selected row in the track list it acts on the
 whole selection. Play Next and Remove go through `Runtime.playerQueueInsertNext`
 and `playerQueueRemove`, so an entry the engine has already lined up is never
 pulled out from under the output.
