@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 13;
+pub const current_version = 14;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -806,6 +806,12 @@ const migration_12 =
 const migration_13 =
     "CREATE INDEX files_duration ON files(duration_ms, id);";
 
+/// The lookup that finds a file's stale Tracks when a reprojection moves it to
+/// another position. Without it each lookup is a full scan of `tracks`, once
+/// per file in every reprojected folder.
+const migration_14 =
+    "CREATE INDEX tracks_by_preferred_file ON tracks(preferred_file_id);";
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -943,6 +949,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 11 and target_version >= 11) try db.exec(migration_11);
     if (version < 12 and target_version >= 12) try db.exec(migration_12);
     if (version < 13 and target_version >= 13) try db.exec(migration_13);
+    if (version < 14 and target_version >= 14) try db.exec(migration_14);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(

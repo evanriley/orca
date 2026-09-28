@@ -52,7 +52,19 @@ pub const Result = struct {
     /// Files re-seated because a different performance already held the track
     /// number they stated.
     displaced_positions: u64 = 0,
+    /// Rows deleted because the files that backed them now project elsewhere.
+    tracks_pruned: u64 = 0,
+    releases_pruned: u64 = 0,
+    artists_pruned: u64 = 0,
 };
+
+/// A Track position this run wrote, which pruning must leave alone.
+const WrittenPosition = struct { release_id: i64, disc: i64, number: i64 };
+
+fn containsPosition(written: []const WrittenPosition, position: WrittenPosition) bool {
+    for (written) |candidate| if (std.meta.eql(candidate, position)) return true;
+    return false;
+}
 
 /// A `(folder, album key)` group's resolved release identity.
 const ReleaseIdentity = struct {
@@ -139,6 +151,98 @@ pub const Projection = struct {
         return result;
     }
 
+    /// Deletes the Tracks this folder's files used to back and no longer do.
+    ///
+    /// A Track is a position on a Release, so a file whose tags now put it on
+    /// another Release or position produces a new row, and the row it backed
+    /// before would otherwise stay listed with nothing behind it. Only rows
+    /// whose preferred file is in this folder are candidates, and only if this
+    /// run did not just write their position. Releases and Artists those rows
+    /// referenced are then deleted if nothing else still references them.
+    /// Everything deleted here is derived, and the next projection rebuilds it.
+    fn pruneStale(
+        self: *Projection,
+        allocator: std.mem.Allocator,
+        entries: []const Entry,
+        written: []const WrittenPosition,
+        result: *Result,
+    ) !void {
+        const db = self.library.database;
+        var candidates = try db.prepare(
+            \\SELECT id, release_id, COALESCE(disc_number, 1), track_number, artist_id
+            \\FROM tracks WHERE preferred_file_id = ?1;
+        );
+        defer candidates.deinit();
+        var delete_track = try db.prepare("DELETE FROM tracks WHERE id = ?1;");
+        defer delete_track.deinit();
+
+        var releases: std.ArrayList(i64) = .empty;
+        var artists: std.ArrayList(i64) = .empty;
+        for (entries) |entry| {
+            try candidates.bindInt64(1, entry.file_id);
+            var stale: std.ArrayList(i64) = .empty;
+            while (try candidates.step() == .row) {
+                const position: WrittenPosition = .{
+                    .release_id = candidates.columnInt64(1),
+                    .disc = candidates.columnInt64(2),
+                    .number = candidates.columnInt64(3),
+                };
+                if (containsPosition(written, position)) continue;
+                try stale.append(allocator, candidates.columnInt64(0));
+                try releases.append(allocator, position.release_id);
+                if (!candidates.columnIsNull(4)) try artists.append(allocator, candidates.columnInt64(4));
+            }
+            try candidates.reset();
+            for (stale.items) |track_id| {
+                try delete_track.bindInt64(1, track_id);
+                if (try delete_track.step() != .done) return error.SqlFailed;
+                try delete_track.reset();
+                result.tracks_pruned += 1;
+            }
+        }
+        if (releases.items.len == 0) return;
+
+        var release_in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
+        defer release_in_use.deinit();
+        var release_artist = try db.prepare("SELECT album_artist_id FROM releases WHERE id = ?1;");
+        defer release_artist.deinit();
+        var delete_release = try db.prepare("DELETE FROM releases WHERE id = ?1;");
+        defer delete_release.deinit();
+        for (releases.items) |release_id| {
+            try release_in_use.bindInt64(1, release_id);
+            const in_use = try release_in_use.step() == .row;
+            try release_in_use.reset();
+            if (in_use) continue;
+            try release_artist.bindInt64(1, release_id);
+            const found = try release_artist.step() == .row;
+            if (found and !release_artist.columnIsNull(0)) try artists.append(allocator, release_artist.columnInt64(0));
+            try release_artist.reset();
+            if (!found) continue;
+            try delete_release.bindInt64(1, release_id);
+            if (try delete_release.step() != .done) return error.SqlFailed;
+            try delete_release.reset();
+            result.releases_pruned += 1;
+        }
+
+        var artist_in_use = try db.prepare(
+            \\SELECT 1 WHERE EXISTS (SELECT 1 FROM tracks WHERE artist_id = ?1)
+            \\   OR EXISTS (SELECT 1 FROM releases WHERE album_artist_id = ?1);
+        );
+        defer artist_in_use.deinit();
+        var delete_artist = try db.prepare("DELETE FROM artists WHERE id = ?1;");
+        defer delete_artist.deinit();
+        for (artists.items) |artist_id| {
+            try artist_in_use.bindInt64(1, artist_id);
+            const in_use = try artist_in_use.step() == .row;
+            try artist_in_use.reset();
+            if (in_use) continue;
+            try delete_artist.bindInt64(1, artist_id);
+            if (try delete_artist.step() != .done) return error.SqlFailed;
+            try delete_artist.reset();
+            if (db.changes() == 1) result.artists_pruned += 1;
+        }
+    }
+
     /// The folders the scope touches, deduplicated and ordered.
     ///
     /// A changed file drags its whole folder in, because its siblings are what
@@ -208,15 +312,17 @@ pub const Projection = struct {
         try self.library.database.exec("BEGIN IMMEDIATE;");
         errdefer self.library.database.exec("ROLLBACK;") catch {};
 
+        var written: std.ArrayList(WrittenPosition) = .empty;
         var start: usize = 0;
         while (start < entries.len) {
             var end = start + 1;
             while (end < entries.len and
                 std.mem.eql(u8, entries[end].album_key, entries[start].album_key)) end += 1;
-            try self.projectGroup(allocator, folder, entries[start..end], result);
+            try self.projectGroup(allocator, folder, entries[start..end], &written, result);
             result.groups_projected += 1;
             start = end;
         }
+        try self.pruneStale(allocator, entries, written.items, result);
         try self.library.database.exec("COMMIT;");
     }
 
@@ -335,6 +441,7 @@ pub const Projection = struct {
         allocator: std.mem.Allocator,
         folder: Folder,
         entries: []Entry,
+        written: *std.ArrayList(WrittenPosition),
         result: *Result,
     ) !void {
         const identity = try self.resolveRelease(allocator, folder, entries);
@@ -370,6 +477,11 @@ pub const Projection = struct {
 
             const recording_id = try self.resolveRecording(allocator, entries, members);
             const preferred = &entries[bestEncoding(entries, members)];
+            try written.append(allocator, .{
+                .release_id = release_id,
+                .disc = position.disc,
+                .number = position.number,
+            });
             try tracks.append(allocator, .{
                 .recording_id = recording_id,
                 .release_id = release_id,
@@ -1866,4 +1978,61 @@ test "an out-of-range page is refused rather than clamped" {
         error.PageOutOfRange,
         library.releases.page(testing.allocator, .{ .limit = 513 }),
     );
+}
+
+test "a retagged file's old track, release and artist are pruned rather than left listed" {
+    var library = try openTestLibrary("file:orca-projection-prune?mode=memory&cache=shared");
+    defer library.close();
+    const file_id = try observe(&library, "/m/Old/a.flac", .flac, .{
+        .title = "Song",
+        .artist = "Old Artist",
+        .album = "Old Album",
+        .album_artist = "Old Artist",
+        .track_number = 1,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{file_id} });
+
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Song",
+        .artist = "New Artist",
+        .album = "New Album",
+        .album_artist = "New Artist",
+        .track_number = 1,
+    } });
+    const result = try projection.run(.{ .files = &.{file_id} });
+    try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
+    try testing.expectEqual(@as(u64, 1), result.releases_pruned);
+    try testing.expectEqual(@as(u64, 1), result.artists_pruned);
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM artists;"));
+    var page = try trackTitles(&library);
+    defer page.deinit();
+    try testing.expectEqualStrings("New Album", page.items[0].album);
+}
+
+test "a release that still has other tracks survives one of them moving away" {
+    var library = try openTestLibrary("file:orca-projection-prune-partial?mode=memory&cache=shared");
+    defer library.close();
+    const album: metadata.ObservedTags = .{ .artist = "Artist", .album = "Album", .album_artist = "Artist" };
+    var first = album;
+    first.title = "One";
+    first.track_number = 1;
+    var second = album;
+    second.title = "Two";
+    second.track_number = 2;
+    const moving = try observe(&library, "/m/Artist/1.flac", .flac, first);
+    const staying = try observe(&library, "/m/Artist/2.flac", .flac, second);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{ moving, staying } });
+
+    first.track_number = 3;
+    try library.observed_tags.upsert(.{ .file_id = moving, .values = first });
+    const result = try projection.run(.{ .files = &.{moving} });
+    try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
+    try testing.expectEqual(@as(u64, 0), result.releases_pruned);
+    try testing.expectEqual(@as(u64, 0), result.artists_pruned);
+    try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 3), try scalar(&library, "SELECT max(track_number) FROM tracks;"));
 }

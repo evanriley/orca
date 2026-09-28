@@ -67,6 +67,17 @@ uri)`, and a scan that changed nothing reprojects nothing. Missing locations are
 projected too, so an unmounted drive greys a Track out rather than deleting it;
 `has_playable_file` and `TrackRepository.playableLocation` answer reachability.
 
+Reprojecting a folder prunes what its files no longer back. A Track is a
+position on a Release, so a file whose tags now place it on another Release or
+position gets a new row; the row it backed before is deleted, and a Release or
+Artist left with nothing referencing it goes with it. Only Tracks whose
+preferred file is in the folder are candidates, found through
+`tracks_by_preferred_file` (version 14), and only if the run did not just write
+their position. Everything pruned is derived and is rebuilt by the next
+projection, so an id handed out for a pruned row does not come back: a client
+holding Track, Release or Artist ids across an edit or a rescan must look them
+up again.
+
 Two source-data defects are common enough that the projection must survive both
 without losing a song. A file with no track number takes the lowest free
 position on its disc and raises `missing_track_number`. A file whose stated
