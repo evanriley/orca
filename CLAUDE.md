@@ -24,8 +24,9 @@ ziglang.org deletes old nightly tarballs, which is how the previous pin
 `io: std.Io` parameter threaded through I/O call sites (`std.testing.io` in
 tests). Do not write code against the older `std.fs` / `std.io` APIs.
 
-The dev shell supplies libFLAC and SQLite, plus PipeWire and GTK4 on Linux.
-`sqlite3`, `FLAC` and GTK are linked via pkg-config. PipeWire's include paths
+The dev shell supplies libFLAC, libopusfile, libvorbis and SQLite, plus
+PipeWire and GTK4 on Linux. `sqlite3`, `FLAC`, `opusfile`, `vorbisfile` and GTK
+are linked via pkg-config. PipeWire's include paths
 come from `pkg-config --cflags-only-I` (`pkgConfigIncludePaths` in `build.zig`)
 and its library is linked without pkg-config, because the rest of its `--cflags`
 breaks Zig's pkg-config parser. No path under `/usr` is assumed, so the same
@@ -179,12 +180,12 @@ invocation, including throwaway checks.
 
 ### Running a single test
 
-There is no test filter wired into `build.zig` — `zig build test` runs all ~360
+There is no test filter wired into `build.zig` — `zig build test` runs all ~375
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `qoa` dependency, libFLAC, libc, and the MP3 and PipeWire shims,
-which is impractical to reconstruct on a bare `zig test` command line.
+SQLite, the `qoa` dependency, libFLAC, libopusfile, libvorbisfile, libc and the
+C shims, which is impractical to reconstruct on a bare `zig test` command line.
 
 Tests are run from the repository root and load fixtures by relative path
 (`fixtures/audio/...`). Do not make test working-directory assumptions.

@@ -11,7 +11,7 @@ links each subsystem's contract.
 ## Requirements
 
 - Zig `0.16.0`
-- libFLAC and SQLite development libraries
+- libFLAC, libopusfile, libvorbis and SQLite development libraries
 - Linux builds: PipeWire and GTK4 development libraries
 
 With Nix, `nix develop` (or direnv) provides all of these, and `nix build`

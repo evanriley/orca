@@ -17,7 +17,7 @@ frontends, no frontend owning behaviour.
                                            |
    library · database · storage · codec · metadata · audio · analysis · jobs
                                            |
-            SQLite · libFLAC · minimp3 · PipeWire (Linux) · platform APIs
+  SQLite · libFLAC · minimp3 · libopusfile · libvorbisfile · PipeWire (Linux)
 ```
 
 - **Zig clients** import the `liborca` module and call its Zig API directly.
@@ -40,8 +40,8 @@ const orca = b.dependency("orca", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("liborca", orca.module("liborca"));
 ```
 
-The module links SQLite and libFLAC, plus PipeWire on Linux, through the host's
-pkg-config.
+The module links SQLite, libFLAC, libopusfile and libvorbisfile, plus PipeWire
+on Linux, through the host's pkg-config.
 
 ## Rules that hold everywhere
 

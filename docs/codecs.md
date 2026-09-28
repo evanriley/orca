@@ -25,7 +25,7 @@ property the container does not state comes back null rather than zero.
 
 A probe also reports **which encoding** the container turned out to hold, as a
 stable lowercase identifier from `decoder.codec_id`: `pcm`, `pcm_float`,
-`flac`, `qoa`, `mp1`, `mp2`, `mp3`. The scanner stores it in `files.codec` and
+`flac`, `qoa`, `mp1`, `mp2`, `mp3`, `opus`, `vorbis`. The scanner stores it in `files.codec` and
 the property backfill repairs it for rows written before it existed.
 
 **It is not a synonym for `audio_format`.** `audio_format` names the container
@@ -80,6 +80,31 @@ against the bytes that follow it.
 Free-format and reserved-field frames are refused. Streams that change channel
 count or sample rate mid-file are refused rather than silently reinterpreted.
 Truncated input ends the stream; input that never syncs fails at open.
+
+## Ogg Opus and Ogg Vorbis
+
+Both decode through the reference libraries, libopusfile and libvorbisfile,
+each behind its own shim (`codec/opus_shim.c`, `codec/vorbis_shim.c`). The
+libraries own the Ogg container, pre-skip and end trimming, and sample-exact
+seeking, so a decoded stream is exactly as long as the audio the encoder was
+given and `frame_count` agrees with it. The shims turn the libraries'
+cursor-shaped I/O callbacks into positional reads over `ReadableSource`.
+
+- Opus always decodes at 48 kHz. The input rate an Opus header records is
+  informational and is not reported as the stream's rate.
+- Neither codec has a sample width, so `source_format` is null and
+  `files.bit_depth` stays unknown, as for MP3.
+- A chained stream whose channel count or rate changes between links fails
+  rather than reinterpreting samples.
+- A seek rebuilds Opus decoder state from an 80 ms pre-roll. The sought audio
+  lands on the requested frame but converges on the sequential decode rather
+  than matching it sample for sample.
+
+Tags come from the stream's comment header, read by `metadata/ogg_comment.zig`
+without either library: it reassembles the second packet of the first logical
+stream from Ogg pages, bounded at 16 MiB, and hands the payload to the Vorbis
+comment parser FLAC already uses. Embedded artwork in Ogg
+(`METADATA_BLOCK_PICTURE`) is not read yet.
 
 ## FLAC
 

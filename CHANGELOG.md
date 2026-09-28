@@ -2,6 +2,20 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Ogg Opus and Ogg Vorbis play, scan and tag
+
+- **Opus and Vorbis decode through libopusfile and libvorbisfile**, each behind
+  a shim on the same terms as libFLAC. The libraries own the Ogg container,
+  pre-skip, end trimming and sample-exact seeking, so a 200 ms Opus fixture
+  whose container also carries 312 frames of encoder pre-skip decodes to
+  exactly 9,600 frames, and 30-second streams report exactly 30,000 ms.
+- **Tags come from the Ogg comment header** through a small page reader in
+  `metadata/ogg_comment.zig` and the existing Vorbis comment parser. A comment
+  packet spanning several pages is reassembled, bounded at 16 MiB.
+- Scanning records `codec` as `opus` or `vorbis`, the decode rate, and no bit
+  depth; analysis measures both formats and playback applies their
+  ReplayGain. Embedded Ogg artwork is not read yet.
+
 ### Stable Zig, a Nix flake, and three defects the old snapshot hid
 
 - **Orca builds with Zig 0.16.0.** The previous pin, `0.17.0-dev.1770`, is no
