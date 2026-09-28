@@ -5,6 +5,7 @@ pub const file_mutation = @import("file_mutation.zig");
 pub const executor = @import("executor.zig");
 pub const model = @import("model.zig");
 pub const mutation = @import("mutation.zig");
+pub const ogg_comment = @import("ogg_comment.zig");
 pub const recovery = @import("recovery.zig");
 pub const vorbis_comment = @import("vorbis_comment.zig");
 
@@ -29,6 +30,7 @@ test {
     _ = @import("executor.zig");
     _ = @import("model.zig");
     _ = @import("mutation.zig");
+    _ = @import("ogg_comment.zig");
     _ = @import("recovery.zig");
     _ = @import("vorbis_comment.zig");
 }
