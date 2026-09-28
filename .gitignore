@@ -1,6 +1,8 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+.direnv/
+result*
 
 # Local editor and OS state
 .DS_Store
