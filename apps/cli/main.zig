@@ -479,6 +479,10 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             " -> output {s} {d} Hz {d} ch",
             .{ formatName(output.sample_format), output.sample_rate, output.channels },
         );
+        if (path.device_rate) |device_rate| {
+            try stdout.print(" -> device {d} Hz", .{device_rate});
+            if (device_rate != output.sample_rate) try stdout.writeAll(" (PipeWire resamples)");
+        }
     } else try stdout.writeAll(" -> no output");
     try stdout.print("; bit-perfect: {s}", .{if (path.bit_perfect_eligible) "yes" else "no"});
     for (path.reasonList(), 0..) |reason, index| {

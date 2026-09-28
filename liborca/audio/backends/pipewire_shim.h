@@ -27,6 +27,7 @@ struct orca_pw_timing {
     uint64_t queued_frames;
     uint64_t buffered_frames;
     uint32_t quantum_frames;
+    uint32_t graph_rate;
 };
 
 const char *orca_pw_library_version(void);

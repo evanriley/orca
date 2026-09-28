@@ -204,6 +204,10 @@ pub const SignalPath = struct {
     volume: f32 = 1,
     /// What the output stream was opened with; null while no output is open.
     output: ?pcm.Format = null,
+    /// The rate the output device is running at, as reported by the backend;
+    /// null while unknown. It differs from `output.sample_rate` when the
+    /// backend resamples.
+    device_rate: ?u32 = null,
     /// False as soon as any reason applies. With no source or no output the
     /// format conversions cannot be judged, so only sample processing counts.
     bit_perfect_eligible: bool = true,
@@ -226,6 +230,7 @@ pub const SignalPath = struct {
         crossfeed: ?f32,
         volume: f32,
         output: ?pcm.Format,
+        device_rate: ?u32,
     }) SignalPath {
         var result: SignalPath = .{
             .source = inputs.source,
@@ -238,6 +243,7 @@ pub const SignalPath = struct {
             .crossfeed = inputs.crossfeed,
             .volume = inputs.volume,
             .output = inputs.output,
+            .device_rate = inputs.device_rate,
         };
         const stereo = if (inputs.output) |output| output.channels == 2 else true;
         const equalizer_changes = if (inputs.equalizer) |setting| setting.isActive() else false;
@@ -251,6 +257,16 @@ pub const SignalPath = struct {
                 const report = signal_path.inspect(max_reasons, source, output, &.{}, &.{});
                 for (report.reasons[0..report.reason_count]) |reason| {
                     result.reasons[result.reason_count] = reason;
+                    result.reason_count += 1;
+                }
+            }
+        }
+        if (inputs.output) |output| {
+            if (inputs.device_rate) |device_rate| {
+                if (device_rate != output.sample_rate and
+                    std.mem.indexOfScalar(signal_path.Reason, result.reasonList(), .sample_rate_conversion) == null)
+                {
+                    result.reasons[result.reason_count] = .sample_rate_conversion;
                     result.reason_count += 1;
                 }
             }
@@ -514,6 +530,7 @@ test "a signal path with no processing over matching formats is bit-perfect elig
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
+        .device_rate = null,
     });
     try std.testing.expect(path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
@@ -529,6 +546,7 @@ test "an integer source reaching a float output is a sample format conversion" {
         .crossfeed = null,
         .volume = 1,
         .output = test_float_format,
+        .device_rate = null,
     });
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expectEqualSlices(
@@ -561,6 +579,7 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
             .crossfeed = case.crossfeed,
             .volume = case.volume,
             .output = test_float_format,
+            .device_rate = null,
         });
         try std.testing.expect(!path.bit_perfect_eligible);
         try std.testing.expectEqualSlices(
@@ -577,8 +596,66 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
         .crossfeed = 0,
         .volume = 1,
         .output = test_float_format,
+        .device_rate = null,
     });
     try std.testing.expect(transparent.bit_perfect_eligible);
+}
+
+test "a device running at another rate than the output stream is a sample rate conversion" {
+    const path = SignalPath.describe(.{
+        .source = test_float_format,
+        .codec = null,
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = 48_000,
+    });
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expectEqual(@as(?u32, 48_000), path.device_rate);
+    try std.testing.expectEqualSlices(
+        signal_path.Reason,
+        &.{.sample_rate_conversion},
+        path.reasonList(),
+    );
+}
+
+test "a device running at the output stream rate, or at an unknown rate, adds no reason" {
+    for ([_]?u32{ 44_100, null }) |device_rate| {
+        const path = SignalPath.describe(.{
+            .source = test_float_format,
+            .codec = null,
+            .replay_gain = 1,
+            .equalizer = null,
+            .crossfeed = null,
+            .volume = 1,
+            .output = test_float_format,
+            .device_rate = device_rate,
+        });
+        try std.testing.expect(path.bit_perfect_eligible);
+        try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+    }
+}
+
+test "a device rate mismatch is one reason even when the source rate already differs" {
+    var source = test_float_format;
+    source.sample_rate = 96_000;
+    const path = SignalPath.describe(.{
+        .source = source,
+        .codec = null,
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = 48_000,
+    });
+    try std.testing.expectEqualSlices(
+        signal_path.Reason,
+        &.{.sample_rate_conversion},
+        path.reasonList(),
+    );
 }
 
 test "crossfeed on a layout it does not apply to is not sample processing" {
@@ -593,6 +670,7 @@ test "crossfeed on a layout it does not apply to is not sample processing" {
         .crossfeed = 0.3,
         .volume = 1,
         .output = surround,
+        .device_rate = null,
     });
     try std.testing.expect(path.bit_perfect_eligible);
 }
@@ -606,6 +684,7 @@ test "replay gain is reported in decibels" {
         .crossfeed = null,
         .volume = 1,
         .output = null,
+        .device_rate = null,
     });
     try std.testing.expectApproxEqAbs(@as(f32, -6.0206), path.replay_gain_db.?, 0.001);
 }

@@ -245,6 +245,7 @@ struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
     if (device_id != 0)
         pw_properties_setf(properties, PW_KEY_TARGET_OBJECT, "%llu",
                            (unsigned long long)device_id);
+    pw_properties_setf(properties, PW_KEY_NODE_RATE, "1/%u", sample_rate);
     if (requested_latency_frames != 0)
         pw_properties_setf(properties, PW_KEY_NODE_LATENCY, "%u/%u",
                            requested_latency_frames, sample_rate);
@@ -309,6 +310,7 @@ int orca_pw_output_timing(struct orca_pw_output *output,
         .buffered_frames = native.buffered,
         .quantum_frames = atomic_load_explicit(&output->quantum_frames,
                                                 memory_order_relaxed),
+        .graph_rate = native.rate.num == 1 ? native.rate.denom : 0,
     };
     return 0;
 }

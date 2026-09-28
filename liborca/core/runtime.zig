@@ -2719,6 +2719,7 @@ pub const OrcaRuntime = struct {
             .crossfeed = object_value.dsp.settings.crossfeed,
             .volume = object_value.gain.linear.load(.acquire),
             .output = if (engine) |value| value.outputFormat() else null,
+            .device_rate = if (engine) |value| value.deviceRate() else null,
         });
     }
 

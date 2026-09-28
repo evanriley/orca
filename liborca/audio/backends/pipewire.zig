@@ -25,6 +25,7 @@ const NativeTiming = extern struct {
     queued_frames: u64,
     buffered_frames: u64,
     quantum_frames: u32,
+    graph_rate: u32,
 };
 extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
 extern fn orca_pw_output_status(?*anyopaque) c_int;
@@ -122,6 +123,7 @@ pub const OutputSession = struct {
             .queued_frames = native.queued_frames,
             .buffered_frames = native.buffered_frames,
             .backend_quantum_frames = native.quantum_frames,
+            .graph_rate_hz = if (native.graph_rate != 0) native.graph_rate else null,
         };
     }
 
@@ -144,6 +146,7 @@ pub const OutputSession = struct {
                 std.math.cast(u32, frames)
             else
                 null,
+            .graph_rate_hz = current.graph_rate_hz,
         };
     }
 };

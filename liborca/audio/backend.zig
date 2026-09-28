@@ -31,6 +31,7 @@ pub const TimingSnapshot = struct {
     queued_frames: u64,
     buffered_frames: u64,
     backend_quantum_frames: u32,
+    graph_rate_hz: ?u32,
 };
 
 /// Platform implementations own discovery and stream lifecycle. Audio callback

@@ -14,6 +14,10 @@
   page with the ten-band equalizer, presets, preamp and crossfeed, saved in
   `settings.ini` and applied at launch; the output menu shows the signal path
   and whether it is bit-perfect.
+- **Playback at the source's sample rate.** Each PipeWire stream requests
+  `node.rate` at its source rate, and the signal path reports the rate the
+  device runs at (`SignalPath.device_rate`), adding sample rate conversion
+  when PipeWire resamples because the request was not honoured.
 
 ### A designed GTK frontend
 

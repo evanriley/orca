@@ -30,6 +30,12 @@ pub fn write(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Err
         try writeDepth(writer, output);
         try writer.writeAll(" · ");
         try writeRate(writer, output.sample_rate);
+        if (path.device_rate) |device_rate| {
+            if (device_rate != output.sample_rate) {
+                try writer.writeAll(", resampled to ");
+                try writeRate(writer, device_rate);
+            }
+        }
     }
     if (path.output == null) return;
     if (path.bit_perfect_eligible) return writer.writeAll("\nBit-perfect");
@@ -70,7 +76,7 @@ fn isLossy(codec: []const u8) bool {
     return false;
 }
 
-fn writeCodecName(writer: *std.Io.Writer, codec: []const u8) !void {
+pub fn writeCodecName(writer: *std.Io.Writer, codec: []const u8) !void {
     if (std.ascii.eqlIgnoreCase(codec, "opus")) return writer.writeAll("Opus");
     if (std.ascii.eqlIgnoreCase(codec, "vorbis")) return writer.writeAll("Vorbis");
     if (std.ascii.eqlIgnoreCase(codec, "pcm_float")) return writer.writeAll("PCM");
@@ -85,6 +91,6 @@ fn writeDepth(writer: *std.Io.Writer, format: liborca.PcmFormat) !void {
     try writer.print("{d}-bit{s}", .{ format.bits_per_sample, suffix });
 }
 
-fn writeRate(writer: *std.Io.Writer, hertz: u32) !void {
+pub fn writeRate(writer: *std.Io.Writer, hertz: u32) !void {
     try writer.print("{d} kHz", .{@as(f64, @floatFromInt(hertz)) / 1000});
 }

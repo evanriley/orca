@@ -34,7 +34,8 @@ the rule in [architecture.md](architecture.md).
 - A runtime-owned Player and Zone object graph with PipeWire output.
 - A gapless queue with repeat, shuffle, next, previous, seek, pause and
   volume. A format change between entries reopens the output at the new
-  format.
+  format, and each stream asks PipeWire for its source's sample rate; the
+  signal path reports the rate the device actually runs at.
 - Per-entry ReplayGain from analysis results.
 - A ten-band equalizer with presets, stereo crossfeed, and a signal-path
   report of the source, each processing stage, the output stream and whether
@@ -80,29 +81,24 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Play at the source's sample rate.** The PipeWire stream asks for no
-   device rate (`node.rate`), so the graph stays at its default and PipeWire
-   resamples: a 44.1 kHz FLAC plays through a sink running at 48 kHz. Request
-   the source rate, read back the rate the device actually runs at, and report
-   resampling in the signal path when the request is not honoured.
-2. **Track details.** A `libraryTrackDetails` query (codec, sample rate, bit
+1. **Track details.** A `libraryTrackDetails` query (codec, sample rate, bit
    depth, channels, bitrate, duration, size, path, loudness, tags), an
    `orca-cli track` command, and an optional details panel in `orca-gtk`
    beside the track list and on album pages, with the live signal path for
    the playing track.
-3. **A fixed output rate with a band-limited resampler** (libsamplerate or
+2. **A fixed output rate with a band-limited resampler** (libsamplerate or
    speexdsp behind a shim), for gapless playback across sample rates.
-4. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
+3. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
    Last.fm follows.
-5. **Filesystem watching** as a scan accelerator.
-6. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
+4. **Filesystem watching** as a scan accelerator.
+5. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
    folder, but its files and tracks stay in the library, listed.
-7. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+6. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
    writable. The C ABI has neither tag writes nor queue editing.
-8. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
+7. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
-9. **Undecodable files are re-examined on every analysis run.** They are
+8. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
 

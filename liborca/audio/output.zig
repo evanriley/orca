@@ -195,6 +195,7 @@ pub const TestBackend = struct {
             .render_ahead_frames = render_ahead_frames,
             .dsp_frames = dsp_frames,
             .hardware_frames = null,
+            .graph_rate_hz = null,
         };
     }
 
@@ -206,6 +207,7 @@ pub const TestBackend = struct {
             .queued_frames = 0,
             .buffered_frames = 0,
             .backend_quantum_frames = 256,
+            .graph_rate_hz = null,
         };
     }
 };

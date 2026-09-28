@@ -202,6 +202,14 @@ pub const PlayerEngine = struct {
         return zone_runtime.streamFormat(open);
     }
 
+    /// Control lane, under `quiesce`. The rate the clock Zone's device reports
+    /// running at, or null while it is unknown.
+    pub fn deviceRate(self: *const PlayerEngine) ?u32 {
+        const zone_value = self.clock_zone orelse return null;
+        const rate = zone_value.published_graph_rate_hz.load(.acquire);
+        return if (rate == 0) null else rate;
+    }
+
     pub fn isDrained(self: *const PlayerEngine) bool {
         return self.drained.load(.acquire);
     }
