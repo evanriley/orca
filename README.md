@@ -68,3 +68,12 @@ acceptance updates Orca metadata without writing media files.
 - `tests/` — integration, platform, recovery, and performance tests
 - `fixtures/` — checked-in test media and pathological inputs
 - `docs/` — architecture decisions and subsystem documentation
+
+## License
+
+Orca is licensed under the [Mozilla Public License 2.0](LICENSE). Applications
+of any licence may embed `liborca`; changes to Orca's own files are shared
+under the same terms. Vendored and linked libraries keep their own licences:
+`liborca/codec/vendor/minimp3` is CC0, and the system libraries Orca links
+(SQLite, libFLAC, libopusfile, libvorbis, PipeWire, GTK4) are distributed under
+theirs.

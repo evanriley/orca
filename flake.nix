@@ -49,6 +49,8 @@
           postConfigure = ''
             ln -s ${finalAttrs.deps} "$ZIG_GLOBAL_CACHE_DIR/p"
           '';
+
+          meta.license = pkgs.lib.licenses.mpl20;
         });
       });
 

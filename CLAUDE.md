@@ -14,6 +14,17 @@ TUIs are built on it. `docs/architecture.md` is the overview,
 comes next, and the other files in `docs/` are per-subsystem contracts: the
 fastest way to load a subsystem's invariants before editing it.
 
+## Licence
+
+Orca is MPL-2.0 (`LICENSE`): embedders may keep their own code closed, changes
+to Orca's files stay open, and App Store distribution stays possible.
+`liborca`'s dependencies, and anything it vendors or links statically, must
+be permissive (BSD, MIT, Apache-2.0, zlib, CC0, public domain): a GPL or LGPL
+dependency there would bind every embedder and rule out the App Stores. This is
+why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
+(FDK licence). A frontend dynamically linking its platform's own toolkit, as
+`orca-gtk` does with LGPL GTK4, is outside that rule.
+
 ## Toolchain
 
 Zig `0.16.0`, the stable release, provided by the flake's dev shell
