@@ -18,7 +18,7 @@ const track_model = @import("track_model.zig");
 /// One page. The list is filled a page at a time as the user scrolls rather
 /// than all at once, so a 22,060-track library stays virtualized.
 pub const page_size: u32 = 512;
-/// One tick drives everything: pump, event drain, transport, scan.
+/// One tick drives everything: pump, event drain, transport, jobs.
 pub const tick_ms: c_uint = 100;
 
 /// Which shelf of the library the track list is showing, and in what order.
@@ -67,6 +67,8 @@ pub const OwnedText = struct {
     }
 };
 
+pub const Task = enum { scan, analysis, duplicates, tag_write };
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -77,8 +79,14 @@ pub const App = struct {
     library: ?liborca.LibraryHandle = null,
     player: liborca.PlayerHandle = undefined,
     zone: ?liborca.ZoneHandle = null,
-    scan_job: ?liborca.JobHandle = null,
-    scanning: bool = false,
+    /// The background job this frontend started and is showing, if any.
+    task: ?Task = null,
+    task_job: ?liborca.JobHandle = null,
+    /// The undo group of the last tag write, for the toast's Undo.
+    tag_write_group: u64 = 0,
+    /// The output device chosen in Preferences, by name, so the choice
+    /// survives device ids being renumbered between runs.
+    preferred_output: OwnedText = .{},
     library_path: ?[:0]u8 = null,
     /// Output pinned by `ORCA_OUTPUT_DEVICE`, overriding the device dropdown.
     /// Development affordance only: it exists so an automated run can be held to a
@@ -169,6 +177,15 @@ pub const App = struct {
     /// What the open right-click menu acts on.
     context: menu.Context = .{},
 
+    // health page
+    health_list: ?*gtk.ListBox = null,
+    health_note: ?*gtk.Label = null,
+    health_body: ?*gtk.Stack = null,
+    health_title: ?*adw.WindowTitle = null,
+    health_count: ?*gtk.Label = null,
+
+    preferences_dialog: ?*adw.Dialog = null,
+
     // artists page
     artist_list_store: ?*gtk.ListStore = null,
     artist_list_loaded: u32 = 0,
@@ -206,6 +223,8 @@ pub const App = struct {
     device_popover: ?*gtk.Popover = null,
     device_ids: std.ArrayList(u64) = .empty,
     device_checks: std.ArrayList(*gtk.Widget) = .empty,
+    /// Names in `device_ids` order, as the output menu shows them.
+    device_names: std.ArrayList([:0]u8) = .empty,
     /// Index into `device_ids` of the output the next Zone opens on.
     device_index: usize = 0,
     /// A drag in flight: the tick stops writing the slider, and the seek is
@@ -347,7 +366,7 @@ pub const App = struct {
     /// never shows an empty table while it is being read.
     pub fn updateWelcome(self: *App) void {
         const page = self.welcome orelse return;
-        if (self.scanning) {
+        if (self.task == .scan) {
             adw.adw_status_page_set_icon_name(page, null);
             adw.adw_status_page_set_title(page, "Reading your music…");
             adw.adw_status_page_set_description(page, "Albums appear here as they are found.");
@@ -359,8 +378,8 @@ pub const App = struct {
                 "Add the folder your music lives in. Orca reads it and never changes a file unless you ask.",
             );
         }
-        if (self.welcome_button) |button| gtk.gtk_widget_set_visible(button, if (self.scanning) gtk.false_ else gtk.true_);
-        if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (self.scanning) gtk.true_ else gtk.false_);
+        if (self.welcome_button) |button| gtk.gtk_widget_set_visible(button, if (self.task == .scan) gtk.false_ else gtk.true_);
+        if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (self.task == .scan) gtk.true_ else gtk.false_);
     }
 
     /// Fetches exactly one bounded page and appends it. The page is caller-owned
@@ -443,9 +462,12 @@ pub const App = struct {
         self.artist_scope_name.clear(self.allocator);
         self.device_ids.deinit(self.allocator);
         self.device_checks.deinit(self.allocator);
+        for (self.device_names.items) |name| self.allocator.free(name);
+        self.device_names.deinit(self.allocator);
         self.art.deinit(self.allocator);
         self.context.deinit(self.allocator);
         self.artist_list_filter.clear(self.allocator);
+        self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }
 };

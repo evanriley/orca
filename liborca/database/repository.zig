@@ -886,6 +886,25 @@ pub const TrackRepository = struct {
         return ids.toOwnedSlice(allocator);
     }
 
+    /// The Tracks a file backs: as their preferred file, or through their
+    /// Recording. The reverse of `fileIds`.
+    pub fn idsForFile(self: *const TrackRepository, allocator: std.mem.Allocator, file_id: i64) ![]i64 {
+        var statement = try self.db.prepare(
+            \\SELECT id FROM tracks WHERE preferred_file_id=?1
+            \\UNION
+            \\SELECT t.id FROM tracks t JOIN files f ON f.recording_id = t.recording_id
+            \\WHERE f.id=?1
+            \\LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, max_page);
+        var ids: std.ArrayList(i64) = .empty;
+        errdefer ids.deinit(allocator);
+        while (try statement.step() == .row) try ids.append(allocator, statement.columnInt64(0));
+        return ids.toOwnedSlice(allocator);
+    }
+
     /// One Track by id, for the "what is playing right now" question. Bounded
     /// by construction: a single row, copied out, with no statement escaping.
     pub fn byId(

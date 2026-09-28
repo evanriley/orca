@@ -77,6 +77,18 @@ pub const TrackEdit = struct {
 
 pub const TrackEditPage = database.repository.FieldValuePage;
 
+/// The Tracks an edit's files back once it is applied. An edit that moves a
+/// track to another album or position reprojects it as a new Track, so the
+/// ids a caller passed in may no longer exist. Caller-owned.
+pub const EditedTracks = struct {
+    allocator: std.mem.Allocator,
+    ids: []i64,
+
+    pub fn deinit(self: EditedTracks) void {
+        self.allocator.free(self.ids);
+    }
+};
+
 const max_edit_bytes = 4096;
 
 fn validateEdit(field: metadata.Field, value: []const u8) !void {
@@ -1976,7 +1988,7 @@ pub const OrcaRuntime = struct {
         library: LibraryHandle,
         track_ids: []const i64,
         edits: []const TrackEdit,
-    ) !void {
+    ) !EditedTracks {
         if (track_ids.len == 0 or track_ids.len > database.repository.max_page) return error.InvalidTrackSelection;
         if (edits.len == 0) return error.NoTrackEdits;
         for (edits) |edit| if (edit.value) |value| try validateEdit(edit.field, value);
@@ -2008,6 +2020,17 @@ pub const OrcaRuntime = struct {
             .library = library_database,
         };
         _ = try pass.run(.{ .files = files.items });
+
+        var edited: std.ArrayList(i64) = .empty;
+        errdefer edited.deinit(self.allocator);
+        for (files.items) |file_id| {
+            const ids = try library_database.tracks.idsForFile(self.allocator, file_id);
+            defer self.allocator.free(ids);
+            for (ids) |id| {
+                if (std.mem.indexOfScalar(i64, edited.items, id) == null) try edited.append(self.allocator, id);
+            }
+        }
+        return .{ .allocator = self.allocator, .ids = try edited.toOwnedSlice(self.allocator) };
     }
 
     /// Orca's values for a track, read from its preferred file.
@@ -3757,26 +3780,28 @@ test "a library edit regroups a track without touching its file, and clearing it
         &.{track_id},
         &.{.{ .field = .track_number, .value = "zero" }},
     ));
-    try runtime.libraryEditTracks(library, &.{track_id}, &.{
+    const moved = try runtime.libraryEditTracks(library, &.{track_id}, &.{
         .{ .field = .artist, .value = "Edited Artist" },
         .{ .field = .album, .value = "Edited Album" },
     });
+    defer moved.deinit();
     var edited = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
     try std.testing.expectEqual(@as(usize, 1), edited.items.len);
     try std.testing.expectEqualStrings("Edited Artist", edited.items[0].artist);
     try std.testing.expectEqualStrings("Edited Album", edited.items[0].album);
     const edited_id = edited.items[0].id;
     edited.deinit();
+    try std.testing.expectEqualSlices(i64, &.{edited_id}, moved.ids);
 
     var values = try runtime.libraryTrackEdits(library, edited_id);
     try std.testing.expectEqual(@as(usize, 2), values.items.len);
     try std.testing.expect(values.items[0].locked);
     values.deinit();
 
-    try runtime.libraryEditTracks(library, &.{edited_id}, &.{
+    (try runtime.libraryEditTracks(library, &.{edited_id}, &.{
         .{ .field = .artist, .value = null },
         .{ .field = .album, .value = null },
-    });
+    })).deinit();
     var reverted = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
     defer reverted.deinit();
     try std.testing.expectEqual(@as(usize, 1), reverted.items.len);
@@ -3835,9 +3860,10 @@ test "an approved tag write rewrites the files, the rescan agrees, and undo rest
     var ids = try allTrackIds(&runtime, library);
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqual(@as(usize, 3), ids.len);
-    try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }});
+    const moved = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }});
     std.testing.allocator.free(ids);
-    ids = try allTrackIds(&runtime, library);
+    ids = try std.testing.allocator.dupe(i64, moved.ids);
+    moved.deinit();
 
     const preview = try runtime.planTagWrite(library, std.testing.io, ids);
     defer preview.deinit();
@@ -3884,7 +3910,7 @@ test "a file changed since its scan is left out of a tag write" {
     const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-changed?mode=memory&cache=shared");
     const ids = try allTrackIds(&runtime, library);
     defer std.testing.allocator.free(ids);
-    try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }})).deinit();
 
     const bytes = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(bytes);

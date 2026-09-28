@@ -5,6 +5,7 @@
 //! never adjusted, cached across tracks, or reconstructed from telemetry: that
 //! is engine state and it belongs to liborca.
 
+const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
@@ -13,6 +14,7 @@ const mpris = @import("mpris.zig");
 const window = @import("window.zig");
 const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
+const settings = @import("settings.zig");
 
 const App = app.App;
 
@@ -56,11 +58,14 @@ fn selectedDeviceId(self: *App) u64 {
     return self.device_ids.items[self.device_index];
 }
 
-fn deviceRow(self: *App, name: [*:0]const u8) void {
+fn deviceRow(self: *App, name: [:0]const u8) void {
+    if (self.allocator.dupeSentinel(u8, name, 0)) |owned| {
+        self.device_names.append(self.allocator, owned) catch self.allocator.free(owned);
+    } else |_| {}
     const list = self.device_list orelse return;
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(row, "device-row");
-    const label = gtk.gtk_label_new(name);
+    const label = gtk.gtk_label_new(name.ptr);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
     gtk.gtk_widget_set_hexpand(label, gtk.true_);
@@ -85,6 +90,8 @@ pub fn refreshDevices(self: *App) void {
     gtk.gtk_list_box_remove_all(list);
     self.device_ids.clearRetainingCapacity();
     self.device_checks.clearRetainingCapacity();
+    for (self.device_names.items) |name| self.allocator.free(name);
+    self.device_names.clearRetainingCapacity();
     // Id 0 is "let the server decide", which is what a single-output frontend
     // should default to.
     deviceRow(self, "System Default");
@@ -96,10 +103,13 @@ pub fn refreshDevices(self: *App) void {
             strings.printZ(&buffer, "{s}", .{device.nameSlice()}) catch continue
         else
             strings.printZ(&buffer, "Device {d}", .{device.id}) catch continue;
-        deviceRow(self, label.ptr);
+        deviceRow(self, label);
         self.device_ids.append(self.allocator, device.id) catch {};
     }
     self.device_index = 0;
+    for (self.device_names.items, 0..) |name, index| {
+        if (index != 0 and std.mem.eql(u8, name, self.preferred_output.value)) self.device_index = index;
+    }
     if (self.pinned_output_device) |pinned| {
         for (self.device_ids.items, 0..) |id, index| {
             if (id == pinned) self.device_index = index;
@@ -125,9 +135,17 @@ fn deviceActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     const index = gtk.gtk_list_box_row_get_index(gtk.cast(gtk.ListBoxRow, row));
     if (index < 0) return;
     if (self.device_popover) |popover| gtk.gtk_popover_popdown(popover);
-    if (@as(usize, @intCast(index)) == self.device_index) return;
-    self.device_index = @intCast(index);
+    selectDevice(self, @intCast(index));
+}
+
+/// Makes the output at `index` in the output menu the one playback uses, and
+/// remembers it by name.
+pub fn selectDevice(self: *App, index: usize) void {
+    if (index >= self.device_ids.items.len or index == self.device_index) return;
+    self.device_index = index;
     showSelectedDevice(self);
+    self.preferred_output.set(self.allocator, if (index == 0) "" else self.device_names.items[index]);
+    settings.save(self);
     if (self.pinned_output_device != null) {
         self.toast("The output is pinned by ORCA_OUTPUT_DEVICE");
         return;

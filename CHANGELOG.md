@@ -18,6 +18,12 @@
   thread.
 - **Artists**: every Artist, searchable, and a page per artist with their
   albums, Play and Shuffle.
+- **Edit Tags** from any right-click menu: one track or many, saved to the
+  library, then optionally written to the files after a preview, with Undo.
+- **Preferences** (Ctrl+,): music folders, loudness measurement, duplicate
+  finding, ReplayGain and the output device, which are remembered.
+- **Health**: the issues liborca found, with Find Duplicates.
+- Scans, measurement, duplicate finding and tag writes share one progress card.
 - **The queue is editable**: click an entry to play it, remove entries, and
   Play Next or Add to Queue from a right-click menu on tracks, albums and
   queue entries, which also offers Show Album and Show Artist.
@@ -39,6 +45,9 @@
   entry the engine has already lined up, if it has, and neither that entry nor
   the playing one can be removed.
 - **`TrackSummary` carries `release_id` and `artist_id`.**
+- **`libraryEditTracks` returns `EditedTracks`**, the Tracks the edited files
+  back afterwards, since moving a track to another album gives it a new id.
+  `orca-cli edit` prints them. (Breaking: it returned nothing.)
 - `core/root.zig` now lists its files in a test block, so their tests run.
 
 ### Tag write-back

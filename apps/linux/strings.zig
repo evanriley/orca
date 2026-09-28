@@ -8,8 +8,8 @@ const std = @import("std");
 
 /// `std.fmt.bufPrint` with a NUL sentinel: the form every `gtk_*_set_text` call
 /// needs.
-pub fn printZ(buffer: []u8, comptime format: []const u8, args: anytype) ![:0]u8 {
-    return std.fmt.bufPrintSentinel(buffer, format, args, 0);
+pub fn printZ(buffer: []u8, comptime pattern: []const u8, args: anytype) ![:0]u8 {
+    return std.fmt.bufPrintSentinel(buffer, pattern, args, 0);
 }
 
 /// Formats milliseconds as `m:ss`, the transport's only time format.
@@ -21,4 +21,9 @@ pub fn formatMs(buffer: []u8, milliseconds: u64) [:0]const u8 {
 /// `text` NUL-terminated in `buffer`, or empty if it does not fit.
 pub fn terminated(buffer: []u8, text: []const u8) [:0]const u8 {
     return printZ(buffer, "{s}", .{text}) catch "";
+}
+
+/// `printZ`, or empty if the result does not fit.
+pub fn format(buffer: []u8, comptime pattern: []const u8, args: anytype) [:0]const u8 {
+    return printZ(buffer, pattern, args) catch "";
 }

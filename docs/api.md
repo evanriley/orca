@@ -55,6 +55,9 @@ defer page.deinit();
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
   (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`).
+- `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
+  back afterwards. An edit that moves a track to another album or position
+  reprojects it under a new id.
 - The queue can be edited in place: `playerQueueJump` plays an entry now,
   `playerQueueInsertNext` queues Tracks after the current one, and
   `playerQueueRemove` removes an entry. The entry playing, and one the engine
