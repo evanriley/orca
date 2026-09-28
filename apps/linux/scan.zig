@@ -113,7 +113,7 @@ pub fn chooseFolder(self: *App) void {
     gtk.g_object_unref(dialog);
 }
 
-fn writeStats(self: *App, stats: liborca.core.runtime.ScanStats) void {
+fn writeStats(self: *App, stats: liborca.ScanStats) void {
     const label = self.scan_label orelse return;
     var buffer: [160]u8 = undefined;
     const text = strings.printZ(&buffer, "{d} files · {d} new · {d} tracks", .{

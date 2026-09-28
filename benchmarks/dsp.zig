@@ -18,12 +18,12 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const scalar_start = std.Io.Clock.awake.now(init.io);
-    for (0..iterations) |_| liborca.audio.kernels.gainScalar(scalar, 0.999_99);
+    for (0..iterations) |_| liborca.internal.audio.kernels.gainScalar(scalar, 0.999_99);
     const scalar_ns = scalar_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     std.mem.doNotOptimizeAway(scalar);
 
     const vector_start = std.Io.Clock.awake.now(init.io);
-    for (0..iterations) |_| liborca.audio.kernels.gainVector(vector, 0.999_99);
+    for (0..iterations) |_| liborca.internal.audio.kernels.gainVector(vector, 0.999_99);
     const vector_ns = vector_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     std.mem.doNotOptimizeAway(vector);
 

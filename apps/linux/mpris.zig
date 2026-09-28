@@ -57,7 +57,7 @@ const introspection_xml =
 /// transport, which needs exactly the same two-step resolve.
 pub const NowPlaying = struct {
     allocator: std.mem.Allocator,
-    summary: liborca.database.TrackSummary,
+    summary: liborca.TrackSummary,
 
     pub fn deinit(self: NowPlaying) void {
         self.summary.deinit(self.allocator);
@@ -65,8 +65,8 @@ pub const NowPlaying = struct {
 };
 
 pub fn nowPlaying(
-    runtime: *liborca.OrcaRuntime,
-    player: liborca.core.PlayerHandle,
+    runtime: *liborca.Runtime,
+    player: liborca.PlayerHandle,
 ) ?NowPlaying {
     const current = (runtime.playerNowPlaying(player) catch return null) orelse return null;
     const summary = (runtime.libraryTrackSummary(current.library, current.track_id) catch
@@ -75,7 +75,7 @@ pub fn nowPlaying(
 }
 
 pub const Mpris = struct {
-    runtime: ?*liborca.OrcaRuntime = null,
+    runtime: ?*liborca.Runtime = null,
     /// The track whose cover is currently on disk, and the `file://` URL of
     /// it. Remembered even when that track has no cover, so a metadata read —
     /// which a controller may do often — does not re-open the audio file every
@@ -85,7 +85,7 @@ pub const Mpris = struct {
     art_track_id: ?i64 = null,
     art_url: ?[:0]u8 = null,
     art_path: ?[:0]u8 = null,
-    player: liborca.core.PlayerHandle = .{ .index = 0, .generation = 0 },
+    player: liborca.PlayerHandle = .{ .index = 0, .generation = 0 },
     application: ?*gtk.GApplication = null,
     connection: ?*gtk.GDBusConnection = null,
     node: ?*gtk.GDBusNodeInfo = null,
@@ -93,7 +93,7 @@ pub const Mpris = struct {
     root_registration: c_uint = 0,
     player_registration: c_uint = 0,
 
-    fn status(self: *Mpris) ?liborca.core.runtime.PlayerStatus {
+    fn status(self: *Mpris) ?liborca.PlayerStatus {
         const runtime = self.runtime orelse return null;
         return runtime.playerStatus(self.player) catch null;
     }
@@ -260,7 +260,7 @@ pub const Mpris = struct {
     /// The name carries the track id so the URL changes with the track:
     /// controllers cache by URL, and a stable path would leave the previous
     /// cover on screen.
-    fn artUrlFor(self: *Mpris, runtime: *liborca.OrcaRuntime, track_id: i64) ?[:0]const u8 {
+    fn artUrlFor(self: *Mpris, runtime: *liborca.Runtime, track_id: i64) ?[:0]const u8 {
         if (self.art_track_id) |cached| {
             if (cached == track_id) return self.art_url;
         }
@@ -326,8 +326,8 @@ pub const Mpris = struct {
 
     pub fn init(
         self: *Mpris,
-        runtime: *liborca.OrcaRuntime,
-        player: liborca.core.PlayerHandle,
+        runtime: *liborca.Runtime,
+        player: liborca.PlayerHandle,
         application: *gtk.GApplication,
         io: std.Io,
     ) void {

@@ -60,7 +60,7 @@ pub fn refreshDevices(self: *App) void {
     const names = self.device_names orelse return;
     const drop_down = self.device_drop_down orelse return;
 
-    var devices: [max_devices]liborca.audio.backend.Device = undefined;
+    var devices: [max_devices]liborca.Device = undefined;
     const count = self.runtime.enumerateOutputDevices(&devices) catch 0;
 
     self.suppress_widget_writeback = true;

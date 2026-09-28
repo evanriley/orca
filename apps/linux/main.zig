@@ -22,7 +22,7 @@ const window = @import("window.zig");
 
 const App = app.App;
 
-fn failureText(failure: liborca.core.control.Failure) [:0]const u8 {
+fn failureText(failure: liborca.Failure) [:0]const u8 {
     return switch (failure) {
         .track_has_no_file => "That track has no file",
         .track_file_missing => "That track's file is missing",
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !u8 {
     track_model.allocator = allocator;
     browse_model.allocator = allocator;
 
-    var runtime: liborca.OrcaRuntime = .init(allocator);
+    var runtime: liborca.Runtime = .init(allocator);
     var self: App = .{
         .allocator = allocator,
         .io = init.io,
