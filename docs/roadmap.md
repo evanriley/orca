@@ -51,8 +51,9 @@ the rule in [architecture.md](architecture.md).
   analysis, duplicates, artwork and queue playback.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
-  menus, a player bar with cover art and an output menu, scan progress, a
-  welcome page, toasts, a shortcuts dialog and MPRIS.
+  menus, tag editing with write-back and undo, Preferences, a Health page, a
+  player bar with cover art and an output menu, job progress, a welcome page,
+  toasts, a shortcuts dialog and MPRIS.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
 ## Built but not reachable
@@ -73,18 +74,16 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **A designed GTK frontend.** The shell, albums, artists, Now Playing, the
-   editable queue and context menus are done. Next:
-   - Preferences (library folders, ReplayGain, output), an Edit Tags dialog
-     with write-back, and the health and duplicate lists.
-2. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
+1. **Live DSP.** Put the prepared DSP chain and resampler in the Zone render
    path and report the signal path from the negotiated output.
-3. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
+2. **MusicBrainz, AcoustID and ListenBrainz**, after the fixes listed above.
    Last.fm follows.
-4. **Filesystem watching** as a scan accelerator.
-5. **Tag writers for the remaining formats, and tag writes in the C ABI.**
-   FLAC, MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
-   writable.
+3. **Filesystem watching** as a scan accelerator.
+4. **Forgetting a removed folder.** `libraryRemoveRoot` stops scanning a
+   folder, but its files and tracks stay in the library, listed.
+5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+   MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
+   writable. The C ABI has neither tag writes nor queue editing.
 6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
    and history have no schema yet.
 7. **Undecodable files are re-examined on every analysis run.** They are

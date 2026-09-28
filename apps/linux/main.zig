@@ -14,7 +14,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const mpris = @import("mpris.zig");
-const scan = @import("scan.zig");
+const jobs = @import("jobs.zig");
 const track_model = @import("track_model.zig");
 const browse_model = @import("browse_model.zig");
 const browse = @import("browse.zig");
@@ -24,6 +24,10 @@ const window = @import("window.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
+const health = @import("health.zig");
+const preferences = @import("preferences.zig");
+const settings = @import("settings.zig");
+const tags = @import("tags.zig");
 const art = @import("art.zig");
 
 const stylesheet = @embedFile("style.css");
@@ -69,7 +73,7 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     art.tick(self);
     transport.tick(self);
     queue.tick(self);
-    scan.tick(self);
+    jobs.tick(self);
     return gtk.SOURCE_CONTINUE;
 }
 
@@ -102,6 +106,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.reload();
     albums.reload(self);
     artists.reload(self);
+    health.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
 }
@@ -111,11 +116,11 @@ fn activatePlayPause(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
 }
 
 fn activateAddFolder(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    scan.chooseFolder(@ptrCast(@alignCast(data.?)));
+    jobs.chooseFolder(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateRescan(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    scan.rescan(@ptrCast(@alignCast(data.?)));
+    jobs.rescan(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -150,6 +155,19 @@ fn activateContextShowAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) c
 fn activateContextShowArtist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self: *App = @ptrCast(@alignCast(data.?));
     window.showArtist(self, self.context.artist_id orelse return);
+}
+
+fn activatePreferences(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    preferences.present(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateUndoTags(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    tags.undoLastWrite(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextEditTags(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    tags.edit(self, self.context.tracks.items);
 }
 
 fn activateQuit(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -196,6 +214,7 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
             .{ "Add Music Folder", "<Control>o" },
         } },
         .{ .title = "General", .items = &.{
+            .{ "Preferences", "<Control>comma" },
             .{ "Keyboard Shortcuts", "<Control>question" },
             .{ "Quit", "<Control>q" },
         } },
@@ -283,6 +302,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
             runtime.playerBindLibrary(self.player, library, init.io) catch {};
+            settings.load(&self);
         } else |_| {}
     }
 
@@ -308,6 +328,9 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);
     addAction(application, "quit", activateQuit, "<Control>q", &self);
+    addAction(application, "preferences", activatePreferences, "<Control>comma", &self);
+    addAction(application, "undo-tags", activateUndoTags, null, &self);
+    addAction(application, "ctx-edit-tags", activateContextEditTags, null, &self);
     addAction(application, "ctx-play", activateContextPlay, null, &self);
     addAction(application, "ctx-play-next", activateContextPlayNext, null, &self);
     addAction(application, "ctx-enqueue", activateContextEnqueue, null, &self);

@@ -113,6 +113,15 @@ pub const FlowBox = opaque {};
 pub const FlowBoxChild = opaque {};
 pub const GestureSingle = opaque {};
 
+pub const GKeyFile = opaque {};
+pub extern fn g_key_file_new() *GKeyFile;
+pub extern fn g_key_file_free(key_file: *GKeyFile) void;
+pub extern fn g_key_file_load_from_file(key_file: *GKeyFile, file: [*:0]const u8, flags: c_uint, err: *?*GError) gboolean;
+pub extern fn g_key_file_save_to_file(key_file: *GKeyFile, file: [*:0]const u8, err: *?*GError) gboolean;
+pub extern fn g_key_file_get_string(key_file: *GKeyFile, group: [*:0]const u8, key: [*:0]const u8, err: *?*GError) ?[*:0]u8;
+pub extern fn g_key_file_set_string(key_file: *GKeyFile, group: [*:0]const u8, key: [*:0]const u8, value: [*:0]const u8) void;
+pub extern fn g_get_user_config_dir() [*:0]const u8;
+
 pub const Rectangle = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
 
 // ------------------------------------------------------------- enum values
@@ -129,6 +138,7 @@ pub const ALIGN_END: c_int = 2;
 pub const ALIGN_CENTER: c_int = 3;
 
 pub const ELLIPSIZE_NONE: c_int = 0;
+pub const ELLIPSIZE_MIDDLE: c_int = 2;
 pub const ELLIPSIZE_END: c_int = 3;
 
 pub const PHASE_NONE: c_int = 0;
@@ -653,6 +663,8 @@ pub extern fn gtk_popover_set_child(popover: *Popover, child: ?*Widget) void;
 
 pub extern fn gtk_scrolled_window_new() *Widget;
 pub extern fn gtk_scrolled_window_set_child(window: *ScrolledWindow, child: ?*Widget) void;
+pub extern fn gtk_scrolled_window_set_propagate_natural_height(window: *ScrolledWindow, propagate: gboolean) void;
+pub extern fn gtk_scrolled_window_set_max_content_height(window: *ScrolledWindow, height: c_int) void;
 pub extern fn gtk_scrolled_window_get_vadjustment(window: *ScrolledWindow) *Adjustment;
 
 pub extern fn gtk_adjustment_new(

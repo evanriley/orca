@@ -86,9 +86,12 @@ The window is an `AdwNavigationSplitView`:
   and the audible entry marked. Clicking an entry plays it; the button at the
   end of a row removes it.
 
+- **Health** lists what liborca found wrong with the library, with a count in
+  the sidebar and a Find Duplicates button.
+
 Right-clicking a track, an album tile, an album's track or a queue entry opens
-a menu: Play, Play Next, Add to Queue, Show Album and Show Artist, or Play and
-Remove for queue entries. On a selected row in the track list it acts on the
+a menu: Play, Play Next, Add to Queue, Edit Tags…, Show Album and Show Artist,
+or Play and Remove for queue entries. On a selected row in the track list it acts on the
 whole selection. Play Next and Remove go through `Runtime.playerQueueInsertNext`
 and `playerQueueRemove`, so an entry the engine has already lined up is never
 pulled out from under the output.
@@ -100,6 +103,23 @@ and the player bar tightens. Messages are toasts. Shortcuts are listed in the
 shortcuts dialog (Ctrl+?); Space and Ctrl+←/→ are handled by a bubble-phase key
 controller rather than application accelerators, so a focused search box keeps
 them.
+
+**Edit Tags** edits one track or many; a field the selection disagrees on is
+marked mixed and left alone unless filled in, and clearing a field returns it
+to what the file says. Save changes the library only. Save and Write to Files
+plans the write with `Runtime.planTagWrite`, shows each file's changes and any
+files skipped, and runs the approved plan as a job; the toast when it finishes
+offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
+files back afterwards, because an edit that moves a track to another album
+gives it a new id.
+
+**Preferences** (Ctrl+,) lists the library's folders with Add, Remove and
+Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
+and the output device. Scans, measurement, duplicate finding and tag writes
+share the status card at the foot of the sidebar, one at a time. ReplayGain
+and the output device (by name, since device ids are renumbered between runs)
+are saved in `$XDG_CONFIG_HOME/orca/settings.ini`. Removing a folder stops
+Orca scanning it; its tracks stay listed.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the output menu; see

@@ -18,6 +18,12 @@
   thread.
 - **Artists**: every Artist, searchable, and a page per artist with their
   albums, Play and Shuffle.
+- **Edit Tags** from any right-click menu: one track or many, saved to the
+  library, then optionally written to the files after a preview, with Undo.
+- **Preferences** (Ctrl+,): music folders, loudness measurement, duplicate
+  finding, ReplayGain and the output device, which are remembered.
+- **Health**: the issues liborca found, with Find Duplicates.
+- Scans, measurement, duplicate finding and tag writes share one progress card.
 - **The queue is editable**: click an entry to play it, remove entries, and
   Play Next or Add to Queue from a right-click menu on tracks, albums and
   queue entries, which also offers Show Album and Show Artist.

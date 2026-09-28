@@ -49,6 +49,8 @@ fn model(context: *const Context) *gtk.GMenu {
             gtk.g_menu_append(playback, "Remove from Queue", "app.ctx-remove");
         },
     }
+    const editing = gtk.g_menu_new();
+    gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
     const navigation = gtk.g_menu_new();
     if (context.kind != .album and context.release_id != null)
         gtk.g_menu_append(navigation, "Show Album", "app.ctx-show-album");
@@ -56,7 +58,9 @@ fn model(context: *const Context) *gtk.GMenu {
         gtk.g_menu_append(navigation, "Show Artist", "app.ctx-show-artist");
     const menu = gtk.g_menu_new();
     gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
+    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
     gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, navigation));
+    gtk.g_object_unref(editing);
     gtk.g_object_unref(playback);
     gtk.g_object_unref(navigation);
     return menu;

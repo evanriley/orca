@@ -7,7 +7,7 @@ const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
-const scan = @import("scan.zig");
+const jobs = @import("jobs.zig");
 const track_model = @import("track_model.zig");
 const transport = @import("transport.zig");
 const browse = @import("browse.zig");
@@ -16,6 +16,7 @@ const albums = @import("albums.zig");
 const nowplaying = @import("nowplaying.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
+const health = @import("health.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -280,7 +281,7 @@ fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn addFolderClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    scan.chooseFolder(state(data));
+    jobs.chooseFolder(state(data));
 }
 
 /// Returns true only when it actually consumed the key. Reached in the bubble
@@ -319,6 +320,7 @@ pub const Page = enum(c_uint) {
     albums,
     artists,
     tracks,
+    health,
     now_playing,
     queue,
 
@@ -327,6 +329,7 @@ pub const Page = enum(c_uint) {
             .albums => "albums",
             .artists => "artists",
             .tracks => "tracks",
+            .health => "health",
             .now_playing => "now-playing",
             .queue => "queue",
         };
@@ -337,6 +340,7 @@ pub const Page = enum(c_uint) {
             .albums => "Albums",
             .artists => "Artists",
             .tracks => "Tracks",
+            .health => "Health",
             .now_playing => "Now Playing",
             .queue => "Queue",
         };
@@ -395,6 +399,7 @@ fn primaryMenu() *gtk.Widget {
     const library = gtk.g_menu_new();
     gtk.g_menu_append(library, "Add Music Folder…", "app.add-folder");
     gtk.g_menu_append(library, "Rescan Library", "app.rescan");
+    gtk.g_menu_append(library, "Preferences", "app.preferences");
     const help = gtk.g_menu_new();
     gtk.g_menu_append(help, "Keyboard Shortcuts", "app.shortcuts");
     gtk.g_menu_append(help, "About Orca", "app.about");
@@ -420,6 +425,12 @@ fn buildSidebar(self: *App) *gtk.Widget {
     _ = sidebarItem(section, "Albums", "media-optical-symbolic");
     _ = sidebarItem(section, "Artists", "avatar-default-symbolic");
     _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
+    const health_item = sidebarItem(section, "Health", "emblem-important-symbolic");
+    const health_count = gtk.gtk_label_new("");
+    self.health_count = gtk.cast(gtk.Label, health_count);
+    gtk.gtk_widget_add_css_class(health_count, "numeric");
+    gtk.gtk_widget_add_css_class(health_count, "dim-label");
+    adw.adw_sidebar_item_set_suffix(health_item, health_count);
     adw.adw_sidebar_append(self.sidebar.?, section);
     const playback = adw.adw_sidebar_section_new();
     adw.adw_sidebar_section_set_title(playback, "Playback");
@@ -435,7 +446,7 @@ fn buildSidebar(self: *App) *gtk.Widget {
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), sidebar);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), scan.build(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), jobs.build(self));
 
     const header = adw.adw_header_bar_new();
     adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), adw.adw_window_title_new("Orca", ""));
@@ -632,6 +643,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
 
