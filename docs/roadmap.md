@@ -7,11 +7,18 @@ the rule in [architecture.md](architecture.md).
 ## Status
 
 Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
-designed libadwaita frontend, gapless playback at each source's sample rate,
-live equalizer and crossfeed, tag editing with undo, track details, a local
-play history, ListenBrainz scrobbling, MusicBrainz and AcoustID matching
-with review, and AcoustID submission. Last.fm and filesystem watching are
-built but not connected; macOS has no audio output yet.
+designed libadwaita frontend, gapless playback between entries of one format,
+output at each source's sample rate, live equalizer and crossfeed, tag
+editing with undo, track details, a local play history, ListenBrainz
+scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
+submission. Filesystem watching is built but not connected. `liborca` does
+not compile for aarch64 targets, Apple Silicon included, and macOS has no
+audio output yet.
+
+The next milestone is correctness and maintenance, not features: the
+signal-path report, tag-write backups, provider state that is lost on restart,
+parser hardening and the size of `runtime.zig` come before filesystem
+watching.
 
 ## Works today
 
@@ -130,75 +137,168 @@ entry point and a client before it counts as working.
 
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
-- Providers: the Last.fm adapter.
 - Setting a recording ID by hand: `libraryEditTracks` accepts a locked
   MusicBrainz recording ID, but neither `orca-cli edit` nor the `orca-gtk` tag
   editor offers the field.
-- The ordered DSP graph (`Chain`, `PublishedChain`) and the resamplers. The
-  Player's equalizer, crossfeed and volume run through `PlayerDsp` instead, and
-  the signal-path inspector is reachable through `playerSignalPath`, but
-  neither uses the graph, and playback never resamples; libsamplerate
-  (`resampler.SampleRate`) resamples only for fingerprints.
 - The Linux filesystem watcher.
+
+These have no planned client and are deleted in the maintenance milestone:
+
+- The Last.fm adapter.
+- The ordered DSP graph (`Chain`, `PublishedChain`), `audio/transition.zig`,
+  and the `Resampler` interface with its linear implementation. The Player's
+  equalizer, crossfeed and volume run through `PlayerDsp`, playback never
+  resamples, and libsamplerate (`resampler.SampleRate`) resamples only for
+  fingerprints.
 
 ## Next
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Filesystem watching** as a scan accelerator, so new files appear without
+1. **Correctness and maintenance.** No new features until these land:
+   - **Tag-write backups out of the scan path.** The staged copy and the
+     retained original sit beside the music, so the next scan ingests the
+     backup as a second Track with the old tags, and after an undo its rows
+     stay as `missing`. Keep stage and backup files where the scanner never
+     looks, prune backups, and drop ghost rows.
+   - **A truthful signal-path report.** Widening a source of 24 bits or fewer
+     to 32-bit float is exact and must not make a path "not bit-perfect"; a
+     lossy source, a 32-bit integer or 64-bit float source, and any gain that
+     is not exactly 1 must. A volume ramp back to 1.0 ends at 0.99999 and is
+     reported as 1.0: the ramp snaps to its target, and the report reads the
+     gain that is applied. `orca-gtk` states that PipeWire's own volume and
+     resampling are not visible to Orca.
+   - **aarch64 builds, and CI.** `database/sqlite.zig` builds
+     `SQLITE_TRANSIENT` as a misaligned function pointer, which aarch64
+     rejects. A CI workflow runs `zig build test`, `zig fmt --check` and a
+     cross-build of `liborca` for `aarch64-macos`.
+   - **Release `v0.2.0`** once the three items above land: the first tag,
+     following [Releases](#releases). `build.zig` and `flake.nix` read the
+     version from `build.zig.zon`, so it is written in one place, and the
+     `-alpha` suffix is dropped: a `0.x` version already makes no stability
+     promise.
+   - **Parser hardening.** Checked arithmetic in `codec/mp4.zig`, where a
+     crafted sample table overflows, and fuzz targets for ID3v2, MP4 and
+     ISO-BMFF, Vorbis comments, WAV, AIFF, ADTS and the MP3 stream reader.
+   - **The two intermittent test failures, fixed at their causes.** The
+     engine's `quiesce` can starve it when the control lane suspends it again
+     within one park interval, so its output never opens; and the queue
+     cursor is published before the Player's gain and duration, so a reader
+     can pair a new entry with the previous entry's figures.
+   - **Provider state that survives the process.** A `429` block and its
+     backoff are held in memory, so a restart or a new `orca-cli scrobble`
+     sends into the block: queue rows record their retry time, and each
+     service's block is stored in the Library. A per-service lease lets one
+     process at a time talk to each service. Backoffs get jitter,
+     `Retry-After` is honoured uncapped, in both forms and on `503`, and a
+     query a provider refused is not sent again for a week.
+   - **AcoustID submissions that add information.** A recording ID that
+     AcoustID itself proposed is not submitted back, and bulk-accepted
+     text-only matches are not submitted.
+   - **Idle power.** The engine thread wakes every 2 ms for the Player's
+     lifetime, paused or not, and the artwork loader every 50 ms: both wait
+     on a futex while idle.
+   - **Maintenance.** Split `core/runtime.zig` (job worker with per-kind
+     requests and stats, tests and fakes, queue, listens, jobs and zones) and
+     `database/repository.zig` (by aggregate, with shared column helpers);
+     one set of network test doubles; a dispatch table for `orca-cli`; delete
+     the code listed above; remove comments that narrate history.
+   - **Documentation cleanup.** Bring `docs/` in line with the code:
+     `analysis.md` still describes the replaced FLAC decoder as one LSB low;
+     `storage.md` and `metadata.md` name tables that schema 8 dropped;
+     `metadata.md` misstates the journalled identity and which client edits
+     recording IDs; `ownership.md`, `frontends.md` and `audio-engine.md`
+     describe superseded stages. Contract docs keep invariants, ownership and
+     threading; measurements, reference-library figures and history move to
+     `CHANGELOG.md` or are deleted. `README.md` gains an embedding entry
+     point and a complete list of requirements.
+2. **`liborca` as a library for others.** A versioned SONAME, `orca_version`,
+   an installed `orca.pc`, and only `orca_*` symbols exported: today every
+   bundled C and C++ dependency is exported from `liborca.so`, libc++'s
+   `operator new` included. A last-error message for C callers, a wakeup
+   callback or file descriptor so hosts need not poll on a timer, a stability
+   statement in `orca.h` and [api.md](api.md), and a provider identity the
+   host must supply instead of a default.
+3. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan. The Linux watcher exists; it needs a runtime entry point
    and a client.
-2. **A fixed output rate with a band-limited resampler**, for gapless playback
-   across sample-rate changes and for devices held at another rate.
-   libsamplerate is already behind `resampler.SampleRate` for fingerprints;
-   playback at the source rate covers the common case.
-3. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
-   MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
-   writable. No writer stores an accepted recording ID in a file yet: ID3
-   needs a `UFID` frame and Vorbis comments a `MUSICBRAINZ_TRACKID` field. The
-   C ABI lacks tag writes, queue editing, DSP, track details, matching and
-   AcoustID submission.
-4. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+4. **Faster analysis.** The analysis pass decodes on one thread and reads
+   every file twice, once for a whole-file hash nothing uses. Decode on a
+   bounded pool of threads, drop the hash, and compute the Chromaprint
+   fingerprint in the same decode.
+5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+   MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
+   tag are reported as not writable. No writer stores an accepted recording
+   ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
+   `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
+   it lacks tag writes, queue editing, artwork, DSP, track details, matching
+   and AcoustID submission.
+6. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+7. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
-   needs the user's token and must share the listen worker's gateway. The
-   Last.fm adapter is built and not connected.
-6. **Undecodable files are re-examined on every analysis run.** They are
-   declined cheaply, but a library of WavPack or APE files still pays two
-   64 KiB reads per file per run until declines are remembered.
+   needs the user's token and must share the listen worker's gateway.
+8. **An optional fixed output rate with a band-limited resampler**, for
+   devices held at another rate and for gapless playback across sample-rate
+   changes. Output at the source rate stays the default, since it is the
+   only path that can be bit-perfect.
+
+## Releases
+
+Orca follows [Semantic Versioning](https://semver.org). Before 1.0, a
+release bumps the minor version when it contains a breaking change to the
+Zig API, the C ABI or the Library schema, and the patch version otherwise.
+Each milestone in [Next](#next) ends with a release.
+
+Every change adds its entry to the Unreleased section of `CHANGELOG.md` in
+the same commit: features, fixes, refactors, removals and breaking changes
+alike.
+
+To release:
+
+1. Rename the Unreleased section of `CHANGELOG.md` to the version and date,
+   and state the Library schema version it ships.
+2. Set `.version` in `build.zig.zon`.
+3. Commit, and tag the commit `vX.Y.Z`.
+4. Update Orca's application entry on the AcoustID website to the new
+   version. Every lookup and submission sends the version as
+   `clientversion`, and the registered details should match what the
+   service receives.
 
 ## Known issues
 
 Small defects that are not yet scheduled:
 
-- A lossy source reports a bit-perfect signal path when no processing
-  applies: the decoded output is unchanged, but the source was not lossless.
 - `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
   it on change, never on a tick.
-- `ZoneRuntime.published_device_delay_frames` is written but never read.
-- Two processes matching the same Library at once, such as `orca-gtk` and
-  `orca-cli match`, each run their own gateways, so MusicBrainz and AcoustID
-  see two requests a second.
+- `orca-cli play-tracks` prints a bit depth for lossy sources ("MP3 32-bit"),
+  and `orca-cli --help` omits `--volume` and `--set-volume`.
+- `orca-cli` runs every command on an arena, so a cold scan holds about
+  23 KB per file until it exits.
+- `write-tags` rewrites a file whose permissions make it read-only.
+- The scanner skips symbolic links to files without counting them.
+- On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
+  root writes `.orca-volume-id` at the mount point.
+- Removing a root leaves its recordings, and their love and hate, in the
+  Library.
+- `orca-gtk` ignores a Library that fails to open, including one with a newer
+  schema, and shows the welcome page.
 - A file whose fingerprint fails, and a Track without a title or artist that
-  MusicBrainz cannot search, are examined again by every matching run. No
-  request is made, but a failed fingerprint is decoded again.
-- Matching has no offline setting. Without a network it uses cached answers
-  and stops at the first Track it has none for.
+  MusicBrainz cannot search, are examined again by every matching run. A
+  failed fingerprint is decoded again.
+- Undecodable files are examined again by every analysis run: a library of
+  WavPack or APE files pays two 64 KiB reads per file per run.
+- Matching has no offline setting, and `orca-gtk` has none for scrobbling.
+  Without a network, matching uses cached answers and stops at the first
+  Track it has none for.
+- Listens carry `submission_client` but not `media_player`.
 - MusicBrainz finds nothing for a Track whose artist tag joins several
   artists with commas, such as "Pa Salieu, Black Sherif"; AcoustID can still
   match it by fingerprint.
-- Chromaprint's C functions are exported from `liborca.so`, so an embedder
-  that links its own Chromaprint can clash with them.
 - An AcoustID candidate without a title is scored on length and fingerprint
   alone, so for a tagged Track it can rank level with a candidate whose title
   and artist match. Several recording IDs sharing one AcoustID fingerprint
   rank by how closely their artist credit matches the Track's.
-- Two tests fail intermittently, unrelated to listening: "a Player's signal
-  path reports sample processing only while DSP or volume is in effect" (the
-  output never opens, `OutputNeverOpened`) and "an unanalyzed entry reached by
-  a gapless advance plays at unity" (`tests/root.zig:779`, gain 0.358 instead
-  of 1).
 
 ## Deferred formats
 
@@ -216,8 +316,8 @@ are sniffed or not recognized until then:
 ## Later
 
 - macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
-  client rebuilt against the current C ABI. `liborca` cannot play on macOS
-  until then.
+  client rebuilt against the current C ABI. The aarch64 fix in [Next](#next)
+  lets `liborca` compile for macOS; without this output it cannot play there.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.
