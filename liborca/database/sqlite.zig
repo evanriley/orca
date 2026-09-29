@@ -120,14 +120,13 @@ pub fn valueText(value: ?*c.sqlite3_value) []const u8 {
     return @as([*]const u8, @ptrCast(raw))[0..len];
 }
 
-/// Hand a caller-owned slice back to SQLite, which copies it.
+/// Hand a copy of a caller-owned slice to SQLite, which frees it.
 pub fn resultText(context: ?*c.sqlite3_context, value: []const u8) void {
-    c.sqlite3_result_text(
-        context,
-        value.ptr,
-        @intCast(value.len),
-        @ptrFromInt(@as(usize, @bitCast(@as(isize, -1)))),
-    );
+    if (value.len == 0) return c.sqlite3_result_text64(context, "", 0, null, c.SQLITE_UTF8);
+    const copy: [*]u8 = @ptrCast(c.sqlite3_malloc64(value.len) orelse
+        return c.sqlite3_result_error_nomem(context));
+    @memcpy(copy[0..value.len], value);
+    c.sqlite3_result_text64(context, copy, value.len, &c.sqlite3_free, c.SQLITE_UTF8);
 }
 
 pub fn resultError(context: ?*c.sqlite3_context, message: [:0]const u8) void {

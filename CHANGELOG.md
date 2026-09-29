@@ -2,6 +2,17 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### aarch64 builds
+
+- **`liborca` builds for aarch64, Apple Silicon included.** SQLite's
+  `SQLITE_TRANSIENT` was built as a misaligned function pointer, which
+  aarch64 rejects; text results are now copied into SQLite's allocator and
+  freed with `sqlite3_free`. The `ogg` and `opus` include directories come
+  from pkg-config, where only Nix's native environment used to supply them.
+- **`zig build lib`** installs only the static `liborca` and
+  `include/orca/orca.h`, which cross-compiles:
+  `zig build lib -Dtarget=aarch64-macos`.
+
 ### Truthful signal-path report
 
 - **Exact widening is bit-perfect.** An 8-, 16- or 24-bit integer source

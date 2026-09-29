@@ -61,6 +61,9 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-std=c11", "-DNDEBUG" },
     });
     liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
+    for ([_][]const u8{ "ogg", "opus" }) |package| {
+        liborca_module.addSystemIncludePath(pkgConfigIncludeDir(b, package));
+    }
     addAlac(b, liborca_module);
     @import("build/libxaac.zig").addTo(b, liborca_module);
     const chromaprint_licences = @import("build/chromaprint.zig").addTo(b, liborca_module);
@@ -93,6 +96,8 @@ pub fn build(b: *std.Build) void {
     installLicenses(b);
     b.getInstallStep().dependOn(chromaprint_licences);
     b.installArtifact(liborca);
+    const lib_step = b.step("lib", "Build the static liborca and orca.h");
+    lib_step.dependOn(&b.addInstallArtifact(liborca, .{}).step);
 
     const liborca_shared = b.addLibrary(.{
         .name = "orca",
@@ -296,6 +301,11 @@ fn pkgConfigIncludePaths(b: *std.Build, package: []const u8) []const std.Build.L
         include_paths.append(b.allocator, .{ .cwd_relative = flag[2..] }) catch @panic("OOM");
     }
     return include_paths.items;
+}
+
+fn pkgConfigIncludeDir(b: *std.Build, package: []const u8) std.Build.LazyPath {
+    const output = b.run(&.{ "pkg-config", "--variable=includedir", package });
+    return .{ .cwd_relative = std.mem.trim(u8, output, " \n") };
 }
 
 /// Apple's reference ALAC decoder, built from source. Only the decoding half
