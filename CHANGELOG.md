@@ -2,7 +2,7 @@
 
 ## Unreleased - 0.2.0-alpha
 
-### aarch64 builds
+### aarch64 builds and CI
 
 - **`liborca` builds for aarch64, Apple Silicon included.** SQLite's
   `SQLITE_TRANSIENT` was built as a misaligned function pointer, which
@@ -12,6 +12,13 @@
 - **`zig build lib`** installs only the static `liborca` and
   `include/orca/orca.h`, which cross-compiles:
   `zig build lib -Dtarget=aarch64-macos`.
+- **A CI workflow** (`.github/workflows/test.yml`) runs `zig build test`,
+  `zig fmt --check` and the aarch64 macOS cross-build on every push to `main`
+  and every pull request.
+- **`scripts/headless-audio.sh CMD`** runs a command against a private
+  PipeWire and WirePlumber with every hardware monitor off, so the C ABI smoke
+  test has an audio server in CI without reaching real devices. The dev shell
+  gains WirePlumber on Linux.
 
 ### Truthful signal-path report
 

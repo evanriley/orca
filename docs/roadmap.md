@@ -11,9 +11,8 @@ designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
 editing with undo, track details, a local play history, ListenBrainz
 scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
-submission. Filesystem watching is built but not connected. `liborca` does
-not compile for aarch64 targets, Apple Silicon included, and macOS has no
-audio output yet.
+submission. Filesystem watching is built but not connected. `liborca`
+builds for aarch64 macOS, but macOS has no audio output yet.
 
 The next milestone is correctness and maintenance, not features: provider
 state that is lost on restart, parser hardening and the size of `runtime.zig`
@@ -133,6 +132,14 @@ come before filesystem watching.
   review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
+### Builds
+
+- Linux x86_64, and a static `liborca` for aarch64 macOS (`zig build lib
+  -Dtarget=aarch64-macos`).
+- CI (`.github/workflows/test.yml`): `zig build test` against a private
+  PipeWire and WirePlumber, `zig fmt --check`, and the aarch64 macOS
+  cross-build.
+
 ## Built but not reachable
 
 These exist with tests, but no client can use them yet. Each needs a runtime
@@ -159,15 +166,10 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **aarch64 builds, and CI.** `database/sqlite.zig` builds
-     `SQLITE_TRANSIENT` as a misaligned function pointer, which aarch64
-     rejects. A CI workflow runs `zig build test`, `zig fmt --check` and a
-     cross-build of `liborca` for `aarch64-macos`.
-   - **Release `v0.2.0`** once the item above lands: the first tag,
-     following [Releases](#releases). `build.zig` and `flake.nix` read the
-     version from `build.zig.zon`, so it is written in one place, and the
-     `-alpha` suffix is dropped: a `0.x` version already makes no stability
-     promise.
+   - **Release `v0.2.0`**: the first tag, following [Releases](#releases).
+     `build.zig` and `flake.nix` read the version from `build.zig.zon`, so it
+     is written in one place, and the `-alpha` suffix is dropped: a `0.x`
+     version already makes no stability promise.
    - **Parser hardening.** Checked arithmetic in `codec/mp4.zig`, where a
      crafted sample table overflows, and fuzz targets for ID3v2, MP4 and
      ISO-BMFF, Vorbis comments, WAV, AIFF, ADTS and the MP3 stream reader.
@@ -307,8 +309,8 @@ are sniffed or not recognized until then:
 ## Later
 
 - macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
-  client rebuilt against the current C ABI. The aarch64 fix in [Next](#next)
-  lets `liborca` compile for macOS; without this output it cannot play there.
+  client rebuilt against the current C ABI. `liborca` compiles for macOS;
+  without this output it cannot play there.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.

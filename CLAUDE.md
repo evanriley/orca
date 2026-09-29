@@ -102,7 +102,9 @@ nix fmt                       # formats Nix files
 zig fmt --check liborca apps benchmarks tests build.zig
 
 zig build                     # static + shared liborca, orca-cli, headers; orca-gtk on Linux
+zig build lib                 # static liborca and orca.h only; CI cross-builds it with -Dtarget=aarch64-macos
 zig build test                # unit + integration + C ABI smoke (+ PipeWire link smoke on Linux)
+scripts/headless-audio.sh zig build test   # tests against a private PipeWire and WirePlumber, as CI runs them
 zig build run -- --version    # orca-cli
 zig build bench               # 500k-track persistence benchmark
 zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
@@ -204,7 +206,10 @@ zig build dependency-smoke      # Linux foreign-library linking pattern
 zig build pipewire-live-smoke   # opens a short silent stream on the user's PipeWire server
 ```
 
-Ordinary tests require no audio server.
+Ordinary tests require no audio server. The C ABI smoke test (`c-abi-smoke`,
+part of `zig build test`) opens an output: on the desktop it plays into
+`scripts/silent-sink.sh`'s sink, and `scripts/headless-audio.sh` gives it a
+private PipeWire and WirePlumber where no audio server runs, as in CI.
 
 ### Testing playback without making noise
 
