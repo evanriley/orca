@@ -341,10 +341,15 @@ pub const DuplicateScanRequest = struct {
 pub const MatchRequest = struct {
     batch_size: usize = 64,
     limit: ?u32 = null,
+    /// Search only this Track, under the same rule as the whole library: one
+    /// already identified or awaiting review is not searched.
+    track_id: ?i64 = null,
 };
 
 pub const MatchProposal = database.MatchProposal;
 pub const MatchProposalPage = database.MatchProposalPage;
+pub const MatchReviewItem = database.MatchReviewItem;
+pub const MatchReviewPage = database.MatchReviewPage;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
 pub const MatchingHooks = struct {
@@ -358,6 +363,7 @@ const MatchingSetup = struct {
     server: []const u8,
     identity: ClientIdentity,
     hooks: MatchingHooks,
+    scope: database.MatchScope,
 };
 
 /// Everything a job worker needs that is not the Library or the kind. One
@@ -493,6 +499,8 @@ const JobWorker = struct {
     token: library_pass.CancellationToken = .{},
     /// Files the *current* root's walk has reached, written by the scanner.
     progress: std.atomic.Value(u64) = .init(0),
+    /// Tracks a running matching pass has found matches for.
+    matched_progress: std.atomic.Value(u64) = .init(0),
     stats: LiveScanStats = .{},
     match_stats: LiveMatchStats = .{},
     failed: std.atomic.Value(bool) = .init(false),
@@ -677,14 +685,17 @@ const JobWorker = struct {
             .musicbrainz = &musicbrainz,
             .cancellation = &self.token,
             .progress = &self.progress,
+            .matched_progress = &self.matched_progress,
             .batch_size = self.batch_size,
             .limit = self.limit,
+            .scope = setup.scope,
         };
         const result = pass.run() catch {
             self.failed.store(true, .release);
             return;
         };
         self.progress.store(0, .release);
+        self.matched_progress.store(0, .release);
         _ = self.match_stats.tracks_examined.fetchAdd(result.tracks_seen, .acq_rel);
         _ = self.match_stats.matched.fetchAdd(result.matched, .acq_rel);
         _ = self.match_stats.unmatched.fetchAdd(result.unmatched, .acq_rel);
@@ -819,7 +830,9 @@ const JobWorker = struct {
     }
 
     fn matchStats(self: *const JobWorker) MatchStats {
-        return self.match_stats.read(if (self.kind == .metadata_lookup) self.progress.load(.acquire) else 0);
+        var stats = self.match_stats.read(if (self.kind == .metadata_lookup) self.progress.load(.acquire) else 0);
+        stats.matched += self.matched_progress.load(.acquire);
+        return stats;
     }
 
     fn wasCancelled(self: *const JobWorker) bool {
@@ -1477,6 +1490,32 @@ pub const OrcaRuntime = struct {
 
     pub fn libraryDismissMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !void {
         try (try self.libraryDatabase(library)).identification_proposals.dismiss(proposal_id);
+    }
+
+    /// Tracks with a pending proposal, by artist, album and position, each
+    /// with its best proposal.
+    pub fn libraryMatchReviewPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        limit: u32,
+        offset: u32,
+    ) !MatchReviewPage {
+        return (try self.libraryDatabase(library)).identification_proposals.reviewPage(self.allocator, limit, offset);
+    }
+
+    pub fn libraryMatchReviewCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).identification_proposals.reviewCount();
+    }
+
+    /// Tracks a matching job would search: no recording ID and nothing
+    /// awaiting review.
+    pub fn libraryUnidentifiedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).identification_proposals.unidentifiedCount(.library, null);
+    }
+
+    /// How many matches `libraryAcceptConfidentMatches` would accept now.
+    pub fn libraryConfidentMatchCount(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !u64 {
+        return (try self.libraryDatabase(library)).identification_proposals.confidentCount(self.allocator, minimum_confidence);
     }
 
     pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !u64 {
@@ -2962,6 +3001,7 @@ pub const OrcaRuntime = struct {
                 .server = self.musicbrainz_server,
                 .identity = self.client_identity,
                 .hooks = self.matching_hooks,
+                .scope = if (request.track_id) |track_id| .{ .track = track_id } else .library,
             },
         });
     }
@@ -2985,7 +3025,10 @@ pub const OrcaRuntime = struct {
             ),
             .duplicate_scan => try library_database.files.count(),
             .mutation => (request.tag_write orelse return error.InvalidJobRequest).plan.actions.len,
-            .metadata_lookup => try library_database.identification_proposals.unidentifiedCount(request.limit),
+            .metadata_lookup => try library_database.identification_proposals.unidentifiedCount(
+                (request.matching orelse return error.InvalidJobRequest).scope,
+                request.limit,
+            ),
             else => null,
         };
         const worker = try self.allocator.create(JobWorker);
@@ -6272,6 +6315,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
 
     const job_handle = try runtime.startLibraryMatching(library, .{});
     try fake.awaitRequests(2);
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(job_handle)).matched);
     try std.testing.expectError(error.MatchingAlreadyRunning, runtime.startLibraryMatching(library, .{}));
     try runtime.cancelJob(job_handle);
 
@@ -6283,7 +6327,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
-    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(null));
+    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, null));
 
     fake.hang_from = null;
     const resumed = try runtime.startLibraryMatching(library, .{});
@@ -6318,7 +6362,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     const unreachable_job = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unreachable_job)).tracks_examined);
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, null));
 
     fake.failure = null;
     const retried = try runtime.startLibraryMatching(library, .{});
@@ -6353,4 +6397,144 @@ test "a tag write leaves out the recording id Orca holds for a file" {
 
     try std.testing.expectEqual(@as(u64, 0), preview.plan_id);
     try std.testing.expectEqual(@as(usize, 0), preview.files.len);
+}
+
+fn addReviewTrack(
+    library_database: *database.LibraryDatabase,
+    title: []const u8,
+    artist: []const u8,
+    album: []const u8,
+    track_number: ?i64,
+) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{ .title = title } });
+    try library_database.tracks.upsertTracks(&.{.{
+        .title = title,
+        .artist = artist,
+        .album = album,
+        .track_number = track_number,
+        .duration_ms = 180_000,
+        .preferred_file_id = file_id,
+    }});
+    const ids = try library_database.tracks.idsForFile(std.testing.allocator, file_id);
+    defer std.testing.allocator.free(ids);
+    return ids[0];
+}
+
+fn proposeMatch(library_database: *database.LibraryDatabase, track_id: i64, mbid: []const u8, confidence: f32, payload: []const u8) !void {
+    const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+    defer std.testing.allocator.free(file_ids);
+    _ = try library_database.identification_proposals.put(.{
+        .file_id = file_ids[0],
+        .provider = "musicbrainz",
+        .provider_id = mbid,
+        .confidence = confidence,
+        .payload = payload,
+    });
+}
+
+const review_payload = "{\"title\":\"Northern Sky\",\"artist\":\"Nick Drake\",\"album\":\"Bryter Layter\",\"duration_ms\":225000}";
+
+test "the review list holds each Track awaiting review once, by artist, album and position, with its best match" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-review?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const later_on_album = try addReviewTrack(library_database, "Northern Sky", "Nick Drake", "Bryter Layter", 8);
+    const first_on_album = try addReviewTrack(library_database, "Hazey Jane II", "Nick Drake", "Bryter Layter", 2);
+    const other_artist = try addReviewTrack(library_database, "Waterloo Sunset", "The Kinks", "Something Else", 12);
+    const earlier_album = try addReviewTrack(library_database, "Pink Moon", "Nick Drake", "Pink Moon", 1);
+    const nothing_pending = try addReviewTrack(library_database, "River Man", "Nick Drake", "Five Leaves Left", 5);
+    try proposeMatch(library_database, later_on_album, northern_sky_mbid, 0.6, review_payload);
+    try proposeMatch(library_database, later_on_album, pink_moon_mbid, 0.95, review_payload);
+    try proposeMatch(library_database, first_on_album, northern_sky_mbid, 0.8, review_payload);
+    try proposeMatch(library_database, other_artist, northern_sky_mbid, 0.7, review_payload);
+    try proposeMatch(library_database, earlier_album, pink_moon_mbid, 0.9, review_payload);
+
+    const page = try runtime.libraryMatchReviewPage(library, 512, 0);
+    defer page.deinit();
+
+    try std.testing.expectEqual(@as(u64, 4), try runtime.libraryMatchReviewCount(library));
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryUnidentifiedCount(library));
+    try std.testing.expectEqual(@as(usize, 4), page.items.len);
+    const expected_order = [_]i64{ first_on_album, later_on_album, earlier_album, other_artist };
+    for (expected_order, page.items) |track_id, item| try std.testing.expectEqual(track_id, item.track_id);
+    const two = page.items[1];
+    try std.testing.expectEqualStrings("Northern Sky", two.title);
+    try std.testing.expectEqual(@as(?i64, 180_000), two.duration_ms);
+    try std.testing.expectEqual(@as(u32, 2), two.proposal_count);
+    try std.testing.expectEqualStrings(pink_moon_mbid, two.best.recording_mbid);
+    try std.testing.expectEqual(@as(?u64, 225_000), two.best.duration_ms);
+    for (page.items) |item| try std.testing.expect(item.track_id != nothing_pending);
+
+    const second = try runtime.libraryMatchReviewPage(library, 2, 2);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 2), second.items.len);
+    try std.testing.expectEqual(earlier_album, second.items[0].track_id);
+    try std.testing.expectError(error.PageOutOfRange, runtime.libraryMatchReviewPage(library, 513, 0));
+    try std.testing.expectError(error.PageOutOfRange, runtime.libraryMatchReviewPage(library, 0, 0));
+}
+
+test "the confident count is exactly how many matches accepting confident ones then accepts" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-confident?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const alone = try addReviewTrack(library_database, "Northern Sky", "Nick Drake", "Bryter Layter", 8);
+    const contested = try addReviewTrack(library_database, "Pink Moon", "Nick Drake", "Pink Moon", 1);
+    const ahead = try addReviewTrack(library_database, "River Man", "Nick Drake", "Five Leaves Left", 5);
+    const doubtful = try addReviewTrack(library_database, "Fly", "Nick Drake", "Bryter Layter", 7);
+    const unreadable = try addReviewTrack(library_database, "Poor Boy", "Nick Drake", "Bryter Layter", 6);
+    try proposeMatch(library_database, alone, northern_sky_mbid, 0.95, review_payload);
+    try proposeMatch(library_database, contested, northern_sky_mbid, 0.95, review_payload);
+    try proposeMatch(library_database, contested, pink_moon_mbid, 0.92, review_payload);
+    try proposeMatch(library_database, ahead, northern_sky_mbid, 0.95, review_payload);
+    try proposeMatch(library_database, ahead, pink_moon_mbid, 0.5, review_payload);
+    try proposeMatch(library_database, doubtful, northern_sky_mbid, 0.7, review_payload);
+    try proposeMatch(library_database, unreadable, northern_sky_mbid, 0.99, "[");
+
+    const counted = try runtime.libraryConfidentMatchCount(library, 0.9);
+    const lower = try runtime.libraryConfidentMatchCount(library, 0.6);
+    const accepted = try runtime.libraryAcceptConfidentMatches(library, 0.9);
+
+    try std.testing.expectEqual(@as(u64, 2), counted);
+    try std.testing.expectEqual(counted, accepted);
+    try std.testing.expectEqual(@as(u64, 3), lower);
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryConfidentMatchCount(library, 0.9));
+    try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryConfidentMatchCount(library, 0));
+}
+
+test "a single-Track matching job searches only that Track, and one already identified or awaiting review is not searched" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-single?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    const tagged = try addMatchTrack(library_database, "Hazey Jane II", "Nick Drake", "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a");
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .track_id = pink_moon });
+
+    try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(job_handle)).matched);
+    try std.testing.expectEqual(@as(u32, 1), fake.requests.load(.acquire));
+    const untouched = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer untouched.deinit();
+    try std.testing.expectEqual(@as(usize, 0), untouched.items.len);
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryUnidentifiedCount(library));
+
+    for ([_]i64{ pink_moon, tagged }) |not_searched| {
+        runtime.reapFinishedJobs();
+        const skipped = try runtime.startLibraryMatching(library, .{ .track_id = not_searched });
+        try std.testing.expectEqual(@as(?u64, 0), (try runtime.jobSnapshotSynced(skipped)).total_units);
+        try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, skipped));
+        try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(skipped)).tracks_examined);
+    }
+    try std.testing.expectEqual(@as(u32, 1), fake.requests.load(.acquire));
 }

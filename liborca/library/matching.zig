@@ -36,8 +36,10 @@ pub const LibraryMatching = struct {
     musicbrainz: *providers.musicbrainz.MusicBrainz,
     cancellation: ?*const CancellationToken = null,
     progress: ?*std.atomic.Value(u64) = null,
+    matched_progress: ?*std.atomic.Value(u64) = null,
     batch_size: usize = 64,
     limit: ?u32 = null,
+    scope: database.MatchScope = .library,
 
     pub fn run(self: *LibraryMatching) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
@@ -45,7 +47,7 @@ pub const LibraryMatching = struct {
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
         var cursor: i64 = 0;
         walk: while (true) {
-            var page = try self.proposals.unidentifiedPage(self.allocator, cursor, page_limit);
+            var page = try self.proposals.unidentifiedPage(self.allocator, self.scope, cursor, page_limit);
             defer page.deinit();
             if (page.items.len == 0) break;
             for (page.items) |candidate| {
@@ -57,7 +59,10 @@ pub const LibraryMatching = struct {
                 cursor = candidate.track_id;
                 switch (try self.search(candidate)) {
                     .stored => |count| {
-                        if (count == 0) result.unmatched += 1 else result.matched += 1;
+                        if (count == 0) result.unmatched += 1 else {
+                            result.matched += 1;
+                            if (self.matched_progress) |counter| counter.store(result.matched, .release);
+                        }
                         result.proposals_stored += count;
                     },
                     .insufficient => result.insufficient += 1,

@@ -118,6 +118,8 @@ pub const MatchStats = runtime.MatchStats;
 pub const MatchProposal = runtime.MatchProposal;
 pub const MatchProposalPage = runtime.MatchProposalPage;
 pub const MatchAcceptance = runtime.MatchAcceptance;
+pub const MatchReviewItem = runtime.MatchReviewItem;
+pub const MatchReviewPage = runtime.MatchReviewPage;
 /// The service and account under which a `CredentialStore` holds the user's
 /// ListenBrainz token.
 pub const listenbrainz_token_service = internal.providers.listenbrainz.token_service;

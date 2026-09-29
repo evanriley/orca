@@ -110,8 +110,19 @@ defer page.deinit();
 - `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
   Job that searches MusicBrainz for the Tracks without a recording ID and
   stores proposals; its snapshot's total is the number of Tracks to search,
-  and `jobMatchStats` reports its counters as `MatchStats`. At most one
-  runs per runtime (`error.MatchingAlreadyRunning`).
+  and `jobMatchStats` reports its counters as `MatchStats`, `matched`
+  included while it runs. `MatchRequest.track_id` searches that Track alone,
+  under the same rule: one already identified or awaiting review is not
+  searched, and the job succeeds with a total of 0. At most one runs per
+  runtime (`error.MatchingAlreadyRunning`).
+  `libraryMatchReviewPage(library, limit, offset)` returns a
+  `MatchReviewPage` of at most 512 `MatchReviewItem`s: the Tracks with a
+  pending proposal, by artist, album and position, each with its own title,
+  artist, album and length, its number of proposals and its best one.
+  `libraryMatchReviewCount` counts them, `libraryUnidentifiedCount` counts the
+  Tracks a matching job would search, and
+  `libraryConfidentMatchCount(library, minimum)` is the number
+  `libraryAcceptConfidentMatches` would accept now.
   `libraryMatchProposals(library, track_id, limit)` returns a
   `MatchProposalPage` of the Track's pending `MatchProposal`s;
   `libraryAcceptMatch` accepts one and returns a `MatchAcceptance`,

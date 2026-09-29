@@ -85,6 +85,9 @@ pub const MatchProposal = repository.MatchProposal;
 pub const MatchProposalPage = repository.MatchProposalPage;
 pub const MatchCandidate = repository.MatchCandidate;
 pub const MatchCandidatePage = repository.MatchCandidatePage;
+pub const MatchScope = repository.MatchScope;
+pub const MatchReviewItem = repository.MatchReviewItem;
+pub const MatchReviewPage = repository.MatchReviewPage;
 pub const RecordingMbid = repository.RecordingMbid;
 
 test {

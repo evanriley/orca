@@ -1871,16 +1871,22 @@ test "matching selects each Track once and passes over one with a recording id o
     const matched = try addFeedbackTrack(&library, "Matched", try addRecording(&library), null);
     _ = try proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, matched), match_mbid, 0.9, match_payload));
 
-    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(null));
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(2));
-    const first = try proposals.unidentifiedPage(std.testing.allocator, 0, 2);
+    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, 2));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = pending }, null));
+    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, 0, 2);
+    defer only.deinit();
+    try std.testing.expectEqual(@as(usize, 1), only.items.len);
+    try std.testing.expectEqual(two_files, only.items[0].track_id);
+    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, 0, 2);
     defer first.deinit();
     try std.testing.expectEqual(@as(usize, 2), first.items.len);
     try std.testing.expectEqual(untagged, first.items[0].track_id);
     try std.testing.expectEqualStrings("Nick Drake", first.items[0].artist);
     try std.testing.expectEqual(two_files, first.items[1].track_id);
     try std.testing.expectEqual(try playFileOf(&library, two_files), first.items[1].file_id);
-    const rest = try proposals.unidentifiedPage(std.testing.allocator, first.items[1].track_id, 2);
+    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, first.items[1].track_id, 2);
     defer rest.deinit();
     try std.testing.expectEqual(@as(usize, 1), rest.items.len);
     try std.testing.expectEqual(dismissed, rest.items[0].track_id);
@@ -1889,7 +1895,7 @@ test "matching selects each Track once and passes over one with a recording id o
         .title = "Dismissed",
         .musicbrainz_recording_id = rival_mbid,
     } });
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, null));
 }
 
 fn queryPlan(library: *LibraryDatabase, comptime sql: []const u8) ![]u8 {
@@ -1929,6 +1935,8 @@ test "a recording id and the matching selection are looked up by key, never by s
         try queryPlan(&library, repository.feedback_syncable_sql),
         try queryPlan(&library, repository.unidentified_page_sql),
         try queryPlan(&library, "SELECT " ++ repository.effectiveRecordingMbid("1") ++ ";"),
+        try queryPlan(&library, repository.review_page_sql),
+        try queryPlan(&library, repository.review_count_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
