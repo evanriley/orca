@@ -65,8 +65,8 @@ watching are built but not connected; macOS has no audio output yet.
   [providers.md](providers.md).
 - Love and hate for songs, kept in the Library per recording and sent to
   ListenBrainz while scrobbling for recordings with a MusicBrainz ID. `orca-gtk`
-  has a heart in the player bar, hearts on loved rows and context menu entries;
-  `orca-cli feedback` sets it.
+  has a heart in the player bar, a heart button on every song row and context
+  menu entries; `orca-cli feedback` sets it.
 - Now Playing, off until enabled: the playing track is announced to
   ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
 
@@ -111,7 +111,11 @@ In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
    `orca-gtk`. Proposal acceptance must re-read the stored payload inside its
-   transaction first. Last.fm follows.
+   transaction first. Last.fm follows. Songs without a MusicBrainz recording
+   ID cannot sync loves to ListenBrainz, which is about a third of the
+   maintainer's library; matching them, for example through ListenBrainz's
+   `/1/metadata/lookup` or through MusicBrainz and AcoustID identification, is
+   part of this work.
 2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
 3. **A fixed output rate with a band-limited resampler** (libsamplerate or
