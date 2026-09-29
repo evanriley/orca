@@ -10,7 +10,7 @@ not a tuning choice.
 
 - **Identification.** Every request carries exactly one `User-Agent`, of the
   form `Name/version ( contact )`. Orca's is
-  `Orca/0.2.0-alpha ( evan@evanriley.com )`. The contact is the maintainer's
+  `Orca/0.2.0 ( evan@evanriley.com )`. The contact is the maintainer's
   email because the repository is private; it becomes the repository URL when
   the repository is public. A host embedding liborca replaces the name,
   version and contact with `Runtime.setClientIdentity`, and liborca's version

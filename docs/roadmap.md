@@ -6,7 +6,7 @@ the rule in [architecture.md](architecture.md).
 
 ## Status
 
-Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
+Released `0.2.0`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
 editing with undo, track details, a local play history, ListenBrainz
@@ -166,10 +166,6 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **Release `v0.2.0`**: the first tag, following [Releases](#releases).
-     `build.zig` and `flake.nix` read the version from `build.zig.zon`, so it
-     is written in one place, and the `-alpha` suffix is dropped: a `0.x`
-     version already makes no stability promise.
    - **Parser hardening.** Checked arithmetic in `codec/mp4.zig`, where a
      crafted sample table overflows, and fuzz targets for ID3v2, MP4 and
      ISO-BMFF, Vorbis comments, WAV, AIFF, ADTS and the MP3 stream reader.

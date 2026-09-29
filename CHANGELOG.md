@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased - 0.2.0-alpha
+## Unreleased
+
+## 0.2.0 - 2026-09-29
+
+The first tagged release. Ships Library schema version 18.
 
 ### The first release
 
+- **The version is `0.2.0`, without `-alpha`**: a `0.x` version already makes
+  no stability promise. `orca-cli --version`, the About dialog and the
+  User-Agent read `0.2.0`.
 - **`build.zig.zon` holds the version.** `build.zig` passes it to liborca,
   which parses `liborca.version` from it, and `flake.nix` reads it for the
   package; `liborca/version.zig` no longer writes it out.
@@ -277,7 +284,7 @@
     rows stay pending.
   - `network.client.Config.user_agent` is replaced by `Config.identity`
     (`ClientIdentity`), and the default User-Agent is now
-    `Orca/0.2.0-alpha ( evan@evanriley.com )`.
+    `Orca/0.2.0 ( evan@evanriley.com )`.
   - `providers.scrobble.dispatchReady` and the `ListenBrainz` adapter are
     removed; `providers.listenbrainz.Delivery` replaces them.
   - `playerBindLibrary` starts the Library's listen worker and can fail doing
@@ -972,7 +979,7 @@ unedited as a record of what was built, not as a statement of what works.
 
 ---
 
-## 0.10.0 - 2026-08-21
+## Pre-reset 0.10.0 - 2026-08-21
 
 Provider-assisted identification and scrobbling milestone.
 
@@ -989,7 +996,7 @@ Provider-assisted identification and scrobbling milestone.
 - Idempotent persistent scrobble queue with eligibility policy, retry state,
   and secure ListenBrainz and signed Last.fm adapters.
 
-## 0.9.0 - 2026-08-21
+## Pre-reset 0.9.0 - 2026-08-21
 
 Cached analysis and Library Health milestone.
 
@@ -1004,7 +1011,7 @@ Cached analysis and Library Health milestone.
 - Indexed Library Health evaluation and bounded query APIs exposed through the
   CLI, stable C ABI, and virtualized GTK frontend.
 
-## 0.8.0 - 2026-08-21
+## Pre-reset 0.8.0 - 2026-08-21
 
 Native frontend and desktop-media integration milestone.
 
@@ -1019,7 +1026,7 @@ Native frontend and desktop-media integration milestone.
 - SwiftUI/AppKit client source over the same ABI with virtualized views, native
   interactions, Now Playing, and remote-command integration.
 
-## 0.7.0 - 2026-08-21
+## Pre-reset 0.7.0 - 2026-08-21
 
 Canonical metadata and safe file-mutation milestone.
 
@@ -1035,7 +1042,7 @@ Canonical metadata and safe file-mutation milestone.
 - Collision-safe journaled file moves with crash recovery and after-state-aware
   undo.
 
-## 0.2.0 - 2026-08-21
+## Pre-reset 0.2.0 - 2026-08-21
 
 Incremental local-library acquisition milestone.
 
@@ -1048,7 +1055,7 @@ Incremental local-library acquisition milestone.
 - Bounded/coalesced watcher hints plus a tested Linux inotify adapter.
 - Headless durable scanning through `orca-cli scan`.
 
-## 0.1.0 - 2026-08-21
+## Pre-reset 0.1.0 - 2026-08-21
 
 First verified liborca foundation milestone.
 
