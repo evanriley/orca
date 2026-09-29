@@ -4,6 +4,9 @@
 
 ### The first release
 
+- **`build.zig.zon` holds the version.** `build.zig` passes it to liborca,
+  which parses `liborca.version` from it, and `flake.nix` reads it for the
+  package; `liborca/version.zig` no longer writes it out.
 - **`orca_player_snapshot` and `orca_player_state_snapshot` are removed**
   (breaking C ABI change). They were kept for a pre-0.2 boundary that was never
   released; `orca_player_status_get` reports the transport, queue and timeline.

@@ -21,6 +21,8 @@ pub fn build(b: *std.Build) void {
         sqlite_translate.addSystemIncludePath(include_path);
     }
     const sqlite_module = sqlite_translate.createModule();
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", @import("build.zig.zon").version);
 
     const liborca_module = b.addModule("liborca", .{
         .root_source_file = b.path("liborca/root.zig"),
@@ -29,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "sqlite", .module = sqlite_module },
+            .{ .name = "build_options", .module = version_options.createModule() },
         },
     });
     liborca_module.linkSystemLibrary("sqlite3", .{ .use_pkg_config = .yes });

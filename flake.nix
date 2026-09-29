@@ -34,7 +34,9 @@
       packages = forAllSystems (pkgs: {
         default = pkgs.stdenv.mkDerivation (finalAttrs: {
           pname = "orca";
-          version = "0.2.0-alpha";
+          version = builtins.head (
+            builtins.match ''.*\.version = "([^"]+)".*'' (builtins.readFile ./build.zig.zon)
+          );
           src = self;
 
           deps = pkgs.zig.fetchDeps {

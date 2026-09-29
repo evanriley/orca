@@ -1,8 +1,4 @@
 const std = @import("std");
+const build_options = @import("build_options");
 
-pub const value = std.SemanticVersion{
-    .major = 0,
-    .minor = 2,
-    .patch = 0,
-    .pre = "alpha",
-};
+pub const value = std.SemanticVersion.parse(build_options.version) catch unreachable;
