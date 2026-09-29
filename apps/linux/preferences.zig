@@ -1,5 +1,6 @@
-//! Preferences: the library's folders and maintenance, playback choices, and
-//! the sound: equalizer and crossfeed.
+//! Preferences: the library's folders and maintenance, playback choices, the
+//! sound (equalizer and crossfeed), and listening: sending listens to
+//! ListenBrainz.
 //! Built fresh each time it opens, from the engine's current state.
 
 const std = @import("std");
@@ -10,9 +11,13 @@ const strings = @import("strings.zig");
 const app = @import("app.zig");
 const jobs = @import("jobs.zig");
 const settings = @import("settings.zig");
+const secret = @import("secret.zig");
 const transport = @import("transport.zig");
 
 const App = app.App;
+
+const listenbrainz_token_service = liborca.listenbrainz_token_service;
+const listenbrainz_token_account = liborca.listenbrainz_token_account;
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -517,6 +522,180 @@ fn soundPage(self: *App) *gtk.Widget {
     return page;
 }
 
+// ---------------------------------------------------------------- listening
+
+const token_settings_url = "https://listenbrainz.org/settings/";
+const token_capacity = 256;
+
+fn scrobblingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.scrobbling) return;
+    self.runtime.librarySetScrobbling(library, enabled, false, self.announce_now_playing) catch {
+        dialogToast(self, "Could not change listen submission");
+        const previous = if (self.scrobbling) gtk.true_ else gtk.false_;
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), previous);
+        return;
+    };
+    self.scrobbling = enabled;
+    if (self.listening_controls.now_playing_row) |now_playing|
+        gtk.gtk_widget_set_sensitive(now_playing, if (enabled) gtk.true_ else gtk.false_);
+    settings.save(self);
+}
+
+fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.announce_now_playing) return;
+    self.runtime.librarySetScrobbling(library, self.scrobbling, false, enabled) catch {
+        dialogToast(self, "Could not change what is shared while playing");
+        const previous = if (self.announce_now_playing) gtk.true_ else gtk.false_;
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), previous);
+        return;
+    };
+    self.announce_now_playing = enabled;
+    settings.save(self);
+}
+
+fn tokenStored(succeeded: bool, data: ?*anyopaque) void {
+    const self = state(data);
+    if (!succeeded) return dialogToast(self, "Could not store the token in the system keyring");
+    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
+    dialogToast(self, "Token saved");
+}
+
+fn tokenRemoved(succeeded: bool, data: ?*anyopaque) void {
+    const self = state(data);
+    if (!succeeded) return dialogToast(self, "Could not remove the token from the system keyring");
+    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
+    dialogToast(self, "Token removed");
+}
+
+fn tokenApplied(row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const editable = gtk.cast(gtk.Editable, row);
+    var buffer: [token_capacity:0]u8 = undefined;
+    defer std.crypto.secureZero(u8, &buffer);
+    const typed = std.mem.trim(u8, std.mem.span(gtk.gtk_editable_get_text(editable)), " \t\r\n");
+    if (typed.len >= buffer.len) return dialogToast(self, "That is too long to be a ListenBrainz token");
+    @memcpy(buffer[0..typed.len], typed);
+    buffer[typed.len] = 0;
+
+    const started = if (typed.len == 0)
+        secret.clear(listenbrainz_token_service, listenbrainz_token_account, tokenRemoved, self)
+    else
+        secret.save(listenbrainz_token_service, listenbrainz_token_account, &buffer, tokenStored, self);
+    started catch return dialogToast(self, "Out of memory");
+    gtk.gtk_editable_set_text(editable, "");
+}
+
+fn plural(count: u64, comptime singular: []const u8, comptime many: []const u8) []const u8 {
+    return if (count == 1) singular else many;
+}
+
+fn statusText(buffer: []u8, self: *App, status: liborca.ScrobblerStatus) [:0]const u8 {
+    var queue_buffer: [128]u8 = undefined;
+    const queue = queueText(&queue_buffer, self, status);
+    if (status.feedback_pending == 0) return strings.terminated(buffer, queue);
+    return strings.format(buffer, "{s} · {d} {s} waiting to sync", .{
+        queue,
+        status.feedback_pending,
+        plural(status.feedback_pending, "love or dislike", "loves and dislikes"),
+    });
+}
+
+fn queueText(buffer: []u8, self: *App, status: liborca.ScrobblerStatus) [:0]const u8 {
+    const user = status.user_name.slice();
+    return switch (status.state) {
+        .invalid_token => "Token rejected",
+        .rate_limited => "Waiting — ListenBrainz asked us to slow down",
+        .backing_off => "Waiting — ListenBrainz could not be reached, trying again later",
+        .offline => "Offline",
+        .needs_token => "Not connected — add your user token",
+        .disabled, .idle, .validating, .submitting => if (user.len != 0)
+            strings.format(buffer, "Connected as {s} · {d} {s} waiting", .{
+                user,
+                status.pending,
+                plural(status.pending, "listen", "listens"),
+            })
+        else if (self.scrobbling)
+            strings.format(buffer, "Submitting listens · {d} {s} waiting", .{
+                status.pending,
+                plural(status.pending, "listen", "listens"),
+            })
+        else
+            "Not connected",
+    };
+}
+
+fn showListeningStatus(self: *App) void {
+    const row = self.listening_controls.status_row orelse return;
+    const library = self.library orelse return;
+    const status = self.runtime.libraryScrobblerStatus(library) catch return;
+    var buffer: [192]u8 = undefined;
+    const text = statusText(&buffer, self, status);
+    const controls = &self.listening_controls;
+    if (std.mem.eql(u8, text, controls.status_text[0..controls.status_len])) return;
+    @memcpy(controls.status_text[0..text.len], text);
+    controls.status_len = text.len;
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), text.ptr);
+}
+
+pub fn tick(self: *App) void {
+    if (self.preferences_dialog == null) return;
+    showListeningStatus(self);
+}
+
+fn listeningPage(self: *App) *gtk.Widget {
+    const page = adw.adw_preferences_page_new();
+    adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Listening");
+    adw.adw_preferences_page_set_icon_name(gtk.cast(adw.PreferencesPage, page), "document-open-recent-symbolic");
+
+    const listenbrainz = group(
+        "ListenBrainz",
+        "Orca always records what you play on this computer. Submitting also sends those listens to your ListenBrainz account.",
+    );
+    const submit = adw.adw_switch_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, submit), "Submit listens");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, submit), "Only listens that start after you turn this on are sent");
+    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, submit), if (self.scrobbling) gtk.true_ else gtk.false_);
+    gtk.gtk_widget_set_sensitive(submit, if (self.library != null) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(submit, "notify::active", gtk.callback(scrobblingSwitched), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), submit);
+
+    const now_playing = adw.adw_switch_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, now_playing), "Show what I'm playing now");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current track to ListenBrainz once it has played for 10 seconds");
+    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, now_playing), if (self.announce_now_playing) gtk.true_ else gtk.false_);
+    gtk.gtk_widget_set_sensitive(now_playing, if (self.library != null and self.scrobbling) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), now_playing);
+
+    const token = adw.adw_password_entry_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, token), "User token");
+    adw.adw_entry_row_set_show_apply_button(gtk.cast(adw.EntryRow, token), gtk.true_);
+    _ = gtk.signalConnect(token, "apply", gtk.callback(tokenApplied), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), token);
+
+    const link = actionRow("Get your token", "Copy it from your ListenBrainz settings, paste it above and apply. Applying an empty field removes the saved token.");
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
+    const link_button = gtk.gtk_link_button_new_with_label(token_settings_url, "listenbrainz.org/settings");
+    gtk.gtk_widget_set_valign(link_button, gtk.ALIGN_CENTER);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, link), link_button);
+    adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), link_button);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), link);
+
+    const status = actionRow("Status", "");
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, status), 2);
+    self.listening_controls = .{ .now_playing_row = now_playing, .status_row = status };
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), status);
+    showListeningStatus(self);
+    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, listenbrainz));
+    return page;
+}
+
 // ------------------------------------------------------------------- dialog
 
 fn closeDialog(self: *App) void {
@@ -528,6 +707,7 @@ fn dialogClosed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.preferences_dialog = null;
     self.sound_controls = .{};
+    self.listening_controls = .{};
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
 }
 
@@ -538,5 +718,6 @@ pub fn present(self: *App) void {
     adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, libraryPage(self)));
     adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, playbackPage(self)));
     adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, soundPage(self)));
+    adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, listeningPage(self)));
     adw.adw_dialog_present(dialog, if (self.window) |w| gtk.cast(gtk.Widget, w) else null);
 }

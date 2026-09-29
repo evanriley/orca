@@ -16,3 +16,20 @@ pub const Store = struct {
         return self.get_fn(self.context, allocator, service, account);
     }
 };
+
+/// Frees a copy of a secret after overwriting it, so it does not linger in
+/// memory the allocator hands out again.
+pub fn wipeAndFree(allocator: std.mem.Allocator, secret: []u8) void {
+    wipe(secret);
+    allocator.free(secret);
+}
+
+pub fn wipe(secret: []u8) void {
+    std.crypto.secureZero(u8, secret);
+}
+
+test "a wiped secret is all zero" {
+    var secret = "user-token".*;
+    wipe(&secret);
+    try std.testing.expect(std.mem.allEqual(u8, &secret, 0));
+}

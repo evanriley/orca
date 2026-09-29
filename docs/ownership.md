@@ -15,6 +15,25 @@ their Player's engine only through an acknowledged published snapshot, never by
 resolving a handle: `core/handle.zig` does no locking, so a worker thread must
 never touch a Pool.
 
+Each Library that a Player has been bound to, or that scrobbles, has a listen
+worker. Its bounded ring, configuration and published status belong to the
+Library and outlive the worker: a full drain joins and releases the worker, and
+the next listen, bind or scrobbling enable starts a new one. Closing a Library
+restarts the scrobbling Library's worker at once, so its queue keeps its retry
+times. A worker records everything in its ring before it finishes.
+
+The `ClientIdentity`, `CredentialStore` and server URL passed to
+`setClientIdentity`, `setCredentialStore` and `setListenBrainzServer` are
+borrowed: their strings and context must outlive the runtime, because a worker
+may read them at any time. `CredentialStore.get` is called on a listen worker's
+thread, never on the caller's.
+
+Listen workers share one network `std.Io`, created with the first worker and
+deinitialized by `deinit`. Creating it installs Zig's handlers for SIGIO and
+SIGPIPE; deinitializing it restores the dispositions it found. A host sets its
+own dispositions for those signals before creating the runtime and leaves them
+unchanged while the runtime exists.
+
 Shutdown follows dependency order:
 
 1. Stop accepting commands and enter `shutting_down`.

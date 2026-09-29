@@ -8,13 +8,49 @@ pub const Event = struct {
     started_at: i64,
     duration_ms: u64,
     listened_ms: u64,
+    recording_mbid: ?[]const u8 = null,
+    release_mbid: ?[]const u8 = null,
+    artist_mbid: ?[]const u8 = null,
+    track_number: ?u32 = null,
+
+    pub fn fromSubject(subject: *const database.ListenSubject, started_at: i64, listened_ms: u64) Event {
+        return .{
+            .title = subject.title,
+            .artist = subject.artist,
+            .album = subject.album,
+            .started_at = started_at,
+            .duration_ms = if (subject.duration_ms) |value| @intCast(@max(value, 0)) else 0,
+            .listened_ms = listened_ms,
+            .recording_mbid = subject.recording_mbid,
+            .release_mbid = subject.release_mbid,
+            .artist_mbid = subject.artist_mbid,
+            .track_number = if (subject.track_number) |value| std.math.cast(u32, value) else null,
+        };
+    }
 
     pub fn eligible(self: Event) bool {
-        if (self.title.len == 0 or self.artist.len == 0 or self.duration_ms < 30_000)
-            return false;
-        return self.listened_ms >= @min(self.duration_ms / 2, 4 * 60 * 1000);
+        if (self.title.len == 0 or self.artist.len == 0) return false;
+        return listenedEnough(self.duration_ms, self.listened_ms);
+    }
+
+    /// The queued payload. Caller-owned.
+    pub fn encode(self: Event, allocator: std.mem.Allocator) ![]u8 {
+        var writer = std.Io.Writer.Allocating.init(allocator);
+        defer writer.deinit();
+        try std.json.Stringify.value(self, .{ .emit_null_optional_fields = false }, &writer.writer);
+        return writer.toOwnedSlice();
     }
 };
+
+pub const minimum_duration_ms: u64 = 30_000;
+const maximum_required_ms: u64 = 4 * 60 * 1000;
+
+/// A track of at least 30 seconds, heard for half its length or four minutes,
+/// whichever is less.
+pub fn listenedEnough(duration_ms: u64, listened_ms: u64) bool {
+    if (duration_ms < minimum_duration_ms) return false;
+    return listened_ms >= @min(duration_ms / 2, maximum_required_ms);
+}
 
 pub const Adapter = struct {
     service: []const u8,
@@ -26,11 +62,6 @@ pub const Adapter = struct {
     }
 };
 
-pub const DispatchResult = struct {
-    submitted: u32 = 0,
-    deferred: u32 = 0,
-};
-
 pub fn enqueueEligible(
     allocator: std.mem.Allocator,
     queue: *database.ScrobbleQueueRepository,
@@ -39,41 +70,44 @@ pub fn enqueueEligible(
     event: Event,
 ) !bool {
     if (!event.eligible()) return false;
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-    try std.json.Stringify.value(event, .{}, &writer.writer);
-    try queue.enqueue(service, event_key, writer.writer.buffered());
+    const payload = try event.encode(allocator);
+    defer allocator.free(payload);
+    try queue.enqueue(service, event_key, payload);
     return true;
 }
 
-pub fn dispatchReady(
-    allocator: std.mem.Allocator,
-    queue: *database.ScrobbleQueueRepository,
-    adapter: Adapter,
-    now: i64,
-    limit: u32,
-) !DispatchResult {
-    const entries = try queue.ready(allocator, adapter.service, now, limit);
-    defer {
-        for (entries) |entry| entry.deinit();
-        allocator.free(entries);
-    }
-    var result: DispatchResult = .{};
-    for (entries) |entry| {
-        adapter.submit(entry.payload) catch |err| {
-            const exponent: u6 = @intCast(@min(entry.attempt_count, 11));
-            const delay = @min(@as(i64, 30) << exponent, 24 * 60 * 60);
-            try queue.markRetry(entry.id, now + delay, @errorName(err));
-            result.deferred += 1;
-            continue;
-        };
-        try queue.markSucceeded(entry.id);
-        result.submitted += 1;
-    }
-    return result;
+test "queued payloads written before MBIDs existed still parse" {
+    const parsed = try std.json.parseFromSlice(Event, std.testing.allocator,
+        \\{"title":"Orca","artist":"Test Artist","album":"","started_at":1700000000,"duration_ms":180000,"listened_ms":95000}
+    , .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), parsed.value.recording_mbid);
+    try std.testing.expectEqual(@as(?u32, null), parsed.value.track_number);
 }
 
-test "eligible scrobbles are idempotent durable and retried" {
+test "events built from a listen subject carry its identifiers" {
+    const allocator = std.testing.allocator;
+    const subject: database.ListenSubject = .{
+        .allocator = allocator,
+        .file_id = null,
+        .recording_id = null,
+        .title = @constCast("Orca"),
+        .artist = @constCast("Test Artist"),
+        .album = @constCast(""),
+        .duration_ms = 180_000,
+        .track_number = 3,
+        .recording_mbid = @constCast("rec"),
+        .release_mbid = null,
+        .artist_mbid = @constCast("art"),
+    };
+    const event = Event.fromSubject(&subject, 1_700_000_000, 100_000);
+    try std.testing.expectEqual(@as(u64, 180_000), event.duration_ms);
+    try std.testing.expectEqual(@as(?u32, 3), event.track_number);
+    try std.testing.expectEqualStrings("art", event.artist_mbid.?);
+    try std.testing.expect(event.eligible());
+}
+
+test "enqueuing an eligible scrobble twice under one key keeps one pending entry" {
     const allocator = std.testing.allocator;
     var library = try database.LibraryDatabase.open(
         allocator,
@@ -104,26 +138,4 @@ test "eligible scrobbles are idempotent durable and retried" {
         event,
     );
     try std.testing.expectEqual(@as(u64, 1), try library.scrobbles.pendingCount());
-    const Mock = struct {
-        calls: u8 = 0,
-        fn submit(context: *anyopaque, payload: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.calls += 1;
-            try std.testing.expect(std.mem.indexOf(u8, payload, "\"title\":\"Orca\"") != null);
-            if (self.calls == 1) return error.Offline;
-        }
-    };
-    var mock: Mock = .{};
-    const adapter: Adapter = .{
-        .service = "listenbrainz",
-        .context = &mock,
-        .submit_fn = Mock.submit,
-    };
-    const first = try dispatchReady(allocator, &library.scrobbles, adapter, 100, 10);
-    try std.testing.expectEqual(@as(u32, 1), first.deferred);
-    const too_soon = try dispatchReady(allocator, &library.scrobbles, adapter, 101, 10);
-    try std.testing.expectEqual(@as(u32, 0), too_soon.submitted);
-    const retried = try dispatchReady(allocator, &library.scrobbles, adapter, 130, 10);
-    try std.testing.expectEqual(@as(u32, 1), retried.submitted);
-    try std.testing.expectEqual(@as(u64, 0), try library.scrobbles.pendingCount());
 }

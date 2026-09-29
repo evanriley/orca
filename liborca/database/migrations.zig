@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 14;
+pub const current_version = 16;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -812,6 +812,44 @@ const migration_13 =
 const migration_14 =
     "CREATE INDEX tracks_by_preferred_file ON tracks(preferred_file_id);";
 
+/// A listen is keyed on `files.id`, the identity that survives a reprojection
+/// giving a Track a new id, and keeps a snapshot of what was heard so history
+/// stays readable after `remove-root` forgets the file and nulls `file_id`.
+const migration_15 =
+    \\CREATE TABLE listens (
+    \\    id INTEGER PRIMARY KEY,
+    \\    file_id INTEGER REFERENCES files(id) ON DELETE SET NULL,
+    \\    recording_id INTEGER REFERENCES recordings(id) ON DELETE SET NULL,
+    \\    started_at INTEGER NOT NULL,
+    \\    listened_ms INTEGER NOT NULL,
+    \\    duration_ms INTEGER,
+    \\    title TEXT NOT NULL,
+    \\    artist TEXT NOT NULL,
+    \\    album TEXT NOT NULL DEFAULT '',
+    \\    recording_mbid TEXT,
+    \\    player_client TEXT NOT NULL DEFAULT '',
+    \\    UNIQUE(file_id, started_at)
+    \\);
+    \\CREATE INDEX listens_by_file ON listens(file_id, started_at);
+    \\ALTER TABLE scrobble_queue ADD COLUMN lease_owner INTEGER;
+    \\ALTER TABLE scrobble_queue ADD COLUMN lease_expires_at INTEGER;
+    \\CREATE INDEX scrobble_queue_leased
+    \\    ON scrobble_queue(lease_expires_at) WHERE state = 1;
+;
+
+/// A `score` of 0 beside a `synced_score` is a clear not yet sent; the row is deleted once it is.
+const migration_16 =
+    \\CREATE TABLE feedback (
+    \\    recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    score INTEGER NOT NULL CHECK (score IN (-1, 0, 1)),
+    \\    updated_at INTEGER NOT NULL,
+    \\    synced_score INTEGER,
+    \\    synced_at INTEGER,
+    \\    last_error TEXT NOT NULL DEFAULT ''
+    \\);
+    \\CREATE INDEX files_by_recording ON files(recording_id);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -950,6 +988,8 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 12 and target_version >= 12) try db.exec(migration_12);
     if (version < 13 and target_version >= 13) try db.exec(migration_13);
     if (version < 14 and target_version >= 14) try db.exec(migration_14);
+    if (version < 15 and target_version >= 15) try db.exec(migration_15);
+    if (version < 16 and target_version >= 16) try db.exec(migration_16);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1184,6 +1224,10 @@ test "migrating the version-7 fixture preserves every path-keyed row" {
     // Untouched tables keep their rows.
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM provider_cache;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM scrobble_queue;"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT count(*) FROM scrobble_queue WHERE state=0 AND lease_owner IS NULL;"),
+    );
 
     // The journal keeps its paths and gains the file it acted on.
     try std.testing.expectEqual(
@@ -1290,6 +1334,81 @@ test "migrating a database that is already current changes nothing" {
     try std.testing.expectEqualStrings(schema, schema_again);
     try std.testing.expectEqual(files, try scalar(db, "SELECT count(*) FROM files;"));
     try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+}
+
+test "upgrading from version 14 keeps a queued scrobble pending and unleased" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v14.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 14);
+    try db.exec(
+        \\INSERT INTO scrobble_queue(service, event_key, payload, attempt_count, next_attempt_at)
+        \\VALUES ('listenbrainz', 'legacy-1', x'7b7d', 2, 500);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db,
+            \\SELECT count(*) FROM scrobble_queue
+            \\WHERE state=0 AND attempt_count=2 AND next_attempt_at=500
+            \\  AND lease_owner IS NULL AND lease_expires_at IS NULL;
+        ),
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM listens;"));
+    try checkForeignKeys(db);
+}
+
+test "upgrading from version 15 adds an empty feedback table and keeps listens" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v15.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 15);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One');
+        \\INSERT INTO files(id, audio_format, size_bytes, recording_id) VALUES (1, 1, 10, 1);
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist)
+        \\VALUES (1, 1, 1700000000, 90000, 'One', 'Artist');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM listens;"));
+    try checkForeignKeys(db);
+}
+
+test "the migrated feedback table rejects other scores and follows its recording" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "feedback.db");
+    defer std.testing.allocator.free(path);
+    try copyFixture(std.testing.allocator, std.testing.io, path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try apply(db);
+    try db.exec("INSERT INTO recordings(id, title) VALUES (900, 'Loved');");
+
+    try std.testing.expectError(
+        error.SqlFailed,
+        db.exec("INSERT INTO feedback(recording_id, score, updated_at) VALUES (900, 2, 0);"),
+    );
+    try std.testing.expectError(
+        error.SqlFailed,
+        db.exec("INSERT INTO feedback(recording_id, score, updated_at) VALUES (901, 1, 0);"),
+    );
+    try db.exec("INSERT INTO feedback(recording_id, score, updated_at) VALUES (900, -1, 0);");
+    try db.exec("DELETE FROM recordings WHERE id = 900;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM feedback;"));
 }
 
 test "an empty database migrates straight to the current version" {

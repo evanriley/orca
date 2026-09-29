@@ -1357,6 +1357,63 @@ test "a FLAC and an MP3 of one song collapse to one recording with the FLAC pref
     _ = mp3;
 }
 
+test "a love survives its Track being reprojected under a new id" {
+    var library = try openTestLibrary("file:orca-projection-feedback?mode=memory&cache=shared");
+    defer library.close();
+    const file_id = try observe(&library, "/m/Artist/one.flac", .flac, .{
+        .title = "One",
+        .artist = "Artist",
+        .album = "First Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const before = try scalar(&library, "SELECT id FROM tracks;");
+    _ = try library.feedback.set(&.{before}, .loved);
+
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "One",
+        .artist = "Artist",
+        .album = "Second Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    } });
+    _ = try projection.run(.all);
+
+    const after = try scalar(&library, "SELECT id FROM tracks;");
+    try testing.expect(after != before);
+    try testing.expectEqual(@as(u64, 1), try library.tracks.count());
+    try testing.expectEqual(database.Feedback.loved, try library.feedback.forTrack(after));
+    const summary = (try library.tracks.byId(testing.allocator, after)).?;
+    defer summary.deinit(testing.allocator);
+    try testing.expectEqual(database.Feedback.loved, summary.feedback);
+    try testing.expectEqual(try scalar(&library, "SELECT recording_id FROM tracks;"), summary.recording_id.?);
+}
+
+test "a hate survives reprojecting a Track backed by two encodings" {
+    var library = try openTestLibrary("file:orca-projection-feedback-encodings?mode=memory&cache=shared");
+    defer library.close();
+    const tags = metadata.ObservedTags{
+        .title = "One",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    };
+    _ = try observe(&library, "/m/Artist/one.mp3", .mp3, tags);
+    _ = try observe(&library, "/m/Artist/one.flac", .flac, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const track = try scalar(&library, "SELECT id FROM tracks;");
+    _ = try library.feedback.set(&.{track}, .hated);
+
+    _ = try projection.run(.all);
+
+    try testing.expectEqual(database.Feedback.hated, try library.feedback.forTrack(track));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM feedback;"));
+}
+
 test "artist keys fold case, width and whitespace without folding distinct scripts together" {
     const allocator = testing.allocator;
     const cases = [_][2][]const u8{
@@ -2212,6 +2269,34 @@ test "removing a root keeps the undo journal of its files" {
     defer operation.deinit();
     try testing.expectEqual(@as(?i64, null), operation.file_id);
     try testing.expectEqualStrings("/m/Old/1.flac", operation.source_path);
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "removing a root keeps the listens of its files with no file" {
+    var library = try openTestLibrary("file:orca-projection-remove-root-listens?mode=memory&cache=shared");
+    defer library.close();
+    const removed_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Old");
+    const kept_root = try library.library_roots.add(database.LibraryDatabase.null_volume, "/m/Kept");
+    const removed_file = try observeUnderRoot(&library, removed_root, "/m/Old/1.flac", singleArtistTags("Old Artist", "One", 1));
+    const kept_file = try observeUnderRoot(&library, kept_root, "/m/Kept/1.flac", singleArtistTags("Kept Artist", "Two", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    for ([_]i64{ removed_file, kept_file }) |file_id| {
+        _ = try library.listens.record(.{
+            .file_id = file_id,
+            .started_at = 1_700_000_000,
+            .listened_ms = 100_000,
+            .title = "Heard",
+            .artist = "Someone",
+        });
+    }
+
+    const removal = try library.library_roots.remove(testing.allocator, removed_root);
+    defer removal.deinit();
+
+    try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT count(*) FROM listens;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NULL;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NOT NULL;"));
     try expectNoForeignKeyViolations(&library);
 }
 

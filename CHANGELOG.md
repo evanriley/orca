@@ -2,6 +2,94 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Listening history and ListenBrainz
+
+- **Orca keeps a play history.** Schema version 15 adds `listens`: one row per
+  heard play, kept forever, keyed on the file so it survives re-projection and
+  keeps a snapshot of the title, artist and album when a folder is removed. A
+  listen is a track of 30 s or more heard for half its length or four minutes;
+  seeks and pauses do not count, and a queue that plays out ends its last
+  listen with the whole time heard. `Runtime.libraryTrackPlayStats` and
+  `TrackDetails.play_count` and `last_played_at` report it. `orca-cli track`
+  prints `plays:` and `last played:`, `orca-cli play-tracks` records listens,
+  and `orca-gtk`'s details panel shows a History section.
+- **ListenBrainz scrobbling.** `librarySetScrobbling` sends a Library's
+  listens through a leased, restart-safe queue; `libraryScrobblerStatus`
+  reports state, user name, queue counts and the last error;
+  `libraryScrobblerCredentialsChanged` validates a changed token once. The
+  token comes from a host-supplied `CredentialStore`
+  (`Runtime.setCredentialStore`), which must never prompt or block on the
+  user, and is never stored in the Library. `libraryListensRecorded` is a
+  cheap counter a host can poll every tick.
+  `setClientIdentity` names the host, and `setListenBrainzServer` selects a
+  compatible server (`https`, or `http` to `127.0.0.1`, `[::1]` and
+  `localhost` only). The rules toward providers are in
+  [docs/providers.md](docs/providers.md).
+- **`orca-cli scrobble DATABASE [--status] [--timeout=MS]`** sends the queue
+  with the token in `ORCA_LISTENBRAINZ_TOKEN` and the server in
+  `ORCA_LISTENBRAINZ_URL`, prints one `scrobble:` line, and exits non-zero when
+  the token is missing or rejected. It never validates the token up front: with
+  nothing queued it makes no request and looks up no token, and otherwise a bad
+  token shows as a refused delivery. `--status` prints the state and queue counts
+  from the database, starts no worker and makes no request.
+- **`orca-gtk` gets a Listening page in Preferences**: a Submit listens
+  switch, a user token field stored in the Secret Service through libsecret
+  (linked into `orca-gtk` only), a link to the ListenBrainz settings, and a
+  status row; its lookup never unlocks the keyring. `settings.ini` saves `[listening] scrobble=true|false`, never the
+  token. `ORCA_LISTENBRAINZ_URL` points the app at another server.
+- **Love and dislike in `orca-gtk`.** A heart beside the title in the player
+  bar loves the audible song or removes the love; loved songs show a small
+  heart in the track list and on album pages; the context menu offers Love,
+  Dislike, Remove Love and Remove Dislike on one song or a selection; the
+  details panel has a Feedback row that says when a song has no MusicBrainz ID
+  and is saved on this computer only. The Listening page shows how many loves
+  and dislikes are waiting to sync. The heart icons are `orca-heart-*-symbolic`
+  SVGs under `apps/linux/data`, dedicated to the public domain (CC0-1.0).
+- **Now Playing in `orca-gtk`.** Preferences > Listening has Show what I'm
+  playing now, off by default and available while Submit listens is on; it is
+  saved as `[listening] now_playing=true|false`.
+- **`orca-cli feedback DATABASE IDS (--love | --hate | --clear)`** sets
+  feedback and prints how many Tracks were updated and skipped. `orca-cli track`
+  prints `feedback:` and `feedback sync:`, and `scrobble` sends pending
+  feedback as well as listens, reports `feedback_pending` and finishes when
+  neither queue has anything left; with both empty it still makes no request
+  and looks up no token. `scrobble --status` prints `feedback_pending`.
+- **Love and hate for songs.** `Runtime.librarySetFeedback` marks the song
+  behind each Track loved, hated or cleared, and `libraryTrackFeedback` reads
+  it; `TrackSummary.feedback` and `TrackDetails.feedback` report it and
+  `TrackDetails.feedback_syncable` says whether ListenBrainz can be told. The
+  mark belongs to the Recording, so a FLAC and an MP3 of one song share it and
+  a reprojection keeps it. While a Library scrobbles, changes are sent as
+  ListenBrainz recording feedback, one request per change, only for
+  Recordings with a MusicBrainz recording id, including changes made while
+  scrobbling was off. `ScrobblerStatus.feedback_pending` counts the changes
+  waiting. A change is sent once it has stood for 2 s, so only the final state
+  goes out, and nothing if it matches what the service has; clearing a change
+  the service rejected forgets it locally with no request; a change the service
+  accepted but Orca could not record is not sent again, and only the local mark
+  is retried, from 60 s doubling to an hour. `TrackSummary.recording_id` names
+  the song behind a row.
+- **Now Playing, off by default.** `librarySetScrobbling`'s new last argument
+  announces the playing track to ListenBrainz once it has been heard for 10 s
+  (tracks of 30 s or more): one request per track, never retried, dropped when
+  the service is rate limited, offline or 60 s stale, and never ahead of a due
+  batch of listens.
+- **Breaking.**
+  - `Runtime.librarySetScrobbling` takes a fourth argument, `now_playing`.
+  - Schema version 16 adds `feedback`, keyed on the recording, and the index
+    `files_by_recording ON files(recording_id)`; a database
+    opened by this build is refused by earlier builds.
+  - Schema version 15: a database opened by this build is refused by earlier
+    builds. `scrobble_queue` gains `lease_owner` and `lease_expires_at`; queued
+    rows stay pending.
+  - `network.client.Config.user_agent` is replaced by `Config.identity`
+    (`ClientIdentity`), and the default User-Agent is now
+    `Orca/0.2.0-alpha ( evan@evanriley.com )`.
+  - `providers.scrobble.dispatchReady` and the `ListenBrainz` adapter are
+    removed; `providers.listenbrainz.Delivery` replaces them.
+  - `playerBindLibrary` starts the Library's listen worker and can fail doing
+    so.
+
 ### Daily-use fixes
 
 - **`orca-gtk` keeps the equalizer curve and crossfeed amount while they are

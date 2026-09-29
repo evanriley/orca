@@ -1,0 +1,169 @@
+//! Love and dislike: the heart in the player bar, the hearts on loved rows,
+//! and the one place a change is applied and shown.
+//!
+//! The choice belongs to liborca and is kept per recording; this only asks for
+//! it and repaints what displays it.
+
+const std = @import("std");
+const liborca = @import("liborca");
+const gtk = @import("gtk.zig");
+const app = @import("app.zig");
+const track_model = @import("track_model.zig");
+const albums = @import("albums.zig");
+const details = @import("details.zig");
+const queue = @import("queue.zig");
+
+const App = app.App;
+const TrackObject = track_model.TrackObject;
+
+const filled_icon = "orca-heart-filled-symbolic";
+const outline_icon = "orca-heart-outline-symbolic";
+const heart_pixels: c_int = 14;
+const change_batch = 512;
+
+pub fn newRowHeart() *gtk.Widget {
+    const heart = gtk.gtk_image_new_from_icon_name(filled_icon);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, heart), heart_pixels);
+    gtk.gtk_widget_add_css_class(heart, "loved-heart");
+    gtk.gtk_widget_set_valign(heart, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_visible(heart, gtk.false_);
+    return heart;
+}
+
+pub fn showRowHeart(heart: *gtk.Widget, feedback: liborca.Feedback) void {
+    gtk.gtk_widget_set_visible(heart, if (feedback == .loved) gtk.true_ else gtk.false_);
+}
+
+pub fn newButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
+    const image = gtk.gtk_image_new_from_icon_name(outline_icon);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), heart_pixels);
+    const button = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), image);
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "circular");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_sensitive(button, gtk.false_);
+    _ = gtk.signalConnect(button, "clicked", handler, self);
+    self.love_button = button;
+    showButton(button, .none);
+    return button;
+}
+
+fn showButton(button: *gtk.Widget, feedback: liborca.Feedback) void {
+    const image = gtk.gtk_button_get_child(gtk.cast(gtk.Button, button)) orelse return;
+    const loved = feedback == .loved;
+    gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), if (loved) filled_icon else outline_icon);
+    if (loved)
+        gtk.gtk_widget_add_css_class(image, "loved-heart")
+    else
+        gtk.gtk_widget_remove_css_class(image, "loved-heart");
+    const label: [*:0]const u8 = if (loved) "Remove Love" else "Love";
+    gtk.gtk_widget_set_tooltip_text(button, label);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
+}
+
+pub const Target = struct {
+    track_id: i64,
+    recording_id: ?i64,
+    feedback: liborca.Feedback,
+};
+
+pub const Recordings = std.AutoHashMapUnmanaged(i64, void);
+
+pub fn showPlaying(self: *App) void {
+    const button = self.love_button orelse return;
+    if (self.shown_track_id == null) {
+        gtk.gtk_widget_set_sensitive(button, gtk.false_);
+        showButton(button, .none);
+        return;
+    }
+    gtk.gtk_widget_set_sensitive(button, gtk.true_);
+    showButton(button, self.shown_feedback);
+}
+
+pub fn toggleLoveOfPlaying(self: *App) void {
+    const track_id = self.shown_track_id orelse return;
+    const target: Target = .{
+        .track_id = track_id,
+        .recording_id = self.shown_recording_id,
+        .feedback = self.shown_feedback,
+    };
+    change(self, &.{target}, null, if (self.shown_feedback == .loved) .none else .loved);
+}
+
+pub fn change(self: *App, targets: []const Target, only: ?liborca.Feedback, value: liborca.Feedback) void {
+    const library = self.library orelse return;
+    var ids: std.ArrayList(i64) = .empty;
+    defer ids.deinit(self.allocator);
+    var chosen: std.ArrayList(Target) = .empty;
+    defer chosen.deinit(self.allocator);
+    for (targets) |target| {
+        if (only) |wanted| if (target.feedback != wanted) continue;
+        ids.append(self.allocator, target.track_id) catch return self.toast("Out of memory");
+        chosen.append(self.allocator, target) catch return self.toast("Out of memory");
+    }
+    var changed: Recordings = .empty;
+    defer changed.deinit(self.allocator);
+    var updated: u32 = 0;
+    var start: usize = 0;
+    var failed = false;
+    while (start < ids.items.len) : (start += change_batch) {
+        const end = @min(start + change_batch, ids.items.len);
+        const result = self.runtime.librarySetFeedback(library, ids.items[start..end], value) catch {
+            failed = true;
+            break;
+        };
+        updated += result.updated;
+        for (chosen.items[start..end]) |target| {
+            const recording = target.recording_id orelse continue;
+            changed.put(self.allocator, recording, {}) catch return self.toast("Out of memory");
+        }
+    }
+    if (failed) self.toast("Could not save that");
+    if (changed.count() == 0) {
+        if (!failed and chosen.items.len != 0) self.toast("Nothing was changed");
+        return;
+    }
+    repaint(self, &changed, value);
+}
+
+fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void {
+    if (self.shown_recording_id) |recording| if (changed.contains(recording)) {
+        self.shown_feedback = value;
+    };
+    showPlaying(self);
+    repaintRows(self, changed, value);
+    albums.repaintFeedback(self, changed, value);
+    queue.invalidate(self);
+    details.invalidate(self);
+}
+
+fn repaintRows(self: *App, changed: *const Recordings, value: liborca.Feedback) void {
+    const store = self.tracks orelse return;
+    const selection = self.selection orelse return;
+    const model = gtk.cast(gtk.ListModel, store);
+    const count = gtk.g_list_model_get_n_items(model);
+    const live = gtk.gtk_selection_model_get_selection(selection);
+    defer gtk.gtk_bitset_unref(live);
+    const selected = gtk.gtk_bitset_copy(live);
+    defer gtk.gtk_bitset_unref(selected);
+    var replaced = false;
+    var index: c_uint = 0;
+    while (index < count) : (index += 1) {
+        const item = gtk.g_list_model_get_item(model, index) orelse continue;
+        defer gtk.g_object_unref(item);
+        const row: *TrackObject = @ptrCast(@alignCast(item));
+        const recording = row.recordingId() orelse continue;
+        if (!changed.contains(recording) or row.feedback() == value) continue;
+        const copy = track_model.clone(row) orelse continue;
+        copy.fields().feedback = value;
+        var replacement: [1]?*anyopaque = .{copy};
+        gtk.g_list_store_splice(store, index, 1, &replacement, 1);
+        gtk.g_object_unref(copy);
+        replaced = true;
+    }
+    if (!replaced) return;
+    const everything = gtk.gtk_bitset_new_range(0, count);
+    defer gtk.gtk_bitset_unref(everything);
+    _ = gtk.gtk_selection_model_set_selection(selection, selected, everything);
+}

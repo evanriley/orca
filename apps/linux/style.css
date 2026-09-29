@@ -330,3 +330,7 @@ button.album-artist {
   font-weight: 800;
   font-size: 1.2em;
 }
+
+.loved-heart {
+  color: @red_3;
+}

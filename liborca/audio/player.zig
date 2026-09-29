@@ -88,6 +88,7 @@ pub const Player = struct {
     /// by the engine from the clock Zone. Zero until something has rendered, in
     /// which case the decode cursor is the only answer available.
     audible_entry_serial: std.atomic.Value(u32) = .init(0),
+    drained: std.atomic.Value(bool) = .init(false),
     /// Loudness correction of the entry being *heard*, republished alongside
     /// its timeline shape. Reporting only: the correction is applied by the
     /// session that decodes the entry, so this is what a host may display

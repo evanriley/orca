@@ -25,7 +25,11 @@ A worker's cancellation is always requested in two places at once: the registry
 flag, which shutdown observes, and the cooperative token the worker itself polls
 (a scanner polls a `CancellationToken` deep inside a filesystem walk and would
 never see the registry flag). Every runtime path that drains workers — shutdown,
-Library close, Player destroy — sets both before it blocks.
+Library close, Player destroy — sets both before it blocks. A Library's listen
+worker has only the one: its network gateway's cancel pointer is the
+registration's own flag, so the flag every drain sets also interrupts an
+in-flight ListenBrainz request or a rate-limit hold. The drain also wakes the
+worker from its sleep.
 
 Progress with no honest denominator is reported as a count, never as a fraction.
 A filesystem scan does not know how many files it will find until it has found

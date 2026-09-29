@@ -53,6 +53,7 @@ pub const GdkPaintable = opaque {};
 pub const GdkTexture = opaque {};
 pub const GdkPixbuf = opaque {};
 pub const GBytes = opaque {};
+pub const Accessible = opaque {};
 pub const GInputStream = opaque {};
 pub const Button = opaque {};
 pub const ToggleButton = opaque {};
@@ -298,6 +299,15 @@ pub extern fn g_file_set_contents(
 ) c_int;
 pub extern fn g_unlink(filename: [*:0]const u8) c_int;
 pub extern fn g_get_monotonic_time() i64;
+
+pub const GDateTime = opaque {};
+pub extern fn g_date_time_new_now_local() ?*GDateTime;
+pub extern fn g_date_time_new_from_unix_local(t: i64) ?*GDateTime;
+pub extern fn g_date_time_add_days(datetime: *GDateTime, days: c_int) ?*GDateTime;
+pub extern fn g_date_time_format(datetime: *GDateTime, format: [*:0]const u8) ?[*:0]u8;
+pub extern fn g_date_time_unref(datetime: *GDateTime) void;
+
+pub extern fn gtk_link_button_new_with_label(uri: [*:0]const u8, label: [*:0]const u8) *Widget;
 pub extern fn g_timeout_add(
     interval: c_uint,
     function: *const fn (?*anyopaque) callconv(.c) gboolean,
@@ -327,6 +337,7 @@ pub extern fn g_application_activate(application: *GApplication) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
 pub extern fn g_menu_new() *GMenu;
+pub extern fn g_menu_model_get_n_items(model: *GMenuModel) c_int;
 pub extern fn g_menu_append(menu: *GMenu, label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) void;
 pub extern fn g_menu_append_section(menu: *GMenu, label: ?[*:0]const u8, section: *GMenuModel) void;
 
@@ -524,6 +535,7 @@ pub extern fn gtk_list_box_row_new() *Widget;
 pub extern fn gtk_list_box_row_set_child(row: *ListBoxRow, child: ?*Widget) void;
 pub extern fn gtk_button_new() *Widget;
 pub extern fn gtk_button_set_child(button: *Button, child: ?*Widget) void;
+pub extern fn gtk_button_get_child(button: *Button) ?*Widget;
 pub extern fn gtk_widget_set_overflow(widget: *Widget, overflow: c_int) void;
 pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
@@ -609,6 +621,8 @@ pub extern fn g_object_get_data(object: *anyopaque, key: [*:0]const u8) ?*anyopa
 pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
+pub const ACCESSIBLE_PROPERTY_LABEL: c_int = 4;
+pub extern fn gtk_accessible_update_property(accessible: *Accessible, first_property: c_int, ...) void;
 pub extern fn gtk_widget_get_clipboard(widget: *Widget) *GdkClipboard;
 pub extern fn gdk_clipboard_set_text(clipboard: *GdkClipboard, text: [*:0]const u8) void;
 pub extern fn gtk_widget_get_visible(widget: *Widget) gboolean;
@@ -735,6 +749,9 @@ pub extern fn gtk_single_selection_get_selected(selection: *SingleSelection) c_u
 pub extern fn gtk_single_selection_set_selected(selection: *SingleSelection, position: c_uint) void;
 pub extern fn gtk_no_selection_new(model: ?*ListModel) *SelectionModel;
 pub extern fn gtk_selection_model_get_selection(model: *SelectionModel) *Bitset;
+pub extern fn gtk_selection_model_set_selection(model: *SelectionModel, selected: *Bitset, mask: *Bitset) gboolean;
+pub extern fn gtk_bitset_copy(bitset: *Bitset) *Bitset;
+pub extern fn gtk_bitset_new_range(start: c_uint, n_items: c_uint) *Bitset;
 
 pub extern fn gtk_bitset_get_size(bitset: *Bitset) u64;
 pub extern fn gtk_bitset_contains(bitset: *Bitset, value: c_uint) gboolean;

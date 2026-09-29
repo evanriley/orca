@@ -19,6 +19,7 @@ const menu = @import("menu.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
 const details = @import("details.zig");
+const feedback = @import("feedback.zig");
 
 const App = app.App;
 
@@ -321,6 +322,10 @@ fn refreshCover(self: *App, track_id: ?i64) void {
     art.show(self, cover, art.Key.track(id, .thumb));
 }
 
+fn loveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    feedback.toggleLoveOfPlaying(state(data));
+}
+
 fn coverClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
     window.showPage(state(data), .now_playing);
 }
@@ -372,7 +377,11 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     gtk.gtk_label_set_ellipsize(self.now_playing_detail.?, gtk.ELLIPSIZE_END);
     gtk.gtk_widget_add_css_class(now_title, "now-title");
     gtk.gtk_widget_add_css_class(now_detail, "now-detail");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_title);
+    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
+    gtk.gtk_widget_set_hexpand(now_title, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), now_title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), feedback.newButton(self, gtk.callback(loveClicked)));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_detail);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
     return box;
@@ -620,6 +629,8 @@ pub fn tick(self: *App) void {
     const track_changed = !optionalEql(status.track_id, self.shown_track_id);
     if (track_changed) {
         self.shown_track_id = status.track_id;
+        self.shown_recording_id = null;
+        self.shown_feedback = .none;
         var title: [:0]const u8 = "Nothing playing";
         var detail: [:0]const u8 = "";
         var title_buffer: [512]u8 = undefined;
@@ -628,6 +639,8 @@ pub fn tick(self: *App) void {
             if (mpris.nowPlaying(self.runtime, self.player)) |current| {
                 defer current.deinit();
                 const summary = current.summary;
+                self.shown_recording_id = summary.recording_id;
+                self.shown_feedback = summary.feedback;
                 title = if (summary.title.len != 0)
                     strings.printZ(&title_buffer, "{s}", .{summary.title}) catch "Unknown title"
                 else
@@ -653,6 +666,7 @@ pub fn tick(self: *App) void {
         albums.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
         details.trackChanged(self);
+        feedback.showPlaying(self);
         if (popoverIsShown(self)) refreshSignalPath(self);
     }
     if (track_changed or status.transport != self.shown_transport) {

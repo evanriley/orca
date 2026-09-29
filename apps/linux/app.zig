@@ -86,6 +86,13 @@ pub const SoundControls = struct {
     crossfeed_amount_row: ?*gtk.Widget = null,
 };
 
+pub const ListeningControls = struct {
+    now_playing_row: ?*gtk.Widget = null,
+    status_row: ?*gtk.Widget = null,
+    status_text: [192]u8 = undefined,
+    status_len: usize = 0,
+};
+
 pub const Task = enum { scan, analysis, duplicates, tag_write };
 
 pub const App = struct {
@@ -183,6 +190,7 @@ pub const App = struct {
     /// Set while the window is below the breakpoint that hides the panels.
     window_narrow: bool = false,
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
+    seen_recorded_listens: u64 = 0,
 
     // albums
     album_store: ?*gtk.ListStore = null,
@@ -216,6 +224,11 @@ pub const App = struct {
     health_count: ?*gtk.Label = null,
 
     preferences_dialog: ?*adw.Dialog = null,
+
+    // listening
+    scrobbling: bool = false,
+    announce_now_playing: bool = false,
+    listening_controls: ListeningControls = .{},
 
     // sound
     sound_controls: SoundControls = .{},
@@ -260,6 +273,7 @@ pub const App = struct {
     /// with a nullable image.
     now_playing_art: ?*gtk.Widget = null,
     now_playing_box: ?*gtk.Widget = null,
+    love_button: ?*gtk.Widget = null,
     volume_button: ?*gtk.Widget = null,
     shuffle_button: ?*gtk.Widget = null,
     repeat_button: ?*gtk.Widget = null,
@@ -282,6 +296,8 @@ pub const App = struct {
     /// What the now-playing labels currently show, so the resolve query only
     /// runs when the audible entry actually changes.
     shown_track_id: ?i64 = null,
+    shown_recording_id: ?i64 = null,
+    shown_feedback: liborca.Feedback = .none,
     shown_transport: liborca.TransportState = .stopped,
     repeat_mode: liborca.RepeatMode = .off,
 

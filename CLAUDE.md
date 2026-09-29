@@ -22,8 +22,8 @@ to Orca's files stay open, and App Store distribution stays possible.
 be permissive (BSD, MIT, Apache-2.0, zlib, CC0, public domain): a GPL or LGPL
 dependency there would bind every embedder and rule out the App Stores. This is
 why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
-(FDK licence). A frontend dynamically linking its platform's own toolkit, as
-`orca-gtk` does with LGPL GTK4, is outside that rule.
+(FDK licence). A frontend dynamically linking its platform's own toolkit or
+keyring, as `orca-gtk` does with LGPL GTK4 and libsecret, is outside that rule.
 
 ## Toolchain
 
@@ -36,17 +36,18 @@ ziglang.org deletes old nightly tarballs, which is how the previous pin
 tests). Do not write code against the older `std.fs` / `std.io` APIs.
 
 The dev shell supplies libFLAC, libopusfile, libvorbis and SQLite, plus
-PipeWire and GTK4 on Linux. `sqlite3`, `FLAC`, `opusfile`, `vorbisfile` and GTK
-are linked via pkg-config. PipeWire's include paths
-come from `pkg-config --cflags-only-I` (`pkgConfigIncludePaths` in `build.zig`)
-and its library is linked without pkg-config, because the rest of its `--cflags`
-breaks Zig's pkg-config parser. No path under `/usr` is assumed, so the same
-build works on NixOS and FHS distributions. The Zig package dependencies are
-`alac` and `libxaac`; `nix build` fetches them through
-`zig.fetchDeps`. When `build.zig.zon` dependencies change, set that hash in
-`flake.nix` to `pkgs.lib.fakeHash` and rebuild to learn the new one: an
-unchanged hash makes Nix reuse the old dependency directory, and the sandboxed
-build then fails trying to fetch the new packages.
+PipeWire, GTK4 and libsecret on Linux. `sqlite3`, `FLAC`, `opusfile`,
+`vorbisfile`, GTK and libsecret (`orca-gtk` only) are linked via pkg-config.
+PipeWire's include paths come from `pkg-config --cflags-only-I`
+(`pkgConfigIncludePaths` in `build.zig`) and its library is linked without
+pkg-config, because the rest of its `--cflags` breaks Zig's pkg-config parser.
+No path under `/usr` is assumed, so the same build works on NixOS and FHS
+distributions. The Zig package dependencies are `alac` and `libxaac`;
+`nix build` fetches them through `zig.fetchDeps`. When `build.zig.zon`
+dependencies change, set that hash in `flake.nix` to `pkgs.lib.fakeHash` and
+rebuild to learn the new one: an unchanged hash makes Nix reuse the old
+dependency directory, and the sandboxed build then fails trying to fetch the
+new packages.
 
 ### Zig facts that cost time to rediscover
 
@@ -137,6 +138,12 @@ zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|
     [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
     [--eq=PRESET|G1,...,G10[:PREAMP]] [--crossfeed=0..1]   # prints a `signal:` line
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
+    # records listens in the play history; never sends them
+
+# listening history and ListenBrainz -- token from ORCA_LISTENBRAINZ_TOKEN,
+# server from ORCA_LISTENBRAINZ_URL (https, or http to localhost)
+zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
+zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
 ```
 
 Frontends:
@@ -147,6 +154,9 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux   # GTK4 frontend
 # Pin the output so an automated run cannot reach the speakers. Unset, the app
 # uses the output menu, which defaults to the system default -- device 0.
 ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1) zig build run-linux
+
+# Point ListenBrainz submission at a local mock instead of listenbrainz.org
+ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does
@@ -384,6 +394,9 @@ records `needs_reconciliation`, and refuses to claim rollback succeeded. See
 `docs/metadata.md`.
 
 ### Network and providers
+
+`docs/providers.md` holds the rules Orca follows toward every provider:
+identification, rate limits, backoff, credentials and listen eligibility.
 
 All provider traffic passes through **one** rate-limited, retrying HTTP
 boundary (`network.Gateway`) with bounded responses, service identification,

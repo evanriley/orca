@@ -1,6 +1,7 @@
 pub const acoustid = @import("acoustid.zig");
 pub const credentials = @import("credentials.zig");
 pub const listenbrainz = @import("listenbrainz.zig");
+pub const listens = @import("listens.zig");
 pub const lastfm = @import("lastfm.zig");
 pub const model = @import("model.zig");
 pub const musicbrainz = @import("musicbrainz.zig");
@@ -17,6 +18,7 @@ test {
     _ = @import("acoustid.zig");
     _ = @import("credentials.zig");
     _ = @import("listenbrainz.zig");
+    _ = @import("listens.zig");
     _ = @import("lastfm.zig");
     _ = @import("model.zig");
     _ = @import("musicbrainz.zig");

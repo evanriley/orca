@@ -77,6 +77,35 @@ defer page.deinit();
   on the Library's artwork loader, at most 64 outstanding, and
   `libraryTakeArtwork` collects finished ones. `libraryCancelArtwork` skips a
   request that has not started.
+- Playback is recorded as local listening history. `processNextCommand`
+  samples every Player bound to a Library at most every 100 ms; a play heard
+  for half its length or four minutes (tracks of 30 s or more) is recorded on
+  that Library's listen worker. `libraryTrackPlayStats` and `TrackDetails`
+  report the play count and last play.
+- `librarySetScrobbling` also sends a Library's listens to ListenBrainz, for
+  at most one Library per runtime. The token comes from the `CredentialStore`
+  given to `setCredentialStore`; `libraryScrobblerCredentialsChanged` has it
+  validated once, and `libraryScrobblerStatus` returns a `ScrobblerStatus`.
+  `setClientIdentity` names the host in submissions and
+  `setListenBrainzServer` points them at a compatible server: `https`, or
+  `http` only to `127.0.0.1`, `[::1]` or `localhost`, and
+  `error.InvalidServerUrl` otherwise. The three setters may be called at any
+  time; each listen worker adopts the new values on its next pass.
+  `listenbrainz_token_service` and `listenbrainz_token_account` name the
+  secret a `CredentialStore` is asked for. See [providers.md](providers.md).
+- `librarySetScrobbling(library, enabled, offline, now_playing)`: the last
+  argument also announces the playing track to ListenBrainz, once per track
+  heard for 10 s and never retried.
+- `librarySetFeedback(library, track_ids, Feedback)` loves, hates or clears
+  the song behind each Track and returns a `FeedbackChange` counting the
+  Tracks changed and the ones skipped for having no Recording;
+  `libraryTrackFeedback` reads one. `Feedback` is `none`, `loved` or `hated`.
+  It belongs to the Recording, so it shows on every Track and file of the song
+  as `TrackSummary.feedback` and `TrackDetails.feedback`; `TrackSummary.recording_id`
+  names the song, so a host can repaint every row of it without a query. It is sent to
+  ListenBrainz while the Library scrobbles when the song has a MusicBrainz
+  recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
+  the changes still waiting as `feedback_pending`.
 - Pages and returned values are owned by the caller and released with their
   `deinit`.
 

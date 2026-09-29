@@ -257,6 +257,74 @@ stable lowercase identifier for what turned out to be inside — `pcm`,
 cost. They coincide for FLAC and QOA and diverge wherever a container is a
 wrapper. See `docs/codecs.md`.
 
+## Listens and the scrobble queue
+
+`listens` (version 15) is the local play history: one row per completed
+listen, kept forever. It is keyed on `files.id`, not on a Track. A Track id
+changes when an edit reprojects it, and a play count keyed on the Track would
+reset with it; the file identity survives, so `trackPlayStats` counts listens
+of the Track's playing file (`preferred_file_id`, else the first file of its
+Recording, as `playableLocation` resolves it). `UNIQUE(file_id, started_at)`
+makes recording idempotent: the same file starting at the same second is one
+listen.
+
+A listen stores a snapshot of the title, artist, album, duration and
+recording MBID that were heard, so history stays readable after the file is
+gone. `remove-root` deletes the root's files, and `ON DELETE SET NULL` on
+`file_id` (and `recording_id`) leaves the listen in place with a null file
+rather than deleting it or failing the delete. Rows with a null `file_id` no
+longer count towards any Track.
+
+`ListenRepository.recordAndQueue` inserts the listen and its `scrobble_queue`
+row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
+never stored without its delivery or queued twice.
+
+`scrobble_queue.state` is 0 pending, 1 leased, 2 delivered, 3 rejected.
+`ScrobbleQueueRepository.lease` claims rows in one `UPDATE ... RETURNING`: pending
+rows whose `next_attempt_at` has come, and leased rows whose `lease_expires_at`
+has passed, so a worker that dies mid-submit strands nothing. Every later
+mark (`markDelivered`, `markRetry`, `markRejected`, `release`) applies only
+while `state = 1 AND lease_owner = owner`; a worker whose lease expired and was
+reclaimed gets `StaleScrobbleEvent` instead of overwriting the new owner's
+result. `release` returns a row to pending without counting an attempt;
+the other marks count one. `nextAttemptAt` gives the earliest retry or lease
+expiry for a worker to sleep until.
+
+## Feedback
+
+`feedback` (version 16) holds the user's love and hate. It is keyed on
+`recordings.id`, so every file and Track of one song shares a row and a
+reprojection that gives a Track a new id keeps it. `tracks.rating`, the unused
+star rating, is a separate thing. Rows are removed with their recording
+(`ON DELETE CASCADE`), which nothing does today.
+
+`score` is what the user wants (`-1`, `0`, `1`) and `synced_score` what
+ListenBrainz was last told, so `score IS NOT synced_score` is exactly the work
+left. A row is kept until it is synced: feedback given while scrobbling is off
+waits, and so does feedback on a Recording with no MusicBrainz recording id,
+which is never sent. Score `0` with a `synced_score` of `1` or `-1` is a clear
+waiting to be sent; `markSynced` deletes the row once it has been, and clearing
+a change that was never sent deletes it at once. A change the service refused
+for good sets `synced_score` to what was refused and records the reason in
+`last_error`, so it is not sent again until the user changes it.
+
+The MusicBrainz recording id comes from `observed_file_tags` of any file of
+the Recording, preferring a file some Track plays, so it is found after the
+files are rescanned or retagged. Removing a root forgets its files but not
+its recordings' feedback rows; rescanning the same folder creates new
+recordings, so feedback given before the removal no longer shows on the
+rescanned Tracks.
+
+Version 16 also adds the index `files_by_recording ON files(recording_id)`,
+which finds a Recording's files when looking for its MusicBrainz recording id.
+
+`TrackSummary.feedback` comes from a `LEFT JOIN feedback` on
+`tracks.recording_id` in the same statement as the page, never a query per
+row, and the same statement selects `TrackSummary.recording_id` so a host can
+tell which rows share a song. `FeedbackRepository.set` changes a bounded batch of Tracks
+(`max_page`) in one write-lane transaction and skips, and counts, Tracks
+without a Recording.
+
 ## Concurrency
 
 - The primary connection uses WAL and `synchronous=NORMAL`.

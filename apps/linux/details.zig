@@ -58,6 +58,10 @@ pub const Panel = struct {
     track_row: *gtk.Widget,
     disc_row: *gtk.Widget,
     compilation_row: *gtk.Widget,
+    history_group: *gtk.Widget,
+    feedback_row: *gtk.Widget,
+    plays_row: *gtk.Widget,
+    last_played_row: *gtk.Widget,
     now_group: *gtk.Widget,
     now_row: *gtk.Widget,
     /// The Track on screen, and whether that is stale since the library changed.
@@ -122,6 +126,14 @@ pub fn invalidate(self: *App) void {
         panel.stale = true;
         update(panel);
     }
+}
+
+pub fn tick(self: *App) void {
+    const library = self.library orelse return;
+    const recorded = self.runtime.libraryListensRecorded(library) catch return;
+    if (recorded == self.seen_recorded_listens) return;
+    self.seen_recorded_listens = recorded;
+    invalidate(self);
 }
 
 /// The playing Track changed.
@@ -247,6 +259,12 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
 
     _ = setRow(panel.loudness_row, loudnessText(&buffer, details.loudness));
 
+    _ = setRow(panel.feedback_row, feedbackText(&buffer, details));
+
+    var plays_buffer: [24]u8 = undefined;
+    _ = setRow(panel.plays_row, strings.printZ(&plays_buffer, "{d}", .{details.play_count}) catch null);
+    _ = setRow(panel.last_played_row, lastPlayedText(&buffer, details.last_played_at));
+
     var any_tag = false;
     any_tag = setRow(panel.album_artist_row, optionalText(&buffer, details.album_artist)) or any_tag;
     any_tag = setRow(panel.date_row, if (details.date) |date| optionalText(&buffer, date) else null) or any_tag;
@@ -338,6 +356,48 @@ fn writeGrouped(writer: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
         if (index != 0 and (text.len - index) % 3 == 0) try writer.writeByte(',');
         try writer.writeByte(digit);
     }
+}
+
+fn feedbackText(buffer: []u8, details: liborca.TrackDetails) [:0]const u8 {
+    const word: []const u8 = switch (details.feedback) {
+        .none => return "None",
+        .loved => "Loved",
+        .hated => "Disliked",
+    };
+    if (details.feedback_syncable) return strings.terminated(buffer, word);
+    return strings.format(buffer, "{s}\nSaved on this computer only — this song has no MusicBrainz ID", .{word});
+}
+
+fn lastPlayedText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
+    const seconds = unix_seconds orelse return "Never";
+    const played = gtk.g_date_time_new_from_unix_local(seconds) orelse return "Never";
+    defer gtk.g_date_time_unref(played);
+    const now = gtk.g_date_time_new_now_local() orelse return "Recently";
+    defer gtk.g_date_time_unref(now);
+    const yesterday = gtk.g_date_time_add_days(now, -1);
+    defer if (yesterday) |value| gtk.g_date_time_unref(value);
+
+    const day = formatted(played, "%F") orelse return "Recently";
+    defer gtk.g_free(day);
+    const clock = formatted(played, "%R") orelse return "Recently";
+    defer gtk.g_free(clock);
+    if (sameDay(day, now)) return strings.format(buffer, "Today, {s}", .{std.mem.span(clock)});
+    if (yesterday) |value| {
+        if (sameDay(day, value)) return strings.format(buffer, "Yesterday, {s}", .{std.mem.span(clock)});
+    }
+    const date = formatted(played, "%-d %b %Y") orelse return "Recently";
+    defer gtk.g_free(date);
+    return strings.format(buffer, "{s}, {s}", .{ std.mem.span(date), std.mem.span(clock) });
+}
+
+fn formatted(moment: *gtk.GDateTime, pattern: [*:0]const u8) ?[*:0]u8 {
+    return gtk.g_date_time_format(moment, pattern);
+}
+
+fn sameDay(day: [*:0]const u8, moment: *gtk.GDateTime) bool {
+    const other = formatted(moment, "%F") orelse return false;
+    defer gtk.g_free(other);
+    return std.mem.eql(u8, std.mem.span(day), std.mem.span(other));
 }
 
 fn loudnessText(buffer: []u8, loudness: ?liborca.TrackLoudness) [:0]const u8 {
@@ -459,18 +519,22 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const track_row = newRow("Track");
     const disc_row = newRow("Disc");
     const compilation_row = newRow("Compilation");
+    const feedback_row = newRow("Feedback");
+    const plays_row = newRow("Plays");
+    const last_played_row = newRow("Last played");
     const now_row = newRow("Signal path");
 
     const format_group = newGroup("Format", &.{ format_row, duration_row });
     const file_group = newGroup("File", &.{ size_row, path_row });
     const loudness_group = newGroup("Loudness", &.{loudness_row});
     const tags_group = newGroup("Tags", &.{ album_artist_row, date_row, track_row, disc_row, compilation_row });
+    const history_group = newGroup("History", &.{ feedback_row, plays_row, last_played_row });
     const now_group = newGroup("Now Playing", &.{now_row});
     gtk.gtk_widget_set_visible(now_group, gtk.false_);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 18);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, format_group, file_group, loudness_group, tags_group, now_group }) |section|
+    for ([_]*gtk.Widget{ heading, format_group, file_group, loudness_group, tags_group, history_group, now_group }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
     const placeholder = gtk.gtk_label_new("Select a track to see its details.");
@@ -516,6 +580,10 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .track_row = track_row,
         .disc_row = disc_row,
         .compilation_row = compilation_row,
+        .history_group = history_group,
+        .feedback_row = feedback_row,
+        .plays_row = plays_row,
+        .last_played_row = last_played_row,
         .now_group = now_group,
         .now_row = now_row,
     };

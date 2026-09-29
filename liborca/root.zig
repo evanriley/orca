@@ -101,6 +101,20 @@ pub const OutputState = audio.zone.OutputState;
 pub const RenderPolicy = audio.zone.RenderPolicy;
 pub const RenderStrategy = audio.zone.RenderStrategy;
 
+// Listening history and ListenBrainz.
+pub const PlayStats = runtime.PlayStats;
+pub const Feedback = runtime.Feedback;
+pub const FeedbackChange = runtime.FeedbackChange;
+pub const ClientIdentity = runtime.ClientIdentity;
+pub const CredentialStore = runtime.CredentialStore;
+pub const ScrobblerStatus = runtime.ScrobblerStatus;
+pub const ScrobblerState = runtime.ScrobblerState;
+pub const BoundedText = runtime.BoundedText;
+/// The service and account under which a `CredentialStore` holds the user's
+/// ListenBrainz token.
+pub const listenbrainz_token_service = internal.providers.listenbrainz.token_service;
+pub const listenbrainz_token_account = internal.providers.listenbrainz.token_account;
+
 // Jobs.
 pub const ScanRequest = runtime.ScanRequest;
 pub const BackfillRequest = runtime.BackfillRequest;

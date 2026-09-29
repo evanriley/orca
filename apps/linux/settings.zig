@@ -1,8 +1,10 @@
 //! The frontend's own preferences, in `$XDG_CONFIG_HOME/orca/settings.ini`.
 //!
-//! Only choices a host keeps for itself live here: which output to open, and
-//! the ReplayGain mode, equalizer and crossfeed to hand the Player at launch.
-//! Nothing about the library does.
+//! Only choices a host keeps for itself live here: which output to open, the
+//! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
+//! whether listens and the current track are submitted. Nothing about the
+//! library does, and never the ListenBrainz token, which lives in the Secret
+//! Service.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -77,6 +79,12 @@ fn getString(keys: *gtk.GKeyFile, group: [:0]const u8, key: [:0]const u8) ?[*:0]
     };
 }
 
+fn enableScrobbling(self: *App) void {
+    const library = self.library orelse return;
+    self.runtime.librarySetScrobbling(library, true, false, self.announce_now_playing) catch return;
+    self.scrobbling = true;
+}
+
 /// Applies saved choices to a newly started app.
 pub fn load(self: *App) void {
     var buffer: [1024]u8 = undefined;
@@ -109,6 +117,14 @@ pub fn load(self: *App) void {
         defer if (enabled) |flag| gtk.g_free(flag);
         loadCrossfeed(self, std.mem.span(value), if (enabled) |flag| std.mem.span(flag) else null);
     }
+    if (getString(keys, "listening", "now_playing")) |value| {
+        defer gtk.g_free(value);
+        self.announce_now_playing = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "listening", "scrobble")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "true")) enableScrobbling(self);
+    }
     if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
         defer gtk.g_free(value);
         self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
@@ -132,6 +148,8 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "sound", "crossfeed", strings.format(&crossfeed_buffer, "{d}", .{self.crossfeed_amount}).ptr);
     const crossfeed_on = (self.runtime.playerCrossfeed(self.player) catch null) != null;
     gtk.g_key_file_set_string(keys, "sound", "crossfeed_enabled", if (crossfeed_on) "true" else "false");
+    gtk.g_key_file_set_string(keys, "listening", "scrobble", if (self.scrobbling) "true" else "false");
+    gtk.g_key_file_set_string(keys, "listening", "now_playing", if (self.announce_now_playing) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

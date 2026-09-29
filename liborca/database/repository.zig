@@ -624,6 +624,86 @@ pub const ScrobbleQueueEntry = struct {
     }
 };
 
+pub const ListenInput = struct {
+    file_id: i64,
+    recording_id: ?i64 = null,
+    started_at: i64,
+    listened_ms: u64,
+    duration_ms: ?u64 = null,
+    title: []const u8,
+    artist: []const u8,
+    album: []const u8 = "",
+    recording_mbid: ?[]const u8 = null,
+    player_client: []const u8 = "",
+};
+
+pub const PlayStats = struct {
+    play_count: u64,
+    last_played_at: ?i64,
+};
+
+pub const Feedback = enum {
+    none,
+    loved,
+    hated,
+
+    pub fn score(self: Feedback) i8 {
+        return switch (self) {
+            .none => 0,
+            .loved => 1,
+            .hated => -1,
+        };
+    }
+
+    pub fn fromScore(value: i64) ?Feedback {
+        return switch (value) {
+            0 => .none,
+            1 => .loved,
+            -1 => .hated,
+            else => null,
+        };
+    }
+};
+
+pub const FeedbackChange = struct {
+    updated: u32 = 0,
+    skipped: u32 = 0,
+};
+
+pub const FeedbackSync = struct {
+    allocator: std.mem.Allocator,
+    recording_id: i64,
+    feedback: Feedback,
+    recording_mbid: []u8,
+
+    pub fn deinit(self: FeedbackSync) void {
+        self.allocator.free(self.recording_mbid);
+    }
+};
+
+pub const ListenSubject = struct {
+    allocator: std.mem.Allocator,
+    file_id: ?i64,
+    recording_id: ?i64,
+    title: []u8,
+    artist: []u8,
+    album: []u8,
+    duration_ms: ?i64,
+    track_number: ?i64,
+    recording_mbid: ?[]u8,
+    release_mbid: ?[]u8,
+    artist_mbid: ?[]u8,
+
+    pub fn deinit(self: ListenSubject) void {
+        self.allocator.free(self.title);
+        self.allocator.free(self.artist);
+        self.allocator.free(self.album);
+        if (self.recording_mbid) |value| self.allocator.free(value);
+        if (self.release_mbid) |value| self.allocator.free(value);
+        if (self.artist_mbid) |value| self.allocator.free(value);
+    }
+};
+
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
 pub const IdentificationProposalInput = struct {
@@ -664,6 +744,8 @@ pub const TrackSummary = struct {
     release_id: ?i64 = null,
     /// The credited Artist, when the projection resolved one.
     artist_id: ?i64 = null,
+    recording_id: ?i64 = null,
+    feedback: Feedback = .none,
 
     pub fn deinit(self: TrackSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -830,12 +912,12 @@ pub const TrackRepository = struct {
         offset: u32,
     ) !TrackPage {
         var statement = try self.db.prepare(track_columns ++
-            \\FROM track_search
-            \\JOIN tracks ON tracks.id = track_search.rowid
-            \\WHERE track_search MATCH ?1
-            \\ORDER BY rank
-            \\LIMIT ?2 OFFSET ?3;
-        );
+            "FROM track_search\n" ++
+            "JOIN tracks ON tracks.id = track_search.rowid\n" ++
+            feedback_join ++
+            "WHERE track_search MATCH ?1\n" ++
+            "ORDER BY rank\n" ++
+            "LIMIT ?2 OFFSET ?3;");
         defer statement.deinit();
         try statement.bindText(1, query);
         try statement.bindInt64(2, limit);
@@ -942,9 +1024,8 @@ pub const TrackRepository = struct {
         allocator: std.mem.Allocator,
         track_id: i64,
     ) !?TrackSummary {
-        var statement = try self.db.prepare(track_columns ++
-            \\FROM tracks WHERE tracks.id = ?1;
-        );
+        var statement = try self.db.prepare(track_columns ++ "FROM tracks\n" ++ feedback_join ++
+            "WHERE tracks.id = ?1;");
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
         var page_result = try collectTrackPage(allocator, statement);
@@ -1127,9 +1208,11 @@ const track_columns =
     \\           WHERE locations.file_id = tracks.preferred_file_id
     \\             AND locations.state <> 'missing'
     \\       ),
-    \\       tracks.release_id, tracks.artist_id
+    \\       tracks.release_id, tracks.artist_id, COALESCE(feedback.score, 0), tracks.recording_id
     \\
 ;
+
+const feedback_join = "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n";
 
 const TrackFilter = enum { none, artist, release, artist_and_release };
 
@@ -1207,7 +1290,7 @@ fn buildTrackQuery(
         .release => "WHERE tracks.release_id = ?4\n",
         .artist_and_release => "WHERE " ++ by_artist ++ " AND tracks.release_id = ?4\n",
     };
-    return track_columns ++ "FROM tracks\n" ++ where ++
+    return track_columns ++ "FROM tracks\n" ++ feedback_join ++ where ++
         "ORDER BY " ++ orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;";
 }
 
@@ -1260,6 +1343,8 @@ fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !
             .has_playable_file = statement.columnInt64(8) != 0,
             .release_id = optionalInt64(statement, 9),
             .artist_id = optionalInt64(statement, 10),
+            .feedback = Feedback.fromScore(statement.columnInt64(11)) orelse return error.InvalidStoredFeedback,
+            .recording_id = optionalInt64(statement, 12),
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
@@ -3742,32 +3827,40 @@ pub const ScrobbleQueueRepository = struct {
             return error.InvalidScrobbleEvent;
         self.write_lane.acquire();
         defer self.write_lane.release();
-        var statement = try self.db.prepare(
-            \\INSERT INTO scrobble_queue(service, event_key, payload)
-            \\VALUES (?1, ?2, ?3) ON CONFLICT(service, event_key) DO NOTHING;
-        );
-        defer statement.deinit();
-        try statement.bindText(1, service);
-        try statement.bindText(2, event_key);
-        try statement.bindBlob(3, payload);
-        if (try statement.step() != .done) return error.SqlFailed;
+        try enqueueScrobbleLocked(self.db, service, event_key, payload);
     }
 
-    pub fn ready(
-        self: *const ScrobbleQueueRepository,
+    /// Claims up to `limit` events for `owner` until `lease_until`: pending
+    /// events whose retry time has come, and events whose earlier lease has
+    /// expired. One statement, so two owners never receive the same row.
+    pub fn lease(
+        self: *ScrobbleQueueRepository,
         allocator: std.mem.Allocator,
         service: []const u8,
+        owner: i64,
         now: i64,
+        lease_until: i64,
         limit: u32,
     ) ![]ScrobbleQueueEntry {
+        if (lease_until <= now) return error.InvalidScrobbleLease;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
         var statement = try self.db.prepare(
-            \\SELECT id, service, event_key, payload, attempt_count FROM scrobble_queue
-            \\WHERE service=?1 AND state=0 AND next_attempt_at<=?2 ORDER BY id LIMIT ?3;
+            \\UPDATE scrobble_queue
+            \\SET state=1, lease_owner=?3, lease_expires_at=?4, updated_at=unixepoch()
+            \\WHERE id IN (
+            \\    SELECT id FROM scrobble_queue
+            \\    WHERE service=?1
+            \\      AND ((state=0 AND next_attempt_at<=?2) OR (state=1 AND lease_expires_at<=?2))
+            \\    ORDER BY id LIMIT ?5)
+            \\RETURNING id, service, event_key, payload, attempt_count;
         );
         defer statement.deinit();
         try statement.bindText(1, service);
         try statement.bindInt64(2, now);
-        try statement.bindInt64(3, limit);
+        try statement.bindInt64(3, owner);
+        try statement.bindInt64(4, lease_until);
+        try statement.bindInt64(5, limit);
         var entries: std.ArrayList(ScrobbleQueueEntry) = .empty;
         errdefer {
             for (entries.items) |entry| entry.deinit();
@@ -3789,50 +3882,492 @@ pub const ScrobbleQueueRepository = struct {
                 .attempt_count = @intCast(statement.columnInt64(4)),
             });
         }
+        std.mem.sort(ScrobbleQueueEntry, entries.items, {}, entryIdLessThan);
         return entries.toOwnedSlice(allocator);
     }
 
-    pub fn markSucceeded(self: *ScrobbleQueueRepository, id: i64) !void {
-        try self.setResult(id, 2, 0, "");
+    fn entryIdLessThan(_: void, left: ScrobbleQueueEntry, right: ScrobbleQueueEntry) bool {
+        return left.id < right.id;
+    }
+
+    pub fn markDelivered(self: *ScrobbleQueueRepository, id: i64, owner: i64) !void {
+        try self.finishLease(id, owner, .delivered, 1, null, "");
     }
 
     pub fn markRetry(
         self: *ScrobbleQueueRepository,
         id: i64,
+        owner: i64,
         next_attempt_at: i64,
         details: []const u8,
     ) !void {
-        try self.setResult(id, 0, next_attempt_at, details);
+        try self.finishLease(id, owner, .pending, 1, next_attempt_at, details);
     }
 
+    pub fn markRejected(
+        self: *ScrobbleQueueRepository,
+        id: i64,
+        owner: i64,
+        details: []const u8,
+    ) !void {
+        try self.finishLease(id, owner, .rejected, 1, null, details);
+    }
+
+    /// Hands a claimed event back without counting an attempt, for work that
+    /// was abandoned before anything was sent.
+    pub fn release(self: *ScrobbleQueueRepository, id: i64, owner: i64) !void {
+        try self.finishLease(id, owner, .pending, 0, null, null);
+    }
+
+    /// Events not yet delivered or rejected, whether waiting or leased.
     pub fn pendingCount(self: *const ScrobbleQueueRepository) !u64 {
-        var statement = try self.db.prepare("SELECT count(*) FROM scrobble_queue WHERE state=0;");
+        var statement = try self.db.prepare("SELECT count(*) FROM scrobble_queue WHERE state IN (0, 1);");
         defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
 
-    fn setResult(
+    pub fn deliveredCount(self: *const ScrobbleQueueRepository, service: []const u8) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM scrobble_queue WHERE service=?1 AND state=2;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, service);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// When a worker should next look for work: the earliest retry time of a
+    /// pending event or the earliest expiry of a lease, whichever comes first.
+    pub fn nextAttemptAt(self: *const ScrobbleQueueRepository, service: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            \\SELECT min(due) FROM (
+            \\    SELECT min(next_attempt_at) AS due FROM scrobble_queue WHERE service=?1 AND state=0
+            \\    UNION ALL
+            \\    SELECT min(lease_expires_at) FROM scrobble_queue WHERE service=?1 AND state=1);
+        );
+        defer statement.deinit();
+        try statement.bindText(1, service);
+        if (try statement.step() != .row) return error.SqlFailed;
+        if (statement.columnIsNull(0)) return null;
+        return statement.columnInt64(0);
+    }
+
+    const LeaseOutcome = enum(u8) { pending = 0, delivered = 2, rejected = 3 };
+
+    fn finishLease(
         self: *ScrobbleQueueRepository,
         id: i64,
-        state: u8,
-        next_attempt_at: i64,
-        details: []const u8,
+        owner: i64,
+        outcome: LeaseOutcome,
+        attempts: u8,
+        next_attempt_at: ?i64,
+        details: ?[]const u8,
     ) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
         var statement = try self.db.prepare(
-            \\UPDATE scrobble_queue SET state=?1, attempt_count=attempt_count+1,
-            \\    next_attempt_at=?2, last_error=?3, updated_at=unixepoch()
-            \\WHERE id=?4 AND state=0;
+            \\UPDATE scrobble_queue SET state=?1, attempt_count=attempt_count+?2,
+            \\    next_attempt_at=COALESCE(?3, next_attempt_at), last_error=COALESCE(?4, last_error),
+            \\    lease_owner=NULL, lease_expires_at=NULL, updated_at=unixepoch()
+            \\WHERE id=?5 AND state=1 AND lease_owner=?6;
         );
         defer statement.deinit();
-        try statement.bindInt64(1, state);
-        try statement.bindInt64(2, next_attempt_at);
-        try statement.bindText(3, details);
-        try statement.bindInt64(4, id);
+        try statement.bindInt64(1, @intFromEnum(outcome));
+        try statement.bindInt64(2, attempts);
+        try statement.bindOptionalInt64(3, next_attempt_at);
+        try statement.bindOptionalText(4, details);
+        try statement.bindInt64(5, id);
+        try statement.bindInt64(6, owner);
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleScrobbleEvent;
+    }
+};
+
+fn enqueueScrobbleLocked(
+    db: sqlite.Database,
+    service: []const u8,
+    event_key: []const u8,
+    payload: []const u8,
+) !void {
+    var statement = try db.prepare(
+        \\INSERT INTO scrobble_queue(service, event_key, payload)
+        \\VALUES (?1, ?2, ?3) ON CONFLICT(service, event_key) DO NOTHING;
+    );
+    defer statement.deinit();
+    try statement.bindText(1, service);
+    try statement.bindText(2, event_key);
+    try statement.bindBlob(3, payload);
+    if (try statement.step() != .done) return error.SqlFailed;
+}
+
+/// The file a Track plays: its preferred file, else the first file of its
+/// Recording, matching `TrackRepository.playableLocation`.
+pub const track_play_file =
+    \\COALESCE(
+    \\    tracks.preferred_file_id,
+    \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1))
+;
+
+pub const ListenRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    /// Records a listen, or returns null when this file already has one that
+    /// started at the same second.
+    pub fn record(self: *ListenRepository, input: ListenInput) !?i64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.insertLocked(input);
+    }
+
+    /// Records a listen and queues `payload` for `service` in one transaction,
+    /// so a listen is never stored without its delivery or the reverse. A
+    /// listen that already existed queues nothing.
+    pub fn recordAndQueue(
+        self: *ListenRepository,
+        input: ListenInput,
+        service: []const u8,
+        payload: []const u8,
+    ) !?i64 {
+        if (service.len == 0 or payload.len == 0) return error.InvalidScrobbleEvent;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const id = try self.insertLocked(input);
+        if (id) |listen_id| {
+            var key_buffer: [32]u8 = undefined;
+            const event_key = std.fmt.bufPrint(&key_buffer, "listen:{d}", .{listen_id}) catch unreachable;
+            try enqueueScrobbleLocked(self.db, service, event_key, payload);
+        }
+        try self.db.exec("COMMIT;");
+        return id;
+    }
+
+    fn insertLocked(self: *ListenRepository, input: ListenInput) !?i64 {
+        const listened_ms = std.math.cast(i64, input.listened_ms) orelse return error.InvalidListen;
+        const duration_ms = if (input.duration_ms) |value|
+            std.math.cast(i64, value) orelse return error.InvalidListen
+        else
+            null;
+        var statement = try self.db.prepare(
+            \\INSERT INTO listens(
+            \\    file_id, recording_id, started_at, listened_ms, duration_ms,
+            \\    title, artist, album, recording_mbid, player_client)
+            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            \\ON CONFLICT(file_id, started_at) DO NOTHING
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, input.file_id);
+        try statement.bindOptionalInt64(2, input.recording_id);
+        try statement.bindInt64(3, input.started_at);
+        try statement.bindInt64(4, listened_ms);
+        try statement.bindOptionalInt64(5, duration_ms);
+        try statement.bindText(6, input.title);
+        try statement.bindText(7, input.artist);
+        try statement.bindText(8, input.album);
+        try statement.bindOptionalText(9, input.recording_mbid);
+        try statement.bindText(10, input.player_client);
+        const inserted = try statement.step() == .row;
+        const id = if (inserted) statement.columnInt64(0) else null;
+        if (inserted and try statement.step() != .done) return error.SqlFailed;
+        return id;
+    }
+
+    /// Raises a recorded listen's `listened_ms` to `listened_ms`; a smaller
+    /// value leaves it. No listen for this file and start is not an error.
+    pub fn updateListened(self: *ListenRepository, file_id: i64, started_at: i64, listened_ms: u64) !void {
+        const value = std.math.cast(i64, listened_ms) orelse return error.InvalidListen;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            "UPDATE listens SET listened_ms = max(listened_ms, ?3) WHERE file_id = ?1 AND started_at = ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, started_at);
+        try statement.bindInt64(3, value);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Plays of the file a Track resolves to. Keyed on the file, so the count
+    /// survives an edit that reprojects the Track under a new id.
+    pub fn trackPlayStats(self: *const ListenRepository, track_id: i64) !PlayStats {
+        var statement = try self.db.prepare(
+            "SELECT count(*), max(started_at) FROM listens WHERE file_id = " ++
+                "(SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1);",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        return readPlayStats(statement);
+    }
+
+    pub fn filePlayStats(self: *const ListenRepository, file_id: i64) !PlayStats {
+        var statement = try self.db.prepare(
+            "SELECT count(*), max(started_at) FROM listens WHERE file_id = ?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        return readPlayStats(statement);
+    }
+
+    fn readPlayStats(statement: sqlite.Statement) !PlayStats {
+        if (try statement.step() != .row) return error.SqlFailed;
+        return .{
+            .play_count = @intCast(statement.columnInt64(0)),
+            .last_played_at = if (statement.columnIsNull(1)) null else statement.columnInt64(1),
+        };
+    }
+
+    /// What a listen of this Track needs: the metadata the library shows for
+    /// it and the MusicBrainz ids recorded for the file it plays. Null when the
+    /// Track does not exist.
+    pub fn listenSubject(
+        self: *const ListenRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?ListenSubject {
+        var statement = try self.db.prepare(
+            "WITH subject AS (\n" ++
+                "    SELECT " ++ track_play_file ++ " AS file_id, tracks.recording_id,\n" ++
+                "           tracks.title, tracks.artist, tracks.album,\n" ++
+                "           tracks.duration_ms, tracks.track_number\n" ++
+                "    FROM tracks WHERE tracks.id = ?1)\n" ++
+                "SELECT subject.file_id, subject.recording_id, subject.title, subject.artist,\n" ++
+                "       subject.album, subject.duration_ms, subject.track_number,\n" ++
+                "       observed_file_tags.musicbrainz_recording_id,\n" ++
+                "       observed_file_tags.musicbrainz_release_id,\n" ++
+                "       observed_file_tags.musicbrainz_artist_id\n" ++
+                "FROM subject LEFT JOIN observed_file_tags ON observed_file_tags.file_id = subject.file_id;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return null;
+        const title = try allocator.dupe(u8, statement.columnText(2));
+        errdefer allocator.free(title);
+        const artist = try allocator.dupe(u8, statement.columnText(3));
+        errdefer allocator.free(artist);
+        const album = try allocator.dupe(u8, statement.columnText(4));
+        errdefer allocator.free(album);
+        const recording_mbid = try dupeNonEmpty(allocator, statement, 7);
+        errdefer if (recording_mbid) |value| allocator.free(value);
+        const release_mbid = try dupeNonEmpty(allocator, statement, 8);
+        errdefer if (release_mbid) |value| allocator.free(value);
+        const artist_mbid = try dupeNonEmpty(allocator, statement, 9);
+        errdefer if (artist_mbid) |value| allocator.free(value);
+        return .{
+            .allocator = allocator,
+            .file_id = optionalInt64(statement, 0),
+            .recording_id = optionalInt64(statement, 1),
+            .title = title,
+            .artist = artist,
+            .album = album,
+            .duration_ms = optionalInt64(statement, 5),
+            .track_number = optionalInt64(statement, 6),
+            .recording_mbid = recording_mbid,
+            .release_mbid = release_mbid,
+            .artist_mbid = artist_mbid,
+        };
+    }
+
+    fn dupeNonEmpty(allocator: std.mem.Allocator, statement: sqlite.Statement, column: c_int) !?[]u8 {
+        if (statement.columnIsNull(column)) return null;
+        const value = statement.columnText(column);
+        if (value.len == 0) return null;
+        return try allocator.dupe(u8, value);
+    }
+};
+
+pub const feedback_settle_seconds: i64 = 2;
+
+pub const feedback_next_sql =
+    \\SELECT feedback.recording_id, feedback.score, observed_file_tags.musicbrainz_recording_id
+    \\FROM feedback
+    \\CROSS JOIN files ON files.recording_id = feedback.recording_id
+    \\CROSS JOIN observed_file_tags ON observed_file_tags.file_id = files.id
+    \\WHERE feedback.score IS NOT feedback.synced_score
+    \\  AND feedback.updated_at <= ?1
+    \\  AND observed_file_tags.musicbrainz_recording_id <> ''
+    \\ORDER BY feedback.updated_at, feedback.recording_id,
+    \\         EXISTS(SELECT 1 FROM tracks WHERE tracks.preferred_file_id = files.id) DESC, files.id
+    \\LIMIT 1;
+;
+
+pub const feedback_pending_sql =
+    \\SELECT count(*) FROM feedback
+    \\WHERE score IS NOT synced_score AND EXISTS (
+    \\    SELECT 1 FROM files JOIN observed_file_tags ON observed_file_tags.file_id = files.id
+    \\    WHERE files.recording_id = feedback.recording_id
+    \\      AND observed_file_tags.musicbrainz_recording_id <> '');
+;
+
+pub const feedback_syncable_sql =
+    \\SELECT EXISTS (
+    \\    SELECT 1 FROM files JOIN observed_file_tags ON observed_file_tags.file_id = files.id
+    \\    WHERE files.recording_id = (SELECT recording_id FROM tracks WHERE id = ?1)
+    \\      AND observed_file_tags.musicbrainz_recording_id <> '');
+;
+
+pub const FeedbackRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn set(self: *FeedbackRepository, track_ids: []const i64, feedback: Feedback) !FeedbackChange {
+        if (track_ids.len > max_page) return error.PageOutOfRange;
+        var change: FeedbackChange = .{};
+        if (track_ids.len == 0) return change;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var find = try self.db.prepare("SELECT recording_id FROM tracks WHERE id=?1;");
+        defer find.deinit();
+        var assign = try self.db.prepare(
+            \\INSERT INTO feedback(recording_id, score, updated_at) VALUES (?1, ?2, unixepoch())
+            \\ON CONFLICT(recording_id) DO UPDATE SET
+            \\    score=excluded.score, updated_at=excluded.updated_at, last_error='';
+        );
+        defer assign.deinit();
+        var retract = try self.db.prepare(
+            \\UPDATE feedback SET score=0, updated_at=unixepoch()
+            \\WHERE recording_id=?1 AND COALESCE(synced_score, 0) <> 0 AND last_error = '';
+        );
+        defer retract.deinit();
+        var forget = try self.db.prepare(
+            "DELETE FROM feedback WHERE recording_id=?1 AND (COALESCE(synced_score, 0) = 0 OR last_error <> '');",
+        );
+        defer forget.deinit();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        for (track_ids) |track_id| {
+            try find.bindInt64(1, track_id);
+            const found = try find.step() == .row;
+            const recording_id = if (found) optionalInt64(find, 0) else null;
+            try find.reset();
+            const recording = recording_id orelse {
+                change.skipped += 1;
+                continue;
+            };
+            switch (feedback) {
+                .none => {
+                    try retract.bindInt64(1, recording);
+                    if (try retract.step() != .done) return error.SqlFailed;
+                    var changed = self.db.changes();
+                    try retract.reset();
+                    try forget.bindInt64(1, recording);
+                    if (try forget.step() != .done) return error.SqlFailed;
+                    changed += self.db.changes();
+                    try forget.reset();
+                    if (changed != 0) change.updated += 1;
+                },
+                .loved, .hated => {
+                    try assign.bindInt64(1, recording);
+                    try assign.bindInt64(2, feedback.score());
+                    if (try assign.step() != .done) return error.SqlFailed;
+                    try assign.reset();
+                    change.updated += 1;
+                },
+            }
+        }
+        try self.db.exec("COMMIT;");
+        return change;
+    }
+
+    pub fn forTrack(self: *const FeedbackRepository, track_id: i64) !Feedback {
+        var statement = try self.db.prepare(
+            \\SELECT feedback.score FROM tracks
+            \\JOIN feedback ON feedback.recording_id = tracks.recording_id
+            \\WHERE tracks.id = ?1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return .none;
+        return Feedback.fromScore(statement.columnInt64(0)) orelse error.InvalidStoredFeedback;
+    }
+
+    pub fn canSync(self: *const FeedbackRepository, track_id: i64) !bool {
+        var statement = try self.db.prepare(feedback_syncable_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return false;
+        return statement.columnInt64(0) != 0;
+    }
+
+    pub fn nextToSync(self: *const FeedbackRepository, allocator: std.mem.Allocator, now: i64) !?FeedbackSync {
+        var statement = try self.db.prepare(feedback_next_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, now -| feedback_settle_seconds);
+        if (try statement.step() != .row) return null;
+        const mbid = try allocator.dupe(u8, statement.columnText(2));
+        return .{
+            .allocator = allocator,
+            .recording_id = statement.columnInt64(0),
+            .feedback = Feedback.fromScore(statement.columnInt64(1)) orelse {
+                allocator.free(mbid);
+                return error.InvalidStoredFeedback;
+            },
+            .recording_mbid = mbid,
+        };
+    }
+
+    pub fn pendingSyncCount(self: *const FeedbackRepository) !u64 {
+        var statement = try self.db.prepare(feedback_pending_sql);
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    pub fn markSynced(self: *FeedbackRepository, recording_id: i64, sent: Feedback) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var update = try self.db.prepare(
+            "UPDATE feedback SET synced_score=?2, synced_at=unixepoch(), last_error='' WHERE recording_id=?1;",
+        );
+        defer update.deinit();
+        try update.bindInt64(1, recording_id);
+        try update.bindInt64(2, sent.score());
+        if (try update.step() != .done) return error.SqlFailed;
+        if (self.db.changes() == 0 and sent != .none) {
+            // The user cleared this while it was being sent; the clear still has to go out.
+            var restore = try self.db.prepare(
+                \\INSERT INTO feedback(recording_id, score, updated_at, synced_score, synced_at)
+                \\SELECT id, 0, unixepoch(), ?2, unixepoch() FROM recordings WHERE id=?1;
+            );
+            defer restore.deinit();
+            try restore.bindInt64(1, recording_id);
+            try restore.bindInt64(2, sent.score());
+            if (try restore.step() != .done) return error.SqlFailed;
+        }
+        try self.forgetSettledLocked(recording_id);
+        try self.db.exec("COMMIT;");
+    }
+
+    pub fn markRejected(self: *FeedbackRepository, recording_id: i64, sent: Feedback, details: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var update = try self.db.prepare(
+            "UPDATE feedback SET synced_score=?2, last_error=?3 WHERE recording_id=?1;",
+        );
+        defer update.deinit();
+        try update.bindInt64(1, recording_id);
+        try update.bindInt64(2, sent.score());
+        try update.bindText(3, details);
+        if (try update.step() != .done) return error.SqlFailed;
+        try self.forgetSettledLocked(recording_id);
+        try self.db.exec("COMMIT;");
+    }
+
+    fn forgetSettledLocked(self: *FeedbackRepository, recording_id: i64) !void {
+        var statement = try self.db.prepare(
+            "DELETE FROM feedback WHERE recording_id=?1 AND score=0 AND COALESCE(synced_score, 0) = 0;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, recording_id);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 };
 

@@ -4,8 +4,23 @@ const handle = @import("handle.zig");
 const WorkTag = struct {};
 pub const WorkHandle = handle.Handle(WorkTag);
 
-/// The owner tag for work that belongs to no single runtime object.
-pub const unowned: u64 = 0;
+/// Which runtime object a worker may still touch. The kind is part of the
+/// owner, so a Player and a Library that share a slot index and generation
+/// never name each other's workers.
+pub const Owner = struct {
+    kind: Kind,
+    index: u32 = 0,
+    generation: u32 = 0,
+
+    pub const Kind = enum(u8) { unowned, player, library };
+
+    pub fn eql(a: Owner, b: Owner) bool {
+        return a.kind == b.kind and a.index == b.index and a.generation == b.generation;
+    }
+};
+
+/// The owner of work that belongs to no single runtime object.
+pub const unowned: Owner = .{ .kind = .unowned };
 
 pub const State = enum {
     active,
@@ -30,11 +45,11 @@ pub const Registration = struct {
     /// Set by the control lane when it spawned a joinable OS thread for this
     /// registration. `awaitCompletion` joins it instead of spinning.
     thread: ?std.Thread = null,
-    /// Which runtime object this worker may still touch, as an opaque tag the
-    /// control lane assigns. Destroying one object has to join the workers
-    /// that could reach *it* -- and only those. `unowned` means the worker is
-    /// not bound to a single object and is joined only by a full `drain`.
-    owner: u64 = unowned,
+    /// Which runtime object this worker may still touch, as the control lane
+    /// assigns it. Destroying one object has to join the workers that could
+    /// reach *it* -- and only those. `unowned` means the worker is not bound
+    /// to a single object and is joined only by a full `drain`.
+    owner: Owner = unowned,
     /// This registration's own handle, so a targeted drain can retire it
     /// through `complete` rather than reimplementing slot invalidation.
     work_handle: WorkHandle = .{ .index = 0, .generation = 0 },
@@ -95,7 +110,7 @@ pub const Registry = struct {
         self.* = undefined;
     }
 
-    pub fn begin(self: *Registry, owner: u64) !WorkHandle {
+    pub fn begin(self: *Registry, owner: Owner) !WorkHandle {
         const entry = try self.allocator.create(Registration);
         errdefer self.allocator.destroy(entry);
         entry.* = .{ .owner = owner };
@@ -112,12 +127,12 @@ pub const Registry = struct {
     /// and every running scan job, which is a real fault rather than mere
     /// waste. Workers tagged `unowned` are never retired here, because a scan
     /// job does not touch a Player and must outlive one being destroyed.
-    pub fn drainOwner(self: *Registry, owner: u64) void {
-        if (owner == unowned) return;
+    pub fn drainOwner(self: *Registry, owner: Owner) void {
+        if (owner.kind == .unowned) return;
         var index: usize = 0;
         while (index < self.pool.slots.items.len) : (index += 1) {
             const entry = self.pool.slots.items[index].value orelse continue;
-            if (entry.owner != owner) continue;
+            if (!entry.owner.eql(owner)) continue;
             self.complete(entry.work_handle) catch {};
         }
     }

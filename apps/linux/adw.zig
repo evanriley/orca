@@ -35,6 +35,7 @@ pub const ActionRow = opaque {};
 pub const SwitchRow = opaque {};
 pub const ComboRow = opaque {};
 pub const SpinRow = opaque {};
+pub const EntryRow = opaque {};
 pub const AlertDialog = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
@@ -60,6 +61,9 @@ pub extern fn adw_action_row_add_prefix(row: *ActionRow, widget: *gtk.Widget) vo
 pub extern fn adw_action_row_set_subtitle(row: *ActionRow, subtitle: [*:0]const u8) void;
 pub extern fn adw_action_row_set_subtitle_lines(row: *ActionRow, lines: c_int) void;
 pub extern fn adw_entry_row_new() *gtk.Widget;
+pub extern fn adw_entry_row_set_show_apply_button(row: *EntryRow, show_apply_button: gtk.gboolean) void;
+pub extern fn adw_password_entry_row_new() *gtk.Widget;
+pub extern fn adw_action_row_set_activatable_widget(row: *ActionRow, widget: ?*gtk.Widget) void;
 pub extern fn adw_switch_row_new() *gtk.Widget;
 pub extern fn adw_switch_row_get_active(row: *SwitchRow) gtk.gboolean;
 pub extern fn adw_switch_row_set_active(row: *SwitchRow, active: gtk.gboolean) void;

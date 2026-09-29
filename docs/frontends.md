@@ -91,8 +91,11 @@ The window is an `AdwNavigationSplitView`:
 
 Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
-player bar opens a menu: Play, Play Next, Add to Queue, Edit Tags…, Show Album
-and Show Artist, as far as they apply; queue entries offer Play and Remove.
+player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, Edit
+Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
+Play and Remove. A song with no feedback offers Love and Dislike; a loved one
+offers Remove Love, a disliked one Remove Dislike. On a selection the entries
+apply to every selected song.
 The playing track is marked across its whole row in the track list, on album
 pages and in the queue.
 
@@ -104,6 +107,17 @@ and `playerQueueRemove`, so an entry the engine has already lined up is never
 pulled out from under the output.
 - The player bar spans the window: cover, title and artist; shuffle, previous,
   play, next and repeat; the seek bar; volume, the output menu and the queue.
+  A heart beside the title loves the audible song and, pressed again, removes
+  the love; it is read when the audible song changes and after any change.
+
+**Love and dislike** are kept by liborca per recording (`librarySetFeedback`).
+The heart in the player bar toggles love. Loved songs show a small heart in the
+Tracks list's title column and on album pages; disliked songs have no marker,
+and the details panel's Feedback row says Loved, Disliked or None. A song
+without a MusicBrainz recording ID is saved on this computer only, and the
+Feedback row says so. A change made in one place repaints the others, by
+recording and without a query per row: rows carry `TrackSummary.recording_id`
+and `feedback`, and only those whose recording changed are replaced.
 
 Below 760sp the sidebar collapses behind a back button, the browse panes hide
 and the player bar tightens. Messages are toasts. Shortcuts are listed in the
@@ -142,6 +156,23 @@ survive while the effect is off, and applied at launch when enabled. A file
 that predates the `*_enabled` keys and holds `off` leaves the effect off with
 the default curve or amount.
 
+The **Listening** page holds the ListenBrainz settings. Submit listens calls
+`Runtime.librarySetScrobbling`; the user token is a password row with an apply
+button, stored in the Secret Service through libsecret (`apps/linux/secret.zig`)
+and never in `settings.ini` or the Library. Applying calls
+`libraryScrobblerCredentialsChanged`; an empty field removes the token. Storing
+is asynchronous, so a locked keyring can prompt without freezing the window.
+The status row is rewritten from `libraryScrobblerStatus` on the tick while
+Preferences is open: connected with the user name and the number of listens
+waiting and, when there are any, the loves and dislikes waiting to sync, token
+rejected, waiting after a rate limit or outage, offline, or not connected.
+Listens are always recorded locally; the page says so. Show what I'm playing
+now is the Now Playing argument of `librarySetScrobbling`; it is off by default
+and insensitive while Submit listens is off. `[listening]
+scrobble=true|false` and `now_playing=true|false` are saved and re-applied at
+launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
+instance or a local mock.
+
 The output menu ends with the **signal path**: the source format, then
 ReplayGain, equalizer, crossfeed, volume and the output format as they apply,
 and whether the path is bit-perfect, with the reasons when it is not. It comes
@@ -157,7 +188,9 @@ playing track when it belongs to the album. On an album page a click or the
 arrow keys select a row, one per page, and double-click or Enter plays from
 it. The panel is filled from `Runtime.libraryTrackDetails` when the shown
 track changes and when the library changes. The playing track also gets its
-signal path, read when the track changes, never on the tick.
+signal path, read when the track changes, never on the tick. A History
+section shows the play count and last play (local time), and is read again
+whenever `Runtime.libraryListensRecorded` reports a newly recorded listen.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the output menu; see
@@ -178,8 +211,44 @@ The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS methods invoke the same Player handle, and `PlaybackStatus` is
 read from and signaled from authoritative snapshots.
 
-`nix build` installs `share/applications/org.orca_music.Orca.desktop` and the
-icon, so the package can be installed like any desktop application.
+`nix build` installs `share/applications/org.orca_music.Orca.desktop`, the
+icon and the two heart icons, so the package can be installed like any desktop
+application. The heart icons resolve through the icon theme, so `zig build
+run-linux` installs first and puts `zig-out/share` on `XDG_DATA_DIRS`; running
+`zig-out/bin/orca-gtk` directly needs that variable set the same way.
+
+## Listening from a host
+
+A host that wants listening history and scrobbling calls, on the Zig API:
+
+- `Runtime.setCredentialStore` with a `CredentialStore` over the platform's
+  secure storage. `get` receives the service and account
+  (`listenbrainz_token_service`, `listenbrainz_token_account`) and returns an
+  owned copy of the token, or null. It is called on a listen worker's thread,
+  never the caller's, so the store must be safe to call from there. It must
+  never prompt or block on user interaction: a locked keyring reads as no
+  token, and the worker's shutdown waits for the call to return. `orca-gtk`
+  searches the Secret Service without unlocking it; only saving the token from
+  Preferences, on the main loop, may show an unlock prompt.
+- `Runtime.setClientIdentity` to name the host in submissions and in the
+  history. The default is Orca's.
+- `Runtime.setListenBrainzServer` only to select a self-hosted or compatible
+  server.
+- `Runtime.librarySetScrobbling` (its last argument turns Now Playing on),
+  `libraryScrobblerCredentialsChanged` after the token changes, and
+  `libraryScrobblerStatus` for presentation.
+- `Runtime.librarySetFeedback` and `libraryTrackFeedback` for love and hate,
+  which `TrackSummary.feedback` and `TrackDetails.feedback` also report.
+  `orca-gtk` repaints the heart, the rows and the details panel after each
+  change rather than waiting for a reload.
+
+The identity, the store's context and the server string are borrowed and must
+outlive the runtime. The setters may be called at any time and reach each
+listen worker on its next pass; a host that sets them before binding a Player
+to a Library avoids a first pass with the defaults. Listens are sampled inside
+`processNextCommand`, so a host pumps it as it already does. The C ABI does not
+expose listening yet. [providers.md](providers.md) describes what a listen is
+and what is sent.
 
 ## macOS SwiftUI
 

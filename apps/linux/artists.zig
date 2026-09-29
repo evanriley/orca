@@ -63,7 +63,7 @@ pub fn setArtistContext(self: *App, artist_id: i64) bool {
     }) catch return false;
     defer tracks.deinit();
     for (tracks.items) |item| {
-        if (item.has_playable_file) self.context.tracks.append(self.allocator, item.id) catch return false;
+        if (item.has_playable_file) self.context.addTrack(self.allocator, item.id, item.recording_id, item.feedback) catch return false;
     }
     return true;
 }

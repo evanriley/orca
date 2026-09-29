@@ -57,6 +57,12 @@ pub const TrackDetails = struct {
     /// parameters, an older algorithm, or bytes it no longer has.
     loudness: ?Loudness,
     has_artwork: bool,
+    /// Listens of the file the Track plays.
+    play_count: u64,
+    /// Unix seconds at which the latest listen started.
+    last_played_at: ?i64,
+    feedback: database.Feedback,
+    feedback_syncable: bool,
 
     pub fn deinit(self: TrackDetails) void {
         self.allocator.free(self.title);
@@ -83,6 +89,7 @@ pub fn load(
     const loudness = if (facts) |file| try storedLoudness(library, file) else null;
     const duration_ms = if (facts) |file| file.duration_ms orelse summary.duration_ms else summary.duration_ms;
     const size_bytes = if (facts) |file| positive(file.size_bytes) else null;
+    const plays = try library.listens.trackPlayStats(track_id);
     const codec_identifier = if (facts) |file| file.codec else try allocator.alloc(u8, 0);
 
     return .{
@@ -108,6 +115,10 @@ pub fn load(
         .file_missing = if (facts) |file| file.path == null else true,
         .loudness = loudness,
         .has_artwork = if (facts) |file| file.has_artwork else false,
+        .play_count = plays.play_count,
+        .last_played_at = plays.last_played_at,
+        .feedback = summary.feedback,
+        .feedback_syncable = try library.feedback.canSync(track_id),
     };
 }
 

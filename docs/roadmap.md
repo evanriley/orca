@@ -8,9 +8,9 @@ the rule in [architecture.md](architecture.md).
 
 Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback at each source's sample rate,
-live equalizer and crossfeed, tag editing with undo, and track details.
-Providers and filesystem watching are built but not connected; macOS has no
-audio output yet.
+live equalizer and crossfeed, tag editing with undo, track details, a local
+play history and ListenBrainz scrobbling. The other providers and filesystem
+watching are built but not connected; macOS has no audio output yet.
 
 ## Works today
 
@@ -52,6 +52,24 @@ audio output yet.
 - Track details: format, file, loudness and tags for one Track
   (`orca-cli track`), and a details panel in `orca-gtk`.
 
+### Listening
+
+- A local play history: every listen (a track of 30 s or more, heard for half
+  its length or four minutes) is recorded in the Library and kept forever.
+  Play count and last play appear in `orca-cli track` and in the `orca-gtk`
+  details panel. `orca-cli play-tracks` records listens too.
+- ListenBrainz scrobbling, off until enabled: a leased, restart-safe queue, a
+  gateway that identifies Orca, spaces requests and honours `429`, and a token
+  held in the Secret Service (`orca-gtk` Preferences > Listening) or read from
+  `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
+  [providers.md](providers.md).
+- Love and hate for songs, kept in the Library per recording and sent to
+  ListenBrainz while scrobbling for recordings with a MusicBrainz ID. `orca-gtk`
+  has a heart in the player bar, hearts on loved rows and context menu entries;
+  `orca-cli feedback` sets it.
+- Now Playing, off until enabled: the playing track is announced to
+  ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
+
 ### Analysis
 
 - Loudness and ReplayGain, peaks, silence, waveform and a temporal
@@ -62,12 +80,13 @@ audio output yet.
 ### Clients
 
 - `orca-cli`: scan, browse, search, library edits, tag write-back and undo,
-  analysis, duplicates, artwork and queue playback.
+  analysis, duplicates, artwork, queue playback, `feedback` and `scrobble`.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
   menus, tag editing with write-back and undo, Preferences, a Health page, a
   player bar with cover art and an output menu, job progress, a welcome page,
-  toasts, a shortcuts dialog and MPRIS.
+  toasts, a shortcuts dialog, MPRIS, ListenBrainz submission with play counts
+  in the details panel, and love and dislike.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
 ## Built but not reachable
@@ -77,10 +96,9 @@ entry point and a client before it counts as working.
 
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
-- Providers: MusicBrainz, AcoustID, ListenBrainz and Last.fm adapters, match
-  proposals and the scrobble queue. Before connecting them: HTTP requests need
-  deadlines and cancellation, proposal acceptance must re-read the stored
-  payload inside its transaction, and scrobble delivery must lease queue rows.
+- Providers: MusicBrainz, AcoustID and Last.fm adapters and match proposals.
+  Before connecting them, proposal acceptance must re-read the stored payload
+  inside its transaction.
 - The ordered DSP graph (`Chain`, `PublishedChain`) and the resampler. The
   Player's equalizer, crossfeed and volume run through `PlayerDsp` instead, and
   the signal-path inspector is reachable through `playerSignalPath`, but
@@ -91,26 +109,22 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **ListenBrainz scrobbling**, the first provider to connect. It needs the
-   HTTP fixes listed under [Built but not reachable](#built-but-not-reachable):
-   request deadlines and cancellation, and leased scrobble queue rows. The
-   token comes from secure storage and is set in Preferences.
-2. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
+1. **MusicBrainz matching, then AcoustID**, as reviewable proposals in
    `orca-gtk`. Proposal acceptance must re-read the stored payload inside its
    transaction first. Last.fm follows.
-3. **Filesystem watching** as a scan accelerator, so new files appear without
+2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
-4. **A fixed output rate with a band-limited resampler** (libsamplerate or
+3. **A fixed output rate with a band-limited resampler** (libsamplerate or
    speexdsp behind a shim), for gapless playback across sample-rate changes
    and for devices held at another rate. Playback at the source rate already
    covers the common case.
-5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+4. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
    writable. The C ABI lacks tag writes, queue editing, DSP and track
    details.
-6. **Playlists, ratings and play history.** `tracks.rating` exists; playlists
-   and history have no schema yet.
-7. **Undecodable files are re-examined on every analysis run.** They are
+5. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+   schema yet. Play history, love and hate, and Now Playing are done.
+6. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
 
@@ -123,6 +137,11 @@ Small defects that are not yet scheduled:
 - `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
   it on change, never on a tick.
 - `ZoneRuntime.published_device_delay_frames` is written but never read.
+- Two tests fail intermittently, unrelated to listening: "a Player's signal
+  path reports sample processing only while DSP or volume is in effect" (the
+  output never opens, `OutputNeverOpened`) and "an unanalyzed entry reached by
+  a gapless advance plays at unity" (`tests/root.zig:779`, gain 0.358 instead
+  of 1).
 
 ## Deferred formats
 

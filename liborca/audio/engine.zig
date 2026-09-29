@@ -88,7 +88,6 @@ pub const PlayerEngine = struct {
     ack: std.atomic.Value(u64) = .init(0),
     running: std.atomic.Value(bool) = .init(false),
     wake: std.atomic.Value(bool) = .init(false),
-    drained: std.atomic.Value(bool) = .init(false),
     /// Set by the control lane while it needs exclusive access to the Player's
     /// `SourceQueue`. The engine is the only decoder, so loading or seeking a
     /// source has to stop it first: `sources` is a plain field, not an atomic.
@@ -211,7 +210,7 @@ pub const PlayerEngine = struct {
     }
 
     pub fn isDrained(self: *const PlayerEngine) bool {
-        return self.drained.load(.acquire);
+        return self.player.drained.load(.acquire);
     }
 
     fn awaitAcknowledgement(self: *PlayerEngine) void {
@@ -717,21 +716,21 @@ pub const PlayerEngine = struct {
 
     fn publishDrained(self: *PlayerEngine, zones: []*ZoneRuntime) void {
         if (self.player.sources == null) {
-            self.drained.store(false, .monotonic);
+            self.player.drained.store(false, .monotonic);
             return;
         }
         if (!self.player.finishedDecoding()) {
-            self.drained.store(false, .monotonic);
+            self.player.drained.store(false, .monotonic);
             return;
         }
         for (zones) |runtime_zone| {
             if (!runtime_zone.output_requested.load(.acquire)) continue;
             if (!runtime_zone.quiescent()) {
-                self.drained.store(false, .monotonic);
+                self.player.drained.store(false, .monotonic);
                 return;
             }
         }
-        self.drained.store(true, .release);
+        self.player.drained.store(true, .release);
     }
 
     fn park(self: *PlayerEngine) void {

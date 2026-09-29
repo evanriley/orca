@@ -8,8 +8,11 @@ const database = @import("../database/root.zig");
 const handle = @import("handle.zig");
 const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
+const listen_worker = @import("listen_worker.zig");
 const metadata = @import("../metadata/root.zig");
+const network = @import("../network/root.zig");
 const object = @import("object.zig");
+const providers = @import("../providers/root.zig");
 const storage = @import("../storage/root.zig");
 const track_details = @import("track_details.zig");
 const track_source = @import("track_source.zig");
@@ -25,6 +28,14 @@ pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const TrackDetails = track_details.TrackDetails;
 pub const TrackLoudness = track_details.Loudness;
+pub const PlayStats = database.PlayStats;
+pub const Feedback = database.Feedback;
+pub const FeedbackChange = database.FeedbackChange;
+pub const ClientIdentity = network.client.Identity;
+pub const CredentialStore = providers.credentials.Store;
+pub const ScrobblerStatus = listen_worker.Status;
+pub const ScrobblerState = providers.listenbrainz.State;
+pub const BoundedText = providers.listenbrainz.BoundedText;
 
 pub const State = enum(u8) {
     running,
@@ -37,7 +48,21 @@ const LibraryObject = struct {
     database: ?*database.LibraryDatabase = null,
     /// Started on the first artwork request, and again after any drain.
     artwork: ?*ArtworkLoader = null,
+    /// Created on the first Player bind or scrobbling change and kept until
+    /// the Library closes. Its worker restarts on the next listen after any
+    /// drain.
+    listens: ?*listen_worker.Listens = null,
+    stored_counts: ?StoredCounts = null,
 };
+
+const StoredCounts = struct {
+    pending: u64,
+    feedback_pending: u64,
+    delivered_total: u64,
+    read_at_ms: i64,
+};
+
+const stored_counts_reuse_ms: i64 = 1000;
 
 const ArtworkLoader = struct {
     loader: artwork.Loader,
@@ -66,6 +91,8 @@ const PlayerObject = struct {
     /// is freed.
     engine: ?*audio.engine.PlayerEngine = null,
     engine_work: ?WorkHandle = null,
+    /// Sampled by the control lane while the Player is bound to a Library.
+    listens: providers.listens.ListenTracker = .{},
 };
 const ZoneObject = struct {
     zone: *audio.zone_runtime.ZoneRuntime,
@@ -281,6 +308,9 @@ const retained_job_records: usize = 8;
 /// Ramp applied to a volume change, in frames. Long enough that a slider does
 /// not click, short enough to feel immediate.
 const volume_ramp_frames: u32 = 512;
+
+/// How often the control lane samples bound Players for listens.
+const listen_sample_interval_ms: i64 = 100;
 
 pub const ScanRequest = struct {
     /// Which registered root to walk. Null walks every enabled root.
@@ -675,6 +705,9 @@ pub const PlayerStatus = struct {
     duration_ms: u64,
     /// The **audible** entry, not the one the decoder has reached.
     track_id: ?i64,
+    /// Serial of the audible entry; each play of a queue entry gets a new
+    /// one. Zero when nothing is loaded.
+    entry_serial: u32,
     queue_length: u32,
     queue_index: u32,
     volume: f32,
@@ -714,6 +747,27 @@ pub const OrcaRuntime = struct {
     job_workers: std.ArrayList(*JobWorker) = .empty,
     /// Tag-write plans awaiting approval. Control lane only.
     pending_tag_writes: [max_pending_tag_writes]?*PendingTagWrite = @splat(null),
+    client_identity: ClientIdentity = .orca,
+    credential_store: ?CredentialStore = null,
+    listenbrainz_server: []const u8 = providers.listenbrainz.default_server,
+    /// Version of the three settings above, copied into every Library's
+    /// listen config.
+    listen_settings: u32 = 0,
+    /// One per runtime, created with the first listen worker and deinitialized
+    /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
+    /// handlers and `deinit` restores what it found, so a second instance torn
+    /// down while this one has a request in flight would leave the host's
+    /// dispositions -- the default one kills the process -- in place under it.
+    network_threaded: ?*std.Io.Threaded = null,
+    /// The one Library whose listens go to ListenBrainz, so a runtime never
+    /// has two gateways to one service.
+    scrobbling_library: ?LibraryHandle = null,
+    /// The control lane's own `std.Io`, for clock reads and worker wakeups
+    /// only.
+    control_threaded: std.Io.Threaded = .init_single_threaded,
+    last_listen_sample_ms: ?i64 = null,
+    /// Replaced by tests that must not reach a network or wait in real time.
+    listen_hooks: listen_worker.Hooks = .{},
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -744,6 +798,10 @@ pub const OrcaRuntime = struct {
     pub fn deinit(self: *OrcaRuntime) void {
         self.shutdown();
         self.work_registry.deinit();
+        if (self.network_threaded) |threaded| {
+            threaded.deinit();
+            self.allocator.destroy(threaded);
+        }
         if (self.output_host_ready) self.output_host.deinit();
         self.jobs.deinit();
         self.zones.deinit();
@@ -768,14 +826,17 @@ pub const OrcaRuntime = struct {
         // Engine threads hold raw `*ZoneRuntime` and `*Player` pointers, so they
         // must be joined before either is freed — closing OutputSessions first,
         // because a live render callback reads Zone-owned memory.
+        self.endListens(null);
         for (self.players.slots.items) |*slot| {
             if (slot.value) |*player| self.stopEngine(player);
         }
         self.cancelJobWorkers();
         self.work_registry.requestCancellation();
+        self.wakeListenWorkers();
         self.work_registry.drain();
         self.finalizeDrainedJobWorkers();
         self.releaseDrainedArtworkLoaders();
+        self.releaseDrainedListenWorkers();
         self.freeAllJobWorkers();
         self.discardPendingTagWrites(null);
         self.jobs.cancelAndDrain();
@@ -788,7 +849,10 @@ pub const OrcaRuntime = struct {
         }
         self.players.discardAll();
         for (self.libraries.slots.items) |*slot| {
-            if (slot.value) |*library| self.closeLibraryDatabase(library);
+            if (slot.value) |*library| {
+                self.closeLibraryDatabase(library);
+                self.freeListens(library);
+            }
         }
         self.libraries.discardAll();
 
@@ -815,6 +879,7 @@ pub const OrcaRuntime = struct {
 
     pub fn destroyLibrary(self: *OrcaRuntime, library: LibraryHandle) !void {
         try self.requireRunning();
+        self.endListens(library);
         // A scan or projection worker holds this database by pointer, so it is
         // cancelled and joined before the connection can be closed. Work is not
         // yet scoped per object, so this conservatively drains every worker —
@@ -830,6 +895,11 @@ pub const OrcaRuntime = struct {
         self.discardPendingTagWrites(library);
         var removed = try self.libraries.remove(library);
         self.closeLibraryDatabase(&removed);
+        self.freeListens(&removed);
+        if (self.scrobbling_library) |scrobbling| {
+            if (scrobbling.eql(library)) self.scrobbling_library = null;
+        }
+        self.restartScrobblingListenWorker();
     }
 
     fn unbindLibraryFromPlayers(self: *OrcaRuntime, library: LibraryHandle) void {
@@ -1095,6 +1165,345 @@ pub const OrcaRuntime = struct {
         }
     }
 
+    // ------------------------------------------------------------- listens
+
+    /// Names the host in its listen history and in every ListenBrainz
+    /// submission, from each listen worker's next pass. `identity`'s strings
+    /// must outlive the runtime.
+    pub fn setClientIdentity(self: *OrcaRuntime, identity: ClientIdentity) !void {
+        try self.requireRunning();
+        try identity.validate();
+        self.client_identity = identity;
+        self.publishListenSettings();
+    }
+
+    /// Where listen workers read the ListenBrainz user token, from each
+    /// worker's next pass. `store.get` is called on a worker's thread;
+    /// `store` must outlive the runtime.
+    pub fn setCredentialStore(self: *OrcaRuntime, store: CredentialStore) !void {
+        try self.requireRunning();
+        self.credential_store = store;
+        self.publishListenSettings();
+    }
+
+    /// Points scrobbling at a self-hosted or compatible ListenBrainz server,
+    /// from each listen worker's next pass. `https` anywhere, or `http` to
+    /// `127.0.0.1`, `[::1]` or `localhost` only, because the user token
+    /// travels in every request. `base_url` must outlive the runtime.
+    pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+        try self.requireRunning();
+        try providers.listenbrainz.validateServer(base_url);
+        self.listenbrainz_server = base_url;
+        self.publishListenSettings();
+    }
+
+    fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
+        var updated = config;
+        updated.identity = self.client_identity;
+        updated.credentials = self.credential_store;
+        updated.server = self.listenbrainz_server;
+        updated.settings = self.listen_settings;
+        return updated;
+    }
+
+    fn publishListenSettings(self: *OrcaRuntime) void {
+        self.listen_settings +%= 1;
+        for (self.libraries.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const listens = object_value.listens orelse continue;
+            listens.configure(self.control_threaded.io(), self.withListenSettings(listens.loadConfig()));
+        }
+    }
+
+    /// Sends this Library's listens and feedback to ListenBrainz, or stops
+    /// sending them. Listens are recorded locally either way; one recorded
+    /// while this is off is never sent later. At most one Library per runtime
+    /// scrobbles. `offline` keeps listens queued without making any request,
+    /// and `now_playing` also announces the playing track.
+    pub fn librarySetScrobbling(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        enabled: bool,
+        offline: bool,
+        now_playing: bool,
+    ) !void {
+        try self.requireRunning();
+        const object_value = try self.libraries.get(library);
+        if (object_value.database == null) return error.LibraryHasNoDatabase;
+        if (enabled) {
+            if (self.scrobbling_library) |other| {
+                if (!other.eql(library)) return error.ScrobblingEnabledElsewhere;
+            }
+        }
+        const listens = if (enabled)
+            try self.startListenWorker(library)
+        else
+            try self.ensureListens(object_value);
+        var config = listens.loadConfig();
+        config.enabled = enabled;
+        config.offline = offline;
+        config.now_playing = now_playing;
+        listens.configure(self.control_threaded.io(), config);
+        if (enabled) {
+            self.scrobbling_library = library;
+        } else if (self.scrobbling_library) |scrobbling| {
+            if (scrobbling.eql(library)) self.scrobbling_library = null;
+        }
+    }
+
+    /// Tells the Library's worker the ListenBrainz token may have changed. The
+    /// worker validates it once, the next time it could make a request, and
+    /// reports the user name or the rejection in `libraryScrobblerStatus`.
+    pub fn libraryScrobblerCredentialsChanged(self: *OrcaRuntime, library: LibraryHandle) !void {
+        try self.requireRunning();
+        const object_value = try self.libraries.get(library);
+        if (object_value.database == null) return error.LibraryHasNoDatabase;
+        (try self.ensureListens(object_value)).credentialsChanged(self.control_threaded.io());
+    }
+
+    /// The scrobbler's last published state. A Library without a running
+    /// worker reports the queue counts from its database, at most once a
+    /// second, and starts nothing.
+    pub fn libraryScrobblerStatus(self: *OrcaRuntime, library: LibraryHandle) !ScrobblerStatus {
+        try self.requireRunning();
+        const object_value = try self.libraries.get(library);
+        const listens = object_value.listens;
+        if (listens) |existing| {
+            if (existing.worker != null) return existing.snapshot();
+        }
+        var status: ScrobblerStatus = if (listens) |existing| existing.snapshot() else .{ .state = .disabled };
+        const counts = self.storedCounts(object_value) orelse return status;
+        status.pending = counts.pending;
+        status.feedback_pending = counts.feedback_pending;
+        status.delivered_total = counts.delivered_total;
+        return status;
+    }
+
+    fn storedCounts(self: *OrcaRuntime, object_value: *LibraryObject) ?StoredCounts {
+        const library_database = object_value.database orelse return null;
+        const now_ms = self.sampleTime().mono_ms;
+        if (object_value.stored_counts) |counts| {
+            if (now_ms - counts.read_at_ms < stored_counts_reuse_ms) return counts;
+        }
+        const counts: StoredCounts = .{
+            .pending = library_database.scrobbles.pendingCount() catch return object_value.stored_counts,
+            .feedback_pending = library_database.feedback.pendingSyncCount() catch return object_value.stored_counts,
+            .delivered_total = library_database.scrobbles.deliveredCount(providers.listenbrainz.service) catch
+                return object_value.stored_counts,
+            .read_at_ms = now_ms,
+        };
+        object_value.stored_counts = counts;
+        return counts;
+    }
+
+    /// Listens recorded since the Library was opened: one atomic load, so a
+    /// host may poll it every tick to learn when to reread its history.
+    pub fn libraryListensRecorded(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        try self.requireRunning();
+        const listens = (try self.libraries.get(library)).listens orelse return 0;
+        return listens.recorded.load(.monotonic);
+    }
+
+    pub fn librarySetFeedback(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+        feedback: Feedback,
+    ) !FeedbackChange {
+        const library_database = try self.libraryDatabase(library);
+        const change = try library_database.feedback.set(track_ids, feedback);
+        const listens = (try self.libraries.get(library)).listens orelse return change;
+        if (change.updated == 0) return change;
+        if (listens.loadConfig().enabled) _ = self.startListenWorker(library) catch {};
+        listens.feedbackChanged(self.control_threaded.io());
+        return change;
+    }
+
+    pub fn libraryTrackFeedback(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !Feedback {
+        return (try self.libraryDatabase(library)).feedback.forTrack(track_id);
+    }
+
+    /// How often the Track's file has been heard, and when last.
+    pub fn libraryTrackPlayStats(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !PlayStats {
+        return (try self.libraryDatabase(library)).listens.trackPlayStats(track_id);
+    }
+
+    fn ensureListens(self: *OrcaRuntime, object_value: *LibraryObject) !*listen_worker.Listens {
+        if (object_value.listens) |existing| return existing;
+        const created = try self.allocator.create(listen_worker.Listens);
+        created.* = .{};
+        created.configure(self.control_threaded.io(), self.withListenSettings(.{}));
+        object_value.listens = created;
+        return created;
+    }
+
+    /// Starts the Library's listen worker unless it is running.
+    fn startListenWorker(self: *OrcaRuntime, library: LibraryHandle) !*listen_worker.Listens {
+        const object_value = try self.libraries.get(library);
+        const library_database = object_value.database orelse return error.LibraryHasNoDatabase;
+        const listens = try self.ensureListens(object_value);
+        if (listens.worker != null) return listens;
+        const io = try self.networkIo();
+        const worker = try self.allocator.create(listen_worker.Worker);
+        errdefer self.allocator.destroy(worker);
+        const work_handle = try self.work_registry.begin(libraryOwnerTag(library));
+        const registration = self.work_registry.registration(work_handle) catch unreachable;
+        errdefer {
+            registration.finish();
+            self.work_registry.complete(work_handle) catch {};
+        }
+        worker.* = .{
+            .allocator = self.allocator,
+            .io = io,
+            .database = library_database,
+            .listens = listens,
+            .registration = registration,
+            .hooks = self.listen_hooks,
+        };
+        registration.thread = try std.Thread.spawn(.{}, listen_worker.Worker.run, .{worker});
+        listens.worker = worker;
+        return listens;
+    }
+
+    fn networkIo(self: *OrcaRuntime) !std.Io {
+        const threaded = self.network_threaded orelse created: {
+            const created = try self.allocator.create(std.Io.Threaded);
+            created.* = .init(self.allocator, .{});
+            self.network_threaded = created;
+            break :created created;
+        };
+        return threaded.io();
+    }
+
+    /// A full drain also joins the scrobbling Library's worker, and its queue
+    /// may be waiting on a retry time that no listen will come to restart it
+    /// for.
+    fn restartScrobblingListenWorker(self: *OrcaRuntime) void {
+        const library = self.scrobbling_library orelse return;
+        const object_value = self.libraries.get(library) catch return;
+        const listens = object_value.listens orelse return;
+        if (!listens.loadConfig().enabled) return;
+        _ = self.startListenWorker(library) catch {};
+    }
+
+    /// Control lane, immediately after `work_registry.drain()`: each worker
+    /// recorded its ring before finishing, so it is released here and
+    /// restarts on its Library's next listen.
+    fn releaseDrainedListenWorkers(self: *OrcaRuntime) void {
+        for (self.libraries.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const listens = object_value.listens orelse continue;
+            const worker = listens.worker orelse continue;
+            self.allocator.destroy(worker);
+            listens.worker = null;
+        }
+    }
+
+    /// Between `requestCancellation` and `drain`, so a sleeping worker sees
+    /// the cancellation now rather than at the end of its poll.
+    fn wakeListenWorkers(self: *OrcaRuntime) void {
+        for (self.libraries.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const listens = object_value.listens orelse continue;
+            listens.wake(self.control_threaded.io());
+        }
+    }
+
+    fn freeListens(self: *OrcaRuntime, library: *LibraryObject) void {
+        const listens = library.listens orelse return;
+        std.debug.assert(listens.worker == null);
+        self.allocator.destroy(listens);
+        library.listens = null;
+    }
+
+    fn sampleTime(self: *OrcaRuntime) listen_worker.SampleTime {
+        if (self.listen_hooks.sample_clock) |clock| return clock.now();
+        const io = self.control_threaded.io();
+        return .{
+            .mono_ms = std.Io.Clock.awake.now(io).toMilliseconds(),
+            .wall_s = std.Io.Clock.real.now(io).toSeconds(),
+        };
+    }
+
+    /// One lock-free status read per bound Player, turned into listens and
+    /// handed to the Library's worker. No SQLite, I/O or allocation here,
+    /// except restarting a worker a drain released.
+    fn sampleListens(self: *OrcaRuntime) void {
+        for (self.players.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            if (object_value.opener != null) break;
+        } else return;
+        const now = self.sampleTime();
+        if (self.last_listen_sample_ms) |last| {
+            if (now.mono_ms - last < listen_sample_interval_ms) return;
+        }
+        self.last_listen_sample_ms = now.mono_ms;
+        for (self.players.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const opener = object_value.opener orelse continue;
+            const read = readStatus(object_value);
+            // A queue entry from a Library this Player was bound to before
+            // names a Track id of that Library, not of this one.
+            const track_id: ?i64 = if (read.audible) |ref|
+                (if (ref.library.eql(opener.library)) ref.track_id else null)
+            else
+                null;
+            const emission = object_value.listens.observe(.{
+                .entry_serial = read.status.entry_serial,
+                .track_id = track_id,
+                .epoch = read.status.epoch,
+                .playing = read.status.transport == .playing,
+                .drained = object_value.player.drained.load(.acquire),
+                .position_ms = read.status.position_ms,
+                .duration_ms = read.status.duration_ms,
+                .mono_ms = now.mono_ms,
+                .wall_s = now.wall_s,
+            });
+            self.queueListen(opener.library, emission, now.mono_ms);
+        }
+    }
+
+    /// Ends the listen a Player is in and hands its final time to `library`'s
+    /// worker, before the Player stops resolving through that Library.
+    fn endListen(self: *OrcaRuntime, object_value: *PlayerObject, library: LibraryHandle) void {
+        const emission = object_value.listens.end();
+        object_value.listens = .{};
+        self.queueListen(library, emission, self.sampleTime().mono_ms);
+    }
+
+    /// `endListen` for every Player bound to `library`, or to any Library.
+    fn endListens(self: *OrcaRuntime, library: ?LibraryHandle) void {
+        for (self.players.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const opener = object_value.opener orelse continue;
+            if (library) |only| {
+                if (!opener.library.eql(only)) continue;
+            }
+            self.endListen(object_value, opener.library);
+        }
+    }
+
+    fn announcesNowPlaying(self: *OrcaRuntime, library: LibraryHandle) bool {
+        const object_value = self.libraries.get(library) catch return false;
+        const listens = object_value.listens orelse return false;
+        const config = listens.loadConfig();
+        return config.enabled and config.now_playing;
+    }
+
+    fn queueListen(self: *OrcaRuntime, library: LibraryHandle, emission: providers.listens.Emission, mono_ms: i64) void {
+        const entry: listen_worker.Entry = switch (emission) {
+            .none => return,
+            .started => |listen| .{ .kind = .now_playing, .listen = listen, .mono_ms = mono_ms },
+            .eligible => |listen| .{ .kind = .eligible, .listen = listen },
+            .finished => |listen| .{ .kind = .finished, .listen = listen },
+        };
+        if (entry.kind == .now_playing and !self.announcesNowPlaying(library)) return;
+        _ = self.startListenWorker(library) catch {};
+        const object_value = self.libraries.get(library) catch return;
+        const listens = object_value.listens orelse return;
+        listens.push(self.control_threaded.io(), entry);
+    }
+
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
         return (try self.libraryDatabase(library)).health_issues.count();
     }
@@ -1150,7 +1559,9 @@ pub const OrcaRuntime = struct {
 
     pub fn destroyPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
-        self.stopEngine(try self.players.get(player));
+        const destroyed = try self.players.get(player);
+        if (destroyed.opener) |opener| self.endListen(destroyed, opener.library);
+        self.stopEngine(destroyed);
         // Join only the workers bound to this Player. This used to drain the
         // whole registry, which cancelled every *other* Player's engine and
         // every running scan job as a side effect of destroying one Player --
@@ -1462,6 +1873,7 @@ pub const OrcaRuntime = struct {
             if (opener.library.eql(library)) return;
         }
         const library_database = try self.libraryDatabase(library);
+        _ = try self.startListenWorker(library);
         const opener = try track_source.TrackSourceOpener.create(
             self.allocator,
             io,
@@ -1471,6 +1883,7 @@ pub const OrcaRuntime = struct {
         errdefer opener.destroy();
 
         const object_value = try self.players.get(player);
+        if (object_value.opener) |old| self.endListen(object_value, old.library);
         if (object_value.engine) |engine| {
             engine.quiesce();
             defer engine.release();
@@ -2546,23 +2959,36 @@ pub const OrcaRuntime = struct {
     /// Zone, never from an event stream.
     pub fn playerStatus(self: *OrcaRuntime, player: PlayerHandle) !PlayerStatus {
         try self.requireRunning();
-        const object_value = try self.players.get(player);
+        return readStatus(try self.players.get(player)).status;
+    }
+
+    const StatusRead = struct {
+        status: PlayerStatus,
+        /// The queue entry `status.track_id` came from, read once with it.
+        audible: ?TrackRef,
+    };
+
+    fn readStatus(object_value: *PlayerObject) StatusRead {
         const snapshot = object_value.player.snapshot();
         const queue_snapshot = object_value.queue.snapshot();
         const rate = object_value.player.published_sample_rate.load(.acquire);
         const frames = object_value.player.published_frame_count.load(.acquire);
         const current = object_value.queue.current();
         return .{
-            .transport = snapshot.state,
-            .repeat = queue_snapshot.repeat,
-            .shuffle = queue_snapshot.shuffle,
-            .epoch = snapshot.epoch,
-            .position_ms = if (rate == 0) 0 else snapshot.position_frames * 1000 / rate,
-            .duration_ms = if (rate == 0) 0 else frames * 1000 / rate,
-            .track_id = if (current) |ref| ref.track_id else null,
-            .queue_length = queue_snapshot.entries,
-            .queue_index = queue_snapshot.cursor,
-            .volume = object_value.gain.linear.load(.acquire),
+            .audible = current,
+            .status = .{
+                .transport = snapshot.state,
+                .repeat = queue_snapshot.repeat,
+                .shuffle = queue_snapshot.shuffle,
+                .epoch = snapshot.epoch,
+                .position_ms = if (rate == 0) 0 else snapshot.position_frames * 1000 / rate,
+                .duration_ms = if (rate == 0) 0 else frames * 1000 / rate,
+                .track_id = if (current) |ref| ref.track_id else null,
+                .entry_serial = object_value.player.audible_entry_serial.load(.acquire),
+                .queue_length = queue_snapshot.entries,
+                .queue_index = queue_snapshot.cursor,
+                .volume = object_value.gain.linear.load(.acquire),
+            },
         };
     }
 
@@ -2862,8 +3288,12 @@ pub const OrcaRuntime = struct {
 
     /// Executes at most one command on the runtime's serialized logical control
     /// lane. Returns false when there is no work or event backpressure applies.
+    /// Each call also samples bound Players for listens, at most once per
+    /// `listen_sample_interval_ms`.
     pub fn processNextCommand(self: *OrcaRuntime) bool {
-        if (self.state.load(.acquire) != .running or !self.events.hasCapacity()) return false;
+        if (self.state.load(.acquire) != .running) return false;
+        self.sampleListens();
+        if (!self.events.hasCapacity()) return false;
         const command = self.commands.pop() orelse return false;
         const outcome = self.execute(command.action) catch |err| control.Outcome{
             .failed = mapFailure(err),
@@ -2941,15 +3371,21 @@ pub const OrcaRuntime = struct {
     /// Identifies a Player to the work registry. Generation is part of the
     /// tag, so a registration left by a destroyed Player can never match the
     /// later occupant of the same slot.
-    fn playerOwnerTag(player: PlayerHandle) u64 {
-        return (@as(u64, player.index) << 32) | @as(u64, player.generation);
+    fn playerOwnerTag(player: PlayerHandle) work.Owner {
+        return .{ .kind = .player, .index = player.index, .generation = player.generation };
+    }
+
+    fn libraryOwnerTag(library: LibraryHandle) work.Owner {
+        return .{ .kind = .library, .index = library.index, .generation = library.generation };
     }
 
     fn joinWorkersBeforeDestroy(self: *OrcaRuntime) void {
         self.cancelJobWorkers();
         self.work_registry.requestCancellation();
+        self.wakeListenWorkers();
         self.work_registry.drain();
         self.releaseDrainedArtworkLoaders();
+        self.releaseDrainedListenWorkers();
     }
 
     fn closeLibraryDatabase(self: *OrcaRuntime, library: *LibraryObject) void {
@@ -4483,4 +4919,881 @@ test "a root cannot be removed while a job runs on its library, and afterwards i
     try std.testing.expectEqual(@as(usize, 0), roots.items.len);
     try std.testing.expectError(error.UnknownRoot, runtime.libraryRemoveRoot(library, binding.root_id));
     try std.Io.Dir.cwd().access(std.testing.io, root, .{});
+}
+
+// ------------------------------------------------------------- listen tests
+
+/// The awake and wall clocks the control lane samples Players by, advanced by
+/// the test rather than by time.
+const FakeSampleClock = struct {
+    mono_ms: i64 = 0,
+    wall_base_s: i64 = 1_700_000_000,
+
+    fn clock(self: *FakeSampleClock) listen_worker.SampleClock {
+        return .{ .context = self, .now_fn = now };
+    }
+
+    fn now(context: *anyopaque) listen_worker.SampleTime {
+        const self: *FakeSampleClock = @ptrCast(@alignCast(context));
+        return .{ .mono_ms = self.mono_ms, .wall_s = self.wall_base_s + @divFloor(self.mono_ms, 1000) };
+    }
+};
+
+/// ListenBrainz, its token store and the gateway's clock, as a listen worker
+/// sees them. Every call arrives on the worker's thread.
+const FakeListenBrainz = struct {
+    /// Holds each request until the gateway cancels it.
+    hang: bool = false,
+    /// The last request's URL and user agent, complete once `requests`
+    /// counts it.
+    url: [128]u8 = undefined,
+    url_len: usize = 0,
+    user_agent: [160]u8 = undefined,
+    user_agent_len: usize = 0,
+    requests: std.atomic.Value(u32) = .init(0),
+    listens_sent: std.atomic.Value(u32) = .init(0),
+    now_playing_sent: std.atomic.Value(u32) = .init(0),
+    feedback_sent: std.atomic.Value(u32) = .init(0),
+    last_score: std.atomic.Value(i32) = .init(99),
+    feedback_status: std.atomic.Value(u16) = .init(200),
+    during_feedback: ?struct { context: *anyopaque, run: *const fn (*anyopaque) void } = null,
+    token_lookups: std.atomic.Value(u32) = .init(0),
+    clock_reads: std.atomic.Value(u32) = .init(0),
+    now_ms: std.atomic.Value(i64) = .init(0),
+
+    const hang_limit_ms = 10_000;
+
+    fn lastUrl(self: *const FakeListenBrainz) []const u8 {
+        return self.url[0..self.url_len];
+    }
+
+    fn lastUserAgent(self: *const FakeListenBrainz) []const u8 {
+        return self.user_agent[0..self.user_agent_len];
+    }
+
+    fn advance(self: *FakeListenBrainz, milliseconds: i64) void {
+        _ = self.now_ms.fetchAdd(milliseconds, .acq_rel);
+    }
+
+    fn transport(self: *FakeListenBrainz) network.client.Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+
+    fn clock(self: *FakeListenBrainz) network.client.Clock {
+        return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
+    }
+
+    /// Unix time that moves with `clock`.
+    fn wallClock(self: *FakeListenBrainz) network.client.Clock {
+        return .{ .context = self, .now_ms_fn = wallMs, .sleep_ms_fn = sleepMs };
+    }
+
+    const wall_base_ms: i64 = 1_800_000_000_000;
+
+    fn wallMs(context: *anyopaque) i64 {
+        const self: *FakeListenBrainz = @ptrCast(@alignCast(context));
+        return wall_base_ms + self.now_ms.load(.acquire);
+    }
+
+    fn store(self: *FakeListenBrainz) CredentialStore {
+        return .{ .context = self, .get_fn = token };
+    }
+
+    fn perform(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        request: network.client.Request,
+    ) anyerror!network.client.Response {
+        const self: *FakeListenBrainz = @ptrCast(@alignCast(context));
+        self.url_len = @min(request.url.len, self.url.len);
+        @memcpy(self.url[0..self.url_len], request.url[0..self.url_len]);
+        self.user_agent_len = @min(request.user_agent.len, self.user_agent.len);
+        @memcpy(self.user_agent[0..self.user_agent_len], request.user_agent[0..self.user_agent_len]);
+        const sent = request.body orelse "";
+        if (std.mem.endsWith(u8, request.url, "/recording-feedback")) {
+            if (self.during_feedback) |hook| {
+                self.during_feedback = null;
+                hook.run(hook.context);
+            }
+            if (std.mem.indexOf(u8, sent, "\"score\":")) |at| {
+                const digits = std.mem.trimEnd(u8, sent[at + 8 ..], "}");
+                self.last_score.store(std.fmt.parseInt(i32, digits, 10) catch 99, .release);
+            }
+            _ = self.feedback_sent.fetchAdd(1, .acq_rel);
+            _ = self.requests.fetchAdd(1, .acq_rel);
+            return .{
+                .allocator = allocator,
+                .status = self.feedback_status.load(.acquire),
+                .body = try allocator.dupe(u8, "{}"),
+            };
+        }
+        if (std.mem.endsWith(u8, request.url, "/submit-listens")) {
+            const counter = if (std.mem.indexOf(u8, sent, "\"playing_now\"") != null) &self.now_playing_sent else &self.listens_sent;
+            _ = counter.fetchAdd(1, .acq_rel);
+        }
+        _ = self.requests.fetchAdd(1, .acq_rel);
+        if (self.hang) {
+            var waited: TestDeadline = .init(hang_limit_ms);
+            while (waited.tick()) {
+                if (request.cancel.?.load(.acquire)) return error.Canceled;
+            }
+            return error.Timeout;
+        }
+        const body = if (std.mem.endsWith(u8, request.url, "/validate-token"))
+            "{\"valid\":true,\"user_name\":\"listener\"}"
+        else
+            "{}";
+        return .{ .allocator = allocator, .status = 200, .body = try allocator.dupe(u8, body) };
+    }
+
+    fn nowMs(context: *anyopaque) i64 {
+        const self: *FakeListenBrainz = @ptrCast(@alignCast(context));
+        _ = self.clock_reads.fetchAdd(1, .acq_rel);
+        return self.now_ms.load(.acquire);
+    }
+
+    fn sleepMs(context: *anyopaque, milliseconds: u64) anyerror!void {
+        const self: *FakeListenBrainz = @ptrCast(@alignCast(context));
+        _ = self.now_ms.fetchAdd(@intCast(milliseconds), .acq_rel);
+    }
+
+    fn token(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8, _: []const u8) anyerror!?[]u8 {
+        const self: *FakeListenBrainz = @ptrCast(@alignCast(context));
+        _ = self.token_lookups.fetchAdd(1, .acq_rel);
+        return try allocator.dupe(u8, "secret-token");
+    }
+};
+
+/// A runtime whose listen sampling and ListenBrainz traffic are both fakes.
+/// Players report playback through their status atomics, as an engine would,
+/// without decoding anything.
+const ListenRig = struct {
+    runtime: OrcaRuntime,
+    clock: FakeSampleClock = .{},
+    listenbrainz: FakeListenBrainz = .{},
+
+    const track_duration_ms = 180_000;
+
+    fn init(self: *ListenRig) void {
+        self.* = .{ .runtime = .init(std.testing.allocator) };
+        self.runtime.listen_hooks = .{
+            .transport = self.listenbrainz.transport(),
+            .clock = self.listenbrainz.clock(),
+            .wall_clock = self.listenbrainz.wallClock(),
+            .sample_clock = self.clock.clock(),
+            .poll_ms = 5,
+        };
+    }
+
+    /// A Library holding one three-minute Track with a file behind it.
+    fn openLibrary(self: *ListenRig, uri: [:0]const u8) !struct { library: LibraryHandle, track_id: i64 } {
+        const library = try self.runtime.openLibrary(std.testing.io, uri);
+        const library_database = try self.runtime.libraryDatabase(library);
+        const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+        try library_database.tracks.upsertTracks(&.{.{
+            .title = "Northern Sky",
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .duration_ms = track_duration_ms,
+            .preferred_file_id = file_id,
+        }});
+        var page = try library_database.tracks.page(std.testing.allocator, .{ .limit = 1, .offset = 0 });
+        defer page.deinit();
+        return .{ .library = library, .track_id = page.items[0].id };
+    }
+
+    fn startPlaying(self: *ListenRig, player: PlayerHandle, library: LibraryHandle, track_id: i64, serial: u32) !void {
+        const object_value = try self.runtime.players.get(player);
+        try object_value.queue.replace(&.{.{ .library = library, .track_id = track_id }}, 0);
+        object_value.player.published_sample_rate.store(1000, .release);
+        object_value.player.published_frame_count.store(track_duration_ms, .release);
+        object_value.player.audible_entry_serial.store(serial, .release);
+        object_value.player.position_frames.store(0, .release);
+        object_value.player.state.store(.playing, .release);
+    }
+
+    /// Plays on for `milliseconds`, pumping the control lane every 100 ms.
+    fn play(self: *ListenRig, player: PlayerHandle, milliseconds: u64) !void {
+        const object_value = try self.runtime.players.get(player);
+        var elapsed: u64 = 0;
+        while (elapsed < milliseconds) : (elapsed += 100) {
+            self.clock.mono_ms += 100;
+            _ = object_value.player.position_frames.fetchAdd(100, .acq_rel);
+            _ = self.runtime.processNextCommand();
+        }
+    }
+
+    fn awaitPlayCount(self: *ListenRig, library: LibraryHandle, track_id: i64, expected: u64) !PlayStats {
+        var deadline: TestDeadline = .init(5_000);
+        while (deadline.tick()) {
+            const stats = try self.runtime.libraryTrackPlayStats(library, track_id);
+            if (stats.play_count == expected) return stats;
+        }
+        return error.ListenNotRecorded;
+    }
+
+    /// Queues one listen for ListenBrainz directly, as another process sharing
+    /// the database would, due at `due_at` Unix seconds.
+    fn queueBacklog(self: *ListenRig, library: LibraryHandle, due_at: i64) !void {
+        const library_database = try self.runtime.libraryDatabase(library);
+        const event: providers.scrobble.Event = .{
+            .title = "Northern Sky",
+            .artist = "Nick Drake",
+            .started_at = 1_700_000_000,
+            .duration_ms = track_duration_ms,
+            .listened_ms = 100_000,
+        };
+        const payload = try event.encode(std.testing.allocator);
+        defer std.testing.allocator.free(payload);
+        try library_database.scrobbles.enqueue(providers.listenbrainz.service, "listen:backlog", payload);
+        var sql: [96]u8 = undefined;
+        try library_database.database.exec(try std.fmt.bufPrintSentinel(
+            &sql,
+            "UPDATE scrobble_queue SET next_attempt_at = {d};",
+            .{due_at},
+            0,
+        ));
+    }
+
+    fn awaitDelivered(self: *ListenRig, library: LibraryHandle, expected: u64) !void {
+        var deadline: TestDeadline = .init(5_000);
+        while ((try self.runtime.libraryScrobblerStatus(library)).delivered_total != expected) {
+            if (!deadline.tick()) return error.ListenNotDelivered;
+        }
+    }
+
+    fn identify(self: *ListenRig, library: LibraryHandle, track_id: i64, mbid: ?[]const u8) !void {
+        const library_database = try self.runtime.libraryDatabase(library);
+        try library_database.database.exec("INSERT INTO recordings(title) VALUES ('Northern Sky');");
+        var sql: [256]u8 = undefined;
+        try library_database.database.exec(try std.fmt.bufPrintSentinel(
+            &sql,
+            "UPDATE files SET recording_id = (SELECT max(id) FROM recordings) " ++
+                "WHERE id = (SELECT preferred_file_id FROM tracks WHERE id = {d});" ++
+                "UPDATE tracks SET recording_id = (SELECT max(id) FROM recordings) WHERE id = {d};",
+            .{ track_id, track_id },
+            0,
+        ));
+        var statement = try library_database.database.prepare("SELECT preferred_file_id FROM tracks WHERE id = ?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        try library_database.observed_tags.upsert(.{ .file_id = statement.columnInt64(0), .values = .{
+            .title = "Northern Sky",
+            .musicbrainz_recording_id = mbid,
+        } });
+    }
+
+    fn awaitCount(counter: *const std.atomic.Value(u32), expected: u32) !void {
+        var deadline: TestDeadline = .init(5_000);
+        while (counter.load(.acquire) < expected) {
+            if (!deadline.tick()) return error.RequestNeverSent;
+        }
+    }
+
+    fn awaitFeedbackSettled(self: *ListenRig, library: LibraryHandle) !void {
+        var deadline: TestDeadline = .init(5_000);
+        while ((try self.runtime.libraryScrobblerStatus(library)).feedback_pending != 0) {
+            if (!deadline.tick()) return error.FeedbackNeverSettled;
+        }
+    }
+
+    /// Lets the listen worker run at least `passes` more passes.
+    fn awaitWorkerPasses(self: *ListenRig, passes: u32) !void {
+        const target = self.listenbrainz.clock_reads.load(.acquire) + passes;
+        var deadline: TestDeadline = .init(5_000);
+        while (self.listenbrainz.clock_reads.load(.acquire) < target) {
+            if (!deadline.tick()) return error.WorkerStalled;
+        }
+    }
+};
+
+test "a play heard past half its length records one listen, and without scrobbling queues and sends nothing" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-local?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+
+    try rig.play(player, 80_000);
+    try rig.awaitWorkerPasses(3);
+    try std.testing.expectEqual(@as(u64, 0), (try rig.runtime.libraryTrackPlayStats(fixture.library, fixture.track_id)).play_count);
+    try rig.play(player, 20_000);
+
+    const stats = try rig.awaitPlayCount(fixture.library, fixture.track_id, 1);
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryListensRecorded(fixture.library));
+    try std.testing.expectEqual(@as(?i64, 1_700_000_000), stats.last_played_at);
+    const details = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer details.deinit();
+    try std.testing.expectEqual(@as(u64, 1), details.play_count);
+    try std.testing.expectEqual(@as(?i64, 1_700_000_000), details.last_played_at);
+
+    try rig.awaitWorkerPasses(3);
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    try std.testing.expectEqual(@as(u64, 0), try library_database.scrobbles.pendingCount());
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+    const status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expect(!status.enabled);
+    try std.testing.expectEqual(@as(u64, 1), status.recorded_total);
+    try std.testing.expectEqual(@as(u64, 0), status.dropped);
+}
+
+test "a finished listen keeps the time heard until the track changed" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-finished?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 150_000);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 8);
+    try rig.play(player, 200);
+
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        var statement = try library_database.database.prepare("SELECT listened_ms FROM listens;");
+        defer statement.deinit();
+        if (try statement.step() == .row and statement.columnInt64(0) == 149_900) return;
+    }
+    return error.FinishedListenNotRecorded;
+}
+
+test "a queue that plays out keeps the whole time heard on its last listen" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-played-out?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 100_000);
+    _ = try rig.awaitPlayCount(fixture.library, fixture.track_id, 1);
+    try rig.play(player, 80_000);
+    (try rig.runtime.players.get(player)).player.drained.store(true, .release);
+    try rig.play(player, 200);
+
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        var statement = try library_database.database.prepare("SELECT listened_ms FROM listens;");
+        defer statement.deinit();
+        if (try statement.step() == .row and statement.columnInt64(0) == 180_000) return;
+    }
+    return error.PlayedOutListenNotFinished;
+}
+
+test "a Library with no listen worker reports the queue stored in its database and starts none" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-stored-status?mode=memory&cache=shared");
+    try rig.queueBacklog(fixture.library, 1_700_000_000);
+
+    var status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(ScrobblerState.disabled, status.state);
+    try std.testing.expect(!status.enabled);
+    try std.testing.expectEqual(@as(u64, 1), status.pending);
+    try std.testing.expectEqual(@as(u64, 0), status.delivered_total);
+    try std.testing.expect((try rig.runtime.libraries.get(fixture.library)).listens == null);
+
+    try rig.runtime.librarySetScrobbling(fixture.library, false, false, false);
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    try library_database.database.exec("UPDATE scrobble_queue SET state = 2;");
+    status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(@as(u64, 1), status.pending);
+
+    rig.clock.mono_ms += stored_counts_reuse_ms;
+    status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(ScrobblerState.disabled, status.state);
+    try std.testing.expectEqual(@as(u64, 0), status.pending);
+    try std.testing.expectEqual(@as(u64, 1), status.delivered_total);
+    try std.testing.expect((try rig.runtime.libraries.get(fixture.library)).listens.?.worker == null);
+}
+
+test "with scrobbling on, a listen is recorded, queued and delivered to ListenBrainz" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-scrobbled?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 100_000);
+
+    _ = try rig.awaitPlayCount(fixture.library, fixture.track_id, 1);
+    var deadline: TestDeadline = .init(5_000);
+    while ((try rig.runtime.libraryScrobblerStatus(fixture.library)).delivered_total != 1) {
+        if (!deadline.tick()) return error.ListenNotDelivered;
+    }
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.requests.load(.acquire));
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    try std.testing.expectEqual(@as(u64, 0), try library_database.scrobbles.pendingCount());
+    const status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expect(status.enabled);
+    try std.testing.expectEqual(ScrobblerState.idle, status.state);
+}
+
+test "destroying one Library leaves another Library's listens recorded" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const doomed = try rig.openLibrary("file:orca-listen-doomed?mode=memory&cache=shared");
+    const kept = try rig.openLibrary("file:orca-listen-kept?mode=memory&cache=shared");
+    const doomed_player = try rig.runtime.createPlayer();
+    const kept_player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(doomed_player, doomed.library, std.testing.io);
+    try rig.runtime.playerBindLibrary(kept_player, kept.library, std.testing.io);
+
+    try rig.runtime.destroyLibrary(doomed.library);
+
+    try rig.startPlaying(kept_player, kept.library, kept.track_id, 3);
+    try rig.play(kept_player, 100_000);
+    _ = try rig.awaitPlayCount(kept.library, kept.track_id, 1);
+    try std.testing.expect((try rig.runtime.libraries.get(kept.library)).listens.?.worker != null);
+}
+
+test "shutdown interrupts a hung ListenBrainz request promptly and leaves the listen queued" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    rig.listenbrainz.hang = true;
+    const uri = "file:orca-listen-hung?mode=memory&cache=shared";
+    const fixture = try rig.openLibrary(uri);
+    var witness = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, uri);
+    defer witness.close();
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 100_000);
+    var deadline: TestDeadline = .init(5_000);
+    while (rig.listenbrainz.requests.load(.acquire) == 0) {
+        if (!deadline.tick()) return error.RequestNeverSent;
+    }
+
+    const started = std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+    rig.runtime.shutdown();
+    const elapsed = std.Io.Clock.awake.now(std.testing.io).toMilliseconds() - started;
+    try std.testing.expect(elapsed < 500);
+
+    try std.testing.expectEqual(@as(u64, 1), try witness.scrobbles.pendingCount());
+    const now_s = std.Io.Clock.real.now(std.testing.io).toSeconds();
+    const unleased = try witness.scrobbles.lease(std.testing.allocator, "listenbrainz", 42, now_s, now_s + 60, 10);
+    defer {
+        for (unleased) |entry| entry.deinit();
+        std.testing.allocator.free(unleased);
+    }
+    try std.testing.expectEqual(@as(usize, 1), unleased.len);
+    try std.testing.expectEqual(@as(u32, 0), unleased[0].attempt_count);
+}
+
+test "a Player and a Library with the same slot and generation own different work" {
+    const player_owner = OrcaRuntime.playerOwnerTag(.{ .index = 0, .generation = 1 });
+    const library_owner = OrcaRuntime.libraryOwnerTag(.{ .index = 0, .generation = 1 });
+    try std.testing.expect(!player_owner.eql(library_owner));
+
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-owners?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try std.testing.expect(player.index == fixture.library.index and player.generation == fixture.library.generation);
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    const worker = (try rig.runtime.libraries.get(fixture.library)).listens.?.worker.?;
+
+    try rig.runtime.destroyPlayer(player);
+
+    try std.testing.expectEqual(@as(usize, 1), rig.runtime.inFlightWorkCount());
+    try std.testing.expect(!worker.registration.cancellationRequested());
+}
+
+test "only one Library at a time may scrobble" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const first = try rig.openLibrary("file:orca-listen-first?mode=memory&cache=shared");
+    const second = try rig.openLibrary("file:orca-listen-second?mode=memory&cache=shared");
+    try rig.runtime.librarySetScrobbling(first.library, true, false, false);
+    try std.testing.expectError(
+        error.ScrobblingEnabledElsewhere,
+        rig.runtime.librarySetScrobbling(second.library, true, false, false),
+    );
+    try rig.runtime.librarySetScrobbling(second.library, false, false, false);
+    try rig.runtime.librarySetScrobbling(first.library, false, false, false);
+    try rig.runtime.librarySetScrobbling(second.library, true, false, false);
+    try std.testing.expect(!(try rig.runtime.libraryScrobblerStatus(first.library)).enabled);
+    try std.testing.expect((try rig.runtime.libraryScrobblerStatus(second.library)).enabled);
+}
+
+test "an idle scrobbling worker looks up no token and sends nothing" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    rig.runtime.listen_hooks.poll_ms = 1;
+    const fixture = try rig.openLibrary("file:orca-listen-idle?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(200);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.token_lookups.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+}
+
+test "a ListenBrainz server is refused unless it is https or loopback" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    try std.testing.expectError(error.InvalidServerUrl, rig.runtime.setListenBrainzServer("http://listenbrainz.example.org"));
+    try std.testing.expectError(error.InvalidServerUrl, rig.runtime.setListenBrainzServer("http://127.0.0.1@example.org"));
+    try rig.runtime.setListenBrainzServer("http://127.0.0.1:8080");
+    try rig.runtime.setListenBrainzServer("https://lb.example.org");
+    try std.testing.expectEqualStrings("https://lb.example.org", rig.runtime.listenbrainz_server);
+}
+
+test "a changed token is validated once, and only once scrobbling is on" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    rig.runtime.listen_hooks.poll_ms = 1;
+    const fixture = try rig.openLibrary("file:orca-listen-validate?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    for (0..3) |_| try rig.runtime.libraryScrobblerCredentialsChanged(fixture.library);
+    try rig.awaitWorkerPasses(20);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    var deadline: TestDeadline = .init(5_000);
+    while (true) {
+        const status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+        if (std.mem.eql(u8, status.user_name.slice(), "listener")) break;
+        if (!deadline.tick()) return error.TokenNeverValidated;
+    }
+    try rig.awaitWorkerPasses(20);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.requests.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.token_lookups.load(.acquire));
+}
+
+test "identity, token store and server set while a worker runs apply to its next submission" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-identity?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(3);
+
+    try std.testing.expectError(
+        error.InvalidNetworkConfiguration,
+        rig.runtime.setClientIdentity(.{ .name = "Player (beta)", .version = "1", .contact = "a@b.c" }),
+    );
+    try rig.runtime.setClientIdentity(.{ .name = "Player", .version = "1.0", .contact = "https://player.example" });
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.setListenBrainzServer("http://127.0.0.1:8080");
+
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 1);
+    try rig.play(player, 100_000);
+    try rig.awaitDelivered(fixture.library, 1);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/1/submit-listens", rig.listenbrainz.lastUrl());
+    try std.testing.expect(std.mem.startsWith(u8, rig.listenbrainz.lastUserAgent(), "Player/1.0 ( https://player.example )"));
+    try std.testing.expect(rig.listenbrainz.token_lookups.load(.acquire) >= 1);
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    var statement = try library_database.database.prepare("SELECT player_client FROM listens;");
+    defer statement.deinit();
+    try std.testing.expect(try statement.step() == .row);
+    try std.testing.expectEqualStrings("Player", statement.columnText(0));
+}
+
+test "closing one Library leaves the network Io another Library's worker is using" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const doomed = try rig.openLibrary("file:orca-listen-io-doomed?mode=memory&cache=shared");
+    const survivor = try rig.openLibrary("file:orca-listen-io-survivor?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(survivor.library, true, false, false);
+    const doomed_player = try rig.runtime.createPlayer();
+    const survivor_player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(doomed_player, doomed.library, std.testing.io);
+    try rig.runtime.playerBindLibrary(survivor_player, survivor.library, std.testing.io);
+    const network_io = rig.runtime.network_threaded.?;
+
+    try rig.runtime.destroyLibrary(doomed.library);
+
+    try std.testing.expectEqual(network_io, rig.runtime.network_threaded.?);
+    try rig.startPlaying(survivor_player, survivor.library, survivor.track_id, 1);
+    try rig.play(survivor_player, 100_000);
+    try rig.awaitDelivered(survivor.library, 1);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.requests.load(.acquire));
+}
+
+test "a scrobbling Library's worker restarts after another Library closes and delivers its backlog when due" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const doomed = try rig.openLibrary("file:orca-listen-restart-doomed?mode=memory&cache=shared");
+    const scrobbling = try rig.openLibrary("file:orca-listen-restart-scrobbling?mode=memory&cache=shared");
+    const due_at = @divFloor(FakeListenBrainz.wall_base_ms, 1000) + 60;
+    try rig.queueBacklog(scrobbling.library, due_at);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(scrobbling.library, true, false, false);
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, doomed.library, std.testing.io);
+    try rig.awaitWorkerPasses(3);
+
+    try rig.runtime.destroyLibrary(doomed.library);
+
+    try std.testing.expect((try rig.runtime.libraries.get(scrobbling.library)).listens.?.worker != null);
+    try rig.awaitWorkerPasses(3);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+    rig.listenbrainz.advance(61_000);
+    try rig.awaitDelivered(scrobbling.library, 1);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.requests.load(.acquire));
+}
+
+test "a listen that ends after its Library's worker was drained still records its final time" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const doomed = try rig.openLibrary("file:orca-listen-late-doomed?mode=memory&cache=shared");
+    const kept = try rig.openLibrary("file:orca-listen-late-kept?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, kept.library, std.testing.io);
+    try rig.startPlaying(player, kept.library, kept.track_id, 7);
+    try rig.play(player, 150_000);
+    _ = try rig.awaitPlayCount(kept.library, kept.track_id, 1);
+
+    try rig.runtime.destroyLibrary(doomed.library);
+    try std.testing.expect((try rig.runtime.libraries.get(kept.library)).listens.?.worker == null);
+    try rig.runtime.destroyPlayer(player);
+
+    const library_database = try rig.runtime.libraryDatabase(kept.library);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        var statement = try library_database.database.prepare("SELECT listened_ms FROM listens;");
+        defer statement.deinit();
+        if (try statement.step() == .row and statement.columnInt64(0) == 149_900) return;
+    }
+    return error.FinishedListenNotRecorded;
+}
+
+test "an idle scrobbling worker finds listens another process queued at its next recheck" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-recheck?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(3);
+
+    try rig.queueBacklog(fixture.library, 0);
+    try rig.awaitWorkerPasses(20);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.token_lookups.load(.acquire));
+
+    rig.listenbrainz.advance(5 * 60 * 1000);
+    try rig.awaitDelivered(fixture.library, 1);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.requests.load(.acquire));
+}
+
+const feedback_mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+test "a Track loved while scrobbling is on reaches ListenBrainz through the worker" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-feedback-love?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(3);
+
+    const change = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try rig.awaitWorkerPasses(3);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.feedback_sent.load(.acquire));
+    rig.listenbrainz.advance(2_000);
+    try ListenRig.awaitCount(&rig.listenbrainz.feedback_sent, 1);
+    try rig.awaitFeedbackSettled(fixture.library);
+    try std.testing.expectEqual(@as(i32, 1), rig.listenbrainz.last_score.load(.acquire));
+    try std.testing.expectEqual(Feedback.loved, try rig.runtime.libraryTrackFeedback(fixture.library, fixture.track_id));
+    try rig.awaitWorkerPasses(10);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.feedback_sent.load(.acquire));
+}
+
+test "feedback given while scrobbling was off is reported pending and sent once it is turned on" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-feedback-later?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .hated);
+
+    const stored = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(@as(u64, 1), stored.feedback_pending);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try ListenRig.awaitCount(&rig.listenbrainz.feedback_sent, 1);
+    try rig.awaitFeedbackSettled(fixture.library);
+    try std.testing.expectEqual(@as(i32, -1), rig.listenbrainz.last_score.load(.acquire));
+}
+
+test "love, dislike and love again while the love is being sent ends loved after at most two requests" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-feedback-flip?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(3);
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    const Flip = struct {
+        library: *database.LibraryDatabase,
+        track_id: i64,
+
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.library.feedback.set(&.{self.track_id}, .hated) catch return;
+            _ = self.library.feedback.set(&.{self.track_id}, .loved) catch return;
+        }
+    };
+    var flip: Flip = .{ .library = library_database, .track_id = fixture.track_id };
+    rig.listenbrainz.during_feedback = .{ .context = &flip, .run = Flip.run };
+
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+    try rig.awaitWorkerPasses(3);
+    rig.listenbrainz.advance(2_000);
+
+    try ListenRig.awaitCount(&rig.listenbrainz.feedback_sent, 1);
+    try rig.awaitFeedbackSettled(fixture.library);
+    try rig.awaitWorkerPasses(10);
+    try std.testing.expect(rig.listenbrainz.feedback_sent.load(.acquire) <= 2);
+    try std.testing.expectEqual(@as(i32, 1), rig.listenbrainz.last_score.load(.acquire));
+    try std.testing.expectEqual(Feedback.loved, try rig.runtime.libraryTrackFeedback(fixture.library, fixture.track_id));
+}
+
+test "a recording without a MusicBrainz id is loved locally, never sent, and costs an idle worker nothing" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    rig.runtime.listen_hooks.poll_ms = 1;
+    const fixture = try rig.openLibrary("file:orca-feedback-untagged?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, null);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+    try rig.awaitWorkerPasses(200);
+
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.token_lookups.load(.acquire));
+    const status = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(@as(u64, 0), status.feedback_pending);
+    const details = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer details.deinit();
+    try std.testing.expectEqual(Feedback.loved, details.feedback);
+    try std.testing.expect(!details.feedback_syncable);
+}
+
+test "a rejected feedback change is recorded and not sent again" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-feedback-rejected?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    rig.listenbrainz.feedback_status.store(400, .release);
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+
+    try rig.awaitWorkerPasses(3);
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+    try rig.awaitWorkerPasses(3);
+    rig.listenbrainz.advance(2_000);
+
+    try ListenRig.awaitCount(&rig.listenbrainz.feedback_sent, 1);
+    try rig.awaitFeedbackSettled(fixture.library);
+    rig.listenbrainz.advance(10 * 60 * 1000);
+    try rig.awaitWorkerPasses(20);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.feedback_sent.load(.acquire));
+    const details = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer details.deinit();
+    try std.testing.expectEqual(Feedback.loved, details.feedback);
+    try std.testing.expect(details.feedback_syncable);
+}
+
+test "track pages and details carry the feedback of the recording" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-feedback-pages?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .hated);
+
+    var page = try rig.runtime.libraryTrackQuery(fixture.library, "", .{ .limit = 8 });
+    defer page.deinit();
+    try std.testing.expectEqual(Feedback.hated, page.items[0].feedback);
+    const details = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer details.deinit();
+    try std.testing.expectEqual(Feedback.hated, details.feedback);
+    try std.testing.expect(details.feedback_syncable);
+
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .none);
+    try std.testing.expectEqual(Feedback.none, try rig.runtime.libraryTrackFeedback(fixture.library, fixture.track_id));
+}
+
+test "Now Playing is announced once a track has been heard for ten seconds, when the option is on" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-now-playing-on?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, true);
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+
+    try rig.play(player, 9_900);
+    try rig.awaitWorkerPasses(5);
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.now_playing_sent.load(.acquire));
+    try rig.play(player, 300);
+
+    try ListenRig.awaitCount(&rig.listenbrainz.now_playing_sent, 1);
+    try rig.play(player, 20_000);
+    try rig.awaitWorkerPasses(10);
+    try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.now_playing_sent.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.listens_sent.load(.acquire));
+}
+
+test "Now Playing is never sent unless the option and scrobbling are both on" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-now-playing-off?mode=memory&cache=shared");
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.play(player, 20_000);
+    try rig.runtime.librarySetScrobbling(fixture.library, false, false, true);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 8);
+    try rig.play(player, 20_000);
+    try rig.awaitWorkerPasses(20);
+
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.now_playing_sent.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
 }

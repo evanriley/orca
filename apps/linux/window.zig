@@ -17,6 +17,7 @@ const albums = @import("albums.zig");
 const nowplaying = @import("nowplaying.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
+const feedback = @import("feedback.zig");
 const health = @import("health.zig");
 
 const App = app.App;
@@ -109,9 +110,18 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
         if (column == .duration or column == .number) 1.0 else 0.0,
     );
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), label);
-    gtk.g_object_set_data(label, "orca-list-item", item);
-    menu.onSecondaryClick(label, cellMenu, null);
+    var child = label;
+    if (column == .title) {
+        const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+        gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
+        child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, child), feedback.newRowHeart());
+        gtk.gtk_box_append(gtk.cast(gtk.Box, child), spacer);
+    }
+    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), child);
+    gtk.g_object_set_data(child, "orca-list-item", item);
+    menu.onSecondaryClick(child, cellMenu, null);
 }
 
 /// The cell factories carry their column as user data, so the right-click
@@ -145,7 +155,7 @@ fn cellMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, _: ?*anyopaque) call
         const row_item = gtk.g_list_model_get_item(model, index) orelse continue;
         defer gtk.g_object_unref(row_item);
         const row: *TrackObject = @ptrCast(@alignCast(row_item));
-        if (row.hasFile()) self.context.tracks.append(self.allocator, row.id()) catch {};
+        if (row.hasFile()) self.context.addTrack(self.allocator, row.id(), row.recordingId(), row.feedback()) catch {};
     }
     if (self.context.tracks.items.len > 1) {
         self.context.release_id = null;
@@ -159,7 +169,15 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     const object = gtk.gtk_list_item_get_item(list_item) orelse return;
     const row: *TrackObject = @ptrCast(@alignCast(object));
     const child = gtk.gtk_list_item_get_child(list_item) orelse return;
-    const label = gtk.cast(gtk.Label, child);
+    const column = columnOf(data);
+    const label = gtk.cast(gtk.Label, if (column == .title)
+        gtk.gtk_widget_get_first_child(child) orelse return
+    else
+        child);
+    if (column == .title) {
+        const heart = gtk.gtk_widget_get_next_sibling(gtk.cast(gtk.Widget, label)) orelse return;
+        feedback.showRowHeart(heart, row.feedback());
+    }
     var buffer: [32]u8 = undefined;
     const text: [:0]const u8 = switch (columnOf(data)) {
         .number => row.numberText(&buffer),

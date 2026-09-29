@@ -30,6 +30,7 @@ const preferences = @import("preferences.zig");
 const settings = @import("settings.zig");
 const tags = @import("tags.zig");
 const art = @import("art.zig");
+const secret = @import("secret.zig");
 
 const stylesheet = @embedFile("style.css");
 
@@ -76,6 +77,8 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     transport.tick(self);
     queue.tick(self);
     jobs.tick(self);
+    preferences.tick(self);
+    details.tick(self);
     return gtk.SOURCE_CONTINUE;
 }
 
@@ -155,6 +158,22 @@ fn activateContextEnqueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
 
 fn activateContextRemove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.remove(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextLove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.love(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextDislike(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.dislike(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextRemoveLove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.removeLove(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextRemoveDislike(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.removeDislike(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateContextShowAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -290,6 +309,15 @@ fn resolvePinnedOutput(environ: *std.process.Environ.Map) ?u64 {
     return std.fmt.parseInt(u64, configured, 10) catch null;
 }
 
+fn resolveListenBrainzServer(
+    allocator: std.mem.Allocator,
+    environ: *std.process.Environ.Map,
+) ?[]const u8 {
+    const configured = environ.get("ORCA_LISTENBRAINZ_URL") orelse return null;
+    if (configured.len == 0) return null;
+    return allocator.dupe(u8, configured) catch null;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const allocator = std.heap.smp_allocator;
     track_model.allocator = allocator;
@@ -310,6 +338,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
+    runtime.setCredentialStore(secret.credential_store) catch {};
+    if (resolveListenBrainzServer(allocator, init.environ_map)) |server|
+        runtime.setListenBrainzServer(server) catch {};
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
@@ -349,6 +380,10 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-play-next", activateContextPlayNext, null, &self);
     addAction(application, "ctx-enqueue", activateContextEnqueue, null, &self);
     addAction(application, "ctx-remove", activateContextRemove, null, &self);
+    addAction(application, "ctx-love", activateContextLove, null, &self);
+    addAction(application, "ctx-dislike", activateContextDislike, null, &self);
+    addAction(application, "ctx-remove-love", activateContextRemoveLove, null, &self);
+    addAction(application, "ctx-remove-dislike", activateContextRemoveDislike, null, &self);
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
 

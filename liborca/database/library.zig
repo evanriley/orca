@@ -58,6 +58,8 @@ pub const LibraryDatabase = struct {
     health_issues: repository.HealthIssueRepository,
     provider_cache: repository.ProviderCacheRepository,
     scrobbles: repository.ScrobbleQueueRepository,
+    listens: repository.ListenRepository,
+    feedback: repository.FeedbackRepository,
     identification_proposals: repository.IdentificationProposalRepository,
 
     /// Open a Library, recovering any interrupted file mutation before the
@@ -107,6 +109,8 @@ pub const LibraryDatabase = struct {
             .health_issues = .{ .db = database, .write_lane = write_lane },
             .provider_cache = .{ .db = database, .write_lane = write_lane },
             .scrobbles = .{ .db = database, .write_lane = write_lane },
+            .listens = .{ .db = database, .write_lane = write_lane },
+            .feedback = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
         };
     }
@@ -1185,4 +1189,556 @@ test "recording a missing file declines the write lane rather than waiting for i
         repository.LocationState.missing,
         try library.locations.stateOf(location_id),
     );
+}
+
+fn testScalar(library: *LibraryDatabase, sql: [:0]const u8) !i64 {
+    var statement = try library.database.prepare(sql);
+    defer statement.deinit();
+    if (try statement.step() != .row) return error.SqlFailed;
+    return statement.columnInt64(0);
+}
+
+fn testListen(file_id: i64, started_at: i64) repository.ListenInput {
+    return .{
+        .file_id = file_id,
+        .started_at = started_at,
+        .listened_ms = 200_000,
+        .duration_ms = 240_000,
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+    };
+}
+
+test "a recorded listen is counted for its Track and survives the Track being reprojected" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-count?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    const track: repository.TrackInput = .{
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .preferred_file_id = file_id,
+    };
+    try library.tracks.upsertTracks(&.{track});
+    const first_id = try testScalar(&library, "SELECT id FROM tracks;");
+    try std.testing.expectEqual(
+        repository.PlayStats{ .play_count = 0, .last_played_at = null },
+        try library.listens.trackPlayStats(first_id),
+    );
+
+    try std.testing.expect(try library.listens.record(testListen(file_id, 1_700_000_000)) != null);
+    try std.testing.expect(try library.listens.record(testListen(file_id, 1_700_001_000)) != null);
+    try std.testing.expectEqual(
+        repository.PlayStats{ .play_count = 2, .last_played_at = 1_700_001_000 },
+        try library.listens.trackPlayStats(first_id),
+    );
+
+    try library.tracks.upsertTracks(&.{.{ .title = "Filler" }});
+    try library.database.exec("DELETE FROM tracks WHERE title='Northern Sky';");
+    try library.tracks.upsertTracks(&.{track});
+    const second_id = try testScalar(&library, "SELECT id FROM tracks WHERE title='Northern Sky';");
+    try std.testing.expect(second_id != first_id);
+    try std.testing.expectEqual(
+        repository.PlayStats{ .play_count = 2, .last_played_at = 1_700_001_000 },
+        try library.listens.trackPlayStats(second_id),
+    );
+    try std.testing.expectEqual(
+        repository.PlayStats{ .play_count = 0, .last_played_at = null },
+        try library.listens.trackPlayStats(second_id + 1000),
+    );
+}
+
+test "a listen stays after its file is forgotten, with no file" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-forgotten?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    _ = try library.listens.record(testListen(file_id, 1_700_000_000));
+
+    try library.database.exec("DELETE FROM files;");
+
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try testScalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NULL AND title='Northern Sky';"),
+    );
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM pragma_foreign_key_check;"));
+}
+
+test "recording the same file and start twice counts once and queues once" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-dedup?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+
+    const first = try library.listens.recordAndQueue(testListen(file_id, 1_700_000_000), "listenbrainz", "{}");
+    const again = try library.listens.recordAndQueue(testListen(file_id, 1_700_000_000), "listenbrainz", "{}");
+
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(?i64, null), again);
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(@as(u64, 1), try library.scrobbles.pendingCount());
+    const entries = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 0, 60, 10);
+    defer {
+        for (entries) |entry| entry.deinit();
+        std.testing.allocator.free(entries);
+    }
+    var expected_key: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        try std.fmt.bufPrint(&expected_key, "listen:{d}", .{first.?}),
+        entries[0].event_key,
+    );
+}
+
+test "updating a listen's time heard only ever raises it" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-update?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    _ = try library.listens.record(testListen(file_id, 1_700_000_000));
+
+    try library.listens.updateListened(file_id, 1_700_000_000, 230_000);
+    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(&library, "SELECT listened_ms FROM listens;"));
+    try library.listens.updateListened(file_id, 1_700_000_000, 100_000);
+    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(&library, "SELECT listened_ms FROM listens;"));
+    try library.listens.updateListened(file_id, 1_700_000_001, 300_000);
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+}
+
+test "a listen subject carries the Track's metadata and the file's MusicBrainz ids" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-subject?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Northern Sky",
+        .musicbrainz_recording_id = "rec-mbid",
+        .musicbrainz_release_id = "rel-mbid",
+        .musicbrainz_artist_id = "",
+    } });
+    try library.tracks.upsertTracks(&.{.{
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 240_000,
+        .track_number = 8,
+        .preferred_file_id = file_id,
+    }});
+    const track_id = try testScalar(&library, "SELECT id FROM tracks;");
+
+    const subject = (try library.listens.listenSubject(std.testing.allocator, track_id)).?;
+    defer subject.deinit();
+    try std.testing.expectEqual(@as(?i64, file_id), subject.file_id);
+    try std.testing.expectEqualStrings("Nick Drake", subject.artist);
+    try std.testing.expectEqualStrings("Bryter Layter", subject.album);
+    try std.testing.expectEqual(@as(?i64, 240_000), subject.duration_ms);
+    try std.testing.expectEqual(@as(?i64, 8), subject.track_number);
+    try std.testing.expectEqualStrings("rec-mbid", subject.recording_mbid.?);
+    try std.testing.expectEqualStrings("rel-mbid", subject.release_mbid.?);
+    try std.testing.expectEqual(@as(?[]u8, null), subject.artist_mbid);
+    try std.testing.expect((try library.listens.listenSubject(std.testing.allocator, track_id + 1000)) == null);
+}
+
+test "two owners never lease the same event and an expired lease can be reclaimed" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-lease?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.scrobbles.enqueue("listenbrainz", "one", "{}");
+    try library.scrobbles.enqueue("listenbrainz", "two", "{}");
+    try library.scrobbles.enqueue("lastfm", "other", "{}");
+
+    const first = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 100, 200, 1);
+    defer freeEntries(first);
+    const second = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 2, 100, 200, 10);
+    defer freeEntries(second);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqualStrings("one", first[0].event_key);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqualStrings("two", second[0].event_key);
+    try std.testing.expectEqual(@as(?i64, 200), try library.scrobbles.nextAttemptAt("listenbrainz"));
+
+    const before_expiry = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 3, 199, 300, 10);
+    defer freeEntries(before_expiry);
+    try std.testing.expectEqual(@as(usize, 0), before_expiry.len);
+
+    const reclaimed = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 3, 200, 300, 10);
+    defer freeEntries(reclaimed);
+    try std.testing.expectEqual(@as(usize, 2), reclaimed.len);
+    try std.testing.expectEqualStrings("one", reclaimed[0].event_key);
+    try std.testing.expectEqualStrings("two", reclaimed[1].event_key);
+
+    try std.testing.expectError(error.StaleScrobbleEvent, library.scrobbles.markDelivered(first[0].id, 1));
+    try std.testing.expectError(error.StaleScrobbleEvent, library.scrobbles.markRetry(first[0].id, 1, 500, "late"));
+    try std.testing.expectError(error.StaleScrobbleEvent, library.scrobbles.markRejected(first[0].id, 1, "late"));
+    try std.testing.expectError(error.StaleScrobbleEvent, library.scrobbles.release(first[0].id, 1));
+    try library.scrobbles.markDelivered(first[0].id, 3);
+    try std.testing.expectError(error.StaleScrobbleEvent, library.scrobbles.markDelivered(first[0].id, 3));
+    try std.testing.expectEqual(@as(u64, 1), try library.scrobbles.deliveredCount("listenbrainz"));
+    try std.testing.expectEqual(@as(u64, 2), try library.scrobbles.pendingCount());
+}
+
+test "releasing a leased event does not count an attempt but retrying does" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-lease-attempts?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.scrobbles.enqueue("listenbrainz", "one", "{}");
+
+    const leased = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 100, 200, 10);
+    defer freeEntries(leased);
+    try library.scrobbles.release(leased[0].id, 1);
+    try std.testing.expectEqual(@as(?i64, 0), try library.scrobbles.nextAttemptAt("listenbrainz"));
+
+    const again = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 100, 200, 10);
+    defer freeEntries(again);
+    try std.testing.expectEqual(@as(u32, 0), again[0].attempt_count);
+    try library.scrobbles.markRetry(again[0].id, 1, 400, "offline");
+    try std.testing.expectEqual(@as(?i64, 400), try library.scrobbles.nextAttemptAt("listenbrainz"));
+
+    const early = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 399, 500, 10);
+    defer freeEntries(early);
+    try std.testing.expectEqual(@as(usize, 0), early.len);
+    const retried = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 400, 500, 10);
+    defer freeEntries(retried);
+    try std.testing.expectEqual(@as(u32, 1), retried[0].attempt_count);
+    try library.scrobbles.markRejected(retried[0].id, 1, "invalid");
+    try std.testing.expectEqual(@as(?i64, null), try library.scrobbles.nextAttemptAt("listenbrainz"));
+    try std.testing.expectEqual(@as(u64, 0), try library.scrobbles.pendingCount());
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try testScalar(&library, "SELECT count(*) FROM scrobble_queue WHERE state=3 AND attempt_count=2 AND lease_owner IS NULL;"),
+    );
+}
+
+fn freeEntries(entries: []repository.ScrobbleQueueEntry) void {
+    for (entries) |entry| entry.deinit();
+    std.testing.allocator.free(entries);
+}
+
+const Feedback = repository.Feedback;
+const settled_at: i64 = 4_000_000_000;
+const feedback_mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+fn openFeedbackLibrary(comptime name: []const u8) !LibraryDatabase {
+    return LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-feedback-" ++ name ++ "?mode=memory&cache=shared",
+    );
+}
+
+fn addFeedbackTrack(library: *LibraryDatabase, title: []const u8, recording_id: ?i64, mbid: ?[]const u8) !i64 {
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    if (recording_id) |recording| {
+        var sql: [96]u8 = undefined;
+        try library.database.exec(try std.fmt.bufPrintSentinel(
+            &sql,
+            "UPDATE files SET recording_id = {d} WHERE id = {d};",
+            .{ recording, file_id },
+            0,
+        ));
+    }
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = title,
+        .musicbrainz_recording_id = mbid,
+    } });
+    try library.tracks.upsertTracks(&.{.{
+        .recording_id = recording_id,
+        .title = title,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .preferred_file_id = file_id,
+    }});
+    var sql: [96]u8 = undefined;
+    return testScalar(library, try std.fmt.bufPrintSentinel(
+        &sql,
+        "SELECT id FROM tracks WHERE preferred_file_id = {d};",
+        .{file_id},
+        0,
+    ));
+}
+
+fn addRecording(library: *LibraryDatabase) !i64 {
+    try library.database.exec("INSERT INTO recordings(title) VALUES ('Song');");
+    return testScalar(library, "SELECT max(id) FROM recordings;");
+}
+
+test "feedback on one Track shows on every Track of its recording, in pages and searches" {
+    var library = try openFeedbackLibrary("shared");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const flac = try addFeedbackTrack(&library, "Northern Sky", recording, null);
+    const compilation = try addFeedbackTrack(&library, "Northern Sky", recording, null);
+    const other = try addFeedbackTrack(&library, "Pink Moon", try addRecording(&library), null);
+
+    const change = try library.feedback.set(&.{flac}, .loved);
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(compilation));
+    try std.testing.expectEqual(Feedback.none, try library.feedback.forTrack(other));
+
+    const summary = (try library.tracks.byId(std.testing.allocator, compilation)).?;
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Feedback.loved, summary.feedback);
+    var page = try library.tracks.page(std.testing.allocator, .{ .limit = 8 });
+    defer page.deinit();
+    for (page.items) |item| {
+        const expected: Feedback = if (item.id == other) .none else .loved;
+        try std.testing.expectEqual(expected, item.feedback);
+    }
+    var found = try library.tracks.search(std.testing.allocator, "Northern", 8, 0);
+    defer found.deinit();
+    try std.testing.expectEqual(@as(usize, 2), found.items.len);
+    for (found.items) |item| try std.testing.expectEqual(Feedback.loved, item.feedback);
+
+    _ = try library.feedback.set(&.{compilation}, .hated);
+    try std.testing.expectEqual(Feedback.hated, try library.feedback.forTrack(flac));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+}
+
+test "feedback on a Track with no recording or no row is skipped and counted" {
+    var library = try openFeedbackLibrary("skipped");
+    defer library.close();
+    const bare = try addFeedbackTrack(&library, "Bare", null, null);
+    const kept = try addFeedbackTrack(&library, "Kept", try addRecording(&library), null);
+
+    const change = try library.feedback.set(&.{ bare, kept, 9999 }, .loved);
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try std.testing.expectEqual(@as(u32, 2), change.skipped);
+    try std.testing.expectEqual(Feedback.none, try library.feedback.forTrack(bare));
+    try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(kept));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+
+    var many: [repository.max_page + 1]i64 = undefined;
+    @memset(&many, kept);
+    try std.testing.expectError(error.PageOutOfRange, library.feedback.set(&many, .loved));
+}
+
+test "clearing feedback that was never sent leaves nothing to send" {
+    var library = try openFeedbackLibrary("clear-unsent");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    try std.testing.expectEqual(@as(u64, 1), try library.feedback.pendingSyncCount());
+
+    _ = try library.feedback.set(&.{track}, .none);
+
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(u64, 0), try library.feedback.pendingSyncCount());
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
+}
+
+test "clearing feedback that was sent stays pending until the clear is sent" {
+    var library = try openFeedbackLibrary("clear-sent");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const love = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer love.deinit();
+    try std.testing.expectEqualStrings(feedback_mbid, love.recording_mbid);
+    try std.testing.expectEqual(Feedback.loved, love.feedback);
+    try library.feedback.markSynced(love.recording_id, .loved);
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
+    try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(track));
+
+    _ = try library.feedback.set(&.{track}, .none);
+
+    try std.testing.expectEqual(Feedback.none, try library.feedback.forTrack(track));
+    const clear = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer clear.deinit();
+    try std.testing.expectEqual(Feedback.none, clear.feedback);
+    try library.feedback.markSynced(clear.recording_id, .none);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+}
+
+test "a change made while feedback was being sent is still pending after it is marked synced" {
+    var library = try openFeedbackLibrary("in-flight");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const sending = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer sending.deinit();
+
+    _ = try library.feedback.set(&.{track}, .hated);
+    try library.feedback.markSynced(sending.recording_id, sending.feedback);
+
+    const next = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer next.deinit();
+    try std.testing.expectEqual(Feedback.hated, next.feedback);
+    try std.testing.expectEqual(Feedback.hated, try library.feedback.forTrack(track));
+}
+
+test "a clear made while a love was being sent is sent next" {
+    var library = try openFeedbackLibrary("cleared-in-flight");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const sending = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer sending.deinit();
+
+    _ = try library.feedback.set(&.{track}, .none);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try library.feedback.markSynced(sending.recording_id, sending.feedback);
+
+    const clear = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer clear.deinit();
+    try std.testing.expectEqual(Feedback.none, clear.feedback);
+    try library.feedback.markSynced(clear.recording_id, .none);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+}
+
+test "rejected feedback is not offered again until the user changes it" {
+    var library = try openFeedbackLibrary("rejected");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const sending = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer sending.deinit();
+
+    try library.feedback.markRejected(sending.recording_id, sending.feedback, "HTTP 400: invalid recording");
+
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
+    try std.testing.expectEqual(@as(u64, 0), try library.feedback.pendingSyncCount());
+    try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(track));
+    _ = try library.feedback.set(&.{track}, .hated);
+    const changed = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer changed.deinit();
+    try std.testing.expectEqual(Feedback.hated, changed.feedback);
+}
+
+test "feedback without a MusicBrainz recording id is kept but never offered for sync" {
+    var library = try openFeedbackLibrary("no-mbid");
+    defer library.close();
+    const untagged = try addFeedbackTrack(&library, "Untagged", try addRecording(&library), null);
+    const blank = try addFeedbackTrack(&library, "Blank", try addRecording(&library), "");
+    const tagged = try addFeedbackTrack(&library, "Tagged", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{ untagged, blank }, .loved);
+
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
+    try std.testing.expectEqual(@as(u64, 0), try library.feedback.pendingSyncCount());
+    try std.testing.expect(!try library.feedback.canSync(untagged));
+    try std.testing.expect(!try library.feedback.canSync(blank));
+    try std.testing.expect(try library.feedback.canSync(tagged));
+    try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(untagged));
+
+    _ = try library.feedback.set(&.{tagged}, .hated);
+    try std.testing.expectEqual(@as(u64, 1), try library.feedback.pendingSyncCount());
+}
+
+test "a recording takes its MusicBrainz id from whichever of its files carries one" {
+    var library = try openFeedbackLibrary("mbid-from-sibling");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const untagged = try addFeedbackTrack(&library, "Song", recording, null);
+    _ = try addFeedbackTrack(&library, "Song", recording, feedback_mbid);
+
+    try std.testing.expect(try library.feedback.canSync(untagged));
+    _ = try library.feedback.set(&.{untagged}, .loved);
+    const pending = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer pending.deinit();
+    try std.testing.expectEqualStrings(feedback_mbid, pending.recording_mbid);
+}
+
+test "the oldest unsent change is offered first" {
+    var library = try openFeedbackLibrary("order");
+    defer library.close();
+    const first = try addFeedbackTrack(&library, "First", try addRecording(&library), feedback_mbid);
+    const second = try addFeedbackTrack(&library, "Second", try addRecording(&library), "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4b");
+    _ = try library.feedback.set(&.{second}, .loved);
+    try library.database.exec("UPDATE feedback SET updated_at = updated_at - 10;");
+    _ = try library.feedback.set(&.{first}, .loved);
+
+    const next = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer next.deinit();
+    try std.testing.expectEqualStrings("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4b", next.recording_mbid);
+}
+
+fn queryPlan(library: *LibraryDatabase, comptime sql: []const u8) ![]u8 {
+    var statement = try library.database.prepare("EXPLAIN QUERY PLAN " ++ sql ++ "");
+    defer statement.deinit();
+    var joined: std.ArrayList(u8) = .empty;
+    errdefer joined.deinit(std.testing.allocator);
+    while (try statement.step() == .row) {
+        try joined.appendSlice(std.testing.allocator, statement.columnText(3));
+        try joined.append(std.testing.allocator, '\n');
+    }
+    return joined.toOwnedSlice(std.testing.allocator);
+}
+
+test "feedback lookups by recording search an index and never scan files" {
+    var library = try openFeedbackLibrary("plans");
+    defer library.close();
+    const plans = [_][]u8{
+        try queryPlan(&library, repository.feedback_next_sql),
+        try queryPlan(&library, repository.feedback_pending_sql),
+        try queryPlan(&library, repository.feedback_syncable_sql),
+        try queryPlan(&library, "SELECT " ++ repository.track_play_file ++ " FROM tracks WHERE tracks.id = 1;"),
+    };
+    defer for (plans) |plan| std.testing.allocator.free(plan);
+    for (plans) |plan| {
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "files_by_recording") != null);
+    }
+}
+
+test "a change is offered only once it has stood for two seconds, and the count includes it before" {
+    var library = try openFeedbackLibrary("settle");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const changed_at = try testScalar(&library, "SELECT updated_at FROM feedback;");
+
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, changed_at) == null);
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, changed_at + 1) == null);
+    try std.testing.expectEqual(@as(u64, 1), try library.feedback.pendingSyncCount());
+    const ready = (try library.feedback.nextToSync(std.testing.allocator, changed_at + repository.feedback_settle_seconds)).?;
+    ready.deinit();
+}
+
+test "clearing feedback the service refused forgets it without a clear to send" {
+    var library = try openFeedbackLibrary("clear-rejected");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+    _ = try library.feedback.set(&.{track}, .loved);
+    const sending = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
+    defer sending.deinit();
+    try library.feedback.markRejected(sending.recording_id, sending.feedback, "HTTP 400");
+
+    const change = try library.feedback.set(&.{track}, .none);
+
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
+}
+
+test "clearing a Track that has no feedback changes nothing and is not counted" {
+    var library = try openFeedbackLibrary("clear-nothing");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
+
+    const change = try library.feedback.set(&.{track}, .none);
+
+    try std.testing.expectEqual(@as(u32, 0), change.updated);
+    try std.testing.expectEqual(@as(u32, 0), change.skipped);
 }

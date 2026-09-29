@@ -30,6 +30,8 @@ pub const Fields = struct {
     track_number: ?i64 = null,
     disc_number: ?i64 = null,
     has_file: bool = false,
+    feedback: liborca.Feedback = .none,
+    recording_id: ?i64 = null,
     release_id: ?i64 = null,
     artist_id: ?i64 = null,
     title: [:0]u8 = &empty,
@@ -65,6 +67,14 @@ pub const TrackObject = extern struct {
 
     pub fn hasFile(self: *TrackObject) bool {
         return self.fields().has_file;
+    }
+
+    pub fn feedback(self: *TrackObject) liborca.Feedback {
+        return self.fields().feedback;
+    }
+
+    pub fn recordingId(self: *TrackObject) ?i64 {
+        return self.fields().recording_id;
     }
 
     pub fn releaseId(self: *TrackObject) ?i64 {
@@ -160,6 +170,8 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     values.track_number = summary.track_number;
     values.disc_number = summary.disc_number;
     values.has_file = summary.has_playable_file;
+    values.feedback = summary.feedback;
+    values.recording_id = summary.recording_id;
     values.release_id = summary.release_id;
     values.artist_id = summary.artist_id;
     values.title = dupe(summary.title);

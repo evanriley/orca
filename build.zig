@@ -165,6 +165,7 @@ pub fn build(b: *std.Build) void {
         });
         linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
+        linux_app_module.linkSystemLibrary("libsecret-1", .{ .use_pkg_config = .yes });
         // Cover art is decoded at a bounded size through gdk-pixbuf's
         // scaling loader. GTK4 depends on it, but the frontend calls it
         // directly, so it has to be linked directly.
@@ -179,7 +180,18 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(linux_app);
         b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
         b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
+        for ([_][]const u8{ "orca-heart-filled-symbolic", "orca-heart-outline-symbolic" }) |icon| {
+            b.installFile(
+                b.fmt("apps/linux/data/{s}.svg", .{icon}),
+                b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),
+            );
+        }
         const run_linux_app = b.addRunArtifact(linux_app);
+        run_linux_app.step.dependOn(b.getInstallStep());
+        run_linux_app.setEnvironmentVariable("XDG_DATA_DIRS", if (b.graph.environ_map.get("XDG_DATA_DIRS")) |existing|
+            b.fmt("{s}/share:{s}", .{ b.install_prefix, existing })
+        else
+            b.fmt("{s}/share:/usr/local/share:/usr/share", .{b.install_prefix}));
         const run_linux_step = b.step("run-linux", "Run the native GTK4 frontend");
         run_linux_step.dependOn(&run_linux_app.step);
 

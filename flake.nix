@@ -26,6 +26,7 @@
           pkgs.pipewire
           pkgs.gtk4
           pkgs.libadwaita
+          pkgs.libsecret
         ];
     in
     {

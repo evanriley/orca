@@ -90,7 +90,7 @@ fn rowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) ca
     const track: *TrackObject = @ptrCast(@alignCast(object));
     self.context.reset(.queue);
     self.context.queue_position = gtk.gtk_list_item_get_position(list_item);
-    self.context.tracks.append(self.allocator, track.id()) catch return;
+    self.context.addTrack(self.allocator, track.id(), track.recordingId(), track.feedback()) catch return;
     self.context.release_id = track.releaseId();
     self.context.artist_id = track.artistId();
     menu.popup(self, row, x, y);

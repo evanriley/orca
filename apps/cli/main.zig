@@ -20,6 +20,9 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidCharacter, error.Overflow => "expected a number",
         error.UnknownOption => "unknown option",
         error.LibraryJobRunning => "a job is running on this library",
+        error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
+        error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL must be https, or http to localhost",
         else => @errorName(err),
     };
 }
@@ -310,6 +313,10 @@ fn run(init: std.process.Init) !void {
         );
     } else if (args.len >= 4 and std.mem.eql(u8, args[1], "play-tracks")) {
         try playTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
+    } else if (args.len == 5 and std.mem.eql(u8, args[1], "feedback")) {
+        try setFeedback(allocator, init.io, stdout, args[2], args[3], args[4]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "scrobble")) {
+        try scrobble(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
     } else {
         try stdout.writeAll(
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
@@ -320,6 +327,8 @@ fn run(init: std.process.Init) !void {
             \\                 | roots DATABASE | remove-root DATABASE ID
             \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
             \\                 | play-tracks DATABASE IDS [OPTIONS]
+            \\                 | scrobble DATABASE [--status] [--timeout=MS]
+            \\                 | feedback DATABASE IDS (--love | --hate | --clear)
             \\                 | artists DATABASE [OPTIONS]
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
@@ -381,7 +390,22 @@ fn run(init: std.process.Init) !void {
             \\
             \\play-tracks prints one `signal:` line once playback is a second in: the
             \\source, each stage that changes the samples, the output stream, and
-            \\whether the path could be bit-perfect.
+            \\whether the path could be bit-perfect. It records listens in the
+            \\Library's play history and never sends them anywhere.
+            \\
+            \\scrobble sends the listens and the love/hate changes queued for
+            \\ListenBrainz. The token comes from ORCA_LISTENBRAINZ_TOKEN;
+            \\ORCA_LISTENBRAINZ_URL selects another server (https, or http to
+            \\localhost only). It works until both queues are empty, the scrobbler
+            \\needs attention, or --timeout=MS passes (default 120000), prints one
+            \\`scrobble:` line, and exits non-zero when the token is missing or
+            \\rejected. --status prints the queue counts and makes no request.
+            \\Listens are queued only while scrobbling is enabled, which the GTK
+            \\app's preferences do; play-tracks never enables it.
+            \\
+            \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
+            \\many Tracks changed and how many were skipped. It is kept in the Library;
+            \\scrobble sends it for recordings with a MusicBrainz ID.
             \\
             \\analyze-library decodes every file the Library has not measured yet and
             \\stores its loudness, peak, clipping, silence and fingerprint. That
@@ -608,6 +632,7 @@ fn playTracks(
     // rather than from the decode cursor.
     var decode_lead_polls: u64 = 0;
     while (elapsed_ms < options.limit_ms) {
+        _ = runtime.processNextCommand();
         const snapshot = try runtime.playerQueueSnapshot(player);
         if (snapshot.decode_position != snapshot.cursor) decode_lead_polls += 1;
         if (last_cursor == null or last_cursor.? != snapshot.cursor) {
@@ -959,6 +984,229 @@ fn showTrack(
         );
     } else try printDetail(stdout, "loudness", "{s}", .{"not measured"});
     try printDetail(stdout, "artwork", "{s}", .{if (details.has_artwork) "yes" else "no"});
+    try printDetail(stdout, "feedback", "{s}", .{switch (details.feedback) {
+        .none => "none",
+        .loved => "loved",
+        .hated => "hated",
+    }});
+    try stdout.print("feedback sync: {s}\n", .{
+        if (details.feedback_syncable) "yes" else "no (no MusicBrainz recording ID)",
+    });
+    try printDetail(stdout, "plays", "{d}", .{details.play_count});
+    try writeDetailKey(stdout, "last played");
+    if (details.last_played_at) |seconds| {
+        try writeIsoUtc(stdout, seconds);
+    } else try stdout.writeAll("never");
+    try stdout.writeAll("\n");
+}
+
+fn writeIsoUtc(stdout: *std.Io.Writer, unix_seconds: i64) !void {
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(unix_seconds, 0)) };
+    const month_day = epoch.getEpochDay().calculateYearDay().calculateMonthDay();
+    const day_seconds = epoch.getDaySeconds();
+    try stdout.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        epoch.getEpochDay().calculateYearDay().year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+    });
+}
+
+/// The user token from the process environment, read once at startup because
+/// the environment map is not safe to read from the listen worker's thread.
+const EnvironmentToken = struct {
+    token: ?[]u8,
+
+    fn init(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !EnvironmentToken {
+        const value = environ.get("ORCA_LISTENBRAINZ_TOKEN") orelse return .{ .token = null };
+        if (value.len == 0) return .{ .token = null };
+        return .{ .token = try allocator.dupe(u8, value) };
+    }
+
+    fn deinit(self: *EnvironmentToken, allocator: std.mem.Allocator) void {
+        if (self.token) |token| {
+            std.crypto.secureZero(u8, token);
+            allocator.free(token);
+        }
+        self.* = undefined;
+    }
+
+    fn store(self: *EnvironmentToken) liborca.CredentialStore {
+        return .{ .context = self, .get_fn = get };
+    }
+
+    fn get(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8, _: []const u8) anyerror!?[]u8 {
+        const self: *EnvironmentToken = @ptrCast(@alignCast(context));
+        const token = self.token orelse return null;
+        return try allocator.dupe(u8, token);
+    }
+};
+
+const ScrobbleOptions = struct {
+    status_only: bool = false,
+    timeout_ms: u64 = 120_000,
+};
+
+fn parseScrobbleOptions(arguments: []const []const u8) !ScrobbleOptions {
+    var options: ScrobbleOptions = .{};
+    for (arguments) |argument| {
+        if (std.mem.eql(u8, argument, "--status")) {
+            options.status_only = true;
+        } else if (std.mem.startsWith(u8, argument, "--timeout=")) {
+            options.timeout_ms = try std.fmt.parseInt(u64, argument["--timeout=".len..], 10);
+        } else return error.UnknownOption;
+    }
+    return options;
+}
+
+fn printScrobbleLine(
+    stdout: *std.Io.Writer,
+    state: liborca.ScrobblerState,
+    delivered: u64,
+    pending: u64,
+    feedback_pending: u64,
+    user_name: []const u8,
+    last_error: []const u8,
+) !void {
+    try stdout.print(
+        "scrobble: state={s} delivered={d} pending={d} feedback_pending={d}",
+        .{ @tagName(state), delivered, pending, feedback_pending },
+    );
+    if (user_name.len != 0) try stdout.print(" user={s}", .{user_name});
+    try stdout.print(" last_error={s}\n", .{if (last_error.len == 0) "-" else last_error});
+}
+
+fn awaitScrobblerState(
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    deadline_ms: u64,
+    elapsed_ms: *u64,
+    settled: *const fn (liborca.ScrobblerStatus) bool,
+) !liborca.ScrobblerStatus {
+    while (true) {
+        _ = runtime.processNextCommand();
+        const status = try runtime.libraryScrobblerStatus(library);
+        if (settled(status) or elapsed_ms.* >= deadline_ms) return status;
+        sleepMilliseconds(20);
+        elapsed_ms.* += 20;
+    }
+}
+
+fn isOffline(status: liborca.ScrobblerStatus) bool {
+    return status.state == .offline;
+}
+
+fn hasLeftOffline(status: liborca.ScrobblerStatus) bool {
+    return status.state != .offline;
+}
+
+fn needsAttention(status: liborca.ScrobblerStatus) bool {
+    return switch (status.state) {
+        .needs_token, .invalid_token, .rate_limited, .backing_off => true,
+        .idle => status.pending == 0 and status.feedback_pending == 0,
+        .disabled, .offline, .validating, .submitting => false,
+    };
+}
+
+/// With nothing queued it makes no request and looks up no token, and the
+/// token is never validated up front: a bad one shows as a refused delivery.
+/// The worker publishes its status only at the end of a pass, and an
+/// unpublished status reads as an empty idle queue. The worker therefore
+/// starts offline, where its first pass makes no request and reports the
+/// queue; going online afterwards leaves `offline` only when a pass with
+/// requests allowed has finished. `--status` starts no worker: it reports the
+/// queue as the database holds it.
+fn scrobble(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: *std.process.Environ.Map,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    const options = try parseScrobbleOptions(option_arguments);
+    var credentials: EnvironmentToken = try .init(allocator, environ);
+    defer credentials.deinit(allocator);
+
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    try runtime.setCredentialStore(credentials.store());
+    if (environ.get("ORCA_LISTENBRAINZ_URL")) |url| {
+        if (url.len > 0) try runtime.setListenBrainzServer(try allocator.dupe(u8, url));
+    }
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+
+    if (options.status_only) {
+        const stored = try runtime.libraryScrobblerStatus(library);
+        try stdout.print(
+            "scrobble: status state={s} pending={d} feedback_pending={d} delivered={d} token={s}\n",
+            .{
+                @tagName(stored.state),
+                stored.pending,
+                stored.feedback_pending,
+                stored.delivered_total,
+                if (credentials.token != null) "set" else "unset",
+            },
+        );
+        return;
+    }
+
+    const waiting = try runtime.libraryScrobblerStatus(library);
+    if (waiting.pending == 0 and waiting.feedback_pending == 0) {
+        try printScrobbleLine(stdout, .idle, 0, 0, 0, "", "");
+        return;
+    }
+
+    var elapsed_ms: u64 = 0;
+    try runtime.librarySetScrobbling(library, true, true, false);
+    const queued = try awaitScrobblerState(&runtime, library, 5_000, &elapsed_ms, isOffline);
+
+    elapsed_ms = 0;
+    try runtime.librarySetScrobbling(library, true, false, false);
+    _ = try awaitScrobblerState(&runtime, library, options.timeout_ms, &elapsed_ms, hasLeftOffline);
+    const status = try awaitScrobblerState(&runtime, library, options.timeout_ms, &elapsed_ms, needsAttention);
+    try printScrobbleLine(
+        stdout,
+        status.state,
+        status.delivered_total -| queued.delivered_total,
+        status.pending,
+        status.feedback_pending,
+        status.user_name.slice(),
+        status.last_error.slice(),
+    );
+    try stdout.flush();
+    switch (status.state) {
+        .invalid_token => return error.InvalidToken,
+        .needs_token => return error.NeedsToken,
+        else => {},
+    }
+}
+
+fn setFeedback(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_list: []const u8,
+    option_argument: []const u8,
+) !void {
+    const feedback: liborca.Feedback = if (std.mem.eql(u8, option_argument, "--love"))
+        .loved
+    else if (std.mem.eql(u8, option_argument, "--hate"))
+        .hated
+    else if (std.mem.eql(u8, option_argument, "--clear"))
+        .none
+    else
+        return error.UnknownOption;
+    var ids = try parseTrackIds(allocator, id_list);
+    defer ids.deinit(allocator);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const change = try runtime.librarySetFeedback(library, ids.items, feedback);
+    try stdout.print("feedback: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
 }
 
 fn writeDetailKey(stdout: *std.Io.Writer, comptime key: []const u8) !void {
