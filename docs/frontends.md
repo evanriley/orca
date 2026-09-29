@@ -157,11 +157,19 @@ that predates the `*_enabled` keys and holds `off` leaves the effect off with
 the default curve or amount.
 
 The **Listening** page holds the ListenBrainz settings. Submit listens calls
-`Runtime.librarySetScrobbling`; the user token is a password row with an apply
-button, stored in the Secret Service through libsecret (`apps/linux/secret.zig`)
-and never in `settings.ini` or the Library. Applying calls
-`libraryScrobblerCredentialsChanged`; an empty field removes the token. Storing
-is asynchronous, so a locked keyring can prompt without freezing the window.
+`Runtime.librarySetScrobbling`. The user token is a password row with a Save
+button, enabled while the field has text; Enter in the field saves too. It is
+stored in the Secret Service through libsecret (`apps/linux/secret.zig`) and
+never in `settings.ini` or the Library. Saving clears the field and calls
+`libraryScrobblerCredentialsChanged`. When a token is stored, a row above the
+field reads "Saved in your keyring" with a Remove button, and the field is
+titled Replace token; Remove deletes the token and calls
+`libraryScrobblerCredentialsChanged`. The stored state is found when the page
+is first shown, and again after each save and remove, by an asynchronous search
+that reads no secret; it may prompt to unlock the keyring. A keyring that stays
+locked reads "Keyring locked", with an Unlock button that searches again.
+Saving, removing and searching are asynchronous, so a prompt cannot freeze the
+window.
 The status row is rewritten from `libraryScrobblerStatus` on the tick while
 Preferences is open: connected with the user name and the number of listens
 waiting and, when there are any, the loves and dislikes waiting to sync, token
@@ -228,8 +236,9 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   never the caller's, so the store must be safe to call from there. It must
   never prompt or block on user interaction: a locked keyring reads as no
   token, and the worker's shutdown waits for the call to return. `orca-gtk`
-  searches the Secret Service without unlocking it; only saving the token from
-  Preferences, on the main loop, may show an unlock prompt.
+  searches the Secret Service without unlocking it; only saving, removing or
+  looking up the token from Preferences, on the main loop, may show an unlock
+  prompt.
 - `Runtime.setClientIdentity` to name the host in submissions and in the
   history. The default is Orca's.
 - `Runtime.setListenBrainzServer` only to select a self-hosted or compatible

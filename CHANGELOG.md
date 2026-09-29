@@ -90,6 +90,16 @@
   - `playerBindLibrary` starts the Library's listen worker and can fail doing
     so.
 
+- **`orca-gtk` shows whether a ListenBrainz token is saved.** The token field
+  no longer has an apply checkmark that looked like the token was already
+  stored: it has a Save button, enabled while the field has text, and Enter
+  saves too. When a token is stored, a row reads "Saved in your keyring" with a
+  Remove button, and the field is titled Replace token. The stored state is
+  looked up when the Listening page is first shown and after each save and
+  remove, asynchronously and without reading the secret; a keyring that stays
+  locked reads "Keyring locked", with an Unlock button. An empty field no longer
+  removes the token; Remove does.
+
 ### Daily-use fixes
 
 - **`orca-gtk` keeps the equalizer curve and crossfeed amount while they are

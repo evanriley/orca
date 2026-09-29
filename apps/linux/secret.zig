@@ -5,8 +5,9 @@
 //! libsecret is LGPL, so it is linked into this frontend only. The listen
 //! worker reads the token through `credential_store` with a synchronous
 //! search that never unlocks the keyring, so a locked one reads as no token
-//! and no prompt appears from that thread; saving and clearing are
-//! asynchronous and run on the main loop, where a prompt is acceptable.
+//! and no prompt appears from that thread; saving, clearing and checking
+//! whether a token is stored are asynchronous and run on the main loop, where
+//! a prompt is acceptable.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -47,6 +48,7 @@ const GList = extern struct {
 const GHashTable = opaque {};
 const SecretValue = opaque {};
 
+const search_all: c_uint = 1 << 1;
 const search_load_secrets: c_uint = 1 << 3;
 
 extern fn g_str_hash(value: ?*const anyopaque) c_uint;
@@ -56,10 +58,18 @@ extern fn g_hash_table_insert(table: *GHashTable, key: ?*anyopaque, value: ?*any
 extern fn g_hash_table_unref(table: *GHashTable) void;
 extern fn g_list_free_full(list: ?*GList, free_func: *const fn (?*anyopaque) callconv(.c) void) void;
 extern fn secret_service_search_sync(service: ?*anyopaque, schema: *const Schema, attributes: *GHashTable, flags: c_uint, cancellable: ?*anyopaque, err: *?*gtk.GError) ?*GList;
+extern fn secret_service_search(service: ?*anyopaque, schema: *const Schema, attributes: *GHashTable, flags: c_uint, cancellable: ?*gtk.GCancellable, callback: *const AsyncReady, user_data: ?*anyopaque) void;
+extern fn secret_service_search_finish(service: ?*anyopaque, result: *gtk.GAsyncResult, err: *?*gtk.GError) ?*GList;
+extern fn secret_service_unlock(service: ?*anyopaque, objects: ?*GList, cancellable: ?*gtk.GCancellable, callback: *const AsyncReady, user_data: ?*anyopaque) void;
+extern fn secret_service_unlock_finish(service: ?*anyopaque, result: *gtk.GAsyncResult, unlocked: ?*?*GList, err: *?*gtk.GError) c_int;
+extern fn secret_item_get_locked(item: *anyopaque) c_int;
 extern fn secret_item_get_secret(item: *anyopaque) ?*SecretValue;
 extern fn secret_value_get_text(value: *SecretValue) ?[*:0]const u8;
 extern fn secret_value_unref(value: *SecretValue) void;
 pub const Completion = *const fn (succeeded: bool, data: ?*anyopaque) void;
+
+pub const Presence = enum { absent, stored, locked, unavailable };
+pub const PresenceCompletion = *const fn (presence: Presence, data: ?*anyopaque) void;
 
 const Pending = struct {
     completion: Completion,
@@ -70,6 +80,13 @@ extern fn secret_password_store(schema: *const Schema, collection: [*:0]const u8
 extern fn secret_password_store_finish(result: *gtk.GAsyncResult, err: *?*gtk.GError) gtk.gboolean;
 extern fn secret_password_clear(schema: *const Schema, cancellable: ?*gtk.GCancellable, callback: *const AsyncReady, user_data: ?*anyopaque, ...) void;
 extern fn secret_password_clear_finish(result: *gtk.GAsyncResult, err: *?*gtk.GError) gtk.gboolean;
+
+const PendingPresence = struct {
+    completion: PresenceCompletion,
+    data: ?*anyopaque,
+    names: Names,
+    items: ?*GList = null,
+};
 
 const default_collection = "default";
 const label = "Orca ListenBrainz user token";
@@ -154,6 +171,39 @@ fn clearFinished(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque)
     pending.completion(cleared, pending.data);
 }
 
+fn finishPresence(pending: *PendingPresence, presence: Presence) void {
+    const completion = pending.completion;
+    const data = pending.data;
+    g_list_free_full(pending.items, &gtk.g_object_unref);
+    std.heap.smp_allocator.destroy(pending);
+    completion(presence, data);
+}
+
+fn presenceFound(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const pending: *PendingPresence = @ptrCast(@alignCast(data.?));
+    var failure: ?*gtk.GError = null;
+    pending.items = secret_service_search_finish(null, result, &failure);
+    if (failure != null) {
+        gtk.g_clear_error(&failure);
+        return finishPresence(pending, .unavailable);
+    }
+    if (pending.items == null) return finishPresence(pending, .absent);
+    var node = pending.items;
+    while (node) |entry| : (node = entry.next) {
+        const item = entry.data orelse continue;
+        if (secret_item_get_locked(item) == 0) return finishPresence(pending, .stored);
+    }
+    secret_service_unlock(null, pending.items, null, &presenceUnlocked, pending);
+}
+
+fn presenceUnlocked(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const pending: *PendingPresence = @ptrCast(@alignCast(data.?));
+    var failure: ?*gtk.GError = null;
+    const unlocked = secret_service_unlock_finish(null, result, null, &failure);
+    if (failure != null) gtk.g_clear_error(&failure);
+    finishPresence(pending, if (unlocked > 0) .stored else .locked);
+}
+
 fn newPending(completion: Completion, data: ?*anyopaque) error{OutOfMemory}!*Pending {
     const pending = try std.heap.smp_allocator.create(Pending);
     pending.* = .{ .completion = completion, .data = data };
@@ -183,6 +233,22 @@ pub fn save(
         @as([*:0]const u8, account.ptr),
         @as(?[*:0]const u8, null),
     );
+}
+
+pub fn check(
+    service: []const u8,
+    account: []const u8,
+    completion: PresenceCompletion,
+    data: ?*anyopaque,
+) error{ OutOfMemory, NameTooLong }!void {
+    const pending = try std.heap.smp_allocator.create(PendingPresence);
+    errdefer std.heap.smp_allocator.destroy(pending);
+    pending.* = .{ .completion = completion, .data = data, .names = try Names.init(service, account) };
+    const attributes = g_hash_table_new(&g_str_hash, &g_str_equal);
+    defer g_hash_table_unref(attributes);
+    _ = g_hash_table_insert(attributes, @constCast("service"), &pending.names.service);
+    _ = g_hash_table_insert(attributes, @constCast("account"), &pending.names.account);
+    secret_service_search(null, &schema, attributes, search_all, null, &presenceFound, pending);
 }
 
 pub fn clear(

@@ -89,6 +89,13 @@ pub const SoundControls = struct {
 pub const ListeningControls = struct {
     now_playing_row: ?*gtk.Widget = null,
     status_row: ?*gtk.Widget = null,
+    token_row: ?*gtk.Widget = null,
+    save_button: ?*gtk.Widget = null,
+    stored_row: ?*gtk.Widget = null,
+    remove_button: ?*gtk.Widget = null,
+    unlock_button: ?*gtk.Widget = null,
+    saving_token: bool = false,
+    checked_token: bool = false,
     status_text: [192]u8 = undefined,
     status_len: usize = 0,
 };

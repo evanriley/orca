@@ -559,36 +559,120 @@ fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     settings.save(self);
 }
 
+fn typedToken(controls: *const app.ListeningControls) []const u8 {
+    const row = controls.token_row orelse return "";
+    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, row)));
+    return std.mem.trim(u8, text, " \t\r\n");
+}
+
+fn showSaveSensitivity(self: *App) void {
+    const controls = &self.listening_controls;
+    const save = controls.save_button orelse return;
+    const ready = !controls.saving_token and typedToken(controls).len != 0;
+    gtk.gtk_widget_set_sensitive(save, if (ready) gtk.true_ else gtk.false_);
+}
+
+fn setSaving(self: *App, saving: bool) void {
+    const controls = &self.listening_controls;
+    controls.saving_token = saving;
+    if (controls.token_row) |row| gtk.gtk_widget_set_sensitive(row, if (saving) gtk.false_ else gtk.true_);
+    showSaveSensitivity(self);
+}
+
+fn showTokenPresence(self: *App, presence: secret.Presence) void {
+    const controls = &self.listening_controls;
+    const stored_row = controls.stored_row orelse return;
+    const visible = presence != .absent;
+    gtk.gtk_widget_set_visible(stored_row, if (visible) gtk.true_ else gtk.false_);
+    const subtitle: [*:0]const u8 = switch (presence) {
+        .absent, .stored => "Saved in your keyring",
+        .locked => "Keyring locked — unlock it to use your saved token",
+        .unavailable => "Could not reach the system keyring",
+    };
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, stored_row), subtitle);
+    if (controls.remove_button) |button| {
+        gtk.gtk_widget_set_visible(button, if (presence == .stored) gtk.true_ else gtk.false_);
+        gtk.gtk_widget_set_sensitive(button, gtk.true_);
+    }
+    if (controls.unlock_button) |button|
+        gtk.gtk_widget_set_visible(button, if (presence == .locked) gtk.true_ else gtk.false_);
+    if (controls.token_row) |row|
+        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), if (presence == .stored) "Replace token" else "User token");
+}
+
+fn tokenChecked(presence: secret.Presence, data: ?*anyopaque) void {
+    showTokenPresence(state(data), presence);
+}
+
+fn checkToken(self: *App) void {
+    secret.check(listenbrainz_token_service, listenbrainz_token_account, tokenChecked, self) catch
+        dialogToast(self, "Could not check the system keyring");
+}
+
 fn tokenStored(succeeded: bool, data: ?*anyopaque) void {
     const self = state(data);
+    setSaving(self, false);
     if (!succeeded) return dialogToast(self, "Could not store the token in the system keyring");
+    if (self.listening_controls.token_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
     if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
     dialogToast(self, "Token saved");
+    checkToken(self);
 }
 
 fn tokenRemoved(succeeded: bool, data: ?*anyopaque) void {
     const self = state(data);
-    if (!succeeded) return dialogToast(self, "Could not remove the token from the system keyring");
+    if (!succeeded) {
+        if (self.listening_controls.remove_button) |button| gtk.gtk_widget_set_sensitive(button, gtk.true_);
+        return dialogToast(self, "Could not remove the token from the system keyring");
+    }
     if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
     dialogToast(self, "Token removed");
+    checkToken(self);
 }
 
-fn tokenApplied(row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const editable = gtk.cast(gtk.Editable, row);
+fn saveToken(self: *App) void {
+    const controls = &self.listening_controls;
+    if (controls.saving_token) return;
     var buffer: [token_capacity:0]u8 = undefined;
     defer std.crypto.secureZero(u8, &buffer);
-    const typed = std.mem.trim(u8, std.mem.span(gtk.gtk_editable_get_text(editable)), " \t\r\n");
+    const typed = typedToken(controls);
+    if (typed.len == 0) return;
     if (typed.len >= buffer.len) return dialogToast(self, "That is too long to be a ListenBrainz token");
     @memcpy(buffer[0..typed.len], typed);
     buffer[typed.len] = 0;
+    secret.save(listenbrainz_token_service, listenbrainz_token_account, &buffer, tokenStored, self) catch
+        return dialogToast(self, "Out of memory");
+    setSaving(self, true);
+}
 
-    const started = if (typed.len == 0)
-        secret.clear(listenbrainz_token_service, listenbrainz_token_account, tokenRemoved, self)
-    else
-        secret.save(listenbrainz_token_service, listenbrainz_token_account, &buffer, tokenStored, self);
-    started catch return dialogToast(self, "Out of memory");
-    gtk.gtk_editable_set_text(editable, "");
+fn saveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    saveToken(state(data));
+}
+
+fn tokenActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    saveToken(state(data));
+}
+
+fn tokenTyped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    showSaveSensitivity(state(data));
+}
+
+fn removeTokenClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    secret.clear(listenbrainz_token_service, listenbrainz_token_account, tokenRemoved, self) catch
+        return dialogToast(self, "Out of memory");
+    gtk.gtk_widget_set_sensitive(gtk.cast(gtk.Widget, button), gtk.false_);
+}
+
+fn unlockTokenClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    checkToken(state(data));
+}
+
+fn listeningMapped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.listening_controls.checked_token) return;
+    self.listening_controls.checked_token = true;
+    checkToken(self);
 }
 
 fn plural(count: u64, comptime singular: []const u8, comptime many: []const u8) []const u8 {
@@ -673,13 +757,26 @@ fn listeningPage(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), now_playing);
 
+    const stored = actionRow("User token", "Saved in your keyring");
+    gtk.gtk_widget_set_visible(stored, gtk.false_);
+    const remove_button = suffixButton(stored, "Remove", null, gtk.callback(removeTokenClicked), self);
+    const unlock_button = suffixButton(stored, "Unlock", null, gtk.callback(unlockTokenClicked), self);
+    gtk.gtk_widget_set_visible(unlock_button, gtk.false_);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), stored);
+
     const token = adw.adw_password_entry_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, token), "User token");
-    adw.adw_entry_row_set_show_apply_button(gtk.cast(adw.EntryRow, token), gtk.true_);
-    _ = gtk.signalConnect(token, "apply", gtk.callback(tokenApplied), self);
+    const save_button = gtk.gtk_button_new_with_label("Save");
+    gtk.gtk_widget_set_valign(save_button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(save_button, "suggested-action");
+    gtk.gtk_widget_set_sensitive(save_button, gtk.false_);
+    _ = gtk.signalConnect(save_button, "clicked", gtk.callback(saveClicked), self);
+    adw.adw_entry_row_add_suffix(gtk.cast(adw.EntryRow, token), save_button);
+    _ = gtk.signalConnect(token, "entry-activated", gtk.callback(tokenActivated), self);
+    _ = gtk.signalConnect(token, "changed", gtk.callback(tokenTyped), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), token);
 
-    const link = actionRow("Get your token", "Copy it from your ListenBrainz settings, paste it above and apply. Applying an empty field removes the saved token.");
+    const link = actionRow("Get your token", "Copy it from your ListenBrainz settings, paste it above and choose Save.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
     const link_button = gtk.gtk_link_button_new_with_label(token_settings_url, "listenbrainz.org/settings");
     gtk.gtk_widget_set_valign(link_button, gtk.ALIGN_CENTER);
@@ -689,10 +786,19 @@ fn listeningPage(self: *App) *gtk.Widget {
 
     const status = actionRow("Status", "");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, status), 2);
-    self.listening_controls = .{ .now_playing_row = now_playing, .status_row = status };
+    self.listening_controls = .{
+        .now_playing_row = now_playing,
+        .status_row = status,
+        .token_row = token,
+        .save_button = save_button,
+        .stored_row = stored,
+        .remove_button = remove_button,
+        .unlock_button = unlock_button,
+    };
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), status);
     showListeningStatus(self);
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, listenbrainz));
+    _ = gtk.signalConnect(page, "map", gtk.callback(listeningMapped), self);
     return page;
 }
 
