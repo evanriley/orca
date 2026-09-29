@@ -638,9 +638,9 @@ int main(void) {
     /* INVERTED, and this is the milestone: a Player with no playable source
      * and no attached output must be REJECTED, not reported as PLAYING. */
     if (orca_player_play(runtime, player) != ORCA_STATUS_INVALID_STATE) return 3;
-    orca_player_state_snapshot snapshot;
-    if (orca_player_snapshot(runtime, player, &snapshot) != ORCA_STATUS_OK) return 4;
-    if (snapshot.state != ORCA_TRANSPORT_STOPPED) return 5;
+    orca_player_status status;
+    if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 4;
+    if (status.transport != ORCA_TRANSPORT_STOPPED) return 5;
 
     /* Nor can it enqueue before it knows which Library ids belong to. */
     int64_t ids[1];
@@ -718,7 +718,6 @@ int main(void) {
         return 171;
     if (effective_gain < 0.2499f || effective_gain > 0.2501f) return 172;
 
-    orca_player_status status;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 55;
     if (status.transport != ORCA_TRANSPORT_PLAYING) return 56;
     if (status.has_track == 0) return 57;
@@ -849,7 +848,7 @@ int main(void) {
 
     if (orca_zone_destroy(runtime, zone) != ORCA_STATUS_OK) return 89;
     if (orca_player_destroy(runtime, player) != ORCA_STATUS_OK) return 6;
-    if (orca_player_snapshot(runtime, player, &snapshot) != ORCA_STATUS_STALE_HANDLE) return 7;
+    if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_STALE_HANDLE) return 7;
     if (orca_library_close(runtime, library) != ORCA_STATUS_OK) return 90;
 
     orca_runtime_destroy(runtime);

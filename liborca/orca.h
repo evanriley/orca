@@ -98,15 +98,6 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
-/* Kept for source compatibility with the pre-0.2 boundary. New code wants
- * orca_player_status, which carries transport, queue and timeline together. */
-typedef struct orca_player_state_snapshot {
-    uint8_t state;
-    uint8_t reserved[7];
-    uint64_t generation;
-    uint64_t position_frames;
-} orca_player_state_snapshot;
-
 typedef struct orca_string_view {
     const char *pointer;
     size_t length;
@@ -832,11 +823,6 @@ orca_status orca_player_seek_ms(
     uint64_t *epoch
 );
 
-orca_status orca_player_snapshot(
-    orca_runtime *runtime,
-    orca_handle player,
-    orca_player_state_snapshot *output
-);
 orca_status orca_player_status_get(
     orca_runtime *runtime,
     orca_handle player,

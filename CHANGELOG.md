@@ -2,6 +2,12 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### The first release
+
+- **`orca_player_snapshot` and `orca_player_state_snapshot` are removed**
+  (breaking C ABI change). They were kept for a pre-0.2 boundary that was never
+  released; `orca_player_status_get` reports the transport, queue and timeline.
+
 ### aarch64 builds and CI
 
 - **`liborca` builds for aarch64, Apple Silicon included.** SQLite's

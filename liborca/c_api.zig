@@ -37,13 +37,6 @@ pub const Handle = extern struct {
     generation: u32,
 };
 
-pub const PlayerSnapshot = extern struct {
-    state: u8,
-    _reserved: [7]u8 = @splat(0),
-    generation: u64,
-    position_frames: u64,
-};
-
 pub const StringView = extern struct {
     pointer: [*]const u8,
     length: usize,
@@ -650,24 +643,6 @@ pub export fn orca_player_seek(
     const next = box.runtime.seekPlayer(importPlayer(player), frame) catch |err|
         return mapError(err);
     if (generation) |output| output.* = next;
-    return .ok;
-}
-
-pub export fn orca_player_snapshot(
-    runtime: ?*Runtime,
-    player: Handle,
-    output: ?*PlayerSnapshot,
-) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
-    const snapshot = box.runtime.playerSnapshot(importPlayer(player)) catch |err|
-        return mapError(err);
-    destination.* = .{
-        .state = @intFromEnum(snapshot.state),
-        .generation = snapshot.epoch,
-        .position_frames = snapshot.position_frames,
-    };
     return .ok;
 }
 
@@ -1611,11 +1586,9 @@ test "a Player with nothing to play and nowhere to play it refuses to start" {
     // The defect this boundary used to lock in: a detached state machine
     // reported PLAYING with no source loaded and no Zone attached.
     try std.testing.expectEqual(Status.invalid_state, orca_player_play(runtime, player));
-    var snapshot: PlayerSnapshot = undefined;
-    try std.testing.expectEqual(Status.ok, orca_player_snapshot(runtime, player, &snapshot));
-    try std.testing.expectEqual(@as(u8, 0), snapshot.state);
     var status: PlayerStatus = undefined;
     try std.testing.expectEqual(Status.ok, orca_player_status_get(runtime, player, &status));
+    try std.testing.expectEqual(@as(u8, 0), status.transport);
     try std.testing.expectEqual(@as(u8, 0), status.has_track);
     try std.testing.expectEqual(@as(u32, 0), status.queue_length);
     try std.testing.expectEqual(@as(f32, 1), status.volume);
@@ -1633,7 +1606,7 @@ test "a Player with nothing to play and nowhere to play it refuses to start" {
     try std.testing.expectEqual(Status.ok, orca_player_seek(runtime, player, 48_000, &generation));
     try std.testing.expect(generation > 1);
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
-    try std.testing.expectEqual(Status.stale_handle, orca_player_snapshot(runtime, player, &snapshot));
+    try std.testing.expectEqual(Status.stale_handle, orca_player_status_get(runtime, player, &status));
 }
 
 test "C ABI library query is bounded and callback-scoped" {
