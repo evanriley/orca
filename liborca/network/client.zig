@@ -367,10 +367,9 @@ pub const StandardTransport = struct {
         const storage = try allocator.alloc(u8, request.max_response_bytes + 1);
         defer allocator.free(storage);
         var writer = std.Io.Writer.fixed(storage);
-        var standard_headers = try allocator.alloc(std.http.Header, request.headers.len + 1);
+        const standard_headers = try allocator.alloc(std.http.Header, request.headers.len);
         defer allocator.free(standard_headers);
-        standard_headers[0] = .{ .name = "user-agent", .value = request.user_agent };
-        for (request.headers, standard_headers[1..]) |source, *destination|
+        for (request.headers, standard_headers) |source, *destination|
             destination.* = .{ .name = source.name, .value = source.value };
         var http_request = try self.client.request(switch (request.method) {
             .get => .GET,
@@ -378,6 +377,7 @@ pub const StandardTransport = struct {
         }, uri, .{
             .redirect_behavior = .unhandled,
             .keep_alive = false,
+            .headers = .{ .user_agent = .{ .override = request.user_agent } },
             .extra_headers = standard_headers,
         });
         defer http_request.deinit();
@@ -786,7 +786,7 @@ fn systemGateway(transport: *StandardTransport, clock: *SystemClock, config: Con
     return .{ .transport = transport.transport(), .clock = clock.clock(), .config = config };
 }
 
-test "a real exchange yields the status, body, rate limit headers and the user agent" {
+test "a real exchange yields the status, body, rate limit headers and exactly one user agent, Orca's" {
     const io = std.testing.io;
     var server = try LocalServer.listen(io);
     defer server.deinit();
@@ -818,6 +818,7 @@ test "a real exchange yields the status, body, rate limit headers and the user a
         head,
         "user-agent: Orca/" ++ test_version ++ " ( evan@evanriley.com )\r\n",
     ) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, head, "user-agent:"));
     try std.testing.expect(std.mem.indexOf(u8, head, "Authorization: Token secret\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, head, "connection: close\r\n") != null);
     try std.testing.expect(gateway.hold_until_ms != null);
