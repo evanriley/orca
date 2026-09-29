@@ -334,3 +334,18 @@ button.album-artist {
 .loved-heart {
   color: @red_3;
 }
+
+button.row-heart {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  opacity: 0.35;
+}
+
+button.row-heart.loved,
+button.row-heart:hover,
+button.row-heart:focus-visible,
+row:hover button.row-heart,
+row:selected button.row-heart {
+  opacity: 1;
+}

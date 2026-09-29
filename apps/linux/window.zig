@@ -116,7 +116,7 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
         gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
         child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
         gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, child), feedback.newRowHeart());
+        gtk.gtk_box_append(gtk.cast(gtk.Box, child), feedback.newRowButton(gtk.callback(heartClicked), null));
         gtk.gtk_box_append(gtk.cast(gtk.Box, child), spacer);
     }
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), child);
@@ -127,6 +127,15 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
 /// The cell factories carry their column as user data, so the right-click
 /// handler reaches the app through this. There is one window.
 var cells_app: ?*App = null;
+
+fn heartClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    const self = cells_app orelse return;
+    const cell = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, button)) orelse return;
+    const item = gtk.g_object_get_data(cell, "orca-list-item") orelse return;
+    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
+    const row: *TrackObject = @ptrCast(@alignCast(object));
+    feedback.toggle(self, .{ .track_id = row.id(), .recording_id = row.recordingId(), .feedback = row.feedback() });
+}
 
 /// A right-click on a selected row acts on the whole selection, as it does in
 /// every file manager; on any other row it selects that row alone first.
@@ -176,7 +185,7 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
         child);
     if (column == .title) {
         const heart = gtk.gtk_widget_get_next_sibling(gtk.cast(gtk.Widget, label)) orelse return;
-        feedback.showRowHeart(heart, row.feedback());
+        feedback.showRowButton(heart, row.feedback());
     }
     var buffer: [32]u8 = undefined;
     const text: [:0]const u8 = switch (columnOf(data)) {

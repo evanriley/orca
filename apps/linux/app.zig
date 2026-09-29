@@ -281,6 +281,7 @@ pub const App = struct {
     now_playing_art: ?*gtk.Widget = null,
     now_playing_box: ?*gtk.Widget = null,
     love_button: ?*gtk.Widget = null,
+    now_love_button: ?*gtk.Widget = null,
     volume_button: ?*gtk.Widget = null,
     shuffle_button: ?*gtk.Widget = null,
     repeat_button: ?*gtk.Widget = null,

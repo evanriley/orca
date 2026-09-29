@@ -327,7 +327,7 @@ pub fn repaintFeedback(self: *App, changed: *const feedback.Recordings, value: l
             song.feedback = value;
             const row = maybe_row orelse continue;
             const heart = gtk.g_object_get_data(row, "orca-heart") orelse continue;
-            feedback.showRowHeart(gtk.cast(gtk.Widget, heart), value);
+            feedback.showRowButton(gtk.cast(gtk.Widget, heart), value);
         }
     }
 }
@@ -395,7 +395,14 @@ fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(
     transport.playIds(page.self, page.ids, @intCast(start));
 }
 
-fn trackRow(summary: liborca.TrackSummary, album_artist: []const u8, position: usize) ?*gtk.Widget {
+fn heartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    const marked = @intFromPtr(gtk.g_object_get_data(button.?, "orca-position"));
+    if (marked == 0 or marked > page.songs.len) return;
+    feedback.toggle(page.self, page.songs[marked - 1]);
+}
+
+fn trackRow(page: *AlbumPage, summary: liborca.TrackSummary, album_artist: []const u8, position: usize) ?*gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_widget_add_css_class(row, "album-track-row");
     var name_buffer: [24]u8 = undefined;
@@ -422,7 +429,18 @@ fn trackRow(summary: liborca.TrackSummary, album_artist: []const u8, position: u
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
     gtk.gtk_widget_add_css_class(title, "album-track-title");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
+
+    const heart = feedback.newRowButton(gtk.callback(heartClicked), page);
+    feedback.showRowButton(heart, summary.feedback);
+    gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(position + 1));
+    gtk.g_object_set_data(row, "orca-heart", heart);
+    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
+    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), heart);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), spacer);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
     if (summary.artist.len != 0 and !std.mem.eql(u8, summary.artist, album_artist)) {
         const artist_text = strings.printZ(&buffer, "{s}", .{summary.artist}) catch "";
         const artist = gtk.gtk_label_new(artist_text.ptr);
@@ -440,13 +458,8 @@ fn trackRow(summary: liborca.TrackSummary, album_artist: []const u8, position: u
     gtk.gtk_widget_add_css_class(duration_label, "numeric");
     gtk.gtk_widget_add_css_class(duration_label, "dim-label");
 
-    const heart = feedback.newRowHeart();
-    feedback.showRowHeart(heart, summary.feedback);
-    gtk.g_object_set_data(row, "orca-heart", heart);
-
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), number_label);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), heart);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), duration_label);
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     if (!summary.has_playable_file) {
@@ -597,7 +610,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
             gtk.gtk_box_append(gtk.cast(gtk.Box, content), box);
             list = box;
         }
-        const row = trackRow(summary, release.album_artist, position) orelse continue;
+        const row = trackRow(page, summary, release.album_artist, position) orelse continue;
         menu.onSecondaryClick(row, trackMenu, page);
         gtk.gtk_list_box_append(gtk.cast(gtk.ListBox, list.?), row);
         page.rows[position] = row;

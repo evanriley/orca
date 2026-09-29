@@ -1,5 +1,5 @@
-//! Love and dislike: the heart in the player bar, the hearts on loved rows,
-//! and the one place a change is applied and shown.
+//! Love and dislike: the heart in the player bar, the heart button on every
+//! song row, and the one place a change is applied and shown.
 //!
 //! The choice belongs to liborca and is kept per recording; this only asks for
 //! it and repaints what displays it.
@@ -12,6 +12,7 @@ const track_model = @import("track_model.zig");
 const albums = @import("albums.zig");
 const details = @import("details.zig");
 const queue = @import("queue.zig");
+const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -21,20 +22,35 @@ const outline_icon = "orca-heart-outline-symbolic";
 const heart_pixels: c_int = 14;
 const change_batch = 512;
 
-pub fn newRowHeart() *gtk.Widget {
-    const heart = gtk.gtk_image_new_from_icon_name(filled_icon);
-    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, heart), heart_pixels);
-    gtk.gtk_widget_add_css_class(heart, "loved-heart");
-    gtk.gtk_widget_set_valign(heart, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_visible(heart, gtk.false_);
-    return heart;
+pub fn newRowButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
+    const button = newHeartButton(handler, data);
+    gtk.gtk_widget_add_css_class(button, "row-heart");
+    gtk.gtk_widget_set_focus_on_click(button, gtk.false_);
+    showButton(button, .none);
+    return button;
 }
 
-pub fn showRowHeart(heart: *gtk.Widget, feedback: liborca.Feedback) void {
-    gtk.gtk_widget_set_visible(heart, if (feedback == .loved) gtk.true_ else gtk.false_);
+pub fn showRowButton(button: *gtk.Widget, feedback: liborca.Feedback) void {
+    showButton(button, feedback);
 }
 
 pub fn newButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
+    const button = newHeartButton(handler, self);
+    gtk.gtk_widget_set_sensitive(button, gtk.false_);
+    self.love_button = button;
+    showButton(button, .none);
+    return button;
+}
+
+pub fn newNowPlayingButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
+    const button = newHeartButton(handler, self);
+    gtk.gtk_widget_set_sensitive(button, gtk.false_);
+    self.now_love_button = button;
+    showButton(button, .none);
+    return button;
+}
+
+fn newHeartButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     const image = gtk.gtk_image_new_from_icon_name(outline_icon);
     gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), heart_pixels);
     const button = gtk.gtk_button_new();
@@ -42,10 +58,7 @@ pub fn newButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
     gtk.gtk_widget_add_css_class(button, "flat");
     gtk.gtk_widget_add_css_class(button, "circular");
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_sensitive(button, gtk.false_);
-    _ = gtk.signalConnect(button, "clicked", handler, self);
-    self.love_button = button;
-    showButton(button, .none);
+    _ = gtk.signalConnect(button, "clicked", handler, data);
     return button;
 }
 
@@ -53,10 +66,13 @@ fn showButton(button: *gtk.Widget, feedback: liborca.Feedback) void {
     const image = gtk.gtk_button_get_child(gtk.cast(gtk.Button, button)) orelse return;
     const loved = feedback == .loved;
     gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), if (loved) filled_icon else outline_icon);
-    if (loved)
-        gtk.gtk_widget_add_css_class(image, "loved-heart")
-    else
+    if (loved) {
+        gtk.gtk_widget_add_css_class(image, "loved-heart");
+        gtk.gtk_widget_add_css_class(button, "loved");
+    } else {
         gtk.gtk_widget_remove_css_class(image, "loved-heart");
+        gtk.gtk_widget_remove_css_class(button, "loved");
+    }
     const label: [*:0]const u8 = if (loved) "Remove Love" else "Love";
     gtk.gtk_widget_set_tooltip_text(button, label);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
@@ -71,14 +87,16 @@ pub const Target = struct {
 pub const Recordings = std.AutoHashMapUnmanaged(i64, void);
 
 pub fn showPlaying(self: *App) void {
-    const button = self.love_button orelse return;
-    if (self.shown_track_id == null) {
-        gtk.gtk_widget_set_sensitive(button, gtk.false_);
-        showButton(button, .none);
-        return;
+    for ([_]?*gtk.Widget{ self.love_button, self.now_love_button }) |maybe_button| {
+        const button = maybe_button orelse continue;
+        if (self.shown_track_id == null) {
+            gtk.gtk_widget_set_sensitive(button, gtk.false_);
+            showButton(button, .none);
+            continue;
+        }
+        gtk.gtk_widget_set_sensitive(button, gtk.true_);
+        showButton(button, self.shown_feedback);
     }
-    gtk.gtk_widget_set_sensitive(button, gtk.true_);
-    showButton(button, self.shown_feedback);
 }
 
 pub fn toggleLoveOfPlaying(self: *App) void {
@@ -88,7 +106,11 @@ pub fn toggleLoveOfPlaying(self: *App) void {
         .recording_id = self.shown_recording_id,
         .feedback = self.shown_feedback,
     };
-    change(self, &.{target}, null, if (self.shown_feedback == .loved) .none else .loved);
+    toggle(self, target);
+}
+
+pub fn toggle(self: *App, target: Target) void {
+    change(self, &.{target}, null, if (target.feedback == .loved) .none else .loved);
 }
 
 pub fn change(self: *App, targets: []const Target, only: ?liborca.Feedback, value: liborca.Feedback) void {
@@ -134,19 +156,17 @@ fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void
     showPlaying(self);
     repaintRows(self, changed, value);
     albums.repaintFeedback(self, changed, value);
-    queue.invalidate(self);
+    queue.repaintFeedback(self, changed, value);
+    nowplaying.repaintFeedback(changed, value);
     details.invalidate(self);
 }
 
-fn repaintRows(self: *App, changed: *const Recordings, value: liborca.Feedback) void {
-    const store = self.tracks orelse return;
-    const selection = self.selection orelse return;
+/// Replaces, in place, each row of `store` whose recording changed, with a copy
+/// that carries the new value: a list view rebinds the widget of an item it is
+/// given anew, and nothing else about the list moves.
+pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, value: liborca.Feedback) bool {
     const model = gtk.cast(gtk.ListModel, store);
     const count = gtk.g_list_model_get_n_items(model);
-    const live = gtk.gtk_selection_model_get_selection(selection);
-    defer gtk.gtk_bitset_unref(live);
-    const selected = gtk.gtk_bitset_copy(live);
-    defer gtk.gtk_bitset_unref(selected);
     var replaced = false;
     var index: c_uint = 0;
     while (index < count) : (index += 1) {
@@ -162,8 +182,18 @@ fn repaintRows(self: *App, changed: *const Recordings, value: liborca.Feedback) 
         gtk.g_object_unref(copy);
         replaced = true;
     }
-    if (!replaced) return;
-    const everything = gtk.gtk_bitset_new_range(0, count);
+    return replaced;
+}
+
+fn repaintRows(self: *App, changed: *const Recordings, value: liborca.Feedback) void {
+    const store = self.tracks orelse return;
+    const selection = self.selection orelse return;
+    const live = gtk.gtk_selection_model_get_selection(selection);
+    defer gtk.gtk_bitset_unref(live);
+    const selected = gtk.gtk_bitset_copy(live);
+    defer gtk.gtk_bitset_unref(selected);
+    if (!replaceRows(store, changed, value)) return;
+    const everything = gtk.gtk_bitset_new_range(0, gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)));
     defer gtk.gtk_bitset_unref(everything);
     _ = gtk.gtk_selection_model_set_selection(selection, selected, everything);
 }

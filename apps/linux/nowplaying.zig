@@ -10,11 +10,16 @@ const app = @import("app.zig");
 const art = @import("art.zig");
 const mpris = @import("mpris.zig");
 const menu = @import("menu.zig");
+const feedback = @import("feedback.zig");
 
 const App = app.App;
 
 const cover_pixels: c_int = 400;
 const up_next_rows = 5;
+
+var up_next_targets: [up_next_rows]feedback.Target = undefined;
+var up_next_hearts: [up_next_rows]*gtk.Widget = undefined;
+var up_next_shown: usize = 0;
 
 pub fn build(self: *App) *gtk.Widget {
     const cover = art.newCover(self, art.iconPlaceholder(cover_pixels), cover_pixels);
@@ -40,8 +45,13 @@ pub fn build(self: *App) *gtk.Widget {
         gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, label), gtk.true_);
         gtk.gtk_label_set_lines(gtk.cast(gtk.Label, label), 3);
         gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, facts), label);
     }
+    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), feedback.newNowPlayingButton(self, gtk.callback(loveClicked)));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, facts), title_row);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, facts), artist);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, facts), album);
 
     const up_next = gtk.gtk_label_new("Up next");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, up_next), 0.0);
@@ -83,6 +93,26 @@ pub fn build(self: *App) *gtk.Widget {
     );
     self.art.on_ready = coverReady;
     return view;
+}
+
+fn loveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    feedback.toggleLoveOfPlaying(@ptrCast(@alignCast(data.?)));
+}
+
+fn upNextHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const marked = @intFromPtr(gtk.g_object_get_data(button.?, "orca-position"));
+    if (marked == 0 or marked > up_next_shown) return;
+    feedback.toggle(self, up_next_targets[marked - 1]);
+}
+
+pub fn repaintFeedback(changed: *const feedback.Recordings, value: liborca.Feedback) void {
+    for (up_next_targets[0..up_next_shown], up_next_hearts[0..up_next_shown]) |*target, heart| {
+        const recording = target.recording_id orelse continue;
+        if (!changed.contains(recording)) continue;
+        target.feedback = value;
+        feedback.showRowButton(heart, value);
+    }
 }
 
 fn setText(label: ?*gtk.Label, text: []const u8) void {
@@ -146,6 +176,7 @@ fn applyTint(self: *App, tint: ?art.Tint) void {
 pub fn refreshUpNext(self: *App) void {
     const list = self.now_up_next orelse return;
     gtk.gtk_list_box_remove_all(list);
+    up_next_shown = 0;
     const status = self.runtime.playerStatus(self.player) catch return;
     const start = status.queue_index + 1;
     var shown: usize = 0;
@@ -164,10 +195,22 @@ pub fn refreshUpNext(self: *App) void {
                 gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
                 gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
                 gtk.gtk_widget_add_css_class(label, "now-up-next-row");
-                gtk.gtk_list_box_append(list, label);
+                const heart = feedback.newRowButton(gtk.callback(upNextHeartClicked), self);
+                feedback.showRowButton(heart, item.feedback);
+                gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(shown + 1));
+                const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+                gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
+                const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+                gtk.gtk_box_append(gtk.cast(gtk.Box, row), label);
+                gtk.gtk_box_append(gtk.cast(gtk.Box, row), heart);
+                gtk.gtk_box_append(gtk.cast(gtk.Box, row), spacer);
+                gtk.gtk_list_box_append(list, row);
+                up_next_targets[shown] = .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback };
+                up_next_hearts[shown] = heart;
                 shown += 1;
             }
         } else |_| {}
     }
+    up_next_shown = shown;
     if (self.now_up_next_heading) |heading| gtk.gtk_widget_set_visible(heading, if (shown != 0) gtk.true_ else gtk.false_);
 }

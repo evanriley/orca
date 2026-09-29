@@ -626,6 +626,7 @@ pub extern fn gtk_accessible_update_property(accessible: *Accessible, first_prop
 pub extern fn gtk_widget_get_clipboard(widget: *Widget) *GdkClipboard;
 pub extern fn gdk_clipboard_set_text(clipboard: *GdkClipboard, text: [*:0]const u8) void;
 pub extern fn gtk_widget_get_visible(widget: *Widget) gboolean;
+pub extern fn gtk_widget_set_focus_on_click(widget: *Widget, focus_on_click: gboolean) void;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;
 pub extern fn gtk_widget_set_margin_start(widget: *Widget, margin: c_int) void;

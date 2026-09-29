@@ -99,6 +99,14 @@
   remove, asynchronously and without reading the secret; a keyring that stays
   locked reads "Keyring locked", with an Unlock button. An empty field no longer
   removes the token; Remove does.
+- **A heart on every song row in `orca-gtk`.** The Tracks list, album pages, the
+  queue and the Now Playing page (the audible song and the songs up next) have a
+  heart button after the title: filled and red when loved, otherwise an outline
+  dimmed until the row is hovered or selected. Pressing it loves the song or
+  removes the love, and a disliked song becomes loved, without playing the song
+  or changing the selection. All rows of the recording, the player bar and the
+  details panel update together. The queue repaints in place instead of
+  rebuilding, so it keeps its scroll position.
 
 ### Daily-use fixes
 

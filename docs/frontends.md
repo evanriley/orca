@@ -111,13 +111,19 @@ pulled out from under the output.
   the love; it is read when the audible song changes and after any change.
 
 **Love and dislike** are kept by liborca per recording (`librarySetFeedback`).
-The heart in the player bar toggles love. Loved songs show a small heart in the
-Tracks list's title column and on album pages; disliked songs have no marker,
-and the details panel's Feedback row says Loved, Disliked or None. A song
-without a MusicBrainz recording ID is saved on this computer only, and the
-Feedback row says so. A change made in one place repaints the others, by
-recording and without a query per row: rows carry `TrackSummary.recording_id`
-and `feedback`, and only those whose recording changed are replaced.
+Every song row ends its title with a heart button: the Tracks list, album
+pages, the queue, and the Now Playing page for the audible song and the songs
+up next. A loved song shows a filled red heart; any other song shows an outline
+heart, dimmed until the row is hovered or selected. Pressing the button loves
+the song, or removes the love, and a disliked song becomes loved. The button
+does not play the song or change the selection. The player bar's heart does the
+same for the audible song. Disliked songs have no marker on their row, and the
+details panel's Feedback row says Loved, Disliked or None. A song without a
+MusicBrainz recording ID is saved on this computer only, and the Feedback row
+says so. A change made in one place repaints the others, by recording and
+without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
+and only those whose recording changed are replaced. The list factories connect
+each button once, in setup, and read the row's song when the button is pressed.
 
 Below 760sp the sidebar collapses behind a back button, the browse panes hide
 and the player bar tightens. Messages are toasts. Shortcuts are listed in the

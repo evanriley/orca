@@ -11,6 +11,7 @@ const track_model = @import("track_model.zig");
 const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
 const menu = @import("menu.zig");
+const feedback = @import("feedback.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -42,8 +43,17 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     for ([_]*gtk.Widget{ title, artist }) |label| {
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
         gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, labels), label);
     }
+    const heart = feedback.newRowButton(gtk.callback(heartClicked), self);
+    gtk.g_object_set_data(heart, "orca-list-item", item);
+    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
+    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), heart);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), spacer);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
     gtk.gtk_widget_add_css_class(title, "queue-title");
     gtk.gtk_widget_add_css_class(artist, "caption");
     gtk.gtk_widget_add_css_class(artist, "dim-label");
@@ -71,6 +81,14 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
     gtk.g_object_set_data(row, "orca-list-item", item);
     menu.onSecondaryClick(row, rowMenu, self);
+}
+
+fn heartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const item = gtk.g_object_get_data(button.?, "orca-list-item") orelse return;
+    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
+    const track: *TrackObject = @ptrCast(@alignCast(object));
+    feedback.toggle(self, .{ .track_id = track.id(), .recording_id = track.recordingId(), .feedback = track.feedback() });
 }
 
 fn removeClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -112,8 +130,10 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     const cover = gtk.gtk_widget_get_next_sibling(marker) orelse return;
     const labels = gtk.gtk_widget_get_next_sibling(cover) orelse return;
     const duration = gtk.gtk_widget_get_next_sibling(labels) orelse return;
-    const title = gtk.gtk_widget_get_first_child(labels) orelse return;
-    const artist = gtk.gtk_widget_get_next_sibling(title) orelse return;
+    const title_row = gtk.gtk_widget_get_first_child(labels) orelse return;
+    const artist = gtk.gtk_widget_get_next_sibling(title_row) orelse return;
+    const title = gtk.gtk_widget_get_first_child(title_row) orelse return;
+    const heart = gtk.gtk_widget_get_next_sibling(title) orelse return;
     const number = gtk.gtk_widget_get_first_child(marker) orelse return;
 
     const position = gtk.gtk_list_item_get_position(list_item);
@@ -129,6 +149,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     else
         gtk.gtk_widget_remove_css_class(row, "now-playing");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, title), track.title().ptr);
+    feedback.showRowButton(heart, track.feedback());
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, artist), track.artist().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&buffer).ptr);
     art.show(self, cover, if (track.releaseId()) |release| art.Key.release(release, .thumb) else art.Key.track(track.id(), .thumb));
@@ -227,6 +248,11 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
             strings.printZ(&buffer, "{d} of {d}", .{ status.queue_index + 1, status.queue_length }) catch "";
         adw.adw_window_title_set_subtitle(title, subtitle.ptr);
     }
+}
+
+pub fn repaintFeedback(self: *App, changed: *const feedback.Recordings, value: liborca.Feedback) void {
+    const store = self.queue_store orelse return;
+    _ = feedback.replaceRows(store, changed, value);
 }
 
 /// Forces the next tick to rebuild the page, for when it becomes visible.
