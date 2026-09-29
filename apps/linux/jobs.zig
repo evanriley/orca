@@ -1,6 +1,7 @@
-//! Background jobs — scans, loudness analysis, duplicate finding and tag
-//! writes — and their status card at the foot of the sidebar. One runs at a
-//! time from this frontend, so the card always describes the job there is.
+//! Background jobs — scans, loudness analysis, duplicate finding, tag writes
+//! and MusicBrainz matching — and their status card at the foot of the
+//! sidebar. One runs at a time from this frontend, so the card always
+//! describes the job there is.
 //!
 //! A filesystem walk has no honest denominator until it has finished walking,
 //! so a scan shows its counts rather than a fabricated percentage.
@@ -15,6 +16,8 @@ const browse = @import("browse.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const health = @import("health.zig");
+const matches = @import("matches.zig");
+const details = @import("details.zig");
 const tags = @import("tags.zig");
 
 const App = app.App;
@@ -38,6 +41,7 @@ fn idle(self: *App) bool {
         .analysis => "Loudness is being measured",
         .duplicates => "Duplicates are being looked for",
         .tag_write => "Tags are being written",
+        .matching => "Already finding matches",
     });
     return false;
 }
@@ -58,6 +62,7 @@ pub fn reloadLibraryViews(self: *App) void {
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
+    matches.reload(self);
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -137,6 +142,29 @@ pub fn startDuplicates(self: *App) void {
     begin(self, .duplicates, job, "Finding duplicates");
 }
 
+/// Searches MusicBrainz for every Track without a recording ID, one a second.
+pub fn startMatching(self: *App) void {
+    startMatchingJob(self, null);
+}
+
+/// Searches MusicBrainz for one Track, if it has no recording ID and nothing
+/// awaiting review.
+pub fn startTrackMatching(self: *App, track_id: i64) void {
+    startMatchingJob(self, track_id);
+}
+
+fn startMatchingJob(self: *App, track_id: ?i64) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const job = self.runtime.startLibraryMatching(library, .{ .track_id = track_id }) catch |err| return self.toast(switch (err) {
+        error.MatchingAlreadyRunning => "Already finding matches",
+        else => "Could not start finding matches",
+    });
+    self.match_task_track = track_id;
+    begin(self, .matching, job, "Finding matches");
+    if (track_id != null) details.invalidate(self);
+}
+
 /// Writes an approved plan. The plan id is its undo group.
 pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) void {
     const library = self.library orelse return;
@@ -200,7 +228,19 @@ fn writeDetail(self: *App, task: app.Task, snapshot: liborca.JobSnapshot, stats:
             strings.printZ(&buffer, "{d} of {d} files", .{ snapshot.completed_units, total })
         else
             strings.printZ(&buffer, "{d} files", .{snapshot.completed_units}),
+        .matching => return,
     } catch return;
+    gtk.gtk_label_set_text(label, text.ptr);
+}
+
+fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.MatchStats) void {
+    const label = self.scan_detail orelse return;
+    var buffer: [160]u8 = undefined;
+    const text = strings.printZ(&buffer, "{f} of {f} songs · {f} matched", .{
+        strings.grouped(snapshot.completed_units),
+        strings.grouped(snapshot.total_units orelse snapshot.completed_units),
+        strings.grouped(stats.matched),
+    }) catch return;
     gtk.gtk_label_set_text(label, text.ptr);
 }
 
@@ -208,7 +248,31 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     tags.undoLastWrite(state(data));
 }
 
-fn finished(self: *App, task: app.Task, state_value: liborca.JobState, stats: ?liborca.ScanStats) void {
+fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    const searched = self.match_task_track;
+    self.match_task_track = null;
+    const matched = if (stats) |value| value.matched else 0;
+    if (searched) |track_id| self.unmatched_track = if (state_value == .succeeded and matched == 0) track_id else null;
+    matches.reload(self);
+    details.invalidate(self);
+    if (state_value == .cancelled) return self.toast("Stopped");
+    if (state_value != .succeeded) return self.toast("MusicBrainz could not be reached; Find Matches continues where it stopped");
+    if (searched != null) return self.toast(if (matched == 0) "No match found" else "Found a match to review");
+    var buffer: [96]u8 = undefined;
+    self.toast(if (matched == 0)
+        "No new matches found"
+    else
+        strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "song" else "songs" }) catch "Found matches");
+}
+
+fn finished(
+    self: *App,
+    task: app.Task,
+    state_value: liborca.JobState,
+    stats: ?liborca.ScanStats,
+    match_stats: ?liborca.MatchStats,
+) void {
+    if (task == .matching) return matchingFinished(self, state_value, match_stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return self.toast(switch (task) {
@@ -216,6 +280,7 @@ fn finished(self: *App, task: app.Task, state_value: liborca.JobState, stats: ?l
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
         .tag_write => "Writing tags failed; the files were left as they were",
+        .matching => unreachable,
     });
     switch (task) {
         .scan => {
@@ -249,6 +314,7 @@ fn finished(self: *App, task: app.Task, state_value: liborca.JobState, stats: ?l
             _ = gtk.signalConnect(item, "button-clicked", gtk.callback(undoClicked), self);
             adw.adw_toast_overlay_add_toast(overlay, item);
         },
+        .matching => unreachable,
     }
 }
 
@@ -258,13 +324,23 @@ pub fn tick(self: *App) void {
     const snapshot = self.runtime.jobSnapshotSynced(job) catch {
         self.task = null;
         self.task_job = null;
+        self.match_task_track = null;
+        self.shown_matched = 0;
         showScanning(self, false);
         return;
     };
-    const stats: ?liborca.ScanStats = self.runtime.jobScanStats(job) catch null;
+    const stats: ?liborca.ScanStats = if (task == .matching) null else self.runtime.jobScanStats(job) catch null;
+    const match_stats: ?liborca.MatchStats = if (task == .matching) self.runtime.jobMatchStats(job) catch null else null;
     if (stats) |value| {
         writeDetail(self, task, snapshot, value);
         if (task == .scan and self.loaded_rows == 0 and value.tracks_written != 0) reloadLibraryViews(self);
+    }
+    if (match_stats) |value| {
+        writeMatchDetail(self, snapshot, value);
+        if (value.matched != self.shown_matched) {
+            self.shown_matched = value.matched;
+            matches.updateCount(self);
+        }
     }
     switch (snapshot.state) {
         .succeeded, .failed, .cancelled => {},
@@ -272,7 +348,8 @@ pub fn tick(self: *App) void {
     }
     self.task = null;
     self.task_job = null;
+    self.shown_matched = 0;
     showScanning(self, false);
-    finished(self, task, snapshot.state, stats);
+    finished(self, task, snapshot.state, stats, match_stats);
     self.updateTracksBody();
 }

@@ -164,6 +164,9 @@ ORCA_LIBRARY=... ORCA_OUTPUT_DEVICE=$(scripts/silent-sink.sh 1) zig build run-li
 
 # Point ListenBrainz submission at a local mock instead of listenbrainz.org
 ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
+
+# Point MusicBrainz matching at a local mock instead of musicbrainz.org
+ORCA_MUSICBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does

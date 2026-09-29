@@ -9,8 +9,8 @@ the rule in [architecture.md](architecture.md).
 Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback at each source's sample rate,
 live equalizer and crossfeed, tag editing with undo, track details, a local
-play history and ListenBrainz scrobbling. MusicBrainz matching is reachable
-from `orca-cli`; the other providers and filesystem watching are built but not
+play history, ListenBrainz scrobbling and MusicBrainz matching with review.
+The other providers and filesystem watching are built but not
 connected; macOS has no audio output yet.
 
 ## Works today
@@ -79,7 +79,10 @@ connected; macOS has no audio output yet.
   the recording ID in the Library only, so loves and listens can be sent under
   it; bulk acceptance of confident matches is an explicit action. Reachable
   through `orca-cli match`, `matches`, `accept-match`, `dismiss-match` and
-  `accept-matches`. See [providers.md](providers.md#musicbrainz-matching).
+  `accept-matches`, and in `orca-gtk` through the Matches page, the details
+  panel's MusicBrainz section (with a single-song Find Match) and the
+  confidence threshold in Preferences. See
+  [providers.md](providers.md#musicbrainz-matching).
 
 ### Analysis
 
@@ -98,7 +101,7 @@ connected; macOS has no audio output yet.
   menus, tag editing with write-back and undo, Preferences, a Health page, a
   player bar with cover art and an output menu, job progress, a welcome page,
   toasts, a shortcuts dialog, MPRIS, ListenBrainz submission with play counts
-  in the details panel, and love and dislike.
+  in the details panel, love and dislike, and MusicBrainz match review.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
 ## Built but not reachable
@@ -119,12 +122,11 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Reviewing matches in `orca-gtk`, then AcoustID and ListenBrainz
-   lookup.** MusicBrainz matching works from `orca-cli`; `orca-gtk` has no
-   review page yet. Songs without a MusicBrainz recording ID cannot sync loves
-   to ListenBrainz, which is about a third of the maintainer's library.
-   AcoustID fingerprint identification and ListenBrainz's
-   `/1/metadata/lookup` would match what a title search misses. Last.fm
+1. **AcoustID and ListenBrainz lookup.** MusicBrainz title search and its
+   review work from `orca-cli` and `orca-gtk`. AcoustID fingerprint
+   identification and ListenBrainz's `/1/metadata/lookup` would match what a
+   title search misses; songs without a recording ID cannot sync loves to
+   ListenBrainz. Last.fm
    follows. No tag writer stores an accepted recording ID in a file yet.
 2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
@@ -151,6 +153,9 @@ Small defects that are not yet scheduled:
 - `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
   it on change, never on a tick.
 - `ZoneRuntime.published_device_delay_frames` is written but never read.
+- Two processes matching the same Library at once, such as `orca-gtk` and
+  `orca-cli match`, each run their own gateway, so MusicBrainz sees two
+  requests a second.
 - Two tests fail intermittently, unrelated to listening: "a Player's signal
   path reports sample processing only while DSP or volume is in effect" (the
   output never opens, `OutputNeverOpened`) and "an unanalyzed entry reached by

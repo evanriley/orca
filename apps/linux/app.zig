@@ -100,7 +100,9 @@ pub const ListeningControls = struct {
     status_len: usize = 0,
 };
 
-pub const Task = enum { scan, analysis, duplicates, tag_write };
+pub const Task = enum { scan, analysis, duplicates, tag_write, matching };
+
+pub const default_match_threshold_percent: u8 = 90;
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -117,6 +119,13 @@ pub const App = struct {
     task_job: ?liborca.JobHandle = null,
     /// The undo group of the last tag write, for the toast's Undo.
     tag_write_group: u64 = 0,
+    /// The one Track a `.matching` task searches, when it searches one.
+    match_task_track: ?i64 = null,
+    /// The Track whose own search last found nothing, so its details say so.
+    unmatched_track: ?i64 = null,
+    /// Tracks the running matching job had matched when the badge was last
+    /// counted.
+    shown_matched: u64 = 0,
     /// The output device chosen in Preferences, by name, so the choice
     /// survives device ids being renumbered between runs.
     preferred_output: OwnedText = .{},
@@ -229,6 +238,22 @@ pub const App = struct {
     health_body: ?*gtk.Stack = null,
     health_title: ?*adw.WindowTitle = null,
     health_count: ?*gtk.Label = null,
+
+    // matches page
+    matches_list: ?*gtk.ListBox = null,
+    matches_note: ?*gtk.Label = null,
+    matches_body: ?*gtk.Stack = null,
+    matches_title: ?*adw.WindowTitle = null,
+    matches_count: ?*gtk.Label = null,
+    matches_empty: ?*adw.StatusPage = null,
+    matches_empty_button: ?*gtk.Widget = null,
+    matches_accept_button: ?*gtk.Widget = null,
+    /// The Track whose row is open, kept open across reloads.
+    matches_open_track: ?i64 = null,
+    /// The open row, focused once laid out so the list scrolls to it.
+    matches_focus_row: ?*gtk.Widget = null,
+    /// Accept Confident takes a song's only match at or above this.
+    match_threshold_percent: u8 = default_match_threshold_percent,
 
     preferences_dialog: ?*adw.Dialog = null,
 

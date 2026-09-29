@@ -115,6 +115,7 @@ pub const FlowBoxChild = opaque {};
 pub const GestureSingle = opaque {};
 pub const Gesture = opaque {};
 pub const GdkClipboard = opaque {};
+pub const UriLauncher = opaque {};
 
 pub const GKeyFile = opaque {};
 pub extern fn g_key_file_new() *GKeyFile;
@@ -618,6 +619,12 @@ pub extern fn gtk_flow_box_set_row_spacing(box: *FlowBox, spacing: c_uint) void;
 pub extern fn gtk_flow_box_child_get_index(child: *FlowBoxChild) c_int;
 pub extern fn g_object_set_data(object: *anyopaque, key: [*:0]const u8, data: ?*anyopaque) void;
 pub extern fn g_object_get_data(object: *anyopaque, key: [*:0]const u8) ?*anyopaque;
+pub extern fn g_object_set_data_full(
+    object: *anyopaque,
+    key: [*:0]const u8,
+    data: ?*anyopaque,
+    destroy: ?*const fn (?*anyopaque) callconv(.c) void,
+) void;
 pub extern fn g_idle_add(function: *const fn (?*anyopaque) callconv(.c) gboolean, data: ?*anyopaque) c_uint;
 pub extern fn gtk_style_context_remove_provider_for_display(display: *GdkDisplay, provider: *CssProvider) void;
 pub extern fn gtk_widget_set_visible(widget: *Widget, visible: gboolean) void;
@@ -819,6 +826,16 @@ pub extern fn gtk_event_controller_set_propagation_phase(
 ) void;
 
 pub const AsyncReadyCallback = *const fn (?*GObject, *GAsyncResult, ?*anyopaque) callconv(.c) void;
+
+pub extern fn gtk_uri_launcher_new(uri: ?[*:0]const u8) *UriLauncher;
+pub extern fn gtk_uri_launcher_launch(
+    launcher: *UriLauncher,
+    parent: ?*Window,
+    cancellable: ?*GCancellable,
+    callback: ?AsyncReadyCallback,
+    data: ?*anyopaque,
+) void;
+pub extern fn gtk_uri_launcher_launch_finish(launcher: *UriLauncher, result: *GAsyncResult, err: *?*GError) gboolean;
 
 pub extern fn gtk_file_dialog_new() *FileDialog;
 pub extern fn gtk_file_dialog_set_title(dialog: *FileDialog, title: [*:0]const u8) void;

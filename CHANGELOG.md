@@ -25,6 +25,20 @@
   (`error.StaleIdentificationProposal`) or cannot be read
   (`error.InvalidProposalPayload`), keeps a locked value, writes only the
   recording ID, and never writes a file. Tag writes leave the field out.
+- **Matches can be reviewed in `orca-gtk`.** A Matches page lists the songs
+  awaiting review with a count in the sidebar, each beside its best proposal
+  and expanding to all of them with Accept, Dismiss and a link to the
+  recording on MusicBrainz. Find Matches runs the job in the status card;
+  Accept Confident asks, then takes each song's only proposal at or above a
+  threshold set in Preferences (90% by default). The details panel gains a
+  MusicBrainz section: the recording ID and its source, or the top proposals,
+  or Find Match for that song alone. `ORCA_MUSICBRAINZ_URL` selects another
+  server.
+- **Review queries.** `libraryMatchReviewPage` (new types `MatchReviewPage`,
+  `MatchReviewItem`), `libraryMatchReviewCount`, `libraryUnidentifiedCount`
+  and `libraryConfidentMatchCount`, which counts exactly what
+  `libraryAcceptConfidentMatches` would accept. `MatchRequest.track_id`
+  searches one Track. `jobMatchStats` reports `matched` while the job runs.
 - **`orca-cli match`, `matches`, `accept-match`, `dismiss-match` and
   `accept-matches`** drive it, with `ORCA_MUSICBRAINZ_URL` for another server;
   `orca-cli track` prints `recording id:` and its source.

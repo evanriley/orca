@@ -28,6 +28,29 @@ pub fn format(buffer: []u8, comptime pattern: []const u8, args: anytype) [:0]con
     return printZ(buffer, pattern, args) catch "";
 }
 
+/// `value` with its thousands separated by commas.
+pub fn writeGrouped(writer: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
+    var digits: [20]u8 = undefined;
+    const text = std.fmt.bufPrint(&digits, "{d}", .{value}) catch return;
+    for (text, 0..) |digit, index| {
+        if (index != 0 and (text.len - index) % 3 == 0) try writer.writeByte(',');
+        try writer.writeByte(digit);
+    }
+}
+
+/// `writeGrouped` as a `{f}` argument.
+pub fn grouped(value: u64) Grouped {
+    return .{ .value = value };
+}
+
+pub const Grouped = struct {
+    value: u64,
+
+    pub fn format(self: Grouped, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writeGrouped(writer, self.value);
+    }
+};
+
 /// `-0.0` formats as `-0`, which is never what a gain label or a settings file
 /// should say.
 pub fn withoutNegativeZero(value: f32) f32 {

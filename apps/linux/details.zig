@@ -14,6 +14,8 @@ const app = @import("app.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
 const track_model = @import("track_model.zig");
+const matches = @import("matches.zig");
+const jobs = @import("jobs.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -23,6 +25,7 @@ const separator = " · ";
 const minus = "−";
 
 pub const panel_limit = app.open_album_page_limit + 1;
+const proposal_slots = 3;
 
 /// Where a panel finds the Track it shows when nobody has chosen one.
 pub const Source = union(enum) {
@@ -58,6 +61,13 @@ pub const Panel = struct {
     track_row: *gtk.Widget,
     disc_row: *gtk.Widget,
     compilation_row: *gtk.Widget,
+    musicbrainz_group: *gtk.Widget,
+    recording_row: *gtk.Widget,
+    recording_link: *gtk.Widget,
+    proposal_rows: [proposal_slots]*gtk.Widget,
+    proposal_ids: [proposal_slots]i64 = @splat(0),
+    review_row: *gtk.Widget,
+    find_row: *gtk.Widget,
     history_group: *gtk.Widget,
     feedback_row: *gtk.Widget,
     plays_row: *gtk.Widget,
@@ -275,6 +285,78 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     const compilation: ?[:0]const u8 = if (details.compilation) |flag| (if (flag) "Yes" else "No") else null;
     any_tag = setRow(panel.compilation_row, compilation) or any_tag;
     gtk.gtk_widget_set_visible(panel.tags_group, boolean(any_tag));
+
+    populateRecording(panel, details);
+}
+
+fn sourceText(source: ?liborca.RecordingIdSource) [*:0]const u8 {
+    return switch (source orelse return "") {
+        .tag => "From tags",
+        .match => "Matched",
+        .edit => "Set by you",
+    };
+}
+
+fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
+    const row = gtk.cast(adw.PreferencesRow, panel.recording_row);
+    for (panel.proposal_rows) |proposal_row| gtk.gtk_widget_set_visible(proposal_row, gtk.false_);
+    gtk.gtk_widget_set_visible(panel.review_row, gtk.false_);
+    gtk.gtk_widget_set_visible(panel.find_row, gtk.false_);
+    var buffer: [256]u8 = undefined;
+    if (details.musicbrainz_recording_id) |recording_mbid| {
+        const text = strings.terminated(&buffer, recording_mbid);
+        adw.adw_preferences_row_set_title(row, sourceText(details.musicbrainz_recording_id_source));
+        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, panel.recording_row), text.ptr);
+        gtk.gtk_widget_set_tooltip_text(panel.recording_row, text.ptr);
+        gtk.gtk_widget_add_css_class(panel.recording_row, "recording-id");
+        matches.setRecording(panel.recording_link, recording_mbid);
+        gtk.gtk_widget_set_visible(panel.recording_link, gtk.true_);
+        return;
+    }
+    adw.adw_preferences_row_set_title(row, "Not identified");
+    gtk.gtk_widget_remove_css_class(panel.recording_row, "recording-id");
+    gtk.gtk_widget_set_tooltip_text(panel.recording_row, null);
+    gtk.gtk_widget_set_visible(panel.recording_link, gtk.false_);
+    const self = panel.self;
+    const searching = self.task == .matching and self.match_task_track == details.track_id;
+    const library = self.library orelse return;
+    const proposals = self.runtime.libraryMatchProposals(library, details.track_id, proposal_slots + 1) catch null;
+    defer if (proposals) |page| page.deinit();
+    const pending = if (proposals) |page| page.items else &.{};
+    const status: [*:0]const u8 = if (searching)
+        "Searching MusicBrainz…"
+    else if (pending.len == 0 and self.unmatched_track == details.track_id)
+        "No match found"
+    else
+        "";
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, panel.recording_row), status);
+    for (pending[0..@min(pending.len, proposal_slots)], panel.proposal_rows[0..@min(pending.len, proposal_slots)], 0..) |proposal, proposal_row, slot| {
+        showProposal(proposal_row, proposal);
+        panel.proposal_ids[slot] = proposal.id;
+    }
+    gtk.gtk_widget_set_visible(panel.review_row, boolean(pending.len > proposal_slots));
+    gtk.gtk_widget_set_visible(panel.find_row, boolean(pending.len == 0 and !searching));
+}
+
+fn showProposal(row: *gtk.Widget, proposal: liborca.MatchProposal) void {
+    var title_buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(title_buffer[0 .. title_buffer.len - 1]);
+    matches.writeHeading(&writer, proposal) catch {};
+    const title = finish(&title_buffer, &writer);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), title.ptr);
+    var subtitle_buffer: [512]u8 = undefined;
+    writer = std.Io.Writer.fixed(subtitle_buffer[0 .. subtitle_buffer.len - 1]);
+    if (proposal.album.len != 0) writer.print("{s}" ++ separator, .{proposal.album}) catch {};
+    if (proposal.duration_ms) |milliseconds| {
+        var length_buffer: [32]u8 = undefined;
+        writer.print("{s}" ++ separator, .{strings.formatMs(&length_buffer, milliseconds)}) catch {};
+    }
+    writer.print("{d}%", .{matches.percent(proposal.confidence)}) catch {};
+    const subtitle = finish(&subtitle_buffer, &writer);
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), subtitle.ptr);
+    var tooltip_buffer: [1024]u8 = undefined;
+    gtk.gtk_widget_set_tooltip_text(row, strings.format(&tooltip_buffer, "{s}\n{s}", .{ title, subtitle }).ptr);
+    gtk.gtk_widget_set_visible(row, gtk.true_);
 }
 
 fn setPath(panel: *Panel, path: ?[]const u8) void {
@@ -344,17 +426,8 @@ fn writeSummary(writer: *std.Io.Writer, details: liborca.TrackDetails) std.Io.Wr
     }
     if (details.bitrate_kbps) |kbps| {
         if (!first) try writer.writeAll(separator);
-        try writeGrouped(writer, kbps);
+        try strings.writeGrouped(writer, kbps);
         try writer.writeAll(" kbps");
-    }
-}
-
-fn writeGrouped(writer: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
-    var digits: [20]u8 = undefined;
-    const text = std.fmt.bufPrint(&digits, "{d}", .{value}) catch return;
-    for (text, 0..) |digit, index| {
-        if (index != 0 and (text.len - index) % 3 == 0) try writer.writeByte(',');
-        try writer.writeByte(digit);
     }
 }
 
@@ -365,7 +438,7 @@ fn feedbackText(buffer: []u8, details: liborca.TrackDetails) [:0]const u8 {
         .hated => "Disliked",
     };
     if (details.feedback_syncable) return strings.terminated(buffer, word);
-    return strings.format(buffer, "{s}\nSaved on this computer only — this song has no MusicBrainz ID", .{word});
+    return strings.format(buffer, "{s}\nWon't sync to ListenBrainz: no recording ID", .{word});
 }
 
 fn lastPlayedText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
@@ -475,6 +548,64 @@ fn copyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     panel.self.toast("Path copied");
 }
 
+fn recordingLinkClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    matches.openRecording(panelData(data).self, matches.recordingOf(button) orelse return);
+}
+
+fn slotOf(button: ?*anyopaque) usize {
+    return @intFromPtr(gtk.g_object_get_data(button.?, "orca-slot"));
+}
+
+fn proposalAcceptClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    matches.accept(panel.self, panel.shown orelse return, panel.proposal_ids[slotOf(button)]);
+}
+
+fn proposalDismissClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    matches.dismiss(panel.self, panel.shown orelse return, panel.proposal_ids[slotOf(button)]);
+}
+
+fn reviewAllActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    matches.reveal(panel.self, panel.shown orelse return);
+}
+
+fn findMatchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    jobs.startTrackMatching(panel.self, panel.shown orelse return);
+}
+
+fn iconButton(icon: [*:0]const u8, tooltip: [*:0]const u8, slot: usize) *gtk.Widget {
+    const button = gtk.gtk_button_new_from_icon_name(icon);
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_set_tooltip_text(button, tooltip);
+    gtk.g_object_set_data(button, "orca-slot", @ptrFromInt(slot));
+    return button;
+}
+
+fn newProposalRow(slot: usize) struct { row: *gtk.Widget, accept: *gtk.Widget, dismiss: *gtk.Widget } {
+    const row = adw.adw_action_row_new();
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    adw.adw_action_row_set_title_lines(gtk.cast(adw.ActionRow, row), 2);
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, row), 1);
+    const accept = iconButton("object-select-symbolic", "Accept", slot);
+    const dismiss = iconButton("window-close-symbolic", "Dismiss", slot);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), accept);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), dismiss);
+    gtk.gtk_widget_set_visible(row, gtk.false_);
+    return .{ .row = row, .accept = accept, .dismiss = dismiss };
+}
+
+fn buttonRow(title: [*:0]const u8, icon: [*:0]const u8) *gtk.Widget {
+    const row = adw.adw_button_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), title);
+    adw.adw_button_row_set_start_icon_name(row, icon);
+    gtk.gtk_widget_set_visible(row, gtk.false_);
+    return row;
+}
+
 fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     const self = panel.self;
@@ -519,6 +650,15 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const track_row = newRow("Track");
     const disc_row = newRow("Disc");
     const compilation_row = newRow("Compilation");
+    const recording_row = adw.adw_action_row_new();
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, recording_row), gtk.false_);
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, recording_row), 1);
+    const recording_link = matches.linkButton("");
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, recording_row), recording_link);
+    var proposal_parts: [proposal_slots]@TypeOf(newProposalRow(0)) = undefined;
+    for (&proposal_parts, 0..) |*parts, index| parts.* = newProposalRow(index);
+    const review_row = buttonRow("Review all", "go-next-symbolic");
+    const find_row = buttonRow("Find Match", "system-search-symbolic");
     const feedback_row = newRow("Feedback");
     const plays_row = newRow("Plays");
     const last_played_row = newRow("Last played");
@@ -528,13 +668,14 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const file_group = newGroup("File", &.{ size_row, path_row });
     const loudness_group = newGroup("Loudness", &.{loudness_row});
     const tags_group = newGroup("Tags", &.{ album_artist_row, date_row, track_row, disc_row, compilation_row });
+    const musicbrainz_group = newGroup("MusicBrainz", &.{ recording_row, proposal_parts[0].row, proposal_parts[1].row, proposal_parts[2].row, review_row, find_row });
     const history_group = newGroup("History", &.{ feedback_row, plays_row, last_played_row });
     const now_group = newGroup("Now Playing", &.{now_row});
     gtk.gtk_widget_set_visible(now_group, gtk.false_);
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 18);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, format_group, file_group, loudness_group, tags_group, history_group, now_group }) |section|
+    for ([_]*gtk.Widget{ heading, format_group, file_group, loudness_group, tags_group, musicbrainz_group, history_group, now_group }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
     const placeholder = gtk.gtk_label_new("Select a track to see its details.");
@@ -580,6 +721,12 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .track_row = track_row,
         .disc_row = disc_row,
         .compilation_row = compilation_row,
+        .musicbrainz_group = musicbrainz_group,
+        .recording_row = recording_row,
+        .recording_link = recording_link,
+        .proposal_rows = .{ proposal_parts[0].row, proposal_parts[1].row, proposal_parts[2].row },
+        .review_row = review_row,
+        .find_row = find_row,
         .history_group = history_group,
         .feedback_row = feedback_row,
         .plays_row = plays_row,
@@ -588,6 +735,13 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .now_row = now_row,
     };
     _ = gtk.signalConnect(copy_button, "clicked", gtk.callback(copyClicked), panel);
+    _ = gtk.signalConnect(recording_link, "clicked", gtk.callback(recordingLinkClicked), panel);
+    for (proposal_parts) |parts| {
+        _ = gtk.signalConnect(parts.accept, "clicked", gtk.callback(proposalAcceptClicked), panel);
+        _ = gtk.signalConnect(parts.dismiss, "clicked", gtk.callback(proposalDismissClicked), panel);
+    }
+    _ = gtk.signalConnect(review_row, "activated", gtk.callback(reviewAllActivated), panel);
+    _ = gtk.signalConnect(find_row, "activated", gtk.callback(findMatchActivated), panel);
     _ = gtk.signalConnect(root, "destroy", gtk.callback(destroyed), panel);
     slot.* = panel;
 

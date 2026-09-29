@@ -19,6 +19,7 @@ const artists = @import("artists.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const health = @import("health.zig");
+const matches = @import("matches.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -368,6 +369,7 @@ pub const Page = enum(c_uint) {
     artists,
     tracks,
     health,
+    matches,
     now_playing,
     queue,
 
@@ -377,6 +379,7 @@ pub const Page = enum(c_uint) {
             .artists => "artists",
             .tracks => "tracks",
             .health => "health",
+            .matches => "matches",
             .now_playing => "now-playing",
             .queue => "queue",
         };
@@ -388,6 +391,7 @@ pub const Page = enum(c_uint) {
             .artists => "Artists",
             .tracks => "Tracks",
             .health => "Health",
+            .matches => "Matches",
             .now_playing => "Now Playing",
             .queue => "Queue",
         };
@@ -519,6 +523,12 @@ fn buildSidebar(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(health_count, "numeric");
     gtk.gtk_widget_add_css_class(health_count, "dim-label");
     adw.adw_sidebar_item_set_suffix(health_item, health_count);
+    const matches_item = sidebarItem(section, "Matches", "system-search-symbolic");
+    const matches_count = gtk.gtk_label_new("");
+    self.matches_count = gtk.cast(gtk.Label, matches_count);
+    gtk.gtk_widget_add_css_class(matches_count, "numeric");
+    gtk.gtk_widget_add_css_class(matches_count, "dim-label");
+    adw.adw_sidebar_item_set_suffix(matches_item, matches_count);
     adw.adw_sidebar_append(self.sidebar.?, section);
     const playback = adw.adw_sidebar_section_new();
     adw.adw_sidebar_section_set_title(playback, "Playback");
@@ -748,6 +758,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
 

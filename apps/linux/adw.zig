@@ -37,6 +37,7 @@ pub const ComboRow = opaque {};
 pub const SpinRow = opaque {};
 pub const EntryRow = opaque {};
 pub const AlertDialog = opaque {};
+pub const ExpanderRow = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
 pub const RESPONSE_SUGGESTED: c_int = 1;
@@ -60,6 +61,14 @@ pub extern fn adw_action_row_add_suffix(row: *ActionRow, widget: *gtk.Widget) vo
 pub extern fn adw_action_row_add_prefix(row: *ActionRow, widget: *gtk.Widget) void;
 pub extern fn adw_action_row_set_subtitle(row: *ActionRow, subtitle: [*:0]const u8) void;
 pub extern fn adw_action_row_set_subtitle_lines(row: *ActionRow, lines: c_int) void;
+pub extern fn adw_action_row_set_title_lines(row: *ActionRow, lines: c_int) void;
+pub extern fn adw_expander_row_new() *gtk.Widget;
+pub extern fn adw_expander_row_add_row(row: *ExpanderRow, child: *gtk.Widget) void;
+pub extern fn adw_expander_row_set_subtitle(row: *ExpanderRow, subtitle: [*:0]const u8) void;
+pub extern fn adw_expander_row_set_expanded(row: *ExpanderRow, expanded: gtk.gboolean) void;
+pub extern fn adw_expander_row_get_expanded(row: *ExpanderRow) gtk.gboolean;
+pub extern fn adw_expander_row_set_title_lines(row: *ExpanderRow, lines: c_int) void;
+pub extern fn adw_expander_row_set_subtitle_lines(row: *ExpanderRow, lines: c_int) void;
 pub extern fn adw_entry_row_new() *gtk.Widget;
 pub extern fn adw_entry_row_set_show_apply_button(row: *EntryRow, show_apply_button: gtk.gboolean) void;
 pub extern fn adw_entry_row_add_suffix(row: *EntryRow, widget: *gtk.Widget) void;

@@ -349,3 +349,11 @@ row:hover button.row-heart,
 row:selected button.row-heart {
   opacity: 1;
 }
+
+row.recording-id label.subtitle {
+  font-family: monospace;
+}
+
+.match-proposal {
+  padding: 6px 12px;
+}

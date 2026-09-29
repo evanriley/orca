@@ -26,6 +26,7 @@ const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
 const health = @import("health.zig");
+const matches = @import("matches.zig");
 const preferences = @import("preferences.zig");
 const settings = @import("settings.zig");
 const tags = @import("tags.zig");
@@ -112,6 +113,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
+    matches.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
 }
@@ -309,11 +311,14 @@ fn resolvePinnedOutput(environ: *std.process.Environ.Map) ?u64 {
     return std.fmt.parseInt(u64, configured, 10) catch null;
 }
 
-fn resolveListenBrainzServer(
+/// A provider server from `variable`, such as a local mock for development.
+/// The copy outlives the runtime, as the runtime requires.
+fn resolveServer(
     allocator: std.mem.Allocator,
     environ: *std.process.Environ.Map,
+    variable: []const u8,
 ) ?[]const u8 {
-    const configured = environ.get("ORCA_LISTENBRAINZ_URL") orelse return null;
+    const configured = environ.get(variable) orelse return null;
     if (configured.len == 0) return null;
     return allocator.dupe(u8, configured) catch null;
 }
@@ -339,8 +344,10 @@ pub fn main(init: std.process.Init) !u8 {
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
     runtime.setCredentialStore(secret.credential_store) catch {};
-    if (resolveListenBrainzServer(allocator, init.environ_map)) |server|
+    if (resolveServer(allocator, init.environ_map, "ORCA_LISTENBRAINZ_URL")) |server|
         runtime.setListenBrainzServer(server) catch {};
+    if (resolveServer(allocator, init.environ_map, "ORCA_MUSICBRAINZ_URL")) |server|
+        runtime.setMusicBrainzServer(server) catch {};
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;

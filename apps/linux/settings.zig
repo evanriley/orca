@@ -2,7 +2,8 @@
 //!
 //! Only choices a host keeps for itself live here: which output to open, the
 //! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
-//! whether listens and the current track are submitted. Nothing about the
+//! whether listens and the current track are submitted, and how confident a
+//! match Accept Confident takes. Nothing about the
 //! library does, and never the ListenBrainz token, which lives in the Secret
 //! Service.
 
@@ -67,6 +68,15 @@ fn loadCrossfeed(self: *App, text: []const u8, enabled: ?[]const u8) void {
     self.runtime.playerSetCrossfeed(self.player, amount) catch {};
 }
 
+pub const threshold_range = [2]u8{ 50, 100 };
+
+/// A whole percentage in `threshold_range`, or null.
+fn parseThreshold(text: []const u8) ?u8 {
+    const percent = std.fmt.parseInt(u8, std.mem.trim(u8, text, " "), 10) catch return null;
+    if (percent < threshold_range[0] or percent > threshold_range[1]) return null;
+    return percent;
+}
+
 fn isEnabled(flag: ?[]const u8) bool {
     return std.mem.eql(u8, flag orelse return true, "true");
 }
@@ -125,6 +135,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         if (std.mem.eql(u8, std.mem.span(value), "true")) enableScrobbling(self);
     }
+    if (getString(keys, "matching", "accept_confidence")) |value| {
+        defer gtk.g_free(value);
+        if (parseThreshold(std.mem.span(value))) |percent| self.match_threshold_percent = percent;
+    }
     if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
         defer gtk.g_free(value);
         self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
@@ -150,6 +164,8 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "sound", "crossfeed_enabled", if (crossfeed_on) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "scrobble", if (self.scrobbling) "true" else "false");
     gtk.g_key_file_set_string(keys, "listening", "now_playing", if (self.announce_now_playing) "true" else "false");
+    var threshold_buffer: [8]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

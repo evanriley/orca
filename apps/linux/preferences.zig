@@ -13,6 +13,7 @@ const jobs = @import("jobs.zig");
 const settings = @import("settings.zig");
 const secret = @import("secret.zig");
 const transport = @import("transport.zig");
+const matches = @import("matches.zig");
 
 const App = app.App;
 
@@ -131,6 +132,17 @@ fn duplicatesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startDuplicates(self);
 }
 
+fn thresholdChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const value = adw.adw_spin_row_get_value(gtk.cast(adw.SpinRow, row));
+    const range = settings.threshold_range;
+    const percent: u8 = @intFromFloat(std.math.clamp(@round(value), @as(f64, range[0]), @as(f64, range[1])));
+    if (percent == self.match_threshold_percent) return;
+    self.match_threshold_percent = percent;
+    settings.save(self);
+    matches.reload(self);
+}
+
 fn libraryPage(self: *App) *gtk.Widget {
     const page = adw.adw_preferences_page_new();
     adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Library");
@@ -177,6 +189,15 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, duplicates), 3);
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), duplicates);
+    const range = settings.threshold_range;
+    const threshold = adw.adw_spin_row_new_with_range(@floatFromInt(range[0]), @floatFromInt(range[1]), 1);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threshold), "Accept confident matches at");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a song's only match scoring this or more.");
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threshold), 3);
+    adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
+    adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));
+    _ = gtk.signalConnect(threshold, "notify::value", gtk.callback(thresholdChanged), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), threshold);
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, maintenance));
     return page;
 }

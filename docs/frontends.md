@@ -88,6 +88,17 @@ The window is an `AdwNavigationSplitView`:
 
 - **Health** lists what liborca found wrong with the library, with a count in
   the sidebar and a Find Duplicates button.
+- **Matches** lists the songs with MusicBrainz proposals awaiting review
+  (`libraryMatchReviewPage`), with their count in the sidebar. Each row shows
+  the song's own title, artist, album and length and its best proposal's
+  score; expanding it lists every proposal with Accept, Dismiss and a
+  MusicBrainz button that opens the recording's page in the browser. A
+  proposal more than 10 s longer or shorter than the song shows its length in
+  the warning colour. Find Matches starts the matching job, which shares the
+  status card; Accept Confident asks first, then accepts each song's only
+  proposal at or above the threshold set in Preferences (90% by default,
+  `[matching] accept_confidence` in `settings.ini`). With nothing to review
+  the page offers Find Matches, or says every song has a recording ID.
 
 Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
@@ -120,7 +131,14 @@ does not play the song or change the selection. The player bar's heart does the
 same for the audible song. Disliked songs have no marker on their row, and the
 details panel's Feedback row says Loved, Disliked or None. A song without a
 MusicBrainz recording ID is saved on this computer only, and the Feedback row
-says so. A change made in one place repaints the others, by recording and
+says it won't sync to ListenBrainz.
+
+The details panel's **MusicBrainz** section shows the recording ID in effect
+and where it came from (From tags, Matched or Set by you), with a MusicBrainz
+button. A song without one shows its top three proposals with Accept and
+Dismiss, and Review all when there are more, which opens the Matches page at
+that song; with no proposals it offers Find Match, which searches for that
+song alone. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
 each button once, in setup, and read the row's song when the button is pressed.
@@ -143,7 +161,8 @@ gives it a new id.
 **Preferences** (Ctrl+,) lists the library's folders with Add, Remove and
 Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
 and the output device. Scans, measurement, duplicate finding and tag writes
-share the status card at the foot of the sidebar, one at a time. ReplayGain
+and MusicBrainz matching share the status card at the foot of the sidebar,
+one at a time. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)
 are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
 settings below. Removing a folder asks first, then forgets its tracks; the
