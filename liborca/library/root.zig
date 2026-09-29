@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 
+pub const acoustid_submission = @import("acoustid_submission.zig");
 pub const analysis_pass = @import("analysis_pass.zig");
 pub const duplicate_pass = @import("duplicate_pass.zig");
 pub const matching = @import("matching.zig");
@@ -13,6 +14,7 @@ pub const NativeRootWatcher = switch (builtin.os.tag) {
     else => void,
 };
 
+pub const AcoustIdSubmission = acoustid_submission.AcoustIdSubmission;
 pub const CancellationToken = scanner.CancellationToken;
 pub const DuplicateScan = duplicate_pass.DuplicateScan;
 pub const LibraryAnalysis = analysis_pass.LibraryAnalysis;
@@ -25,6 +27,7 @@ pub const Tags = tag_reader.Tags;
 pub const WatchHintChannel = watch_hints.Channel;
 
 test {
+    _ = @import("acoustid_submission.zig");
     _ = @import("analysis_pass.zig");
     _ = @import("duplicate_pass.zig");
     _ = @import("matching.zig");

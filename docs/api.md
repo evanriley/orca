@@ -108,13 +108,17 @@ defer page.deinit();
   recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
   the changes still waiting as `feedback_pending`.
 - `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
-  Job that searches MusicBrainz for the Tracks without a recording ID and
-  stores proposals; its snapshot's total is the number of Tracks to search,
-  and `jobMatchStats` reports its counters as `MatchStats`, `matched`
-  included while it runs. `MatchRequest.track_id` searches that Track alone,
-  under the same rule: one already identified or awaiting review is not
-  searched, and the job succeeds with a total of 0. At most one runs per
-  runtime (`error.MatchingAlreadyRunning`).
+  Job that searches MusicBrainz, and AcoustID by fingerprint, for the Tracks
+  without a recording ID and stores proposals; its snapshot's total is the
+  number of Tracks to search, and `jobMatchStats` reports its counters as
+  `MatchStats`, `matched` included while it runs, and whether AcoustID took
+  part as `AcoustIdUse`. `MatchRequest.fingerprints` (default true) includes
+  AcoustID when an application key is set. `MatchRequest.track_id` searches
+  that Track alone, under the same rule: one already identified, or already
+  answered for by every service in scope, is not searched, and the job
+  succeeds with a total of 0. At most one runs per runtime
+  (`error.MatchingAlreadyRunning`), and none while an AcoustID submission
+  runs (`error.AcoustIdBusy`).
   `libraryMatchReviewPage(library, limit, offset)` returns a
   `MatchReviewPage` of at most 512 `MatchReviewItem`s: the Tracks with a
   pending proposal, by artist, album and position, each with its own title,
@@ -124,15 +128,38 @@ defer page.deinit();
   `libraryConfidentMatchCount(library, minimum)` is the number
   `libraryAcceptConfidentMatches` would accept now.
   `libraryMatchProposals(library, track_id, limit)` returns a
-  `MatchProposalPage` of the Track's pending `MatchProposal`s;
-  `libraryAcceptMatch` accepts one and returns a `MatchAcceptance`,
-  `libraryDismissMatch` dismisses one, and
+  `MatchProposalPage` of the Track's pending `MatchProposal`s, each with its
+  `provider` (`musicbrainz`, `acoustid` or `musicbrainz+acoustid`) and
+  `acoustid_score`; `libraryAcceptMatch` accepts one and returns a
+  `MatchAcceptance`, `libraryDismissMatch` dismisses one, and
   `libraryAcceptConfidentMatches(library, minimum)` accepts, for every file
   with exactly one pending proposal at least that confident, that proposal.
-  `setMusicBrainzServer` selects a mirror under the same rules as
-  `setListenBrainzServer`, from the next job. See
-  [providers.md](providers.md#musicbrainz-matching) and
+  `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
+  the same rules as `setListenBrainzServer`, from the next job.
+  `setAcoustIdClientKey(key)` sets the AcoustID application key; the key
+  must outlive the runtime, and a `CredentialStore` value under
+  `acoustid_credential_service` / `acoustid_client_key_account` overrides
+  it. See [providers.md](providers.md#matching) and
   [metadata.md](metadata.md#musicbrainz-recording-ids).
+- `libraryTrackFingerprint(library, io, track_id)` returns the
+  `TrackFingerprint` of the file a Track plays: Chromaprint's compressed
+  fingerprint, the file's length and whether it came from the Library's
+  cache. It decodes up to two minutes of audio on the caller's thread when
+  the cache has none, and returns null when the file has no present
+  location.
+- `startAcoustIdSubmission(library)` starts an `acoustid_submission` Job that
+  sends AcoustID the fingerprints of files whose recording ID came from an
+  accepted match or an edit, as the user whose key the `CredentialStore`
+  holds under `acoustid_credential_service` / `acoustid_user_key_account`.
+  `jobSubmissionStats` returns its `SubmissionStats`: the files examined
+  while it runs, and every counter and the `SubmissionOutcome` once it has
+  finished. `libraryAcoustIdSubmittableCount` and
+  `libraryAcoustIdSubmittablePage(library, cursor, limit)` list what it would
+  send, as `AcoustIdSubmittable`s by file id after `cursor`;
+  `AcoustIdSubmittable.sendsRecordingId(file_duration_ms)` says whether the
+  recording ID or the file's metadata is sent. It cannot run beside matching
+  or another submission (`error.AcoustIdBusy`). See
+  [providers.md](providers.md#acoustid-submission).
 - Pages and returned values are owned by the caller and released with their
   `deinit`.
 

@@ -55,7 +55,10 @@ listen subject and the three feedback queries all use it.
 `prefer_file` to the same values, which is the same order, for
 `TrackDetails.musicbrainz_recording_id` and its source: `tag`, `match` or
 `edit`. `orca-cli track` prints both. A file that gains a tag on a rescan
-therefore uses the tag at once, and matching no longer searches for it.
+therefore uses the tag at once, and matching no longer searches for it. A
+recording ID from an accepted match or an edit, and never a tagged one, may be
+sent to AcoustID with the file's fingerprint; see
+[providers.md](providers.md#acoustid-submission).
 
 The projection does not read the field, so accepting a match reprojects
 nothing. Tag writes leave it out: no writer stores a recording ID yet.
@@ -63,7 +66,7 @@ nothing. Tag writes leave it out: no writer stores a recording ID yet.
 ### Accepting a match
 
 A match is an `identification_proposals` row from the matching job described
-in [providers.md](providers.md#musicbrainz-matching).
+in [providers.md](providers.md#matching).
 `IdentificationProposalRepository.acceptProposal` does all of this in one
 transaction:
 

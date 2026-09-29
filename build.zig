@@ -3,6 +3,14 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const acoustid_key = b.option(
+        []const u8,
+        "acoustid-key",
+        "AcoustID application key orca-cli and orca-gtk use for lookups and submissions",
+    ) orelse "AqlfLksN1K";
+    const app_options = b.addOptions();
+    app_options.addOption([]const u8, "acoustid_key", acoustid_key);
+    const app_options_module = app_options.createModule();
 
     const sqlite_translate = b.addTranslateC(.{
         .root_source_file = b.path("liborca/database/sqlite_import.h"),
@@ -55,6 +63,12 @@ pub fn build(b: *std.Build) void {
     liborca_module.linkSystemLibrary("vorbisfile", .{ .use_pkg_config = .yes });
     addAlac(b, liborca_module);
     @import("build/libxaac.zig").addTo(b, liborca_module);
+    const chromaprint_licences = @import("build/chromaprint.zig").addTo(b, liborca_module);
+    liborca_module.addCSourceFile(.{
+        .file = b.path("liborca/audio/samplerate_shim.c"),
+        .flags = &.{ "-std=c11", "-DNDEBUG" },
+    });
+    liborca_module.linkSystemLibrary("samplerate", .{ .use_pkg_config = .yes });
     liborca_module.addCSourceFile(.{
         .file = b.path("liborca/codec/aac_shim.c"),
         .flags = &.{ "-std=c11", "-DNDEBUG" },
@@ -77,6 +91,7 @@ pub fn build(b: *std.Build) void {
     });
     liborca.installHeader(b.path("liborca/orca.h"), "orca/orca.h");
     installLicenses(b);
+    b.getInstallStep().dependOn(chromaprint_licences);
     b.installArtifact(liborca);
 
     const liborca_shared = b.addLibrary(.{
@@ -92,7 +107,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("apps/cli/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+            .imports = &.{
+                .{ .name = "liborca", .module = liborca_module },
+                .{ .name = "build_options", .module = app_options_module },
+            },
         }),
     });
     b.installArtifact(cli);
@@ -142,6 +160,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run all unit and integration tests");
+    test_step.dependOn(chromaprint_licences);
     test_step.dependOn(&run_unit_tests.step);
     // Built as its own project, so the documented way to embed liborca as a
     // Zig package dependency is exercised rather than asserted.
@@ -161,7 +180,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+            .imports = &.{
+                .{ .name = "liborca", .module = liborca_module },
+                .{ .name = "build_options", .module = app_options_module },
+            },
         });
         linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
@@ -308,7 +330,8 @@ fn addAlac(b: *std.Build, module: *std.Build.Module) void {
 }
 
 /// Apache-2.0 requires its licence and any NOTICE to travel with binaries that
-/// contain the code, and ALAC and libxaac are compiled into liborca.
+/// contain the code, and ALAC and libxaac are compiled into liborca; so do the
+/// MIT and BSD licences of Chromaprint and KissFFT.
 fn installLicenses(b: *std.Build) void {
     const directory = "share/doc/orca/licenses";
     b.installFile("LICENSE", directory ++ "/orca/LICENSE");
@@ -319,4 +342,10 @@ fn installLicenses(b: *std.Build) void {
     const libxaac = b.dependency("libxaac", .{});
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("LICENSE"), directory ++ "/libxaac/LICENSE").step);
     b.getInstallStep().dependOn(&b.addInstallFile(libxaac.path("NOTICE"), directory ++ "/libxaac/NOTICE").step);
+    const chromaprint = b.dependency("chromaprint", .{});
+    b.getInstallStep().dependOn(&b.addInstallFile(chromaprint.path("LICENSE.md"), directory ++ "/chromaprint/LICENSE.md").step);
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        chromaprint.path("src/3rdparty/kissfft/LICENSES/BSD-3-Clause"),
+        directory ++ "/kissfft/BSD-3-Clause",
+    ).step);
 }

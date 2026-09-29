@@ -10,8 +10,9 @@ Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback at each source's sample rate,
 live equalizer and crossfeed, tag editing with undo, track details, a local
 play history, ListenBrainz scrobbling and MusicBrainz matching with review.
-The other providers and filesystem watching are built but not
-connected; macOS has no audio output yet.
+`orca-cli` also matches by AcoustID fingerprint and submits fingerprints to
+AcoustID. Last.fm and filesystem watching are built but not connected; macOS
+has no audio output yet.
 
 ## Works today
 
@@ -82,20 +83,31 @@ connected; macOS has no audio output yet.
   `accept-matches`, and in `orca-gtk` through the Matches page, the details
   panel's MusicBrainz section (with a single-song Find Match) and the
   confidence threshold in Preferences. See
-  [providers.md](providers.md#musicbrainz-matching).
+  [providers.md](providers.md#matching).
+- AcoustID matching: the same job fingerprints each file with Chromaprint and
+  looks up to 20 fingerprints at a time on AcoustID, merging both services'
+  candidates into one proposal per recording; each service is asked once per
+  file. Reachable through `orca-cli match` (`--no-fingerprints` leaves it
+  out), `matches` and `fingerprint`; `orca-gtk` runs it within Find Matches
+  but does not show the source or the AcoustID score yet.
+- AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
+  files whose recording ID came from an accepted match or an edit, once per
+  file and ID, with the user key from `ORCA_ACOUSTID_USER_KEY`. See
+  [providers.md](providers.md#acoustid-submission).
 
 ### Analysis
 
 - Loudness and ReplayGain, peaks, silence, waveform and a temporal
   fingerprint, cached by algorithm version and parameters.
+- AcoustID fingerprints (Chromaprint over libsamplerate), cached per file.
 - Library-wide analysis and indexed duplicate detection as cancellable jobs.
 - Library health issues.
 
 ### Clients
 
 - `orca-cli`: scan, browse, search, library edits, tag write-back and undo,
-  analysis, duplicates, artwork, queue playback, `feedback`, `scrobble` and
-  MusicBrainz matching.
+  analysis, duplicates, artwork, queue playback, `feedback`, `scrobble`,
+  MusicBrainz and AcoustID matching, fingerprints and AcoustID submission.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
   menus, tag editing with write-back and undo, Preferences, a Health page, a
@@ -111,27 +123,28 @@ entry point and a client before it counts as working.
 
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
-- Providers: the AcoustID and Last.fm adapters.
-- The ordered DSP graph (`Chain`, `PublishedChain`) and the resampler. The
+- Providers: the Last.fm adapter.
+- The ordered DSP graph (`Chain`, `PublishedChain`) and the resamplers. The
   Player's equalizer, crossfeed and volume run through `PlayerDsp` instead, and
   the signal-path inspector is reachable through `playerSignalPath`, but
-  neither uses the graph, and nothing resamples.
+  neither uses the graph, and playback never resamples; libsamplerate
+  (`resampler.SampleRate`) resamples only for fingerprints.
 - The Linux filesystem watcher.
 
 ## Next
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **AcoustID and ListenBrainz lookup.** MusicBrainz title search and its
-   review work from `orca-cli` and `orca-gtk`. AcoustID fingerprint
-   identification and ListenBrainz's `/1/metadata/lookup` would match what a
-   title search misses; songs without a recording ID cannot sync loves to
-   ListenBrainz. Last.fm
+1. **AcoustID in `orca-gtk`, and ListenBrainz lookup.** Matching already
+   asks AcoustID; the Matches page and details panel should show each
+   proposal's source and AcoustID score, and Preferences should hold the
+   user's AcoustID key and start a submission. ListenBrainz's
+   `/1/metadata/lookup` would match what both services miss. Last.fm
    follows. No tag writer stores an accepted recording ID in a file yet.
 2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
-3. **A fixed output rate with a band-limited resampler** (libsamplerate or
-   speexdsp behind a shim), for gapless playback across sample-rate changes
+3. **A fixed output rate with a band-limited resampler** (libsamplerate is
+   already behind `resampler.SampleRate`), for gapless playback across sample-rate changes
    and for devices held at another rate. Playback at the source rate already
    covers the common case.
 4. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
@@ -154,8 +167,15 @@ Small defects that are not yet scheduled:
   it on change, never on a tick.
 - `ZoneRuntime.published_device_delay_frames` is written but never read.
 - Two processes matching the same Library at once, such as `orca-gtk` and
-  `orca-cli match`, each run their own gateway, so MusicBrainz sees two
-  requests a second.
+  `orca-cli match`, each run their own gateways, so MusicBrainz and AcoustID
+  see two requests a second.
+- A file whose fingerprint fails, and a Track without a title or artist that
+  MusicBrainz cannot search, are examined again by every matching run. No
+  request is made, but a failed fingerprint is decoded again.
+- An AcoustID candidate without a title is scored on length and fingerprint
+  alone, so for a tagged Track it can rank level with a candidate whose title
+  and artist match. Several recording IDs sharing one AcoustID fingerprint
+  rank by how closely their artist credit matches the Track's.
 - Two tests fail intermittently, unrelated to listening: "a Player's signal
   path reports sample processing only while DSP or volume is in effect" (the
   output never opens, `OutputNeverOpened`) and "an unanalyzed entry reached by

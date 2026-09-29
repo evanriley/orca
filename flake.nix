@@ -21,6 +21,7 @@
           pkgs.libopus
           pkgs.opusfile
           pkgs.libvorbis
+          pkgs.libsamplerate
         ]
         ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
           pkgs.pipewire
@@ -38,7 +39,7 @@
 
           deps = pkgs.zig.fetchDeps {
             inherit (finalAttrs) pname version src;
-            hash = "sha256-efC4DrL0XcmQF/Dj+vZGsKYfXEg7WwQ3oq4yjHRN1CM=";
+            hash = "sha256-PagG6fv96840UDWtKFWP6tnRGahU8hMZTLjJtyFu23U=";
           };
 
           nativeBuildInputs = [

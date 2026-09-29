@@ -11,6 +11,36 @@ Two things use the result: **ReplayGain on playback**, and duplicate detection.
 Neither can use a measurement that does not exist, which is what
 `library/analysis_pass.zig` is for.
 
+## AcoustID fingerprints
+
+`analysis/chromaprint.zig` computes the fingerprint AcoustID matches on, the
+way `fpcalc` does: the first 120 s of a file, decoded by Orca's codecs, mixed
+to mono, resampled to 11,025 Hz by libsamplerate (`resampler.SampleRate`,
+`sinc_fastest`), converted to 16-bit and fed to Chromaprint's default
+algorithm (`TEST2`) behind `chromaprint_shim.c`. The result is Chromaprint's
+compressed, base64 fingerprint and the whole file's length; a file shorter
+than 120 s is fingerprinted whole. Chromaprint is built without its own
+resampler, which is LGPL and accepts only 11,025 Hz input; see
+[architecture.md](architecture.md#dependencies-and-licences).
+
+- **No partial fingerprints.** Any decode error while reading the window fails
+  the fingerprint. Nothing is cached or sent for that file, and it is tried
+  again next time.
+- **Cached per file.** A fingerprint is stored in `analysis_results` as kind 3,
+  `orca.chromaprint` version 1, under a parameter hash of the algorithm, the
+  libsamplerate converter and the window length, and the quick hash of the
+  bytes it was taken from. Changing any of them takes a new fingerprint. The
+  stored result is the length in milliseconds (8 bytes, little-endian)
+  followed by the fingerprint.
+- **Agreement with `fpcalc`.** On Chromaprint's own test recording
+  (`fixtures/audio/chromaprint-test.mp3`), Orca's fingerprint has the same 59
+  sub-fingerprints as `fpcalc`'s and agrees on 99.79 % of their bits; a unit
+  test holds it above 95 %.
+
+Matching and AcoustID submission take fingerprints as they need them;
+`Runtime.libraryTrackFingerprint` and `orca-cli fingerprint` take one for a
+single Track.
+
 ## The pass
 
 `library/analysis_pass.zig` measures every file in a Library that has not been

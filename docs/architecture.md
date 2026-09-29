@@ -18,6 +18,7 @@ frontends, no frontend owning behaviour.
    library · database · storage · codec · metadata · audio · analysis · jobs
                                            |
   SQLite · libFLAC · minimp3 · ALAC · libxaac · Xiph libraries · PipeWire
+  Chromaprint · KissFFT · libsamplerate
 ```
 
 - **Zig clients** import the `liborca` module and call its Zig API directly.
@@ -50,6 +51,30 @@ package dependency and what the surface contains.
 - Every queue, page, commit and retry is bounded.
 - Foreign libraries stay behind Orca-owned interfaces and never leak their
   types.
+
+## Dependencies and licences
+
+Everything liborca compiles in or links is permissively licensed, so an
+embedder may keep its own code closed; `CLAUDE.md` states the rule. The
+licences of vendored code are installed under `share/doc/orca/licenses`.
+
+| Dependency | Licence | How it is used |
+| --- | --- | --- |
+| SQLite | public domain | system library |
+| libFLAC, libogg, libopus, opusfile, libvorbis | BSD-3-Clause | system libraries |
+| libsamplerate | BSD-2-Clause | system library, behind `samplerate_shim.c` |
+| PipeWire | MIT | system library on Linux, behind `pipewire_shim.c` |
+| minimp3, QOA | CC0, MIT | vendored in `liborca/codec/vendor` |
+| ALAC, libxaac | Apache-2.0 | built from source by `build.zig` |
+| Chromaprint 1.6.1 | MIT | built from source by `build/chromaprint.zig` |
+| KissFFT (in Chromaprint) | BSD-3-Clause | built from source with Chromaprint |
+
+Chromaprint's repository also carries FFmpeg's LGPL resampler
+(`src/avresample`). It is not compiled: `config.h` leaves
+`USE_INTERNAL_AVRESAMPLE` undefined, and Orca resamples with libsamplerate
+instead. The build step `check Chromaprint licences`, which `zig build` and
+`zig build test` run, fails if any Chromaprint or KissFFT source it compiles
+contains a GPL or LGPL notice.
 
 ## Subsystem contracts
 

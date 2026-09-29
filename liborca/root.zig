@@ -120,6 +120,20 @@ pub const MatchProposalPage = runtime.MatchProposalPage;
 pub const MatchAcceptance = runtime.MatchAcceptance;
 pub const MatchReviewItem = runtime.MatchReviewItem;
 pub const MatchReviewPage = runtime.MatchReviewPage;
+pub const AcoustIdUse = runtime.AcoustIdUse;
+
+// AcoustID: fingerprints, and submissions of recording IDs a person chose.
+pub const TrackFingerprint = runtime.TrackFingerprint;
+pub const SubmissionStats = runtime.SubmissionStats;
+pub const SubmissionOutcome = runtime.SubmissionOutcome;
+pub const AcoustIdSubmittable = runtime.AcoustIdSubmittable;
+pub const AcoustIdSubmittablePage = runtime.AcoustIdSubmittablePage;
+/// Where a `CredentialStore` holds AcoustID keys: the user's own under
+/// `acoustid_user_key_account`, and an application key that overrides the
+/// host's under `acoustid_client_key_account`.
+pub const acoustid_credential_service = internal.providers.acoustid.credential_service;
+pub const acoustid_user_key_account = internal.providers.acoustid.user_key_account;
+pub const acoustid_client_key_account = internal.providers.acoustid.client_key_account;
 /// The service and account under which a `CredentialStore` holds the user's
 /// ListenBrainz token.
 pub const listenbrainz_token_service = internal.providers.listenbrainz.token_service;

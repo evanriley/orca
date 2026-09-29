@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const liborca = @import("liborca");
 
 pub fn main(init: std.process.Init) void {
@@ -22,8 +23,15 @@ fn describe(err: anyerror) []const u8 {
         error.LibraryJobRunning => "a job is running on this library",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL and ORCA_MUSICBRAINZ_URL must be https, or http to localhost",
-        error.MatchingStopped => "matching stopped early: MusicBrainz could not be reached or kept refusing requests; run match again to continue",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL must be https, or http to localhost",
+        error.MatchingStopped => "matching stopped early: MusicBrainz or AcoustID could not be reached or kept refusing requests; run match again to continue",
+        error.AcoustIdBusy => "another job is using AcoustID; wait for it to finish",
+        error.InvalidAcoustIdKey => "the AcoustID application key is empty, too long or contains spaces; rebuild with -Dacoustid-key=KEY",
+        error.NeedsAcoustIdUserKey => "set ORCA_ACOUSTID_USER_KEY to your AcoustID user key (https://acoustid.org/api-key)",
+        error.InvalidAcoustIdUserKey => "AcoustID does not accept the user key in ORCA_ACOUSTID_USER_KEY",
+        error.InvalidAcoustIdClientKey => "AcoustID does not accept the application key; rebuild with -Dacoustid-key=KEY",
+        error.SubmissionStopped => "submission stopped early: AcoustID could not be reached or kept refusing requests; run submit-acoustid again to continue",
+        error.NoPresentFile => "the track's file is not where the library last saw it; rescan its folder",
         error.UnknownIdentificationProposal => "no match with that id",
         error.StaleIdentificationProposal => "that match was already accepted or dismissed",
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
@@ -326,6 +334,10 @@ fn run(init: std.process.Init) !void {
         try matchLibrary(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "matches")) {
         try listMatches(allocator, init.io, stdout, args[2], args[3]);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "fingerprint")) {
+        try printFingerprint(allocator, init.io, stdout, args[2], args[3]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "submit-acoustid")) {
+        try submitAcoustId(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "accept-match")) {
         var runtime = liborca.Runtime.init(allocator);
         defer runtime.deinit();
@@ -363,8 +375,11 @@ fn run(init: std.process.Init) !void {
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | scrobble DATABASE [--status] [--timeout=MS]
             \\                 | feedback DATABASE IDS (--love | --hate | --clear)
-            \\                 | match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]
+            \\                 | match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]
+            \\                   [--cancel-after=MS]
             \\                 | matches DATABASE TRACK_ID
+            \\                 | fingerprint DATABASE TRACK_ID
+            \\                 | submit-acoustid DATABASE [--dry-run]
             \\                 | accept-match DATABASE ID | dismiss-match DATABASE ID
             \\                 | accept-matches DATABASE --min-score=SCORE
             \\                 | artists DATABASE [OPTIONS]
@@ -446,17 +461,31 @@ fn run(init: std.process.Init) !void {
             \\scrobble sends it for recordings with a MusicBrainz ID.
             \\
             \\match searches MusicBrainz for every Track whose file has no MusicBrainz
-            \\recording ID and no match waiting, one request a second, and keeps what
-            \\it finds as matches to review. Answers are cached for 30 days, so a rerun
-            \\makes no request for a Track already searched. --limit=N searches at most
-            \\N Tracks; ORCA_MUSICBRAINZ_URL selects another server (https, or http to
-            \\localhost only). matches lists a Track's matches, most confident first:
-            \\id, confidence (0 to 1), MusicBrainz's score, recording ID, title,
-            \\artist, album, track, length and release ID. accept-match records one
-            \\match's recording ID for the Track's file, in the Library only, and
-            \\dismisses the file's other matches; dismiss-match drops one.
+            \\recording ID, and fingerprints its file and looks it up on AcoustID, once
+            \\per service: a Track either service has answered for is not asked again.
+            \\It keeps what it finds as matches to review. Each service is asked at most
+            \\once a second, AcoustID about up to 20 fingerprints at a time, and answers
+            \\are cached. --limit=N searches at most N Tracks; --no-fingerprints leaves
+            \\AcoustID out. ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL select other
+            \\servers (https, or http to localhost only). matches lists a Track's
+            \\matches, most confident first: id, confidence (0 to 1), MusicBrainz's
+            \\score, source (musicbrainz, acoustid or both), AcoustID's score, recording
+            \\ID, title, artist, album, track, length and release ID. accept-match
+            \\records one match's recording ID for the Track's file, in the Library only,
+            \\and dismisses the file's other matches; dismiss-match drops one.
             \\accept-matches accepts, for every file with exactly one match at least as
             \\confident as --min-score, that match.
+            \\
+            \\fingerprint prints a Track's AcoustID fingerprint and length, in fpcalc's
+            \\format, decoding the first two minutes of its file unless the Library
+            \\already holds it.
+            \\
+            \\submit-acoustid sends AcoustID the fingerprints of files whose recording
+            \\ID came from an accepted match or an edit, once per file and ID, as the
+            \\user whose key is in ORCA_ACOUSTID_USER_KEY. A file whose length is more
+            \\than 30 s from its recording's is sent with its title, artist and album
+            \\instead of the ID. --dry-run lists what would be sent and makes no
+            \\request.
             \\
             \\analyze-library decodes every file the Library has not measured yet and
             \\stores its loudness, peak, clipping, silence and fingerprint. That
@@ -1068,33 +1097,54 @@ fn writeIsoUtc(stdout: *std.Io.Writer, unix_seconds: i64) !void {
     });
 }
 
-/// The user token from the process environment, read once at startup because
-/// the environment map is not safe to read from the listen worker's thread.
-const EnvironmentToken = struct {
+/// The ListenBrainz token and the AcoustID user key from the process
+/// environment, read once at startup because the environment map is not safe
+/// to read from a worker's thread.
+const EnvironmentCredentials = struct {
     token: ?[]u8,
+    acoustid_user_key: ?[]u8,
 
-    fn init(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !EnvironmentToken {
-        const value = environ.get("ORCA_LISTENBRAINZ_TOKEN") orelse return .{ .token = null };
-        if (value.len == 0) return .{ .token = null };
-        return .{ .token = try allocator.dupe(u8, value) };
+    fn init(allocator: std.mem.Allocator, environ: *std.process.Environ.Map) !EnvironmentCredentials {
+        const token = try copyVariable(allocator, environ, "ORCA_LISTENBRAINZ_TOKEN");
+        errdefer if (token) |value| wipe(allocator, value);
+        return .{
+            .token = token,
+            .acoustid_user_key = try copyVariable(allocator, environ, "ORCA_ACOUSTID_USER_KEY"),
+        };
     }
 
-    fn deinit(self: *EnvironmentToken, allocator: std.mem.Allocator) void {
-        if (self.token) |token| {
-            std.crypto.secureZero(u8, token);
-            allocator.free(token);
-        }
+    fn copyVariable(allocator: std.mem.Allocator, environ: *std.process.Environ.Map, name: []const u8) !?[]u8 {
+        const value = environ.get(name) orelse return null;
+        if (value.len == 0) return null;
+        return try allocator.dupe(u8, value);
+    }
+
+    fn wipe(allocator: std.mem.Allocator, value: []u8) void {
+        std.crypto.secureZero(u8, value);
+        allocator.free(value);
+    }
+
+    fn deinit(self: *EnvironmentCredentials, allocator: std.mem.Allocator) void {
+        if (self.token) |token| wipe(allocator, token);
+        if (self.acoustid_user_key) |key| wipe(allocator, key);
         self.* = undefined;
     }
 
-    fn store(self: *EnvironmentToken) liborca.CredentialStore {
+    fn store(self: *EnvironmentCredentials) liborca.CredentialStore {
         return .{ .context = self, .get_fn = get };
     }
 
-    fn get(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8, _: []const u8) anyerror!?[]u8 {
-        const self: *EnvironmentToken = @ptrCast(@alignCast(context));
-        const token = self.token orelse return null;
-        return try allocator.dupe(u8, token);
+    fn get(context: *anyopaque, allocator: std.mem.Allocator, service: []const u8, account: []const u8) anyerror!?[]u8 {
+        const self: *EnvironmentCredentials = @ptrCast(@alignCast(context));
+        const secret = if (std.mem.eql(u8, service, liborca.listenbrainz_token_service) and
+            std.mem.eql(u8, account, liborca.listenbrainz_token_account))
+            self.token
+        else if (std.mem.eql(u8, service, liborca.acoustid_credential_service) and
+            std.mem.eql(u8, account, liborca.acoustid_user_key_account))
+            self.acoustid_user_key
+        else
+            null;
+        return if (secret) |value| try allocator.dupe(u8, value) else null;
     }
 };
 
@@ -1181,7 +1231,7 @@ fn scrobble(
     option_arguments: []const []const u8,
 ) !void {
     const options = try parseScrobbleOptions(option_arguments);
-    var credentials: EnvironmentToken = try .init(allocator, environ);
+    var credentials: EnvironmentCredentials = try .init(allocator, environ);
     defer credentials.deinit(allocator);
 
     var runtime = liborca.Runtime.init(allocator);
@@ -1263,6 +1313,15 @@ fn setFeedback(
     try stdout.print("feedback: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
 }
 
+/// Sets the application key and any other AcoustID server, as `match` and
+/// `submit-acoustid` both need.
+fn configureAcoustId(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
+    try runtime.setAcoustIdClientKey(build_options.acoustid_key);
+    if (environ.get("ORCA_ACOUSTID_URL")) |url| {
+        if (url.len > 0) try runtime.setAcoustIdServer(try allocator.dupe(u8, url));
+    }
+}
+
 fn matchLibrary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1278,6 +1337,8 @@ fn matchLibrary(
             request.batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
         } else if (std.mem.startsWith(u8, argument, "--limit=")) {
             request.limit = try std.fmt.parseInt(u32, argument["--limit=".len..], 10);
+        } else if (std.mem.eql(u8, argument, "--no-fingerprints")) {
+            request.fingerprints = false;
         } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
             cancel_after_ms = try std.fmt.parseInt(u64, argument["--cancel-after=".len..], 10);
         } else return error.UnknownOption;
@@ -1287,6 +1348,7 @@ fn matchLibrary(
     if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
         if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
     }
+    try configureAcoustId(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const job_handle = try runtime.startLibraryMatching(library, request);
     const planned = try runtime.jobSnapshotSynced(job_handle);
@@ -1306,6 +1368,107 @@ fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
         .{ stats.tracks_examined, stats.matched, stats.unmatched, stats.insufficient_evidence, stats.refused, stats.proposals_stored },
     );
     try stdout.print("requests={d} cached={d}\n", .{ stats.requests, stats.cache_hits });
+    try stdout.print(
+        "acoustid={s} fingerprinted={d} fingerprints_cached={d} fingerprint_failures={d} acoustid_requests={d} acoustid_cached={d} acoustid_refused={d}\n",
+        .{
+            @tagName(stats.acoustid),
+            stats.fingerprinted,
+            stats.fingerprint_cache_hits,
+            stats.fingerprint_failures,
+            stats.acoustid_requests,
+            stats.acoustid_cache_hits,
+            stats.acoustid_refused,
+        },
+    );
+}
+
+fn printFingerprint(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_argument: []const u8,
+) !void {
+    const track_id = try std.fmt.parseInt(i64, id_argument, 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const outcome = try runtime.libraryTrackFingerprint(library, io, track_id) orelse return error.NoPresentFile;
+    defer outcome.fingerprint.deinit();
+    try stdout.print("DURATION={d}\nFINGERPRINT={s}\n", .{ outcome.fingerprint.durationSeconds(), outcome.fingerprint.encoded });
+}
+
+fn submitAcoustId(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: *std.process.Environ.Map,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var dry_run = false;
+    for (option_arguments) |argument| {
+        if (std.mem.eql(u8, argument, "--dry-run")) dry_run = true else return error.UnknownOption;
+    }
+    var credentials: EnvironmentCredentials = try .init(allocator, environ);
+    defer credentials.deinit(allocator);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    try runtime.setCredentialStore(credentials.store());
+    try configureAcoustId(allocator, &runtime, environ);
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    try stdout.print("{d} files to submit\n", .{try runtime.libraryAcoustIdSubmittableCount(library)});
+    if (dry_run) return listSubmittable(&runtime, library, stdout);
+    try stdout.flush();
+
+    const job_handle = try runtime.startAcoustIdSubmission(library);
+    awaitJob(&runtime, stdout, job_handle, null) catch |err| if (err != error.JobFailed) return err;
+    const stats = try runtime.jobSubmissionStats(job_handle);
+    try stdout.print(
+        "outcome={s} examined={d} submitted={d} as_metadata={d} fingerprinted={d} fingerprints_cached={d} fingerprint_failures={d} rejected={d} requests={d}\n",
+        .{
+            @tagName(stats.outcome),
+            stats.files_examined,
+            stats.submitted,
+            stats.sent_as_metadata,
+            stats.fingerprinted,
+            stats.fingerprint_cache_hits,
+            stats.fingerprint_failures,
+            stats.rejected,
+            stats.requests,
+        },
+    );
+    try stdout.flush();
+    return switch (stats.outcome) {
+        .completed, .cancelled => {},
+        .needs_user_key => error.NeedsAcoustIdUserKey,
+        .invalid_user_key => error.InvalidAcoustIdUserKey,
+        .needs_client_key, .invalid_client_key => error.InvalidAcoustIdClientKey,
+        .unavailable => error.SubmissionStopped,
+    };
+}
+
+/// One line per file: file id, Track id, what is sent (the recording ID, or
+/// `metadata`), recording ID, title and artist.
+fn listSubmittable(runtime: *liborca.Runtime, library: liborca.LibraryHandle, stdout: *std.Io.Writer) !void {
+    var cursor: i64 = 0;
+    while (true) {
+        const page = try runtime.libraryAcoustIdSubmittablePage(library, cursor, 512);
+        defer page.deinit();
+        if (page.items.len == 0) return;
+        for (page.items) |item| {
+            cursor = item.file_id;
+            const length: ?u64 = if (item.duration_ms) |milliseconds| std.math.cast(u64, milliseconds) else null;
+            try stdout.print("{d}\t{d}\t{s}\t{s}\t{s}\t{s}\n", .{
+                item.file_id,
+                item.track_id,
+                if (item.sendsRecordingId(length)) "recording_id" else "metadata",
+                item.recording_mbid,
+                item.title,
+                item.artist,
+            });
+        }
+    }
 }
 
 fn listMatches(
@@ -1324,6 +1487,8 @@ fn listMatches(
     for (page.items) |proposal| {
         try stdout.print("{d}\t{d:.2}\t", .{ proposal.id, proposal.confidence });
         if (proposal.musicbrainz_score) |score| try stdout.print("{d}", .{score}) else try stdout.writeAll("-");
+        try stdout.print("\t{s}\t", .{proposal.provider});
+        if (proposal.acoustid_score) |score| try stdout.print("{d:.2}", .{score}) else try stdout.writeAll("-");
         try stdout.print("\t{s}\t{s}\t{s}\t{s}\t", .{ proposal.recording_mbid, proposal.title, proposal.artist, proposal.album });
         if (proposal.track_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
         try stdout.writeAll("\t");

@@ -22,7 +22,9 @@ to Orca's files stay open, and App Store distribution stays possible.
 be permissive (BSD, MIT, Apache-2.0, zlib, CC0, public domain): a GPL or LGPL
 dependency there would bind every embedder and rule out the App Stores. This is
 why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
-(FDK licence). A frontend dynamically linking its platform's own toolkit or
+(FDK licence), and why Chromaprint is built without its bundled LGPL
+resampler, with libsamplerate (BSD-2-Clause) resampling instead; a build step
+fails if a compiled Chromaprint source carries a GPL or LGPL notice. A frontend dynamically linking its platform's own toolkit or
 keyring, as `orca-gtk` does with LGPL GTK4 and libsecret, is outside that rule.
 
 ## Toolchain
@@ -35,14 +37,16 @@ ziglang.org deletes old nightly tarballs, which is how the previous pin
 `io: std.Io` parameter threaded through I/O call sites (`std.testing.io` in
 tests). Do not write code against the older `std.fs` / `std.io` APIs.
 
-The dev shell supplies libFLAC, libopusfile, libvorbis and SQLite, plus
-PipeWire, GTK4 and libsecret on Linux. `sqlite3`, `FLAC`, `opusfile`,
-`vorbisfile`, GTK and libsecret (`orca-gtk` only) are linked via pkg-config.
+The dev shell supplies libFLAC, libopusfile, libvorbis, libsamplerate and
+SQLite, plus PipeWire, GTK4 and libsecret on Linux. `sqlite3`, `FLAC`,
+`opusfile`, `vorbisfile`, `samplerate`, GTK and libsecret (`orca-gtk` only)
+are linked via pkg-config.
 PipeWire's include paths come from `pkg-config --cflags-only-I`
 (`pkgConfigIncludePaths` in `build.zig`) and its library is linked without
 pkg-config, because the rest of its `--cflags` breaks Zig's pkg-config parser.
 No path under `/usr` is assumed, so the same build works on NixOS and FHS
-distributions. The Zig package dependencies are `alac` and `libxaac`;
+distributions. The Zig package dependencies are `alac`, `libxaac` and
+`chromaprint` (built by `build/chromaprint.zig`);
 `nix build` fetches them through `zig.fetchDeps`. When `build.zig.zon`
 dependencies change, set that hash in `flake.nix` to `pkgs.lib.fakeHash` and
 rebuild to learn the new one: an unchanged hash makes Nix reuse the old
@@ -145,12 +149,19 @@ zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|
 zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
 zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
 
-# MusicBrainz matching -- server from ORCA_MUSICBRAINZ_URL (https, or http to localhost)
-zig build run -- match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]   # 1 request/s, answers cached 30 days
-zig build run -- matches DATABASE TRACK_ID
+# MusicBrainz and AcoustID matching -- servers from ORCA_MUSICBRAINZ_URL and
+# ORCA_ACOUSTID_URL (https, or http to localhost); AcoustID application key from
+# -Dacoustid-key=KEY at build time (default AqlfLksN1K)
+zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
+zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal
+zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FINGERPRINT=
 zig build run -- accept-match DATABASE PROPOSAL_ID   # records the recording ID in the library only
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # files with exactly one match that confident
+
+# AcoustID submission of recording IDs from accepted matches or edits -- user key
+# from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing
+zig build run -- submit-acoustid DATABASE [--dry-run]
 ```
 
 Frontends:
@@ -233,8 +244,9 @@ There is no test filter wired into `build.zig` — `zig build test` runs all ~40
 tests (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
-SQLite, the `alac` and `libxaac` packages, libFLAC, libopusfile,
-libvorbisfile, libc, libc++ and the C shims, which is impractical to
+SQLite, the `alac`, `libxaac` and `chromaprint` packages, libFLAC,
+libopusfile, libvorbisfile, libsamplerate, libc, libc++ and the C shims, which
+is impractical to
 reconstruct on a bare `zig test` command line.
 
 Tests are run from the repository root and load fixtures by relative path

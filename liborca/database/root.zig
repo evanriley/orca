@@ -89,6 +89,13 @@ pub const MatchScope = repository.MatchScope;
 pub const MatchReviewItem = repository.MatchReviewItem;
 pub const MatchReviewPage = repository.MatchReviewPage;
 pub const RecordingMbid = repository.RecordingMbid;
+pub const IdentificationProvider = repository.IdentificationProvider;
+pub const ProviderSet = repository.ProviderSet;
+pub const ProposalEvidence = repository.ProposalEvidence;
+pub const AcoustIdSubmittable = repository.AcoustIdSubmittable;
+pub const AcoustIdSubmittablePage = repository.AcoustIdSubmittablePage;
+pub const AcoustIdSubmission = repository.AcoustIdSubmission;
+pub const AcoustIdSubmissionRepository = repository.AcoustIdSubmissionRepository;
 
 test {
     _ = @import("library.zig");

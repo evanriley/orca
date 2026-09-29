@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 16;
+pub const current_version = 17;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -850,6 +850,28 @@ const migration_16 =
     \\CREATE INDEX files_by_recording ON files(recording_id);
 ;
 
+/// A file counts as searched by a provider once that provider answered for
+/// it, even with nothing, so no search is repeated. Files MusicBrainz proposed
+/// something for before this version were searched by it.
+const migration_17 =
+    \\CREATE TABLE identification_searches (
+    \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    \\    provider TEXT NOT NULL,
+    \\    searched_at INTEGER NOT NULL,
+    \\    PRIMARY KEY(file_id, provider)
+    \\) WITHOUT ROWID;
+    \\INSERT INTO identification_searches(file_id, provider, searched_at)
+    \\    SELECT file_id, 'musicbrainz', max(updated_at) FROM identification_proposals
+    \\    WHERE provider = 'musicbrainz' GROUP BY file_id;
+    \\CREATE TABLE acoustid_submissions (
+    \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    \\    recording_mbid TEXT NOT NULL,
+    \\    submission_id INTEGER,
+    \\    submitted_at INTEGER NOT NULL,
+    \\    PRIMARY KEY(file_id, recording_mbid)
+    \\) WITHOUT ROWID;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -990,6 +1012,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 14 and target_version >= 14) try db.exec(migration_14);
     if (version < 15 and target_version >= 15) try db.exec(migration_15);
     if (version < 16 and target_version >= 16) try db.exec(migration_16);
+    if (version < 17 and target_version >= 17) try db.exec(migration_17);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1409,6 +1432,38 @@ test "the migrated feedback table rejects other scores and follows its recording
     try db.exec("INSERT INTO feedback(recording_id, score, updated_at) VALUES (900, -1, 0);");
     try db.exec("DELETE FROM recordings WHERE id = 900;");
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM feedback;"));
+}
+
+test "upgrading from version 16 counts files with MusicBrainz proposals as searched and keeps the proposals" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v16.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 16);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10), (3, 1, 10), (4, 1, 10);
+        \\INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload, state, updated_at)
+        \\VALUES (1, 'musicbrainz', 'a', 0.9, x'7b7d', 0, 100),
+        \\       (1, 'musicbrainz', 'b', 0.6, x'7b7d', 2, 200),
+        \\       (2, 'musicbrainz', 'c', 0.9, x'7b7d', 1, 300),
+        \\       (3, 'musicbrainz', 'd', 0.9, x'7b7d', 2, 400);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM identification_searches WHERE provider = 'musicbrainz';"));
+    try std.testing.expectEqual(@as(i64, 200), try scalar(db, "SELECT searched_at FROM identification_searches WHERE file_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM identification_searches WHERE file_id = 4;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM identification_proposals;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM acoustid_submissions;"));
+    try db.exec("INSERT INTO acoustid_submissions(file_id, recording_mbid, submission_id, submitted_at) VALUES (2, 'c', 7, 500);");
+    try db.exec("DELETE FROM files WHERE id = 2;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM acoustid_submissions;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM identification_searches;"));
+    try checkForeignKeys(db);
 }
 
 test "an empty database migrates straight to the current version" {

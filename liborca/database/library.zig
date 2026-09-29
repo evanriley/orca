@@ -62,6 +62,7 @@ pub const LibraryDatabase = struct {
     listens: repository.ListenRepository,
     feedback: repository.FeedbackRepository,
     identification_proposals: repository.IdentificationProposalRepository,
+    acoustid_submissions: repository.AcoustIdSubmissionRepository,
 
     /// Open a Library, recovering any interrupted file mutation before the
     /// caller can see it.
@@ -113,6 +114,7 @@ pub const LibraryDatabase = struct {
             .listens = .{ .db = database, .write_lane = write_lane },
             .feedback = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
+            .acoustid_submissions = .{ .db = database, .write_lane = write_lane },
         };
     }
 
@@ -1853,7 +1855,7 @@ test "a Track's proposals come most confident first, old payloads included, and 
     try std.testing.expectError(error.PageOutOfRange, library.identification_proposals.pendingForTrack(std.testing.allocator, track, 0));
 }
 
-test "matching selects each Track once and passes over one with a recording id or a pending proposal" {
+test "matching selects a Track until each provider in scope has answered for its file, and never one with a recording id" {
     var library = try openFeedbackLibrary("unidentified");
     defer library.close();
     const proposals = &library.identification_proposals;
@@ -1864,38 +1866,151 @@ test "matching selects each Track once and passes over one with a recording id o
     const second_file = try library.files.create(.{ .audio_format = 2, .size_bytes = 2048 });
     var sql: [96]u8 = undefined;
     try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE files SET recording_id = {d} WHERE id = {d};", .{ recording, second_file }, 0));
-    const pending = try addFeedbackTrack(&library, "Pending", try addRecording(&library), null);
-    _ = try putProposal(&library, try playFileOf(&library, pending), match_mbid, 0.9, match_payload);
-    const dismissed = try addFeedbackTrack(&library, "Dismissed", try addRecording(&library), null);
-    try proposals.dismiss(try putProposal(&library, try playFileOf(&library, dismissed), match_mbid, 0.9, match_payload));
+    const musicbrainz_answered = try addFeedbackTrack(&library, "MusicBrainz Answered", try addRecording(&library), null);
+    _ = try proposals.recordSearch(std.testing.allocator, try playFileOf(&library, musicbrainz_answered), .{ .musicbrainz = true }, &.{});
+    const both_answered = try addFeedbackTrack(&library, "Both Answered", try addRecording(&library), null);
+    _ = try proposals.recordSearch(std.testing.allocator, try playFileOf(&library, both_answered), .{ .musicbrainz = true, .acoustid = true }, &.{});
     const matched = try addFeedbackTrack(&library, "Matched", try addRecording(&library), null);
     _ = try proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, matched), match_mbid, 0.9, match_payload));
 
-    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, null));
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, 2));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, null));
-    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = pending }, null));
-    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, 0, 2);
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, false, null));
+    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, true, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, true, 2));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, false, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, true, null));
+    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, false, 0, 2);
     defer only.deinit();
     try std.testing.expectEqual(@as(usize, 1), only.items.len);
     try std.testing.expectEqual(two_files, only.items[0].track_id);
-    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, 0, 2);
+    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, true, 0, 2);
     defer first.deinit();
     try std.testing.expectEqual(@as(usize, 2), first.items.len);
     try std.testing.expectEqual(untagged, first.items[0].track_id);
     try std.testing.expectEqualStrings("Nick Drake", first.items[0].artist);
+    try std.testing.expect(first.items[0].needs_musicbrainz and first.items[0].needs_acoustid);
+    try std.testing.expectEqual(@as(?[]u8, null), first.items[0].path);
     try std.testing.expectEqual(two_files, first.items[1].track_id);
     try std.testing.expectEqual(try playFileOf(&library, two_files), first.items[1].file_id);
-    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, first.items[1].track_id, 2);
+    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, true, first.items[1].track_id, 2);
     defer rest.deinit();
     try std.testing.expectEqual(@as(usize, 1), rest.items.len);
-    try std.testing.expectEqual(dismissed, rest.items[0].track_id);
+    try std.testing.expectEqual(musicbrainz_answered, rest.items[0].track_id);
+    try std.testing.expect(!rest.items[0].needs_musicbrainz and rest.items[0].needs_acoustid);
 
-    try library.observed_tags.upsert(.{ .file_id = try playFileOf(&library, dismissed), .values = .{
-        .title = "Dismissed",
+    try library.observed_tags.upsert(.{ .file_id = try playFileOf(&library, untagged), .values = .{
+        .title = "Untagged",
         .musicbrainz_recording_id = rival_mbid,
     } });
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, true, null));
+}
+
+fn proposalScalar(library: *LibraryDatabase, comptime column: []const u8, proposal_id: i64) !i64 {
+    var sql: [128]u8 = undefined;
+    return testScalar(library, try std.fmt.bufPrintSentinel(&sql, "SELECT " ++ column ++ " FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
+}
+
+test "a search's proposals merge by recording, two providers agreeing raise the confidence, and a dismissed one stays dismissed" {
+    var library = try openFeedbackLibrary("merge");
+    defer library.close();
+    const proposals = &library.identification_proposals;
+    const file = try playFileOf(&library, try addFeedbackTrack(&library, "Song", try addRecording(&library), null));
+
+    try std.testing.expectEqual(@as(u32, 1), try proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &.{.{
+        .recording_mbid = match_mbid,
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{ .title = "Song", .album = "Bryter Layter", .mb_score = 100, .musicbrainz_confidence = 0.8 },
+    }}));
+    const merged = try testScalar(&library, "SELECT max(id) FROM identification_proposals;");
+    const legacy = try putProposal(&library, file, rival_mbid, 0.6, match_payload);
+    try proposals.dismiss(legacy);
+    try std.testing.expectEqual(@as(u32, 1), try proposals.recordSearch(std.testing.allocator, file, .{ .acoustid = true }, &.{
+        .{
+            .recording_mbid = match_mbid,
+            .found_by = .{ .acoustid = true },
+            .payload = .{ .title = "AcoustID title", .acoustid_score = 0.95, .acoustid_confidence = 0.7 },
+        },
+        .{
+            .recording_mbid = rival_mbid,
+            .found_by = .{ .acoustid = true },
+            .payload = .{ .title = "", .acoustid_score = 0.9, .acoustid_confidence = 0.9 },
+        },
+    }));
+
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_proposals;"));
+    const page = try proposals.pendingForTrack(std.testing.allocator, try testScalar(&library, "SELECT min(id) FROM tracks;"), 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.items.len);
+    const both = page.items[0];
+    try std.testing.expectEqual(merged, both.id);
+    try std.testing.expectEqualStrings("musicbrainz+acoustid", both.provider);
+    try std.testing.expectApproxEqAbs(@as(f32, 1 - 0.2 * 0.3), both.confidence, 0.0001);
+    try std.testing.expect(both.confidence > 0.8);
+    try std.testing.expectEqualStrings("Song", both.title);
+    try std.testing.expectEqual(@as(?u8, 100), both.musicbrainz_score);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), both.acoustid_score.?, 0.0001);
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, legacy));
+    try std.testing.expectEqual(@as(i64, 96), try proposalScalar(&library, "CAST(round(confidence * 100) AS INTEGER)", legacy));
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_searches;"));
+
+    try std.testing.expectError(error.InvalidIdentificationProposal, proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &.{.{
+        .recording_mbid = "not-a-recording",
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{},
+    }}));
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_searches;"));
+}
+
+fn setRecordingId(library: *LibraryDatabase, track_id: i64, mbid: []const u8, provenance: metadata.Provenance, locked: bool) !void {
+    try library.orca_metadata.upsert(.{
+        .file_id = try playFileOf(library, track_id),
+        .field = .musicbrainz_recording_id,
+        .value = mbid,
+        .provenance = provenance,
+        .locked = locked,
+    });
+}
+
+test "only a recording ID Orca chose and the file's tag does not carry is offered to AcoustID, once per ID" {
+    var library = try openFeedbackLibrary("submittable");
+    defer library.close();
+    const accepted = try addFeedbackTrack(&library, "Accepted", try addRecording(&library), null);
+    _ = try library.identification_proposals.acceptProposal(std.testing.allocator, try putProposal(
+        &library,
+        try playFileOf(&library, accepted),
+        match_mbid,
+        0.9,
+        "{\"title\":\"Accepted\",\"duration_ms\":181000}",
+    ));
+    const tag_wins = try addFeedbackTrack(&library, "Tag Wins", try addRecording(&library), feedback_mbid);
+    try setRecordingId(&library, tag_wins, match_mbid, .user, false);
+    const same_as_tag = try addFeedbackTrack(&library, "Same As Tag", try addRecording(&library), feedback_mbid);
+    try setRecordingId(&library, same_as_tag, feedback_mbid, .user, true);
+    const locked_edit = try addFeedbackTrack(&library, "Locked Edit", try addRecording(&library), feedback_mbid);
+    try setRecordingId(&library, locked_edit, rival_mbid, .user, true);
+    const inferred = try addFeedbackTrack(&library, "Inferred", try addRecording(&library), null);
+    try setRecordingId(&library, inferred, rival_mbid, .inference, false);
+    const submissions = &library.acoustid_submissions;
+
+    try std.testing.expectEqual(@as(u64, 2), try submissions.submittableCount());
+    const page = try submissions.submittablePage(std.testing.allocator, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(accepted, page.items[0].track_id);
+    try std.testing.expectEqualStrings(match_mbid, page.items[0].recording_mbid);
+    try std.testing.expectEqual(@as(?u64, 181_000), page.items[0].recording_length_ms);
+    try std.testing.expectEqualStrings("Bryter Layter", page.items[0].album);
+    try std.testing.expectEqual(locked_edit, page.items[1].track_id);
+    try std.testing.expectEqual(@as(?u64, null), page.items[1].recording_length_ms);
+
+    try submissions.record(&.{.{ .file_id = page.items[0].file_id, .recording_mbid = match_mbid, .submission_id = 41 }});
+    try std.testing.expectEqual(@as(u64, 1), try submissions.submittableCount());
+    try setRecordingId(&library, accepted, rival_mbid, .user, false);
+    try std.testing.expectEqual(@as(u64, 2), try submissions.submittableCount());
+    const later = try submissions.submittablePage(std.testing.allocator, page.items[0].file_id, 10);
+    defer later.deinit();
+    try std.testing.expectEqual(@as(usize, 1), later.items.len);
+    try std.testing.expectEqual(locked_edit, later.items[0].track_id);
 }
 
 fn queryPlan(library: *LibraryDatabase, comptime sql: []const u8) ![]u8 {
@@ -1935,6 +2050,7 @@ test "a recording id and the matching selection are looked up by key, never by s
         try queryPlan(&library, repository.feedback_syncable_sql),
         try queryPlan(&library, repository.unidentified_page_sql),
         try queryPlan(&library, "SELECT " ++ repository.effectiveRecordingMbid("1") ++ ";"),
+        try queryPlan(&library, repository.acoustid_submittable_page_sql),
         try queryPlan(&library, repository.review_page_sql),
         try queryPlan(&library, repository.review_count_sql),
     };

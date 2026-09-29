@@ -72,3 +72,9 @@ release:"Hot Space"` (`limit=10`, `fmt=json`), trimmed to four recordings
 with the artists' aliases removed. MusicBrainz data is CC0. It covers a joined
 artist credit, a recording with no length, several releases per recording and
 a track numbered `B6`.
+
+`audio/chromaprint-test.mp3` and `audio/chromaprint-test.fpcalc.txt` are
+`tests/data/test.mp3` and `tests/data/test.mp3.fpcalc.out` from Chromaprint
+1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
+Chromaprint is MIT-licensed. The fingerprint parity test compares Orca's
+fingerprint of the MP3 with the reference.

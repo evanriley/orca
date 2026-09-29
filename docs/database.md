@@ -329,19 +329,41 @@ without a Recording.
 
 ## Identification proposals
 
-`identification_proposals` holds what a provider proposed for a file, keyed on
-`files.id`: the provider, its id for the candidate (a MusicBrainz recording
-id), Orca's confidence from 0 to 1, and a JSON payload of what the provider
-said. `state` is 0 pending, 1 accepted, 2 dismissed; storing the same
-candidate again updates its confidence and payload and keeps its state, so a
-dismissed proposal stays dismissed. Every payload field has a default, so
-payloads written before a field existed still parse.
+`identification_proposals` holds what the providers proposed for a file, keyed
+on `files.id`: the providers that found the candidate (`musicbrainz`,
+`acoustid` or `musicbrainz+acoustid`), its MusicBrainz recording id, Orca's
+confidence from 0 to 1, and a JSON payload of what the providers said,
+including each provider's confidence alone and AcoustID's score. `state` is 0
+pending, 1 accepted, 2 dismissed. A file has one proposal per recording:
+`IdentificationProposalRepository.recordSearch` finds an existing one by file
+and recording id, whatever its provider, merges the new evidence into it and
+keeps its state, so a dismissed proposal stays dismissed. A payload written
+before per-provider confidences existed lends its row's confidence to the one
+provider it names. Every payload field has a default, so payloads written
+before a field existed still parse.
+
+`identification_searches` (version 17) records which provider has answered
+for which file, empty answers included: `(file_id, provider)` is its primary
+key, `searched_at` is Unix seconds, and rows go with their file
+(`ON DELETE CASCADE`). `recordSearch` writes the proposals and the search rows
+of one search in one transaction, and only for providers that answered.
+Migration 17 counts every file with a MusicBrainz proposal, in any state, as
+searched by MusicBrainz, so no MusicBrainz search from before it is repeated.
 
 `repository.unidentified_tracks` is the one definition of which Tracks the
 matching job still has to search: those whose playing file has no recording
-id in effect and no pending proposal. The job's page and its count both use
-it, and every lookup in it is by key: the three recording-id lookups by
-primary key, the proposal check through `identification_proposals_file`.
+id in effect and lacks a search row for MusicBrainz, or for AcoustID when
+AcoustID is in scope. The job's page and its count both use it, and every
+lookup in it is by key: the three recording-id lookups and the two search-row
+checks by primary key.
+
+`acoustid_submissions` (version 17) records each fingerprint AcoustID
+accepted: `(file_id, recording_mbid)` is its primary key, with the
+`submission_id` AcoustID returned and `submitted_at`. Rows go with their file.
+`repository.acoustid_submittable` selects the files a submission sends: an
+Orca value for the recording id with `provider` or `user` provenance that is
+the id in effect, is not the file's tag, and has no row here for that id.
+Editing the id makes the file eligible again under the new one.
 
 ## Concurrency
 

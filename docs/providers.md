@@ -1,7 +1,8 @@
 # Providers and listening history
 
 Orca talks to online services only through `network.Gateway`, and the rules
-below hold for every provider. ListenBrainz and MusicBrainz are connected.
+below hold for every provider. ListenBrainz, MusicBrainz and AcoustID are
+connected.
 Other services follow the same rules; a request that breaks one is a defect,
 not a tuning choice.
 
@@ -48,14 +49,15 @@ not a tuning choice.
   nothing queued it makes no request and looks up no token, and otherwise a
   bad token shows as a `401` or `403` on submission, which stops delivery
   until the token changes.
-- **Credentials.** The token is read from the host's secure storage through
-  `CredentialStore` at the moment of a request. It is never written to the
-  Library database, a log, a cache key or a settings file. `orca-gtk` uses the
-  Secret Service through libsecret; `orca-cli` reads
-  `ORCA_LISTENBRAINZ_TOKEN`.
+- **Credentials.** A user's token or key is read from the host's secure
+  storage through `CredentialStore` at the moment of a request. It is never
+  written to the Library database, a log, a cache key or a settings file.
+  `orca-gtk` uses the Secret Service through libsecret; `orca-cli` reads
+  `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
 - **Servers.** ListenBrainz-compatible servers are reachable with
-  `Runtime.setListenBrainzServer`, and a MusicBrainz mirror with
-  `Runtime.setMusicBrainzServer`. `http` is accepted only for `127.0.0.1`,
+  `Runtime.setListenBrainzServer`, a MusicBrainz mirror with
+  `Runtime.setMusicBrainzServer` and another AcoustID server with
+  `Runtime.setAcoustIdServer`. `http` is accepted only for `127.0.0.1`,
   `[::1]` and `localhost`, so a token or a library's contents never cross a
   network in clear text.
 
@@ -194,58 +196,153 @@ built from the same fields as a listen. It is off by default.
   shared backoff, so Now Playing cannot hide an outage.
 - **Never ahead of listens.** A due batch of listens is sent before it.
 
-## MusicBrainz matching
+## Matching
 
 A file without a MusicBrainz recording ID cannot have its loves, hates or
 listens tied to a recording on ListenBrainz. `Runtime.startLibraryMatching`
-searches MusicBrainz for those files and stores what it finds as proposals.
-Nothing takes effect until a person accepts one; what acceptance writes is in
+asks MusicBrainz, and AcoustID by fingerprint, about those files and stores
+what they find as proposals. Nothing takes effect until a person accepts one;
+what acceptance writes is in
 [metadata.md](metadata.md#musicbrainz-recording-ids).
 
-- **What is searched.** Every Track whose playing file has no recording ID
-  and no pending proposal, in Track id order. One Track is one search however
-  many files back it. A Track without a title or an artist is counted and not
-  searched. `MatchRequest.limit` bounds how many Tracks one run examines.
+- **What is searched.** Every Track whose playing file has no recording ID in
+  effect, in Track id order, by each service that has not yet answered for
+  that file. An answer, empty ones included, is recorded per file and service
+  in `identification_searches`, so no service is asked about a file twice. A
+  failed or refused search records nothing and is repeated on the next run.
+  One Track is one search however many files back it. `MatchRequest.limit`
+  bounds how many Tracks one run examines, and `MatchRequest.track_id` limits
+  it to one Track under the same rule.
+- **One proposal per recording.** Candidates from both services are merged by
+  recording ID. A proposal names the services that found it: `musicbrainz`,
+  `acoustid` or `musicbrainz+acoustid`. When a file already has a proposal for
+  that recording, it is updated in place and keeps its state, so a dismissed
+  or accepted proposal is never offered again.
+- **Confidence.** Orca scores each service's candidate from 0 to 1 against the
+  Track's title, artist, album and length; AcoustID's own score is the
+  fingerprint evidence in that score. The proposal's confidence is
+  `1 − (1 − c_musicbrainz)(1 − c_acoustid)` over the services that found it, so
+  two services agreeing rank above either alone. Candidates below 0.5 are
+  dropped.
+- **Failures.** A `429`, a `5xx` or a timeout waits out the longer of the
+  service's block and a backoff of 60 s doubling per attempt, cancellably,
+  then asks again. After three attempts, or at once when the network cannot
+  be reached, the job stops and reports `failed`. Cached answers are still
+  used without a network. A query refused with any other `4xx`, or answered
+  with something that is not a search result, is counted and skipped.
+- **One job at a time.** A second `startLibraryMatching` while one runs returns
+  `error.MatchingAlreadyRunning`, and one while an AcoustID submission runs
+  returns `error.AcoustIdBusy`, so each service sees one client and one
+  backoff. Cancellation is checked between Tracks, between fingerprints,
+  while waiting for the next request slot and while backing off.
+
+`jobMatchStats` reports, besides the Tracks examined and matched, the
+MusicBrainz requests and cache hits, the fingerprints taken, read from the
+cache or failed, the AcoustID requests, cache hits and refused queries, and
+`acoustid`: `searched`, `off` (the request asked for no fingerprints),
+`no_client_key` or `invalid_client_key`.
+
+`libraryMatchProposals` lists a Track's pending proposals, most confident
+first, with their source and AcoustID score. `libraryAcceptMatch` accepts one
+and `libraryDismissMatch` dismisses one.
+`libraryAcceptConfidentMatches(minimum)` accepts, for every file where
+exactly one pending proposal has a confidence of at least `minimum`, that
+proposal; it is an explicit user action, never run by a job.
+
+### MusicBrainz search
+
 - **The query.** `GET /ws/2/recording?fmt=json&limit=10&query=` with
   `recording:"TITLE" AND artist:"ARTIST" release:"ALBUM"`. The release term is
   optional, so it raises matching releases without excluding the others.
-  Lucene syntax characters in the values are escaped with a backslash.
-- **What is kept.** Orca scores each candidate from 0 to 1 against the
-  Track's title, artist, album and length, and drops candidates below 0.5. A
-  proposal keeps the recording ID, title, full artist credit, the release
+  Lucene syntax characters in the values are escaped with a backslash. A
+  Track without a title or an artist is counted and not searched.
+- **What is kept.** The recording ID, title, full artist credit, the release
   whose title is closest to the album with its ID and track number, the
   length, and MusicBrainz's own score from 0 to 100.
-- **Rate and cache.** One request a second under the rules above. Answers,
-  empty ones included, are cached in `provider_cache` for 30 days of wall
-  time, keyed by the request URL, so a rerun makes no request for a Track
-  already searched. When a request fails and an expired answer is cached,
-  that answer is used.
-- **Failures.** A `429`, a `5xx` or a timeout waits out the longer of the
-  service's block and a backoff of 60 s doubling per attempt, cancellably,
-  then searches the same Track again. After three attempts, or at once when
-  the network cannot be reached, the job stops and reports `failed`. A failed
-  search stores nothing, so the next run searches that Track again; cached
-  answers are still used without a network. A query refused with any other
-  `4xx`, or answered with something that is not a search result, is counted
-  and skipped.
-- **One job per runtime.** A second `startLibraryMatching` while one runs
-  returns `error.MatchingAlreadyRunning`. Cancellation is checked between
-  Tracks, while waiting for the next request slot and while backing off.
+- **Cache.** Answers, empty ones included, are cached in `provider_cache` for
+  30 days of wall time, keyed by the request URL. When a request fails and an
+  expired answer is cached, that answer is used.
 
-`libraryMatchProposals` lists a Track's pending proposals, most confident
-first. `libraryAcceptMatch` accepts one and `libraryDismissMatch` dismisses
-one. `libraryAcceptConfidentMatches(minimum)` accepts, for every file where
-exactly one pending proposal has a confidence of at least `minimum`, that
-proposal; it is an explicit user action, never run by a job.
+### AcoustID lookup
+
+- **Fingerprints.** The first 120 s of the playing file are decoded by Orca,
+  resampled to 11,025 Hz and fingerprinted by Chromaprint, as `fpcalc` does;
+  see [analysis.md](analysis.md#acoustid-fingerprints). A file that does not
+  decode cleanly has no fingerprint, is counted in `fingerprint_failures`, and
+  its Track is still searched on MusicBrainz.
+- **The request.** `POST /v2/lookup`, a gzip-compressed form
+  (`Content-Encoding: gzip`) with `client`, `clientversion`, `format=json`,
+  `meta=recordings releasegroups compress`, `batch=1` and `duration.N` and
+  `fingerprint.N` for up to 20 fingerprints. `duration` is the whole file's
+  length in whole seconds, rounded. Answers come back per index.
+- **What is kept.** Each recording with an ID once per fingerprint, under its
+  best score: the ID, the title (empty when AcoustID has none), the artists
+  joined by their join phrases, the release group title closest to the
+  Track's album, the length and AcoustID's score. With `compress`, an artist
+  or release group named in full once may appear by ID alone elsewhere; names
+  are resolved across the whole answer.
+- **Cache.** Each fingerprint's answer is cached in `provider_cache` for 90
+  days, keyed by the duration and a BLAKE3 hash of the fingerprint, so
+  fingerprints already answered are left out of the request.
+- **Application key.** AcoustID identifies the application by a client key.
+  `orca-cli` and `orca-gtk` set it with `Runtime.setAcoustIdClientKey` from
+  the build option `-Dacoustid-key=` (default `AqlfLksN1K`); liborca has no
+  key of its own. A `CredentialStore` value under `org.acoustid` /
+  `client-key` overrides it. Without a key AcoustID is skipped and reported
+  as `no_client_key`; a key AcoustID refuses (error code 4) stops AcoustID for
+  the rest of the job and is reported as `invalid_client_key`.
+
+## AcoustID submission
+
+`Runtime.startAcoustIdSubmission` sends AcoustID the fingerprints of files
+whose recording ID Orca chose, so other people's copies of the recording can
+be identified. It is started only by a person; no job starts it.
+
+- **What is sent.** Files whose recording ID in effect is an Orca value from
+  an accepted match or an edit, differs from the file's own tag, and has not
+  been sent for that file. Tagged IDs are never sent. A file is sent once per
+  recording ID: after the ID is edited, the new ID is sent again.
+  `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
+  them without fingerprinting anything.
+- **ID or metadata.** When the file's length differs from the recording's by
+  more than 30 s, the title, artist, album, album artist, track and disc
+  number and year are sent instead of the ID. The recording's length comes
+  from the accepted match; without one, the ID is sent.
+- **Only clean fingerprints.** A file that does not decode cleanly is counted
+  in `fingerprint_failures` and not sent.
+- **The request.** `POST /v2/submit`, a gzip-compressed form with `client`,
+  `clientversion`, `user`, `format=json` and, per item N, `duration.N`,
+  `fingerprint.N`, `fileformat.N`, `bitrate.N` (the file's average) and
+  either `mbid.N` or the metadata fields. A batch holds at most 50 items and
+  at most 900 KB of form, below the service's 1 MiB limit; an item that would
+  pass either bound starts the next batch.
+- **User key.** The user's key is read from the `CredentialStore` under
+  `org.acoustid` / `user-key` before each request and never kept. Without one
+  the job fails with `needs_user_key` before fingerprinting anything; a key
+  AcoustID refuses (`401`, `403`, or error code 6) fails it with
+  `invalid_user_key`. Nothing is marked sent in either case.
+- **Failures.** Another `4xx` rejects that batch: its files are counted in
+  `rejected` and stay unsent. `429`, `5xx` and network errors use the same
+  backoff as matching, and after three attempts the job fails with
+  `unavailable`.
+- **Record.** Each accepted item's submission ID is stored in
+  `acoustid_submissions` with the file and recording ID.
+
+`jobSubmissionStats` reports the files examined, submitted and sent as
+metadata, the fingerprints taken, read from the cache or failed, the files
+rejected, the requests made and the `outcome`.
 
 From the command line:
 
 ```sh
-orca-cli match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]
+orca-cli match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]
 orca-cli matches DATABASE TRACK_ID
 orca-cli accept-match DATABASE PROPOSAL_ID
 orca-cli dismiss-match DATABASE PROPOSAL_ID
 orca-cli accept-matches DATABASE --min-score=0.9
+orca-cli fingerprint DATABASE TRACK_ID
+ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 ```
 
-`ORCA_MUSICBRAINZ_URL` points `match` at another server.
+`ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` point `match` and
+`submit-acoustid` at other servers.

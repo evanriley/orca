@@ -11,6 +11,10 @@
             .url = "git+https://github.com/ittiam-systems/libxaac?ref=v0.1.13#55af74f9ce7cadb99fbd7870c6487c8a12d75689",
             .hash = "N-V-__8AADdaEgEjrBn3etD0SrajY3dLtLZFN45mpMYLPNsW",
         },
+        .chromaprint = .{
+            .url = "git+https://github.com/acoustid/chromaprint?ref=v1.6.1#aed8eba2202dd9d7b3b0a56c77904cc805490d72",
+            .hash = "N-V-__8AAAZTUQCJVueKPg7JZOJEWI6kjYDp41XxHF5Bt1Wu",
+        },
     },
     .paths = .{
         "build.zig",

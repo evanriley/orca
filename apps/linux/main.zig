@@ -8,6 +8,7 @@
 //! the SwiftUI client needs.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
@@ -344,6 +345,7 @@ pub fn main(init: std.process.Init) !u8 {
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
     runtime.setCredentialStore(secret.credential_store) catch {};
+    runtime.setAcoustIdClientKey(build_options.acoustid_key) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_LISTENBRAINZ_URL")) |server|
         runtime.setListenBrainzServer(server) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_MUSICBRAINZ_URL")) |server|

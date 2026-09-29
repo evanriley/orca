@@ -95,7 +95,9 @@ The window is an `AdwNavigationSplitView`:
   MusicBrainz button that opens the recording's page in the browser. A
   proposal more than 10 s longer or shorter than the song shows its length in
   the warning colour. Find Matches starts the matching job, which shares the
-  status card; Accept Confident asks first, then accepts each song's only
+  status card and also asks AcoustID by fingerprint with the application key
+  the app sets at startup; the page does not yet show a proposal's source or
+  AcoustID score; Accept Confident asks first, then accepts each song's only
   proposal at or above the threshold set in Preferences (90% by default,
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
   the page offers Find Matches, or says every song has a recording ID.

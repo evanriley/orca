@@ -18,6 +18,8 @@ pub const Kind = enum {
     conversion,
     ripping,
     metadata_lookup,
+    /// Sending fingerprints to AcoustID for recording IDs a person chose.
+    acoustid_submission,
     artwork,
     mutation,
     dummy,

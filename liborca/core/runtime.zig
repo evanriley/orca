@@ -1,4 +1,5 @@
 const std = @import("std");
+const analysis_chromaprint = @import("../analysis/chromaprint.zig");
 const analysis_service = @import("../analysis/service.zig");
 const artwork = @import("artwork.zig");
 const audio = @import("../audio/root.zig");
@@ -148,6 +149,7 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
 
 /// One file's measurement from `libraryAnalyzeFile`.
 pub const FileAnalysis = analysis_service.Analysis;
+pub const TrackFingerprint = analysis_chromaprint.Fingerprinter.Outcome;
 
 /// The Library's database, for liborca's own C ABI and tests. Clients use the
 /// runtime's methods; the database is not part of the API.
@@ -342,8 +344,30 @@ pub const MatchRequest = struct {
     batch_size: usize = 64,
     limit: ?u32 = null,
     /// Search only this Track, under the same rule as the whole library: one
-    /// already identified or awaiting review is not searched.
+    /// already identified, or already answered for, is not searched.
     track_id: ?i64 = null,
+    /// Also fingerprint each Track's file and look it up on AcoustID, when an
+    /// AcoustID application key is set.
+    fingerprints: bool = true,
+};
+
+pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
+pub const AcoustIdSubmittable = database.AcoustIdSubmittable;
+pub const AcoustIdSubmittablePage = database.AcoustIdSubmittablePage;
+pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
+
+/// What an AcoustID submission job did.
+pub const SubmissionStats = struct {
+    files_examined: u64 = 0,
+    submitted: u64 = 0,
+    sent_as_metadata: u64 = 0,
+    fingerprinted: u64 = 0,
+    fingerprint_cache_hits: u64 = 0,
+    fingerprint_failures: u64 = 0,
+    rejected: u64 = 0,
+    requests: u64 = 0,
+    /// Why the job stopped; `completed` while it runs.
+    outcome: SubmissionOutcome = .completed,
 };
 
 pub const MatchProposal = database.MatchProposal;
@@ -354,8 +378,16 @@ pub const MatchAcceptance = database.ProposalAcceptance;
 
 pub const MatchingHooks = struct {
     transport: ?network.client.Transport = null,
+    /// AcoustID's transport; `transport` when null.
+    acoustid_transport: ?network.client.Transport = null,
     clock: ?network.client.Clock = null,
     wall_clock: ?network.client.Clock = null,
+};
+
+const AcoustIdSetup = struct {
+    server: []const u8,
+    client_key: ?[]const u8,
+    credentials: ?CredentialStore,
 };
 
 const MatchingSetup = struct {
@@ -364,7 +396,41 @@ const MatchingSetup = struct {
     identity: ClientIdentity,
     hooks: MatchingHooks,
     scope: database.MatchScope,
+    /// Null when the job looks nothing up on AcoustID.
+    acoustid: ?AcoustIdSetup,
 };
+
+const SubmissionSetup = struct {
+    io: std.Io,
+    identity: ClientIdentity,
+    hooks: MatchingHooks,
+    acoustid: AcoustIdSetup,
+};
+
+/// The application key a matching or submission job uses: the credential
+/// store's `org.acoustid`/`client-key`, else the host's, also when the store
+/// cannot be read. Read on the worker's thread; the caller frees it with
+/// `wipeAndFree`.
+fn resolveClientKey(allocator: std.mem.Allocator, setup: AcoustIdSetup) !?[]u8 {
+    if (setup.credentials) |store| {
+        const override = store.get(allocator, providers.acoustid.credential_service, providers.acoustid.client_key_account) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+        if (override) |stored| {
+            if (validAcoustIdKey(stored)) return stored;
+            providers.credentials.wipeAndFree(allocator, stored);
+        }
+    }
+    const key = setup.client_key orelse return null;
+    return try allocator.dupe(u8, key);
+}
+
+fn validAcoustIdKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > providers.acoustid.max_key_bytes) return false;
+    for (key) |byte| if (byte <= 0x20 or byte >= 0x7f) return false;
+    return true;
+}
 
 /// Everything a job worker needs that is not the Library or the kind. One
 /// struct rather than a widening parameter list, because every kind takes a
@@ -377,6 +443,7 @@ const WorkerRequest = struct {
     tag_write: ?*PendingTagWrite = null,
     limit: ?u32 = null,
     matching: ?MatchingSetup = null,
+    submission: ?SubmissionSetup = null,
 };
 
 /// What a scan job observed, mirroring `scanner.Result` plus what the
@@ -428,7 +495,8 @@ const LiveScanStats = struct {
     }
 };
 
-/// What a matching job did with the Tracks it examined.
+/// What a matching job did with the Tracks it examined. `requests` and
+/// `cache_hits` are MusicBrainz's.
 pub const MatchStats = struct {
     tracks_examined: u64 = 0,
     matched: u64 = 0,
@@ -438,6 +506,13 @@ pub const MatchStats = struct {
     proposals_stored: u64 = 0,
     requests: u64 = 0,
     cache_hits: u64 = 0,
+    fingerprinted: u64 = 0,
+    fingerprint_cache_hits: u64 = 0,
+    fingerprint_failures: u64 = 0,
+    acoustid_requests: u64 = 0,
+    acoustid_cache_hits: u64 = 0,
+    acoustid_refused: u64 = 0,
+    acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
 };
 
@@ -450,18 +525,32 @@ const LiveMatchStats = struct {
     proposals_stored: std.atomic.Value(u64) = .init(0),
     requests: std.atomic.Value(u64) = .init(0),
     cache_hits: std.atomic.Value(u64) = .init(0),
+    fingerprinted: std.atomic.Value(u64) = .init(0),
+    fingerprint_cache_hits: std.atomic.Value(u64) = .init(0),
+    fingerprint_failures: std.atomic.Value(u64) = .init(0),
+    acoustid_requests: std.atomic.Value(u64) = .init(0),
+    acoustid_cache_hits: std.atomic.Value(u64) = .init(0),
+    acoustid_refused: std.atomic.Value(u64) = .init(0),
+    acoustid: std.atomic.Value(AcoustIdUse) = .init(.off),
     cancelled: std.atomic.Value(bool) = .init(false),
 
-    fn read(self: *const LiveMatchStats, in_flight: u64) MatchStats {
+    fn read(self: *const LiveMatchStats, progress: *const library_pass.matching.Progress) MatchStats {
         return .{
-            .tracks_examined = self.tracks_examined.load(.acquire) + in_flight,
-            .matched = self.matched.load(.acquire),
+            .tracks_examined = self.tracks_examined.load(.acquire) + progress.tracks_seen.load(.acquire),
+            .matched = self.matched.load(.acquire) + progress.matched.load(.acquire),
             .unmatched = self.unmatched.load(.acquire),
             .insufficient_evidence = self.insufficient_evidence.load(.acquire),
             .refused = self.refused.load(.acquire),
             .proposals_stored = self.proposals_stored.load(.acquire),
             .requests = self.requests.load(.acquire),
             .cache_hits = self.cache_hits.load(.acquire),
+            .fingerprinted = self.fingerprinted.load(.acquire) + progress.fingerprinted.load(.acquire),
+            .fingerprint_cache_hits = self.fingerprint_cache_hits.load(.acquire),
+            .fingerprint_failures = self.fingerprint_failures.load(.acquire),
+            .acoustid_requests = self.acoustid_requests.load(.acquire),
+            .acoustid_cache_hits = self.acoustid_cache_hits.load(.acquire),
+            .acoustid_refused = self.acoustid_refused.load(.acquire),
+            .acoustid = self.acoustid.load(.acquire),
             .cancelled = self.cancelled.load(.acquire),
         };
     }
@@ -490,6 +579,7 @@ const JobWorker = struct {
     tag_write: ?*PendingTagWrite,
     limit: ?u32,
     matching: ?MatchingSetup,
+    submission: ?SubmissionSetup,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -499,10 +589,12 @@ const JobWorker = struct {
     token: library_pass.CancellationToken = .{},
     /// Files the *current* root's walk has reached, written by the scanner.
     progress: std.atomic.Value(u64) = .init(0),
-    /// Tracks a running matching pass has found matches for.
-    matched_progress: std.atomic.Value(u64) = .init(0),
+    /// A running matching pass's counters.
+    match_progress: library_pass.matching.Progress = .{},
     stats: LiveScanStats = .{},
     match_stats: LiveMatchStats = .{},
+    /// Written by the worker just before it finishes; read only after.
+    submission_result: SubmissionStats = .{},
     failed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
@@ -520,6 +612,7 @@ const JobWorker = struct {
             .duplicate_scan => self.runDuplicateScan(),
             .mutation => self.runTagWrite(),
             .metadata_lookup => self.runMatching(),
+            .acoustid_submission => self.runSubmission(),
             else => self.failed.store(true, .release),
         }
     }
@@ -667,25 +760,55 @@ const JobWorker = struct {
         var standard: network.StandardTransport = .init(self.allocator, setup.io);
         defer standard.deinit();
         var system_clock: network.SystemClock = .{ .io = setup.io };
+        const clock = setup.hooks.clock orelse system_clock.clock();
+        const wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock();
         var gateway: network.Gateway = .{
             .transport = setup.hooks.transport orelse standard.transport(),
-            .clock = setup.hooks.clock orelse system_clock.clock(),
+            .clock = clock,
             .config = .{ .identity = setup.identity },
             .cancel = &self.registration.cancel,
         };
         var musicbrainz: providers.musicbrainz.MusicBrainz = .{
             .gateway = &gateway,
             .cache = &self.database.provider_cache,
-            .wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock(),
+            .wall_clock = wall_clock,
             .server = setup.server,
         };
+        var acoustid_gateway: network.Gateway = .{
+            .transport = setup.hooks.acoustid_transport orelse setup.hooks.transport orelse standard.transport(),
+            .clock = clock,
+            .config = .{ .identity = setup.identity },
+            .cancel = &self.registration.cancel,
+        };
+        const client_key = if (setup.acoustid) |acoustid| resolveClientKey(self.allocator, acoustid) catch {
+            self.failed.store(true, .release);
+            return;
+        } else null;
+        defer if (client_key) |key| providers.credentials.wipeAndFree(self.allocator, key);
+        var acoustid: ?providers.acoustid.AcoustId = if (client_key) |key| .{
+            .gateway = &acoustid_gateway,
+            .cache = &self.database.provider_cache,
+            .wall_clock = wall_clock,
+            .server = setup.acoustid.?.server,
+            .client_key = key,
+        } else null;
+        self.match_stats.acoustid.store(if (acoustid != null) .searched else if (setup.acoustid == null) .off else .no_client_key, .release);
+        const codecs = codec.CodecRegistry.builtins();
         var pass: library_pass.LibraryMatching = .{
             .allocator = self.allocator,
             .proposals = &self.database.identification_proposals,
             .musicbrainz = &musicbrainz,
+            .acoustid = if (acoustid) |*service| service else null,
+            .acoustid_use = self.match_stats.acoustid.load(.acquire),
+            .fingerprinter = .{
+                .allocator = self.allocator,
+                .io = self.threaded.io(),
+                .codecs = &codecs,
+                .cache = &self.database.analysis_cache,
+                .cancellation = &self.token,
+            },
             .cancellation = &self.token,
-            .progress = &self.progress,
-            .matched_progress = &self.matched_progress,
+            .progress = &self.match_progress,
             .batch_size = self.batch_size,
             .limit = self.limit,
             .scope = setup.scope,
@@ -694,8 +817,9 @@ const JobWorker = struct {
             self.failed.store(true, .release);
             return;
         };
-        self.progress.store(0, .release);
-        self.matched_progress.store(0, .release);
+        self.match_progress.tracks_seen.store(0, .release);
+        self.match_progress.matched.store(0, .release);
+        self.match_progress.fingerprinted.store(0, .release);
         _ = self.match_stats.tracks_examined.fetchAdd(result.tracks_seen, .acq_rel);
         _ = self.match_stats.matched.fetchAdd(result.matched, .acq_rel);
         _ = self.match_stats.unmatched.fetchAdd(result.unmatched, .acq_rel);
@@ -704,8 +828,83 @@ const JobWorker = struct {
         _ = self.match_stats.proposals_stored.fetchAdd(result.proposals_stored, .acq_rel);
         _ = self.match_stats.requests.fetchAdd(result.requests_answered, .acq_rel);
         _ = self.match_stats.cache_hits.fetchAdd(result.cache_hits, .acq_rel);
+        _ = self.match_stats.fingerprinted.fetchAdd(result.fingerprinted, .acq_rel);
+        _ = self.match_stats.fingerprint_cache_hits.fetchAdd(result.fingerprint_cache_hits, .acq_rel);
+        _ = self.match_stats.fingerprint_failures.fetchAdd(result.fingerprint_failures, .acq_rel);
+        _ = self.match_stats.acoustid_requests.fetchAdd(result.acoustid_requests, .acq_rel);
+        _ = self.match_stats.acoustid_cache_hits.fetchAdd(result.acoustid_cache_hits, .acq_rel);
+        _ = self.match_stats.acoustid_refused.fetchAdd(result.acoustid_refused, .acq_rel);
+        self.match_stats.acoustid.store(result.acoustid, .release);
         if (result.cancelled) self.match_stats.cancelled.store(true, .release);
         if (result.unavailable) self.failed.store(true, .release);
+    }
+
+    fn runSubmission(self: *JobWorker) void {
+        const setup = self.submission orelse {
+            self.failed.store(true, .release);
+            return;
+        };
+        var standard: network.StandardTransport = .init(self.allocator, setup.io);
+        defer standard.deinit();
+        var system_clock: network.SystemClock = .{ .io = setup.io };
+        var gateway: network.Gateway = .{
+            .transport = setup.hooks.acoustid_transport orelse setup.hooks.transport orelse standard.transport(),
+            .clock = setup.hooks.clock orelse system_clock.clock(),
+            .config = .{ .identity = setup.identity },
+            .cancel = &self.registration.cancel,
+        };
+        const client_key = resolveClientKey(self.allocator, setup.acoustid) catch {
+            self.failed.store(true, .release);
+            return;
+        } orelse {
+            self.submission_result = .{ .outcome = .needs_client_key };
+            self.failed.store(true, .release);
+            return;
+        };
+        defer providers.credentials.wipeAndFree(self.allocator, client_key);
+        var acoustid: providers.acoustid.AcoustId = .{
+            .gateway = &gateway,
+            .cache = &self.database.provider_cache,
+            .wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock(),
+            .server = setup.acoustid.server,
+            .client_key = client_key,
+        };
+        const codecs = codec.CodecRegistry.builtins();
+        var pass: library_pass.AcoustIdSubmission = .{
+            .allocator = self.allocator,
+            .submissions = &self.database.acoustid_submissions,
+            .acoustid = &acoustid,
+            .fingerprinter = .{
+                .allocator = self.allocator,
+                .io = self.threaded.io(),
+                .codecs = &codecs,
+                .cache = &self.database.analysis_cache,
+                .cancellation = &self.token,
+            },
+            .credentials = setup.acoustid.credentials,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.submission_result = .{
+            .files_examined = result.files_examined,
+            .submitted = result.submitted,
+            .sent_as_metadata = result.sent_as_metadata,
+            .fingerprinted = result.fingerprinted,
+            .fingerprint_cache_hits = result.fingerprint_cache_hits,
+            .fingerprint_failures = result.fingerprint_failures,
+            .rejected = result.rejected,
+            .requests = result.requests,
+            .outcome = result.outcome,
+        };
+        switch (result.outcome) {
+            .completed => {},
+            .cancelled => self.stats.cancelled.store(true, .release),
+            .needs_client_key, .invalid_client_key, .needs_user_key, .invalid_user_key, .unavailable => self.failed.store(true, .release),
+        }
     }
 
     fn runScan(self: *JobWorker) void {
@@ -818,21 +1017,27 @@ const JobWorker = struct {
     }
 
     fn filesProcessed(self: *const JobWorker) u64 {
-        const done = switch (self.kind) {
-            .metadata_lookup => self.match_stats.tracks_examined.load(.acquire),
-            else => self.stats.files_seen.load(.acquire),
+        return switch (self.kind) {
+            .metadata_lookup => self.matchStats().tracks_examined,
+            .acoustid_submission => self.submissionStats().files_examined,
+            else => self.stats.files_seen.load(.acquire) + self.progress.load(.acquire),
         };
-        return done + self.progress.load(.acquire);
     }
 
     fn scanStats(self: *const JobWorker) ScanStats {
-        return self.stats.read(if (self.kind == .metadata_lookup) 0 else self.progress.load(.acquire));
+        return self.stats.read(switch (self.kind) {
+            .metadata_lookup, .acoustid_submission => 0,
+            else => self.progress.load(.acquire),
+        });
     }
 
     fn matchStats(self: *const JobWorker) MatchStats {
-        var stats = self.match_stats.read(if (self.kind == .metadata_lookup) self.progress.load(.acquire) else 0);
-        stats.matched += self.matched_progress.load(.acquire);
-        return stats;
+        return self.match_stats.read(&self.match_progress);
+    }
+
+    fn submissionStats(self: *const JobWorker) SubmissionStats {
+        if (self.retired or self.registration.isFinished()) return self.submission_result;
+        return .{ .files_examined = self.progress.load(.acquire) };
     }
 
     fn wasCancelled(self: *const JobWorker) bool {
@@ -899,6 +1104,8 @@ pub const OrcaRuntime = struct {
     /// Version of the three settings above, copied into every Library's
     /// listen config.
     listen_settings: u32 = 0,
+    acoustid_server: []const u8 = providers.acoustid.default_server,
+    acoustid_client_key: ?[]const u8 = null,
     /// One per runtime, created with the first listen worker and deinitialized
     /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
     /// handlers and `deinit` restores what it found, so a second instance torn
@@ -1104,6 +1311,31 @@ pub const OrcaRuntime = struct {
         };
         const binding = try library_database.resolveOrCreateFile(io, path, .{});
         return service.analyzeFile(binding.file_id, path, .{});
+    }
+
+    /// The AcoustID fingerprint of the file a Track plays, from the Library's
+    /// cache or decoded now: the first two minutes, on the caller's thread.
+    /// Null when the Track has no file with a present location. A file that
+    /// does not decode cleanly has no fingerprint and returns its error.
+    pub fn libraryTrackFingerprint(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        track_id: i64,
+    ) !?TrackFingerprint {
+        const library_database = try self.libraryDatabase(library);
+        const facts = try library_database.tracks.fileFacts(self.allocator, track_id) orelse return error.TrackNotFound;
+        defer facts.deinit();
+        const location = try library_database.locations.presentOf(self.allocator, facts.file_id) orelse return null;
+        defer self.allocator.free(location.uri);
+        const codecs = codec.CodecRegistry.builtins();
+        const fingerprinter: analysis_chromaprint.Fingerprinter = .{
+            .allocator = self.allocator,
+            .io = io,
+            .codecs = &codecs,
+            .cache = &library_database.analysis_cache,
+        };
+        return try fingerprinter.fingerprintFile(facts.file_id, location.uri);
     }
 
     pub fn libraryTrackCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -1351,6 +1583,25 @@ pub const OrcaRuntime = struct {
         self.musicbrainz_server = base_url;
     }
 
+    /// The AcoustID application key matching and submission jobs use, unless
+    /// the credential store holds one under `org.acoustid`/`client-key`.
+    /// Without either, matching skips AcoustID. `key` must outlive the
+    /// runtime.
+    pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: []const u8) !void {
+        try self.requireRunning();
+        if (!validAcoustIdKey(key)) return error.InvalidAcoustIdKey;
+        self.acoustid_client_key = key;
+    }
+
+    /// Points AcoustID lookups and submissions at another server, under the
+    /// same rule as `setListenBrainzServer`. `base_url` must outlive the
+    /// runtime.
+    pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: []const u8) !void {
+        try self.requireRunning();
+        try providers.url.validateServer(base_url);
+        self.acoustid_server = base_url;
+    }
+
     fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
         var updated = config;
         updated.identity = self.client_identity;
@@ -1507,10 +1758,15 @@ pub const OrcaRuntime = struct {
         return (try self.libraryDatabase(library)).identification_proposals.reviewCount();
     }
 
-    /// Tracks a matching job would search: no recording ID and nothing
-    /// awaiting review.
+    /// Tracks a matching job with fingerprints would search: no recording ID,
+    /// and not yet answered for by MusicBrainz, or by AcoustID when a key is
+    /// set.
     pub fn libraryUnidentifiedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
-        return (try self.libraryDatabase(library)).identification_proposals.unidentifiedCount(.library, null);
+        return (try self.libraryDatabase(library)).identification_proposals.unidentifiedCount(
+            .library,
+            self.acoustIdInScope(true),
+            null,
+        );
     }
 
     /// How many matches `libraryAcceptConfidentMatches` would accept now.
@@ -2982,17 +3238,16 @@ pub const OrcaRuntime = struct {
         });
     }
 
-    /// At most one runs per runtime, so MusicBrainz sees one request a second.
+    /// At most one runs per runtime, so MusicBrainz sees one request a second,
+    /// and not while an AcoustID submission runs, so AcoustID sees one client.
     pub fn startLibraryMatching(
         self: *OrcaRuntime,
         library: LibraryHandle,
         request: MatchRequest,
     ) !JobHandle {
         try self.requireRunning();
-        for (self.job_workers.items) |worker| {
-            if (!worker.retired and worker.kind == .metadata_lookup and !worker.registration.isFinished())
-                return error.MatchingAlreadyRunning;
-        }
+        if (self.runningJob(.metadata_lookup)) return error.MatchingAlreadyRunning;
+        if (self.runningJob(.acoustid_submission)) return error.AcoustIdBusy;
         return self.startJobWorker(library, .metadata_lookup, .{
             .batch_size = request.batch_size,
             .limit = request.limit,
@@ -3002,8 +3257,72 @@ pub const OrcaRuntime = struct {
                 .identity = self.client_identity,
                 .hooks = self.matching_hooks,
                 .scope = if (request.track_id) |track_id| .{ .track = track_id } else .library,
+                .acoustid = if (request.fingerprints) self.acoustIdSetup() else null,
             },
         });
+    }
+
+    /// Fingerprints every file whose recording ID came from an accepted match
+    /// or an edit and sends it to AcoustID, as the user whose key the
+    /// credential store holds under `org.acoustid`/`user-key`. Fails with
+    /// `needs_user_key` or `invalid_user_key` without marking anything sent.
+    pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
+        try self.requireRunning();
+        if (self.runningJob(.metadata_lookup) or self.runningJob(.acoustid_submission)) return error.AcoustIdBusy;
+        return self.startJobWorker(library, .acoustid_submission, .{
+            .submission = .{
+                .io = try self.networkIo(),
+                .identity = self.client_identity,
+                .hooks = self.matching_hooks,
+                .acoustid = self.acoustIdSetup(),
+            },
+        });
+    }
+
+    /// An AcoustID submission job's counters: files examined while it runs,
+    /// everything once it has finished.
+    pub fn jobSubmissionStats(self: *OrcaRuntime, job_handle: JobHandle) !SubmissionStats {
+        for (self.job_workers.items) |worker| {
+            if (!worker.job.eql(job_handle)) continue;
+            return worker.submissionStats();
+        }
+        return error.StaleHandle;
+    }
+
+    /// Files an AcoustID submission would send now, fingerprints permitting.
+    pub fn libraryAcoustIdSubmittableCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try self.libraryDatabase(library)).acoustid_submissions.submittableCount();
+    }
+
+    /// The files an AcoustID submission would send, by file id after `cursor`.
+    pub fn libraryAcoustIdSubmittablePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        cursor: i64,
+        limit: u32,
+    ) !AcoustIdSubmittablePage {
+        return (try self.libraryDatabase(library)).acoustid_submissions.submittablePage(self.allocator, cursor, limit);
+    }
+
+    fn runningJob(self: *const OrcaRuntime, kind: job.Kind) bool {
+        for (self.job_workers.items) |worker| {
+            if (!worker.retired and worker.kind == kind and !worker.registration.isFinished()) return true;
+        }
+        return false;
+    }
+
+    fn acoustIdSetup(self: *const OrcaRuntime) AcoustIdSetup {
+        return .{
+            .server = self.acoustid_server,
+            .client_key = self.acoustid_client_key,
+            .credentials = self.credential_store,
+        };
+    }
+
+    /// Whether a matching job would look anything up on AcoustID: a key is set
+    /// or the credential store may hold one.
+    fn acoustIdInScope(self: *const OrcaRuntime, fingerprints: bool) bool {
+        return fingerprints and (self.acoustid_client_key != null or self.credential_store != null);
     }
 
     fn startJobWorker(
@@ -3025,10 +3344,15 @@ pub const OrcaRuntime = struct {
             ),
             .duplicate_scan => try library_database.files.count(),
             .mutation => (request.tag_write orelse return error.InvalidJobRequest).plan.actions.len,
-            .metadata_lookup => try library_database.identification_proposals.unidentifiedCount(
-                (request.matching orelse return error.InvalidJobRequest).scope,
-                request.limit,
-            ),
+            .metadata_lookup => blk: {
+                const setup = request.matching orelse return error.InvalidJobRequest;
+                break :blk try library_database.identification_proposals.unidentifiedCount(
+                    setup.scope,
+                    setup.acoustid != null and self.acoustIdInScope(true),
+                    request.limit,
+                );
+            },
+            .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
             else => null,
         };
         const worker = try self.allocator.create(JobWorker);
@@ -3057,6 +3381,7 @@ pub const OrcaRuntime = struct {
             .tag_write = request.tag_write,
             .limit = request.limit,
             .matching = request.matching,
+            .submission = request.submission,
         };
         try self.job_workers.append(self.allocator, worker);
         errdefer _ = self.job_workers.pop();
@@ -6169,7 +6494,7 @@ fn addMatchTrack(library_database: *database.LibraryDatabase, title: []const u8,
     return ids[0];
 }
 
-test "a matching job proposes recordings for the Tracks without one, one search a Track, and a rerun is answered from the cache" {
+test "a matching job proposes recordings for the Tracks without one, one search a Track, and a rerun asks nothing already answered" {
     var fake: FakeMusicBrainz = .{ .answers = &.{
         .{ .title = "Northern%20Sky", .body = northern_sky_answer },
         .{ .title = "Pink%20Moon", .body = pink_moon_answer },
@@ -6230,9 +6555,11 @@ test "a matching job proposes recordings for the Tracks without one, one search 
     const rerun = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, rerun));
     const rerun_stats = try runtime.jobMatchStats(rerun);
-    try std.testing.expectEqual(@as(u64, 2), rerun_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), rerun_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), rerun_stats.insufficient_evidence);
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests);
-    try std.testing.expectEqual(@as(u64, 1), rerun_stats.cache_hits);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.cache_hits);
+    try std.testing.expectEqual(AcoustIdUse.no_client_key, rerun_stats.acoustid);
     try std.testing.expectEqual(@as(u32, 3), fake.requests.load(.acquire));
 }
 
@@ -6327,7 +6654,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
-    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, null));
+    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
 
     fake.hang_from = null;
     const resumed = try runtime.startLibraryMatching(library, .{});
@@ -6362,7 +6689,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     const unreachable_job = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unreachable_job)).tracks_examined);
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
 
     fake.failure = null;
     const retried = try runtime.startLibraryMatching(library, .{});
@@ -6431,6 +6758,7 @@ fn proposeMatch(library_database: *database.LibraryDatabase, track_id: i64, mbid
         .confidence = confidence,
         .payload = payload,
     });
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, file_ids[0], .{ .musicbrainz = true }, &.{});
 }
 
 const review_payload = "{\"title\":\"Northern Sky\",\"artist\":\"Nick Drake\",\"album\":\"Bryter Layter\",\"duration_ms\":225000}";
@@ -6504,7 +6832,7 @@ test "the confident count is exactly how many matches accepting confident ones t
     try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryConfidentMatchCount(library, 0));
 }
 
-test "a single-Track matching job searches only that Track, and one already identified or awaiting review is not searched" {
+test "a single-Track matching job searches only that Track, and one already identified or already answered for is not searched" {
     var fake: FakeMusicBrainz = .{ .answers = &.{
         .{ .title = "Northern%20Sky", .body = northern_sky_answer },
         .{ .title = "Pink%20Moon", .body = pink_moon_answer },
@@ -6537,4 +6865,290 @@ test "a single-Track matching job searches only that Track, and one already iden
         try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(skipped)).tracks_examined);
     }
     try std.testing.expectEqual(@as(u32, 1), fake.requests.load(.acquire));
+}
+
+/// Answers AcoustID lookups and submissions on the job's thread; a test reads
+/// what it recorded once the job is reaped.
+const FakeAcoustId = struct {
+    lookup_body: []const u8 = "{\"status\":\"ok\",\"fingerprints\":[]}",
+    submit_status: u16 = 200,
+    submit_body: []const u8 = "{\"status\":\"ok\",\"submissions\":[]}",
+    lookups: std.atomic.Value(u32) = .init(0),
+    submissions: std.atomic.Value(u32) = .init(0),
+    form: [16 * 1024]u8 = undefined,
+    form_len: usize = 0,
+
+    fn transport(self: *FakeAcoustId) network.client.Transport {
+        return .{ .context = self, .perform_fn = perform };
+    }
+
+    fn lastForm(self: *const FakeAcoustId) []const u8 {
+        return self.form[0..self.form_len];
+    }
+
+    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: network.client.Request) anyerror!network.client.Response {
+        const self: *FakeAcoustId = @ptrCast(@alignCast(context));
+        var input: std.Io.Reader = .fixed(request.body.?);
+        const window = try allocator.alloc(u8, std.compress.flate.max_window_len);
+        defer allocator.free(window);
+        var decompressor: std.compress.flate.Decompress = .init(&input, .gzip, window);
+        var form = std.Io.Writer.Allocating.init(allocator);
+        defer form.deinit();
+        _ = try decompressor.reader.streamRemaining(&form.writer);
+        self.form_len = @min(form.written().len, self.form.len);
+        @memcpy(self.form[0..self.form_len], form.written()[0..self.form_len]);
+        if (std.mem.endsWith(u8, request.url, "/v2/lookup")) {
+            _ = self.lookups.fetchAdd(1, .acq_rel);
+            return .{ .allocator = allocator, .status = 200, .body = try allocator.dupe(u8, self.lookup_body) };
+        }
+        _ = self.submissions.fetchAdd(1, .acq_rel);
+        return .{ .allocator = allocator, .status = self.submit_status, .body = try allocator.dupe(u8, self.submit_body) };
+    }
+};
+
+const AcoustIdUserKey = struct {
+    key: ?[]const u8,
+
+    fn store(self: *AcoustIdUserKey) CredentialStore {
+        return .{ .context = self, .get_fn = get };
+    }
+
+    fn get(context: *anyopaque, allocator: std.mem.Allocator, service: []const u8, account: []const u8) anyerror!?[]u8 {
+        const self: *AcoustIdUserKey = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, service, providers.acoustid.credential_service)) return null;
+        if (!std.mem.eql(u8, account, providers.acoustid.user_key_account)) return null;
+        return if (self.key) |key| try allocator.dupe(u8, key) else null;
+    }
+};
+
+/// Fifteen seconds of a mono tone at 11025 Hz, long enough to fingerprint.
+fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
+    const rate = 11_025;
+    const frames = 15 * rate;
+    var bytes: [44 + frames * 2]u8 = undefined;
+    @memcpy(bytes[0..4], "RIFF");
+    std.mem.writeInt(u32, bytes[4..8], bytes.len - 8, .little);
+    @memcpy(bytes[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, bytes[16..20], 16, .little);
+    std.mem.writeInt(u16, bytes[20..22], 1, .little);
+    std.mem.writeInt(u16, bytes[22..24], 1, .little);
+    std.mem.writeInt(u32, bytes[24..28], rate, .little);
+    std.mem.writeInt(u32, bytes[28..32], rate * 2, .little);
+    std.mem.writeInt(u16, bytes[32..34], 2, .little);
+    std.mem.writeInt(u16, bytes[34..36], 16, .little);
+    @memcpy(bytes[36..40], "data");
+    std.mem.writeInt(u32, bytes[40..44], frames * 2, .little);
+    for (0..frames) |frame| {
+        const time = @as(f32, @floatFromInt(frame)) / rate;
+        const wobble = frequency * (1 + 0.2 * @sin(2 * std.math.pi * 0.5 * time));
+        const sample: i16 = @intFromFloat(9000 * @sin(2 * std.math.pi * wobble * time));
+        std.mem.writeInt(i16, bytes[44 + frame * 2 ..][0..2], sample, .little);
+    }
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = &bytes });
+}
+
+fn addAudioTrack(
+    library_database: *database.LibraryDatabase,
+    temporary: *std.testing.TmpDir,
+    name: []const u8,
+    title: []const u8,
+    artist: []const u8,
+) !i64 {
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    defer std.testing.allocator.free(path);
+    const binding = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:acoustid" });
+    try library_database.tracks.upsertTracks(&.{.{
+        .title = title,
+        .artist = artist,
+        .album = "Bryter Layter",
+        .duration_ms = 15_000,
+        .preferred_file_id = binding.file_id,
+    }});
+    const ids = try library_database.tracks.idsForFile(std.testing.allocator, binding.file_id);
+    defer std.testing.allocator.free(ids);
+    return ids[0];
+}
+
+const two_fingerprint_answer =
+    "{\"status\":\"ok\",\"fingerprints\":[" ++
+    "{\"index\":0,\"results\":[{\"id\":\"t1\",\"score\":0.96,\"recordings\":[{\"id\":\"" ++ northern_sky_mbid ++
+    "\",\"title\":\"Northern Sky\",\"duration\":15,\"artists\":[{\"id\":\"a1\",\"name\":\"Nick Drake\"}]}]}]}," ++
+    "{\"index\":1,\"results\":[{\"id\":\"t2\",\"score\":0.93,\"recordings\":[{\"id\":\"" ++ pink_moon_mbid ++ "\"}]}]}]}";
+
+test "a matching job fingerprints each file, asks AcoustID about them in one request, merges both services, and a rerun asks neither" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "northern.wav", 440);
+    try writeToneWave(temporary.dir, "untagged.wav", 620);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    var acoustid: FakeAcoustId = .{ .lookup_body = two_fingerprint_answer };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try std.testing.expectError(error.InvalidAcoustIdKey, runtime.setAcoustIdClientKey("with space"));
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setAcoustIdServer("http://127.0.0.1:5002");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-acoustid?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const northern_sky = try addAudioTrack(library_database, &temporary, "northern.wav", "Northern Sky", "Nick Drake");
+    const untagged = try addAudioTrack(library_database, &temporary, "untagged.wav", "", "");
+
+    const job_handle = try runtime.startLibraryMatching(library, .{});
+
+    try std.testing.expectEqual(@as(?u64, 2), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(AcoustIdUse.searched, stats.acoustid);
+    try std.testing.expectEqual(@as(u64, 2), stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 1), stats.acoustid_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.requests);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(@as(u32, 1), acoustid.lookups.load(.acquire));
+    try std.testing.expect(std.mem.startsWith(u8, acoustid.lastForm(), "client=test-client&"));
+    try std.testing.expect(std.mem.indexOf(u8, acoustid.lastForm(), "&duration.0=15&fingerprint.0=AQA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, acoustid.lastForm(), "&duration.1=15&fingerprint.1=AQA") != null);
+
+    const both = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer both.deinit();
+    try std.testing.expectEqual(@as(usize, 1), both.items.len);
+    try std.testing.expectEqualStrings("musicbrainz+acoustid", both.items[0].provider);
+    try std.testing.expectEqualStrings("Bryter Layter", both.items[0].album);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.96), both.items[0].acoustid_score.?, 0.0001);
+    const fingerprint_only = try runtime.libraryMatchProposals(library, untagged, 10);
+    defer fingerprint_only.deinit();
+    try std.testing.expectEqual(@as(usize, 1), fingerprint_only.items.len);
+    try std.testing.expectEqualStrings("acoustid", fingerprint_only.items[0].provider);
+    try std.testing.expectEqualStrings("", fingerprint_only.items[0].title);
+
+    runtime.reapFinishedJobs();
+    const rerun = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, rerun));
+    const rerun_stats = try runtime.jobMatchStats(rerun);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests + rerun_stats.acoustid_requests);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.fingerprinted);
+    try std.testing.expectEqual(@as(u32, 1), acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), musicbrainz.requests.load(.acquire));
+
+    _ = try runtime.libraryAcceptMatch(library, fingerprint_only.items[0].id);
+    const details = (try runtime.libraryTrackDetails(library, untagged)).?;
+    defer details.deinit();
+    try std.testing.expectEqualStrings(pink_moon_mbid, details.musicbrainz_recording_id.?);
+}
+
+test "a file that fails to decode is not fingerprinted and its Track is still searched on MusicBrainz, and no fingerprints means no AcoustID" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/tagged-reference.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(bytes);
+    const packed_bits = std.mem.readInt(u64, bytes[18..26], .big);
+    std.mem.writeInt(u64, bytes[18..26], packed_bits + 1_000_000, .big);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "damaged.flac", .data = bytes });
+    try writeToneWave(temporary.dir, "whole.wav", 440);
+    var musicbrainz: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    var acoustid: FakeAcoustId = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-damaged?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const damaged = try addAudioTrack(library_database, &temporary, "damaged.flac", "Northern Sky", "Nick Drake");
+    _ = try addAudioTrack(library_database, &temporary, "whole.wav", "Pink Moon", "Nick Drake");
+
+    const without = try runtime.startLibraryMatching(library, .{ .fingerprints = false, .track_id = damaged + 1 });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, without));
+    try std.testing.expectEqual(AcoustIdUse.off, (try runtime.jobMatchStats(without)).acoustid);
+    try std.testing.expectEqual(@as(u32, 0), acoustid.lookups.load(.acquire));
+
+    runtime.reapFinishedJobs();
+    const job_handle = try runtime.startLibraryMatching(library, .{ .track_id = damaged });
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 0), stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 1), stats.fingerprint_failures);
+    try std.testing.expectEqual(@as(u64, 0), stats.acoustid_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.matched);
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM analysis_results WHERE kind = 3;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM identification_searches WHERE provider = 'acoustid';"));
+}
+
+fn scalarOf(library_database: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
+    var statement = try library_database.database.prepare(sql);
+    defer statement.deinit();
+    if (try statement.step() != .row) return error.NoRow;
+    return statement.columnInt64(0);
+}
+
+test "a submission sends a chosen recording ID once, fails without marking anything when the user key is missing or refused, and cannot run beside matching" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "chosen.wav", 440);
+    try writeToneWave(temporary.dir, "doubted.wav", 530);
+    var musicbrainz: FakeMusicBrainz = .{ .hang_from = 0 };
+    var acoustid: FakeAcoustId = .{
+        .submit_body = "{\"status\":\"ok\",\"submissions\":[{\"id\":71,\"status\":\"pending\",\"index\":\"0\"},{\"id\":72,\"status\":\"pending\",\"index\":\"1\"}]}",
+    };
+    var user: AcoustIdUserKey = .{ .key = null };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    try runtime.setAcoustIdClientKey("test-client");
+    try runtime.setCredentialStore(user.store());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-acoustid-submit?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const chosen = try addAudioTrack(library_database, &temporary, "chosen.wav", "Northern Sky", "Nick Drake");
+    const doubted = try addAudioTrack(library_database, &temporary, "doubted.wav", "Pink Moon", "Nick Drake");
+    try proposeMatch(library_database, chosen, northern_sky_mbid, 0.95, "{\"title\":\"Northern Sky\",\"duration_ms\":15000}");
+    try proposeMatch(library_database, doubted, pink_moon_mbid, 0.95, "{\"title\":\"Pink Moon\",\"duration_ms\":300000}");
+    for ([_]i64{ chosen, doubted }) |track_id| {
+        const page = try runtime.libraryMatchProposals(library, track_id, 1);
+        defer page.deinit();
+        _ = try runtime.libraryAcceptMatch(library, page.items[0].id);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
+
+    const matching = try runtime.startLibraryMatching(library, .{ .fingerprints = false });
+    try std.testing.expectError(error.AcoustIdBusy, runtime.startAcoustIdSubmission(library));
+    try runtime.cancelJob(matching);
+    _ = try awaitJob(&runtime, matching);
+
+    const without_key = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, without_key));
+    try std.testing.expectEqual(SubmissionOutcome.needs_user_key, (try runtime.jobSubmissionStats(without_key)).outcome);
+    try std.testing.expectEqual(@as(u32, 0), acoustid.submissions.load(.acquire));
+
+    user.key = "user key";
+    acoustid.submit_status = 400;
+    const refused_body = "{\"status\":\"error\",\"error\":{\"code\":6,\"message\":\"invalid user API key\"}}";
+    const accepted_body = acoustid.submit_body;
+    acoustid.submit_body = refused_body;
+    const refused = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, refused));
+    try std.testing.expectEqual(SubmissionOutcome.invalid_user_key, (try runtime.jobSubmissionStats(refused)).outcome);
+    try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
+
+    acoustid.submit_status = 200;
+    acoustid.submit_body = accepted_body;
+    const sent = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, sent));
+    const stats = try runtime.jobSubmissionStats(sent);
+    try std.testing.expectEqual(SubmissionOutcome.completed, stats.outcome);
+    try std.testing.expectEqual(@as(u64, 2), stats.submitted);
+    try std.testing.expectEqual(@as(u64, 1), stats.sent_as_metadata);
+    try std.testing.expectEqual(@as(u64, 1), stats.requests);
+    const form = acoustid.lastForm();
+    try std.testing.expect(std.mem.indexOf(u8, form, "&user=user%20key&") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form, "&mbid.0=" ++ northern_sky_mbid) != null);
+    try std.testing.expect(std.mem.indexOf(u8, form, "&mbid.1=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, form, "&track.1=Pink%20Moon&artist.1=Nick%20Drake") != null);
+    try std.testing.expectEqual(@as(i64, 72), try scalarOf(library_database, "SELECT submission_id FROM acoustid_submissions WHERE recording_mbid = '" ++ pink_moon_mbid ++ "';"));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryAcoustIdSubmittableCount(library));
+
+    const again = try runtime.startAcoustIdSubmission(library);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, again));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobSubmissionStats(again)).files_examined);
+    try std.testing.expectEqual(@as(u32, 2), acoustid.submissions.load(.acquire));
 }

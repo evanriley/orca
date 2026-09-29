@@ -2,6 +2,62 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### AcoustID
+
+- **Matching fingerprints files and asks AcoustID.** A matching job
+  fingerprints each Track's file (the first 120 s, decoded by Orca, resampled
+  to 11,025 Hz by libsamplerate and fingerprinted by Chromaprint) and looks up
+  to 20 fingerprints at a time on AcoustID, at one request a second, in a
+  gzip-compressed form. Candidates from MusicBrainz and AcoustID are merged
+  into one proposal per recording, named `musicbrainz`, `acoustid` or
+  `musicbrainz+acoustid`; two services agreeing rank above either alone, and a
+  proposal found again keeps its state, so a dismissed one stays dismissed.
+  `MatchRequest.fingerprints` (default true) turns it off. `MatchStats` gains
+  `fingerprinted`, `fingerprint_cache_hits`, `fingerprint_failures`,
+  `acoustid_requests`, `acoustid_cache_hits`, `acoustid_refused` and
+  `acoustid` (new type `AcoustIdUse`); `MatchProposal` gains
+  `acoustid_score`.
+- **Each service is asked once per file.** Schema version 17 adds
+  `identification_searches`, recording which service has answered for which
+  file, empty answers included. Matching selects a Track until every service
+  in scope has answered for its file, so a rerun asks nothing already
+  answered; files with MusicBrainz proposals from before count as searched by
+  MusicBrainz. A Track with a pending proposal is no longer skipped when
+  AcoustID has not been asked about it.
+- **Application key.** `Runtime.setAcoustIdClientKey` sets the key AcoustID
+  identifies the application by; `orca-cli` and `orca-gtk` set it from the new
+  build option `-Dacoustid-key=` (default `AqlfLksN1K`). A `CredentialStore`
+  value under `org.acoustid` / `client-key` overrides it; without a key
+  AcoustID is skipped. `setAcoustIdServer` and `ORCA_ACOUSTID_URL` select
+  another server.
+- **Fingerprints are cached.** `analysis_results` gains kind 3,
+  `orca.chromaprint`, keyed by the algorithm, the resampler and the bytes.
+  A file that does not decode cleanly gets no fingerprint.
+  `Runtime.libraryTrackFingerprint` (new type `TrackFingerprint`) and
+  `orca-cli fingerprint DATABASE TRACK_ID` print one in `fpcalc`'s format.
+- **Chosen recording IDs can be submitted.** `startAcoustIdSubmission` starts
+  an `acoustid_submission` Job (new `JobKind`) that sends the fingerprints of
+  files whose recording ID came from an accepted match or an edit, never a
+  tagged one, once per file and ID, in batches of at most 50 items and
+  900 KB, with the user key the `CredentialStore` holds under `org.acoustid`
+  / `user-key`. A file more than 30 s from its recording's length is sent
+  with its metadata instead of the ID. It fails with `needs_user_key` or
+  `invalid_user_key` without marking anything sent, and records each
+  submission ID in the new `acoustid_submissions` table.
+  `jobSubmissionStats` (new types `SubmissionStats`, `SubmissionOutcome`),
+  `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` (new
+  types `AcoustIdSubmittable`, `AcoustIdSubmittablePage`) report it.
+  Matching and submission cannot run at once (`error.AcoustIdBusy`).
+  `orca-cli submit-acoustid DATABASE [--dry-run]` reads the key from
+  `ORCA_ACOUSTID_USER_KEY`.
+- **`orca-cli`**: `match` prints a line of AcoustID counters and takes
+  `--no-fingerprints`; `matches` prints each proposal's source and AcoustID
+  score.
+- **New dependencies.** Chromaprint 1.6.1 (MIT) with KissFFT (BSD-3-Clause)
+  is built from source without its LGPL resampler, and a build step fails if
+  a compiled source carries a GPL or LGPL notice. libsamplerate (BSD-2-Clause)
+  is linked through pkg-config and exposed as `resampler.SampleRate`.
+
 ### MusicBrainz matching
 
 - **Tracks without a MusicBrainz recording ID can be matched.**
