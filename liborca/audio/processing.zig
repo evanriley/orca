@@ -165,6 +165,12 @@ pub const Gain = struct {
         _ = self.command_generation.fetchAdd(1, .release);
     }
 
+    /// The multiplier applied to the last frame processed. Call it only from
+    /// the engine lane, or while the engine is quiesced.
+    pub fn applied(self: *const Gain) f32 {
+        return if (self.initialized) self.current else self.linear.load(.acquire);
+    }
+
     pub fn processor(self: *Gain) Processor {
         if (!self.initialized) {
             self.current = self.linear.load(.monotonic);
@@ -207,8 +213,8 @@ pub const Gain = struct {
         }
         for (0..frames) |frame| {
             if (self.remaining_frames > 0) {
-                self.current += self.step;
                 self.remaining_frames -= 1;
+                self.current = if (self.remaining_frames == 0) target else self.current + self.step;
             } else {
                 self.current = target;
             }
@@ -300,6 +306,27 @@ test "a volume change is the only thing that moves the gain node" {
 
     gain.setLinear(1, 0);
     try std.testing.expectEqual(@as(f32, 1), gain.linear.load(.acquire));
+}
+
+test "a ramp ending on a block boundary lands exactly on its target" {
+    var gain: Gain = .{};
+    gain.setLinear(0.73, 0);
+    var block: [256 * 2]f32 = @splat(1);
+    gain.processor().process(&block, 256, 2);
+
+    gain.setLinear(1, 512);
+    for (0..2) |_| {
+        block = @splat(1);
+        gain.processor().process(&block, 256, 2);
+    }
+    try std.testing.expectEqual(@as(f32, 1), gain.current);
+    try std.testing.expectEqual(@as(f32, 1), gain.applied());
+
+    var samples: [256 * 2]f32 = undefined;
+    for (&samples, 0..) |*sample, index| sample.* = @as(f32, @floatFromInt(index)) / 512 - 0.5;
+    const original = samples;
+    gain.processor().process(&samples, 256, 2);
+    try std.testing.expectEqualSlices(f32, &original, &samples);
 }
 
 test "a boost is capped by the peak it would clip" {

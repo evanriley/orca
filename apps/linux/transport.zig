@@ -484,6 +484,7 @@ fn buildOutputs(self: *App) *gtk.Widget {
     gtk.gtk_label_set_xalign(self.signal_path_label.?, 0.0);
     gtk.gtk_label_set_wrap(self.signal_path_label.?, gtk.true_);
     gtk.gtk_label_set_max_width_chars(self.signal_path_label.?, 36);
+    gtk.gtk_widget_set_tooltip_text(path_label, signal_path.pipewire_hedge);
     gtk.gtk_widget_add_css_class(path_label, "dim-label");
     gtk.gtk_widget_set_margin_start(path_label, 10);
     gtk.gtk_widget_set_margin_end(path_label, 10);

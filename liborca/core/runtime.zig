@@ -3780,13 +3780,13 @@ pub const OrcaRuntime = struct {
         return (try self.players.get(player)).dsp.settings.crossfeed;
     }
 
-    /// What the audio being decoded passes through on its way to the output,
+    /// What the audio being heard passes through on its way to the output,
     /// and whether that path could be bit-perfect.
     ///
-    /// The source format and codec are the decode cursor's, which leads the
-    /// audible entry by the render-ahead depth; the ReplayGain figure is the
-    /// audible entry's. The engine is stopped while they are read, because the
-    /// decoder and the Zone's open format are engine-thread state.
+    /// The source format, codec and ReplayGain figure are the audible entry's,
+    /// and the volume is the gain being applied, not the target it ramps
+    /// toward. The engine is stopped while they are read, because the entry
+    /// ring, the gain ramp and the Zone's open format are engine-thread state.
     pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.SignalPath {
         try self.requireRunning();
         const object_value = try self.players.get(player);
@@ -3796,11 +3796,15 @@ pub const OrcaRuntime = struct {
         const audible = object_value.player.audibleSource();
         return .describe(.{
             .source = if (audible) |value| value.format else null,
+            .source_declared = if (audible) |value| value.declared else false,
             .codec = if (audible) |value| value.codec else null,
             .replay_gain = object_value.player.effectiveReplayGain(),
             .equalizer = object_value.dsp.settings.equalizer,
             .crossfeed = object_value.dsp.settings.crossfeed,
-            .volume = object_value.gain.linear.load(.acquire),
+            .volume = if (engine != null)
+                object_value.gain.applied()
+            else
+                object_value.gain.linear.load(.acquire),
             .output = if (engine) |value| value.outputFormat() else null,
             .device_rate = if (engine) |value| value.deviceRate() else null,
         });
@@ -4624,6 +4628,7 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     var path = try runtime.playerSignalPath(player);
     var deadline: TestDeadline = .init(5_000);
     while (path.output == null and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
         if (backend.liveStream()) |stream| stream.pump(&samples, 256);
         path = try runtime.playerSignalPath(player);
     }
@@ -4633,6 +4638,8 @@ test "a Player's signal path reports sample processing only while DSP or volume 
     try std.testing.expectEqual(path.source.?.sample_rate, output.sample_rate);
     try std.testing.expectEqual(path.source.?.channels, output.channels);
     try std.testing.expect(!hasReason(path, .sample_processing));
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
     try std.testing.expectEqual(@as(f32, 1), path.volume);
     try std.testing.expectEqual(@as(?audio.dsp.Equalizer, null), path.equalizer);
 
@@ -4649,8 +4656,25 @@ test "a Player's signal path reports sample processing only while DSP or volume 
 
     try runtime.playerSetVolume(player, 0.5);
     path = try runtime.playerSignalPath(player);
+    deadline = .init(5_000);
+    while (path.volume != 0.5 and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
     try std.testing.expect(hasReason(path, .sample_processing));
     try std.testing.expectEqual(@as(f32, 0.5), path.volume);
+
+    try runtime.playerSetVolume(player, 1);
+    path = try runtime.playerSignalPath(player);
+    deadline = .init(5_000);
+    while (path.volume != 1 and deadline.tick()) {
+        if (deadline.remaining_ms % 5 != 0) continue;
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        path = try runtime.playerSignalPath(player);
+    }
+    try std.testing.expectEqual(@as(f32, 1), path.volume);
+    try std.testing.expect(path.bit_perfect_eligible);
 
     try runtime.destroyZone(zone);
     try runtime.destroyPlayer(player);

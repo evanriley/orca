@@ -232,9 +232,12 @@ the same for matching and submission.
 
 The output menu ends with the **signal path**: the source format, then
 ReplayGain, equalizer, crossfeed, volume and the output format as they apply,
-and whether the path is bit-perfect, with the reasons when it is not. It comes
-from `Runtime.playerSignalPath` and is read only when the menu opens and when
-the track changes while it is open, never on the tick.
+and whether the path is bit-perfect, with the reasons when it is not. An
+eligible path reads "Bit-perfect up to PipeWire", and the label's tooltip, like
+the details panel's signal-path row, says that PipeWire's own volume and
+resampling are not visible to Orca. It comes from `Runtime.playerSignalPath`
+and is read only when the menu opens and when the track changes while it is
+open, never on the tick.
 
 The **details panel** sits right of the Tracks list and of each album page.
 The header toggle or `Ctrl+I` shows or hides every panel at once, and the

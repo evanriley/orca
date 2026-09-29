@@ -6,6 +6,7 @@ const std = @import("std");
 const liborca = @import("liborca");
 
 pub const nothing_playing = "Nothing playing";
+pub const pipewire_hedge = "PipeWire's own volume and resampling are not visible to Orca.";
 
 /// The path as text in `buffer`, cut short if it does not fit.
 pub fn render(buffer: []u8, path: liborca.SignalPath) [:0]const u8 {
@@ -17,17 +18,18 @@ pub fn render(buffer: []u8, path: liborca.SignalPath) [:0]const u8 {
 
 pub fn write(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Error!void {
     const source = path.source orelse return writer.writeAll(nothing_playing);
-    try writeSource(writer, source, path.codec);
+    try writeSource(writer, source, path.source_declared, path.codec);
     if (path.replay_gain_db) |decibels| {
         const tenths = @round(decibels * 10) / 10;
         try writer.print("\n→ ReplayGain {s}{d:.1} dB", .{ if (tenths < 0) "−" else "+", @abs(tenths) });
     }
     if (path.equalizer != null) try writer.writeAll("\n→ Equalizer");
     if (path.crossfeed != null) try writer.writeAll("\n→ Crossfeed");
-    if (path.volume < 1) try writer.print("\n→ Volume {d} %", .{@as(u32, @intFromFloat(@round(@max(path.volume, 0) * 100)))});
+    if (path.volume != 1) try writer.print("\n→ Volume {d} %", .{@as(u32, @intFromFloat(@round(@max(path.volume, 0) * 100)))});
     if (path.output) |output| {
         try writer.writeAll("\n→ PipeWire · ");
         try writeDepth(writer, output);
+        if (path.widened_exactly) try writer.writeAll(" (exact)");
         try writer.writeAll(" · ");
         try writeRate(writer, output.sample_rate);
         if (path.device_rate) |device_rate| {
@@ -38,7 +40,7 @@ pub fn write(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Err
         }
     }
     if (path.output == null) return;
-    if (path.bit_perfect_eligible) return writer.writeAll("\nBit-perfect");
+    if (path.bit_perfect_eligible) return writer.writeAll("\nBit-perfect up to PipeWire");
     try writer.writeAll("\nNot bit-perfect");
     for (path.reasonList(), 0..) |reason, index| {
         try writer.writeAll(if (index == 0) ": " else ", ");
@@ -47,16 +49,22 @@ pub fn write(writer: *std.Io.Writer, path: liborca.SignalPath) std.Io.Writer.Err
             .sample_format_conversion => "converted to 32-bit float",
             .sample_rate_conversion => "resampled",
             .channel_layout_conversion => "channels remixed",
+            .lossy_source => "lossy source",
         });
     }
 }
 
-fn writeSource(writer: *std.Io.Writer, source: liborca.PcmFormat, codec: ?[]const u8) !void {
+fn writeSource(
+    writer: *std.Io.Writer,
+    source: liborca.PcmFormat,
+    source_declared: bool,
+    codec: ?[]const u8,
+) !void {
     if (codec) |id| {
         try writeCodecName(writer, id);
         try writer.writeAll(" · ");
     }
-    if (codec == null or !isLossy(codec.?)) {
+    if (source_declared) {
         try writeDepth(writer, source);
         try writer.writeAll(" · ");
     }
@@ -67,13 +75,6 @@ fn writeSource(writer: *std.Io.Writer, source: liborca.PcmFormat, codec: ?[]cons
         2 => try writer.writeAll("stereo"),
         else => |channels| try writer.print("{d} channels", .{channels}),
     }
-}
-
-fn isLossy(codec: []const u8) bool {
-    for ([_][]const u8{ "mp1", "mp2", "mp3", "aac", "vorbis", "opus", "qoa" }) |lossy| {
-        if (std.ascii.eqlIgnoreCase(codec, lossy)) return true;
-    }
-    return false;
 }
 
 pub fn writeCodecName(writer: *std.Io.Writer, codec: []const u8) !void {

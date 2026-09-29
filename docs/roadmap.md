@@ -15,9 +15,9 @@ submission. Filesystem watching is built but not connected. `liborca` does
 not compile for aarch64 targets, Apple Silicon included, and macOS has no
 audio output yet.
 
-The next milestone is correctness and maintenance, not features: the
-signal-path report, provider state that is lost on restart, parser hardening
-and the size of `runtime.zig` come before filesystem watching.
+The next milestone is correctness and maintenance, not features: provider
+state that is lost on restart, parser hardening and the size of `runtime.zig`
+come before filesystem watching.
 
 ## Works today
 
@@ -54,7 +54,10 @@ and the size of `runtime.zig` come before filesystem watching.
 - Per-entry ReplayGain from analysis results.
 - A ten-band equalizer with presets, stereo crossfeed, and a signal-path
   report of the source, each processing stage, the output stream and whether
-  the path could be bit-perfect (`orca-cli play-tracks --eq --crossfeed`).
+  the path could be bit-perfect up to PipeWire: exact widening of a source of
+  24 bits or fewer to float is, a lossy source, a 32-bit integer or 64-bit
+  float source and any gain that is not exactly 1 are not
+  (`orca-cli play-tracks --eq --crossfeed`).
 - Output device selection.
 - Track details: format, file, loudness, tags and MusicBrainz recording ID
   with its source for one Track (`orca-cli track`), and a details panel in
@@ -156,18 +159,11 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **A truthful signal-path report.** Widening a source of 24 bits or fewer
-     to 32-bit float is exact and must not make a path "not bit-perfect"; a
-     lossy source, a 32-bit integer or 64-bit float source, and any gain that
-     is not exactly 1 must. A volume ramp back to 1.0 ends at 0.99999 and is
-     reported as 1.0: the ramp snaps to its target, and the report reads the
-     gain that is applied. `orca-gtk` states that PipeWire's own volume and
-     resampling are not visible to Orca.
    - **aarch64 builds, and CI.** `database/sqlite.zig` builds
      `SQLITE_TRANSIENT` as a misaligned function pointer, which aarch64
      rejects. A CI workflow runs `zig build test`, `zig fmt --check` and a
      cross-build of `liborca` for `aarch64-macos`.
-   - **Release `v0.2.0`** once the two items above land: the first tag,
+   - **Release `v0.2.0`** once the item above lands: the first tag,
      following [Releases](#releases). `build.zig` and `flake.nix` read the
      version from `build.zig.zon`, so it is written in one place, and the
      `-alpha` suffix is dropped: a `0.x` version already makes no stability

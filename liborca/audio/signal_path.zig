@@ -18,16 +18,20 @@ pub const Reason = enum {
     sample_rate_conversion,
     channel_layout_conversion,
     sample_format_conversion,
+    lossy_source,
 };
+
+pub const max_reasons = @typeInfo(Reason).@"enum".fields.len;
 
 pub fn Report(comptime capacity: usize) type {
     return struct {
         bit_perfect_eligible: bool = true,
         direct_rt_eligible: bool = true,
         nodes_truncated: bool = false,
+        widened_exactly: bool = false,
         nodes: [capacity]Node = undefined,
         node_count: usize = 0,
-        reasons: [4]Reason = undefined,
+        reasons: [max_reasons]Reason = undefined,
         reason_count: usize = 0,
         algorithmic_latency_frames: u32 = 0,
 
@@ -111,8 +115,21 @@ pub fn inspectWithResampler(
     if (source.sample_format != output.sample_format or
         source.bits_per_sample != output.bits_per_sample or
         source.bytes_per_frame != output.bytes_per_frame)
-        report.addReason(.sample_format_conversion);
+    {
+        if (widensExactly(source.sample_format, output.sample_format))
+            report.widened_exactly = true
+        else
+            report.addReason(.sample_format_conversion);
+    }
     return report;
+}
+
+fn widensExactly(source: pcm.SampleFormat, output: pcm.SampleFormat) bool {
+    if (output != .float_32) return false;
+    return switch (source) {
+        .unsigned_8, .signed_16, .signed_24 => true,
+        else => false,
+    };
 }
 
 test "signal path explains bit-perfect eligibility" {
@@ -163,4 +180,54 @@ test "signal path explains bit-perfect eligibility" {
     resampled.applyAlgorithmicLatency(&latency);
     try std.testing.expectEqual(@as(u32, 1), latency.dsp_frames);
     try std.testing.expectEqual(@as(u64, 193), latency.knownTotalFrames());
+}
+
+fn testFormat(sample_format: pcm.SampleFormat, bits_per_sample: u16, bytes_per_sample: u16) pcm.Format {
+    return .{
+        .sample_format = sample_format,
+        .channels = 2,
+        .sample_rate = 44_100,
+        .bits_per_sample = bits_per_sample,
+        .bytes_per_frame = 2 * bytes_per_sample,
+    };
+}
+
+test "widening an integer source of 24 bits or fewer to float32 is exact and stays eligible" {
+    const std = @import("std");
+    const output = testFormat(.float_32, 32, 4);
+    const sources = [_]pcm.Format{
+        testFormat(.unsigned_8, 8, 1),
+        testFormat(.signed_16, 16, 2),
+        testFormat(.signed_24, 20, 3),
+        testFormat(.signed_24, 24, 3),
+    };
+    for (sources) |source| {
+        const report = inspect(1, source, output, &.{}, &.{});
+        try std.testing.expect(report.bit_perfect_eligible);
+        try std.testing.expect(report.widened_exactly);
+        try std.testing.expectEqual(@as(usize, 0), report.reason_count);
+    }
+}
+
+test "a source already in the output format is not a widening" {
+    const std = @import("std");
+    const format = testFormat(.float_32, 32, 4);
+    const report = inspect(1, format, format, &.{}, &.{});
+    try std.testing.expect(report.bit_perfect_eligible);
+    try std.testing.expect(!report.widened_exactly);
+}
+
+test "a 32-bit integer or float64 source reaching float32 is a sample format conversion" {
+    const std = @import("std");
+    const output = testFormat(.float_32, 32, 4);
+    for ([_]pcm.Format{ testFormat(.signed_32, 32, 4), testFormat(.float_64, 64, 8) }) |source| {
+        const report = inspect(1, source, output, &.{}, &.{});
+        try std.testing.expect(!report.bit_perfect_eligible);
+        try std.testing.expect(!report.widened_exactly);
+        try std.testing.expectEqualSlices(
+            Reason,
+            &.{.sample_format_conversion},
+            report.reasons[0..report.reason_count],
+        );
+    }
 }

@@ -87,11 +87,20 @@ also have scalar references and tested Zig vector kernels; run
 Signal-path reports list Player and Zone nodes, format/rate/layout conversions,
 direct-RT eligibility, and total algorithmic latency. They distinguish source
 PCM from canonical float32 working PCM and conservatively explain why a path is
-not bit-perfect. Eligibility is not an assertion that the current backend and
-device negotiated a bit-perfect native output path. `Runtime.playerSignalPath`
-reports the live path of one Player: the decoder's source format, the audible
-entry's ReplayGain, the equalizer, crossfeed and volume, and the format the
-clock Zone opened its stream with.
+not bit-perfect. Widening an 8-, 16- or 24-bit integer source to float32 is
+exact, so it is not a reason; the report marks it `widened_exactly`. These are
+reasons: a 32-bit integer or 64-bit float source (`sample_format_conversion`),
+a lossy codec (`lossy_source`), any ReplayGain, equalizer, crossfeed or volume
+that is not exactly 1 (`sample_processing`), and a rate or channel layout that
+changes. Eligibility ends at the stream Orca hands the backend: it says nothing
+about what PipeWire does after it, and is not an assertion that the device
+negotiated a bit-perfect native path. `Runtime.playerSignalPath` reports the
+live path of one Player: the audible entry's source format, codec and
+ReplayGain, the equalizer and crossfeed, the volume the gain node is applying
+(not the target it ramps toward), and the format the clock Zone opened its
+stream with. A decoder that declares no source format, as lossy decoders do,
+leaves `source_declared` false: `source` then holds the canonical format, and
+only its rate and channels are meaningful.
 
 A runtime Zone owns its whole private render path: `BlockPool`, `RenderPipe`,
 `RenderContext` and `OutputSession`, plus every atomic the render callback reads

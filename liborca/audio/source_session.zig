@@ -182,6 +182,10 @@ pub const SourceQueue = struct {
         return self.current.decoder.source_format orelse self.current.decoder.format;
     }
 
+    pub fn sourceDeclared(self: *const SourceQueue) bool {
+        return self.current.decoder.source_format != null;
+    }
+
     pub fn seek(self: *SourceQueue, frame: u64) !void {
         try self.current.seek(frame);
     }

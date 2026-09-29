@@ -648,10 +648,8 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             const name = if (codec.len <= upper.len) std.ascii.upperString(&upper, codec) else codec;
             try stdout.print("{s} ", .{name});
         }
-        try stdout.print(
-            "{d}-bit {d} Hz {d} ch",
-            .{ source.bits_per_sample, source.sample_rate, source.channels },
-        );
+        if (path.source_declared) try stdout.print("{d}-bit ", .{source.bits_per_sample});
+        try stdout.print("{d} Hz {d} ch", .{ source.sample_rate, source.channels });
     } else try stdout.writeAll("no source");
     if (path.replay_gain_db) |decibels| try stdout.print(" -> replay gain {d:.1} dB", .{decibels});
     if (path.equalizer != null) try stdout.writeAll(" -> eq");
@@ -662,6 +660,7 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             " -> output {s} {d} Hz {d} ch",
             .{ formatName(output.sample_format), output.sample_rate, output.channels },
         );
+        if (path.widened_exactly) try stdout.writeAll(" (exact)");
         if (path.device_rate) |device_rate| {
             try stdout.print(" -> device {d} Hz", .{device_rate});
             if (device_rate != output.sample_rate) try stdout.writeAll(" (PipeWire resamples)");

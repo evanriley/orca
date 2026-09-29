@@ -667,6 +667,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const plays_row = newRow("Plays");
     const last_played_row = newRow("Last played");
     const now_row = newRow("Signal path");
+    gtk.gtk_widget_set_tooltip_text(now_row, signal_path.pipewire_hedge);
 
     const format_group = newGroup("Format", &.{ format_row, duration_row });
     const file_group = newGroup("File", &.{ size_row, path_row });

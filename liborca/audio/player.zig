@@ -48,6 +48,7 @@ const EntryInfo = struct {
     /// by the session that decodes the entry, not from here.
     replay_gain: f32 = 1,
     source_format: ?pcm.Format = null,
+    source_declared: bool = false,
     codec: []const u8 = "",
 };
 
@@ -219,6 +220,7 @@ pub const Player = struct {
             .frame_count = sources.current.decoder.frame_count orelse 0,
             .replay_gain = sources.current.replay_gain,
             .source_format = sources.sourceFormat(),
+            .source_declared = sources.sourceDeclared(),
             .codec = sources.codec(),
         };
     }
@@ -301,10 +303,14 @@ pub const Player = struct {
 
     /// The audible entry's source format and codec, resolved like its
     /// duration. Read under the engine handshake.
-    pub fn audibleSource(self: *const Player) ?struct { format: pcm.Format, codec: []const u8 } {
+    pub fn audibleSource(self: *const Player) ?struct {
+        format: pcm.Format,
+        declared: bool,
+        codec: []const u8,
+    } {
         const info = self.audibleEntryInfo();
         const source = info.source_format orelse return null;
-        return .{ .format = source, .codec = info.codec };
+        return .{ .format = source, .declared = info.source_declared, .codec = info.codec };
     }
 
     pub fn decodeAndFanout(

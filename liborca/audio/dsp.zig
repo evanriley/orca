@@ -1,4 +1,5 @@
 const std = @import("std");
+const codec_id = @import("../codec/decoder.zig").codec_id;
 const equalizer = @import("equalizer.zig");
 const kernels = @import("kernels.zig");
 const nodes = @import("nodes.zig");
@@ -195,6 +196,9 @@ pub const PlayerDsp = struct {
 pub const SignalPath = struct {
     /// The decoder's source format, before conversion to canonical float32.
     source: ?pcm.Format = null,
+    /// False when the decoder declared no source format: `source` then holds
+    /// the canonical format, and only its rate and channels are meaningful.
+    source_declared: bool = false,
     /// Canonical codec identifier of the source, from `codec_id`.
     codec: ?[]const u8 = null,
     /// The correction applied to the audible entry, or null when it is 1.
@@ -211,10 +215,12 @@ pub const SignalPath = struct {
     /// False as soon as any reason applies. With no source or no output the
     /// format conversions cannot be judged, so only sample processing counts.
     bit_perfect_eligible: bool = true,
+    /// The integer source reaches float32 unchanged, which is not a reason.
+    widened_exactly: bool = false,
     reasons: [max_reasons]signal_path.Reason = undefined,
     reason_count: usize = 0,
 
-    pub const max_reasons = 4;
+    pub const max_reasons = signal_path.max_reasons;
 
     pub fn reasonList(self: *const SignalPath) []const signal_path.Reason {
         return self.reasons[0..self.reason_count];
@@ -224,6 +230,7 @@ pub const SignalPath = struct {
     /// correction and, like a volume of exactly 1, is not sample processing.
     pub fn describe(inputs: struct {
         source: ?pcm.Format,
+        source_declared: bool,
         codec: ?[]const u8,
         replay_gain: f32,
         equalizer: ?Equalizer,
@@ -234,6 +241,7 @@ pub const SignalPath = struct {
     }) SignalPath {
         var result: SignalPath = .{
             .source = inputs.source,
+            .source_declared = inputs.source_declared,
             .codec = inputs.codec,
             .replay_gain_db = if (inputs.replay_gain == 1)
                 null
@@ -255,6 +263,7 @@ pub const SignalPath = struct {
         if (inputs.source) |source| {
             if (inputs.output) |output| {
                 const report = signal_path.inspect(max_reasons, source, output, &.{}, &.{});
+                result.widened_exactly = report.widened_exactly;
                 for (report.reasons[0..report.reason_count]) |reason| {
                     result.reasons[result.reason_count] = reason;
                     result.reason_count += 1;
@@ -269,6 +278,12 @@ pub const SignalPath = struct {
                     result.reasons[result.reason_count] = .sample_rate_conversion;
                     result.reason_count += 1;
                 }
+            }
+        }
+        if (inputs.codec) |codec| {
+            if (!codec_id.isLossless(codec)) {
+                result.reasons[result.reason_count] = .lossy_source;
+                result.reason_count += 1;
             }
         }
         result.bit_perfect_eligible = result.reason_count == 0;
@@ -524,6 +539,7 @@ const test_float_format: pcm.Format = .{
 test "a signal path with no processing over matching formats is bit-perfect eligible" {
     const path = SignalPath.describe(.{
         .source = test_float_format,
+        .source_declared = true,
         .codec = "pcm_float",
         .replay_gain = 1,
         .equalizer = null,
@@ -537,10 +553,74 @@ test "a signal path with no processing over matching formats is bit-perfect elig
     try std.testing.expectEqual(@as(?f32, null), path.replay_gain_db);
 }
 
-test "an integer source reaching a float output is a sample format conversion" {
+test "a 16-bit source widened to float32 is exact and stays bit-perfect eligible" {
     const path = SignalPath.describe(.{
         .source = test_flac_format,
+        .source_declared = true,
         .codec = "flac",
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = null,
+    });
+    try std.testing.expect(path.bit_perfect_eligible);
+    try std.testing.expect(path.widened_exactly);
+    try std.testing.expectEqual(@as(usize, 0), path.reasonList().len);
+}
+
+test "a 32-bit integer source reaching a float output is a sample format conversion" {
+    var source = test_flac_format;
+    source.sample_format = .signed_32;
+    source.bits_per_sample = 32;
+    source.bytes_per_frame = 8;
+    const path = SignalPath.describe(.{
+        .source = source,
+        .source_declared = true,
+        .codec = "pcm",
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = null,
+    });
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(!path.widened_exactly);
+    try std.testing.expectEqualSlices(
+        signal_path.Reason,
+        &.{.sample_format_conversion},
+        path.reasonList(),
+    );
+}
+
+test "a lossy source that declares no source format is only a lossy source" {
+    const path = SignalPath.describe(.{
+        .source = test_float_format,
+        .source_declared = false,
+        .codec = "mp3",
+        .replay_gain = 1,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = test_float_format,
+        .device_rate = null,
+    });
+    try std.testing.expect(!path.bit_perfect_eligible);
+    try std.testing.expect(!path.source_declared);
+    try std.testing.expectEqualSlices(
+        signal_path.Reason,
+        &.{.lossy_source},
+        path.reasonList(),
+    );
+}
+
+test "a lossy codec declaring an integer source format is still a lossy source" {
+    const path = SignalPath.describe(.{
+        .source = test_flac_format,
+        .source_declared = true,
+        .codec = "qoa",
         .replay_gain = 1,
         .equalizer = null,
         .crossfeed = null,
@@ -551,7 +631,7 @@ test "an integer source reaching a float output is a sample format conversion" {
     try std.testing.expect(!path.bit_perfect_eligible);
     try std.testing.expectEqualSlices(
         signal_path.Reason,
-        &.{.sample_format_conversion},
+        &.{.lossy_source},
         path.reasonList(),
     );
 }
@@ -573,6 +653,7 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
     for (cases) |case| {
         const path = SignalPath.describe(.{
             .source = test_float_format,
+            .source_declared = true,
             .codec = null,
             .replay_gain = case.replay_gain,
             .equalizer = case.equalizer,
@@ -590,6 +671,7 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
     }
     const transparent = SignalPath.describe(.{
         .source = test_float_format,
+        .source_declared = true,
         .codec = null,
         .replay_gain = 1,
         .equalizer = .{},
@@ -604,6 +686,7 @@ test "equalizer, crossfeed, volume and replay gain each count as sample processi
 test "a device running at another rate than the output stream is a sample rate conversion" {
     const path = SignalPath.describe(.{
         .source = test_float_format,
+        .source_declared = true,
         .codec = null,
         .replay_gain = 1,
         .equalizer = null,
@@ -625,6 +708,7 @@ test "a device running at the output stream rate, or at an unknown rate, adds no
     for ([_]?u32{ 44_100, null }) |device_rate| {
         const path = SignalPath.describe(.{
             .source = test_float_format,
+            .source_declared = true,
             .codec = null,
             .replay_gain = 1,
             .equalizer = null,
@@ -643,6 +727,7 @@ test "a device rate mismatch is one reason even when the source rate already dif
     source.sample_rate = 96_000;
     const path = SignalPath.describe(.{
         .source = source,
+        .source_declared = true,
         .codec = null,
         .replay_gain = 1,
         .equalizer = null,
@@ -664,6 +749,7 @@ test "crossfeed on a layout it does not apply to is not sample processing" {
     surround.bytes_per_frame = 24;
     const path = SignalPath.describe(.{
         .source = surround,
+        .source_declared = true,
         .codec = null,
         .replay_gain = 1,
         .equalizer = null,
@@ -678,6 +764,7 @@ test "crossfeed on a layout it does not apply to is not sample processing" {
 test "replay gain is reported in decibels" {
     const path = SignalPath.describe(.{
         .source = null,
+        .source_declared = false,
         .codec = null,
         .replay_gain = 0.5,
         .equalizer = null,

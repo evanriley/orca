@@ -2,6 +2,30 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Truthful signal-path report
+
+- **Exact widening is bit-perfect.** An 8-, 16- or 24-bit integer source
+  widened to float32 reaches the output unchanged, so FLAC, ALAC, WAV and AIFF
+  are no longer reported "not bit-perfect" for it; the report marks the path
+  `widened_exactly`, and `orca-cli` prints `(exact)` after the output format.
+  A 32-bit integer or 64-bit float source is still a
+  `sample_format_conversion`.
+- **Lossy sources are not bit-perfect.** MP3, AAC, Opus, Vorbis and QOA carry
+  the new reason `lossy_source`. They used to report "bit-perfect: yes"
+  because a decoder that declares no source format reported the canonical
+  float32 format, which matched the stream.
+- **A volume ramp lands exactly on its target**, where a ramp ending on a
+  block boundary stopped at 0.99999, and the report reads the gain being
+  applied rather than the target, so volume 1 is bit-perfect once the ramp
+  ends.
+- **No bit depth for lossy sources.** `orca-cli` and `orca-gtk` print a depth
+  only when the decoder declared a source format.
+- **`orca-gtk` says "Bit-perfect up to PipeWire"**, with "PipeWire's own
+  volume and resampling are not visible to Orca." on hover over the signal
+  path, and shows the volume whenever it is not 100 %, above it included.
+- `SignalPath` gains `source_declared` and `widened_exactly`, and
+  `SignalPathReason` gains `lossy_source` (public API addition).
+
 ### Tag-write backups out of the music folders
 
 - **A tag write leaves nothing beside the music.** The original is copied,
