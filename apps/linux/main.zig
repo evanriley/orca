@@ -350,6 +350,8 @@ pub fn main(init: std.process.Init) !u8 {
         runtime.setListenBrainzServer(server) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_MUSICBRAINZ_URL")) |server|
         runtime.setMusicBrainzServer(server) catch {};
+    if (resolveServer(allocator, init.environ_map, "ORCA_ACOUSTID_URL")) |server|
+        runtime.setAcoustIdServer(server) catch {};
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;

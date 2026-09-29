@@ -1,13 +1,14 @@
-//! The ListenBrainz user token in the desktop's Secret Service, through
-//! libsecret. The token lives nowhere else: not in `settings.ini`, not in the
-//! Library.
+//! Provider credentials in the desktop's Secret Service, through libsecret:
+//! the ListenBrainz user token and the AcoustID user key, each under the
+//! service and account liborca asks for. They live nowhere else: not in
+//! `settings.ini`, not in the Library.
 //!
-//! libsecret is LGPL, so it is linked into this frontend only. The listen
-//! worker reads the token through `credential_store` with a synchronous
-//! search that never unlocks the keyring, so a locked one reads as no token
-//! and no prompt appears from that thread; saving, clearing and checking
-//! whether a token is stored are asynchronous and run on the main loop, where
-//! a prompt is acceptable.
+//! libsecret is LGPL, so it is linked into this frontend only. Workers read a
+//! credential through `credential_store` with a synchronous search that never
+//! unlocks the keyring, so a locked one reads as no credential and no prompt
+//! appears from their threads; saving, clearing and checking whether one is
+//! stored are asynchronous and run on the main loop, where a prompt is
+//! acceptable.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -69,6 +70,7 @@ extern fn secret_value_unref(value: *SecretValue) void;
 pub const Completion = *const fn (succeeded: bool, data: ?*anyopaque) void;
 
 pub const Presence = enum { absent, stored, locked, unavailable };
+pub const LockedItems = enum { unlock, report };
 pub const PresenceCompletion = *const fn (presence: Presence, data: ?*anyopaque) void;
 
 const Pending = struct {
@@ -85,11 +87,11 @@ const PendingPresence = struct {
     completion: PresenceCompletion,
     data: ?*anyopaque,
     names: Names,
+    locked_items: LockedItems,
     items: ?*GList = null,
 };
 
 const default_collection = "default";
-const label = "Orca ListenBrainz user token";
 const name_capacity = 128;
 
 const Names = struct {
@@ -193,6 +195,7 @@ fn presenceFound(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque)
         const item = entry.data orelse continue;
         if (secret_item_get_locked(item) == 0) return finishPresence(pending, .stored);
     }
+    if (pending.locked_items == .report) return finishPresence(pending, .locked);
     secret_service_unlock(null, pending.items, null, &presenceUnlocked, pending);
 }
 
@@ -214,6 +217,7 @@ fn newPending(completion: Completion, data: ?*anyopaque) error{OutOfMemory}!*Pen
 pub fn save(
     service: [:0]const u8,
     account: [:0]const u8,
+    label: [:0]const u8,
     token: [*:0]const u8,
     completion: Completion,
     data: ?*anyopaque,
@@ -222,7 +226,7 @@ pub fn save(
     secret_password_store(
         &schema,
         default_collection,
-        label,
+        label.ptr,
         token,
         null,
         &storeFinished,
@@ -238,12 +242,13 @@ pub fn save(
 pub fn check(
     service: []const u8,
     account: []const u8,
+    locked_items: LockedItems,
     completion: PresenceCompletion,
     data: ?*anyopaque,
 ) error{ OutOfMemory, NameTooLong }!void {
     const pending = try std.heap.smp_allocator.create(PendingPresence);
     errdefer std.heap.smp_allocator.destroy(pending);
-    pending.* = .{ .completion = completion, .data = data, .names = try Names.init(service, account) };
+    pending.* = .{ .completion = completion, .data = data, .names = try Names.init(service, account), .locked_items = locked_items };
     const attributes = g_hash_table_new(&g_str_hash, &g_str_equal);
     defer g_hash_table_unref(attributes);
     _ = g_hash_table_insert(attributes, @constCast("service"), &pending.names.service);

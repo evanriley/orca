@@ -1,6 +1,7 @@
-//! The Matches page: the Tracks MusicBrainz proposed recordings for, each
-//! beside its best proposal, to accept or dismiss. liborca finds, orders and
-//! records the matches; this only words them.
+//! The Matches page: the Tracks MusicBrainz or AcoustID proposed recordings
+//! for, each beside its best proposal, to accept or dismiss, and the
+//! submission of accepted matches to AcoustID. liborca finds, orders, records
+//! and submits the matches; this only words them.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -11,6 +12,7 @@ const app = @import("app.zig");
 const jobs = @import("jobs.zig");
 const details = @import("details.zig");
 const window = @import("window.zig");
+const secret = @import("secret.zig");
 
 const App = app.App;
 
@@ -49,6 +51,18 @@ pub fn thresholdFraction(self: *const App) f32 {
 pub fn writeHeading(writer: *std.Io.Writer, proposal: liborca.MatchProposal) std.Io.Writer.Error!void {
     try writer.writeAll(if (proposal.title.len != 0) proposal.title else "Unknown title");
     if (proposal.artist.len != 0) try writer.print(" — {s}", .{proposal.artist});
+}
+
+fn sourceName(provider: []const u8) []const u8 {
+    if (std.mem.eql(u8, provider, "musicbrainz")) return "MusicBrainz";
+    if (std.mem.eql(u8, provider, "acoustid")) return "AcoustID";
+    if (std.mem.eql(u8, provider, "musicbrainz+acoustid")) return "MusicBrainz + AcoustID";
+    return provider;
+}
+
+pub fn writeSource(writer: *std.Io.Writer, proposal: liborca.MatchProposal) std.Io.Writer.Error!void {
+    try writer.writeAll(sourceName(proposal.provider));
+    if (proposal.acoustid_score) |score| try writer.print(separator ++ "fingerprint {d}%", .{percent(score)});
 }
 
 fn finish(buffer: []u8, writer: *const std.Io.Writer) [:0]const u8 {
@@ -217,6 +231,64 @@ fn acceptConfidentResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyo
     changed(self);
 }
 
+// ------------------------------------------------------ AcoustID submission
+
+pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
+    self.acoustid_key_stored = presence == .stored;
+    const library = self.library orelse return;
+    showSubmit(self, library);
+}
+
+fn acoustIdKeyChecked(presence: secret.Presence, data: ?*anyopaque) void {
+    showAcoustIdKey(state(data), presence);
+}
+
+pub fn checkAcoustIdKey(self: *App) void {
+    secret.check(liborca.acoustid_credential_service, liborca.acoustid_user_key_account, .report, acoustIdKeyChecked, self) catch {};
+}
+
+fn showSubmit(self: *App, library: liborca.LibraryHandle) void {
+    const submit = self.matches_submit_button orelse return;
+    const count = if (self.acoustid_key_stored) self.runtime.libraryAcoustIdSubmittableCount(library) catch 0 else 0;
+    gtk.gtk_widget_set_visible(submit, if (count == 0) gtk.false_ else gtk.true_);
+    if (count == 0) return;
+    var buffer: [64]u8 = undefined;
+    gtk.gtk_button_set_label(gtk.cast(gtk.Button, submit), strings.format(&buffer, "Submit to AcoustID ({f})", .{strings.grouped(count)}).ptr);
+}
+
+fn submitClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const count = self.runtime.libraryAcoustIdSubmittableCount(library) catch
+        return self.toast("Could not count the songs to submit");
+    if (count == 0) {
+        showSubmit(self, library);
+        return self.toast("Nothing to submit");
+    }
+    var buffer: [160]u8 = undefined;
+    const heading = if (count == 1)
+        strings.format(&buffer, "Send audio fingerprints and recording IDs for 1 song to AcoustID?", .{})
+    else
+        strings.format(&buffer, "Send audio fingerprints and recording IDs for {f} songs to AcoustID?", .{strings.grouped(count)});
+    const dialog = adw.adw_alert_dialog_new(
+        heading.ptr,
+        "This helps others identify the same recordings. Only matches you accepted or IDs you set are sent, never IDs already in your files' tags.",
+    );
+    const alert = gtk.cast(adw.AlertDialog, dialog);
+    adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
+    adw.adw_alert_dialog_add_response(alert, "send", "Send");
+    adw.adw_alert_dialog_set_response_appearance(alert, "send", adw.RESPONSE_SUGGESTED);
+    adw.adw_alert_dialog_set_default_response(alert, "cancel");
+    adw.adw_alert_dialog_set_close_response(alert, "cancel");
+    _ = gtk.signalConnect(dialog, "response", gtk.callback(submitResponse), self);
+    adw.adw_dialog_present(dialog, gtk.cast(gtk.Widget, button));
+}
+
+fn submitResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
+    if (!std.mem.eql(u8, std.mem.span(response), "send")) return;
+    jobs.startSubmission(state(data));
+}
+
 // ------------------------------------------------------------------- rows
 
 fn newLabel(text: [:0]const u8, css_class: ?[*:0]const u8) *gtk.Widget {
@@ -235,8 +307,8 @@ fn proposalButton(text: [*:0]const u8, tooltip: [*:0]const u8, proposal_id: i64,
     return widget;
 }
 
-/// "Title — Artist credit · Album · #3 · 4:19 · 92%" with Accept, Dismiss and
-/// a link to the recording. The length is flagged when it is far from the
+/// "Title — Artist credit · Album · #3 · 4:19 · 92% · AcoustID · fingerprint
+/// 98%" with Accept, Dismiss and a link to the recording. The length is flagged when it is far from the
 /// Track's.
 fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
     var buffer: [1024]u8 = undefined;
@@ -265,6 +337,15 @@ fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
     }
     var percent_buffer: [16]u8 = undefined;
     gtk.gtk_box_append(gtk.cast(gtk.Box, line), newLabel(strings.format(&percent_buffer, separator ++ "{d}%", .{percent(proposal.confidence)}), "numeric"));
+    var source_buffer: [96]u8 = undefined;
+    var source_writer = std.Io.Writer.fixed(source_buffer[0 .. source_buffer.len - 1]);
+    source_writer.writeAll(separator) catch {};
+    writeSource(&source_writer, proposal) catch {};
+    const source_text = finish(&source_buffer, &source_writer);
+    const source = newLabel(source_text, "dim-label");
+    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, source), gtk.ELLIPSIZE_END);
+    gtk.gtk_widget_set_tooltip_text(source, source_text[separator.len..].ptr);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, line), source);
 
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
     gtk.gtk_widget_add_css_class(row, "match-proposal");
@@ -386,6 +467,13 @@ pub fn build(self: *App) *gtk.Widget {
     self.matches_accept_button = accept_confident;
     _ = gtk.signalConnect(accept_confident, "clicked", gtk.callback(acceptConfidentClicked), self);
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), accept_confident);
+    const submit = gtk.gtk_button_new_with_label("Submit to AcoustID");
+    self.matches_submit_button = submit;
+    gtk.gtk_widget_set_tooltip_text(submit, "Send the matches you accepted to AcoustID");
+    gtk.gtk_widget_set_visible(submit, gtk.false_);
+    _ = gtk.signalConnect(submit, "clicked", gtk.callback(submitClicked), self);
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), submit);
+    checkAcoustIdKey(self);
 
     const view = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
@@ -402,10 +490,10 @@ fn showEmpty(self: *App, unidentified: u64) void {
     } else {
         adw.adw_status_page_set_icon_name(page, "system-search-symbolic");
         adw.adw_status_page_set_title(page, "No matches to review");
-        adw.adw_status_page_set_description(
-            page,
-            "Finding matches sends song titles, artists and album names to MusicBrainz. Nothing is sent until you start it.",
-        );
+        adw.adw_status_page_set_description(page, if (self.match_fingerprints)
+            "Finding matches sends song titles, artists and album names to MusicBrainz, and a fingerprint of each song's audio to AcoustID. Nothing is sent until you start it."
+        else
+            "Finding matches sends song titles, artists and album names to MusicBrainz. Nothing is sent until you start it.");
     }
     if (self.matches_empty_button) |find| gtk.gtk_widget_set_visible(find, if (unidentified == 0) gtk.false_ else gtk.true_);
 }
@@ -444,6 +532,7 @@ pub fn reload(self: *App) void {
     const library = self.library orelse return;
     updateCount(self);
     showAcceptConfident(self, library);
+    showSubmit(self, library);
     const total = self.runtime.libraryMatchReviewCount(library) catch 0;
     const unidentified = self.runtime.libraryUnidentifiedCount(library) catch 0;
     var buffer: [256]u8 = undefined;

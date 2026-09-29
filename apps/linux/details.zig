@@ -324,7 +324,7 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
     defer if (proposals) |page| page.deinit();
     const pending = if (proposals) |page| page.items else &.{};
     const status: [*:0]const u8 = if (searching)
-        "Searching MusicBrainz…"
+        (if (self.match_fingerprints) "Searching MusicBrainz and AcoustID…" else "Searching MusicBrainz…")
     else if (pending.len == 0 and self.unmatched_track == details.track_id)
         "No match found"
     else
@@ -354,8 +354,12 @@ fn showProposal(row: *gtk.Widget, proposal: liborca.MatchProposal) void {
     writer.print("{d}%", .{matches.percent(proposal.confidence)}) catch {};
     const subtitle = finish(&subtitle_buffer, &writer);
     adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), subtitle.ptr);
+    var source_buffer: [96]u8 = undefined;
+    writer = std.Io.Writer.fixed(source_buffer[0 .. source_buffer.len - 1]);
+    matches.writeSource(&writer, proposal) catch {};
+    const source = finish(&source_buffer, &writer);
     var tooltip_buffer: [1024]u8 = undefined;
-    gtk.gtk_widget_set_tooltip_text(row, strings.format(&tooltip_buffer, "{s}\n{s}", .{ title, subtitle }).ptr);
+    gtk.gtk_widget_set_tooltip_text(row, strings.format(&tooltip_buffer, "{s}\n{s}\nFrom {s}", .{ title, subtitle, source }).ptr);
     gtk.gtk_widget_set_visible(row, gtk.true_);
 }
 

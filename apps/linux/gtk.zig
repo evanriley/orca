@@ -652,6 +652,7 @@ pub extern fn gtk_header_bar_pack_end(bar: *HeaderBar, child: *Widget) void;
 pub extern fn gtk_header_bar_set_title_widget(bar: *HeaderBar, title_widget: ?*Widget) void;
 
 pub extern fn gtk_button_new_with_label(label: [*:0]const u8) *Widget;
+pub extern fn gtk_button_set_label(button: *Button, label: [*:0]const u8) void;
 pub extern fn gtk_button_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
 pub extern fn gtk_button_set_icon_name(button: *Button, icon_name: [*:0]const u8) void;
 pub extern fn gtk_toggle_button_new() *Widget;

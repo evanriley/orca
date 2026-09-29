@@ -178,6 +178,9 @@ ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
 
 # Point MusicBrainz matching at a local mock instead of musicbrainz.org
 ORCA_MUSICBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
+
+# Point AcoustID lookups and submissions at a local mock instead of acoustid.org
+ORCA_ACOUSTID_URL=http://127.0.0.1:PORT zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does

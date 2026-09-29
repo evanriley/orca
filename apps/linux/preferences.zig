@@ -1,6 +1,6 @@
-//! Preferences: the library's folders and maintenance, playback choices, the
-//! sound (equalizer and crossfeed), and listening: sending listens to
-//! ListenBrainz.
+//! Preferences: the library's folders, maintenance and AcoustID, playback
+//! choices, the sound (equalizer and crossfeed), and listening: sending
+//! listens to ListenBrainz.
 //! Built fresh each time it opens, from the engine's current state.
 
 const std = @import("std");
@@ -143,6 +143,55 @@ fn thresholdChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callcon
     matches.reload(self);
 }
 
+fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.match_fingerprints) return;
+    self.match_fingerprints = enabled;
+    settings.save(self);
+    matches.reload(self);
+}
+
+const acoustid_key_url = "https://acoustid.org/api-key";
+
+fn keyPageLaunched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    var err: ?*gtk.GError = null;
+    if (gtk.gtk_uri_launcher_launch_finish(gtk.cast(gtk.UriLauncher, source), result, &err) != 0) return;
+    gtk.g_clear_error(&err);
+    dialogToast(state(data), "Could not open AcoustID");
+}
+
+fn getKeyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const launcher = gtk.gtk_uri_launcher_new(acoustid_key_url);
+    gtk.gtk_uri_launcher_launch(launcher, self.window, null, keyPageLaunched, self);
+    gtk.g_object_unref(launcher);
+}
+
+fn acoustIdGroup(self: *App) *gtk.Widget {
+    const acoustid = group(
+        "AcoustID",
+        "AcoustID identifies songs by their sound. With your key, the matches you accept can be sent back from the Matches page, so others can identify them too.",
+    );
+    const fingerprints = adw.adw_switch_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fingerprints), "Match by audio fingerprint");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fingerprints), "Find Matches also sends a fingerprint of each song's audio to AcoustID");
+    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fingerprints), if (self.match_fingerprints) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(fingerprints, "notify::active", gtk.callback(fingerprintsSwitched), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, acoustid), fingerprints);
+
+    AcoustIdKey.add(self, acoustid);
+
+    const link = actionRow("Need a key?", "Sign in to AcoustID, copy your API key, paste it above and choose Save.");
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
+    const get_key = suffixButton(link, "Get a key", null, gtk.callback(getKeyClicked), self);
+    gtk.gtk_widget_add_css_class(get_key, "flat");
+    adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), get_key);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, acoustid), link);
+    AcoustIdKey.checkOnce(self);
+    return acoustid;
+}
+
 fn libraryPage(self: *App) *gtk.Widget {
     const page = adw.adw_preferences_page_new();
     adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Library");
@@ -199,6 +248,7 @@ fn libraryPage(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(threshold, "notify::value", gtk.callback(thresholdChanged), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), threshold);
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, maintenance));
+    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, acoustIdGroup(self)));
     return page;
 }
 
@@ -546,7 +596,7 @@ fn soundPage(self: *App) *gtk.Widget {
 // ---------------------------------------------------------------- listening
 
 const token_settings_url = "https://listenbrainz.org/settings/";
-const token_capacity = 256;
+const secret_capacity = 256;
 
 fn scrobblingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
@@ -580,120 +630,234 @@ fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     settings.save(self);
 }
 
-fn typedToken(controls: *const app.ListeningControls) []const u8 {
-    const row = controls.token_row orelse return "";
-    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, row)));
-    return std.mem.trim(u8, text, " \t\r\n");
+// -------------------------------------------------------------- credentials
+
+const Credential = struct {
+    service: [:0]const u8,
+    account: [:0]const u8,
+    keyring_label: [:0]const u8,
+    title: [*:0]const u8,
+    replace_title: [*:0]const u8,
+    locked_subtitle: [*:0]const u8,
+    too_long: [:0]const u8,
+    saved: [:0]const u8,
+    removed: [:0]const u8,
+    store_failed: [:0]const u8,
+    remove_failed: [:0]const u8,
+    first_check: secret.LockedItems,
+    controls: *const fn (*App) *app.CredentialControls,
+    changed: *const fn (*App) void,
+    checked: *const fn (*App, secret.Presence) void,
+};
+
+fn listenBrainzControls(self: *App) *app.CredentialControls {
+    return &self.listening_controls.token;
 }
 
-fn showSaveSensitivity(self: *App) void {
-    const controls = &self.listening_controls;
-    const save = controls.save_button orelse return;
-    const ready = !controls.saving_token and typedToken(controls).len != 0;
-    gtk.gtk_widget_set_sensitive(save, if (ready) gtk.true_ else gtk.false_);
+fn listenBrainzTokenChanged(self: *App) void {
+    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
 }
 
-fn setSaving(self: *App, saving: bool) void {
-    const controls = &self.listening_controls;
-    controls.saving_token = saving;
-    if (controls.token_row) |row| gtk.gtk_widget_set_sensitive(row, if (saving) gtk.false_ else gtk.true_);
-    showSaveSensitivity(self);
+fn ignorePresence(_: *App, _: secret.Presence) void {}
+
+const listenbrainz_token: Credential = .{
+    .service = listenbrainz_token_service,
+    .account = listenbrainz_token_account,
+    .keyring_label = "Orca ListenBrainz user token",
+    .title = "User token",
+    .replace_title = "Replace token",
+    .locked_subtitle = "Keyring locked — unlock it to use your saved token",
+    .too_long = "That is too long to be a ListenBrainz token",
+    .saved = "Token saved",
+    .removed = "Token removed",
+    .store_failed = "Could not store the token in the system keyring",
+    .remove_failed = "Could not remove the token from the system keyring",
+    .first_check = .unlock,
+    .controls = listenBrainzControls,
+    .changed = listenBrainzTokenChanged,
+    .checked = ignorePresence,
+};
+
+fn acoustIdControls(self: *App) *app.CredentialControls {
+    return &self.acoustid_controls;
 }
 
-fn showTokenPresence(self: *App, presence: secret.Presence) void {
-    const controls = &self.listening_controls;
-    const stored_row = controls.stored_row orelse return;
-    const visible = presence != .absent;
-    gtk.gtk_widget_set_visible(stored_row, if (visible) gtk.true_ else gtk.false_);
-    const subtitle: [*:0]const u8 = switch (presence) {
-        .absent, .stored => "Saved in your keyring",
-        .locked => "Keyring locked — unlock it to use your saved token",
-        .unavailable => "Could not reach the system keyring",
+fn acoustIdKeyChanged(_: *App) void {}
+
+const acoustid_user_key: Credential = .{
+    .service = liborca.acoustid_credential_service,
+    .account = liborca.acoustid_user_key_account,
+    .keyring_label = "Orca AcoustID user key",
+    .title = "Your AcoustID key",
+    .replace_title = "Replace key",
+    .locked_subtitle = "Keyring locked — unlock it to use your saved key",
+    .too_long = "That is too long to be an AcoustID key",
+    .saved = "Key saved",
+    .removed = "Key removed",
+    .store_failed = "Could not store the key in the system keyring",
+    .remove_failed = "Could not remove the key from the system keyring",
+    .first_check = .report,
+    .controls = acoustIdControls,
+    .changed = acoustIdKeyChanged,
+    .checked = matches.showAcoustIdKey,
+};
+
+fn CredentialRows(comptime credential: Credential) type {
+    return struct {
+        fn typed(controls: *const app.CredentialControls) []const u8 {
+            const row = controls.entry_row orelse return "";
+            const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, row)));
+            return std.mem.trim(u8, text, " \t\r\n");
+        }
+
+        fn showSaveSensitivity(self: *App) void {
+            const controls = credential.controls(self);
+            const save_button = controls.save_button orelse return;
+            const ready = !controls.saving and typed(controls).len != 0;
+            gtk.gtk_widget_set_sensitive(save_button, if (ready) gtk.true_ else gtk.false_);
+        }
+
+        fn setSaving(self: *App, saving: bool) void {
+            const controls = credential.controls(self);
+            controls.saving = saving;
+            if (controls.entry_row) |row| gtk.gtk_widget_set_sensitive(row, if (saving) gtk.false_ else gtk.true_);
+            showSaveSensitivity(self);
+        }
+
+        fn showPresence(self: *App, presence: secret.Presence) void {
+            const controls = credential.controls(self);
+            const stored_row = controls.stored_row orelse return;
+            const visible = presence != .absent;
+            gtk.gtk_widget_set_visible(stored_row, if (visible) gtk.true_ else gtk.false_);
+            const subtitle: [*:0]const u8 = switch (presence) {
+                .absent, .stored => "Saved in your keyring",
+                .locked => credential.locked_subtitle,
+                .unavailable => "Could not reach the system keyring",
+            };
+            adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, stored_row), subtitle);
+            if (controls.remove_button) |button| {
+                gtk.gtk_widget_set_visible(button, if (presence == .stored) gtk.true_ else gtk.false_);
+                gtk.gtk_widget_set_sensitive(button, gtk.true_);
+            }
+            if (controls.unlock_button) |button|
+                gtk.gtk_widget_set_visible(button, if (presence == .locked) gtk.true_ else gtk.false_);
+            if (controls.entry_row) |row|
+                adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), if (presence == .stored) credential.replace_title else credential.title);
+        }
+
+        fn presenceFound(presence: secret.Presence, data: ?*anyopaque) void {
+            const self = state(data);
+            credential.checked(self, presence);
+            showPresence(self, presence);
+        }
+
+        fn check(self: *App, locked_items: secret.LockedItems) void {
+            secret.check(credential.service, credential.account, locked_items, presenceFound, self) catch
+                dialogToast(self, "Could not check the system keyring");
+        }
+
+        fn stored(succeeded: bool, data: ?*anyopaque) void {
+            const self = state(data);
+            setSaving(self, false);
+            if (!succeeded) return dialogToast(self, credential.store_failed);
+            if (credential.controls(self).entry_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
+            credential.changed(self);
+            dialogToast(self, credential.saved);
+            check(self, credential.first_check);
+        }
+
+        fn removed(succeeded: bool, data: ?*anyopaque) void {
+            const self = state(data);
+            if (!succeeded) {
+                if (credential.controls(self).remove_button) |button| gtk.gtk_widget_set_sensitive(button, gtk.true_);
+                return dialogToast(self, credential.remove_failed);
+            }
+            credential.changed(self);
+            dialogToast(self, credential.removed);
+            check(self, credential.first_check);
+        }
+
+        fn save(self: *App) void {
+            const controls = credential.controls(self);
+            if (controls.saving) return;
+            var buffer: [secret_capacity:0]u8 = undefined;
+            defer std.crypto.secureZero(u8, &buffer);
+            const text = typed(controls);
+            if (text.len == 0) return;
+            if (text.len >= buffer.len) return dialogToast(self, credential.too_long);
+            @memcpy(buffer[0..text.len], text);
+            buffer[text.len] = 0;
+            secret.save(credential.service, credential.account, credential.keyring_label, &buffer, stored, self) catch
+                return dialogToast(self, "Out of memory");
+            setSaving(self, true);
+        }
+
+        fn saveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            save(state(data));
+        }
+
+        fn entryActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            save(state(data));
+        }
+
+        fn entryTyped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            showSaveSensitivity(state(data));
+        }
+
+        fn removeClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            const self = state(data);
+            secret.clear(credential.service, credential.account, removed, self) catch
+                return dialogToast(self, "Out of memory");
+            gtk.gtk_widget_set_sensitive(gtk.cast(gtk.Widget, button), gtk.false_);
+        }
+
+        fn unlockClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            check(state(data), .unlock);
+        }
+
+        fn checkOnce(self: *App) void {
+            const controls = credential.controls(self);
+            if (controls.checked) return;
+            controls.checked = true;
+            check(self, credential.first_check);
+        }
+
+        fn add(self: *App, target: *gtk.Widget) void {
+            const stored_row = actionRow(credential.title, "Saved in your keyring");
+            gtk.gtk_widget_set_visible(stored_row, gtk.false_);
+            const remove_button = suffixButton(stored_row, "Remove", null, gtk.callback(removeClicked), self);
+            const unlock_button = suffixButton(stored_row, "Unlock", null, gtk.callback(unlockClicked), self);
+            gtk.gtk_widget_set_visible(unlock_button, gtk.false_);
+            adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, target), stored_row);
+
+            const entry = adw.adw_password_entry_row_new();
+            adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, entry), credential.title);
+            const save_button = gtk.gtk_button_new_with_label("Save");
+            gtk.gtk_widget_set_valign(save_button, gtk.ALIGN_CENTER);
+            gtk.gtk_widget_add_css_class(save_button, "suggested-action");
+            gtk.gtk_widget_set_sensitive(save_button, gtk.false_);
+            _ = gtk.signalConnect(save_button, "clicked", gtk.callback(saveClicked), self);
+            adw.adw_entry_row_add_suffix(gtk.cast(adw.EntryRow, entry), save_button);
+            _ = gtk.signalConnect(entry, "entry-activated", gtk.callback(entryActivated), self);
+            _ = gtk.signalConnect(entry, "changed", gtk.callback(entryTyped), self);
+            adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, target), entry);
+
+            credential.controls(self).* = .{
+                .entry_row = entry,
+                .save_button = save_button,
+                .stored_row = stored_row,
+                .remove_button = remove_button,
+                .unlock_button = unlock_button,
+            };
+        }
     };
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, stored_row), subtitle);
-    if (controls.remove_button) |button| {
-        gtk.gtk_widget_set_visible(button, if (presence == .stored) gtk.true_ else gtk.false_);
-        gtk.gtk_widget_set_sensitive(button, gtk.true_);
-    }
-    if (controls.unlock_button) |button|
-        gtk.gtk_widget_set_visible(button, if (presence == .locked) gtk.true_ else gtk.false_);
-    if (controls.token_row) |row|
-        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), if (presence == .stored) "Replace token" else "User token");
 }
 
-fn tokenChecked(presence: secret.Presence, data: ?*anyopaque) void {
-    showTokenPresence(state(data), presence);
-}
-
-fn checkToken(self: *App) void {
-    secret.check(listenbrainz_token_service, listenbrainz_token_account, tokenChecked, self) catch
-        dialogToast(self, "Could not check the system keyring");
-}
-
-fn tokenStored(succeeded: bool, data: ?*anyopaque) void {
-    const self = state(data);
-    setSaving(self, false);
-    if (!succeeded) return dialogToast(self, "Could not store the token in the system keyring");
-    if (self.listening_controls.token_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
-    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
-    dialogToast(self, "Token saved");
-    checkToken(self);
-}
-
-fn tokenRemoved(succeeded: bool, data: ?*anyopaque) void {
-    const self = state(data);
-    if (!succeeded) {
-        if (self.listening_controls.remove_button) |button| gtk.gtk_widget_set_sensitive(button, gtk.true_);
-        return dialogToast(self, "Could not remove the token from the system keyring");
-    }
-    if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
-    dialogToast(self, "Token removed");
-    checkToken(self);
-}
-
-fn saveToken(self: *App) void {
-    const controls = &self.listening_controls;
-    if (controls.saving_token) return;
-    var buffer: [token_capacity:0]u8 = undefined;
-    defer std.crypto.secureZero(u8, &buffer);
-    const typed = typedToken(controls);
-    if (typed.len == 0) return;
-    if (typed.len >= buffer.len) return dialogToast(self, "That is too long to be a ListenBrainz token");
-    @memcpy(buffer[0..typed.len], typed);
-    buffer[typed.len] = 0;
-    secret.save(listenbrainz_token_service, listenbrainz_token_account, &buffer, tokenStored, self) catch
-        return dialogToast(self, "Out of memory");
-    setSaving(self, true);
-}
-
-fn saveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    saveToken(state(data));
-}
-
-fn tokenActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    saveToken(state(data));
-}
-
-fn tokenTyped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    showSaveSensitivity(state(data));
-}
-
-fn removeTokenClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    secret.clear(listenbrainz_token_service, listenbrainz_token_account, tokenRemoved, self) catch
-        return dialogToast(self, "Out of memory");
-    gtk.gtk_widget_set_sensitive(gtk.cast(gtk.Widget, button), gtk.false_);
-}
-
-fn unlockTokenClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    checkToken(state(data));
-}
+const ListenBrainzToken = CredentialRows(listenbrainz_token);
+const AcoustIdKey = CredentialRows(acoustid_user_key);
 
 fn listeningMapped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.listening_controls.checked_token) return;
-    self.listening_controls.checked_token = true;
-    checkToken(self);
+    ListenBrainzToken.checkOnce(state(data));
 }
 
 fn plural(count: u64, comptime singular: []const u8, comptime many: []const u8) []const u8 {
@@ -778,24 +942,7 @@ fn listeningPage(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), now_playing);
 
-    const stored = actionRow("User token", "Saved in your keyring");
-    gtk.gtk_widget_set_visible(stored, gtk.false_);
-    const remove_button = suffixButton(stored, "Remove", null, gtk.callback(removeTokenClicked), self);
-    const unlock_button = suffixButton(stored, "Unlock", null, gtk.callback(unlockTokenClicked), self);
-    gtk.gtk_widget_set_visible(unlock_button, gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), stored);
-
-    const token = adw.adw_password_entry_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, token), "User token");
-    const save_button = gtk.gtk_button_new_with_label("Save");
-    gtk.gtk_widget_set_valign(save_button, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_add_css_class(save_button, "suggested-action");
-    gtk.gtk_widget_set_sensitive(save_button, gtk.false_);
-    _ = gtk.signalConnect(save_button, "clicked", gtk.callback(saveClicked), self);
-    adw.adw_entry_row_add_suffix(gtk.cast(adw.EntryRow, token), save_button);
-    _ = gtk.signalConnect(token, "entry-activated", gtk.callback(tokenActivated), self);
-    _ = gtk.signalConnect(token, "changed", gtk.callback(tokenTyped), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), token);
+    ListenBrainzToken.add(self, listenbrainz);
 
     const link = actionRow("Get your token", "Copy it from your ListenBrainz settings, paste it above and choose Save.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
@@ -807,15 +954,8 @@ fn listeningPage(self: *App) *gtk.Widget {
 
     const status = actionRow("Status", "");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, status), 2);
-    self.listening_controls = .{
-        .now_playing_row = now_playing,
-        .status_row = status,
-        .token_row = token,
-        .save_button = save_button,
-        .stored_row = stored,
-        .remove_button = remove_button,
-        .unlock_button = unlock_button,
-    };
+    self.listening_controls.now_playing_row = now_playing;
+    self.listening_controls.status_row = status;
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), status);
     showListeningStatus(self);
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, listenbrainz));
@@ -835,6 +975,7 @@ fn dialogClosed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.preferences_dialog = null;
     self.sound_controls = .{};
     self.listening_controls = .{};
+    self.acoustid_controls = .{};
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
 }
 

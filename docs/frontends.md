@@ -88,19 +88,28 @@ The window is an `AdwNavigationSplitView`:
 
 - **Health** lists what liborca found wrong with the library, with a count in
   the sidebar and a Find Duplicates button.
-- **Matches** lists the songs with MusicBrainz proposals awaiting review
-  (`libraryMatchReviewPage`), with their count in the sidebar. Each row shows
-  the song's own title, artist, album and length and its best proposal's
-  score; expanding it lists every proposal with Accept, Dismiss and a
-  MusicBrainz button that opens the recording's page in the browser. A
-  proposal more than 10 s longer or shorter than the song shows its length in
-  the warning colour. Find Matches starts the matching job, which shares the
-  status card and also asks AcoustID by fingerprint with the application key
-  the app sets at startup; the page does not yet show a proposal's source or
-  AcoustID score; Accept Confident asks first, then accepts each song's only
-  proposal at or above the threshold set in Preferences (90% by default,
+- **Matches** lists the songs with MusicBrainz or AcoustID proposals
+  awaiting review (`libraryMatchReviewPage`), with their count in the
+  sidebar. Each row shows the song's own title, artist, album and length and
+  its best proposal's score; expanding it lists every proposal with its
+  source (MusicBrainz, AcoustID or MusicBrainz + AcoustID) and AcoustID's
+  fingerprint score when there is one, Accept, Dismiss and a MusicBrainz
+  button that opens the recording's page in the browser. An AcoustID
+  proposal without a title reads Unknown title. A proposal more than 10 s
+  longer or shorter than the song shows its length in the warning colour.
+  Find Matches starts the matching job, which shares the status card and,
+  unless Match by audio fingerprint is off in Preferences, also asks
+  AcoustID by fingerprint with the application key the app sets at startup.
+  Accept Confident asks first, then accepts each song's only proposal at or
+  above the threshold set in Preferences (90% by default,
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
   the page offers Find Matches, or says every song has a recording ID.
+
+  Submit to AcoustID (N) appears when an AcoustID key is saved and
+  `libraryAcoustIdSubmittableCount` is above zero. It asks first, then runs
+  `startAcoustIdSubmission` as a job on the status card, and the count is
+  read again when it finishes. A missing or refused key, or an unreachable
+  AcoustID, is reported in a toast; nothing is marked sent.
 
 Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
@@ -138,7 +147,7 @@ says it won't sync to ListenBrainz.
 The details panel's **MusicBrainz** section shows the recording ID in effect
 and where it came from (From tags, Matched or Set by you), with a MusicBrainz
 button. A song without one shows its top three proposals with Accept and
-Dismiss, and Review all when there are more, which opens the Matches page at
+Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
 that song; with no proposals it offers Find Match, which searches for that
 song alone. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
@@ -162,9 +171,9 @@ gives it a new id.
 
 **Preferences** (Ctrl+,) lists the library's folders with Add, Remove and
 Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
-and the output device. Scans, measurement, duplicate finding and tag writes
-and MusicBrainz matching share the status card at the foot of the sidebar,
-one at a time. ReplayGain
+and the output device. Scans, measurement, duplicate finding, tag writes,
+matching and AcoustID submission share the status card at the foot of the
+sidebar, one at a time. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)
 are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
 settings below. Removing a folder asks first, then forgets its tracks; the
@@ -182,6 +191,18 @@ because applying pauses the engine briefly. Both are saved in `[sound]`
 survive while the effect is off, and applied at launch when enabled. A file
 that predates the `*_enabled` keys and holds `off` leaves the effect off with
 the default curve or amount.
+
+The Library page's **AcoustID** group holds Match by audio fingerprint, on
+by default, which is `MatchRequest.fingerprints` for Find Matches and Find
+Match and is saved as `[matching] fingerprints=true|false`. Below it, the
+user's AcoustID key has the same password row, Save, stored row, Remove and
+Unlock as the ListenBrainz token below, stored under
+`acoustid_credential_service` / `acoustid_user_key_account`. Its stored
+state is found without unlocking the keyring, so opening Preferences never
+prompts; a locked keyring reads "Keyring locked" until Unlock is chosen.
+Get a key opens AcoustID's API key page in the browser. The Matches page
+finds whether a key is saved the same way at startup, and again after each
+save and remove.
 
 The **Listening** page holds the ListenBrainz settings. Submit listens calls
 `Runtime.librarySetScrobbling`. The user token is a password row with a Save
@@ -206,7 +227,8 @@ now is the Now Playing argument of `librarySetScrobbling`; it is off by default
 and insensitive while Submit listens is off. `[listening]
 scrobble=true|false` and `now_playing=true|false` are saved and re-applied at
 launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
-instance or a local mock.
+instance or a local mock; `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` do
+the same for matching and submission.
 
 The output menu ends with the **signal path**: the source format, then
 ReplayGain, equalizer, crossfeed, volume and the output format as they apply,

@@ -1,6 +1,6 @@
-//! Background jobs — scans, loudness analysis, duplicate finding, tag writes
-//! and MusicBrainz matching — and their status card at the foot of the
-//! sidebar. One runs at a time from this frontend, so the card always
+//! Background jobs — scans, loudness analysis, duplicate finding, tag writes,
+//! matching and AcoustID submission — and their status card at the foot of
+//! the sidebar. One runs at a time from this frontend, so the card always
 //! describes the job there is.
 //!
 //! A filesystem walk has no honest denominator until it has finished walking,
@@ -42,6 +42,7 @@ fn idle(self: *App) bool {
         .duplicates => "Duplicates are being looked for",
         .tag_write => "Tags are being written",
         .matching => "Already finding matches",
+        .submission => "Already submitting to AcoustID",
     });
     return false;
 }
@@ -142,12 +143,13 @@ pub fn startDuplicates(self: *App) void {
     begin(self, .duplicates, job, "Finding duplicates");
 }
 
-/// Searches MusicBrainz for every Track without a recording ID, one a second.
+/// Searches MusicBrainz, and AcoustID by fingerprint when that is on, for
+/// every Track without a recording ID.
 pub fn startMatching(self: *App) void {
     startMatchingJob(self, null);
 }
 
-/// Searches MusicBrainz for one Track, if it has no recording ID and nothing
+/// Searches for one Track, if it has no recording ID and nothing
 /// awaiting review.
 pub fn startTrackMatching(self: *App, track_id: i64) void {
     startMatchingJob(self, track_id);
@@ -156,13 +158,27 @@ pub fn startTrackMatching(self: *App, track_id: i64) void {
 fn startMatchingJob(self: *App, track_id: ?i64) void {
     const library = self.library orelse return;
     if (!idle(self)) return;
-    const job = self.runtime.startLibraryMatching(library, .{ .track_id = track_id }) catch |err| return self.toast(switch (err) {
+    const job = self.runtime.startLibraryMatching(library, .{
+        .track_id = track_id,
+        .fingerprints = self.match_fingerprints,
+    }) catch |err| return self.toast(switch (err) {
         error.MatchingAlreadyRunning => "Already finding matches",
+        error.AcoustIdBusy => "Already submitting to AcoustID",
         else => "Could not start finding matches",
     });
     self.match_task_track = track_id;
     begin(self, .matching, job, "Finding matches");
     if (track_id != null) details.invalidate(self);
+}
+
+pub fn startSubmission(self: *App) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const job = self.runtime.startAcoustIdSubmission(library) catch |err| return self.toast(switch (err) {
+        error.AcoustIdBusy => "Already finding matches",
+        else => "Could not start submitting to AcoustID",
+    });
+    begin(self, .submission, job, "Submitting");
 }
 
 /// Writes an approved plan. The plan id is its undo group.
@@ -228,7 +244,7 @@ fn writeDetail(self: *App, task: app.Task, snapshot: liborca.JobSnapshot, stats:
             strings.printZ(&buffer, "{d} of {d} files", .{ snapshot.completed_units, total })
         else
             strings.printZ(&buffer, "{d} files", .{snapshot.completed_units}),
-        .matching => return,
+        .matching, .submission => return,
     } catch return;
     gtk.gtk_label_set_text(label, text.ptr);
 }
@@ -240,6 +256,16 @@ fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.Ma
         strings.grouped(snapshot.completed_units),
         strings.grouped(snapshot.total_units orelse snapshot.completed_units),
         strings.grouped(stats.matched),
+    }) catch return;
+    gtk.gtk_label_set_text(label, text.ptr);
+}
+
+fn writeSubmissionDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.SubmissionStats) void {
+    const label = self.scan_detail orelse return;
+    var buffer: [160]u8 = undefined;
+    const text = strings.printZ(&buffer, "{f} of {f} songs", .{
+        strings.grouped(stats.files_examined),
+        strings.grouped(snapshot.total_units orelse stats.files_examined),
     }) catch return;
     gtk.gtk_label_set_text(label, text.ptr);
 }
@@ -256,7 +282,7 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     matches.reload(self);
     details.invalidate(self);
     if (state_value == .cancelled) return self.toast("Stopped");
-    if (state_value != .succeeded) return self.toast("MusicBrainz could not be reached; Find Matches continues where it stopped");
+    if (state_value != .succeeded) return self.toast("MusicBrainz or AcoustID could not be reached; Find Matches continues where it stopped");
     if (searched != null) return self.toast(if (matched == 0) "No match found" else "Found a match to review");
     var buffer: [96]u8 = undefined;
     self.toast(if (matched == 0)
@@ -265,14 +291,33 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
         strings.printZ(&buffer, "Found matches for {f} {s}", .{ strings.grouped(matched), if (matched == 1) "song" else "songs" }) catch "Found matches");
 }
 
+fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.SubmissionStats) void {
+    matches.reload(self);
+    if (state_value == .cancelled) return self.toast("Stopped");
+    const result = stats orelse return self.toast("AcoustID could not be reached; try again later");
+    if (state_value != .succeeded) return self.toast(switch (result.outcome) {
+        .needs_user_key => "Save your AcoustID key in Preferences first",
+        .invalid_user_key => "AcoustID did not accept your key",
+        .cancelled => "Stopped",
+        .completed, .needs_client_key, .invalid_client_key, .unavailable => "AcoustID could not be reached; try again later",
+    });
+    var buffer: [64]u8 = undefined;
+    self.toast(strings.printZ(&buffer, "Submitted {f} {s} to AcoustID", .{
+        strings.grouped(result.submitted),
+        if (result.submitted == 1) "song" else "songs",
+    }) catch "Submitted to AcoustID");
+}
+
 fn finished(
     self: *App,
     task: app.Task,
     state_value: liborca.JobState,
     stats: ?liborca.ScanStats,
     match_stats: ?liborca.MatchStats,
+    submission_stats: ?liborca.SubmissionStats,
 ) void {
     if (task == .matching) return matchingFinished(self, state_value, match_stats);
+    if (task == .submission) return submissionFinished(self, state_value, submission_stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return self.toast(switch (task) {
@@ -280,7 +325,7 @@ fn finished(
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
         .tag_write => "Writing tags failed; the files were left as they were",
-        .matching => unreachable,
+        .matching, .submission => unreachable,
     });
     switch (task) {
         .scan => {
@@ -314,7 +359,7 @@ fn finished(
             _ = gtk.signalConnect(item, "button-clicked", gtk.callback(undoClicked), self);
             adw.adw_toast_overlay_add_toast(overlay, item);
         },
-        .matching => unreachable,
+        .matching, .submission => unreachable,
     }
 }
 
@@ -329,8 +374,13 @@ pub fn tick(self: *App) void {
         showScanning(self, false);
         return;
     };
-    const stats: ?liborca.ScanStats = if (task == .matching) null else self.runtime.jobScanStats(job) catch null;
+    const stats: ?liborca.ScanStats = switch (task) {
+        .matching, .submission => null,
+        else => self.runtime.jobScanStats(job) catch null,
+    };
     const match_stats: ?liborca.MatchStats = if (task == .matching) self.runtime.jobMatchStats(job) catch null else null;
+    const submission_stats: ?liborca.SubmissionStats = if (task == .submission) self.runtime.jobSubmissionStats(job) catch null else null;
+    if (submission_stats) |value| writeSubmissionDetail(self, snapshot, value);
     if (stats) |value| {
         writeDetail(self, task, snapshot, value);
         if (task == .scan and self.loaded_rows == 0 and value.tracks_written != 0) reloadLibraryViews(self);
@@ -350,6 +400,6 @@ pub fn tick(self: *App) void {
     self.task_job = null;
     self.shown_matched = 0;
     showScanning(self, false);
-    finished(self, task, snapshot.state, stats, match_stats);
+    finished(self, task, snapshot.state, stats, match_stats, submission_stats);
     self.updateTracksBody();
 }

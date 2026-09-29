@@ -53,6 +53,15 @@
 - **`orca-cli`**: `match` prints a line of AcoustID counters and takes
   `--no-fingerprints`; `matches` prints each proposal's source and AcoustID
   score.
+- **`orca-gtk`**: Preferences > Library gains an AcoustID group with Match
+  by audio fingerprint (`[matching] fingerprints` in `settings.ini`, on by
+  default), the user's AcoustID key saved in the Secret Service with Save,
+  Remove and Unlock, and Get a key. The Matches page shows each proposal's
+  source and AcoustID score, the details panel shows them in the proposal's
+  tooltip, and Submit to AcoustID (N) sends accepted matches as a job after
+  asking. `ORCA_ACOUSTID_URL` selects another AcoustID server. A failed
+  matching job now names MusicBrainz or AcoustID. The GTK credential store
+  labels each keyring item by its service.
 - **New dependencies.** Chromaprint 1.6.1 (MIT) with KissFFT (BSD-3-Clause)
   is built from source without its LGPL resampler, and a build step fails if
   a compiled source carries a GPL or LGPL notice. libsamplerate (BSD-2-Clause)

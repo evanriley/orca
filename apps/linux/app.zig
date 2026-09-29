@@ -86,21 +86,25 @@ pub const SoundControls = struct {
     crossfeed_amount_row: ?*gtk.Widget = null,
 };
 
-pub const ListeningControls = struct {
-    now_playing_row: ?*gtk.Widget = null,
-    status_row: ?*gtk.Widget = null,
-    token_row: ?*gtk.Widget = null,
+pub const CredentialControls = struct {
+    entry_row: ?*gtk.Widget = null,
     save_button: ?*gtk.Widget = null,
     stored_row: ?*gtk.Widget = null,
     remove_button: ?*gtk.Widget = null,
     unlock_button: ?*gtk.Widget = null,
-    saving_token: bool = false,
-    checked_token: bool = false,
+    saving: bool = false,
+    checked: bool = false,
+};
+
+pub const ListeningControls = struct {
+    now_playing_row: ?*gtk.Widget = null,
+    status_row: ?*gtk.Widget = null,
+    token: CredentialControls = .{},
     status_text: [192]u8 = undefined,
     status_len: usize = 0,
 };
 
-pub const Task = enum { scan, analysis, duplicates, tag_write, matching };
+pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission };
 
 pub const default_match_threshold_percent: u8 = 90;
 
@@ -248,12 +252,16 @@ pub const App = struct {
     matches_empty: ?*adw.StatusPage = null,
     matches_empty_button: ?*gtk.Widget = null,
     matches_accept_button: ?*gtk.Widget = null,
+    matches_submit_button: ?*gtk.Widget = null,
     /// The Track whose row is open, kept open across reloads.
     matches_open_track: ?i64 = null,
     /// The open row, focused once laid out so the list scrolls to it.
     matches_focus_row: ?*gtk.Widget = null,
     /// Accept Confident takes a song's only match at or above this.
     match_threshold_percent: u8 = default_match_threshold_percent,
+    match_fingerprints: bool = true,
+    acoustid_key_stored: bool = false,
+    acoustid_controls: CredentialControls = .{},
 
     preferences_dialog: ?*adw.Dialog = null,
 

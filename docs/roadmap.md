@@ -9,9 +9,8 @@ the rule in [architecture.md](architecture.md).
 Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback at each source's sample rate,
 live equalizer and crossfeed, tag editing with undo, track details, a local
-play history, ListenBrainz scrobbling and MusicBrainz matching with review.
-`orca-cli` also matches by AcoustID fingerprint and submits fingerprints to
-AcoustID. Last.fm and filesystem watching are built but not connected; macOS
+play history, ListenBrainz scrobbling, MusicBrainz and AcoustID matching
+with review, and AcoustID submission. Last.fm and filesystem watching are built but not connected; macOS
 has no audio output yet.
 
 ## Works today
@@ -88,11 +87,15 @@ has no audio output yet.
   looks up to 20 fingerprints at a time on AcoustID, merging both services'
   candidates into one proposal per recording; each service is asked once per
   file. Reachable through `orca-cli match` (`--no-fingerprints` leaves it
-  out), `matches` and `fingerprint`; `orca-gtk` runs it within Find Matches
-  but does not show the source or the AcoustID score yet.
+  out), `matches` and `fingerprint`, and in `orca-gtk` through Find Matches
+  (Preferences > Library > Match by audio fingerprint turns it off), with
+  each proposal's source and AcoustID score on the Matches page and in the
+  details panel.
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
   files whose recording ID came from an accepted match or an edit, once per
-  file and ID, with the user key from `ORCA_ACOUSTID_USER_KEY`. See
+  file and ID, with the user key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk`
+  sends them from the Matches page's Submit to AcoustID, with the key saved
+  in Preferences > Library. See
   [providers.md](providers.md#acoustid-submission).
 
 ### Analysis
@@ -113,7 +116,8 @@ has no audio output yet.
   menus, tag editing with write-back and undo, Preferences, a Health page, a
   player bar with cover art and an output menu, job progress, a welcome page,
   toasts, a shortcuts dialog, MPRIS, ListenBrainz submission with play counts
-  in the details panel, love and dislike, and MusicBrainz match review.
+  in the details panel, love and dislike, MusicBrainz and AcoustID match
+  review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
 
 ## Built but not reachable
@@ -135,12 +139,9 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **AcoustID in `orca-gtk`, and ListenBrainz lookup.** Matching already
-   asks AcoustID; the Matches page and details panel should show each
-   proposal's source and AcoustID score, and Preferences should hold the
-   user's AcoustID key and start a submission. ListenBrainz's
-   `/1/metadata/lookup` would match what both services miss. Last.fm
-   follows. No tag writer stores an accepted recording ID in a file yet.
+1. **ListenBrainz lookup.** ListenBrainz's `/1/metadata/lookup` would match
+   what MusicBrainz and AcoustID miss. Last.fm follows. No tag writer stores
+   an accepted recording ID in a file yet.
 2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan.
 3. **A fixed output rate with a band-limited resampler** (libsamplerate is
