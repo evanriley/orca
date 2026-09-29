@@ -301,6 +301,10 @@
   row and show it in the details panel; double-click or Enter plays from it.
 - **`orca-cli` reports errors as one line**, `orca-cli: no track with that id`,
   instead of an error trace, and exits with status 1.
+- **A library migrated from before file identity, on storage Orca cannot
+  name, moves its root onto the root's own volume.** Without a filesystem
+  UUID or a writable mount root, the root and its files used to stay on the
+  shared `legacy` volume after every scan. No data was lost.
 
 ### Removing a folder forgets its tracks
 

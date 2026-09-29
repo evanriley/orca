@@ -573,6 +573,14 @@ test "cancelled scans stop before filesystem work" {
 }
 
 test "a scan after migration claims the files it inherited instead of re-importing them" {
+    try expectMigratedFilesClaimed(.{});
+}
+
+test "a migrated root on storage Orca cannot name moves off the legacy volume with its files" {
+    try expectMigratedFilesClaimed(.{ .use_platform_adapter = false });
+}
+
+fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{
@@ -661,9 +669,7 @@ test "a scan after migration claims the files it inherited instead of re-importi
         tracked,
     )).?;
 
-    // The platform adapter is deliberately left on: this is the path the field
-    // takes, and it resolves a volume the migration could not have known.
-    const binding = try library.ensureRoot(std.testing.io, root_path, .{});
+    const binding = try library.ensureRoot(std.testing.io, root_path, volume_options);
     try std.testing.expect(binding.volume_id != database.LibraryDatabase.null_volume);
     try std.testing.expectEqual(@as(u64, 3), binding.claimed_locations);
 

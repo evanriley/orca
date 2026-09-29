@@ -204,16 +204,18 @@ pub const LibraryDatabase = struct {
                 ),
             };
         }
-        if (try self.rootVolume(path)) |existing| return .{
-            .volume_id = existing.volume_id,
-            .root_id = existing.root_id,
-            .claimed_locations = try self.locations.claimLegacyLocations(
-                null_volume,
-                existing.volume_id,
-                existing.root_id,
-                path,
-            ),
-        };
+        if (try self.rootVolume(path)) |existing| {
+            if (existing.volume_id != null_volume) return .{
+                .volume_id = existing.volume_id,
+                .root_id = existing.root_id,
+                .claimed_locations = try self.locations.claimLegacyLocations(
+                    null_volume,
+                    existing.volume_id,
+                    existing.root_id,
+                    path,
+                ),
+            };
+        }
         var provisional_buffer: [64]u8 = undefined;
         const provisional = try std.fmt.bufPrint(
             &provisional_buffer,
