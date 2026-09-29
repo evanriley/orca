@@ -27,6 +27,7 @@ pub const TrackRef = audio.playback_queue.TrackRef;
 pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
 pub const TrackDetails = track_details.TrackDetails;
+pub const RecordingIdSource = track_details.RecordingIdSource;
 pub const TrackLoudness = track_details.Loudness;
 pub const PlayStats = database.PlayStats;
 pub const Feedback = database.Feedback;
@@ -140,6 +141,7 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
         },
         .compilation => if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1"))
             return error.InvalidEditValue,
+        .musicbrainz_recording_id => if (!metadata.isMusicBrainzId(value)) return error.InvalidEditValue,
         .title, .artist, .album, .album_artist, .date => {},
     }
 }
@@ -230,6 +232,7 @@ fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field
         .track_number => if (tags.track_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
+        .musicbrainz_recording_id => tags.musicbrainz_recording_id,
     };
 }
 
@@ -335,6 +338,28 @@ pub const DuplicateScanRequest = struct {
     batch_size: usize = 256,
 };
 
+pub const MatchRequest = struct {
+    batch_size: usize = 64,
+    limit: ?u32 = null,
+};
+
+pub const MatchProposal = database.MatchProposal;
+pub const MatchProposalPage = database.MatchProposalPage;
+pub const MatchAcceptance = database.ProposalAcceptance;
+
+pub const MatchingHooks = struct {
+    transport: ?network.client.Transport = null,
+    clock: ?network.client.Clock = null,
+    wall_clock: ?network.client.Clock = null,
+};
+
+const MatchingSetup = struct {
+    io: std.Io,
+    server: []const u8,
+    identity: ClientIdentity,
+    hooks: MatchingHooks,
+};
+
 /// Everything a job worker needs that is not the Library or the kind. One
 /// struct rather than a widening parameter list, because every kind takes a
 /// bounded batch size and each takes at most one thing besides.
@@ -344,6 +369,8 @@ const WorkerRequest = struct {
     force: bool = false,
     /// A `.mutation` worker's plan, which the worker owns once started.
     tag_write: ?*PendingTagWrite = null,
+    limit: ?u32 = null,
+    matching: ?MatchingSetup = null,
 };
 
 /// What a scan job observed, mirroring `scanner.Result` plus what the
@@ -395,6 +422,45 @@ const LiveScanStats = struct {
     }
 };
 
+/// What a matching job did with the Tracks it examined.
+pub const MatchStats = struct {
+    tracks_examined: u64 = 0,
+    matched: u64 = 0,
+    unmatched: u64 = 0,
+    insufficient_evidence: u64 = 0,
+    refused: u64 = 0,
+    proposals_stored: u64 = 0,
+    requests: u64 = 0,
+    cache_hits: u64 = 0,
+    cancelled: bool = false,
+};
+
+const LiveMatchStats = struct {
+    tracks_examined: std.atomic.Value(u64) = .init(0),
+    matched: std.atomic.Value(u64) = .init(0),
+    unmatched: std.atomic.Value(u64) = .init(0),
+    insufficient_evidence: std.atomic.Value(u64) = .init(0),
+    refused: std.atomic.Value(u64) = .init(0),
+    proposals_stored: std.atomic.Value(u64) = .init(0),
+    requests: std.atomic.Value(u64) = .init(0),
+    cache_hits: std.atomic.Value(u64) = .init(0),
+    cancelled: std.atomic.Value(bool) = .init(false),
+
+    fn read(self: *const LiveMatchStats, in_flight: u64) MatchStats {
+        return .{
+            .tracks_examined = self.tracks_examined.load(.acquire) + in_flight,
+            .matched = self.matched.load(.acquire),
+            .unmatched = self.unmatched.load(.acquire),
+            .insufficient_evidence = self.insufficient_evidence.load(.acquire),
+            .refused = self.refused.load(.acquire),
+            .proposals_stored = self.proposals_stored.load(.acquire),
+            .requests = self.requests.load(.acquire),
+            .cache_hits = self.cache_hits.load(.acquire),
+            .cancelled = self.cancelled.load(.acquire),
+        };
+    }
+};
+
 /// One background worker behind a `JobHandle`.
 ///
 /// Threading contract, the same one `core/work.zig` states: the worker thread
@@ -416,6 +482,8 @@ const JobWorker = struct {
     batch_size: usize,
     force: bool,
     tag_write: ?*PendingTagWrite,
+    limit: ?u32,
+    matching: ?MatchingSetup,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,
@@ -426,6 +494,7 @@ const JobWorker = struct {
     /// Files the *current* root's walk has reached, written by the scanner.
     progress: std.atomic.Value(u64) = .init(0),
     stats: LiveScanStats = .{},
+    match_stats: LiveMatchStats = .{},
     failed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
@@ -442,6 +511,7 @@ const JobWorker = struct {
             .analysis => self.runAnalysis(),
             .duplicate_scan => self.runDuplicateScan(),
             .mutation => self.runTagWrite(),
+            .metadata_lookup => self.runMatching(),
             else => self.failed.store(true, .release),
         }
     }
@@ -581,6 +651,52 @@ const JobWorker = struct {
         if (result.cancelled) self.stats.cancelled.store(true, .release);
     }
 
+    fn runMatching(self: *JobWorker) void {
+        const setup = self.matching orelse {
+            self.failed.store(true, .release);
+            return;
+        };
+        var standard: network.StandardTransport = .init(self.allocator, setup.io);
+        defer standard.deinit();
+        var system_clock: network.SystemClock = .{ .io = setup.io };
+        var gateway: network.Gateway = .{
+            .transport = setup.hooks.transport orelse standard.transport(),
+            .clock = setup.hooks.clock orelse system_clock.clock(),
+            .config = .{ .identity = setup.identity },
+            .cancel = &self.registration.cancel,
+        };
+        var musicbrainz: providers.musicbrainz.MusicBrainz = .{
+            .gateway = &gateway,
+            .cache = &self.database.provider_cache,
+            .wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock(),
+            .server = setup.server,
+        };
+        var pass: library_pass.LibraryMatching = .{
+            .allocator = self.allocator,
+            .proposals = &self.database.identification_proposals,
+            .musicbrainz = &musicbrainz,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = self.batch_size,
+            .limit = self.limit,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = self.match_stats.tracks_examined.fetchAdd(result.tracks_seen, .acq_rel);
+        _ = self.match_stats.matched.fetchAdd(result.matched, .acq_rel);
+        _ = self.match_stats.unmatched.fetchAdd(result.unmatched, .acq_rel);
+        _ = self.match_stats.insufficient_evidence.fetchAdd(result.insufficient, .acq_rel);
+        _ = self.match_stats.refused.fetchAdd(result.refused, .acq_rel);
+        _ = self.match_stats.proposals_stored.fetchAdd(result.proposals_stored, .acq_rel);
+        _ = self.match_stats.requests.fetchAdd(result.requests_answered, .acq_rel);
+        _ = self.match_stats.cache_hits.fetchAdd(result.cache_hits, .acq_rel);
+        if (result.cancelled) self.match_stats.cancelled.store(true, .release);
+        if (result.unavailable) self.failed.store(true, .release);
+    }
+
     fn runScan(self: *JobWorker) void {
         const io = self.threaded.io();
         var roots = self.database.library_roots.list(self.allocator) catch {
@@ -691,7 +807,23 @@ const JobWorker = struct {
     }
 
     fn filesProcessed(self: *const JobWorker) u64 {
-        return self.stats.files_seen.load(.acquire) + self.progress.load(.acquire);
+        const done = switch (self.kind) {
+            .metadata_lookup => self.match_stats.tracks_examined.load(.acquire),
+            else => self.stats.files_seen.load(.acquire),
+        };
+        return done + self.progress.load(.acquire);
+    }
+
+    fn scanStats(self: *const JobWorker) ScanStats {
+        return self.stats.read(if (self.kind == .metadata_lookup) 0 else self.progress.load(.acquire));
+    }
+
+    fn matchStats(self: *const JobWorker) MatchStats {
+        return self.match_stats.read(if (self.kind == .metadata_lookup) self.progress.load(.acquire) else 0);
+    }
+
+    fn wasCancelled(self: *const JobWorker) bool {
+        return self.stats.cancelled.load(.acquire) or self.match_stats.cancelled.load(.acquire);
     }
 };
 
@@ -750,6 +882,7 @@ pub const OrcaRuntime = struct {
     client_identity: ClientIdentity = .orca,
     credential_store: ?CredentialStore = null,
     listenbrainz_server: []const u8 = providers.listenbrainz.default_server,
+    musicbrainz_server: []const u8 = providers.musicbrainz.default_server,
     /// Version of the three settings above, copied into every Library's
     /// listen config.
     listen_settings: u32 = 0,
@@ -768,6 +901,7 @@ pub const OrcaRuntime = struct {
     last_listen_sample_ms: ?i64 = null,
     /// Replaced by tests that must not reach a network or wait in real time.
     listen_hooks: listen_worker.Hooks = .{},
+    matching_hooks: MatchingHooks = .{},
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{
@@ -1192,9 +1326,16 @@ pub const OrcaRuntime = struct {
     /// travels in every request. `base_url` must outlive the runtime.
     pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
         try self.requireRunning();
-        try providers.listenbrainz.validateServer(base_url);
+        try providers.url.validateServer(base_url);
         self.listenbrainz_server = base_url;
         self.publishListenSettings();
+    }
+
+    /// `base_url` must outlive the runtime.
+    pub fn setMusicBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+        try self.requireRunning();
+        try providers.url.validateServer(base_url);
+        self.musicbrainz_server = base_url;
     }
 
     fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
@@ -1317,6 +1458,39 @@ pub const OrcaRuntime = struct {
         if (listens.loadConfig().enabled) _ = self.startListenWorker(library) catch {};
         listens.feedbackChanged(self.control_threaded.io());
         return change;
+    }
+
+    pub fn libraryMatchProposals(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_id: i64,
+        limit: u32,
+    ) !MatchProposalPage {
+        return (try self.libraryDatabase(library)).identification_proposals.pendingForTrack(self.allocator, track_id, limit);
+    }
+
+    pub fn libraryAcceptMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !MatchAcceptance {
+        const acceptance = try (try self.libraryDatabase(library)).identification_proposals.acceptProposal(self.allocator, proposal_id);
+        if (acceptance.values_written != 0) self.recordingIdsChanged(library);
+        return acceptance;
+    }
+
+    pub fn libraryDismissMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !void {
+        try (try self.libraryDatabase(library)).identification_proposals.dismiss(proposal_id);
+    }
+
+    pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !u64 {
+        const accepted = try (try self.libraryDatabase(library)).identification_proposals.acceptConfident(self.allocator, minimum_confidence);
+        if (accepted != 0) self.recordingIdsChanged(library);
+        return accepted;
+    }
+
+    fn recordingIdsChanged(self: *OrcaRuntime, library: LibraryHandle) void {
+        const object_value = self.libraries.get(library) catch return;
+        object_value.stored_counts = null;
+        const listens = object_value.listens orelse return;
+        if (listens.loadConfig().enabled) _ = self.startListenWorker(library) catch {};
+        listens.feedbackChanged(self.control_threaded.io());
     }
 
     pub fn libraryTrackFeedback(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !Feedback {
@@ -2564,6 +2738,7 @@ pub const OrcaRuntime = struct {
             var changes: std.ArrayList(metadata.mutation.Change) = .empty;
             var shown: std.ArrayList(TagWriteChange) = .empty;
             for (values.items) |value| {
+                if (!value.field.writesToFiles()) continue;
                 const before = try observedText(scratch, tags, value.field);
                 if (before) |current| if (std.mem.eql(u8, current, value.text)) continue;
                 try changes.append(scratch, .{ .field = value.field, .before = before, .after = value.text });
@@ -2768,6 +2943,29 @@ pub const OrcaRuntime = struct {
         });
     }
 
+    /// At most one runs per runtime, so MusicBrainz sees one request a second.
+    pub fn startLibraryMatching(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: MatchRequest,
+    ) !JobHandle {
+        try self.requireRunning();
+        for (self.job_workers.items) |worker| {
+            if (!worker.retired and worker.kind == .metadata_lookup and !worker.registration.isFinished())
+                return error.MatchingAlreadyRunning;
+        }
+        return self.startJobWorker(library, .metadata_lookup, .{
+            .batch_size = request.batch_size,
+            .limit = request.limit,
+            .matching = .{
+                .io = try self.networkIo(),
+                .server = self.musicbrainz_server,
+                .identity = self.client_identity,
+                .hooks = self.matching_hooks,
+            },
+        });
+    }
+
     fn startJobWorker(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -2787,6 +2985,7 @@ pub const OrcaRuntime = struct {
             ),
             .duplicate_scan => try library_database.files.count(),
             .mutation => (request.tag_write orelse return error.InvalidJobRequest).plan.actions.len,
+            .metadata_lookup => try library_database.identification_proposals.unidentifiedCount(request.limit),
             else => null,
         };
         const worker = try self.allocator.create(JobWorker);
@@ -2813,6 +3012,8 @@ pub const OrcaRuntime = struct {
             .batch_size = request.batch_size,
             .force = request.force,
             .tag_write = request.tag_write,
+            .limit = request.limit,
+            .matching = request.matching,
         };
         try self.job_workers.append(self.allocator, worker);
         errdefer _ = self.job_workers.pop();
@@ -2844,7 +3045,17 @@ pub const OrcaRuntime = struct {
     pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
         for (self.job_workers.items) |worker| {
             if (!worker.job.eql(job_handle)) continue;
-            return worker.stats.read(worker.progress.load(.acquire));
+            return worker.scanStats();
+        }
+        return error.StaleHandle;
+    }
+
+    /// A matching job's counters, live while it runs and retained for a
+    /// bounded number of finished jobs afterwards.
+    pub fn jobMatchStats(self: *OrcaRuntime, job_handle: JobHandle) !MatchStats {
+        for (self.job_workers.items) |worker| {
+            if (!worker.job.eql(job_handle)) continue;
+            return worker.matchStats();
         }
         return error.StaleHandle;
     }
@@ -2877,7 +3088,7 @@ pub const OrcaRuntime = struct {
         worker.retired = true;
         const state: job.State = if (worker.failed.load(.acquire))
             .failed
-        else if (worker.stats.cancelled.load(.acquire))
+        else if (worker.wasCancelled())
             .cancelled
         else
             .succeeded;
@@ -4955,6 +5166,9 @@ const FakeListenBrainz = struct {
     now_playing_sent: std.atomic.Value(u32) = .init(0),
     feedback_sent: std.atomic.Value(u32) = .init(0),
     last_score: std.atomic.Value(i32) = .init(99),
+    /// The recording id of the last feedback sent, complete once
+    /// `feedback_sent` counts it.
+    feedback_mbid: [36]u8 = @splat(0),
     feedback_status: std.atomic.Value(u16) = .init(200),
     during_feedback: ?struct { context: *anyopaque, run: *const fn (*anyopaque) void } = null,
     token_lookups: std.atomic.Value(u32) = .init(0),
@@ -5018,6 +5232,12 @@ const FakeListenBrainz = struct {
             if (std.mem.indexOf(u8, sent, "\"score\":")) |at| {
                 const digits = std.mem.trimEnd(u8, sent[at + 8 ..], "}");
                 self.last_score.store(std.fmt.parseInt(i32, digits, 10) catch 99, .release);
+            }
+            const mbid_key = "\"recording_mbid\":\"";
+            if (std.mem.indexOf(u8, sent, mbid_key)) |at| {
+                const start = at + mbid_key.len;
+                if (sent.len >= start + self.feedback_mbid.len)
+                    @memcpy(&self.feedback_mbid, sent[start..][0..self.feedback_mbid.len]);
             }
             _ = self.feedback_sent.fetchAdd(1, .acq_rel);
             _ = self.requests.fetchAdd(1, .acq_rel);
@@ -5796,4 +6016,341 @@ test "Now Playing is never sent unless the option and scrobbling are both on" {
 
     try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.now_playing_sent.load(.acquire));
     try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requests.load(.acquire));
+}
+
+const northern_sky_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
+const pink_moon_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
+
+fn recordingAnswer(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
+    return "{\"recordings\":[{\"id\":\"" ++ mbid ++ "\",\"score\":100,\"title\":\"" ++ title ++
+        "\",\"length\":180000,\"artist-credit\":[{\"name\":\"Nick Drake\"}],\"releases\":[{" ++
+        "\"id\":\"2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b\",\"title\":\"Bryter Layter\"," ++
+        "\"media\":[{\"track-offset\":2,\"track\":[{\"number\":\"3\"}]}]}]}]}";
+}
+
+const northern_sky_answer = recordingAnswer(northern_sky_mbid, "Northern Sky");
+const pink_moon_answer = recordingAnswer(pink_moon_mbid, "Pink Moon");
+
+/// Every call arrives on the job's thread; a test reads `requests` while the
+/// job runs and the rest only once it is reaped.
+const FakeMusicBrainz = struct {
+    answers: []const Answer = &.{},
+    refusals: []const u16 = &.{},
+    failure: ?anyerror = null,
+    hang_from: ?u32 = null,
+    requests: std.atomic.Value(u32) = .init(0),
+    request_times_ms: [8]i64 = @splat(0),
+    url: [256]u8 = undefined,
+    url_len: usize = 0,
+    now_ms: std.atomic.Value(i64) = .init(0),
+
+    const Answer = struct { title: []const u8, body: []const u8 };
+    const wall_base_ms: i64 = 1_800_000_000_000;
+
+    fn hooks(self: *FakeMusicBrainz) MatchingHooks {
+        return .{
+            .transport = .{ .context = self, .perform_fn = perform },
+            .clock = .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs },
+            .wall_clock = .{ .context = self, .now_ms_fn = wallMs, .sleep_ms_fn = sleepMs },
+        };
+    }
+
+    fn lastUrl(self: *const FakeMusicBrainz) []const u8 {
+        return self.url[0..self.url_len];
+    }
+
+    fn perform(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        request: network.client.Request,
+    ) anyerror!network.client.Response {
+        const self: *FakeMusicBrainz = @ptrCast(@alignCast(context));
+        const index = self.requests.load(.acquire);
+        if (index < self.request_times_ms.len) self.request_times_ms[index] = self.now_ms.load(.acquire);
+        self.url_len = @min(request.url.len, self.url.len);
+        @memcpy(self.url[0..self.url_len], request.url[0..self.url_len]);
+        _ = self.requests.fetchAdd(1, .acq_rel);
+        if (self.hang_from) |first| if (index >= first) {
+            var waited: TestDeadline = .init(10_000);
+            while (waited.tick()) {
+                if (request.cancel.?.load(.acquire)) return error.Canceled;
+            }
+            return error.Timeout;
+        };
+        if (self.failure) |err| return err;
+        if (index < self.refusals.len)
+            return .{ .allocator = allocator, .status = self.refusals[index], .body = try allocator.dupe(u8, "") };
+        const body = for (self.answers) |answer| {
+            if (std.mem.indexOf(u8, request.url, answer.title) != null) break answer.body;
+        } else "{\"recordings\":[]}";
+        return .{ .allocator = allocator, .status = 200, .body = try allocator.dupe(u8, body) };
+    }
+
+    fn nowMs(context: *anyopaque) i64 {
+        const self: *FakeMusicBrainz = @ptrCast(@alignCast(context));
+        return self.now_ms.load(.acquire);
+    }
+
+    fn wallMs(context: *anyopaque) i64 {
+        return wall_base_ms + nowMs(context);
+    }
+
+    fn sleepMs(context: *anyopaque, milliseconds: u64) anyerror!void {
+        const self: *FakeMusicBrainz = @ptrCast(@alignCast(context));
+        _ = self.now_ms.fetchAdd(@intCast(milliseconds), .acq_rel);
+    }
+
+    fn awaitRequests(self: *const FakeMusicBrainz, expected: u32) !void {
+        var deadline: TestDeadline = .init(5_000);
+        while (self.requests.load(.acquire) < expected) {
+            if (!deadline.tick()) return error.RequestNeverSent;
+        }
+    }
+};
+
+fn addMatchTrack(library_database: *database.LibraryDatabase, title: []const u8, artist: []const u8, mbid: ?[]const u8) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = title,
+        .musicbrainz_recording_id = mbid,
+    } });
+    try library_database.tracks.upsertTracks(&.{.{
+        .title = title,
+        .artist = artist,
+        .album = "Bryter Layter",
+        .duration_ms = 180_000,
+        .preferred_file_id = file_id,
+    }});
+    const ids = try library_database.tracks.idsForFile(std.testing.allocator, file_id);
+    defer std.testing.allocator.free(ids);
+    return ids[0];
+}
+
+test "a matching job proposes recordings for the Tracks without one, one search a Track, and a rerun is answered from the cache" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try std.testing.expectError(error.InvalidServerUrl, runtime.setMusicBrainzServer("http://musicbrainz.org"));
+    try runtime.setMusicBrainzServer("http://127.0.0.1:5000");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-job?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    _ = try addMatchTrack(library_database, "Hazey Jane II", "Nick Drake", "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a");
+    _ = try addMatchTrack(library_database, "Untitled", "", null);
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    try library_database.database.exec(
+        "INSERT INTO recordings(title) VALUES ('Pink Moon');" ++
+            "UPDATE files SET recording_id = (SELECT max(id) FROM recordings) " ++
+            "WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Pink Moon');" ++
+            "UPDATE tracks SET recording_id = (SELECT max(id) FROM recordings) WHERE title = 'Pink Moon';" ++
+            "INSERT INTO files(audio_format, size_bytes, recording_id) VALUES (2, 512, (SELECT max(id) FROM recordings));",
+    );
+    _ = try addMatchTrack(library_database, "Unknown Song", "Nobody", null);
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .batch_size = 2 });
+
+    try std.testing.expectEqual(@as(?u64, 4), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 4), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(@as(u64, 1), stats.unmatched);
+    try std.testing.expectEqual(@as(u64, 1), stats.insufficient_evidence);
+    try std.testing.expectEqual(@as(u64, 3), stats.requests);
+    try std.testing.expectEqual(@as(u64, 0), stats.cache_hits);
+    try std.testing.expectEqual(@as(u64, 2), stats.proposals_stored);
+    try std.testing.expectEqual(ScanStats{}, try runtime.jobScanStats(job_handle));
+    try std.testing.expectEqual(@as(u32, 3), fake.requests.load(.acquire));
+    try std.testing.expect(std.mem.startsWith(u8, fake.lastUrl(), "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query="));
+
+    const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    const proposal = proposals.items[0];
+    try std.testing.expectEqualStrings(northern_sky_mbid, proposal.recording_mbid);
+    try std.testing.expectEqualStrings("Nick Drake", proposal.artist);
+    try std.testing.expectEqualStrings("Bryter Layter", proposal.album);
+    try std.testing.expectEqualStrings("2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b", proposal.release_mbid.?);
+    try std.testing.expectEqual(@as(?u32, 3), proposal.track_number);
+    try std.testing.expectEqual(@as(?u64, 180_000), proposal.duration_ms);
+    try std.testing.expectEqual(@as(?u8, 100), proposal.musicbrainz_score);
+    try std.testing.expect(proposal.confidence > 0.9);
+    const pink_proposals = try runtime.libraryMatchProposals(library, pink_moon, 10);
+    defer pink_proposals.deinit();
+    try std.testing.expectEqualStrings(pink_moon_mbid, pink_proposals.items[0].recording_mbid);
+
+    runtime.reapFinishedJobs();
+    const rerun = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, rerun));
+    const rerun_stats = try runtime.jobMatchStats(rerun);
+    try std.testing.expectEqual(@as(u64, 2), rerun_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests);
+    try std.testing.expectEqual(@as(u64, 1), rerun_stats.cache_hits);
+    try std.testing.expectEqual(@as(u32, 3), fake.requests.load(.acquire));
+}
+
+test "an accepted match gives the Track a recording id, which its love is sent to ListenBrainz under" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    rig.runtime.matching_hooks = fake.hooks();
+    const fixture = try rig.openLibrary("file:orca-matching-accept?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, null);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&rig.runtime, try rig.runtime.startLibraryMatching(fixture.library, .{})));
+    const proposals = try rig.runtime.libraryMatchProposals(fixture.library, fixture.track_id, 10);
+    defer proposals.deinit();
+    const before = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer before.deinit();
+    try std.testing.expect(!before.feedback_syncable);
+    try std.testing.expectEqual(@as(?[]u8, null), before.musicbrainz_recording_id);
+
+    const acceptance = try rig.runtime.libraryAcceptMatch(fixture.library, proposals.items[0].id);
+
+    try std.testing.expectEqual(@as(u32, 1), acceptance.values_written);
+    try std.testing.expectError(error.StaleIdentificationProposal, rig.runtime.libraryAcceptMatch(fixture.library, proposals.items[0].id));
+    const after = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer after.deinit();
+    try std.testing.expect(after.feedback_syncable);
+    try std.testing.expectEqualStrings(northern_sky_mbid, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqual(@as(?RecordingIdSource, .match), after.musicbrainz_recording_id_source);
+
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+    try rig.runtime.librarySetScrobbling(fixture.library, true, false, false);
+    try rig.awaitWorkerPasses(3);
+    rig.listenbrainz.advance(2_000);
+    try ListenRig.awaitCount(&rig.listenbrainz.feedback_sent, 1);
+    try std.testing.expectEqualStrings(northern_sky_mbid, &rig.listenbrainz.feedback_mbid);
+}
+
+test "a Track's recording id names where it came from, and only a well-formed one can be set by hand" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-matching-source?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, northern_sky_mbid);
+    const tagged = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer tagged.deinit();
+    try std.testing.expectEqual(@as(?RecordingIdSource, .tag), tagged.musicbrainz_recording_id_source);
+
+    try std.testing.expectError(error.InvalidEditValue, rig.runtime.libraryEditTracks(
+        fixture.library,
+        &.{fixture.track_id},
+        &.{.{ .field = .musicbrainz_recording_id, .value = "not-a-recording" }},
+    ));
+    const library_database = try rig.runtime.libraryDatabase(fixture.library);
+    const file_ids = try library_database.tracks.fileIds(std.testing.allocator, fixture.track_id);
+    defer std.testing.allocator.free(file_ids);
+    try library_database.orca_metadata.upsert(.{
+        .file_id = file_ids[0],
+        .field = .musicbrainz_recording_id,
+        .value = pink_moon_mbid,
+        .provenance = .user,
+        .locked = true,
+    });
+    const edited = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
+    defer edited.deinit();
+    try std.testing.expectEqualStrings(pink_moon_mbid, edited.musicbrainz_recording_id.?);
+    try std.testing.expectEqual(@as(?RecordingIdSource, .edit), edited.musicbrainz_recording_id_source);
+}
+
+test "a matching job stops when cancelled mid-search, and another cannot start while it runs" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }}, .hang_from = 1 };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-cancel?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    _ = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    _ = try addMatchTrack(library_database, "River Man", "Nick Drake", null);
+
+    const job_handle = try runtime.startLibraryMatching(library, .{});
+    try fake.awaitRequests(2);
+    try std.testing.expectError(error.MatchingAlreadyRunning, runtime.startLibraryMatching(library, .{}));
+    try runtime.cancelJob(job_handle);
+
+    try std.testing.expectEqual(job.State.cancelled, try awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expect(stats.cancelled);
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u32, 2), fake.requests.load(.acquire));
+    const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(null));
+
+    fake.hang_from = null;
+    const resumed = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, resumed));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(resumed)).tracks_examined);
+    try std.testing.expectEqual(@as(u32, 4), fake.requests.load(.acquire));
+}
+
+test "a refused search is waited out and retried, and an unreachable MusicBrainz stops the job without marking the Track" {
+    var fake: FakeMusicBrainz = .{
+        .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }},
+        .refusals = &.{ 503, 429 },
+    };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-backoff?mode=memory&cache=shared");
+    const library_database = try runtime.libraryDatabase(library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+
+    try std.testing.expectEqual(@as(u32, 3), fake.requests.load(.acquire));
+    try std.testing.expect(fake.request_times_ms[1] - fake.request_times_ms[0] >= 60_000);
+    try std.testing.expect(fake.request_times_ms[2] - fake.request_times_ms[1] >= 120_000);
+    const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+
+    _ = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    fake.failure = error.ConnectionRefused;
+    const unreachable_job = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, unreachable_job));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unreachable_job)).tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(null));
+
+    fake.failure = null;
+    const retried = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, retried));
+    const retried_stats = try runtime.jobMatchStats(retried);
+    try std.testing.expectEqual(@as(u64, 1), retried_stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), retried_stats.requests);
+}
+
+test "a tag write leaves out the recording id Orca holds for a file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-mbid?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const library_database = try runtime.libraryDatabase(library);
+    for (ids) |track_id| {
+        const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+        defer std.testing.allocator.free(file_ids);
+        for (file_ids) |file_id| try library_database.orca_metadata.upsert(.{
+            .file_id = file_id,
+            .field = .musicbrainz_recording_id,
+            .value = northern_sky_mbid,
+            .provenance = .provider,
+        });
+    }
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer preview.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), preview.plan_id);
+    try std.testing.expectEqual(@as(usize, 0), preview.files.len);
 }

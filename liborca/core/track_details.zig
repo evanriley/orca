@@ -10,6 +10,7 @@ const std = @import("std");
 const analysis = @import("../analysis/root.zig");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
+const metadata = @import("../metadata/root.zig");
 
 /// The loudness measured from a file's stored bytes, under the canonical
 /// analysis parameters.
@@ -20,6 +21,20 @@ pub const Loudness = struct {
     replay_gain_db: f32,
     /// Largest absolute sample as a linear amplitude: 1.0 is full scale.
     sample_peak: f32,
+};
+
+pub const RecordingIdSource = enum {
+    tag,
+    match,
+    edit,
+
+    fn of(provenance: metadata.Provenance) RecordingIdSource {
+        return switch (provenance) {
+            .observed_file => .tag,
+            .user => .edit,
+            .provider, .inference, .analysis => .match,
+        };
+    }
 };
 
 /// A Track as a details view shows it. Caller-owned: release with `deinit`.
@@ -63,6 +78,8 @@ pub const TrackDetails = struct {
     last_played_at: ?i64,
     feedback: database.Feedback,
     feedback_syncable: bool,
+    musicbrainz_recording_id: ?[]u8,
+    musicbrainz_recording_id_source: ?RecordingIdSource,
 
     pub fn deinit(self: TrackDetails) void {
         self.allocator.free(self.title);
@@ -72,6 +89,7 @@ pub const TrackDetails = struct {
         if (self.date) |value| self.allocator.free(value);
         self.allocator.free(self.codec);
         if (self.path) |value| self.allocator.free(value);
+        if (self.musicbrainz_recording_id) |value| self.allocator.free(value);
     }
 };
 
@@ -90,6 +108,9 @@ pub fn load(
     const duration_ms = if (facts) |file| file.duration_ms orelse summary.duration_ms else summary.duration_ms;
     const size_bytes = if (facts) |file| positive(file.size_bytes) else null;
     const plays = try library.listens.trackPlayStats(track_id);
+    const feedback_syncable = try library.feedback.canSync(track_id);
+    const recording_mbid = try library.tracks.recordingMbid(allocator, track_id);
+    errdefer if (recording_mbid) |value| value.deinit(allocator);
     const codec_identifier = if (facts) |file| file.codec else try allocator.alloc(u8, 0);
 
     return .{
@@ -118,7 +139,9 @@ pub fn load(
         .play_count = plays.play_count,
         .last_played_at = plays.last_played_at,
         .feedback = summary.feedback,
-        .feedback_syncable = try library.feedback.canSync(track_id),
+        .feedback_syncable = feedback_syncable,
+        .musicbrainz_recording_id = if (recording_mbid) |value| value.text else null,
+        .musicbrainz_recording_id_source = if (recording_mbid) |value| RecordingIdSource.of(value.provenance) else null,
     };
 }
 

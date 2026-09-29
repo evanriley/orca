@@ -652,6 +652,7 @@ pub fn rewrite(
 
     const current = try currentTags(scratch, loaded, trailer);
     for (changes) |change| {
+        if (!change.field.writesToFiles()) return error.UnwritableMetadataField;
         if (change.before) |expected| {
             const value = try currentValue(scratch, current, change.field) orelse
                 return error.MetadataPreconditionChanged;
@@ -715,6 +716,7 @@ fn currentValue(allocator: std.mem.Allocator, tags: model.ObservedTags, field: m
         .track_number => if (tags.track_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
+        .musicbrainz_recording_id => tags.musicbrainz_recording_id,
     };
 }
 
@@ -730,6 +732,7 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .disc_number => &.{"TPOS"},
         .compilation => &.{"TCMP"},
         .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT", "TIME", "TRDA" },
+        .musicbrainz_recording_id => &.{},
     };
 }
 
@@ -867,7 +870,7 @@ fn updatedTrailer(legacy: id3v1.Tag, original: [128]u8, changes: []const mutatio
                 std.fmt.parseUnsigned(u8, text, 10) catch return original
             else
                 null,
-            .album_artist, .disc_number, .compilation => {},
+            .album_artist, .disc_number, .compilation, .musicbrainz_recording_id => {},
         }
     }
     return id3v1.encode(tag) catch original;

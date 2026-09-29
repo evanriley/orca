@@ -1,14 +1,14 @@
 # Providers and listening history
 
 Orca talks to online services only through `network.Gateway`, and the rules
-below hold for every provider. ListenBrainz is the first one connected.
+below hold for every provider. ListenBrainz and MusicBrainz are connected.
 Other services follow the same rules; a request that breaks one is a defect,
 not a tuning choice.
 
 ## Rules toward providers
 
-- **Identification.** Every request carries a `User-Agent` of the form
-  `Name/version ( contact )`. Orca's is
+- **Identification.** Every request carries exactly one `User-Agent`, of the
+  form `Name/version ( contact )`. Orca's is
   `Orca/0.2.0-alpha ( evan@evanriley.com )`. The contact is the maintainer's
   email because the repository is private; it becomes the repository URL when
   the repository is public. A host embedding liborca replaces the name,
@@ -54,8 +54,10 @@ not a tuning choice.
   Secret Service through libsecret; `orca-cli` reads
   `ORCA_LISTENBRAINZ_TOKEN`.
 - **Servers.** ListenBrainz-compatible servers are reachable with
-  `Runtime.setListenBrainzServer`. `http` is accepted only for `127.0.0.1`,
-  `[::1]` and `localhost`, so a token never crosses a network in clear text.
+  `Runtime.setListenBrainzServer`, and a MusicBrainz mirror with
+  `Runtime.setMusicBrainzServer`. `http` is accepted only for `127.0.0.1`,
+  `[::1]` and `localhost`, so a token or a library's contents never cross a
+  network in clear text.
 
 ## Listens
 
@@ -191,3 +193,59 @@ built from the same fields as a listen. It is off by default.
   still blocks the service, and a `5xx` or network error counts toward the
   shared backoff, so Now Playing cannot hide an outage.
 - **Never ahead of listens.** A due batch of listens is sent before it.
+
+## MusicBrainz matching
+
+A file without a MusicBrainz recording ID cannot have its loves, hates or
+listens tied to a recording on ListenBrainz. `Runtime.startLibraryMatching`
+searches MusicBrainz for those files and stores what it finds as proposals.
+Nothing takes effect until a person accepts one; what acceptance writes is in
+[metadata.md](metadata.md#musicbrainz-recording-ids).
+
+- **What is searched.** Every Track whose playing file has no recording ID
+  and no pending proposal, in Track id order. One Track is one search however
+  many files back it. A Track without a title or an artist is counted and not
+  searched. `MatchRequest.limit` bounds how many Tracks one run examines.
+- **The query.** `GET /ws/2/recording?fmt=json&limit=10&query=` with
+  `recording:"TITLE" AND artist:"ARTIST" release:"ALBUM"`. The release term is
+  optional, so it raises matching releases without excluding the others.
+  Lucene syntax characters in the values are escaped with a backslash.
+- **What is kept.** Orca scores each candidate from 0 to 1 against the
+  Track's title, artist, album and length, and drops candidates below 0.5. A
+  proposal keeps the recording ID, title, full artist credit, the release
+  whose title is closest to the album with its ID and track number, the
+  length, and MusicBrainz's own score from 0 to 100.
+- **Rate and cache.** One request a second under the rules above. Answers,
+  empty ones included, are cached in `provider_cache` for 30 days of wall
+  time, keyed by the request URL, so a rerun makes no request for a Track
+  already searched. When a request fails and an expired answer is cached,
+  that answer is used.
+- **Failures.** A `429`, a `5xx` or a timeout waits out the longer of the
+  service's block and a backoff of 60 s doubling per attempt, cancellably,
+  then searches the same Track again. After three attempts, or at once when
+  the network cannot be reached, the job stops and reports `failed`. A failed
+  search stores nothing, so the next run searches that Track again; cached
+  answers are still used without a network. A query refused with any other
+  `4xx`, or answered with something that is not a search result, is counted
+  and skipped.
+- **One job per runtime.** A second `startLibraryMatching` while one runs
+  returns `error.MatchingAlreadyRunning`. Cancellation is checked between
+  Tracks, while waiting for the next request slot and while backing off.
+
+`libraryMatchProposals` lists a Track's pending proposals, most confident
+first. `libraryAcceptMatch` accepts one and `libraryDismissMatch` dismisses
+one. `libraryAcceptConfidentMatches(minimum)` accepts, for every file where
+exactly one pending proposal has a confidence of at least `minimum`, that
+proposal; it is an explicit user action, never run by a job.
+
+From the command line:
+
+```sh
+orca-cli match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]
+orca-cli matches DATABASE TRACK_ID
+orca-cli accept-match DATABASE PROPOSAL_ID
+orca-cli dismiss-match DATABASE PROPOSAL_ID
+orca-cli accept-matches DATABASE --min-score=0.9
+```
+
+`ORCA_MUSICBRAINZ_URL` points `match` at another server.

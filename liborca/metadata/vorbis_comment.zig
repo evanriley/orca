@@ -524,6 +524,7 @@ fn parseEntry(entry: []const u8) !Entry {
 
 fn validateChanges(changes: []const mutation.Change) !void {
     for (changes, 0..) |change, index| {
+        if (!change.field.writesToFiles()) return error.UnwritableMetadataField;
         for (changes[0..index]) |previous| if (previous.field == change.field)
             return error.DuplicateMetadataFieldChange;
     }
@@ -541,6 +542,7 @@ fn fieldMatches(field: mutation.Field, key: []const u8) bool {
         .disc_number => &.{"DISCNUMBER"},
         .date => &.{ "DATE", "YEAR" },
         .compilation => &.{"COMPILATION"},
+        .musicbrainz_recording_id => &.{"MUSICBRAINZ_TRACKID"},
     };
     return matches(key, spellings);
 }
@@ -569,6 +571,7 @@ fn fieldKey(field: mutation.Field) []const u8 {
         .disc_number => "DISCNUMBER",
         .date => "DATE",
         .compilation => "COMPILATION",
+        .musicbrainz_recording_id => "MUSICBRAINZ_TRACKID",
     };
 }
 

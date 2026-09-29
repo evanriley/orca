@@ -89,6 +89,9 @@ pub const Plan = struct {
             .write_tags => |write| {
                 if (write.path.len == 0 or write.changes.len == 0)
                     return error.InvalidMutationPlan;
+                for (write.changes) |change| {
+                    if (!change.field.writesToFiles()) return error.InvalidMutationPlan;
+                }
             },
             .move => |move| {
                 if (move.source_path.len == 0 or move.destination_path.len == 0 or
@@ -309,6 +312,15 @@ test "mutation preview is inert and execution requires exact approval" {
     try plan.beginExecution();
     try plan.finish(true);
     try std.testing.expectEqual(State.completed, plan.state);
+}
+
+test "a plan that would write a recording id into a file is refused" {
+    const actions = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }},
+    } }};
+    try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &actions));
 }
 
 test "an approved plan cannot be altered through a caller-held alias" {

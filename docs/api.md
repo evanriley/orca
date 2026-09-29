@@ -61,8 +61,9 @@ defer page.deinit();
   and output stream, and why the path is or is not bit-perfect.
 - `libraryTrackDetails` returns `TrackDetails` for one Track: codec, sample
   rate, bit depth, channels, bitrate, duration, file size and path (or that
-  the file is missing), loudness when measured, and tags. The caller frees it
-  with `deinit`.
+  the file is missing), loudness when measured, tags, and the MusicBrainz
+  recording ID in effect with its `RecordingIdSource` (`tag`, `match` or
+  `edit`). The caller frees it with `deinit`.
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
   back afterwards. An edit that moves a track to another album or position
   reprojects it under a new id.
@@ -106,6 +107,21 @@ defer page.deinit();
   ListenBrainz while the Library scrobbles when the song has a MusicBrainz
   recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
   the changes still waiting as `feedback_pending`.
+- `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
+  Job that searches MusicBrainz for the Tracks without a recording ID and
+  stores proposals; its snapshot's total is the number of Tracks to search,
+  and `jobMatchStats` reports its counters as `MatchStats`. At most one
+  runs per runtime (`error.MatchingAlreadyRunning`).
+  `libraryMatchProposals(library, track_id, limit)` returns a
+  `MatchProposalPage` of the Track's pending `MatchProposal`s;
+  `libraryAcceptMatch` accepts one and returns a `MatchAcceptance`,
+  `libraryDismissMatch` dismisses one, and
+  `libraryAcceptConfidentMatches(library, minimum)` accepts, for every file
+  with exactly one pending proposal at least that confident, that proposal.
+  `setMusicBrainzServer` selects a mirror under the same rules as
+  `setListenBrainzServer`, from the next job. See
+  [providers.md](providers.md#musicbrainz-matching) and
+  [metadata.md](metadata.md#musicbrainz-recording-ids).
 - Pages and returned values are owned by the caller and released with their
   `deinit`.
 

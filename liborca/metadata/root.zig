@@ -21,6 +21,7 @@ pub const OrcaMetadata = model.OrcaMetadata;
 pub const ResolutionPolicy = model.ResolutionPolicy;
 pub const Provenance = model.Provenance;
 pub const Field = model.Field;
+pub const isMusicBrainzId = model.isMusicBrainzId;
 pub const Value = model.Value;
 pub const resolve = model.resolve;
 pub const resolveValue = model.resolveValue;

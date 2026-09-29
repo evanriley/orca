@@ -65,3 +65,10 @@ comment, by `opustags --set-cover` and `vorbiscomment` respectively.
 `audio/tagged-reference.aac` is the AAC frames of
 `audio/chirp-reference-aac.m4a` remuxed by FFmpeg into ADTS behind an ID3v2
 tag. ADTS keeps the 1,024 frames of priming the MP4's edit list trimmed.
+
+`providers/musicbrainz-recording-search.json` is MusicBrainz's answer to the
+recording search `recording:"Under Pressure" AND artist:"Queen"
+release:"Hot Space"` (`limit=10`, `fmt=json`), trimmed to four recordings
+with the artists' aliases removed. MusicBrainz data is CC0. It covers a joined
+artist credit, a recording with no length, several releases per recording and
+a track numbered `B6`.

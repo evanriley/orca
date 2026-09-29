@@ -433,9 +433,19 @@ pub const SystemClock = struct {
         return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
     }
 
+    /// Unix time in milliseconds, for expiry times stored across restarts.
+    pub fn wallClock(self: *SystemClock) Clock {
+        return .{ .context = self, .now_ms_fn = wallMs, .sleep_ms_fn = sleepMs };
+    }
+
     fn nowMs(context: *anyopaque) i64 {
         const self: *SystemClock = @ptrCast(@alignCast(context));
         return std.Io.Clock.awake.now(self.io).toMilliseconds();
+    }
+
+    fn wallMs(context: *anyopaque) i64 {
+        const self: *SystemClock = @ptrCast(@alignCast(context));
+        return std.Io.Clock.real.now(self.io).toMilliseconds();
     }
 
     fn sleepMs(context: *anyopaque, milliseconds: u64) !void {

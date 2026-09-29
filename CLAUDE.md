@@ -144,6 +144,13 @@ zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|
 # server from ORCA_LISTENBRAINZ_URL (https, or http to localhost)
 zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
 zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
+
+# MusicBrainz matching -- server from ORCA_MUSICBRAINZ_URL (https, or http to localhost)
+zig build run -- match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]   # 1 request/s, answers cached 30 days
+zig build run -- matches DATABASE TRACK_ID
+zig build run -- accept-match DATABASE PROPOSAL_ID   # records the recording ID in the library only
+zig build run -- dismiss-match DATABASE PROPOSAL_ID
+zig build run -- accept-matches DATABASE --min-score=0.9   # files with exactly one match that confident
 ```
 
 Frontends:

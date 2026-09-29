@@ -79,6 +79,13 @@ pub const ProposalState = repository.ProposalState;
 pub const IdentificationProposalInput = repository.IdentificationProposalInput;
 pub const IdentificationProposal = repository.IdentificationProposal;
 pub const IdentificationProposalRepository = repository.IdentificationProposalRepository;
+pub const ProposalPayload = repository.ProposalPayload;
+pub const ProposalAcceptance = repository.ProposalAcceptance;
+pub const MatchProposal = repository.MatchProposal;
+pub const MatchProposalPage = repository.MatchProposalPage;
+pub const MatchCandidate = repository.MatchCandidate;
+pub const MatchCandidatePage = repository.MatchCandidatePage;
+pub const RecordingMbid = repository.RecordingMbid;
 
 test {
     _ = @import("library.zig");

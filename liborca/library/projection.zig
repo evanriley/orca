@@ -404,6 +404,7 @@ pub const Projection = struct {
                     .disc_number => extra.disc_number = value,
                     .date => extra.date = value,
                     .compilation => extra.compilation = value,
+                    .musicbrainz_recording_id => {},
                 }
             }
             try overrides.reset();

@@ -19,7 +19,29 @@ pub const Field = enum {
     disc_number,
     date,
     compilation,
+    musicbrainz_recording_id,
+
+    pub fn writesToFiles(self: Field) bool {
+        return self != .musicbrainz_recording_id;
+    }
 };
+
+pub fn isMusicBrainzId(text: []const u8) bool {
+    if (text.len != 36) return false;
+    for (text, 0..) |byte, index| switch (index) {
+        8, 13, 18, 23 => if (byte != '-') return false,
+        else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
+    };
+    return true;
+}
+
+test "a MusicBrainz id is a lowercase UUID and nothing else" {
+    try std.testing.expect(isMusicBrainzId("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a"));
+    try std.testing.expect(!isMusicBrainzId("8F3471B5-7E6A-48DA-86A9-C1C07A0F5B4A"));
+    try std.testing.expect(!isMusicBrainzId("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4"));
+    try std.testing.expect(!isMusicBrainzId("8f3471b5x7e6a-48da-86a9-c1c07a0f5b4a"));
+    try std.testing.expect(!isMusicBrainzId(""));
+}
 
 pub const Value = struct {
     text: []const u8,

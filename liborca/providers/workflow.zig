@@ -1,25 +1,10 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
+const metadata = @import("../metadata/model.zig");
 const model = @import("model.zig");
 const scoring = @import("scoring.zig");
 
-const ProposalPayload = struct {
-    title: []const u8,
-    artist: []const u8,
-    album: []const u8,
-    track_number: ?u32,
-};
-
-pub const Suggestions = struct {
-    candidates: model.CandidateList,
-    ranked: []model.ScoredCandidate,
-
-    pub fn deinit(self: Suggestions) void {
-        const allocator = self.candidates.allocator;
-        self.candidates.deinit();
-        allocator.free(self.ranked);
-    }
-};
+pub const minimum_confidence: f32 = 0.5;
 
 pub fn identify(
     allocator: std.mem.Allocator,
@@ -27,122 +12,146 @@ pub fn identify(
     provider: model.Provider,
     file_id: i64,
     query: model.Query,
-) !Suggestions {
+) !u32 {
     const candidates = try provider.search(allocator, query);
-    errdefer candidates.deinit();
+    defer candidates.deinit();
     const ranked = try scoring.rank(allocator, query, candidates.items);
-    errdefer allocator.free(ranked);
+    defer allocator.free(ranked);
+    var stored: u32 = 0;
     for (ranked) |result| {
+        if (result.score < minimum_confidence) break;
         const candidate = candidates.items[result.candidate_index];
-        var writer = std.Io.Writer.Allocating.init(allocator);
-        defer writer.deinit();
-        try std.json.Stringify.value(ProposalPayload{
+        const payload = try (database.ProposalPayload{
             .title = candidate.title,
             .artist = candidate.artist,
             .album = candidate.album,
             .track_number = candidate.track_number,
-        }, .{}, &writer.writer);
-        try proposals.put(.{
+            .release_mbid = candidate.release_mbid,
+            .duration_ms = candidate.duration_ms,
+            .mb_score = candidate.mb_score,
+        }).encode(allocator);
+        defer allocator.free(payload);
+        const state = try proposals.put(.{
             .file_id = file_id,
             .provider = candidate.provider,
             .provider_id = candidate.provider_id,
             .confidence = result.score,
-            .payload = writer.writer.buffered(),
+            .payload = payload,
         });
+        if (state == .pending) stored += 1;
     }
-    return .{ .candidates = candidates, .ranked = ranked };
+    return stored;
 }
 
-pub fn accept(
-    allocator: std.mem.Allocator,
-    proposals: *database.IdentificationProposalRepository,
-    proposal: database.IdentificationProposal,
-    file_id: i64,
-) !void {
-    const parsed = std.json.parseFromSlice(ProposalPayload, allocator, proposal.payload, .{}) catch
-        return error.InvalidProposalPayload;
-    defer parsed.deinit();
-    const payload = parsed.value;
-    var values: [4]database.OrcaMetadataInput = undefined;
-    var count: usize = 0;
-    if (payload.title.len > 0) {
-        values[count] = .{ .file_id = file_id, .field = .title, .value = payload.title, .provenance = .provider };
-        count += 1;
-    }
-    if (payload.artist.len > 0) {
-        values[count] = .{ .file_id = file_id, .field = .artist, .value = payload.artist, .provenance = .provider };
-        count += 1;
-    }
-    if (payload.album.len > 0) {
-        values[count] = .{ .file_id = file_id, .field = .album, .value = payload.album, .provenance = .provider };
-        count += 1;
-    }
-    var track_number_buffer: [16]u8 = undefined;
-    if (payload.track_number) |track_number| {
-        values[count] = .{
-            .file_id = file_id,
-            .field = .track_number,
-            .value = try std.fmt.bufPrint(&track_number_buffer, "{d}", .{track_number}),
-            .provenance = .provider,
-        };
-        count += 1;
-    }
-    try proposals.accept(proposal.id, file_id, values[0..count]);
-}
+const testing = std.testing;
+const exact_mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+const distant_mbid = "9a2c1f6e-3b4d-4e5f-8a7b-6c5d4e3f2a1b";
 
-test "accepted proposals update Orca metadata but preserve user locks" {
-    const allocator = std.testing.allocator;
-    var library = try database.LibraryDatabase.open(
-        allocator,
-        std.testing.io,
-        "file:orca-identification-workflow?mode=memory&cache=shared",
-    );
-    defer library.close();
+const FakeProvider = struct {
+    fn provider(self: *FakeProvider) model.Provider {
+        return .{ .id = "musicbrainz", .context = self, .search_fn = search };
+    }
+
+    fn search(_: *anyopaque, allocator: std.mem.Allocator, _: model.Query) anyerror!model.CandidateList {
+        var exact = try model.Candidate.init(allocator, "musicbrainz", exact_mbid, "Northern Sky", "Nick Drake", "Bryter Layter");
+        errdefer exact.deinit();
+        exact.duration_ms = 224_000;
+        exact.mb_score = 100;
+        exact.release_mbid = try allocator.dupe(u8, "1c1a2b3c-4d5e-4f60-8a7b-9c8d7e6f5a4b");
+        var distant = try model.Candidate.init(allocator, "musicbrainz", distant_mbid, "Something Else", "Other Artist", "Compilation");
+        errdefer distant.deinit();
+        distant.duration_ms = 90_000;
+        const items = try allocator.alloc(model.Candidate, 2);
+        items[0] = distant;
+        items[1] = exact;
+        return .{ .allocator = allocator, .items = items };
+    }
+};
+
+fn openLibraryWithFile(uri: [:0]const u8) !struct { library: database.LibraryDatabase, file_id: i64 } {
+    var library = try database.LibraryDatabase.open(testing.allocator, testing.io, uri);
+    errdefer library.close();
     const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 100 });
-    _ = try library.locations.upsert(.{
-        .file_id = file_id,
-        .volume_id = database.LibraryDatabase.null_volume,
-        .uri = "music/track.flac",
-        .native_inode = 1,
-        .size_bytes = 100,
-        .modified_ns = 1,
+    return .{ .library = library, .file_id = file_id };
+}
+
+test "identify stores only the candidates worth reviewing, with what the provider said, and a dismissed one stays dismissed" {
+    var opened = try openLibraryWithFile("file:orca-workflow-identify?mode=memory&cache=shared");
+    defer opened.library.close();
+    var fake: FakeProvider = .{};
+
+    const stored = try identify(testing.allocator, &opened.library.identification_proposals, fake.provider(), opened.file_id, .{
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 223_500,
     });
+
+    try testing.expectEqual(@as(u32, 1), stored);
+    const pending = try opened.library.identification_proposals.pending(testing.allocator, opened.file_id, 10);
+    defer {
+        for (pending) |proposal| proposal.deinit();
+        testing.allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqualStrings(exact_mbid, pending[0].provider_id);
+    const payload = try database.ProposalPayload.parse(testing.allocator, pending[0].payload);
+    defer payload.deinit();
+    try testing.expectEqualStrings("Bryter Layter", payload.value.album);
+    try testing.expectEqualStrings("1c1a2b3c-4d5e-4f60-8a7b-9c8d7e6f5a4b", payload.value.release_mbid.?);
+    try testing.expectEqual(@as(?u64, 224_000), payload.value.duration_ms);
+    try testing.expectEqual(@as(?u8, 100), payload.value.mb_score);
+
+    try opened.library.identification_proposals.dismiss(pending[0].id);
+    const again = try identify(testing.allocator, &opened.library.identification_proposals, fake.provider(), opened.file_id, .{
+        .title = "Northern Sky",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 223_500,
+    });
+    try testing.expectEqual(@as(u32, 0), again);
+    const after_dismissal = try opened.library.identification_proposals.pending(testing.allocator, opened.file_id, 10);
+    defer testing.allocator.free(after_dismissal);
+    try testing.expectEqual(@as(usize, 0), after_dismissal.len);
+}
+
+test "accepting a proposal keeps a user's locked recording id and still settles the proposal" {
+    var opened = try openLibraryWithFile("file:orca-workflow-locked?mode=memory&cache=shared");
+    defer opened.library.close();
+    const library = &opened.library;
+    const locked_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
     try library.orca_metadata.upsert(.{
-        .file_id = file_id,
-        .field = .title,
-        .value = "User title",
+        .file_id = opened.file_id,
+        .field = .musicbrainz_recording_id,
+        .value = locked_mbid,
         .provenance = .user,
         .locked = true,
     });
-    const payload =
-        \\{"title":"Provider title","artist":"Provider artist","album":"Provider album","track_number":2}
-    ;
-    try library.identification_proposals.put(.{
-        .file_id = file_id,
+    _ = try library.identification_proposals.put(.{
+        .file_id = opened.file_id,
         .provider = "musicbrainz",
-        .provider_id = "recording-1",
+        .provider_id = exact_mbid,
         .confidence = 0.95,
-        .payload = payload,
+        .payload =
+        \\{"title":"Provider title","artist":"Provider artist","album":"Provider album","track_number":2}
+        ,
     });
-    const pending = try library.identification_proposals.pending(allocator, file_id, 10);
+    const pending = try library.identification_proposals.pending(testing.allocator, opened.file_id, 10);
     defer {
         for (pending) |proposal| proposal.deinit();
-        allocator.free(pending);
+        testing.allocator.free(pending);
     }
-    try accept(allocator, &library.identification_proposals, pending[0], file_id);
-    const title = (try library.orca_metadata.get(allocator, file_id, .title)).?;
-    defer title.deinit(allocator);
-    try std.testing.expectEqualStrings("User title", title.text);
-    try std.testing.expect(title.locked);
-    const artist = (try library.orca_metadata.get(allocator, file_id, .artist)).?;
-    defer artist.deinit(allocator);
-    try std.testing.expectEqualStrings("Provider artist", artist.text);
-    try std.testing.expectEqual(@import("../metadata/model.zig").Provenance.provider, artist.provenance);
-    const remaining = try library.identification_proposals.pending(
-        allocator,
-        file_id,
-        10,
-    );
-    defer allocator.free(remaining);
-    try std.testing.expectEqual(@as(usize, 0), remaining.len);
+
+    const acceptance = try library.identification_proposals.acceptProposal(testing.allocator, pending[0].id);
+
+    try testing.expectEqual(@as(u32, 0), acceptance.values_written);
+    const kept = (try library.orca_metadata.get(testing.allocator, opened.file_id, .musicbrainz_recording_id)).?;
+    defer kept.deinit(testing.allocator);
+    try testing.expectEqualStrings(locked_mbid, kept.text);
+    try testing.expectEqual(metadata.Provenance.user, kept.provenance);
+    try testing.expect(kept.locked);
+    try testing.expect(try library.orca_metadata.get(testing.allocator, opened.file_id, .title) == null);
+    const remaining = try library.identification_proposals.pending(testing.allocator, opened.file_id, 10);
+    defer testing.allocator.free(remaining);
+    try testing.expectEqual(@as(usize, 0), remaining.len);
 }

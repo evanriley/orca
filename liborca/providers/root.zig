@@ -7,6 +7,7 @@ pub const model = @import("model.zig");
 pub const musicbrainz = @import("musicbrainz.zig");
 pub const scoring = @import("scoring.zig");
 pub const scrobble = @import("scrobble.zig");
+pub const url = @import("url.zig");
 pub const workflow = @import("workflow.zig");
 
 pub const Candidate = model.Candidate;
@@ -24,5 +25,6 @@ test {
     _ = @import("musicbrainz.zig");
     _ = @import("scoring.zig");
     _ = @import("scrobble.zig");
+    _ = @import("url.zig");
     _ = @import("workflow.zig");
 }

@@ -2,6 +2,35 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### MusicBrainz matching
+
+- **Tracks without a MusicBrainz recording ID can be matched.**
+  `Runtime.startLibraryMatching(library, MatchRequest)` starts a cancellable
+  `metadata_lookup` Job that searches MusicBrainz for every Track whose file
+  has no recording ID and no pending match, at one request a second, caching
+  answers for 30 days, and stores the candidates Orca scores at 0.5 or above as
+  proposals. At most one runs per runtime. `jobMatchStats` reports what it
+  did as `MatchStats`. `libraryMatchProposals`,
+  `libraryAcceptMatch`, `libraryDismissMatch` and
+  `libraryAcceptConfidentMatches` review them; `setMusicBrainzServer` selects a
+  mirror. New public types: `MatchRequest`, `MatchStats`, `MatchProposal`,
+  `MatchProposalPage`, `MatchAcceptance`, `RecordingIdSource`.
+- **An accepted match is the recording ID loves and listens are sent under.**
+  `MetadataField` gains `musicbrainz_recording_id`. The ID in effect is a
+  locked Orca value, else the file's tag, else an accepted match; listens,
+  feedback sync and `TrackDetails.feedback_syncable` all use it.
+  `TrackDetails` gains `musicbrainz_recording_id` and
+  `musicbrainz_recording_id_source`. Acceptance re-reads the proposal inside
+  its transaction, refuses one that is no longer pending
+  (`error.StaleIdentificationProposal`) or cannot be read
+  (`error.InvalidProposalPayload`), keeps a locked value, writes only the
+  recording ID, and never writes a file. Tag writes leave the field out.
+- **`orca-cli match`, `matches`, `accept-match`, `dismiss-match` and
+  `accept-matches`** drive it, with `ORCA_MUSICBRAINZ_URL` for another server;
+  `orca-cli track` prints `recording id:` and its source.
+- **Provider requests carry one User-Agent.** Every request also sent
+  `zig/0.16.0 (std.http)` ahead of Orca's; it now sends Orca's alone.
+
 ### Listening history and ListenBrainz
 
 - **Orca keeps a play history.** Schema version 15 adds `listens`: one row per

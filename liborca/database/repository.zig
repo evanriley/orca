@@ -729,6 +729,101 @@ pub const IdentificationProposal = struct {
     }
 };
 
+/// What a provider said about a candidate, stored as a proposal's JSON
+/// payload. Every field has a default so older payloads still parse.
+pub const ProposalPayload = struct {
+    title: []const u8 = "",
+    artist: []const u8 = "",
+    album: []const u8 = "",
+    track_number: ?u32 = null,
+    release_mbid: ?[]const u8 = null,
+    duration_ms: ?u64 = null,
+    mb_score: ?u8 = null,
+
+    pub fn parse(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+    ) error{ InvalidProposalPayload, OutOfMemory }!std.json.Parsed(ProposalPayload) {
+        return std.json.parseFromSlice(ProposalPayload, allocator, bytes, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidProposalPayload,
+        };
+    }
+
+    pub fn encode(self: ProposalPayload, allocator: std.mem.Allocator) ![]u8 {
+        var writer = std.Io.Writer.Allocating.init(allocator);
+        errdefer writer.deinit();
+        try std.json.Stringify.value(self, .{ .emit_null_optional_fields = false }, &writer.writer);
+        var list = writer.toArrayList();
+        return list.toOwnedSlice(allocator);
+    }
+};
+
+pub const MatchProposal = struct {
+    id: i64,
+    provider: []const u8,
+    recording_mbid: []const u8,
+    confidence: f32,
+    title: []const u8,
+    artist: []const u8,
+    album: []const u8,
+    track_number: ?u32,
+    release_mbid: ?[]const u8,
+    duration_ms: ?u64,
+    musicbrainz_score: ?u8,
+};
+
+pub const MatchProposalPage = struct {
+    arena: *std.heap.ArenaAllocator,
+    items: []MatchProposal,
+
+    pub fn deinit(self: MatchProposalPage) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
+
+pub const ProposalAcceptance = struct {
+    file_id: i64,
+    values_written: u32,
+};
+
+pub const MatchCandidate = struct {
+    track_id: i64,
+    file_id: i64,
+    title: []u8,
+    artist: []u8,
+    album: []u8,
+    duration_ms: ?i64,
+};
+
+pub const MatchCandidatePage = struct {
+    allocator: std.mem.Allocator,
+    items: []MatchCandidate,
+
+    pub fn deinit(self: MatchCandidatePage) void {
+        for (self.items) |item| {
+            self.allocator.free(item.title);
+            self.allocator.free(item.artist);
+            self.allocator.free(item.album);
+        }
+        self.allocator.free(self.items);
+    }
+};
+
+pub const RecordingMbid = struct {
+    text: []u8,
+    provenance: metadata.Provenance,
+
+    pub fn deinit(self: RecordingMbid, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+    }
+};
+
 pub const TrackSummary = struct {
     id: i64,
     title: []u8,
@@ -977,6 +1072,31 @@ pub const TrackRepository = struct {
         try statement.bindOptionalInt64(4, query.release_id);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    pub fn recordingMbid(self: *const TrackRepository, allocator: std.mem.Allocator, track_id: i64) !?RecordingMbid {
+        var statement = try self.db.prepare(
+            "SELECT orca.value, orca.provenance, orca.locked, observed.musicbrainz_recording_id\n" ++
+                "FROM (SELECT " ++ track_play_file ++ " AS file_id FROM tracks WHERE tracks.id = ?1) AS track\n" ++
+                "LEFT JOIN orca_metadata_values AS orca\n" ++
+                "    ON orca.file_id = track.file_id AND orca.field = " ++ recording_mbid_field ++ "\n" ++
+                "LEFT JOIN observed_file_tags AS observed ON observed.file_id = track.file_id;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        if (try statement.step() != .row) return null;
+        const orca: ?metadata.Value = if (statement.columnIsNull(0) or statement.columnText(0).len == 0) null else .{
+            .text = statement.columnText(0),
+            .provenance = std.enums.fromInt(metadata.Provenance, statement.columnInt64(1)) orelse
+                return error.InvalidStoredProvenance,
+            .locked = statement.columnInt64(2) != 0,
+        };
+        const observed: ?metadata.Value = if (statement.columnIsNull(3) or statement.columnText(3).len == 0) null else .{
+            .text = statement.columnText(3),
+            .provenance = .observed_file,
+        };
+        const resolved = metadata.resolveValue(observed, orca, .prefer_file) orelse return null;
+        return .{ .text = try allocator.dupe(u8, resolved.text), .provenance = resolved.provenance };
     }
 
     /// The files a Track resolves to: its preferred file and every other
@@ -4009,6 +4129,20 @@ pub const track_play_file =
     \\    (SELECT id FROM files WHERE recording_id = tracks.recording_id ORDER BY id LIMIT 1))
 ;
 
+const recording_mbid_field = std.fmt.comptimePrint("{d}", .{@intFromEnum(metadata.Field.musicbrainz_recording_id)});
+
+/// A locked Orca value, else the file's tag, else an Orca value: the order
+/// `TrackRepository.recordingMbid` applies through `metadata.resolveValue`.
+/// The two must agree, or details and sync name different recordings.
+pub fn effectiveRecordingMbid(comptime file_id: []const u8) []const u8 {
+    return "COALESCE(" ++
+        "(SELECT NULLIF(value, '') FROM orca_metadata_values WHERE orca_metadata_values.file_id = " ++ file_id ++
+        " AND orca_metadata_values.field = " ++ recording_mbid_field ++ " AND orca_metadata_values.locked = 1), " ++
+        "(SELECT NULLIF(musicbrainz_recording_id, '') FROM observed_file_tags WHERE observed_file_tags.file_id = " ++ file_id ++ "), " ++
+        "(SELECT NULLIF(value, '') FROM orca_metadata_values WHERE orca_metadata_values.file_id = " ++ file_id ++
+        " AND orca_metadata_values.field = " ++ recording_mbid_field ++ "))";
+}
+
 pub const ListenRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
@@ -4137,7 +4271,7 @@ pub const ListenRepository = struct {
                 "    FROM tracks WHERE tracks.id = ?1)\n" ++
                 "SELECT subject.file_id, subject.recording_id, subject.title, subject.artist,\n" ++
                 "       subject.album, subject.duration_ms, subject.track_number,\n" ++
-                "       observed_file_tags.musicbrainz_recording_id,\n" ++
+                "       " ++ comptime effectiveRecordingMbid("subject.file_id") ++ ",\n" ++
                 "       observed_file_tags.musicbrainz_release_id,\n" ++
                 "       observed_file_tags.musicbrainz_artist_id\n" ++
                 "FROM subject LEFT JOIN observed_file_tags ON observed_file_tags.file_id = subject.file_id;",
@@ -4183,32 +4317,27 @@ pub const ListenRepository = struct {
 pub const feedback_settle_seconds: i64 = 2;
 
 pub const feedback_next_sql =
-    \\SELECT feedback.recording_id, feedback.score, observed_file_tags.musicbrainz_recording_id
-    \\FROM feedback
-    \\CROSS JOIN files ON files.recording_id = feedback.recording_id
-    \\CROSS JOIN observed_file_tags ON observed_file_tags.file_id = files.id
-    \\WHERE feedback.score IS NOT feedback.synced_score
-    \\  AND feedback.updated_at <= ?1
-    \\  AND observed_file_tags.musicbrainz_recording_id <> ''
-    \\ORDER BY feedback.updated_at, feedback.recording_id,
-    \\         EXISTS(SELECT 1 FROM tracks WHERE tracks.preferred_file_id = files.id) DESC, files.id
-    \\LIMIT 1;
-;
+    "SELECT feedback.recording_id, feedback.score, " ++ effectiveRecordingMbid("files.id") ++ " AS mbid\n" ++
+    "FROM feedback\n" ++
+    "CROSS JOIN files ON files.recording_id = feedback.recording_id\n" ++
+    "WHERE feedback.score IS NOT feedback.synced_score\n" ++
+    "  AND feedback.updated_at <= ?1\n" ++
+    "  AND mbid IS NOT NULL\n" ++
+    "ORDER BY feedback.updated_at, feedback.recording_id,\n" ++
+    "         EXISTS(SELECT 1 FROM tracks WHERE tracks.preferred_file_id = files.id) DESC, files.id\n" ++
+    "LIMIT 1;";
 
 pub const feedback_pending_sql =
-    \\SELECT count(*) FROM feedback
-    \\WHERE score IS NOT synced_score AND EXISTS (
-    \\    SELECT 1 FROM files JOIN observed_file_tags ON observed_file_tags.file_id = files.id
-    \\    WHERE files.recording_id = feedback.recording_id
-    \\      AND observed_file_tags.musicbrainz_recording_id <> '');
-;
+    "SELECT count(*) FROM feedback\n" ++
+    "WHERE score IS NOT synced_score AND EXISTS (\n" ++
+    "    SELECT 1 FROM files WHERE files.recording_id = feedback.recording_id\n" ++
+    "      AND " ++ effectiveRecordingMbid("files.id") ++ " IS NOT NULL);";
 
 pub const feedback_syncable_sql =
-    \\SELECT EXISTS (
-    \\    SELECT 1 FROM files JOIN observed_file_tags ON observed_file_tags.file_id = files.id
-    \\    WHERE files.recording_id = (SELECT recording_id FROM tracks WHERE id = ?1)
-    \\      AND observed_file_tags.musicbrainz_recording_id <> '');
-;
+    "SELECT EXISTS (\n" ++
+    "    SELECT 1 FROM files\n" ++
+    "    WHERE files.recording_id = (SELECT recording_id FROM tracks WHERE id = ?1)\n" ++
+    "      AND " ++ effectiveRecordingMbid("files.id") ++ " IS NOT NULL);";
 
 pub const FeedbackRepository = struct {
     db: sqlite.Database,
@@ -4375,7 +4504,7 @@ pub const IdentificationProposalRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
 
-    pub fn put(self: *IdentificationProposalRepository, input: IdentificationProposalInput) !void {
+    pub fn put(self: *IdentificationProposalRepository, input: IdentificationProposalInput) !ProposalState {
         if (input.file_id == 0 or input.provider.len == 0 or input.provider_id.len == 0 or
             input.payload.len == 0 or !std.math.isFinite(input.confidence) or
             input.confidence < 0 or input.confidence > 1) return error.InvalidIdentificationProposal;
@@ -4387,7 +4516,8 @@ pub const IdentificationProposalRepository = struct {
             \\VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())
             \\ON CONFLICT(file_id, provider, provider_id) DO UPDATE SET
             \\    confidence=excluded.confidence, payload=excluded.payload,
-            \\    updated_at=excluded.updated_at;
+            \\    updated_at=excluded.updated_at
+            \\RETURNING state;
         );
         defer statement.deinit();
         try statement.bindInt64(1, input.file_id);
@@ -4395,7 +4525,11 @@ pub const IdentificationProposalRepository = struct {
         try statement.bindText(3, input.provider_id);
         try statement.bindDouble(4, input.confidence);
         try statement.bindBlob(5, input.payload);
+        if (try statement.step() != .row) return error.SqlFailed;
+        const state = std.enums.fromInt(ProposalState, statement.columnInt64(0)) orelse
+            return error.InvalidStoredProposalState;
         if (try statement.step() != .done) return error.SqlFailed;
+        return state;
     }
 
     pub fn pending(
@@ -4436,50 +4570,260 @@ pub const IdentificationProposalRepository = struct {
         return proposals.toOwnedSlice(allocator);
     }
 
-    /// Accepts a proposal into Orca metadata only. Locked values survive, and
-    /// writing those values back to a media file remains a separate mutation.
-    pub fn accept(
+    pub fn acceptProposal(
         self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
         proposal_id: i64,
-        file_id: i64,
-        values: []const OrcaMetadataInput,
-    ) !void {
-        for (values) |value| {
-            if (value.file_id != file_id or value.provenance != .provider or
-                value.value.len == 0) return error.InvalidProviderMetadata;
-        }
+    ) !ProposalAcceptance {
         self.write_lane.acquire();
         defer self.write_lane.release();
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
-        var update = try self.db.prepare(
-            \\UPDATE identification_proposals SET state=1, updated_at=unixepoch()
-            \\WHERE id=?1 AND file_id=?2 AND state=0;
+        const acceptance = try self.acceptLocked(allocator, proposal_id);
+        try self.db.exec("COMMIT;");
+        return acceptance;
+    }
+
+    /// Nothing is written before the proposal has been read and its payload
+    /// parsed, so a refusal leaves the open transaction as it found it.
+    fn acceptLocked(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        proposal_id: i64,
+    ) !ProposalAcceptance {
+        var select = try self.db.prepare(
+            "SELECT file_id, provider_id, payload, state FROM identification_proposals WHERE id=?1;",
         );
-        defer update.deinit();
-        try update.bindInt64(1, proposal_id);
-        try update.bindInt64(2, file_id);
-        if (try update.step() != .done) return error.SqlFailed;
-        if (self.db.changes() != 1) return error.StaleIdentificationProposal;
-        var metadata_statement = try self.db.prepare(
+        defer select.deinit();
+        try select.bindInt64(1, proposal_id);
+        if (try select.step() != .row) return error.UnknownIdentificationProposal;
+        if (select.columnInt64(3) != @intFromEnum(ProposalState.pending)) return error.StaleIdentificationProposal;
+        const file_id = select.columnInt64(0);
+        const recording_mbid = try allocator.dupe(u8, select.columnText(1));
+        defer allocator.free(recording_mbid);
+        if (!metadata.isMusicBrainzId(recording_mbid)) return error.InvalidProposalPayload;
+        const payload = try ProposalPayload.parse(allocator, select.columnBlob(2));
+        payload.deinit();
+        try select.reset();
+
+        var store = try self.db.prepare(
             \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, 0, unixepoch())
             \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
             \\    provenance=excluded.provenance, updated_at=excluded.updated_at
             \\WHERE orca_metadata_values.locked=0;
         );
-        defer metadata_statement.deinit();
-        for (values) |value| {
-            try metadata_statement.bindInt64(1, file_id);
-            try metadata_statement.bindInt64(2, @intFromEnum(value.field));
-            try metadata_statement.bindText(3, value.value);
-            try metadata_statement.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
-            if (try metadata_statement.step() != .done) return error.SqlFailed;
-            try metadata_statement.reset();
+        defer store.deinit();
+        try store.bindInt64(1, file_id);
+        try store.bindInt64(2, @intFromEnum(metadata.Field.musicbrainz_recording_id));
+        try store.bindText(3, recording_mbid);
+        try store.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
+        if (try store.step() != .done) return error.SqlFailed;
+        const values_written: u32 = @intCast(self.db.changes());
+
+        var settle = try self.db.prepare(
+            \\UPDATE identification_proposals
+            \\SET state = CASE WHEN id=?1 THEN ?3 ELSE ?4 END, updated_at=unixepoch()
+            \\WHERE file_id=?2 AND state=?5;
+        );
+        defer settle.deinit();
+        try settle.bindInt64(1, proposal_id);
+        try settle.bindInt64(2, file_id);
+        try settle.bindInt64(3, @intFromEnum(ProposalState.accepted));
+        try settle.bindInt64(4, @intFromEnum(ProposalState.dismissed));
+        try settle.bindInt64(5, @intFromEnum(ProposalState.pending));
+        if (try settle.step() != .done) return error.SqlFailed;
+        return .{ .file_id = file_id, .values_written = values_written };
+    }
+
+    pub fn dismiss(self: *IdentificationProposalRepository, proposal_id: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var update = try self.db.prepare(
+            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch() WHERE id=?1 AND state=?3;",
+        );
+        defer update.deinit();
+        try update.bindInt64(1, proposal_id);
+        try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+        try update.bindInt64(3, @intFromEnum(ProposalState.pending));
+        if (try update.step() != .done) return error.SqlFailed;
+        if (self.db.changes() == 1) return;
+        var exists = try self.db.prepare("SELECT 1 FROM identification_proposals WHERE id=?1;");
+        defer exists.deinit();
+        try exists.bindInt64(1, proposal_id);
+        return if (try exists.step() == .row) error.StaleIdentificationProposal else error.UnknownIdentificationProposal;
+    }
+
+    pub fn acceptConfident(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        minimum_confidence: f32,
+    ) !u64 {
+        if (!std.math.isFinite(minimum_confidence) or minimum_confidence <= 0 or minimum_confidence > 1)
+            return error.InvalidMinimumConfidence;
+        var accepted: u64 = 0;
+        var cursor: i64 = 0;
+        var batch: [max_page]i64 = undefined;
+        while (true) {
+            const selected = try self.confidentBatch(minimum_confidence, cursor, &batch);
+            if (selected.len == 0) return accepted;
+            cursor = selected[selected.len - 1];
+            self.write_lane.acquire();
+            defer self.write_lane.release();
+            try self.db.exec("BEGIN IMMEDIATE;");
+            errdefer self.db.exec("ROLLBACK;") catch {};
+            for (selected) |proposal_id| {
+                _ = self.acceptLocked(allocator, proposal_id) catch |err| switch (err) {
+                    error.InvalidProposalPayload, error.StaleIdentificationProposal => continue,
+                    else => return err,
+                };
+                accepted += 1;
+            }
+            try self.db.exec("COMMIT;");
         }
-        try self.db.exec("COMMIT;");
+    }
+
+    fn confidentBatch(
+        self: *IdentificationProposalRepository,
+        minimum_confidence: f32,
+        cursor: i64,
+        batch: *[max_page]i64,
+    ) ![]i64 {
+        var statement = try self.db.prepare(
+            \\SELECT candidate.id FROM identification_proposals AS candidate
+            \\WHERE candidate.state = ?4 AND candidate.confidence >= ?1 AND candidate.id > ?2
+            \\  AND NOT EXISTS (
+            \\    SELECT 1 FROM identification_proposals AS rival
+            \\    WHERE rival.file_id = candidate.file_id AND rival.state = ?4
+            \\      AND rival.confidence >= ?1 AND rival.id <> candidate.id)
+            \\ORDER BY candidate.id LIMIT ?3;
+        );
+        defer statement.deinit();
+        try statement.bindDouble(1, minimum_confidence);
+        try statement.bindInt64(2, cursor);
+        try statement.bindInt64(3, batch.len);
+        try statement.bindInt64(4, @intFromEnum(ProposalState.pending));
+        var count: usize = 0;
+        while (try statement.step() == .row) : (count += 1) batch[count] = statement.columnInt64(0);
+        return batch[0..count];
+    }
+
+    pub fn pendingForTrack(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+        limit: u32,
+    ) !MatchProposalPage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(
+            "SELECT id, provider, provider_id, confidence, payload FROM identification_proposals\n" ++
+                "WHERE file_id = (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1)\n" ++
+                "  AND state = ?3\n" ++
+                "ORDER BY confidence DESC, id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        try statement.bindInt64(2, limit);
+        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        const page: MatchProposalPage = .{ .arena = arena, .items = &.{} };
+        errdefer page.deinit();
+        const owned = arena.allocator();
+        var items: std.ArrayList(MatchProposal) = .empty;
+        while (try statement.step() == .row) {
+            const payload = ProposalPayload.parse(owned, statement.columnBlob(4)) catch |err| switch (err) {
+                error.InvalidProposalPayload => null,
+                error.OutOfMemory => return err,
+            };
+            const said: ProposalPayload = if (payload) |parsed| parsed.value else .{};
+            try items.append(owned, .{
+                .id = statement.columnInt64(0),
+                .provider = try owned.dupe(u8, statement.columnText(1)),
+                .recording_mbid = try owned.dupe(u8, statement.columnText(2)),
+                .confidence = @floatCast(statement.columnDouble(3)),
+                .title = said.title,
+                .artist = said.artist,
+                .album = said.album,
+                .track_number = said.track_number,
+                .release_mbid = said.release_mbid,
+                .duration_ms = said.duration_ms,
+                .musicbrainz_score = said.mb_score,
+            });
+        }
+        return .{ .arena = arena, .items = items.items };
+    }
+
+    pub fn unidentifiedPage(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        cursor: i64,
+        limit: u32,
+    ) !MatchCandidatePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(unidentified_page_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, cursor);
+        try statement.bindInt64(2, limit);
+        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+        var items: std.ArrayList(MatchCandidate) = .empty;
+        errdefer {
+            for (items.items) |item| {
+                allocator.free(item.title);
+                allocator.free(item.artist);
+                allocator.free(item.album);
+            }
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const title = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(title);
+            const artist = try allocator.dupe(u8, statement.columnText(3));
+            errdefer allocator.free(artist);
+            const album = try allocator.dupe(u8, statement.columnText(4));
+            errdefer allocator.free(album);
+            try items.append(allocator, .{
+                .track_id = statement.columnInt64(0),
+                .file_id = statement.columnInt64(1),
+                .title = title,
+                .artist = artist,
+                .album = album,
+                .duration_ms = optionalInt64(statement, 5),
+            });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    pub fn unidentifiedCount(self: *const IdentificationProposalRepository, limit: ?u32) !u64 {
+        var statement = try self.db.prepare(unidentified_count_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, 0);
+        try statement.bindInt64(2, if (limit) |bound| bound else -1);
+        try statement.bindInt64(3, @intFromEnum(ProposalState.pending));
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
     }
 };
+
+/// Tracks above id ?1 whose play file has no recording id and no proposal in
+/// state ?3. The matching job's page and its count share it so they agree.
+pub const unidentified_tracks =
+    "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
+    "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
+    "    FROM tracks WHERE tracks.id > ?1) AS track\n" ++
+    "WHERE track.file_id IS NOT NULL\n" ++
+    "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
+    "  AND NOT EXISTS (SELECT 1 FROM identification_proposals\n" ++
+    "      WHERE identification_proposals.file_id = track.file_id\n" ++
+    "        AND identification_proposals.state = ?3)";
+
+pub const unidentified_page_sql =
+    "SELECT track.id, track.file_id, track.title, track.artist, track.album, track.duration_ms\n" ++
+    "FROM " ++ unidentified_tracks ++ "\nORDER BY track.id LIMIT ?2;";
+
+pub const unidentified_count_sql =
+    "SELECT count(*) FROM (SELECT 1 FROM " ++ unidentified_tracks ++ " LIMIT ?2);";
 
 /// Binds ?3 to ?6 of `unanalyzed_predicate`. The cursor and limit stay ?1 and
 /// ?2 so the selector can be appended to any paged query without renumbering.

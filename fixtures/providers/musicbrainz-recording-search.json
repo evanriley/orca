@@ -1,0 +1,573 @@
+{
+ "created": "2026-09-29T13:16:13.531Z",
+ "count": 135,
+ "offset": 0,
+ "recordings": [
+  {
+   "id": "a6d3063b-c34f-46c7-b61c-dda4d94195a9",
+   "score": 100,
+   "artist-credit-id": "94e6c1ea-82e8-31d0-bc1a-f3a864cc7fe2",
+   "title": "Under Pressure",
+   "length": 266920,
+   "video": true,
+   "artist-credit": [
+    {
+     "joinphrase": " & ",
+     "name": "Queen",
+     "artist": {
+      "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+      "name": "Queen",
+      "sort-name": "Queen",
+      "disambiguation": "UK rock group"
+     }
+    },
+    {
+     "name": "David Bowie",
+     "artist": {
+      "id": "5441c29d-3602-4898-b1a1-b77fa23b8e50",
+      "name": "David Bowie",
+      "sort-name": "Bowie, David",
+      "disambiguation": "English singer‐songwriter"
+     }
+    }
+   ],
+   "first-release-date": "2014",
+   "releases": [
+    {
+     "id": "047a4aae-27f8-4f2d-92fb-214fd8dc865a",
+     "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 2,
+     "title": "Hot Space",
+     "status": "Official",
+     "disambiguation": "deluxe edition",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "3918b90b-340e-3779-9d7e-ba1593653498",
+      "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "Hot Space",
+      "primary-type": "Album"
+     },
+     "date": "2014",
+     "country": "GB",
+     "release-events": [
+      {
+       "date": "2014",
+       "area": {
+        "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+        "name": "United Kingdom",
+        "sort-name": "United Kingdom",
+        "iso-3166-1-codes": [
+         "GB"
+        ]
+       }
+      }
+     ],
+     "track-count": 19,
+     "media": [
+      {
+       "id": "9fd81338-bf30-30ff-96ad-0fb11129c38c",
+       "position": 2,
+       "format": "Digital Media",
+       "track": [
+        {
+         "id": "6a31811e-e7ac-44d9-8345-7a6918130bf7",
+         "number": "7",
+         "title": "Under Pressure",
+         "length": 266920
+        }
+       ],
+       "track-count": 8,
+       "track-offset": 6
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "816c8fd1-5042-4ff8-b7d6-5f22e2a867db",
+   "score": 68,
+   "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+   "title": "Under Pressure",
+   "length": 201000,
+   "disambiguation": "live, 1985-05-11: Tokyo, Japan",
+   "video": null,
+   "artist-credit": [
+    {
+     "name": "Queen",
+     "artist": {
+      "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+      "name": "Queen",
+      "sort-name": "Queen",
+      "disambiguation": "UK rock group"
+     }
+    }
+   ],
+   "first-release-date": "1993",
+   "releases": [
+    {
+     "id": "5ad1dd8f-d674-406d-9fe9-0a28022f6402",
+     "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 2,
+     "title": "Nihon",
+     "status": "Bootleg",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "50c46450-e8a8-315d-a295-f4de1a657cf0",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "Nihon",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "1993",
+     "country": "IT",
+     "release-events": [
+      {
+       "date": "1993",
+       "area": {
+        "id": "c6500277-9a3d-349b-bf30-41afdbf42add",
+        "name": "Italy",
+        "sort-name": "Italy",
+        "iso-3166-1-codes": [
+         "IT"
+        ]
+       }
+      }
+     ],
+     "track-count": 25,
+     "media": [
+      {
+       "id": "6b1300eb-7d05-3806-928a-ad9a002aebed",
+       "position": 1,
+       "track": [
+        {
+         "id": "4de6c918-f518-39e2-97b5-7b84cc98a41b",
+         "number": "3",
+         "title": "Under Pressure",
+         "length": 201000
+        }
+       ],
+       "track-count": 12,
+       "track-offset": 2
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "af59c0c3-f3da-4bc2-ae24-dd2aa93021a4",
+   "score": 68,
+   "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+   "title": "Under Pressure",
+   "disambiguation": "live, 1985-05-11: 国立代々木競技場, Jinnan, Shibuya, Tokyo, Japan",
+   "video": true,
+   "artist-credit": [
+    {
+     "name": "Queen",
+     "artist": {
+      "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+      "name": "Queen",
+      "sort-name": "Queen",
+      "disambiguation": "UK rock group"
+     }
+    }
+   ],
+   "first-release-date": "2004-06-02",
+   "releases": [
+    {
+     "id": "2257e18c-8d38-45e7-8587-1d4e8b63ed4c",
+     "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 1,
+     "title": "We Are the Champions: Final Live in Japan",
+     "status": "Official",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "bf3df1d9-8dcb-3dd6-976c-771f51da7510",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "We Are the Champions: Final Live in Japan",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "2019-05-11",
+     "country": "JP",
+     "release-events": [
+      {
+       "date": "2019-05-11",
+       "area": {
+        "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+        "name": "Japan",
+        "sort-name": "Japan",
+        "iso-3166-1-codes": [
+         "JP"
+        ]
+       }
+      }
+     ],
+     "track-count": 18,
+     "media": [
+      {
+       "id": "e7da9bb7-b5a4-3a54-b6eb-53f32baa0583",
+       "position": 1,
+       "format": "DVD-Video",
+       "track": [
+        {
+         "id": "381f9fa4-df39-497d-bcbc-1051df8f66f2",
+         "number": "3",
+         "title": "Under Pressure"
+        }
+       ],
+       "track-count": 18,
+       "track-offset": 2
+      }
+     ]
+    },
+    {
+     "id": "71bd28aa-6d6f-473c-bca8-ac7a71c24c98",
+     "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 1,
+     "title": "We Are the Champions: Final Live in Japan",
+     "status": "Official",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "bf3df1d9-8dcb-3dd6-976c-771f51da7510",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "We Are the Champions: Final Live in Japan",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "2004-06-02",
+     "country": "JP",
+     "release-events": [
+      {
+       "date": "2004-06-02",
+       "area": {
+        "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+        "name": "Japan",
+        "sort-name": "Japan",
+        "iso-3166-1-codes": [
+         "JP"
+        ]
+       }
+      }
+     ],
+     "track-count": 18,
+     "media": [
+      {
+       "id": "a3c3a073-dbd7-3cca-af6b-032c66b1d0e4",
+       "position": 1,
+       "format": "DVD-Video",
+       "track": [
+        {
+         "id": "617eeab2-62bb-42fd-a9ee-4a943ea333bc",
+         "number": "3",
+         "title": "Under Pressure"
+        }
+       ],
+       "track-count": 18,
+       "track-offset": 2
+      }
+     ]
+    }
+   ],
+   "tags": [
+    {
+     "count": 1,
+     "name": "n."
+    }
+   ]
+  },
+  {
+   "id": "e3a15a94-41d6-45c0-bbc1-aae6137bcb7a",
+   "score": 68,
+   "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+   "title": "Under Pressure",
+   "length": 201000,
+   "disambiguation": "live",
+   "video": null,
+   "artist-credit": [
+    {
+     "name": "Queen",
+     "artist": {
+      "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+      "name": "Queen",
+      "sort-name": "Queen",
+      "disambiguation": "UK rock group"
+     }
+    }
+   ],
+   "first-release-date": "1991",
+   "releases": [
+    {
+     "id": "85981280-6d37-4d84-b54e-a676aeb93c23",
+     "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 1,
+     "title": "Live USA, Vol. 2",
+     "status": "Bootleg",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "96fc6e93-f459-48b0-9b0a-4f26355fb5c8",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "Live USA, Vol. 2",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "1991",
+     "country": "DE",
+     "release-events": [
+      {
+       "date": "1991",
+       "area": {
+        "id": "85752fda-13c4-31a3-bee5-0e5cb1f51dad",
+        "name": "Germany",
+        "sort-name": "Germany",
+        "iso-3166-1-codes": [
+         "DE"
+        ]
+       }
+      },
+      {
+       "date": "1991",
+       "area": {
+        "id": "1333ff06-8e3d-3c8e-9f3a-13a2a38b41df",
+        "name": "Switzerland",
+        "sort-name": "Switzerland",
+        "iso-3166-1-codes": [
+         "CH"
+        ]
+       }
+      }
+     ],
+     "track-count": 11,
+     "media": [
+      {
+       "id": "15f943ac-01b0-3975-b5e4-84f7ea46fe5b",
+       "position": 1,
+       "format": "Cassette",
+       "track": [
+        {
+         "id": "d3c9f252-5c5f-4564-918e-85ee93478cf8",
+         "number": "B6",
+         "title": "Under Pressure",
+         "length": 201000
+        }
+       ],
+       "track-count": 11,
+       "track-offset": 10
+      }
+     ]
+    },
+    {
+     "id": "786a6852-4b41-44c9-a585-c65f9caa54a1",
+     "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 2,
+     "title": "Live USA",
+     "status": "Bootleg",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "471208ac-060e-4f0d-82e1-47004719f7b2",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "Live USA",
+      "disambiguation": "2 CD Set",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "1991",
+     "country": "DE",
+     "release-events": [
+      {
+       "date": "1991",
+       "area": {
+        "id": "85752fda-13c4-31a3-bee5-0e5cb1f51dad",
+        "name": "Germany",
+        "sort-name": "Germany",
+        "iso-3166-1-codes": [
+         "DE"
+        ]
+       }
+      }
+     ],
+     "track-count": 21,
+     "media": [
+      {
+       "id": "7724f45f-1da1-34a1-addf-65915e7a9c7e",
+       "position": 1,
+       "format": "CD",
+       "track": [
+        {
+         "id": "6e344ea7-cbc1-436c-aadb-a14f742bf5ce",
+         "number": "6",
+         "title": "Under Pressure",
+         "length": 201000
+        }
+       ],
+       "track-count": 11,
+       "track-offset": 5
+      }
+     ]
+    },
+    {
+     "id": "b46d885d-3deb-4757-b762-23dff4e4a7c9",
+     "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+     "artist-credit-id": "edbf1ee2-3861-3d95-b971-8f243cbc7e54",
+     "count": 1,
+     "title": "Live USA, Vol. 2",
+     "status": "Bootleg",
+     "disambiguation": "with barcode on right side",
+     "artist-credit": [
+      {
+       "name": "Queen",
+       "artist": {
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "name": "Queen",
+        "sort-name": "Queen",
+        "disambiguation": "UK rock group"
+       }
+      }
+     ],
+     "release-group": {
+      "id": "96fc6e93-f459-48b0-9b0a-4f26355fb5c8",
+      "type-id": "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0",
+      "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+      "title": "Live USA, Vol. 2",
+      "primary-type": "Album",
+      "secondary-types": [
+       "Live"
+      ],
+      "secondary-type-ids": [
+       "6fd474e2-6b58-3102-9d17-d6f7eb7da0a0"
+      ]
+     },
+     "date": "1991",
+     "country": "DE",
+     "release-events": [
+      {
+       "date": "1991",
+       "area": {
+        "id": "85752fda-13c4-31a3-bee5-0e5cb1f51dad",
+        "name": "Germany",
+        "sort-name": "Germany",
+        "iso-3166-1-codes": [
+         "DE"
+        ]
+       }
+      }
+     ],
+     "track-count": 11,
+     "media": [
+      {
+       "id": "5785559c-0c01-32ee-9280-88183caadcb5",
+       "position": 1,
+       "format": "CD",
+       "track": [
+        {
+         "id": "735da4c7-712b-44b8-b7b2-f020375aa40c",
+         "number": "6",
+         "title": "Under Pressure",
+         "length": 201000
+        }
+       ],
+       "track-count": 11,
+       "track-offset": 5
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

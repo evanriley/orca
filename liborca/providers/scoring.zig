@@ -68,7 +68,7 @@ fn addTextEvidence(
     weighted_score.* += weight * try textSimilarity(allocator, text, actual);
 }
 
-fn textSimilarity(allocator: std.mem.Allocator, first: []const u8, second: []const u8) !f64 {
+pub fn textSimilarity(allocator: std.mem.Allocator, first: []const u8, second: []const u8) !f64 {
     if (std.ascii.eqlIgnoreCase(first, second)) return 1;
     const longer = @max(first.len, second.len);
     if (longer == 0) return 1;

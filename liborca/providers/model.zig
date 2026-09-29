@@ -18,8 +18,10 @@ pub const Candidate = struct {
     title: []u8,
     artist: []u8,
     album: []u8,
+    release_mbid: ?[]u8 = null,
     duration_ms: ?u64 = null,
     track_number: ?u32 = null,
+    mb_score: ?u8 = null,
     fingerprint_similarity: ?f32 = null,
 
     pub fn init(
@@ -54,6 +56,7 @@ pub const Candidate = struct {
         self.allocator.free(self.title);
         self.allocator.free(self.artist);
         self.allocator.free(self.album);
+        if (self.release_mbid) |value| self.allocator.free(value);
     }
 };
 

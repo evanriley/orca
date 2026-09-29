@@ -22,7 +22,12 @@ fn describe(err: anyerror) []const u8 {
         error.LibraryJobRunning => "a job is running on this library",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL must be https, or http to localhost",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL and ORCA_MUSICBRAINZ_URL must be https, or http to localhost",
+        error.MatchingStopped => "matching stopped early: MusicBrainz could not be reached or kept refusing requests; run match again to continue",
+        error.UnknownIdentificationProposal => "no match with that id",
+        error.StaleIdentificationProposal => "that match was already accepted or dismissed",
+        error.InvalidProposalPayload => "that match cannot be read; dismiss it",
+        error.InvalidMinimumConfidence => "--min-score must be above 0 and at most 1",
         else => @errorName(err),
     };
 }
@@ -317,6 +322,35 @@ fn run(init: std.process.Init) !void {
         try setFeedback(allocator, init.io, stdout, args[2], args[3], args[4]);
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "scrobble")) {
         try scrobble(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
+    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "match")) {
+        try matchLibrary(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "matches")) {
+        try listMatches(allocator, init.io, stdout, args[2], args[3]);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "accept-match")) {
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
+        const proposal_id = try std.fmt.parseInt(i64, args[3], 10);
+        const acceptance = try runtime.libraryAcceptMatch(library, proposal_id);
+        try stdout.print("accepted match {d}: {s}\n", .{
+            proposal_id,
+            if (acceptance.values_written == 0) "the file's locked recording id was kept" else "recording id stored",
+        });
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "dismiss-match")) {
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
+        const proposal_id = try std.fmt.parseInt(i64, args[3], 10);
+        try runtime.libraryDismissMatch(library, proposal_id);
+        try stdout.print("dismissed match {d}\n", .{proposal_id});
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "accept-matches")) {
+        if (!std.mem.startsWith(u8, args[3], "--min-score=")) return error.UnknownOption;
+        const minimum = try std.fmt.parseFloat(f32, args[3]["--min-score=".len..]);
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
+        const accepted = try runtime.libraryAcceptConfidentMatches(library, minimum);
+        try stdout.print("accepted {d} matches\n", .{accepted});
     } else {
         try stdout.writeAll(
             \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
@@ -329,6 +363,10 @@ fn run(init: std.process.Init) !void {
             \\                 | play-tracks DATABASE IDS [OPTIONS]
             \\                 | scrobble DATABASE [--status] [--timeout=MS]
             \\                 | feedback DATABASE IDS (--love | --hate | --clear)
+            \\                 | match DATABASE [--batch=N] [--limit=N] [--cancel-after=MS]
+            \\                 | matches DATABASE TRACK_ID
+            \\                 | accept-match DATABASE ID | dismiss-match DATABASE ID
+            \\                 | accept-matches DATABASE --min-score=SCORE
             \\                 | artists DATABASE [OPTIONS]
             \\                 | releases DATABASE [--artist ID] [OPTIONS]
             \\                 | tracks DATABASE [OPTIONS]
@@ -406,6 +444,19 @@ fn run(init: std.process.Init) !void {
             \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
             \\many Tracks changed and how many were skipped. It is kept in the Library;
             \\scrobble sends it for recordings with a MusicBrainz ID.
+            \\
+            \\match searches MusicBrainz for every Track whose file has no MusicBrainz
+            \\recording ID and no match waiting, one request a second, and keeps what
+            \\it finds as matches to review. Answers are cached for 30 days, so a rerun
+            \\makes no request for a Track already searched. --limit=N searches at most
+            \\N Tracks; ORCA_MUSICBRAINZ_URL selects another server (https, or http to
+            \\localhost only). matches lists a Track's matches, most confident first:
+            \\id, confidence (0 to 1), MusicBrainz's score, recording ID, title,
+            \\artist, album, track, length and release ID. accept-match records one
+            \\match's recording ID for the Track's file, in the Library only, and
+            \\dismisses the file's other matches; dismiss-match drops one.
+            \\accept-matches accepts, for every file with exactly one match at least as
+            \\confident as --min-score, that match.
             \\
             \\analyze-library decodes every file the Library has not measured yet and
             \\stores its loudness, peak, clipping, silence and fingerprint. That
@@ -992,6 +1043,9 @@ fn showTrack(
     try stdout.print("feedback sync: {s}\n", .{
         if (details.feedback_syncable) "yes" else "no (no MusicBrainz recording ID)",
     });
+    if (details.musicbrainz_recording_id) |recording_id| {
+        try printDetail(stdout, "recording id", "{s} ({s})", .{ recording_id, @tagName(details.musicbrainz_recording_id_source.?) });
+    } else try printDetail(stdout, "recording id", "{s}", .{"-"});
     try printDetail(stdout, "plays", "{d}", .{details.play_count});
     try writeDetailKey(stdout, "last played");
     if (details.last_played_at) |seconds| {
@@ -1207,6 +1261,75 @@ fn setFeedback(
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const change = try runtime.librarySetFeedback(library, ids.items, feedback);
     try stdout.print("feedback: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
+}
+
+fn matchLibrary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: *std.process.Environ.Map,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    option_arguments: []const []const u8,
+) !void {
+    var request: liborca.MatchRequest = .{};
+    var cancel_after_ms: ?u64 = null;
+    for (option_arguments) |argument| {
+        if (std.mem.startsWith(u8, argument, "--batch=")) {
+            request.batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--limit=")) {
+            request.limit = try std.fmt.parseInt(u32, argument["--limit=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
+            cancel_after_ms = try std.fmt.parseInt(u64, argument["--cancel-after=".len..], 10);
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
+        if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
+    }
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const job_handle = try runtime.startLibraryMatching(library, request);
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} tracks to match\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    awaitJob(&runtime, stdout, job_handle, cancel_after_ms) catch |err| {
+        try printMatchStats(stdout, try runtime.jobMatchStats(job_handle));
+        try stdout.flush();
+        return if (err == error.JobFailed) error.MatchingStopped else err;
+    };
+    try printMatchStats(stdout, try runtime.jobMatchStats(job_handle));
+}
+
+fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
+    try stdout.print(
+        "examined={d} matched={d} unmatched={d} no_title_or_artist={d} refused={d} matches={d}\n",
+        .{ stats.tracks_examined, stats.matched, stats.unmatched, stats.insufficient_evidence, stats.refused, stats.proposals_stored },
+    );
+    try stdout.print("requests={d} cached={d}\n", .{ stats.requests, stats.cache_hits });
+}
+
+fn listMatches(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    database_path_argument: []const u8,
+    id_argument: []const u8,
+) !void {
+    const track_id = try std.fmt.parseInt(i64, id_argument, 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const page = try runtime.libraryMatchProposals(library, track_id, 512);
+    defer page.deinit();
+    for (page.items) |proposal| {
+        try stdout.print("{d}\t{d:.2}\t", .{ proposal.id, proposal.confidence });
+        if (proposal.musicbrainz_score) |score| try stdout.print("{d}", .{score}) else try stdout.writeAll("-");
+        try stdout.print("\t{s}\t{s}\t{s}\t{s}\t", .{ proposal.recording_mbid, proposal.title, proposal.artist, proposal.album });
+        if (proposal.track_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
+        try stdout.writeAll("\t");
+        try writeDuration(stdout, if (proposal.duration_ms) |milliseconds| std.math.cast(i64, milliseconds) else null);
+        try stdout.print("\t{s}\n", .{proposal.release_mbid orelse "-"});
+    }
 }
 
 fn writeDetailKey(stdout: *std.Io.Writer, comptime key: []const u8) !void {

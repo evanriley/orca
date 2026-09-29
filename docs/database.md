@@ -308,8 +308,10 @@ a change that was never sent deletes it at once. A change the service refused
 for good sets `synced_score` to what was refused and records the reason in
 `last_error`, so it is not sent again until the user changes it.
 
-The MusicBrainz recording id comes from `observed_file_tags` of any file of
-the Recording, preferring a file some Track plays, so it is found after the
+The MusicBrainz recording id is the one in effect for any file of the
+Recording, preferring a file some Track plays: a locked Orca value, else the
+file's tag, else an accepted match (see
+[metadata.md](metadata.md#musicbrainz-recording-ids)). It is found after the
 files are rescanned or retagged. Removing a root forgets its files but not
 its recordings' feedback rows; rescanning the same folder creates new
 recordings, so feedback given before the removal no longer shows on the
@@ -324,6 +326,22 @@ row, and the same statement selects `TrackSummary.recording_id` so a host can
 tell which rows share a song. `FeedbackRepository.set` changes a bounded batch of Tracks
 (`max_page`) in one write-lane transaction and skips, and counts, Tracks
 without a Recording.
+
+## Identification proposals
+
+`identification_proposals` holds what a provider proposed for a file, keyed on
+`files.id`: the provider, its id for the candidate (a MusicBrainz recording
+id), Orca's confidence from 0 to 1, and a JSON payload of what the provider
+said. `state` is 0 pending, 1 accepted, 2 dismissed; storing the same
+candidate again updates its confidence and payload and keeps its state, so a
+dismissed proposal stays dismissed. Every payload field has a default, so
+payloads written before a field existed still parse.
+
+`repository.unidentified_tracks` is the one definition of which Tracks the
+matching job still has to search: those whose playing file has no recording
+id in effect and no pending proposal. The job's page and its count both use
+it, and every lookup in it is by key: the three recording-id lookups by
+primary key, the proposal check through `identification_proposals_file`.
 
 ## Concurrency
 

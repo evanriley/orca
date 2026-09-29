@@ -48,6 +48,7 @@ pub const TrackPage = database.TrackPage;
 pub const TrackSummary = database.TrackSummary;
 pub const TrackDetails = runtime.TrackDetails;
 pub const TrackLoudness = runtime.TrackLoudness;
+pub const RecordingIdSource = runtime.RecordingIdSource;
 pub const ArtistQuery = database.ArtistQuery;
 pub const ArtistPage = database.ArtistPage;
 pub const ArtistSummary = database.ArtistSummary;
@@ -110,6 +111,13 @@ pub const CredentialStore = runtime.CredentialStore;
 pub const ScrobblerStatus = runtime.ScrobblerStatus;
 pub const ScrobblerState = runtime.ScrobblerState;
 pub const BoundedText = runtime.BoundedText;
+
+// MusicBrainz matching: proposals found by a job, reviewed by a person.
+pub const MatchRequest = runtime.MatchRequest;
+pub const MatchStats = runtime.MatchStats;
+pub const MatchProposal = runtime.MatchProposal;
+pub const MatchProposalPage = runtime.MatchProposalPage;
+pub const MatchAcceptance = runtime.MatchAcceptance;
 /// The service and account under which a `CredentialStore` holds the user's
 /// ListenBrainz token.
 pub const listenbrainz_token_service = internal.providers.listenbrainz.token_service;

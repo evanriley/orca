@@ -31,11 +31,58 @@ survives rescans; a cleared value lets the tags apply again. The edited files
 are reprojected before the call returns, which moves a Track to another Release
 or Artist when the edit says so. Editable fields are title, artist, album,
 album artist, track number, disc number, date and compilation, the fields the
-projection groups and orders by; `metadata.Field` appends new ones, because
+projection groups and orders by, and the MusicBrainz recording ID, which must
+be a lowercase UUID; `metadata.Field` appends new ones, because
 `orca_metadata_values.field` stores them by number. `orca-cli edit` drives it.
 
 Writing those values back into the files is a separate, explicit mutation; see
 below.
+
+## MusicBrainz recording IDs
+
+A file's MusicBrainz recording ID is what its listens and its recording's love
+and hate are sent to ListenBrainz under. Orca can hold one of its own in
+`orca_metadata_values` (`metadata.Field.musicbrainz_recording_id`), beside the
+one the file's tag carries. The ID in effect is:
+
+1. a locked Orca value, which is a user's own edit;
+2. else the file's tag, when it is not empty;
+3. else an unlocked Orca value, which is an accepted match.
+
+`repository.effectiveRecordingMbid` states that order once in SQL, and the
+listen subject and the three feedback queries all use it.
+`TrackRepository.recordingMbid` applies `metadata.resolveValue` under
+`prefer_file` to the same values, which is the same order, for
+`TrackDetails.musicbrainz_recording_id` and its source: `tag`, `match` or
+`edit`. `orca-cli track` prints both. A file that gains a tag on a rescan
+therefore uses the tag at once, and matching no longer searches for it.
+
+The projection does not read the field, so accepting a match reprojects
+nothing. Tag writes leave it out: no writer stores a recording ID yet.
+
+### Accepting a match
+
+A match is an `identification_proposals` row from the matching job described
+in [providers.md](providers.md#musicbrainz-matching).
+`IdentificationProposalRepository.acceptProposal` does all of this in one
+transaction:
+
+1. Reads the proposal. One that no longer exists is refused with
+   `error.UnknownIdentificationProposal`, and one that is not pending with
+   `error.StaleIdentificationProposal`.
+2. Parses its payload and checks its recording ID. Either failing is
+   `error.InvalidProposalPayload`, and nothing is written.
+3. Stores the recording ID as an unlocked `provider` value for the file,
+   unless the file holds a locked value, which is kept. `values_written`
+   reports which.
+4. Marks the proposal accepted and dismisses the file's other pending
+   proposals.
+
+Only the recording ID is stored. The candidate's title, artist and album are
+there for a person to review and change nothing. No media file is written.
+`acceptConfident` accepts, for every file where exactly one pending proposal
+reaches the given confidence, that proposal, in commits of at most 512, and
+passes over a proposal it cannot read.
 
 ## Cover art
 
