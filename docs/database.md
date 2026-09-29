@@ -224,7 +224,16 @@ unknown newer schema version.
 `mutation_operations` keeps its paths: the subject of a filesystem operation
 genuinely is a path. It also carries `file_id` and the full journaled
 `FileIdentity` (size, modification time and quick hash), so recovery compares
-the same identity an in-process check does.
+the same identity an in-process check does. `backup_path` is NULL once pruning
+has deleted the backup; `prunableBackups` and `clearBackupPath` select and
+record that. See [metadata.md](metadata.md#pruning-backups).
+
+Migration 18 forgets the files a scan made of tag-write stages and backups that
+earlier versions kept beside the music. A file goes only when every one of its
+locations is a journaled `stage_path`, `backup_path` or
+`stage_path || '.recovery-displaced'`; its Tracks go with it, then the Releases
+and Artists left without Tracks, and journal rows that named it keep their paths
+with `file_id` set to NULL, as `remove-root` leaves them.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables

@@ -135,6 +135,7 @@ zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers v
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
+zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]

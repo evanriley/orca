@@ -36,6 +36,9 @@ fn describe(err: anyerror) []const u8 {
         error.StaleIdentificationProposal => "that match was already accepted or dismissed",
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
         error.InvalidMinimumConfidence => "--min-score must be above 0 and at most 1",
+        error.TagWriteBackupPruned => "the backups for this write were pruned, so it cannot be undone",
+        error.TagTargetUnavailable => "a file an interrupted tag write changed is in a folder that is not there; mount it and try again",
+        error.NoBackupDirectory => "this library has no database file, so a tag write has nowhere to keep the originals",
         else => @errorName(err),
     };
 }
@@ -270,6 +273,20 @@ fn run(init: std.process.Init) !void {
         const group = try std.fmt.parseInt(u64, args[3], 10);
         try runtime.undoTagWrite(library, init.io, group);
         try stdout.print("undid group {d}\n", .{group});
+    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "prune-backups")) {
+        const older_than_days = if (args.len == 4) days: {
+            if (!std.mem.startsWith(u8, args[3], "--older-than=")) return error.UnknownOption;
+            break :days try std.fmt.parseInt(u64, args[3]["--older-than=".len..], 10);
+        } else 0;
+        var runtime = liborca.Runtime.init(allocator);
+        defer runtime.deinit();
+        const library = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
+        const pruned = try runtime.pruneTagWriteBackups(
+            library,
+            init.io,
+            try std.math.mul(u64, older_than_days, std.time.s_per_day),
+        );
+        try stdout.print("pruned {d} backups ({d} bytes)\n", .{ pruned.backups, pruned.bytes });
     } else if (args.len >= 3 and std.mem.eql(u8, args[1], "covers")) {
         try loadCovers(allocator, init.io, stdout, args[2], args[3..]);
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "track")) {
@@ -390,7 +407,8 @@ fn run(init: std.process.Init) !void {
             \\                 | covers DATABASE [--limit N] [--offset N]
             \\                 | edit DATABASE IDS [EDITS]
             \\                 | write-tags DATABASE IDS [--approve=DIGEST]
-            \\                 | undo-tags DATABASE GROUP]
+            \\                 | undo-tags DATABASE GROUP
+            \\                 | prune-backups DATABASE [--older-than=DAYS]]
             \\
             \\roots lists the registered folders. remove-root forgets one and every
             \\file, Track, Release and Artist that exists only under it; a file also
@@ -409,6 +427,12 @@ fn run(init: std.process.Init) !void {
             \\again with --approve=DIGEST to write exactly that plan. A digest from a
             \\plan that no longer matches the library is refused. It prints the group
             \\to pass to undo-tags, which restores the files' previous bytes.
+            \\
+            \\Each write keeps the files' previous bytes in DATABASE.orca-backups until
+            \\they are undone or pruned. prune-backups deletes the backups of every
+            \\write whose files all committed, or with --older-than=DAYS only of writes
+            \\at least that old, and prints how many it deleted and their size. A
+            \\pruned write cannot be undone.
             \\
             \\Browsing. artists lists Artists in sort order; releases lists Releases,
             \\optionally one Artist's; tracks lists Tracks in a named order, optionally

@@ -11,17 +11,22 @@ pub const FaultPoint = enum {
     after_journal_prepare,
     after_stage,
     after_stage_journaled,
-    after_backup_rename,
+    after_backup_copy,
     after_source_rename,
     after_move_rename,
     before_journal_commit,
-    rollback_after_displace,
+    rollback_after_restore_copy,
     rollback_after_restore,
 };
 
 pub const Fault = struct {
     point: FaultPoint,
     action_index: u32 = 0,
+};
+
+pub const PruneSummary = struct {
+    backups: u64 = 0,
+    bytes: u64 = 0,
 };
 
 const CompletedAction = struct {
@@ -49,13 +54,18 @@ pub const Executor = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     journal: *database.MutationJournalRepository,
+    /// Where tag writes keep each original, as
+    /// `<backup_directory>/<plan>/<action>-<name>`. Null for a Library that has
+    /// no database file, which cannot write tags.
+    backup_directory: ?[]const u8 = null,
     /// Test-only interruption request; see `FaultPoint`.
     fault: ?Fault = null,
     /// Set once an injected fault has fired, so no compensation runs.
     crashed: bool = false,
 
-    /// Execute every tag action as one logical group. Each path is staged
-    /// before replacement and each original remains as a journaled backup.
+    /// Execute every action as one logical group. A tag write builds a hidden
+    /// stage beside the file, keeps a verified copy of the original in the
+    /// backup directory, and only then renames the stage onto the file.
     ///
     /// Every action in the group is journaled in `planned` state before any
     /// filesystem work begins. That is what makes the group discoverable after
@@ -63,11 +73,19 @@ pub const Executor = struct {
     /// find the group and unwind the ones that did.
     pub fn executePlan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
+        var writes_tags = false;
         for (plan.actions) |action| switch (action) {
-            .write_tags => |write| _ = try tagFormat(self.io, write.path) orelse
-                return error.UnsupportedTagWriter,
+            .write_tags => |write| {
+                writes_tags = true;
+                _ = try tagFormat(self.io, write.path) orelse return error.UnsupportedTagWriter;
+            },
             .move => {},
         };
+        const plan_backup_directory: ?[]u8 = if (writes_tags) try self.planBackupDirectory(plan.id) else null;
+        defer if (plan_backup_directory) |path| self.allocator.free(path);
+        if (plan_backup_directory) |path| {
+            if (try pathExists(self.io, path)) return error.TagWriteBackupExists;
+        }
         var prepared: std.ArrayList(PreparedAction) = .empty;
         defer {
             for (prepared.items) |item| item.deinit(self.allocator);
@@ -100,16 +118,12 @@ pub const Executor = struct {
 
         for (plan.actions, 0..) |action, action_index| switch (action) {
             .write_tags => |write| {
-                const stage_path = try std.fmt.allocPrint(
-                    self.allocator,
-                    "{s}.orca-stage-{d}-{d}",
-                    .{ write.path, plan.id, action_index },
-                );
+                const stage_path = try siblingPath(self.allocator, write.path, "stage", plan.id, action_index);
                 errdefer self.allocator.free(stage_path);
                 const backup_path = try std.fmt.allocPrint(
                     self.allocator,
-                    "{s}.orca-backup-{d}-{d}",
-                    .{ write.path, plan.id, action_index },
+                    "{s}/{d}-{s}",
+                    .{ plan_backup_directory.?, action_index, std.Io.Dir.path.basename(write.path) },
                 );
                 errdefer self.allocator.free(backup_path);
                 const operation = try self.journal.prepare(.{
@@ -187,8 +201,7 @@ pub const Executor = struct {
                 try self.interrupt(.after_stage_journaled, action_index);
                 const commit_interrupt = self.commitInterrupt(action_index);
                 if (commit_interrupt != null) self.crashed = true;
-                file_mutation.commitReplacementInterrupted(
-                    self.io,
+                self.commitWrite(
                     write.path,
                     stage_path,
                     backup_path,
@@ -254,6 +267,31 @@ pub const Executor = struct {
         try plan.finish(true);
     }
 
+    fn planBackupDirectory(self: *const Executor, plan_id: u64) ![]u8 {
+        const backup_directory = self.backup_directory orelse return error.NoBackupDirectory;
+        return std.fmt.allocPrint(self.allocator, "{s}/{d}", .{ backup_directory, plan_id });
+    }
+
+    fn commitWrite(
+        self: *Executor,
+        source_path: []const u8,
+        stage_path: []const u8,
+        backup_path: []const u8,
+        expected: mutation.FileIdentity,
+        commit_interrupt: ?file_mutation.Interrupt,
+    ) !void {
+        try file_mutation.createDirectoryDurably(self.io, self.backup_directory.?);
+        try file_mutation.createDirectoryDurably(self.io, std.Io.Dir.path.dirname(backup_path).?);
+        try file_mutation.commitReplacementInterrupted(
+            self.io,
+            source_path,
+            stage_path,
+            backup_path,
+            expected,
+            commit_interrupt,
+        );
+    }
+
     fn faultMatches(self: *const Executor, point: FaultPoint, action_index: usize) bool {
         const fault = self.fault orelse return false;
         return fault.point == point and fault.action_index == action_index;
@@ -267,16 +305,16 @@ pub const Executor = struct {
     }
 
     fn commitInterrupt(self: *const Executor, action_index: usize) ?file_mutation.Interrupt {
-        if (self.faultMatches(.after_backup_rename, action_index)) return .after_backup_rename;
+        if (self.faultMatches(.after_backup_copy, action_index)) return .after_backup_copy;
         if (self.faultMatches(.after_source_rename, action_index)) return .after_source_rename;
         return null;
     }
 
     fn rollbackInterrupt(self: *const Executor, action_index: u32) ?file_mutation.Interrupt {
-        if (self.faultMatches(.rollback_after_displace, action_index))
-            return .after_rollback_displace;
+        if (self.faultMatches(.rollback_after_restore_copy, action_index))
+            return .after_restore_copy;
         if (self.faultMatches(.rollback_after_restore, action_index))
-            return .after_rollback_restore;
+            return .after_restore_rename;
         return null;
     }
 
@@ -300,11 +338,14 @@ pub const Executor = struct {
         return false;
     }
 
-    /// Undo refuses to replace a file that changed after the journaled commit.
+    /// Undo refuses to replace a file that changed after the journaled commit,
+    /// and refuses to start without the verified original to restore.
     pub fn undoOperation(self: *Executor, operation_id: i64) !void {
         var operation = try self.journal.get(self.allocator, operation_id);
         defer operation.deinit();
         if (operation.state != .committed) return error.MutationOperationNotCommitted;
+        if (operation.kind == .write_tags and operation.backup_path == null)
+            return error.TagWriteBackupPruned;
         const expected = try resultIdentity(operation);
         const current_path = switch (operation.kind) {
             .write_tags => operation.source_path,
@@ -312,20 +353,20 @@ pub const Executor = struct {
         };
         const current = try file_mutation.identity(self.io, current_path);
         if (!expected.eql(current)) {
-            try self.journal.transition(
-                operation_id,
-                .committed,
-                .needs_reconciliation,
-                "undo target changed externally",
-            );
+            try self.reconcile(operation_id, .committed, "undo target changed externally");
+            return error.MutationNeedsReconciliation;
+        }
+        if (operation.kind == .write_tags and !try backupHoldsOriginal(self.io, operation)) {
+            try self.reconcile(operation_id, .committed, "tag write backup is missing or damaged");
             return error.MutationNeedsReconciliation;
         }
         try self.rollbackOperation(operation_id, null);
     }
 
-    /// Undo a logical group only after every current after-state has been
-    /// validated. Operations then reverse in action order so write-then-move
-    /// plans restore the path before restoring the original tagged bytes.
+    /// Undo a logical group only after every current after-state and every
+    /// backup has been validated. Operations then reverse in action order so
+    /// write-then-move plans restore the path before restoring the original
+    /// tagged bytes.
     pub fn undoGroup(self: *Executor, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
         const ids = try self.journal.groupOperationIds(self.allocator, group_id);
@@ -341,9 +382,13 @@ pub const Executor = struct {
             try self.journal.get(self.allocator, id),
         );
 
-        for (operations.items, 0..) |operation, index| {
+        for (operations.items) |operation| {
             if (operation.state != .committed)
                 return error.MutationGroupNotCommitted;
+            if (operation.kind == .write_tags and operation.backup_path == null)
+                return error.TagWriteBackupPruned;
+        }
+        for (operations.items, 0..) |operation, index| {
             var current_path = switch (operation.kind) {
                 .write_tags => operation.source_path,
                 .move => operation.destination_path orelse
@@ -370,8 +415,31 @@ pub const Executor = struct {
                 try self.reconcile(operation.id, operation.state, "group undo destination exists");
                 return error.MutationNeedsReconciliation;
             }
+            if (operation.kind == .write_tags and !try backupHoldsOriginal(self.io, operation)) {
+                try self.reconcile(operation.id, operation.state, "tag write backup is missing or damaged");
+                return error.MutationNeedsReconciliation;
+            }
         }
         for (ids) |id| try self.rollbackOperation(id, null);
+    }
+
+    /// Delete the backups of tag-write groups whose every operation committed
+    /// at least `older_than_s` seconds ago. A pruned group can no longer be
+    /// undone. The file is deleted before its journal path is cleared, so an
+    /// interrupted prune finishes on the next run.
+    pub fn pruneBackups(self: *Executor, older_than_s: u64) !PruneSummary {
+        var summary: PruneSummary = .{};
+        while (true) {
+            const page = try self.journal.prunableBackups(self.allocator, older_than_s);
+            defer page.deinit();
+            if (page.items.len == 0) return summary;
+            for (page.items) |backup| {
+                summary.bytes += try deleteCountingBytes(self.io, backup.backup_path);
+                try self.journal.clearBackupPath(backup.operation_id);
+                try self.removeEmptyBackupDirectories(backup.backup_path);
+                summary.backups += 1;
+            }
+        }
     }
 
     /// Resolve a nonterminal journal entry after interruption. Recovery always
@@ -453,84 +521,73 @@ pub const Executor = struct {
         return self.finishRecoveryState(operation.id, operation.state);
     }
 
+    /// Decided by identity alone, so a record written with the backup beside
+    /// the music converges the same way as one with it in the backup directory.
     fn recoverWriteTags(self: *Executor, operation: database.MutationOperation) !void {
         const stage_path = operation.stage_path orelse return error.MissingMutationStagePath;
         const backup_path = operation.backup_path orelse return error.MissingMutationBackupPath;
+        const original = expectedIdentity(operation) catch null;
         const staged = resultIdentity(operation) catch null;
-        // A recovery that was itself interrupted can leave this behind, so it is
-        // cleaned up on every pass and not only on the pass that creates it.
-        const displaced_path = try std.fmt.allocPrint(
+        const restore_path = try siblingPath(
+            self.allocator,
+            operation.source_path,
+            "restore",
+            operation.plan_id,
+            operation.action_index,
+        );
+        defer self.allocator.free(restore_path);
+        const legacy_displaced_path = try std.fmt.allocPrint(
             self.allocator,
             "{s}.recovery-displaced",
             .{stage_path},
         );
-        defer self.allocator.free(displaced_path);
-        const has_backup = try pathExists(self.io, backup_path);
-        // Neither a completed stage nor a backup exists, so no Orca replacement
-        // can be in effect. Remove a torn stage and stop: claiming anything
-        // about the source itself would be a claim about somebody else's edit.
-        if (staged == null and !has_backup) {
-            try deleteIfPresent(self.io, stage_path);
-            try deleteIfPresent(self.io, displaced_path);
+        defer self.allocator.free(legacy_displaced_path);
+        const temporaries = [_][]const u8{ stage_path, restore_path, legacy_displaced_path };
+        const current = try identityIfPresent(self.io, operation.source_path);
+
+        if (current != null and original != null and current.?.eql(original.?)) {
+            for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
+            try self.discardBackup(backup_path);
             return self.finishRecoveryState(operation.id, operation.state);
         }
-        if (has_backup) {
-            if (try pathExists(self.io, operation.source_path)) {
-                const current = try file_mutation.identity(self.io, operation.source_path);
-                const is_replacement = staged != null and staged.?.eql(current);
-                const is_original = if (expectedIdentity(operation)) |expected|
-                    expected.eql(current)
-                else |_|
-                    false;
-                if (!is_replacement and !is_original) {
-                    try self.reconcile(
-                        operation.id,
-                        operation.state,
-                        "tag target changed externally",
-                    );
-                    return error.MutationNeedsReconciliation;
-                }
-            }
-            try file_mutation.rollbackReplacement(
-                self.io,
-                operation.source_path,
-                backup_path,
-                displaced_path,
-            );
+        // Nothing was ever staged, so no Orca write can be in effect: removing
+        // a torn stage is the whole recovery, and claiming anything about the
+        // source would be a claim about somebody else's edit.
+        const replacement = staged orelse {
+            for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
+            return self.finishRecoveryState(operation.id, operation.state);
+        };
+        const in_place = current orelse {
+            // A missing folder is most likely an unmounted drive: a terminal
+            // state now would stop recovery for good once it is back.
+            if (!try directoryExists(self.io, std.Io.Dir.path.dirname(operation.source_path) orelse "."))
+                return error.TagTargetUnavailable;
+            try self.reconcile(operation.id, operation.state, "the tag target is missing");
+            return error.MutationNeedsReconciliation;
+        };
+        if (!in_place.eql(replacement)) {
+            try self.reconcile(operation.id, operation.state, "tag target changed externally");
+            return error.MutationNeedsReconciliation;
         }
-        try deleteIfPresent(self.io, stage_path);
-        try deleteIfPresent(self.io, displaced_path);
-
-        if (!try pathExists(self.io, operation.source_path)) {
+        if (!try backupHoldsOriginal(self.io, operation)) {
             try self.reconcile(
                 operation.id,
                 operation.state,
-                "the original source is missing and no backup could restore it",
+                "the staged replacement is in place and its backup is missing or damaged",
             );
             return error.MutationNeedsReconciliation;
         }
-        const current = try file_mutation.identity(self.io, operation.source_path);
-        if (expectedIdentity(operation)) |expected| {
-            if (expected.eql(current))
-                return self.finishRecoveryState(operation.id, operation.state);
-        } else |_| {}
-        // Nothing was ever staged, so no Orca write can be in effect regardless
-        // of what else changed this file.
-        if (staged == null) return self.finishRecoveryState(operation.id, operation.state);
-        if (staged.?.eql(current)) {
-            try self.reconcile(
-                operation.id,
-                operation.state,
-                "the staged replacement is in place and its backup is gone",
-            );
-            return error.MutationNeedsReconciliation;
-        }
-        try self.reconcile(
-            operation.id,
-            operation.state,
-            "source does not match the journaled original identity",
+        try file_mutation.restoreFromBackup(
+            self.io,
+            operation.source_path,
+            backup_path,
+            restore_path,
+            original.?,
+            replacement,
         );
-        return error.MutationNeedsReconciliation;
+        for (temporaries) |path| try file_mutation.deleteIfPresent(self.io, path);
+        try self.discardBackup(backup_path);
+        return self.finishRecoveryState(operation.id, operation.state);
     }
 
     fn finishRecoveryState(
@@ -594,17 +651,43 @@ pub const Executor = struct {
             try self.journal.transition(operation_id, operation.state, .rolled_back, null);
             return;
         }
-        const stage_path = operation.stage_path orelse return error.MissingMutationStagePath;
-        const backup_path = operation.backup_path orelse return error.MissingMutationBackupPath;
+        const backup_path = operation.backup_path orelse return error.TagWriteBackupPruned;
+        const restore_path = try siblingPath(
+            self.allocator,
+            operation.source_path,
+            "restore",
+            operation.plan_id,
+            operation.action_index,
+        );
+        defer self.allocator.free(restore_path);
         if (rollback_interrupt != null) self.crashed = true;
-        try file_mutation.rollbackReplacementInterrupted(
+        try file_mutation.restoreFromBackupInterrupted(
             self.io,
             operation.source_path,
             backup_path,
-            stage_path,
+            restore_path,
+            try expectedIdentity(operation),
+            try resultIdentity(operation),
             rollback_interrupt,
         );
         try self.journal.transition(operation_id, operation.state, .rolled_back, null);
+        try self.discardBackup(backup_path);
+    }
+
+    fn discardBackup(self: *Executor, backup_path: []const u8) !void {
+        try file_mutation.deleteIfPresent(self.io, backup_path);
+        try self.removeEmptyBackupDirectories(backup_path);
+    }
+
+    /// Only directories inside `backup_directory` are removed: a backup from
+    /// before it existed sits beside the music, whose folder is not Orca's.
+    fn removeEmptyBackupDirectories(self: *Executor, backup_path: []const u8) !void {
+        const backup_directory = self.backup_directory orelse return;
+        const plan_directory = std.Io.Dir.path.dirname(backup_path) orelse return;
+        const parent = std.Io.Dir.path.dirname(plan_directory) orelse return;
+        if (!std.mem.eql(u8, parent, backup_directory)) return;
+        try deleteDirectoryIfEmpty(self.io, plan_directory);
+        try deleteDirectoryIfEmpty(self.io, backup_directory);
     }
 };
 
@@ -631,6 +714,40 @@ fn expectedIdentity(operation: database.MutationOperation) !mutation.FileIdentit
     };
 }
 
+fn backupHoldsOriginal(io: std.Io, operation: database.MutationOperation) !bool {
+    const backup_path = operation.backup_path orelse return false;
+    const original = expectedIdentity(operation) catch return false;
+    const backup = try identityIfPresent(io, backup_path) orelse return false;
+    return backup.eql(original);
+}
+
+fn siblingPath(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    purpose: []const u8,
+    plan_id: u64,
+    action_index: usize,
+) ![]u8 {
+    const name = std.Io.Dir.path.basename(source_path);
+    return std.fmt.allocPrint(allocator, "{s}.{s}.orca-{s}-{d}-{d}", .{
+        source_path[0 .. source_path.len - name.len],
+        name,
+        purpose,
+        plan_id,
+        action_index,
+    });
+}
+
+/// Whether a file name is one of the temporaries or backups a tag write puts
+/// beside the music, in this layout or the one before it, which a scan must
+/// never ingest as music.
+pub fn isOrcaTemporaryName(name: []const u8) bool {
+    if (std.mem.indexOf(u8, name, ".orca-stage-") != null) return true;
+    if (std.mem.indexOf(u8, name, ".orca-backup-") != null) return true;
+    if (std.mem.endsWith(u8, name, ".recovery-displaced")) return true;
+    return std.mem.startsWith(u8, name, ".") and std.mem.indexOf(u8, name, ".orca-restore-") != null;
+}
+
 /// Whether Orca can write tags into the file at `path`.
 pub fn canWriteTags(io: std.Io, path: []const u8) !bool {
     return try tagFormat(io, path) != null;
@@ -652,12 +769,39 @@ fn tagFormat(io: std.Io, path: []const u8) !?TagFormat {
     };
 }
 
-fn deleteIfPresent(io: std.Io, path: []const u8) !void {
-    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
-        error.FileNotFound => return,
+fn deleteCountingBytes(io: std.Io, path: []const u8) !u64 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return 0,
         else => return err,
     };
-    try file_mutation.syncContainingDirectory(io, path);
+    const stat = file.stat(io);
+    file.close(io);
+    const size = (try stat).size;
+    try file_mutation.deleteIfPresent(io, path);
+    return size;
+}
+
+fn deleteDirectoryIfEmpty(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().deleteDir(io, path) catch |err| switch (err) {
+        error.DirNotEmpty, error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn identityIfPresent(io: std.Io, path: []const u8) !?mutation.FileIdentity {
+    return file_mutation.identity(io, path) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
+    };
+}
+
+fn directoryExists(io: std.Io, path: []const u8) !bool {
+    var directory = std.Io.Dir.cwd().openDir(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    directory.close(io);
+    return true;
 }
 
 fn pathExists(io: std.Io, path: []const u8) !bool {
@@ -715,6 +859,7 @@ test "approved plan commits through journal and undo detects external edits" {
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
     };
     try std.testing.expectError(error.MutationPlanNotApproved, executor.executePlan(&plan, 8));
     defer plan.deinit();
@@ -830,6 +975,7 @@ test "recovery restores original after replacement before journal commit" {
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
     };
     try executor.recoverOperation(operation);
     try expectTitle(source, "Before crash");
@@ -973,6 +1119,7 @@ test "approved move supports undo and rejects an externally edited destination" 
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
     };
 
     const expected = try file_mutation.identity(std.testing.io, source);
@@ -1081,6 +1228,7 @@ test "move recovery restores a rename interrupted before journal commit" {
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
     };
     try executor.recoverOperation(operation);
     try std.testing.expect(try pathExists(std.testing.io, source));
@@ -1163,9 +1311,265 @@ test "failed move rolls back an earlier tag write in the same group" {
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
     };
     try std.testing.expectError(error.DestinationExists, executor.executePlan(&plan, 103));
     try std.testing.expectEqual(mutation.State.failed, plan.state);
     try std.testing.expectEqual(database.MutationState.rolled_back, try library.mutation_journal.state(1));
     try expectTitle(source, "Before group");
+}
+
+const WriteFixture = struct {
+    music: std.testing.TmpDir,
+    data: std.testing.TmpDir,
+    source: []u8,
+    library: @import("../database/library.zig").LibraryDatabase,
+    original: mutation.FileIdentity,
+
+    fn init(database_name: ?[:0]const u8) !WriteFixture {
+        const id3v1 = @import("id3v1.zig");
+        const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
+        const allocator = std.testing.allocator;
+        var music = std.testing.tmpDir(.{ .iterate = true });
+        errdefer music.cleanup();
+        var data = std.testing.tmpDir(.{});
+        errdefer data.cleanup();
+        try music.dir.writeFile(std.testing.io, .{
+            .sub_path = "source.mp3",
+            .data = "\xff\xfb\x90\x64generated payload" ++ try id3v1.encode(.{
+                .title = "Before write",
+                .artist = "Generated",
+                .album = "Generated",
+                .year = "2026",
+                .comment = "Generated",
+                .track_number = 1,
+                .genre = 13,
+            }),
+        });
+        const source = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/source.mp3", .{music.sub_path});
+        errdefer allocator.free(source);
+        const database_path = if (database_name) |name|
+            try allocator.dupeSentinel(u8, name, 0)
+        else
+            try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/library.db", .{data.sub_path}, 0);
+        defer allocator.free(database_path);
+        const original = try file_mutation.identity(std.testing.io, source);
+        return .{
+            .music = music,
+            .data = data,
+            .source = source,
+            .library = try LibraryDatabase.open(allocator, std.testing.io, database_path),
+            .original = original,
+        };
+    }
+
+    fn deinit(self: *WriteFixture) void {
+        self.library.close();
+        std.testing.allocator.free(self.source);
+        self.data.cleanup();
+        self.music.cleanup();
+    }
+
+    fn newExecutor(self: *WriteFixture) Executor {
+        return .{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .journal = &self.library.mutation_journal,
+            .backup_directory = self.library.backup_directory,
+        };
+    }
+
+    fn write(self: *WriteFixture, plan_id: u64) !void {
+        const actions = [_]mutation.Action{.{ .write_tags = .{
+            .path = self.source,
+            .expected = self.original,
+            .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        } }};
+        var plan = try mutation.Plan.init(std.testing.allocator, plan_id, &actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var executor = self.newExecutor();
+        try executor.executePlan(&plan, plan_id);
+    }
+
+    fn backupPath(self: *WriteFixture, plan_id: u64) ![]u8 {
+        return std.fmt.allocPrint(std.testing.allocator, "{s}/{d}/0-source.mp3", .{ self.library.backup_directory.?, plan_id });
+    }
+
+    fn current(self: *WriteFixture) !mutation.FileIdentity {
+        return file_mutation.identity(std.testing.io, self.source);
+    }
+
+    fn expectMusicFolderUntouched(self: *WriteFixture) !void {
+        var iterator = self.music.dir.iterate();
+        var count: usize = 0;
+        while (try iterator.next(std.testing.io)) |entry| {
+            count += 1;
+            try std.testing.expectEqualStrings("source.mp3", entry.name);
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+};
+
+test "a tag write keeps the original in the backup directory and nothing beside the file" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+
+    try expectTitle(fixture.source, "After write");
+    try fixture.expectMusicFolderUntouched();
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    try std.testing.expect(std.Io.Dir.path.isAbsolute(backup));
+    try std.testing.expect(fixture.original.eql(try file_mutation.identity(std.testing.io, backup)));
+    var operation = try fixture.library.mutation_journal.get(std.testing.allocator, 1);
+    defer operation.deinit();
+    try std.testing.expectEqualStrings(backup, operation.backup_path.?);
+}
+
+test "undo restores the original identity and removes the emptied backup directory" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    var executor = fixture.newExecutor();
+    try executor.undoGroup(7);
+
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+}
+
+test "undo refuses a pruned write and changes nothing" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    const written = try fixture.current();
+    var executor = fixture.newExecutor();
+
+    const pruned = try executor.pruneBackups(0);
+    try std.testing.expectEqual(@as(u64, 1), pruned.backups);
+    try std.testing.expectEqual(fixture.original.size_bytes, pruned.bytes);
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(0)).backups);
+
+    try std.testing.expectError(error.TagWriteBackupPruned, executor.undoGroup(7));
+    try std.testing.expect(written.eql(try fixture.current()));
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
+}
+
+test "undo reconciles a write whose backup is missing, changes nothing, and is never pruned" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    const written = try fixture.current();
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, backup);
+    var executor = fixture.newExecutor();
+
+    try std.testing.expectError(error.MutationNeedsReconciliation, executor.undoGroup(7));
+    try std.testing.expect(written.eql(try fixture.current()));
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try fixture.library.mutation_journal.state(1),
+    );
+    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(0)).backups);
+    var operation = try fixture.library.mutation_journal.get(std.testing.allocator, 1);
+    defer operation.deinit();
+    try std.testing.expect(operation.backup_path != null);
+}
+
+test "pruning keeps the backups of writes younger than the cutoff" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    var executor = fixture.newExecutor();
+
+    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(3600)).backups);
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    try std.testing.expect(try pathExists(std.testing.io, backup));
+}
+
+test "a Library with no database file refuses a tag write before touching the file" {
+    var fixture = try WriteFixture.init("file:orca-executor-no-backups?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try std.testing.expect(fixture.library.backup_directory == null);
+
+    try std.testing.expectError(error.NoBackupDirectory, fixture.write(7));
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expectEqual(@as(u64, 1), try fixture.library.mutation_journal.nextGroupId());
+}
+
+test "a tag write refuses a plan whose backup directory already exists" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    const plan_directory = try std.fmt.allocPrint(std.testing.allocator, "{s}/7", .{fixture.library.backup_directory.?});
+    defer std.testing.allocator.free(plan_directory);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, plan_directory);
+
+    try std.testing.expectError(error.TagWriteBackupExists, fixture.write(7));
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expectEqual(@as(u64, 1), try fixture.library.mutation_journal.nextGroupId());
+}
+
+fn commitLegacyWrite(fixture: *WriteFixture, plan_id: u64) ![]u8 {
+    const allocator = std.testing.allocator;
+    const stage = try std.fmt.allocPrint(allocator, "{s}.orca-stage-{d}-0", .{ fixture.source, plan_id });
+    defer allocator.free(stage);
+    const backup = try std.fmt.allocPrint(allocator, "{s}.orca-backup-{d}-0", .{ fixture.source, plan_id });
+    errdefer allocator.free(backup);
+    const journal = &fixture.library.mutation_journal;
+    const operation = try journal.prepare(.{
+        .plan_id = plan_id,
+        .group_id = plan_id,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = fixture.source,
+        .stage_path = stage,
+        .backup_path = backup,
+        .expected_size = fixture.original.size_bytes,
+        .expected_modified_ns = fixture.original.modified_ns,
+        .expected_quick_hash = fixture.original.quick_hash,
+    });
+    try file_mutation.stageMpeg(allocator, std.testing.io, fixture.source, stage, fixture.original, &.{
+        .{ .field = .title, .before = "Before write", .after = "After write" },
+    });
+    const staged = try file_mutation.identity(std.testing.io, stage);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.transition(operation, .planned, .staged, null);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(fixture.source, cwd, backup, std.testing.io);
+    try cwd.rename(stage, cwd, fixture.source, std.testing.io);
+    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    return backup;
+}
+
+test "undo restores a write whose backup sits beside the music and deletes that backup" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    const backup = try commitLegacyWrite(&fixture, 5);
+    defer std.testing.allocator.free(backup);
+    var executor = fixture.newExecutor();
+
+    try executor.undoGroup(5);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expect(!try pathExists(std.testing.io, backup));
+    try fixture.expectMusicFolderUntouched();
+}
+
+test "pruning deletes a backup beside the music from before the backup directory" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    const backup = try commitLegacyWrite(&fixture, 5);
+    defer std.testing.allocator.free(backup);
+    var executor = fixture.newExecutor();
+
+    const pruned = try executor.pruneBackups(0);
+    try std.testing.expectEqual(@as(u64, 1), pruned.backups);
+    try std.testing.expectEqual(fixture.original.size_bytes, pruned.bytes);
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expectError(error.TagWriteBackupPruned, executor.undoGroup(5));
 }

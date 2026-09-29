@@ -179,22 +179,97 @@ modification time under the current schema, so recovery compares
 
 Every action of a group is journaled before any filesystem work begins, and
 journal writes raise SQLite durability for their own transaction, so a group is
-always discoverable after a crash. Tag writes create and fsync a complete
-same-filesystem stage, fsync the containing directory, and revalidate the source
-identity immediately before the rename; both rename boundaries fsync the
-directories they change, so the namespace can never lag the committed journal.
-The exact original is retained as a journaled backup. Moves reject collisions and
-use the same operation journal.
+always discoverable after a crash. Moves reject collisions and use the same
+operation journal.
 
-Logical groups undo in reverse action order. `LibraryDatabase.open` runs journal
-recovery before the Library is returned to the caller — after the journal table
-exists and before any later migration rewrites what a nonterminal operation
-refers to — and refuses to open at all if recovery cannot reach a terminal state.
-Recovery converges planned, staged, failed and interrupted-rollback operations
-toward the original state. `rolled_back` is only recorded when the original file
-is provably back in place or when nothing was ever staged; otherwise, and
-whenever the target has changed externally, Orca retains every file, records
-`needs_reconciliation`, and refuses to claim that rollback succeeded.
+### Tag-write files
+
+A tag write to `Album/01.flac` in plan 7, action 0, uses three files. Only the
+backup outlives the write, and it lives outside the music folders:
+
+| File | Path | Exists |
+| --- | --- | --- |
+| Stage | `Album/.01.flac.orca-stage-7-0` | until the write commits |
+| Backup | `<database>.orca-backups/7/0-01.flac` | until undone or pruned |
+| Restore | `Album/.01.flac.orca-restore-7-0` | during an undo |
+
+`<database>` is the absolute path of the Library's database file, so the
+journaled backup path does not depend on the working directory. A Library with
+no database file, such as an in-memory one, has no backup directory:
+`Runtime.startTagWrite` returns `error.NoBackupDirectory` and the executor
+refuses before touching any file.
+
+A write runs in three steps, and at every point either the original is in place
+or a durable, verified copy of it exists:
+
+1. Build the complete replacement at the stage, and fsync it and its directory.
+2. Copy the original into the backup directory with its modification time, fsync
+   the copy and every directory created for it, and verify that the copy's
+   identity is the original's.
+3. Revalidate the file's identity, rename the stage onto it, and fsync the
+   directory.
+
+The backup is a copy rather than a rename, so it may sit on another disk:
+backups use space on the database's disk until they are undone or pruned. A
+disk that fills during the copy fails the write at step 2 with the file
+untouched.
+
+### Undo
+
+Logical groups undo in reverse action order. Before any file changes,
+`undoGroup` checks every operation of the group:
+
+- A write whose backup was pruned returns `error.TagWriteBackupPruned`.
+- A file that changed since the write, or a backup that is missing or no longer
+  has the original's identity, records `needs_reconciliation` and returns
+  `error.MutationNeedsReconciliation`.
+
+Each file is then restored: its backup is copied to the restore file with the
+original's modification time, fsynced and verified, the file is revalidated
+against the write's result, and the restore file is renamed onto it. The
+operation becomes `rolled_back`, then the backup is deleted, and the plan
+directory and the backup directory are removed once empty. An undo needs free
+space for one file on the music disk; if the copy fails, the file is untouched
+and the operation stays `committed`.
+
+### Recovery
+
+`LibraryDatabase.open` runs journal recovery before the Library is returned to
+the caller — after the journal table exists and before any later migration
+rewrites what a nonterminal operation refers to — and refuses to open at all if
+recovery cannot reach a terminal state. Recovery of a tag write is decided by
+identity alone:
+
+| Found | Action | Result |
+| --- | --- | --- |
+| File is the original | delete stage, restore file and backup | `rolled_back` |
+| Nothing was staged | delete a torn stage | `rolled_back` |
+| File is the result, backup is the original | restore as an undo does | `rolled_back` |
+| File is the result, backup missing or damaged | keep every file | `needs_reconciliation` |
+| File's folder missing, as on an unmounted drive | keep every file | refuses to open; retried at the next open |
+| File missing or matching neither | keep every file | `needs_reconciliation` |
+
+Journal records from before the backup directory existed name a stage and a
+backup beside the music (`Album/01.flac.orca-stage-7-0`,
+`Album/01.flac.orca-backup-7-0`), and may leave
+`<stage>.recovery-displaced`. Recovery, undo and pruning follow the journaled
+paths, so they handle those records too, and recovery deletes a leftover
+`.recovery-displaced` file. Orca removes directories only inside the backup
+directory, never a music folder.
+
+### Pruning backups
+
+`Runtime.pruneTagWriteBackups(library, io, older_than_s)` deletes the backups
+of every group whose operations are all `committed` and were last updated at
+least `older_than_s` seconds ago; zero prunes every committed group. It returns
+a `PruneSummary` with the number of backups pruned and their bytes. Each backup
+file is deleted before its journal path is cleared, so a prune that is
+interrupted finishes on the next run. A pruned write cannot be undone. Groups
+awaiting reconciliation keep their backups, and nothing prunes automatically.
+
+```sh
+orca-cli prune-backups DATABASE [--older-than=DAYS]
+```
 
 ## Writing tags back
 
@@ -231,5 +306,6 @@ Writers keep what they do not understand:
 
 From the command line, `orca-cli write-tags DATABASE IDS` prints the plan and
 its digest, `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
-writes it if the digest still matches, and `orca-cli undo-tags DATABASE GROUP`
-undoes it.
+writes it if the digest still matches, `orca-cli undo-tags DATABASE GROUP`
+undoes it, and `orca-cli prune-backups DATABASE` deletes the backups that make
+undo possible; see [Pruning backups](#pruning-backups).

@@ -16,9 +16,8 @@ not compile for aarch64 targets, Apple Silicon included, and macOS has no
 audio output yet.
 
 The next milestone is correctness and maintenance, not features: the
-signal-path report, tag-write backups, provider state that is lost on restart,
-parser hardening and the size of `runtime.zig` come before filesystem
-watching.
+signal-path report, provider state that is lost on restart, parser hardening
+and the size of `runtime.zig` come before filesystem watching.
 
 ## Works today
 
@@ -118,9 +117,10 @@ watching.
 
 ### Clients
 
-- `orca-cli`: scan, browse, search, library edits, tag write-back and undo,
-  analysis, duplicates, artwork, queue playback, `feedback`, `scrobble`,
-  MusicBrainz and AcoustID matching, fingerprints and AcoustID submission.
+- `orca-cli`: scan, browse, search, library edits, tag write-back, undo and
+  backup pruning, analysis, duplicates, artwork, queue playback, `feedback`,
+  `scrobble`, MusicBrainz and AcoustID matching, fingerprints and AcoustID
+  submission.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
   menus, tag editing with write-back and undo, Preferences, a Health page, a
@@ -156,11 +156,6 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **Tag-write backups out of the scan path.** The staged copy and the
-     retained original sit beside the music, so the next scan ingests the
-     backup as a second Track with the old tags, and after an undo its rows
-     stay as `missing`. Keep stage and backup files where the scanner never
-     looks, prune backups, and drop ghost rows.
    - **A truthful signal-path report.** Widening a source of 24 bits or fewer
      to 32-bit float is exact and must not make a path "not bit-perfect"; a
      lossy source, a 32-bit integer or 64-bit float source, and any gain that
@@ -172,7 +167,7 @@ In priority order. Each step leaves `orca-gtk` usable every day.
      `SQLITE_TRANSIENT` as a misaligned function pointer, which aarch64
      rejects. A CI workflow runs `zig build test`, `zig fmt --check` and a
      cross-build of `liborca` for `aarch64-macos`.
-   - **Release `v0.2.0`** once the three items above land: the first tag,
+   - **Release `v0.2.0`** once the two items above land: the first tag,
      following [Releases](#releases). `build.zig` and `flake.nix` read the
      version from `build.zig.zon`, so it is written in one place, and the
      `-alpha` suffix is dropped: a `0.x` version already makes no stability

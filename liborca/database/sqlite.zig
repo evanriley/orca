@@ -60,6 +60,12 @@ pub const Database = struct {
         return .{ .handle = raw.? };
     }
 
+    pub fn filename(self: Database) ?[]const u8 {
+        const name = c.sqlite3_db_filename(self.handle, "main") orelse return null;
+        const path = std.mem.span(name);
+        return if (path.len == 0) null else path;
+    }
+
     pub fn lastError(self: Database) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }

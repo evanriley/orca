@@ -1,6 +1,7 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
+const mutation_executor = @import("../metadata/executor.zig");
 const storage = @import("../storage/root.zig");
 const projection = @import("projection.zig");
 const tag_reader = @import("tag_reader.zig");
@@ -123,6 +124,7 @@ pub const Scanner = struct {
                 break;
             };
             if (entry.kind != .file) continue;
+            if (mutation_executor.isOrcaTemporaryName(entry.basename)) continue;
             result.files_seen += 1;
             if (self.progress) |counter| counter.store(result.files_seen, .release);
 
@@ -490,6 +492,52 @@ test "a scan projects only the batches it changed and reprojects nothing on a re
     try std.testing.expectEqual(@as(u64, 0), second.projection.folders_visited);
     try std.testing.expectEqual(@as(u64, 0), second.projection.tracks_written);
     try std.testing.expectEqual(@as(u64, 2), try library.tracks.count());
+}
+
+test "a scan never ingests the temporaries and backups a tag write leaves beside the music" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    for ([_][]const u8{
+        "one.flac",
+        ".one.flac.orca-stage-7-0",
+        ".one.flac.orca-restore-7-0",
+        "one.flac.orca-stage-3-0",
+        "one.flac.orca-backup-3-0",
+        "one.flac.orca-stage-3-0.recovery-displaced",
+    }) |name| try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = name,
+        .data = "fLaCgenerated one",
+    });
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = ".hidden.flac",
+        .data = "fLaCgenerated hidden",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-temporaries?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+    defer scanner.deinit();
+
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 2), result.files_seen);
+    try std.testing.expectEqual(@as(u64, 2), try library.files.count());
 }
 
 test "cancelled scans stop before filesystem work" {

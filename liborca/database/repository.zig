@@ -510,6 +510,8 @@ pub const MutationOperationInput = struct {
 pub const MutationOperation = struct {
     allocator: std.mem.Allocator,
     id: i64,
+    plan_id: u64,
+    action_index: u32,
     kind: MutationKind,
     file_id: ?i64,
     source_path: []u8,
@@ -529,6 +531,21 @@ pub const MutationOperation = struct {
         if (self.destination_path) |value| self.allocator.free(value);
         if (self.stage_path) |value| self.allocator.free(value);
         if (self.backup_path) |value| self.allocator.free(value);
+    }
+};
+
+pub const PrunableBackup = struct {
+    operation_id: i64,
+    backup_path: []u8,
+};
+
+pub const PrunableBackupPage = struct {
+    allocator: std.mem.Allocator,
+    items: []PrunableBackup,
+
+    pub fn deinit(self: PrunableBackupPage) void {
+        for (self.items) |item| self.allocator.free(item.backup_path);
+        self.allocator.free(self.items);
     }
 };
 
@@ -3729,7 +3746,8 @@ pub const MutationJournalRepository = struct {
             \\SELECT kind, source_path, destination_path, stage_path, backup_path,
             \\       expected_size, expected_modified_ns,
             \\       committed_size, committed_modified_ns, state,
-            \\       file_id, expected_quick_hash, committed_quick_hash
+            \\       file_id, expected_quick_hash, committed_quick_hash,
+            \\       plan_id, action_index
             \\FROM mutation_operations WHERE id=?1;
         );
         defer statement.deinit();
@@ -3750,6 +3768,8 @@ pub const MutationJournalRepository = struct {
         return .{
             .allocator = allocator,
             .id = operation_id,
+            .plan_id = @intCast(statement.columnInt64(13)),
+            .action_index = @intCast(statement.columnInt64(14)),
             .kind = kind,
             .file_id = optionalInt64(statement, 10),
             .source_path = source_path,
@@ -3815,6 +3835,60 @@ pub const MutationJournalRepository = struct {
         while (try statement.step() == .row)
             try ids.append(allocator, statement.columnInt64(0));
         return ids.toOwnedSlice(allocator);
+    }
+
+    /// Backups of groups whose every operation is committed and was last
+    /// updated at least `older_than_s` seconds ago, at most one page of them.
+    pub fn prunableBackups(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+        older_than_s: u64,
+    ) !PrunableBackupPage {
+        var statement = try self.db.prepare(
+            \\SELECT operation.id, operation.backup_path FROM mutation_operations AS operation
+            \\WHERE operation.backup_path IS NOT NULL AND operation.state = ?1
+            \\  AND NOT EXISTS (
+            \\      SELECT 1 FROM mutation_operations AS member
+            \\      WHERE member.group_id = operation.group_id
+            \\        AND (member.state <> ?1 OR member.updated_at > unixepoch() - ?2))
+            \\ORDER BY operation.id LIMIT ?3;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intFromEnum(MutationState.committed));
+        try statement.bindInt64(2, std.math.cast(i64, older_than_s) orelse std.math.maxInt(i64));
+        try statement.bindInt64(3, max_page);
+        var items: std.ArrayList(PrunableBackup) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.backup_path);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const backup_path = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(backup_path);
+            try items.append(allocator, .{
+                .operation_id = statement.columnInt64(0),
+                .backup_path = backup_path,
+            });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// Records that a committed operation's backup is gone. `updated_at` is
+    /// left alone, because it is the age the rest of its group is pruned by.
+    pub fn clearBackupPath(self: *MutationJournalRepository, operation_id: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations SET backup_path = NULL
+            \\WHERE id = ?1 AND state = ?2 AND backup_path IS NOT NULL;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, operation_id);
+        try statement.bindInt64(2, @intFromEnum(MutationState.committed));
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
 };
 

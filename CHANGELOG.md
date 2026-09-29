@@ -2,6 +2,40 @@
 
 ## Unreleased - 0.2.0-alpha
 
+### Tag-write backups out of the music folders
+
+- **A tag write leaves nothing beside the music.** The original is copied,
+  with its modification time, fsynced and verified, into
+  `<database>.orca-backups/<plan>/<action>-<name>` before the replacement is
+  renamed into place. The stage is a hidden file beside the music
+  (`.<name>.orca-stage-<plan>-<action>`) that exists only during the write, and
+  an undo copies the backup to a hidden `.orca-restore-` file and renames it
+  over the file. A rescan after a write used to list each backup as a second
+  Track with the old tags, and after an undo as a `missing` one.
+- **Scans skip Orca's temporaries**: hidden `.orca-stage-` and
+  `.orca-restore-` files, and the `.orca-backup-`, `.orca-stage-` and
+  `.recovery-displaced` names of earlier versions.
+- **Schema version 18 forgets the ghost rows.** Files whose every location is
+  a journaled stage or backup path go, with their Tracks and the Releases and
+  Artists left without Tracks.
+- **Backups can be pruned.** `Runtime.pruneTagWriteBackups` (new type
+  `PruneSummary`) and `orca-cli prune-backups DATABASE [--older-than=DAYS]`
+  delete the backups of fully committed writes, including backups earlier
+  versions left beside the music, and print how many and their size. A pruned
+  write cannot be undone: `undoTagWrite` returns `error.TagWriteBackupPruned`
+  and changes nothing.
+- **Undo checks every backup first.** A backup that is missing or no longer
+  holds the original records `needs_reconciliation` before any file changes.
+  Recovery restores from a verified backup, keeps every file when the backup is
+  gone, and handles journals of both layouts. When a changed file's folder is
+  missing, as on an unmounted drive, the Library refuses to open with
+  `error.TagTargetUnavailable` and recovery runs again at the next open.
+- **An in-memory Library cannot write tags.** `startTagWrite` returns
+  `error.NoBackupDirectory`, because it has nowhere to keep the originals.
+  (Breaking for hosts that wrote tags through an in-memory Library.)
+- `orca-cli` and `orca-gtk` explain a pruned write and a missing backup
+  directory instead of printing the error name.
+
 ### AcoustID
 
 - **Matching fingerprints files and asks AcoustID.** A matching job

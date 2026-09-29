@@ -13,10 +13,10 @@ const max_flac_metadata_block_size = (1 << 24) - 1;
 /// callers pass null; recovery tests drive the same code path and stop it at a
 /// real boundary rather than simulating one.
 pub const Interrupt = enum {
-    after_backup_rename,
+    after_backup_copy,
     after_source_rename,
-    after_rollback_displace,
-    after_rollback_restore,
+    after_restore_copy,
+    after_restore_rename,
 };
 
 pub const InterruptError = error{SimulatedPowerLoss};
@@ -50,8 +50,8 @@ pub fn syncContainingDirectory(io: std.Io, path: []const u8) !void {
     try directory.sync(io);
 }
 
-/// Sync every distinct directory named by `paths`. Tag replacement usually
-/// keeps stage, backup and source in one directory, so this is one fsync.
+/// Sync every distinct directory named by `paths`. A replacement keeps its
+/// stage or restore file beside the source, so this is usually one fsync.
 fn syncContainingDirectories(io: std.Io, paths: []const []const u8) !void {
     for (paths, 0..) |path, index| {
         const directory_path = std.Io.Dir.path.dirname(path) orelse ".";
@@ -180,12 +180,12 @@ pub fn stageMpeg(
     try syncContainingDirectory(io, stage_path);
 }
 
-/// Replace the source while retaining its exact previous bytes at `backup_path`.
+/// Copy the source to `backup_path`, then rename the stage onto the source.
 ///
-/// The source identity is revalidated immediately before the first rename: an
-/// external edit between staging and commit must not be replaced silently. Both
-/// rename boundaries fsync the containing directories so a power loss cannot
-/// leave the namespace behind the committed SQLite journal.
+/// The backup is fsynced and verified to be `expected` before the source is
+/// touched, and the source is revalidated immediately before the rename, so at
+/// every point either the original is in place or a durable verified copy of it
+/// exists.
 pub fn commitReplacement(
     io: std.Io,
     source_path: []const u8,
@@ -204,24 +204,10 @@ pub fn commitReplacementInterrupted(
     expected: mutation.FileIdentity,
     interrupt: ?Interrupt,
 ) !void {
-    const cwd = std.Io.Dir.cwd();
-    {
-        const source = try cwd.openFile(io, source_path, .{});
-        defer source.close(io);
-        const stat = try source.stat(io);
-        try requireIdentity(io, source, stat, expected);
-    }
-    try cwd.rename(source_path, cwd, backup_path, io);
-    try syncContainingDirectories(io, &.{ source_path, backup_path });
-    if (interrupt == .after_backup_rename) return error.SimulatedPowerLoss;
-    {
-        errdefer {
-            cwd.rename(backup_path, cwd, source_path, io) catch {};
-            syncContainingDirectories(io, &.{ source_path, backup_path }) catch {};
-        }
-        try cwd.rename(stage_path, cwd, source_path, io);
-    }
-    try syncContainingDirectories(io, &.{ source_path, stage_path });
+    try requireIdentityAt(io, source_path, expected);
+    try copyVerified(io, source_path, backup_path, expected);
+    if (interrupt == .after_backup_copy) return error.SimulatedPowerLoss;
+    try replaceVerified(io, stage_path, source_path, expected);
     if (interrupt == .after_source_rename) return error.SimulatedPowerLoss;
 }
 
@@ -237,46 +223,103 @@ pub fn commitMove(io: std.Io, source_path: []const u8, destination_path: []const
     try syncContainingDirectories(io, &.{ source_path, destination_path });
 }
 
-pub fn rollbackReplacement(
+/// Copy the backup to `restore_path`, verify it is `original`, and rename it
+/// onto the source, which must still be `replacing`. The backup is left in
+/// place.
+pub fn restoreFromBackup(
     io: std.Io,
     source_path: []const u8,
     backup_path: []const u8,
-    displaced_path: []const u8,
+    restore_path: []const u8,
+    original: mutation.FileIdentity,
+    replacing: mutation.FileIdentity,
 ) !void {
-    return rollbackReplacementInterrupted(io, source_path, backup_path, displaced_path, null);
+    return restoreFromBackupInterrupted(io, source_path, backup_path, restore_path, original, replacing, null);
 }
 
-pub fn rollbackReplacementInterrupted(
+pub fn restoreFromBackupInterrupted(
     io: std.Io,
     source_path: []const u8,
     backup_path: []const u8,
-    displaced_path: []const u8,
+    restore_path: []const u8,
+    original: mutation.FileIdentity,
+    replacing: mutation.FileIdentity,
     interrupt: ?Interrupt,
 ) !void {
+    try deleteIfPresent(io, restore_path);
+    try copyVerified(io, backup_path, restore_path, original);
+    if (interrupt == .after_restore_copy) return error.SimulatedPowerLoss;
+    replaceVerified(io, restore_path, source_path, replacing) catch |err| {
+        std.Io.Dir.cwd().deleteFile(io, restore_path) catch {};
+        return err;
+    };
+    if (interrupt == .after_restore_rename) return error.SimulatedPowerLoss;
+}
+
+pub fn copyVerified(
+    io: std.Io,
+    source_path: []const u8,
+    copy_path: []const u8,
+    expected: mutation.FileIdentity,
+) !void {
     const cwd = std.Io.Dir.cwd();
-    // Verify the recovery source before moving the current file out of place.
-    const backup = try cwd.openFile(io, backup_path, .{});
-    backup.close(io);
-    var displaced = true;
-    cwd.rename(source_path, cwd, displaced_path, io) catch |err| switch (err) {
-        error.FileNotFound => displaced = false,
+    const source = try cwd.openFile(io, source_path, .{});
+    defer source.close(io);
+    const stat = try source.stat(io);
+    const copy = try cwd.createFile(io, copy_path, .{
+        .read = true,
+        .exclusive = true,
+        .permissions = stat.permissions,
+    });
+    var copy_open = true;
+    errdefer {
+        if (copy_open) copy.close(io);
+        cwd.deleteFile(io, copy_path) catch {};
+    }
+    try copyRange(source, copy, io, 0, stat.size);
+    try copy.setTimestamps(io, .{
+        .modify_timestamp = .{ .new = .{ .nanoseconds = expected.modified_ns } },
+    });
+    try copy.sync(io);
+    const copied = try identityOfFile(io, copy);
+    copy_open = false;
+    copy.close(io);
+    if (!copied.eql(expected)) return error.CopyIdentityMismatch;
+    try syncContainingDirectory(io, copy_path);
+}
+
+pub fn createDirectoryDurably(io: std.Io, directory_path: []const u8) !void {
+    std.Io.Dir.cwd().createDir(io, directory_path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => return,
         else => return err,
     };
-    if (displaced) try syncContainingDirectories(io, &.{ source_path, displaced_path });
-    if (interrupt == .after_rollback_displace) return error.SimulatedPowerLoss;
-    {
-        errdefer if (displaced) {
-            cwd.rename(displaced_path, cwd, source_path, io) catch {};
-            syncContainingDirectories(io, &.{ source_path, displaced_path }) catch {};
-        };
-        try cwd.rename(backup_path, cwd, source_path, io);
-    }
-    try syncContainingDirectories(io, &.{ source_path, backup_path });
-    if (interrupt == .after_rollback_restore) return error.SimulatedPowerLoss;
-    if (displaced) {
-        try cwd.deleteFile(io, displaced_path);
-        try syncContainingDirectory(io, displaced_path);
-    }
+    try syncContainingDirectory(io, directory_path);
+}
+
+pub fn deleteIfPresent(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    try syncContainingDirectory(io, path);
+}
+
+fn replaceVerified(
+    io: std.Io,
+    replacement_path: []const u8,
+    target_path: []const u8,
+    target_expected: mutation.FileIdentity,
+) !void {
+    try requireIdentityAt(io, target_path, target_expected);
+    const cwd = std.Io.Dir.cwd();
+    try cwd.rename(replacement_path, cwd, target_path, io);
+    try syncContainingDirectories(io, &.{ target_path, replacement_path });
+}
+
+fn requireIdentityAt(io: std.Io, path: []const u8, expected: mutation.FileIdentity) !void {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    try requireIdentity(io, file, try file.stat(io), expected);
 }
 
 fn requireIdentity(
@@ -336,7 +379,7 @@ fn writeMetadataHeader(
     try file.writeStreamingAll(io, &header);
 }
 
-test "ID3v1 replacement stages, commits, and rolls back generated bytes" {
+test "a replacement keeps an identical backup and a restore puts the original back" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const prefix = try std.fmt.allocPrint(
@@ -373,9 +416,92 @@ test "ID3v1 replacement stages, commits, and rolls back generated bytes" {
     try std.testing.expect(expected.eql(try identity(std.testing.io, source_path)));
     try commitReplacement(std.testing.io, source_path, stage_path, backup_path, expected);
     try expectTitle(source_path, "New title");
-    try expectTitle(backup_path, "Old title");
-    try rollbackReplacement(std.testing.io, source_path, backup_path, stage_path);
-    try expectTitle(source_path, "Old title");
+    try std.testing.expect(expected.eql(try identity(std.testing.io, backup_path)));
+    try std.testing.expectError(error.FileNotFound, identity(std.testing.io, stage_path));
+
+    const restore_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/.restore.mp3", .{prefix});
+    defer std.testing.allocator.free(restore_path);
+    const replaced = try identity(std.testing.io, source_path);
+    try restoreFromBackup(std.testing.io, source_path, backup_path, restore_path, expected, replaced);
+    try std.testing.expect(expected.eql(try identity(std.testing.io, source_path)));
+    try std.testing.expectError(error.FileNotFound, identity(std.testing.io, restore_path));
+    try std.testing.expect(expected.eql(try identity(std.testing.io, backup_path)));
+}
+
+test "a restore leaves alone a source that changed after the write" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const prefix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(prefix);
+    const source_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/source.mp3", .{prefix});
+    defer std.testing.allocator.free(source_path);
+    const stage_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/stage.mp3", .{prefix});
+    defer std.testing.allocator.free(stage_path);
+    const backup_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/backup.mp3", .{prefix});
+    defer std.testing.allocator.free(backup_path);
+    const restore_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/.restore.mp3", .{prefix});
+    defer std.testing.allocator.free(restore_path);
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "source.mp3",
+        .data = "\xff\xfb\x90\x64generated audio payload" ++ try id3v1.encode(.{
+            .title = "Old title",
+            .artist = "Generated artist",
+            .album = "Generated album",
+            .year = "2026",
+            .comment = "Generated",
+            .track_number = 1,
+            .genre = 13,
+        }),
+    });
+    const expected = try identity(std.testing.io, source_path);
+    try stageMpeg(std.testing.allocator, std.testing.io, source_path, stage_path, expected, &.{.{
+        .field = .title,
+        .before = "Old title",
+        .after = "New title",
+    }});
+    try commitReplacement(std.testing.io, source_path, stage_path, backup_path, expected);
+    const replaced = try identity(std.testing.io, source_path);
+    try forgeInPlaceEdit(source_path, 0, "GENERATED");
+
+    try std.testing.expectError(error.FileIdentityChanged, restoreFromBackup(
+        std.testing.io,
+        source_path,
+        backup_path,
+        restore_path,
+        expected,
+        replaced,
+    ));
+    try expectTitle(source_path, "New title");
+    try std.testing.expectError(error.FileNotFound, identity(std.testing.io, restore_path));
+    try std.testing.expect(expected.eql(try identity(std.testing.io, backup_path)));
+}
+
+test "a copy that does not come out as the expected identity is deleted" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const prefix = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(prefix);
+    const source_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/source.bin", .{prefix});
+    defer std.testing.allocator.free(source_path);
+    const copy_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/copy.bin", .{prefix});
+    defer std.testing.allocator.free(copy_path);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "source.bin", .data = "generated bytes" });
+    var expected = try identity(std.testing.io, source_path);
+    expected.quick_hash[0] ^= 1;
+
+    try std.testing.expectError(
+        error.CopyIdentityMismatch,
+        copyVerified(std.testing.io, source_path, copy_path, expected),
+    );
+    try std.testing.expectError(error.FileNotFound, identity(std.testing.io, copy_path));
 }
 
 test "FLAC replacement rewrites comments and preserves audio bytes" {

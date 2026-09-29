@@ -80,6 +80,19 @@ scan continues, exactly as an unreadable tag is handled — malformed and
 truncated audio is normal in a real library. A transform codec such as MPEG has
 no sample width to declare, and that stays unknown rather than being invented.
 
+The walk skips the files a tag write puts beside the music, because each is a
+temporary of Orca's and a scan that recorded one would list a second Track with
+the old tags:
+
+- hidden names containing `.orca-stage-` or `.orca-restore-`;
+- names from journals that predate the backup directory: those containing
+  `.orca-backup-` or `.orca-stage-`, or ending in `.recovery-displaced`.
+
+Backups live in `<database>.orca-backups`, beside the database, which the walk
+reaches only if the database itself sits inside a library root. Keep the
+database outside every root. [Tag-write files](metadata.md#tag-write-files)
+covers the layout and the disk space backups and undo need.
+
 Cancellation is checked before filesystem work and between entries. A cancelled
 or interrupted scan is resumable by restarting it: already committed unchanged
 identities are skipped, so no traversal-order checkpoint is required. Filesystem

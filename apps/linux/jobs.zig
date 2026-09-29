@@ -185,7 +185,10 @@ pub fn startSubmission(self: *App) void {
 pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) void {
     const library = self.library orelse return;
     if (!idle(self)) return;
-    const job = self.runtime.startTagWrite(library, plan_id, digest) catch return self.toast("Could not write the tags");
+    const job = self.runtime.startTagWrite(library, plan_id, digest) catch |err| return self.toast(switch (err) {
+        error.NoBackupDirectory => "This library has no database file to keep the originals beside",
+        else => "Could not write the tags",
+    });
     self.tag_write_group = plan_id;
     begin(self, .tag_write, job, "Writing tags");
 }

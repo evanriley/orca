@@ -77,6 +77,7 @@ pub const TagWriteChange = runtime.TagWriteChange;
 pub const TagWriteSkip = runtime.TagWriteSkip;
 pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
 pub const TagWriteDigest = internal.metadata.mutation.Digest;
+pub const PruneSummary = runtime.PruneSummary;
 
 // Playback.
 pub const PlayerStatus = runtime.PlayerStatus;

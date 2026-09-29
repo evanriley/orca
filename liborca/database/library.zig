@@ -41,6 +41,7 @@ pub const FileBinding = struct {
 pub const LibraryDatabase = struct {
     allocator: std.mem.Allocator,
     path: [:0]u8,
+    backup_directory: ?[]u8,
     database: sqlite.Database,
     write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
@@ -83,16 +84,22 @@ pub const LibraryDatabase = struct {
         errdefer allocator.destroy(write_lane);
         write_lane.* = .{ .io = io };
         try database.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+        const backup_directory: ?[]u8 = if (database.filename()) |file|
+            try std.fmt.allocPrint(allocator, "{s}.orca-backups", .{file})
+        else
+            null;
+        errdefer if (backup_directory) |directory| allocator.free(directory);
         try migrations.applyThrough(database, migrations.journal_ready_version);
         var journal: repository.MutationJournalRepository = .{
             .db = database,
             .write_lane = write_lane,
         };
-        _ = try mutation_recovery.recoverPending(allocator, io, &journal);
+        _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory);
         try migrations.apply(database);
         return .{
             .allocator = allocator,
             .path = owned_path,
+            .backup_directory = backup_directory,
             .database = database,
             .write_lane = write_lane,
             .tracks = .{ .db = database, .write_lane = write_lane },
@@ -121,6 +128,7 @@ pub const LibraryDatabase = struct {
     pub fn close(self: *LibraryDatabase) void {
         self.database.close();
         self.allocator.destroy(self.write_lane);
+        if (self.backup_directory) |directory| self.allocator.free(directory);
         self.allocator.free(self.path);
         self.* = undefined;
     }

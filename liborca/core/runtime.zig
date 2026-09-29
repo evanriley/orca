@@ -202,6 +202,9 @@ pub const TagWriteSkipReason = enum {
     changed_since_scan,
 };
 
+/// What `pruneTagWriteBackups` deleted: how many backups, and their bytes.
+pub const PruneSummary = metadata.executor.PruneSummary;
+
 /// Plans held between `planTagWrite` and `startTagWrite`. Few, because a plan
 /// waits on a person.
 const max_pending_tag_writes = 8;
@@ -236,6 +239,16 @@ fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field
         .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
         .musicbrainz_recording_id => tags.musicbrainz_recording_id,
     };
+}
+
+fn backupPlanDirectoryExists(allocator: std.mem.Allocator, io: std.Io, backups: []const u8, plan_id: u64) !bool {
+    const path = try std.fmt.allocPrint(allocator, "{s}/{d}", .{ backups, plan_id });
+    defer allocator.free(path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 /// Why a file cannot be written now, or null when it can.
@@ -995,6 +1008,7 @@ const JobWorker = struct {
             .allocator = self.allocator,
             .io = io,
             .journal = &self.database.mutation_journal,
+            .backup_directory = self.database.backup_directory,
         };
         if (executor.executePlan(&pending.plan, pending.plan.id)) {
             _ = self.stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
@@ -3062,6 +3076,9 @@ pub const OrcaRuntime = struct {
         for (self.pending_tag_writes) |held| if (held) |pending| {
             plan_id = @max(plan_id, pending.plan.id + 1);
         };
+        if (library_database.backup_directory) |backups| {
+            while (try backupPlanDirectoryExists(scratch, io, backups, plan_id)) plan_id += 1;
+        }
 
         const pending = try self.allocator.create(PendingTagWrite);
         errdefer self.allocator.destroy(pending);
@@ -3093,7 +3110,8 @@ pub const OrcaRuntime = struct {
     /// A digest that does not match the plan leaves it pending and unwritten.
     /// The job is not cancellable once started: a journaled group finishes or
     /// rolls back as a whole. The files are re-observed and reprojected when
-    /// it ends.
+    /// it ends. A Library with no database file has nowhere to keep the
+    /// originals and returns `error.NoBackupDirectory`.
     pub fn startTagWrite(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -3104,6 +3122,7 @@ pub const OrcaRuntime = struct {
             const pending = candidate.* orelse continue;
             if (pending.plan.id == plan_id and pending.library.eql(library)) break candidate;
         } else return error.UnknownTagWritePlan;
+        if ((try self.libraryDatabase(library)).backup_directory == null) return error.NoBackupDirectory;
         const pending = slot.*.?;
         try pending.plan.approve(.{ .plan_id = plan_id, .digest = digest });
         const job_handle = try self.startJobWorker(library, .mutation, .{ .tag_write = pending });
@@ -3125,8 +3144,10 @@ pub const OrcaRuntime = struct {
 
     /// Restores the files a tag write changed, on the caller's thread, and
     /// re-observes them. Orca's values are kept, so the library still shows
-    /// the edit. A file changed again since the write is left alone and
-    /// recorded for reconciliation rather than overwritten.
+    /// the edit. A file changed again since the write, or whose backup is
+    /// missing or damaged, is left alone and recorded for reconciliation
+    /// rather than overwritten. A write whose backups were pruned returns
+    /// `error.TagWriteBackupPruned` and changes nothing.
     pub fn undoTagWrite(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, group_id: u64) !void {
         const library_database = try self.libraryDatabase(library);
         for (self.job_workers.items) |worker| {
@@ -3137,6 +3158,7 @@ pub const OrcaRuntime = struct {
             .allocator = self.allocator,
             .io = io,
             .journal = &library_database.mutation_journal,
+            .backup_directory = library_database.backup_directory,
         };
         try executor.undoGroup(group_id);
         const operations = try library_database.mutation_journal.groupOperationIds(self.allocator, group_id);
@@ -3148,6 +3170,21 @@ pub const OrcaRuntime = struct {
             defer self.allocator.free(location.uri);
             try reobserve(self.allocator, io, library_database, location);
         }
+    }
+
+    /// Deletes the originals kept for tag writes whose every file committed
+    /// at least `older_than_s` seconds ago; zero prunes every committed write.
+    /// A pruned write can no longer be undone. Writes awaiting reconciliation
+    /// keep their backups.
+    pub fn pruneTagWriteBackups(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, older_than_s: u64) !PruneSummary {
+        const library_database = try self.libraryDatabase(library);
+        var executor: metadata.executor.Executor = .{
+            .allocator = self.allocator,
+            .io = io,
+            .journal = &library_database.mutation_journal,
+            .backup_directory = library_database.backup_directory,
+        };
+        return executor.pruneBackups(older_than_s);
     }
 
     // ---------------------------------------------------------------- jobs
@@ -5247,12 +5284,38 @@ fn allTrackIds(runtime: *OrcaRuntime, library: LibraryHandle) ![]i64 {
     return ids;
 }
 
+fn tempDatabasePath(data: *std.testing.TmpDir) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/library.db", .{data.sub_path}, 0);
+}
+
+fn rescan(runtime: *OrcaRuntime, library: LibraryHandle) !void {
+    var roots = try runtime.libraryRootPage(library, 1, 0);
+    defer roots.deinit();
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(runtime, try runtime.startLibraryScan(library, .{ .root_id = roots.items[0].id })));
+}
+
+fn expectOnlyFixtureFiles(dir: std.Io.Dir) !void {
+    var iterator = dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| {
+        count += 1;
+        try std.testing.expect(std.mem.eql(u8, entry.name, "a.mp3") or
+            std.mem.eql(u8, entry.name, "b.flac") or
+            std.mem.eql(u8, entry.name, "c.m4a"));
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
 test "an approved tag write rewrites the files, the rescan agrees, and undo restores their bytes" {
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
-    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write?mode=memory&cache=shared");
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
     const original_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(original_mp3);
 
@@ -5287,10 +5350,19 @@ test "an approved tag write rewrites the files, the rescan agrees, and undo rest
     try std.testing.expectEqual(@as(u64, 0), after.plan_id);
 
     const library_database = try runtime.libraryDatabase(library);
+    try expectOnlyFixtureFiles(temporary.dir);
+    try rescan(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 3), try scalarOf(library_database, "SELECT count(*) FROM tracks;"));
+
     try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
     const restored_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(restored_mp3);
     try std.testing.expectEqualSlices(u8, original_mp3, restored_mp3);
+    try expectOnlyFixtureFiles(temporary.dir);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
+    try rescan(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 3), try scalarOf(library_database, "SELECT count(*) FROM files;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalarOf(library_database, "SELECT count(*) FROM locations WHERE state <> 'present';"));
     const stored = (try library_database.observed_tags.get(std.testing.allocator, preview.files[0].file_id)).?;
     defer stored.deinit();
     try std.testing.expect(stored.values.album == null or !std.mem.eql(u8, stored.values.album.?, "Written Album"));
@@ -5299,6 +5371,56 @@ test "an approved tag write rewrites the files, the rescan agrees, and undo rest
     defer again.deinit();
     try std.testing.expectEqual(@as(usize, 2), again.files.len);
     try runtime.discardTagWrite(library, again.plan_id);
+}
+
+test "pruned tag-write backups free their space and leave the write impossible to undo" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Pruned Album" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    const written_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(written_mp3);
+
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.pruneTagWriteBackups(library, std.testing.io, 3600)).backups);
+    const pruned = try runtime.pruneTagWriteBackups(library, std.testing.io, 0);
+    try std.testing.expectEqual(@as(u64, 2), pruned.backups);
+    try std.testing.expect(pruned.bytes > 0);
+    try std.testing.expectError(error.TagWriteBackupPruned, runtime.undoTagWrite(library, std.testing.io, preview.plan_id));
+    const after_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after_mp3);
+    try std.testing.expectEqualSlices(u8, written_mp3, after_mp3);
+}
+
+test "a Library with no database file refuses to start a tag write" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-memory?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Nowhere" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    try std.testing.expect(preview.files.len > 0);
+
+    try std.testing.expectError(error.NoBackupDirectory, runtime.startTagWrite(library, preview.plan_id, preview.digest));
+    try runtime.discardTagWrite(library, preview.plan_id);
 }
 
 test "a file changed since its scan is left out of a tag write" {

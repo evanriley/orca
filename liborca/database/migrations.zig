@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 17;
+pub const current_version = 18;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -872,6 +872,54 @@ const migration_17 =
     \\) WITHOUT ROWID;
 ;
 
+/// Forget the files a scan made of tag-write stages and backups kept beside the
+/// music. Only a file whose every location is a path the journal names as a
+/// stage, backup or recovery leftover goes; a file located anywhere else is
+/// music, whatever else it shares.
+const migration_18 =
+    \\CREATE TEMP TABLE orca_temporaries(uri TEXT PRIMARY KEY);
+    \\INSERT OR IGNORE INTO temp.orca_temporaries(uri)
+    \\    SELECT stage_path FROM mutation_operations WHERE stage_path IS NOT NULL
+    \\    UNION SELECT backup_path FROM mutation_operations WHERE backup_path IS NOT NULL
+    \\    UNION SELECT stage_path || '.recovery-displaced' FROM mutation_operations
+    \\          WHERE stage_path IS NOT NULL;
+    \\CREATE TEMP TABLE ghost_files(id INTEGER PRIMARY KEY);
+    \\INSERT INTO temp.ghost_files(id)
+    \\    SELECT DISTINCT file_id FROM locations AS ghost
+    \\    WHERE NOT EXISTS (
+    \\        SELECT 1 FROM locations AS other
+    \\        WHERE other.file_id = ghost.file_id
+    \\          AND other.uri NOT IN (SELECT uri FROM temp.orca_temporaries));
+    \\CREATE TEMP TABLE ghost_releases(id INTEGER PRIMARY KEY);
+    \\INSERT OR IGNORE INTO temp.ghost_releases(id)
+    \\    SELECT release_id FROM tracks
+    \\    WHERE preferred_file_id IN (SELECT id FROM temp.ghost_files) AND release_id IS NOT NULL;
+    \\CREATE TEMP TABLE ghost_artists(id INTEGER PRIMARY KEY);
+    \\INSERT OR IGNORE INTO temp.ghost_artists(id)
+    \\    SELECT artist_id FROM tracks
+    \\    WHERE preferred_file_id IN (SELECT id FROM temp.ghost_files) AND artist_id IS NOT NULL;
+    \\DELETE FROM tracks WHERE preferred_file_id IN (SELECT id FROM temp.ghost_files);
+    \\INSERT OR IGNORE INTO temp.ghost_artists(id)
+    \\    SELECT album_artist_id FROM releases
+    \\    WHERE id IN (SELECT id FROM temp.ghost_releases) AND album_artist_id IS NOT NULL
+    \\      AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.release_id = releases.id);
+    \\DELETE FROM releases
+    \\    WHERE id IN (SELECT id FROM temp.ghost_releases)
+    \\      AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.release_id = releases.id);
+    \\DELETE FROM artists
+    \\    WHERE id IN (SELECT id FROM temp.ghost_artists)
+    \\      AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id = artists.id)
+    \\      AND NOT EXISTS (SELECT 1 FROM releases WHERE releases.album_artist_id = artists.id);
+    \\UPDATE mutation_operations SET file_id = NULL
+    \\    WHERE file_id IN (SELECT id FROM temp.ghost_files);
+    \\DELETE FROM locations WHERE file_id IN (SELECT id FROM temp.ghost_files);
+    \\DELETE FROM files WHERE id IN (SELECT id FROM temp.ghost_files);
+    \\DROP TABLE temp.ghost_artists;
+    \\DROP TABLE temp.ghost_releases;
+    \\DROP TABLE temp.ghost_files;
+    \\DROP TABLE temp.orca_temporaries;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1013,6 +1061,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 15 and target_version >= 15) try db.exec(migration_15);
     if (version < 16 and target_version >= 16) try db.exec(migration_16);
     if (version < 17 and target_version >= 17) try db.exec(migration_17);
+    if (version < 18 and target_version >= 18) try db.exec(migration_18);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1463,6 +1512,55 @@ test "upgrading from version 16 counts files with MusicBrainz proposals as searc
     try db.exec("DELETE FROM files WHERE id = 2;");
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM acoustid_submissions;"));
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM identification_searches;"));
+    try checkForeignKeys(db);
+}
+
+test "upgrading from version 17 forgets the files scanned from tag-write temporaries and keeps the music" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v17.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 17);
+    try db.exec(
+        \\INSERT INTO artists(id, name, key) VALUES (1, 'Artist', 'artist'), (2, 'Old Artist', 'old artist');
+        \\INSERT INTO releases(id, title, release_key, album_artist_id) VALUES (1, 'New Album', 'new', 1), (2, 'Old Album', 'old', 2);
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10), (3, 1, 10), (4, 1, 10), (5, 1, 10);
+        \\INSERT INTO locations(file_id, volume_id, uri, state) VALUES
+        \\    (1, 1, '/m/a/01.flac', 'present'),
+        \\    (2, 1, '/m/a/01.flac.orca-backup-7-0', 'missing'),
+        \\    (3, 1, '/m/a/01.flac.orca-stage-7-0', 'missing'),
+        \\    (4, 1, '/m/a/01.flac.orca-stage-7-0.recovery-displaced', 'missing'),
+        \\    (5, 1, '/m/a/02.flac.orca-backup-8-0', 'present'),
+        \\    (5, 1, '/m/b/02.flac', 'present');
+        \\INSERT INTO tracks(id, title, release_id, artist_id, track_number, preferred_file_id) VALUES
+        \\    (1, 'Real', 1, 1, 1, 1),
+        \\    (2, 'Ghost', 2, 2, 1, 2),
+        \\    (3, 'Also real', 1, 1, 2, 5);
+        \\INSERT INTO mutation_operations(
+        \\    plan_id, group_id, action_index, kind, source_path, stage_path, backup_path,
+        \\    expected_size, expected_modified_ns, state, file_id
+        \\) VALUES
+        \\    (7, 7, 0, 0, '/m/a/01.flac', '/m/a/01.flac.orca-stage-7-0', '/m/a/01.flac.orca-backup-7-0', 10, 1, 2, 2),
+        \\    (8, 8, 0, 0, '/m/a/02.flac', '/m/a/02.flac.orca-stage-8-0', '/m/a/02.flac.orca-backup-8-0', 10, 1, 2, 5);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM files;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM locations WHERE file_id = 5;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM locations;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM tracks;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT preferred_file_id FROM tracks WHERE title = 'Real';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM releases WHERE id = 2;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM artists WHERE id = 2;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM releases;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM artists;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE file_id IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT file_id FROM mutation_operations WHERE plan_id = 8;"));
     try checkForeignKeys(db);
 }
 

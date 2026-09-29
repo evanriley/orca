@@ -1,5 +1,4 @@
 const std = @import("std");
-const quick_hash = @import("../storage/quick_hash.zig");
 const database = @import("../database/repository.zig");
 const executor_module = @import("executor.zig");
 
@@ -25,6 +24,7 @@ pub fn recoverPending(
     allocator: std.mem.Allocator,
     io: std.Io,
     journal: *database.MutationJournalRepository,
+    backup_directory: ?[]const u8,
 ) !Summary {
     const group_ids = try journal.nonterminalGroupIds(allocator);
     defer allocator.free(group_ids);
@@ -35,6 +35,7 @@ pub fn recoverPending(
         .allocator = allocator,
         .io = io,
         .journal = journal,
+        .backup_directory = backup_directory,
     };
     for (group_ids) |group_id| {
         const operation_ids = try journal.groupOperationIds(allocator, group_id);
@@ -79,9 +80,11 @@ const Harness = struct {
     prefix: []u8,
     source: []u8,
     stage: []u8,
+    restore: []u8,
+    backup_directory: []u8,
     backup: []u8,
-    displaced: []u8,
     database_path: [:0]u8,
+    original: mutation.FileIdentity,
 
     fn init() !Harness {
         var temporary = std.testing.tmpDir(.{});
@@ -97,18 +100,16 @@ const Harness = struct {
         errdefer allocator.free(source);
         const stage = try std.fmt.allocPrint(
             allocator,
-            "{s}.orca-stage-{d}-0",
-            .{ source, test_plan_id },
+            "{s}/.source.mp3.orca-stage-{d}-0",
+            .{ prefix, test_plan_id },
         );
         errdefer allocator.free(stage);
-        const backup = try std.fmt.allocPrint(
+        const restore = try std.fmt.allocPrint(
             allocator,
-            "{s}.orca-backup-{d}-0",
-            .{ source, test_plan_id },
+            "{s}/.source.mp3.orca-restore-{d}-0",
+            .{ prefix, test_plan_id },
         );
-        errdefer allocator.free(backup);
-        const displaced = try std.fmt.allocPrint(allocator, "{s}.recovery-displaced", .{stage});
-        errdefer allocator.free(displaced);
+        errdefer allocator.free(restore);
         const database_path = try std.fmt.allocPrintSentinel(
             allocator,
             "{s}/library.db",
@@ -128,14 +129,28 @@ const Harness = struct {
                 .genre = 13,
             })),
         });
+        const backup_directory = backup_directory: {
+            var library = try LibraryDatabase.open(allocator, std.testing.io, database_path);
+            defer library.close();
+            break :backup_directory try allocator.dupe(u8, library.backup_directory.?);
+        };
+        errdefer allocator.free(backup_directory);
+        const backup = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{d}/0-source.mp3",
+            .{ backup_directory, test_plan_id },
+        );
+        errdefer allocator.free(backup);
         return .{
             .temporary = temporary,
             .prefix = prefix,
             .source = source,
             .stage = stage,
+            .restore = restore,
+            .backup_directory = backup_directory,
             .backup = backup,
-            .displaced = displaced,
             .database_path = database_path,
+            .original = try file_mutation.identity(std.testing.io, source),
         };
     }
 
@@ -144,14 +159,34 @@ const Harness = struct {
         allocator.free(self.prefix);
         allocator.free(self.source);
         allocator.free(self.stage);
+        allocator.free(self.restore);
+        allocator.free(self.backup_directory);
         allocator.free(self.backup);
-        allocator.free(self.displaced);
         allocator.free(self.database_path);
         self.temporary.cleanup();
     }
 
     fn open(self: *Harness) !LibraryDatabase {
         return LibraryDatabase.open(std.testing.allocator, std.testing.io, self.database_path);
+    }
+
+    fn crashWrite(self: *Harness, point: executor_module.FaultPoint) !void {
+        var library = try self.open();
+        defer library.close();
+        const actions = [_]mutation.Action{.{ .write_tags = .{
+            .path = self.source,
+            .expected = self.original,
+            .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+        } }};
+        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var executor = executorFor(&library, .{ .point = point });
+        try std.testing.expectError(
+            error.SimulatedPowerLoss,
+            executor.executePlan(&plan, test_group_id),
+        );
+        try std.testing.expect(executor.crashed);
     }
 
     fn writeFile(self: *Harness, sub_path: []const u8, data: []const u8) !void {
@@ -162,14 +197,29 @@ const Harness = struct {
         return std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ self.prefix, sub_path });
     }
 
+    fn expectOriginal(self: *Harness) !void {
+        try std.testing.expect(self.original.eql(try file_mutation.identity(std.testing.io, self.source)));
+    }
+
     /// Every intermediate file a tag replacement can create must be gone once
     /// recovery has finished.
     fn expectNoResidue(self: *Harness) !void {
         try std.testing.expect(!try exists(self.stage));
+        try std.testing.expect(!try exists(self.restore));
         try std.testing.expect(!try exists(self.backup));
-        try std.testing.expect(!try exists(self.displaced));
+        try std.testing.expect(!try exists(self.backup_directory));
     }
 };
+
+fn executorFor(library: *LibraryDatabase, fault: ?executor_module.Fault) executor_module.Executor {
+    return .{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .journal = &library.mutation_journal,
+        .backup_directory = library.backup_directory,
+        .fault = fault,
+    };
+}
 
 fn exists(path: []const u8) !bool {
     const file = std.Io.Dir.cwd().openFile(std.testing.io, path, .{}) catch |err| switch (err) {
@@ -204,36 +254,15 @@ fn expectTerminal(journal: *database.MutationJournalRepository, operation_id: i6
 fn expectConvergesFromCrash(point: executor_module.FaultPoint) !void {
     var harness = try Harness.init();
     defer harness.deinit();
-
-    {
-        var library = try harness.open();
-        defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
-        const actions = [_]mutation.Action{.{ .write_tags = .{
-            .path = harness.source,
-            .expected = expected,
-            .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
-        } }};
-        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
-        defer plan.deinit();
-        try plan.approve(plan.approval());
-        var executor: executor_module.Executor = .{
-            .allocator = std.testing.allocator,
-            .io = std.testing.io,
-            .journal = &library.mutation_journal,
-            .fault = .{ .point = point },
-        };
-        try std.testing.expectError(
-            error.SimulatedPowerLoss,
-            executor.executePlan(&plan, test_group_id),
-        );
-        try std.testing.expect(executor.crashed);
-    }
+    try harness.crashWrite(point);
 
     var reopened = try harness.open();
     defer reopened.close();
-    try expectTerminal(&reopened.mutation_journal, 1);
-    try expectTitle(harness.source, "Original");
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try reopened.mutation_journal.state(1),
+    );
+    try harness.expectOriginal();
     try harness.expectNoResidue();
 }
 
@@ -242,7 +271,7 @@ test "recovery converges from a crash at every tag-write boundary" {
         .after_journal_prepare,
         .after_stage,
         .after_stage_journaled,
-        .after_backup_rename,
+        .after_backup_copy,
         .after_source_rename,
         .before_journal_commit,
     }) |point| try expectConvergesFromCrash(point);
@@ -257,21 +286,15 @@ test "recovery restores a move interrupted after the rename and before the commi
     {
         var library = try harness.open();
         defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
         const actions = [_]mutation.Action{.{ .move = .{
             .source_path = harness.source,
             .destination_path = destination,
-            .expected = expected,
+            .expected = harness.original,
         } }};
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor: executor_module.Executor = .{
-            .allocator = std.testing.allocator,
-            .io = std.testing.io,
-            .journal = &library.mutation_journal,
-            .fault = .{ .point = .after_move_rename },
-        };
+        var executor = executorFor(&library, .{ .point = .after_move_rename });
         try std.testing.expectError(
             error.SimulatedPowerLoss,
             executor.executePlan(&plan, test_group_id),
@@ -307,7 +330,7 @@ fn expectConvergesFromRollbackCrash(point: executor_module.FaultPoint) !void {
         const actions = [_]mutation.Action{
             .{ .write_tags = .{
                 .path = harness.source,
-                .expected = try file_mutation.identity(std.testing.io, harness.source),
+                .expected = harness.original,
                 .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
             } },
             .{ .move = .{
@@ -319,12 +342,7 @@ fn expectConvergesFromRollbackCrash(point: executor_module.FaultPoint) !void {
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor: executor_module.Executor = .{
-            .allocator = std.testing.allocator,
-            .io = std.testing.io,
-            .journal = &library.mutation_journal,
-            .fault = .{ .point = point },
-        };
+        var executor = executorFor(&library, .{ .point = point });
         try std.testing.expectError(
             error.DestinationExists,
             executor.executePlan(&plan, test_group_id),
@@ -336,7 +354,7 @@ fn expectConvergesFromRollbackCrash(point: executor_module.FaultPoint) !void {
     defer reopened.close();
     try expectTerminal(&reopened.mutation_journal, 1);
     try expectTerminal(&reopened.mutation_journal, 2);
-    try expectTitle(harness.source, "Original");
+    try harness.expectOriginal();
     try harness.expectNoResidue();
     try std.testing.expect(try exists(move_source));
     try expectFileContents(collision, "do not replace");
@@ -351,7 +369,7 @@ fn expectFileContents(path: []const u8, expected: []const u8) !void {
 }
 
 test "recovery finishes a group rollback that was itself interrupted" {
-    try expectConvergesFromRollbackCrash(.rollback_after_displace);
+    try expectConvergesFromRollbackCrash(.rollback_after_restore_copy);
     try expectConvergesFromRollbackCrash(.rollback_after_restore);
 }
 
@@ -361,7 +379,6 @@ test "recovery removes a stage torn by a crash before it was journaled" {
     {
         var library = try harness.open();
         defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
         _ = try library.mutation_journal.prepare(.{
             .plan_id = test_plan_id,
             .group_id = test_group_id,
@@ -370,13 +387,13 @@ test "recovery removes a stage torn by a crash before it was journaled" {
             .source_path = harness.source,
             .stage_path = harness.stage,
             .backup_path = harness.backup,
-            .expected_size = expected.size_bytes,
-            .expected_modified_ns = expected.modified_ns,
-            .expected_quick_hash = expected.quick_hash,
+            .expected_size = harness.original.size_bytes,
+            .expected_modified_ns = harness.original.modified_ns,
+            .expected_quick_hash = harness.original.quick_hash,
         });
         // A stage whose bytes never reached the disk in full and whose identity
         // was therefore never journaled.
-        try harness.writeFile("source.mp3.orca-stage-1000-0", "half-written stag");
+        try harness.writeFile(".source.mp3.orca-stage-1000-0", "half-written stag");
     }
 
     var reopened = try harness.open();
@@ -385,52 +402,16 @@ test "recovery removes a stage torn by a crash before it was journaled" {
         database.MutationState.rolled_back,
         try reopened.mutation_journal.state(1),
     );
-    try expectTitle(harness.source, "Original");
+    try harness.expectOriginal();
     try harness.expectNoResidue();
 }
 
-test "recovery reconciles rather than claiming a rollback it cannot prove" {
+test "recovery keeps every file when the replacement is in place and its backup is gone" {
     var harness = try Harness.init();
     defer harness.deinit();
-    {
-        var library = try harness.open();
-        defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
-        const operation = try library.mutation_journal.prepare(.{
-            .plan_id = test_plan_id,
-            .group_id = test_group_id,
-            .action_index = 0,
-            .kind = .write_tags,
-            .source_path = harness.source,
-            .stage_path = harness.stage,
-            .backup_path = harness.backup,
-            .expected_size = expected.size_bytes,
-            .expected_modified_ns = expected.modified_ns,
-            .expected_quick_hash = expected.quick_hash,
-        });
-        try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, harness.stage, expected, &.{
-            .{ .field = .title, .before = "Original", .after = "Replaced" },
-        });
-        const staged = try file_mutation.identity(std.testing.io, harness.stage);
-        try library.mutation_journal.recordResultIdentity(
-            operation,
-            .planned,
-            staged.size_bytes,
-            staged.modified_ns,
-            staged.quick_hash,
-        );
-        try library.mutation_journal.transition(operation, .planned, .staged, null);
-        try file_mutation.commitReplacement(
-            std.testing.io,
-            harness.source,
-            harness.stage,
-            harness.backup,
-            expected,
-        );
-        // The replacement is committed to the filesystem and the only copy of
-        // the original bytes has been destroyed from outside Orca.
-        try std.Io.Dir.cwd().deleteFile(std.testing.io, harness.backup);
-    }
+    try harness.crashWrite(.after_source_rename);
+    // The only copy of the original bytes is destroyed from outside Orca.
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, harness.backup);
 
     var reopened = try harness.open();
     defer reopened.close();
@@ -438,8 +419,25 @@ test "recovery reconciles rather than claiming a rollback it cannot prove" {
         database.MutationState.needs_reconciliation,
         try reopened.mutation_journal.state(1),
     );
-    // Every file is retained; nothing claims the original was restored.
     try expectTitle(harness.source, "Replaced");
+}
+
+test "recovery keeps every file when the backup no longer holds the original" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.crashWrite(.after_source_rename);
+    const backup = try std.Io.Dir.cwd().openFile(std.testing.io, harness.backup, .{ .mode = .read_write });
+    try backup.writePositionalAll(std.testing.io, "damaged", 0);
+    backup.close(std.testing.io);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.needs_reconciliation,
+        try reopened.mutation_journal.state(1),
+    );
+    try expectTitle(harness.source, "Replaced");
+    try std.testing.expect(try exists(harness.backup));
 }
 
 test "recovery reconciles a source that vanished along with its backup" {
@@ -448,7 +446,6 @@ test "recovery reconciles a source that vanished along with its backup" {
     {
         var library = try harness.open();
         defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
         const operation = try library.mutation_journal.prepare(.{
             .plan_id = test_plan_id,
             .group_id = test_group_id,
@@ -457,16 +454,16 @@ test "recovery reconciles a source that vanished along with its backup" {
             .source_path = harness.source,
             .stage_path = harness.stage,
             .backup_path = harness.backup,
-            .expected_size = expected.size_bytes,
-            .expected_modified_ns = expected.modified_ns,
-            .expected_quick_hash = expected.quick_hash,
+            .expected_size = harness.original.size_bytes,
+            .expected_modified_ns = harness.original.modified_ns,
+            .expected_quick_hash = harness.original.quick_hash,
         });
         try library.mutation_journal.recordResultIdentity(
             operation,
             .planned,
-            expected.size_bytes,
-            expected.modified_ns,
-            expected.quick_hash,
+            harness.original.size_bytes,
+            harness.original.modified_ns,
+            harness.original.quick_hash,
         );
         try library.mutation_journal.transition(operation, .planned, .staged, null);
         try std.Io.Dir.cwd().deleteFile(std.testing.io, harness.source);
@@ -480,11 +477,76 @@ test "recovery reconciles a source that vanished along with its backup" {
     );
 }
 
+test "recovery waits for a folder that is gone, as an unmounted drive is, and restores once it is back" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.temporary.dir.createDir(std.testing.io, "drive", .default_dir);
+    try harness.temporary.dir.rename("source.mp3", harness.temporary.dir, "drive/source.mp3", std.testing.io);
+    const source = try harness.childPath("drive/source.mp3");
+    defer std.testing.allocator.free(source);
+    {
+        var library = try harness.open();
+        defer library.close();
+        const actions = [_]mutation.Action{.{ .write_tags = .{
+            .path = source,
+            .expected = harness.original,
+            .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+        } }};
+        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var executor = executorFor(&library, .{ .point = .after_source_rename });
+        try std.testing.expectError(error.SimulatedPowerLoss, executor.executePlan(&plan, test_group_id));
+    }
+    try harness.temporary.dir.rename("drive", harness.temporary.dir, "unmounted", std.testing.io);
+
+    try std.testing.expectError(error.TagTargetUnavailable, harness.open());
+
+    try harness.temporary.dir.rename("unmounted", harness.temporary.dir, "drive", std.testing.io);
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try reopened.mutation_journal.state(1),
+    );
+    try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, source)));
+    try std.testing.expect(!try exists(harness.backup_directory));
+}
+
 test "a Library refuses to open when recovery cannot reach a terminal state" {
     var harness = try Harness.init();
     defer harness.deinit();
-    const unreachable_source = try harness.childPath("absent-directory/source.mp3");
-    defer std.testing.allocator.free(unreachable_source);
+    try harness.crashWrite(.after_source_rename);
+    try harness.temporary.dir.createDir(std.testing.io, ".source.mp3.orca-restore-1000-0", .default_dir);
+
+    if (harness.open()) |*opened| {
+        var library = opened.*;
+        library.close();
+        return error.LibraryOpenedWithUnrecoverableJournal;
+    } else |_| {}
+    try expectTitle(harness.source, "Replaced");
+    try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+
+    try harness.temporary.dir.deleteDir(std.testing.io, ".source.mp3.orca-restore-1000-0");
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try reopened.mutation_journal.state(1),
+    );
+    try harness.expectOriginal();
+    try harness.expectNoResidue();
+}
+
+test "recovery restores a write journaled with its backup beside the music" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const legacy_stage = try harness.childPath("source.mp3.orca-stage-1000-0");
+    defer std.testing.allocator.free(legacy_stage);
+    const legacy_backup = try harness.childPath("source.mp3.orca-backup-1000-0");
+    defer std.testing.allocator.free(legacy_backup);
+    const legacy_displaced = try harness.childPath("source.mp3.orca-stage-1000-0.recovery-displaced");
+    defer std.testing.allocator.free(legacy_displaced);
     {
         var library = try harness.open();
         defer library.close();
@@ -493,22 +555,42 @@ test "a Library refuses to open when recovery cannot reach a terminal state" {
             .group_id = test_group_id,
             .action_index = 0,
             .kind = .write_tags,
-            .source_path = unreachable_source,
-            .stage_path = harness.stage,
-            .backup_path = harness.backup,
-            .expected_size = 1,
-            .expected_modified_ns = 1,
-            .expected_quick_hash = quick_hash.zero,
+            .source_path = harness.source,
+            .stage_path = legacy_stage,
+            .backup_path = legacy_backup,
+            .expected_size = harness.original.size_bytes,
+            .expected_modified_ns = harness.original.modified_ns,
+            .expected_quick_hash = harness.original.quick_hash,
         });
+        try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, legacy_stage, harness.original, &.{
+            .{ .field = .title, .before = "Original", .after = "Replaced" },
+        });
+        const staged = try file_mutation.identity(std.testing.io, legacy_stage);
+        try library.mutation_journal.recordResultIdentity(
+            operation,
+            .planned,
+            staged.size_bytes,
+            staged.modified_ns,
+            staged.quick_hash,
+        );
         try library.mutation_journal.transition(operation, .planned, .staged, null);
-        try harness.writeFile("source.mp3.orca-backup-1000-0", "the only original copy");
+        const cwd = std.Io.Dir.cwd();
+        try cwd.rename(harness.source, cwd, legacy_backup, std.testing.io);
+        try cwd.rename(legacy_stage, cwd, harness.source, std.testing.io);
+        try harness.writeFile("source.mp3.orca-stage-1000-0.recovery-displaced", "left by a recovery");
     }
 
-    if (harness.open()) |*opened| {
-        var library = opened.*;
-        library.close();
-        return error.LibraryOpenedWithUnrecoverableJournal;
-    } else |_| {}
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(
+        database.MutationState.rolled_back,
+        try reopened.mutation_journal.state(1),
+    );
+    try harness.expectOriginal();
+    try std.testing.expect(!try exists(legacy_stage));
+    try std.testing.expect(!try exists(legacy_backup));
+    try std.testing.expect(!try exists(legacy_displaced));
+    try harness.expectNoResidue();
 }
 
 test "recovery unwinds a whole group when its last action crashed mid-rename" {
@@ -520,28 +602,22 @@ test "recovery unwinds a whole group when its last action crashed mid-rename" {
     {
         var library = try harness.open();
         defer library.close();
-        const expected = try file_mutation.identity(std.testing.io, harness.source);
         const actions = [_]mutation.Action{
             .{ .write_tags = .{
                 .path = harness.source,
-                .expected = expected,
+                .expected = harness.original,
                 .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
             } },
             .{ .move = .{
                 .source_path = harness.source,
                 .destination_path = destination,
-                .expected = expected,
+                .expected = harness.original,
             } },
         };
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor: executor_module.Executor = .{
-            .allocator = std.testing.allocator,
-            .io = std.testing.io,
-            .journal = &library.mutation_journal,
-            .fault = .{ .point = .after_move_rename, .action_index = 1 },
-        };
+        var executor = executorFor(&library, .{ .point = .after_move_rename, .action_index = 1 });
         try std.testing.expectError(
             error.SimulatedPowerLoss,
             executor.executePlan(&plan, test_group_id),
@@ -561,6 +637,6 @@ test "recovery unwinds a whole group when its last action crashed mid-rename" {
         try reopened.mutation_journal.state(2),
     );
     try std.testing.expect(!try exists(destination));
-    try expectTitle(harness.source, "Original");
+    try harness.expectOriginal();
     try harness.expectNoResidue();
 }
