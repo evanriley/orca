@@ -453,5 +453,7 @@ into Orca metadata that preserves user locks and does **not** write media files.
 - Bounded everything: fixed-capacity queues, 512-row query pages, bounded
   commits, bounded retries. Prefer rejecting or applying backpressure over
   unbounded growth.
-- Update `CHANGELOG.md` and the `version` in both `build.zig.zon` and
-  `liborca/root.zig` together when releasing.
+- Every commit that adds, fixes, refactors or removes something adds its
+  entry to the Unreleased section of `CHANGELOG.md` in the same commit.
+  Versioning and the release steps are in
+  [docs/roadmap.md](docs/roadmap.md#releases).
