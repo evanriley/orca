@@ -28,12 +28,7 @@ const audio = internal.audio;
 const control = internal.core.control;
 const job = internal.core.job;
 
-pub const version = std.SemanticVersion{
-    .major = 0,
-    .minor = 2,
-    .patch = 0,
-    .pre = "alpha",
-};
+pub const version = @import("version.zig").value;
 
 /// The root object: owns libraries, players, zones and jobs, and shuts them
 /// down in dependency order.
