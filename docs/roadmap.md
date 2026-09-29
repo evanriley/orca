@@ -10,8 +10,8 @@ Unreleased `0.2.0-alpha`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback at each source's sample rate,
 live equalizer and crossfeed, tag editing with undo, track details, a local
 play history, ListenBrainz scrobbling, MusicBrainz and AcoustID matching
-with review, and AcoustID submission. Last.fm and filesystem watching are built but not connected; macOS
-has no audio output yet.
+with review, and AcoustID submission. Last.fm and filesystem watching are
+built but not connected; macOS has no audio output yet.
 
 ## Works today
 
@@ -50,8 +50,9 @@ has no audio output yet.
   report of the source, each processing stage, the output stream and whether
   the path could be bit-perfect (`orca-cli play-tracks --eq --crossfeed`).
 - Output device selection.
-- Track details: format, file, loudness and tags for one Track
-  (`orca-cli track`), and a details panel in `orca-gtk`.
+- Track details: format, file, loudness, tags and MusicBrainz recording ID
+  with its source for one Track (`orca-cli track`), and a details panel in
+  `orca-gtk`.
 
 ### Listening
 
@@ -65,9 +66,11 @@ has no audio output yet.
   `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
   [providers.md](providers.md).
 - Love and hate for songs, kept in the Library per recording and sent to
-  ListenBrainz while scrobbling for recordings with a MusicBrainz ID. `orca-gtk`
-  has a heart in the player bar, a heart button on every song row and context
-  menu entries; `orca-cli feedback` sets it.
+  ListenBrainz while scrobbling for recordings with a MusicBrainz recording
+  ID, from the file's tags or an accepted match. `orca-gtk` has a heart in the
+  player bar, a heart button on every song row and context menu entries, and
+  its details panel says when a love cannot sync; `orca-cli feedback` sets
+  it.
 - Now Playing, off until enabled: the playing track is announced to
   ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
 
@@ -128,6 +131,9 @@ entry point and a client before it counts as working.
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
 - Providers: the Last.fm adapter.
+- Setting a recording ID by hand: `libraryEditTracks` accepts a locked
+  MusicBrainz recording ID, but neither `orca-cli edit` nor the `orca-gtk` tag
+  editor offers the field.
 - The ordered DSP graph (`Chain`, `PublishedChain`) and the resamplers. The
   Player's equalizer, crossfeed and volume run through `PlayerDsp` instead, and
   the signal-path inspector is reachable through `playerSignalPath`, but
@@ -139,21 +145,25 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **ListenBrainz lookup.** ListenBrainz's `/1/metadata/lookup` would match
-   what MusicBrainz and AcoustID miss. Last.fm follows. No tag writer stores
-   an accepted recording ID in a file yet.
-2. **Filesystem watching** as a scan accelerator, so new files appear without
-   a manual rescan.
-3. **A fixed output rate with a band-limited resampler** (libsamplerate is
-   already behind `resampler.SampleRate`), for gapless playback across sample-rate changes
-   and for devices held at another rate. Playback at the source rate already
-   covers the common case.
-4. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+1. **Filesystem watching** as a scan accelerator, so new files appear without
+   a manual rescan. The Linux watcher exists; it needs a runtime entry point
+   and a client.
+2. **A fixed output rate with a band-limited resampler**, for gapless playback
+   across sample-rate changes and for devices held at another rate.
+   libsamplerate is already behind `resampler.SampleRate` for fingerprints;
+   playback at the source rate covers the common case.
+3. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV and AIFF are reported as not
-   writable. The C ABI lacks tag writes, queue editing, DSP and track
-   details.
-5. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+   writable. No writer stores an accepted recording ID in a file yet: ID3
+   needs a `UFID` frame and Vorbis comments a `MUSICBRAINZ_TRACKID` field. The
+   C ABI lacks tag writes, queue editing, DSP, track details, matching and
+   AcoustID submission.
+4. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
+5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+   would match what MusicBrainz and AcoustID miss, 50 songs per request, but
+   needs the user's token and must share the listen worker's gateway. The
+   Last.fm adapter is built and not connected.
 6. **Undecodable files are re-examined on every analysis run.** They are
    declined cheaply, but a library of WavPack or APE files still pays two
    64 KiB reads per file per run until declines are remembered.
@@ -173,6 +183,13 @@ Small defects that are not yet scheduled:
 - A file whose fingerprint fails, and a Track without a title or artist that
   MusicBrainz cannot search, are examined again by every matching run. No
   request is made, but a failed fingerprint is decoded again.
+- Matching has no offline setting. Without a network it uses cached answers
+  and stops at the first Track it has none for.
+- MusicBrainz finds nothing for a Track whose artist tag joins several
+  artists with commas, such as "Pa Salieu, Black Sherif"; AcoustID can still
+  match it by fingerprint.
+- Chromaprint's C functions are exported from `liborca.so`, so an embedder
+  that links its own Chromaprint can clash with them.
 - An AcoustID candidate without a title is scored on length and fingerprint
   alone, so for a tagged Track it can rank level with a candidate whose title
   and artist match. Several recording IDs sharing one AcoustID fingerprint
