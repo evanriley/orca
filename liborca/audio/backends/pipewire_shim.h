@@ -5,6 +5,7 @@
 
 typedef void (*orca_pw_render_fn)(void *userdata, float *samples,
                                   uint32_t frames, uint32_t channels);
+typedef void (*orca_pw_wake_fn)(void *context);
 
 struct orca_pw_output;
 
@@ -45,6 +46,8 @@ void orca_pw_output_destroy(struct orca_pw_output *output);
 int orca_pw_output_timing(struct orca_pw_output *output,
                           struct orca_pw_timing *timing);
 enum orca_pw_output_state orca_pw_output_status(struct orca_pw_output *output);
+void orca_pw_output_set_waker(struct orca_pw_output *output,
+                              orca_pw_wake_fn wake, void *context);
 void orca_pw_fill(orca_pw_render_fn render, void *userdata, float *samples,
                   uint32_t frames, uint32_t channels);
 

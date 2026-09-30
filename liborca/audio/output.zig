@@ -1,4 +1,5 @@
 const std = @import("std");
+const work = @import("../core/work.zig");
 const contract = @import("backend.zig");
 const zone_model = @import("zone.zig");
 
@@ -25,6 +26,7 @@ pub const Output = struct {
         status: *const fn (?*anyopaque) Status,
         latency: *const fn (?*anyopaque, u32, u32) anyerror!zone_model.Latency,
         timing: *const fn (?*anyopaque) anyerror!contract.TimingSnapshot,
+        set_state_waker: *const fn (?*anyopaque, ?work.Waker) void,
     };
 
     pub fn close(self: Output) void {
@@ -45,6 +47,13 @@ pub const Output = struct {
 
     pub fn timing(self: Output) anyerror!contract.TimingSnapshot {
         return self.vtable.timing(self.context);
+    }
+
+    /// `waker` is called whenever `status` may have changed, from the
+    /// backend's control thread and never from the render callback. Once this
+    /// returns, the previous waker is never called again.
+    pub fn setStateWaker(self: Output, waker: ?work.Waker) void {
+        self.vtable.set_state_waker(self.context, waker);
     }
 };
 
@@ -99,6 +108,7 @@ pub const TestBackend = struct {
         request: contract.OpenRequest,
         state: std.atomic.Value(u8) = .init(@intFromEnum(Status.active)),
         closed: bool = false,
+        state_waker: ?work.Waker = null,
 
         /// Drives one render callback exactly as a backend RT thread would.
         pub fn pump(self: *Stream, samples: []f32, frames: u32) void {
@@ -107,6 +117,7 @@ pub const TestBackend = struct {
 
         pub fn markLost(self: *Stream) void {
             self.state.store(@intFromEnum(Status.lost), .release);
+            if (self.state_waker) |waker| waker.wake();
         }
     };
 
@@ -139,6 +150,7 @@ pub const TestBackend = struct {
         .status = streamStatus,
         .latency = streamLatency,
         .timing = streamTiming,
+        .set_state_waker = setStreamStateWaker,
     };
 
     fn open(
@@ -197,6 +209,11 @@ pub const TestBackend = struct {
             .hardware_frames = null,
             .graph_rate_hz = null,
         };
+    }
+
+    fn setStreamStateWaker(context: ?*anyopaque, waker: ?work.Waker) void {
+        const stream: *Stream = @ptrCast(@alignCast(context.?));
+        stream.state_waker = waker;
     }
 
     fn streamTiming(_: ?*anyopaque) anyerror!contract.TimingSnapshot {

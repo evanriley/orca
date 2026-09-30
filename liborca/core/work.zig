@@ -27,6 +27,15 @@ pub const State = enum {
     cancellation_requested,
 };
 
+pub const Waker = struct {
+    context: *anyopaque,
+    wake_fn: *const fn (*anyopaque) callconv(.c) void,
+
+    pub fn wake(self: Waker) void {
+        self.wake_fn(self.context);
+    }
+};
+
 /// One live worker's runtime-visible presence. A registration exists for
 /// exactly as long as its worker may still touch runtime-owned objects, so it
 /// is heap-allocated and stable: workers hold this pointer, never a Pool slot.
@@ -53,10 +62,14 @@ pub const Registration = struct {
     /// This registration's own handle, so a targeted drain can retire it
     /// through `complete` rather than reimplementing slot invalidation.
     work_handle: WorkHandle = .{ .index = 0, .generation = 0 },
+    /// Set before the worker's thread is spawned; `requestCancellation` calls it.
+    waker: ?Waker = null,
 
-    /// Control lane. Safe to call repeatedly.
+    /// Control lane. Safe to call repeatedly. Only the first call wakes the
+    /// worker, so no call reaches a worker that has already finished.
     pub fn requestCancellation(self: *Registration) void {
-        self.cancel.store(true, .release);
+        if (self.cancel.swap(true, .acq_rel)) return;
+        if (self.waker) |waker| waker.wake();
     }
 
     /// Worker lane. Long-running workers must poll this and return promptly.

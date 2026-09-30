@@ -45,10 +45,6 @@ pub const max_release_candidates: usize = 8;
 /// `capacity`, so no two outstanding ids share a slot.
 const cancel_slots = capacity * 4;
 
-/// How long an idle loader sleeps before checking for cancellation, which is
-/// also how long a drain can wait for it.
-const poll_ms = 50;
-
 const Request = struct {
     id: u64,
     subject: Subject,
@@ -99,6 +95,15 @@ pub const Loader = struct {
         io.futexWake(u32, &self.signal.raw, 1);
     }
 
+    pub fn waker(self: *Loader) work.Waker {
+        return .{ .context = self, .wake_fn = wakeFromWaker };
+    }
+
+    fn wakeFromWaker(context: *anyopaque) callconv(.c) void {
+        const self: *Loader = @ptrCast(@alignCast(context));
+        self.wake(self.threaded.io());
+    }
+
     /// Control lane, after the loader has been joined: frees results nobody
     /// took.
     pub fn discardResults(self: *Loader) void {
@@ -107,23 +112,28 @@ pub const Loader = struct {
         }
     }
 
+    /// Control lane, after the loader has been joined.
+    pub fn deinit(self: *Loader) void {
+        self.discardResults();
+        self.threaded.deinit();
+    }
+
     fn isCancelled(self: *const Loader, id: u64) bool {
         return self.cancelled[id % cancel_slots].load(.acquire) == id;
     }
 
+    /// Sleeps until a request or cancellation wakes it, so the registration
+    /// must carry `waker()`.
     pub fn run(self: *Loader) void {
-        defer {
-            self.threaded.deinit();
-            self.registration.finish();
-        }
+        defer self.registration.finish();
         const io = self.threaded.io();
-        while (!self.registration.cancellationRequested()) {
+        while (true) {
+            // Read before the cancellation check and the queue, so a wake that
+            // lands after them makes the wait below return at once.
             const seen = self.signal.load(.acquire);
+            if (self.registration.cancellationRequested()) return;
             if (self.step(io)) continue;
-            io.futexWaitTimeout(u32, &self.signal.raw, seen, .{ .duration = .{
-                .raw = .fromMilliseconds(poll_ms),
-                .clock = .awake,
-            } }) catch {};
+            io.futexWait(u32, &self.signal.raw, seen) catch {};
         }
     }
 
@@ -246,4 +256,37 @@ test "requests beyond capacity are refused until results are taken" {
     _ = loader.take().?;
     _ = try loader.request(std.testing.io, .{ .release = 1 });
     loader.discardResults();
+}
+
+test "cancellation wakes a parked loader" {
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-artwork-loader-park?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var registration: work.Registration = .{};
+    var loader: Loader = .{
+        .allocator = std.testing.allocator,
+        .database = &library,
+        .registration = &registration,
+    };
+    defer loader.deinit();
+    registration.waker = loader.waker();
+    registration.thread = try std.Thread.spawn(.{}, Loader.run, .{&loader});
+    errdefer {
+        registration.requestCancellation();
+        registration.awaitCompletion();
+    }
+
+    const id = try loader.request(std.testing.io, .{ .release = 1 });
+    const result = for (0..5_000) |_| {
+        if (loader.take()) |value| break value;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    } else return error.RequestNeverFinished;
+    try std.testing.expectEqual(id, result.request);
+
+    registration.requestCancellation();
+    registration.awaitCompletion();
+    try std.testing.expect(registration.isFinished());
 }

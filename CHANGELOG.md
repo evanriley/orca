@@ -40,6 +40,17 @@
   position, duration and gain first and the cursor last, and a status read
   takes the cursor first.
 
+### Idle power
+
+- **An idle Player makes no wakeups.** The engine thread slept 2 ms at a time
+  for the Player's whole life; it now waits on a futex while there is nothing
+  to do, and is woken by control calls, cancellation and PipeWire stream state
+  changes. Measured on a paused and on a stopped Player: 4,882 context
+  switches per 10 s before, 0 after.
+- **The artwork loader waits with no timeout.** It woke every 50 ms to check
+  for cancellation; a `work.Registration` now carries a waker that
+  `requestCancellation` calls.
+
 ## 0.2.0 - 2026-09-29
 
 The first tagged release. Ships Library schema version 18.

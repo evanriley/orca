@@ -14,6 +14,8 @@ struct orca_pw_output {
     uint32_t channels;
     _Atomic uint32_t quantum_frames;
     _Atomic int state;
+    orca_pw_wake_fn wake;
+    void *wake_context;
 };
 
 struct discovery {
@@ -140,8 +142,10 @@ static void output_state_changed(void *userdata, enum pw_stream_state old,
                               memory_order_release);
         break;
     default:
-        break;
+        return;
     }
+    if (output->wake != NULL)
+        output->wake(output->wake_context);
 }
 
 static const struct pw_stream_events output_events = {
@@ -319,4 +323,16 @@ enum orca_pw_output_state orca_pw_output_status(struct orca_pw_output *output) {
     if (output == NULL)
         return ORCA_PW_OUTPUT_LOST;
     return atomic_load_explicit(&output->state, memory_order_acquire);
+}
+
+void orca_pw_output_set_waker(struct orca_pw_output *output,
+                              orca_pw_wake_fn wake, void *context) {
+    if (output == NULL)
+        return;
+    // state_changed runs on the loop thread with this lock held, so once it is
+    // released the previous waker can no longer be running or be called.
+    pw_thread_loop_lock(output->loop);
+    output->wake = wake;
+    output->wake_context = context;
+    pw_thread_loop_unlock(output->loop);
 }

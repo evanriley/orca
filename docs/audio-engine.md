@@ -116,12 +116,37 @@ spawned lazily when a Player first receives a source and registered with
 `work.Registry`, so `drain`, `destroyPlayer` and `shutdown` join it rather than
 abandoning it. Each pass adopts a published zone set, reclaims consumed blocks,
 decodes one canonical block per Zone budget, fans it out, services output
-opening and bounded recovery, publishes position, and parks briefly so
-play/pause/seek take effect within a device quantum. The Player's `SourceQueue`
-is plain state rather than an atomic, so loading a source or seeking quiesces the
-engine first. A quiesce that follows a release waits for one full engine pass
-before suspending it again, so back-to-back control calls cannot starve the
-engine.
+opening and bounded recovery, publishes position, and parks on a futex. The
+Player's `SourceQueue` is plain state rather than an atomic, so loading a source
+or seeking quiesces the engine first. A quiesce that follows a release waits for
+one full engine pass before suspending it again, so back-to-back control calls
+cannot starve the engine.
+
+A busy engine parks for 2 ms, so decoding stays ahead of the device. An idle
+engine parks with no timeout and costs no wakeups. The engine is idle when its
+next pass would do nothing:
+
+- no seek is waiting to be serviced and no format-switch successor is held;
+- the Player is not playing, or it is playing with its queue decoded, every Zone
+  drained and no further entry to open;
+- the clock Zone's position, when it has one in the current epoch, has been
+  sent as a telemetry hint;
+- every attached Zone is settled: its output is active in the format being
+  decoded and is either silenced or holds no blocks, or it has no output and
+  nothing to open one for (no source, or recovery attempts exhausted). A Zone
+  that is opening, lost or waiting out its recovery backoff keeps the engine
+  busy, and so does a suspended engine.
+
+Everything that can end idleness wakes the engine, after the write it must act
+on: `wakeUp` (play, pause and output requests call it), zone publication,
+`quiesce`, `release`, the first cancellation request through the waker the
+engine gives its `work.Registration`, and output state changes. The PipeWire
+backend calls the output's waker from the stream's state-changed callback on its
+loop thread, never from the process callback. An engine sets that waker on every
+output it adopts or opens and clears it on every output it drops or leaves open
+at exit; setting it takes the stream loop's lock, so an output that outlives its
+engine never calls into a freed one. Telemetry cadence and recovery backoff are
+measured on a monotonic clock, so a long idle park counts as its real length.
 
 The engine thread never resolves a handle. `core/handle.zig` performs no locking,
 so generational handles protect handles, not a pointer a worker already

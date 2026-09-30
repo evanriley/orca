@@ -1,4 +1,5 @@
 const std = @import("std");
+const work = @import("../../core/work.zig");
 const contract = @import("../backend.zig");
 const buffer = @import("../buffer.zig");
 const pcm = @import("../pcm.zig");
@@ -29,6 +30,8 @@ const NativeTiming = extern struct {
 };
 extern fn orca_pw_output_timing(?*anyopaque, *NativeTiming) c_int;
 extern fn orca_pw_output_status(?*anyopaque) c_int;
+const WakeFn = *const fn (*anyopaque) callconv(.c) void;
+extern fn orca_pw_output_set_waker(?*anyopaque, ?WakeFn, ?*anyopaque) void;
 extern fn orca_pw_fill(?RenderFn, ?*anyopaque, [*]f32, u32, u32) void;
 
 /// Process-level PipeWire client library lifetime. Server connections and
@@ -131,6 +134,13 @@ pub const OutputSession = struct {
         return @enumFromInt(@as(std.meta.Tag(Status), @intCast(orca_pw_output_status(self.native))));
     }
 
+    pub fn setStateWaker(self: *const OutputSession, waker: ?work.Waker) void {
+        if (waker) |value|
+            orca_pw_output_set_waker(self.native, value.wake_fn, value.context)
+        else
+            orca_pw_output_set_waker(self.native, null, null);
+    }
+
     pub fn latency(
         self: *const OutputSession,
         render_ahead_frames: u32,
@@ -186,6 +196,7 @@ pub const OutputFactory = struct {
         .status = outputStatus,
         .latency = outputLatency,
         .timing = outputTiming,
+        .set_state_waker = setOutputStateWaker,
     };
 
     fn open(
@@ -239,6 +250,11 @@ pub const OutputFactory = struct {
     fn outputTiming(context: ?*anyopaque) anyerror!contract.TimingSnapshot {
         const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
         return owned.session.timing();
+    }
+
+    fn setOutputStateWaker(context: ?*anyopaque, waker: ?work.Waker) void {
+        const owned: *OwnedSession = @ptrCast(@alignCast(context.?));
+        owned.session.setStateWaker(waker);
     }
 };
 

@@ -1540,6 +1540,7 @@ pub const OrcaRuntime = struct {
             },
             .work_handle = work_handle,
         };
+        registration.waker = loader.loader.waker();
         registration.thread = try std.Thread.spawn(.{}, artwork.Loader.run, .{&loader.loader});
         object_value.artwork = loader;
         return loader;
@@ -1552,7 +1553,7 @@ pub const OrcaRuntime = struct {
         for (self.libraries.slots.items) |*slot| {
             const object_value = if (slot.value) |*value| value else continue;
             const loader = object_value.artwork orelse continue;
-            loader.loader.discardResults();
+            loader.loader.deinit();
             self.allocator.destroy(loader);
             object_value.artwork = null;
         }
@@ -2260,11 +2261,14 @@ pub const OrcaRuntime = struct {
             return error.PlayerHasNoSource;
         if (!self.playerHasZone(player)) return error.PlayerHasNoOutput;
         object_value.player.play();
+        if (object_value.engine) |engine| engine.wakeUp();
     }
 
     pub fn pausePlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
         try self.requireRunning();
-        (try self.players.get(player)).player.pause();
+        const object_value = try self.players.get(player);
+        object_value.player.pause();
+        if (object_value.engine) |engine| engine.wakeUp();
     }
 
     /// Stops the transport and releases its decoders. Entries and cursor
@@ -2779,6 +2783,7 @@ pub const OrcaRuntime = struct {
             self.work_registry.complete(work_handle) catch {};
         }
         engine.registration = registration;
+        registration.waker = engine.waker();
         // The engine must never resolve a handle, so it is handed its zone set
         // before it starts and re-handed one on every attach or detach.
         try self.publishZonesTo(player, engine);
@@ -4564,6 +4569,64 @@ test "a runtime Player and Zone form one object graph that actually renders" {
         stream.pump(&samples, 256);
         std.Thread.yield() catch {};
     }
+    try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(player);
+}
+
+fn awaitEngineParked(engine: *const audio.engine.PlayerEngine) !void {
+    var deadline: TestDeadline = .init(5_000);
+    var last = engine.pass_epoch.load(.seq_cst);
+    var unchanged_ms: u32 = 0;
+    while (unchanged_ms < 50) {
+        if (!deadline.tick()) return error.EngineNeverParked;
+        const current = engine.pass_epoch.load(.seq_cst);
+        unchanged_ms = if (current == last) unchanged_ms + 1 else 0;
+        last = current;
+    }
+}
+
+test "playing a paused or stopped Player wakes its parked engine" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    var samples: [512]f32 = undefined;
+    deadline = .init(5_000);
+    while ((try runtime.playerSnapshot(player)).position_frames == 0 and deadline.tick())
+        stream.pump(&samples, 256);
+
+    try runtime.pausePlayer(player);
+    try awaitEngineParked((try runtime.players.get(player)).engine.?);
+    const paused_at = (try runtime.playerSnapshot(player)).position_frames;
+    try std.testing.expect(paused_at > 0);
+
+    try runtime.playPlayer(player);
+    deadline = .init(5_000);
+    while ((try runtime.playerSnapshot(player)).position_frames <= paused_at and deadline.tick())
+        stream.pump(&samples, 256);
+    try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > paused_at);
+
+    try runtime.stopPlayer(player);
+    try awaitEngineParked((try runtime.players.get(player)).engine.?);
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.playerSnapshot(player)).position_frames);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.playPlayer(player);
+    deadline = .init(5_000);
+    while ((try runtime.playerSnapshot(player)).position_frames == 0 and deadline.tick())
+        stream.pump(&samples, 256);
     try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
 
     try runtime.destroyZone(zone);

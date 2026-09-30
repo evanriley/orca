@@ -176,9 +176,6 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    - **AcoustID submissions that add information.** A recording ID that
      AcoustID itself proposed is not submitted back, and bulk-accepted
      text-only matches are not submitted.
-   - **Idle power.** The engine thread wakes every 2 ms for the Player's
-     lifetime, paused or not, and the artwork loader every 50 ms: both wait
-     on a futex while idle.
    - **Maintenance.** Split `core/runtime.zig` (job worker with per-kind
      requests and stats, tests and fakes, queue, listens, jobs and zones) and
      `database/repository.zig` (by aggregate, with shared column helpers);

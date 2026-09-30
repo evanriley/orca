@@ -29,7 +29,9 @@ Library close, Player destroy — sets both before it blocks. A Library's listen
 worker has only the one: its network gateway's cancel pointer is the
 registration's own flag, so the flag every drain sets also interrupts an
 in-flight ListenBrainz request or a rate-limit hold. The drain also wakes the
-worker from its sleep.
+worker from its sleep. A Player engine and a Library's artwork loader sleep
+without a timeout while idle, so each gives its registration a waker, set before
+its thread starts, which the first cancellation request calls.
 
 Progress with no honest denominator is reported as a count, never as a fraction.
 A filesystem scan does not know how many files it will find until it has found

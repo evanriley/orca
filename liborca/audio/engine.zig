@@ -21,8 +21,9 @@ pub const max_channels = zone_runtime.max_channels;
 /// the engine's sink array and both publication slots are fixed-capacity.
 pub const max_zones: usize = 8;
 
-/// Engine wake interval. Short enough that play/pause/seek take effect within
-/// one device quantum, long enough that an idle Player costs nothing.
+/// How long a busy engine sleeps between passes: short enough that the next
+/// block is decoded within one device quantum. An idle engine sleeps until it
+/// is woken.
 pub const park_ns: u64 = 2 * std.time.ns_per_ms;
 pub const telemetry_interval_ns: u64 = 100 * std.time.ns_per_ms;
 pub const recovery_backoff_ns: u64 = 100 * std.time.ns_per_ms;
@@ -87,7 +88,8 @@ pub const PlayerEngine = struct {
     /// before reusing a slot or freeing a Zone.
     ack: std.atomic.Value(u64) = .init(0),
     running: std.atomic.Value(bool) = .init(false),
-    wake: std.atomic.Value(bool) = .init(false),
+    wake: std.atomic.Value(u32) = .init(0),
+    threaded: std.Io.Threaded = .init_single_threaded,
     /// Set by the control lane while it needs exclusive access to the Player's
     /// `SourceQueue`. The engine is the only decoder, so loading or seeking a
     /// source has to stop it first: `sources` is a plain field, not an atomic.
@@ -105,7 +107,10 @@ pub const PlayerEngine = struct {
     clock_zone: ?*ZoneRuntime = null,
     scratch: [frames_per_block * max_channels]f32 = undefined,
     elapsed_ns: u64 = 0,
+    last_pass_ns: u64 = 0,
     last_telemetry_ns: u64 = 0,
+    hinted_frames: u64 = 0,
+    hint_owed: bool = false,
     passes: u64 = 0,
     /// A successor whose canonical format does not match the current source, so
     /// it could not be primed gaplessly. It is held here, already opened, until
@@ -145,6 +150,7 @@ pub const PlayerEngine = struct {
     /// Control lane. Only legal once the engine thread has been joined.
     pub fn destroy(self: *PlayerEngine) void {
         std.debug.assert(!self.running.load(.acquire));
+        self.threaded.deinit();
         self.allocator.destroy(self);
     }
 
@@ -170,8 +176,19 @@ pub const PlayerEngine = struct {
         self.awaitAcknowledgement();
     }
 
+    /// Any thread. Every write the engine should act on must precede this.
     pub fn wakeUp(self: *PlayerEngine) void {
-        self.wake.store(true, .release);
+        _ = self.wake.fetchAdd(1, .release);
+        self.threaded.io().futexWake(u32, &self.wake.raw, 1);
+    }
+
+    pub fn waker(self: *PlayerEngine) work.Waker {
+        return .{ .context = self, .wake_fn = wakeFromWaker };
+    }
+
+    fn wakeFromWaker(context: *anyopaque) callconv(.c) void {
+        const self: *PlayerEngine = @ptrCast(@alignCast(context));
+        self.wakeUp();
     }
 
     /// Control lane. Blocks until the engine is provably outside its pass body,
@@ -241,17 +258,33 @@ pub const PlayerEngine = struct {
     /// and `destroyPlayer` cancel and join it rather than abandoning it.
     pub fn run(self: *PlayerEngine) void {
         const registration = self.registration.?;
+        const io = self.threaded.io();
         self.running.store(true, .seq_cst);
-        while (!registration.cancellationRequested()) {
-            if (!self.suspend_requested.load(.seq_cst)) self.pass();
+        var clock = std.Io.Clock.awake.now(io);
+        while (true) {
+            // Read before anything the pass reads, so a wake that lands after
+            // it makes the park return at once instead of being lost.
+            const seen = self.wake.load(.acquire);
+            if (registration.cancellationRequested()) break;
+            var idle = false;
+            if (!self.suspend_requested.load(.seq_cst)) {
+                self.pass();
+                idle = self.isIdle();
+            }
             _ = self.pass_epoch.fetchAdd(1, .seq_cst);
-            self.park();
+            self.park(io, seen, idle);
+            const now = std.Io.Clock.awake.now(io);
+            self.elapsed_ns +|= std.math.lossyCast(u64, clock.durationTo(now).toNanoseconds());
+            clock = now;
         }
         // A final adopt releases a control lane blocked in awaitAcknowledgement,
         // and silencing leaves any still-open output emitting zeros rather than
         // whatever it last had queued.
         self.adoptZones();
-        for (self.adopted) |runtime_zone| runtime_zone.silenced.store(true, .release);
+        for (self.adopted) |runtime_zone| {
+            runtime_zone.silenced.store(true, .release);
+            watchOutput(runtime_zone, null);
+        }
         self.releasePending();
         self.running.store(false, .release);
         registration.finish();
@@ -261,6 +294,8 @@ pub const PlayerEngine = struct {
     /// deterministically, with no thread and no sleeping.
     pub fn pass(self: *PlayerEngine) void {
         self.passes += 1;
+        const since_last_pass_ns = self.elapsed_ns - self.last_pass_ns;
+        self.last_pass_ns = self.elapsed_ns;
         self.adoptZones();
         const zones = self.adopted;
         const silenced = self.player.silenced.load(.acquire);
@@ -276,9 +311,46 @@ pub const PlayerEngine = struct {
         // handed PCM in a layout it cannot render.
         self.reopenOnFormatChange(zones, format);
         self.pump(zones, format);
-        self.serviceOutputs(zones, format);
+        self.serviceOutputs(zones, format, since_last_pass_ns);
         self.publishPosition(zones);
         self.publishDrained(zones);
+    }
+
+    /// Engine thread, after a pass: whether the next pass would do nothing
+    /// until the control lane, an output or cancellation wakes the engine.
+    fn isIdle(self: *const PlayerEngine) bool {
+        if (self.player.pending_seek != null or self.pending_source != null) return false;
+        if (self.player.state.load(.acquire) == .playing and !self.queueFinished()) return false;
+        if (self.hint_owed) return false;
+        const format = self.player.format();
+        for (self.adopted) |runtime_zone| {
+            if (!self.zoneSettled(runtime_zone, format)) return false;
+        }
+        return true;
+    }
+
+    fn queueFinished(self: *const PlayerEngine) bool {
+        if (!self.player.drained.load(.acquire)) return false;
+        const queue = self.queue orelse return true;
+        if (self.opener == null) return true;
+        if (self.consecutive_open_failures >= max_consecutive_open_failures) return true;
+        return queue.followingPosition() == null;
+    }
+
+    /// Whether `serviceOutputs` would leave this Zone as it is, and its render
+    /// callback consumes nothing the engine would have to reclaim or refill.
+    fn zoneSettled(self: *const PlayerEngine, runtime_zone: *ZoneRuntime, format: ?pcm.Format) bool {
+        if (!runtime_zone.output_requested.load(.acquire)) return runtime_zone.output == null;
+        if (runtime_zone.output) |active| {
+            if (active.status() != .active or runtime_zone.zone.output_state != .active) return false;
+            if (format) |value| {
+                if (runtime_zone.outputFormatChanged(value)) return false;
+            }
+            return runtime_zone.silenced.load(.acquire) or runtime_zone.quiescent();
+        }
+        if (self.factory == null or format == null) return true;
+        return runtime_zone.zone.output_state == .failed and
+            runtime_zone.zone.recovery_attempts >= zone_runtime.max_recovery_attempts;
     }
 
     /// Drops a successor the engine opened but never handed to the Player.
@@ -463,7 +535,19 @@ pub const PlayerEngine = struct {
         const sequence = published >> 32;
         if (sequence == self.adopted_sequence) return;
         const slot: usize = @intCast(published & 0xffff_ffff);
-        self.adopted = self.slots[slot][0..self.slot_lens[slot]];
+        const adopting = self.slots[slot][0..self.slot_lens[slot]];
+        // An output can outlive this engine and move to another one, so a Zone
+        // leaving the set stops waking this engine before the control lane,
+        // which may free the engine next, sees the acknowledgement.
+        for (self.adopted) |runtime_zone| {
+            if (std.mem.indexOfScalar(*ZoneRuntime, adopting, runtime_zone) == null)
+                watchOutput(runtime_zone, null);
+        }
+        for (adopting) |runtime_zone| {
+            if (std.mem.indexOfScalar(*ZoneRuntime, self.adopted, runtime_zone) == null)
+                watchOutput(runtime_zone, self.waker());
+        }
+        self.adopted = adopting;
         self.adopted_sequence = sequence;
         self.ack.store(sequence, .release);
     }
@@ -540,8 +624,14 @@ pub const PlayerEngine = struct {
     /// Opens, polls and recovers each Zone's output. Stream creation and
     /// destruction stay on this control-side lane; the render callback only ever
     /// consumes prepared blocks.
-    fn serviceOutputs(self: *PlayerEngine, zones: []*ZoneRuntime, format: ?pcm.Format) void {
+    fn serviceOutputs(
+        self: *PlayerEngine,
+        zones: []*ZoneRuntime,
+        format: ?pcm.Format,
+        since_last_pass_ns: u64,
+    ) void {
         const factory = self.factory orelse return;
+        for (zones) |runtime_zone| runtime_zone.recovery_wait_ns -|= since_last_pass_ns;
         for (zones) |runtime_zone| {
             if (!runtime_zone.output_requested.load(.acquire)) {
                 if (runtime_zone.output != null) {
@@ -595,10 +685,7 @@ pub const PlayerEngine = struct {
                     }
                     continue;
                 }
-                if (runtime_zone.recovery_wait_ns > 0) {
-                    runtime_zone.recovery_wait_ns -|= park_ns;
-                    continue;
-                }
+                if (runtime_zone.recovery_wait_ns > 0) continue;
                 runtime_zone.zone.beginRecovery();
             } else if (runtime_zone.zone.output_state != .opening) {
                 runtime_zone.zone.beginOpen(runtime_zone.requested_device_id.load(.acquire));
@@ -618,6 +705,7 @@ pub const PlayerEngine = struct {
                 runtime_zone.publishState();
                 continue;
             };
+            watchOutput(runtime_zone, self.waker());
             runtime_zone.stalled_passes = 0;
             if (runtime_zone.output.?.latency(
                 @intCast(runtime_zone.blockBudget() * frames_per_block),
@@ -645,6 +733,7 @@ pub const PlayerEngine = struct {
     /// Derives authoritative position from the clock Zone and publishes a
     /// coalesced hint. Snapshots stay authoritative; this channel is a hint.
     fn publishPosition(self: *PlayerEngine, zones: []*ZoneRuntime) void {
+        self.hint_owed = false;
         // A gapless transition swaps `SourceQueue.current` inside the decode
         // lane, so the source's shape has to be republished from here rather
         // than only where a source is loaded.
@@ -715,13 +804,16 @@ pub const PlayerEngine = struct {
         self.player.publishSourceInfo();
         if (self.queue) |queue| queue.observeRenderedSerial(serial);
 
+        const telemetry = self.telemetry orelse return;
+        self.hint_owed = frames != self.hinted_frames;
         if (self.elapsed_ns -| self.last_telemetry_ns < telemetry_interval_ns) return;
         self.last_telemetry_ns = self.elapsed_ns;
-        const telemetry = self.telemetry orelse return;
         telemetry.publish(.{ .player_position = .{
             .player = self.handle,
             .frames = frames,
-        } }) catch {};
+        } }) catch return;
+        self.hinted_frames = frames;
+        self.hint_owed = false;
     }
 
     fn publishDrained(self: *PlayerEngine, zones: []*ZoneRuntime) void {
@@ -743,21 +835,18 @@ pub const PlayerEngine = struct {
         self.player.drained.store(true, .release);
     }
 
-    fn park(self: *PlayerEngine) void {
-        if (self.wake.swap(false, .acq_rel)) return;
-        sleepNanoseconds(park_ns);
-        // Wall-clock is only needed for cadence, so it is accumulated from the
-        // parks actually taken rather than reading a clock every pass.
-        self.elapsed_ns += park_ns;
+    fn park(self: *PlayerEngine, io: std.Io, seen: u32, idle: bool) void {
+        const timeout: std.Io.Timeout = if (idle) .none else .{ .duration = .{
+            .raw = .fromNanoseconds(park_ns),
+            .clock = .awake,
+        } };
+        io.futexWaitTimeout(u32, &self.wake.raw, seen, timeout) catch {};
     }
 };
 
-fn sleepNanoseconds(nanoseconds: u64) void {
-    const duration: std.c.timespec = .{
-        .sec = @intCast(nanoseconds / std.time.ns_per_s),
-        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
-    };
-    _ = std.c.nanosleep(&duration, null);
+fn watchOutput(runtime_zone: *ZoneRuntime, waker: ?work.Waker) void {
+    const active = runtime_zone.output orelse return;
+    active.setStateWaker(waker);
 }
 
 // ---------------------------------------------------------------------- tests
@@ -823,6 +912,7 @@ const Harness = struct {
             .factory = self.backend.factory(),
         });
         self.engine.registration = &self.registration;
+        self.registration.waker = self.engine.waker();
         return self;
     }
 
@@ -1128,6 +1218,98 @@ test "a control lane that quiesces back to back still lets the engine run" {
     try std.testing.expect(harness.engine.passes >= suspensions);
 }
 
+fn awaitPassEpoch(engine: *const PlayerEngine, target: u64) !void {
+    for (0..5_000) |_| {
+        if (engine.pass_epoch.load(.seq_cst) >= target) return;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.EngineNeverPassed;
+}
+
+fn awaitOutputState(runtime_zone: *const ZoneRuntime, state: zone_model.OutputState) !void {
+    for (0..5_000) |_| {
+        if (runtime_zone.outputState() == state) return;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.OutputStateNeverReached;
+}
+
+test "an idle engine makes no pass in 200 ms and resumes on wakeUp" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    defer {
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+
+    try awaitPassEpoch(harness.engine, 1);
+    const parked = harness.engine.pass_epoch.load(.seq_cst);
+    try std.testing.io.sleep(.fromMilliseconds(200), .awake);
+    try std.testing.expectEqual(parked, harness.engine.pass_epoch.load(.seq_cst));
+
+    harness.engine.wakeUp();
+    try awaitPassEpoch(harness.engine, parked + 1);
+}
+
+test "quiesce returns against a parked engine" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    defer {
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    try awaitPassEpoch(harness.engine, 1);
+    const parked = harness.engine.pass_epoch.load(.seq_cst);
+
+    harness.engine.quiesce();
+    try std.testing.expect(harness.engine.pass_epoch.load(.seq_cst) >= parked + 2);
+    harness.engine.release();
+}
+
+test "cancellation wakes a parked engine" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    errdefer {
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    try awaitPassEpoch(harness.engine, 1);
+
+    harness.registration.requestCancellation();
+    harness.registration.awaitCompletion();
+    try std.testing.expect(!harness.engine.running.load(.acquire));
+}
+
+test "a lost output wakes a parked engine, which recovers it" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    defer {
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+        runtime_zone.closeOutput();
+        runtime_zone.resetPipe();
+    }
+
+    try awaitOutputState(runtime_zone, .active);
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    try awaitOutputState(runtime_zone, .lost);
+    try awaitOutputState(runtime_zone, .active);
+    try std.testing.expectEqual(@as(usize, 2), harness.backend.opens);
+}
+
 // -------------------------------------------------------------- queue tests
 
 /// Opens a synthetic track per id. Stands in for `TrackSourceOpener` so the
@@ -1231,6 +1413,7 @@ const QueueHarness = struct {
             .opener = self.test_opener.opener(),
         });
         self.engine.registration = &self.registration;
+        self.registration.waker = self.engine.waker();
         self.runtime_zone = try openZone(allocator);
         try self.engine.publishZones(&.{self.runtime_zone});
         return self;
@@ -1697,4 +1880,73 @@ test "a decoder that fails mid-entry ends the entry instead of stalling the queu
     try std.testing.expect(harness.engine.decode_errors > 0);
     try std.testing.expectEqual(@as(u64, 1), harness.engine.entries_started);
     try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+}
+
+test "an engine is idle only once a pass has nothing left to do" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block },
+    });
+    defer harness.deinit();
+    harness.step(0);
+    try std.testing.expect(harness.engine.isIdle());
+
+    try harness.enqueue(&.{10});
+    harness.player.play();
+    harness.step(0);
+    try std.testing.expect(!harness.engine.isIdle());
+
+    var pass: usize = 0;
+    while (pass < 256 and !harness.player.drained.load(.acquire)) : (pass += 1)
+        harness.step(frames_per_block);
+    try std.testing.expect(harness.player.drained.load(.acquire));
+    try std.testing.expect(harness.engine.isIdle());
+}
+
+test "a parked engine services a seek issued while its Player is paused" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 64 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames },
+        .{ .track_id = 11, .frames = entry_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    var pass: usize = 0;
+    while (pass < 512) : (pass += 1) {
+        harness.step(32);
+        if (harness.queue.cursorPosition() != 0) break;
+        if (harness.player.entrySerial() != harness.player.audible_entry_serial.load(.acquire))
+            break;
+    }
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    harness.player.pause();
+    harness.step(0);
+    try std.testing.expect(harness.engine.isIdle());
+
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    defer {
+        harness.registration.requestCancellation();
+        harness.registration.awaitCompletion();
+    }
+    try awaitPassEpoch(harness.engine, 1);
+
+    const target: u64 = 8 * frames_per_block;
+    harness.engine.quiesce();
+    _ = try harness.player.seek(target);
+    try std.testing.expect(harness.player.pending_seek != null);
+    harness.engine.release();
+
+    for (0..5_000) |_| {
+        if (harness.queue.decodePosition() == 0) break;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+    harness.engine.quiesce();
+    defer harness.engine.release();
+    try std.testing.expect(harness.player.pending_seek == null);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
+    try std.testing.expectEqual(target, harness.player.snapshot().position_frames);
 }
