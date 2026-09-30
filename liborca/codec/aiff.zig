@@ -28,12 +28,13 @@ const Context = struct {
     position: u64 = 0,
 };
 
-const scratch_frames = 4096;
+const max_scratch_frames = 4096;
 
 pub fn openDecoder(allocator: std.mem.Allocator, source: storage.ReadableSource) !decoder_api.Decoder {
     const layout = try readLayout(source);
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
+    const scratch_frames: usize = @intCast(@max(1, @min(max_scratch_frames, layout.frames)));
     const scratch = try allocator.alloc(u8, try std.math.mul(usize, scratch_frames, layout.format.bytes_per_frame));
     errdefer allocator.free(scratch);
     context.* = .{ .allocator = allocator, .source = source, .layout = layout, .scratch = scratch };
@@ -151,7 +152,7 @@ fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
     const layout = context.layout;
     const channels = layout.format.channels;
     const remaining = layout.frames -| context.position;
-    const frames: usize = @intCast(@min(remaining, output.len / channels, scratch_frames));
+    const frames: usize = @intCast(@min(remaining, output.len / channels, context.scratch.len / layout.format.bytes_per_frame));
     if (frames == 0) return 0;
     const bytes = context.scratch[0 .. frames * layout.format.bytes_per_frame];
     const offset = layout.data_offset + context.position * layout.format.bytes_per_frame;

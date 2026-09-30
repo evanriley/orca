@@ -20,7 +20,8 @@ pub fn openDecoder(
     const reader = try Reader.open(source);
     const context = try allocator.create(DecoderContext);
     errdefer allocator.destroy(context);
-    const scratch_len = try std.math.mul(usize, 4096, reader.format.bytes_per_frame);
+    const scratch_frames: usize = @intCast(@max(1, @min(4096, reader.frameCount())));
+    const scratch_len = try std.math.mul(usize, scratch_frames, reader.format.bytes_per_frame);
     const scratch = try allocator.alloc(u8, scratch_len);
     errdefer allocator.free(scratch);
     context.* = .{ .allocator = allocator, .reader = reader, .scratch = scratch };

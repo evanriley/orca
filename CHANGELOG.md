@@ -16,6 +16,9 @@
   (`liborca/fuzz.zig`). `zig build test` replays their seeds, including every
   input under `fixtures/fuzz/`; `zig build fuzz --fuzz[=N]` fuzzes them. A
   single allocation above the largest designed bound fails the input.
+- **WAV and AIFF size their read buffer by the frames the file holds.** A
+  header declaring thousands of channels made the decoder allocate 4,096
+  frames of them, 256 MiB for a 41-byte file.
 
 ## 0.2.0 - 2026-09-29
 
