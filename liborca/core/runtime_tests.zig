@@ -2052,6 +2052,7 @@ test "a scan of a root no longer on its recorded volume fails and marks nothing 
     try std.testing.expectEqual(@as(u64, 1), stats.errors);
     try std.testing.expectEqual(@as(u64, 0), stats.files_seen);
     try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
+    try std.testing.expect(stats.volume_changed);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
 }
 
@@ -2066,5 +2067,6 @@ test "a subtree reconcile of a root no longer on its recorded volume fails and m
     try std.testing.expectEqual(job.State.failed, outcome.state);
     try std.testing.expectEqual(@as(u64, 1), outcome.stats.errors);
     try std.testing.expectEqual(@as(u64, 0), outcome.stats.marked_missing);
+    try std.testing.expect(outcome.stats.volume_changed);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
 }

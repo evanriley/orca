@@ -293,6 +293,9 @@ pub const ScanStats = struct {
     releases_written: u64 = 0,
     /// Locations the job's completed walks no longer found.
     marked_missing: u64 = 0,
+    /// A root was not walked because it is no longer on the volume the
+    /// Library recorded for it, as when its drive is not mounted.
+    volume_changed: bool = false,
 };
 
 /// The same counters as the worker publishes them: monotonic atomics, so the
@@ -1088,7 +1091,11 @@ pub const JobWorker = struct {
 
     pub fn scanStats(self: *const JobWorker) ScanStats {
         return switch (self.stats) {
-            .scan => |*stats| stats.read(self.progress.load(.acquire)),
+            .scan => |*stats| stats: {
+                var read = stats.read(self.progress.load(.acquire));
+                read.volume_changed = self.volume_changed.load(.acquire);
+                break :stats read;
+            },
             .duplicates => |*stats| stats.read(self.progress.load(.acquire)).scanStats(),
             .matching => .{},
             .submission => |*stats| .{ .cancelled = stats.cancelled.load(.acquire) },

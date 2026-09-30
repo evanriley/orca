@@ -17,6 +17,7 @@ fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.TrackNotFound => "no track with that id",
         error.UnknownRoot => "no folder with that id",
+        error.RootVolumeChanged => "the folder is not on the drive it was added from, so nothing was scanned; mount that drive, or run add-root to accept the drive it is on now",
         error.OpenFailed => "could not open the database",
         error.InvalidCharacter, error.Overflow => "expected a number",
         error.UnknownOption => "unknown option",
@@ -111,6 +112,7 @@ const commands = [_]Command{
     .{ .name = "analyze-library", .usage = "analyze-library DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = analyzeLibrary },
     .{ .name = "duplicates", .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = findDuplicates },
     .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
+    .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
     .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
     .{ .name = "health", .usage = "health DATABASE [OFFSET]", .min_arguments = 1, .max_arguments = 2, .run = listHealthIssues },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
@@ -334,27 +336,60 @@ fn runDemo(context: Context) !void {
     }
 }
 
-/// The same path the C ABI exposes: register the root, start the scan as a
-/// runtime job on a registered worker, and poll it. The scan projects as it
-/// commits, which is why there is no separate projection step here.
+/// The same path the C ABI exposes: register the root unless it already is,
+/// start the scan as a runtime job on a registered worker, and poll it. The
+/// scan projects as it commits, which is why there is no separate projection
+/// step here.
 fn scanRoot(context: Context) !void {
     const stdout = context.stdout;
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    // Adding a root is an explicit user action, so this is the one place
-    // allowed to write a volume identifier to a mount root that has no
-    // filesystem UUID of its own.
-    const binding = try runtime.libraryAddRoot(library_handle, context.io, context.arguments[1]);
-    if (binding.claimed_locations != 0) try stdout.print(
+    // Re-adding a registered root would rebind it to whatever volume its path
+    // is on now, so an unmounted drive's empty mount point would pass the
+    // volume check and the scan would mark every file under it missing.
+    const root_id = try registeredRootId(&runtime, library_handle, context.arguments[1]) orelse
+        (try bindRoot(&runtime, library_handle, context)).root_id;
+    const job_handle = try runtime.startLibraryScan(library_handle, .{ .root_id = root_id });
+    awaitJob(&runtime, stdout, job_handle, null) catch |err| {
+        if (err == error.JobFailed and (try runtime.jobScanStats(job_handle)).volume_changed)
+            return error.RootVolumeChanged;
+        return err;
+    };
+    try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+fn addRoot(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const binding = try bindRoot(&runtime, library_handle, context);
+    try context.stdout.print("root {d} on volume {d}\n", .{ binding.root_id, binding.volume_id });
+}
+
+/// Adding a root is an explicit user action, so this is the one path allowed
+/// to write a volume identifier to a mount root that has no filesystem UUID
+/// of its own, and to bind an existing root to the volume it is on now.
+fn bindRoot(
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    context: Context,
+) !liborca.RootBinding {
+    const binding = try runtime.libraryAddRoot(library, context.io, context.arguments[1]);
+    if (binding.claimed_locations != 0) try context.stdout.print(
         "claimed {d} migrated locations for volume {d}\n",
         .{ binding.claimed_locations, binding.volume_id },
     );
-    const job_handle = try runtime.startLibraryScan(library_handle, .{
-        .root_id = binding.root_id,
-    });
-    try awaitJob(&runtime, stdout, job_handle, null);
-    try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+    return binding;
+}
+
+fn registeredRootId(runtime: *liborca.Runtime, library: liborca.LibraryHandle, path: []const u8) !?i64 {
+    var page = try runtime.libraryRootPage(library, 512, 0);
+    defer page.deinit();
+    for (page.items) |root| {
+        if (std.mem.eql(u8, root.path, path)) return root.id;
+    }
+    return null;
 }
 
 /// Walks a registered root, or only the given directories under it, and marks

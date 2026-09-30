@@ -157,11 +157,15 @@ lies on now and compares it with the volume the root was bound to
   identity and always passes.
 
 A root that fails the check is neither walked nor swept: the job counts one
-error, ends `failed`, and marks nothing `missing`. Other roots of the same
-scan are still walked. The check runs for `startLibraryScan`,
-`startLibraryReconcile` and automatic reconciles; `orca-cli scan DATABASE
-ROOT` first adds the root again, which binds it to whatever volume its path
-resolves to, so only an already registered root is protected there.
+error, ends `failed`, sets `ScanStats.volume_changed`, and marks nothing
+`missing`. Other roots of the same scan are still walked. The check runs for
+`startLibraryScan`, `startLibraryReconcile` and automatic reconciles.
+
+`libraryAddRoot` is the one path that binds an existing root to the volume
+its path is on now, which is how a replacement drive at the same path is
+accepted. `orca-cli scan DATABASE ROOT` therefore scans a registered root by
+its id without adding it again, and fails with a message when the check
+fails; `orca-cli add-root DATABASE ROOT` rebinds it explicitly.
 
 ## Repairing properties without a walk
 

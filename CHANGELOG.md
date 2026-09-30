@@ -50,6 +50,10 @@
   root's path still resolves to the volume the root was recorded on; a root
   that does not is neither walked nor swept, and the job ends `failed`. A
   watched root that fails the check is reported unavailable until it is back.
+  `orca-cli scan` no longer re-adds a registered root, which rebound it to
+  the volume its path is on now and so bypassed the check; `orca-cli
+  add-root DATABASE ROOT` rebinds a root explicitly, and
+  `ScanStats.volume_changed` reports the failure.
 
 - **Two scans of one Library could mark present files missing.** A second
   scan or reconcile of a Library while one runs is now refused with
