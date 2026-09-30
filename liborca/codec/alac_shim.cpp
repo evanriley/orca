@@ -16,6 +16,8 @@ struct orca_alac_decoder {
     uint32_t bit_depth;
 };
 
+static const uint32_t max_frame_length = 65536;
+
 static uint32_t bytes_per_sample(uint32_t bit_depth)
 {
     return bit_depth == 16 ? 2 : bit_depth == 32 ? 4 : 3;
@@ -47,7 +49,8 @@ extern "C" struct orca_alac_decoder *orca_alac_decoder_create(const uint8_t *con
     self->frame_length = stream.frameLength;
     self->channels = stream.numChannels;
     self->bit_depth = stream.bitDepth;
-    if (self->channels == 0 || self->frame_length == 0 ||
+    if (self->channels == 0 || self->channels > kALACMaxChannels || self->frame_length == 0 ||
+        self->frame_length > max_frame_length ||
         (self->bit_depth != 16 && self->bit_depth != 20 && self->bit_depth != 24 &&
          self->bit_depth != 32)) {
         self->~orca_alac_decoder();

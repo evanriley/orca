@@ -19,6 +19,9 @@
 - **WAV and AIFF size their read buffer by the frames the file holds.** A
   header declaring thousands of channels made the decoder allocate 4,096
   frames of them, 256 MiB for a 41-byte file.
+- **ALAC rejects a configuration of more than 8 channels or 65,536 frames per
+  packet.** The decoder's buffers were sized from the declared frame length,
+  so a crafted cookie could demand gigabytes.
 
 ## 0.2.0 - 2026-09-29
 
