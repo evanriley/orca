@@ -26,7 +26,9 @@ frontends, no frontend owning behaviour.
   another language.
 - **Non-Zig clients** use the C ABI in `liborca/orca.h`: opaque runtime
   ownership, generational handles, plain-data snapshots and callback-scoped
-  query views. Only the macOS app needs it, because AppKit requires Swift.
+  query views. Only the macOS app needs it, because AppKit requires Swift; that
+  app is not built against the current ABI (see
+  [frontends.md](frontends.md#macos-swiftui)).
 - **Frontends own presentation only**: windows, widgets, accessibility, event
   loops and OS media-control glue. Transport state, library paging, metadata
   resolution and file mutation belong to `liborca`.

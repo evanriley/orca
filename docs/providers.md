@@ -19,10 +19,34 @@ not a tuning choice.
 - **Rate.** At most one request per second per service. The gateway honours
   `X-RateLimit-Remaining` and `X-RateLimit-Reset-In` when a response carries
   them, and waits out the window instead of sending into it.
-- **429.** A `429` blocks every request to the service until the longer of
-  its `Retry-After` or `X-RateLimit-Reset-In` and a backoff of 60 s, doubling
-  per repeated refusal up to 1 h; the two are not added. One success resets
-  the backoff.
+- **429 and 503.** A `429`, or a `503` with a `Retry-After`, blocks every
+  request to the service until the latest of its `Retry-After`, its
+  `X-RateLimit-Reset-In` and a backoff of 60 s, doubling per repeated refusal
+  up to 1 h; they are not added. One success resets the backoff. A `503`
+  without `Retry-After` goes back to the caller as a failure.
+- **`Retry-After` in full.** `Retry-After` is read as delay-seconds or as an
+  HTTP-date in the IMF-fixdate form (`Wed, 21 Oct 2026 07:28:00 GMT`) and is
+  honoured however long it is. A value in neither form is ignored, and a date
+  already past adds nothing to the backoff. `X-RateLimit-Reset-In` counts
+  for at most 1 h.
+- **Blocks outlive the process.** Each service's block and backoff are kept
+  in the Library (`provider_state`) in wall-clock time. Every Gateway over
+  that Library reads them before a request, so a restarted or second process
+  obeys a block another one received. Libraries do not share blocks.
+- **One process per service.** Before each request a Gateway claims the
+  service's lease in the Library (`provider_leases`) for 120 s, and it
+  releases the lease when its job ends. While another process holds the
+  lease, the request fails with `error.ProviderBusy` without being sent. A
+  matching or submission job then fails and names the busy service
+  (`MatchStats.busy`, `SubmissionOutcome.busy`); the listen worker reports
+  `busy` and tries again 120 s later; `orca-cli` prints, for example,
+  `MusicBrainz is in use by another Orca process`. The lease of a process
+  that crashed is free 120 s after its last request.
+- **Jitter.** Every backoff Orca chooses lasts a random 0.5 to 1.5 times its
+  nominal length: the retries inside a call, the rate-limit backoff,
+  ListenBrainz delivery's backoff, and the waits of matching and submission.
+  Processes that failed together therefore do not retry together. A time the
+  server gave is never shortened.
 - **No retries inside a call.** By default (`Config.maximum_attempts = 1`) a
   request is made once. A failure goes back to the caller, which retries on
   its own schedule. The gateway has a 30 s
@@ -106,9 +130,15 @@ than an event.
 An eligible listen is stored with a `scrobble_queue` row in one transaction.
 The worker leases rows (`lease_owner`, `lease_expires_at`), sends them, and
 marks them delivered, rejected or, on a transient failure, pending again with
-a later attempt time. A lease that outlives a crashed worker expires and is
-reclaimed, and a result from a worker that lost its lease is discarded. Queue
-states are pending, leased, delivered and rejected.
+a later attempt time. A transient failure is a `429`, a `5xx`, a timeout or a
+network error: each unsent listen gets the end of the block or backoff it
+started as its `next_attempt_at`, and the backoff also blocks the service in
+`provider_state`, so a restarted or second process sends nothing before then.
+Listens of a request that was never sent (offline, canceled, the service busy)
+or whose token was refused go back to pending as they were. A lease that
+outlives a crashed worker expires and is reclaimed, and a result from a worker
+that lost its lease is discarded. Queue states are pending, leased, delivered
+and rejected.
 
 `libraryScrobblerStatus` reports the scrobbler's state:
 
@@ -123,12 +153,15 @@ states are pending, leased, delivered and rejected.
 | `rate_limited` | The service asked Orca to slow down. |
 | `backing_off` | The last request failed; the next attempt is scheduled. |
 | `offline` | Offline mode: listens stay queued and nothing is sent. |
+| `busy` | Another Orca process holds the service's lease; the worker tries again 120 s later. |
 
 The status also carries the user name of the last validated token, the number
 of pending listens, the number of love and hate changes waiting to be sent
-(`feedback_pending`), the total delivered, the time of the next attempt and the
-last error. A Library with no running worker reports both counts from its
-database.
+(`feedback_pending`), the total delivered, the time of the next attempt, the
+end of the service's block (`blocked_until`, Unix seconds) and the last error.
+A Library with no running worker reports both counts and the block from its
+database; `orca-cli scrobble --status` prints the block as `blocked_until=` in
+UTC.
 
 Each pass of the worker sends, in this order, at most one request of each kind
 and only while no request is held back: listens, then Now Playing, then one
@@ -227,9 +260,19 @@ what acceptance writes is in
 - **Failures.** A `429`, a `5xx` or a timeout waits out the longer of the
   service's block and a backoff of 60 s doubling per attempt, cancellably,
   then asks again. After three attempts, or at once when the network cannot
-  be reached, the job stops and reports `failed`. Cached answers are still
-  used without a network. A query refused with any other `4xx`, or answered
-  with something that is not a search result, is counted and skipped.
+  be reached or another process holds the service, the job stops and reports
+  `failed`. Cached answers are still used without a network. A query answered
+  with something that is not a search result is counted and skipped.
+- **Refused queries.** A query MusicBrainz or AcoustID refuses with a `4xx`
+  other than `401`, `403`, `408` and `429` is counted as refused and skipped,
+  and the refusal is cached in `provider_cache` with its status for 7 days.
+  Until then the query counts as refused without a request, and a cache hit;
+  afterwards it is asked again. When AcoustID refuses a batch of several
+  fingerprints, nothing is cached and each fingerprint is asked again in a
+  request of its own, through the same gateway and its request spacing; only
+  a refusal of a single fingerprint is cached. A refused key (AcoustID error codes
+  4 and 6) is not cached, and a cached refusal never stands in for an answer
+  while the service is down.
 - **One job at a time.** A second `startLibraryMatching` while one runs returns
   `error.MatchingAlreadyRunning`, and one while an AcoustID submission runs
   returns `error.AcoustIdBusy`, so each service sees one client and one
@@ -301,7 +344,14 @@ be identified. It is started only by a person; no job starts it.
 - **What is sent.** Files whose recording ID in effect is an Orca value from
   an accepted match or an edit, differs from the file's own tag, and has not
   been sent for that file. Tagged IDs are never sent. A file is sent once per
-  recording ID: after the ID is edited, the new ID is sent again.
+  recording ID: after the ID is edited, the new ID is sent again. An ID from
+  an accepted match is not sent when AcoustID was among the match's sources,
+  since AcoustID already knows it, or when the match was accepted by
+  `libraryAcceptConfidentMatches`: a match without AcoustID has no
+  fingerprint score, so a bulk acceptance of it rests on text alone. A match
+  accepted one at a time from MusicBrainz alone is sent, and so is an ID the
+  user edited, whatever proposed it. Matches accepted before library version
+  19 count as accepted one at a time.
   `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
   them without fingerprinting anything.
 - **ID or metadata.** When the file's length differs from the recording's by
@@ -324,7 +374,7 @@ be identified. It is started only by a person; no job starts it.
 - **Failures.** Another `4xx` rejects that batch: its files are counted in
   `rejected` and stay unsent. `429`, `5xx` and network errors use the same
   backoff as matching, and after three attempts the job fails with
-  `unavailable`.
+  `unavailable`. While another process holds AcoustID it fails with `busy`.
 - **Record.** Each accepted item's submission ID is stored in
   `acoustid_submissions` with the file and recording ID.
 

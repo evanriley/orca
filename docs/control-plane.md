@@ -41,7 +41,7 @@ answer "how many rows still owe work" with one indexed count before they start,
 so their snapshots carry a total and a host may show a fraction.
 
 Cancellation is not only a shutdown path. The library-wide analysis decodes
-whole files, so a run is measured in hours and stopping it is the ordinary way
+whole files, so a library-wide run is long and stopping it is the ordinary way
 to use it: the token is polled inside a decode, the batch already measured is
 still committed, and a later run selects only what is left. `docs/analysis.md`
 covers what that resumption is keyed on.

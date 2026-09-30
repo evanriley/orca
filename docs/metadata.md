@@ -3,8 +3,8 @@
 Orca keeps three concepts separate:
 
 - `ObservedFileMetadata` records what a source file currently says.
-- `OrcaMetadata` records preferred values, user edits, locks, and later provider
-  proposals without mutating that file.
+- `OrcaMetadata` records preferred values, user edits, locks, and accepted
+  provider matches without mutating that file.
 - `EffectiveMetadata` is a resolved view under an explicit preference policy.
 
 Every value carries provenance. A user-locked Orca value outranks automatic
@@ -17,9 +17,10 @@ preserves unknown comments and metadata blocks, and leaves audio frames
 byte-for-byte unchanged. Format-specific genre numbers, fixed-width storage,
 and comment keys do not define the canonical metadata model.
 
-Scanner observations are persisted in `observed_file_metadata`, keyed to the
-physical observed file record and updated in the same bounded transaction. They
-do not update Track metadata and never cause a source-file write.
+Scanner observations are persisted in `observed_file_tags`, one row per
+`files` row, with genres in `observed_file_genres`, and are updated in the same
+bounded transaction as the file row. They do not update Track metadata and
+never cause a source-file write.
 
 ## Library edits
 
@@ -29,11 +30,13 @@ touching their files. A set value is a locked `user` value in
 and every other encoding of its recording), so it outranks the files' tags and
 survives rescans; a cleared value lets the tags apply again. The edited files
 are reprojected before the call returns, which moves a Track to another Release
-or Artist when the edit says so. Editable fields are title, artist, album,
-album artist, track number, disc number, date and compilation, the fields the
-projection groups and orders by, and the MusicBrainz recording ID, which must
-be a lowercase UUID; `metadata.Field` appends new ones, because
-`orca_metadata_values.field` stores them by number. `orca-cli edit` drives it.
+or Artist when the edit says so. Editable fields are title, artist, album, album
+artist, track number, disc number, date and compilation, the fields the
+projection groups and orders by, and the MusicBrainz recording ID, which must be
+a lowercase UUID; `metadata.Field` appends new ones, because
+`orca_metadata_values.field` stores them by number. `orca-cli edit` and the
+`orca-gtk` tag editor drive it. Neither offers the recording ID; see
+[roadmap.md](roadmap.md#built-but-not-reachable).
 
 Writing those values back into the files is a separate, explicit mutation; see
 below.
@@ -55,7 +58,7 @@ listen subject and the three feedback queries all use it.
 `prefer_file` to the same values, which is the same order, for
 `TrackDetails.musicbrainz_recording_id` and its source: `tag`, `match` or
 `edit`. `orca-cli track` prints both. A file that gains a tag on a rescan
-therefore uses the tag at once, and matching no longer searches for it. A
+therefore uses the tag at once, and matching does not search for it. A
 recording ID from an accepted match or an edit, and never a tagged one, may be
 sent to AcoustID with the file's fingerprint; see
 [providers.md](providers.md#acoustid-submission).
@@ -109,34 +112,30 @@ different picture from the one the scan described.
 Both halves of each reader parse the frame or block through one function, so an
 observation and a fetch cannot disagree about which bytes are the image.
 
-- **The media type comes from the bytes, not from the claim.** 93 files in the
-  22,060-file reference library declare `image/jpg`, which is not a media type,
-  24 declare nothing at all, and one album's covers are 5.3 MB animated GIFs
-  behind an empty declaration. `EmbeddedImage.mime_type` is what the magic bytes
-  say; a payload that matches none of PNG, JPEG, GIF, WebP or BMP is refused as
-  `UnrecognizedArtworkImage` rather than passed to a platform image decoder.
-  `Artwork.mime_type`, being an observation, still records the claim.
+- **The media type comes from the bytes, not from the claim.** Real files
+  declare `image/jpg`, which is not a media type, or nothing at all, or an empty
+  declaration in front of an animated GIF. `EmbeddedImage.mime_type` is what the
+  magic bytes say; a payload that matches none of PNG, JPEG, GIF, WebP or BMP is
+  refused as `UnrecognizedArtworkImage` rather than passed to a platform image
+  decoder. `Artwork.mime_type`, being an observation, still records the claim.
 - **Bounded at 12 MiB, checked against the declaration.** The whole image is
   held in memory at once, so `model.max_image_bytes` is compared with the length
   a container declares *before* anything is allocated to honour it. The value
   sits below both containers' own ceilings — a FLAC `PICTURE` length is 24 bits
   and `id3v2.max_tag_bytes` is 16 MiB — because a bound above them could never
-  fire, and above every honest cover: the largest in the reference library is
-  11.29 MiB, the median is 157 KB.
-- **Read from the file, never stored and not cached.** 19,031 of the reference
-  library's 22,060 files carry a readable cover, totalling 6.09 GB. Storing
-  decoded images in the Library would multiply its size by roughly two hundred,
-  for data that already exists on disk and would go stale the moment a file is
-  re-tagged. Reading on demand costs one open and one read, and it is right by
-  construction — a track whose stored observation predates the current reader
-  still yields its cover, because the row is not consulted.
-- **There is no cache yet, deliberately.** A bounded per-Release cache is the
-  obvious next step and is measurably cheaper than a per-Track one, since an
-  album's tracks share one cover. It is not here because nothing needs it: the
-  only consumer is the now-playing widget, which loads one image per track
-  change — minutes apart. Adding a correct, bounded, invalidated cache with no
-  caller is precisely the shape of defect this codebase is recovering from. Add
-  it with the grid view that needs it.
+  fire, and above every honest cover.
+- **Read from the file, never stored in the Library.** Storing images in the
+  Library would multiply its size by orders of magnitude, for data that already
+  exists on disk and would go stale the moment a file is re-tagged. Reading on
+  demand costs one open and one read, and it is right by construction — a track
+  whose stored observation predates the current reader still yields its cover,
+  because the row is not consulted.
+- **liborca keeps no image cache.** `Runtime.libraryRequestArtwork` queues a
+  request on the Library's artwork loader (`core/artwork.zig`), which reads
+  covers on its own thread with at most `artwork.capacity` requests
+  outstanding; the host collects results with `Runtime.libraryTakeArtwork`.
+  Keeping decoded images is the host's concern: `orca-gtk` holds a bounded set
+  of textures in `apps/linux/art.zig`.
 
 ### What a Release's artwork is
 
@@ -173,9 +172,9 @@ another through an alias it still holds.
 Identity is `(size, modified_ns, quick_hash)`, where `quick_hash` is the
 storage-wide definition — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size), in
 `storage/quick_hash.zig` — so a same-size edit that preserves the modification
-time is still detected. The mutation journal can persist only size and
-modification time under the current schema, so recovery compares
-`FileIdentity.Journaled`; in-process checks always compare the full identity.
+time is still detected. The mutation journal persists the full identity, so
+recovery compares the same `FileIdentity` an in-process check does; see
+[database.md](database.md).
 
 Every action of a group is journaled before any filesystem work begins, and
 journal writes raise SQLite durability for their own transaction, so a group is
@@ -280,7 +279,8 @@ and why, and the plan's ID and digest:
 
 - `missing`: no present location to write to.
 - `format_not_writable`: no writer for the sniffed format yet. FLAC, MP3 and
-  ADTS are written; M4A, Ogg, WAV and AIFF are not.
+  ADTS are written; M4A, Ogg, WAV and AIFF are not, and neither is a FLAC
+  stream behind a leading ID3v2 tag.
 - `changed_since_scan`: the file's identity no longer matches the last scan,
   so the plan would describe tags the file no longer has. Rescan first.
 

@@ -199,7 +199,9 @@ which reaches GTK where transient virtual pointers do not. Use
 single command, as `wlrctl`'s do.
 
 macOS: `zig build` first, then build `apps/macos` with SwiftPM — it links
-`zig-out/lib/liborca` through a systemLibrary modulemap.
+`zig-out/lib/liborca` through a systemLibrary modulemap. The SwiftUI client is
+not built or tested against the current C ABI, and liborca has no macOS audio
+output (`docs/roadmap.md`, Later).
 
 Live/host-dependent checks, excluded from the normal test run:
 
@@ -251,8 +253,8 @@ invocation, including throwaway checks.
 
 ### Running a single test
 
-There is no test filter wired into `build.zig` — `zig build test` runs all ~400
-tests (it is fast and heavily cached, so this is usually fine). If you need
+There is no test filter wired into `build.zig` — `zig build test` runs every
+test (it is fast and heavily cached, so this is usually fine). If you need
 filtering, add `.filters` to the relevant `b.addTest` call rather than trying
 to invoke the test binary by hand; the `liborca` module needs translate-C
 SQLite, the `alac`, `libxaac` and `chromaprint` packages, libFLAC,
@@ -323,12 +325,15 @@ actually uses.
 
 ### Runtime ownership
 
-`Runtime` (`core.OrcaRuntime` inside liborca) is the process-level root. Every runtime-visible object is a
-typed generational handle (`handle.Pool`), so destroying an object bumps its
-slot generation and a stale handle can never resolve to a later occupant of the
-same slot. Shutdown is strictly dependency-ordered — work → Zones → Players →
-Libraries — and `deinit` always performs shutdown, idempotently. See
-`docs/ownership.md`.
+`Runtime` (`core.OrcaRuntime` inside liborca) is the process-level root. It is
+defined in `core/runtime.zig`; its methods delegate by area to
+`core/runtime_*.zig` (jobs, listens, queue, roots, status, zones), and
+`core/job_worker.zig` holds `JobWorker`, the thread behind each Job. Every
+runtime-visible object is a typed generational handle (`handle.Pool`), so
+destroying an object bumps its slot generation and a stale handle can never
+resolve to a later occupant of the same slot. Shutdown is strictly
+dependency-ordered — work → Zones → Players → Libraries — and `deinit` always
+performs shutdown, idempotently. See `docs/ownership.md`.
 
 Hosts drive a single logical control lane via a fixed-capacity command queue
 with request-ID-correlated completions. Completion events are lossless and
@@ -350,16 +355,16 @@ and counted as an underrun.
 Related invariants: transport state is independent of physical output (seeks
 publish a new **epoch**, and stale-epoch blocks are discarded rather than
 surgically removed from the queue). Track identity travels separately, as
-`entry_serial`, because the two questions are incompatible: "is this audio
-stale after a seek" must be compared, while "which track is this" must not be,
-or gapless breaks. What is *audible* is resolved from the entry serial the
-render callback publishes, never from the decode cursor, which runs a whole
-entry ahead of the audio; Players decode canonical PCM once and
-fanout copies it into independently owned Zone pools so one Zone's failure
-cannot starve another; processing chains are fixed-capacity and triple-buffered
-so the control lane publishes a prepared chain that the render lane adopts only
-at a block boundary. On Linux, PipeWire headers and native object lifetime stay
-inside a narrow C shim (`liborca/audio/backends/pipewire_shim.c`); stream
+`entry_serial`, because the two questions are incompatible: "is this audio stale
+after a seek" must be compared, while "which track is this" must not be, or
+gapless breaks. What is *audible* is resolved from the entry serial the render
+callback publishes, never from the decode cursor, which runs a whole entry ahead
+of the audio; Players decode canonical PCM once and fanout copies it into
+independently owned Zone pools so one Zone's failure cannot starve another; the
+Player's DSP chain runs on the engine thread before fanout, never in the
+callback, and the control lane changes its settings only while the engine is
+quiesced. On Linux, PipeWire headers and native object lifetime stay inside a
+narrow C shim (`liborca/audio/backends/pipewire_shim.c`); stream
 creation/destruction stays on the control side. Read `docs/audio-engine.md`
 before touching anything under `liborca/audio/`.
 
@@ -392,15 +397,15 @@ behind `codec/flac_shim.c` because the pure-Zig package that preceded it
 reconstructed mid-side stereo one LSB low, which made a lossless format lossy;
 see `docs/codecs.md`.
 
-Scanning is incremental and restart-resumable: unchanged path + storage
-identity skips all format/metadata work, commits are bounded, and cancellation
-is checked before filesystem work and between entries. Because only changed
-bytes are probed, a library scanned before probing existed keeps null
-properties for ever; `library/property_backfill.zig` repairs those rows by
-`files.id` with no walk, selected through a partial index over exactly the rows
-that are incomplete, and reprojects each batch it repairs. Filesystem watchers are
-an *acceleration only* — they emit bounded, coalescing, root-scoped hints and
-never directly insert, remove, or mutate observed state. See `docs/storage.md`.
+Scanning is incremental and restart-resumable: unchanged path + storage identity
+skips all format/metadata work, commits are bounded, and cancellation is checked
+before filesystem work and between entries. Because only changed bytes are
+probed, a row written without a probe keeps null properties for ever;
+`library/property_backfill.zig` repairs those rows by `files.id` with no walk,
+selected through a partial index over exactly the rows that are incomplete, and
+reprojects each batch it repairs. Filesystem watchers are an *acceleration only*
+— they emit bounded, coalescing, root-scoped hints and never directly insert,
+remove, or mutate observed state. See `docs/storage.md`.
 
 ### Metadata and file mutation
 
@@ -449,8 +454,9 @@ into Orca metadata that preserves user locks and does **not** write media files.
 - **Interfaces are context+vtable structs** (`ReadableSource`, `Transport`,
   `Clock`, `Decoder`) rather than generics, which keeps the C ABI and platform
   adapters possible.
-- **Inject time and I/O for determinism.** Provider and network tests supply a
-  `Mock` transport and `FakeClock` through those vtables — no live network, no
+- **Inject time and I/O for determinism.** Provider and network tests supply
+  `network.testing`'s `ScriptedTransport` and `TestClock`
+  (`liborca/network/testing.zig`) through those vtables — no live network, no
   wall-clock sleeps. Follow that pattern for anything with retry or rate-limit
   behavior.
 - **Platform code is contained.** `liborca/platform.zig` switches on

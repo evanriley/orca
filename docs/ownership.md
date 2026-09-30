@@ -34,16 +34,21 @@ SIGPIPE; deinitializing it restores the dispositions it found. A host sets its
 own dispositions for those signals before creating the runtime and leaves them
 unchanged while the runtime exists.
 
-Shutdown follows dependency order:
+Shutdown (`Runtime.shutdown` in `core/runtime.zig`) follows dependency order,
+work → Zones → Players → Libraries:
 
 1. Stop accepting commands and enter `shutting_down`.
-2. Request cancellation of all registered work — Player engine threads included
-   — and block until every worker has finished.
-3. Invalidate Zones, which depend on Players and output resources.
-4. Invalidate Players.
-5. Invalidate Libraries.
+2. End open listens, stop every Player's engine thread, cancel job workers and
+   all other registered work (listen workers, artwork loaders), and block until
+   every worker has finished. Then release the drained workers, discard tag
+   write plans awaiting approval, and cancel and drain Jobs.
+3. Destroy Zones, closing their output sessions; Zones depend on Players and
+   output resources.
+4. Free Players.
+5. Close each Library's database and release its listen state.
 6. Enter `stopped`; repeated shutdown calls are no-ops.
 
-Subsystem-owned values must release nested resources before their manager pool
-is deinitialized. The initial object values are resource-free manager skeletons;
-later phases will add explicit subsystem teardown at the same boundaries.
+Each step releases an object's nested resources before its handle pool discards
+the slot, and no object is freed while a worker that holds a pointer into it
+can still run. `deinit` runs `shutdown`, then frees the handle pools, the work
+registry and the network `std.Io`.

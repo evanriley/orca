@@ -14,9 +14,10 @@ scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
 submission. Filesystem watching is built but not connected. `liborca`
 builds for aarch64 macOS, but macOS has no audio output yet.
 
-The next milestone is correctness and maintenance, not features: provider
-state that is lost on restart, parser hardening and the size of `runtime.zig`
-come before filesystem watching.
+The next milestone is `liborca` as a library for others: a versioned shared
+library that exports only `orca_*` symbols, a stability statement, and the
+other host-facing pieces in step 1 of [Next](#next). Filesystem watching comes
+after it.
 
 ## Works today
 
@@ -73,6 +74,11 @@ come before filesystem watching.
   held in the Secret Service (`orca-gtk` Preferences > Listening) or read from
   `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
   [providers.md](providers.md).
+- Provider blocks and backoffs for ListenBrainz, MusicBrainz and AcoustID are
+  stored in the Library, so they persist across restarts and bind every
+  process using it, and a per-service lease lets one process at a time talk
+  to each service; another gets `ProviderBusy` without sending. See
+  [providers.md](providers.md#rules-toward-providers).
 - Love and hate for songs, kept in the Library per recording and sent to
   ListenBrainz while scrobbling for recordings with a MusicBrainz recording
   ID, from the file's tags or an accepted match. `orca-gtk` has a heart in the
@@ -103,10 +109,10 @@ come before filesystem watching.
   each proposal's source and AcoustID score on the Matches page and in the
   details panel.
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
-  files whose recording ID came from an accepted match or an edit, once per
-  file and ID, with the user key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk`
-  sends them from the Matches page's Submit to AcoustID, with the key saved
-  in Preferences > Library. See
+  files whose recording ID came from an edit or from a match accepted one at
+  a time that AcoustID did not propose, once per file and ID, with the user
+  key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk` sends them from the Matches
+  page's Submit to AcoustID, with the key saved in Preferences > Library. See
   [providers.md](providers.md#acoustid-submission).
 
 ### Analysis
@@ -152,71 +158,37 @@ entry point and a client before it counts as working.
   editor offers the field.
 - The Linux filesystem watcher.
 
-These have no planned client and are deleted in the maintenance milestone:
-
-- The Last.fm adapter.
-- The ordered DSP graph (`Chain`, `PublishedChain`), `audio/transition.zig`,
-  and the `Resampler` interface with its linear implementation. The Player's
-  equalizer, crossfeed and volume run through `PlayerDsp`, playback never
-  resamples, and libsamplerate (`resampler.SampleRate`) resamples only for
-  fingerprints.
-
 ## Next
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Correctness and maintenance.** No new features until these land:
-   - **Provider state that survives the process.** A `429` block and its
-     backoff are held in memory, so a restart or a new `orca-cli scrobble`
-     sends into the block: queue rows record their retry time, and each
-     service's block is stored in the Library. A per-service lease lets one
-     process at a time talk to each service. Backoffs get jitter,
-     `Retry-After` is honoured uncapped, in both forms and on `503`, and a
-     query a provider refused is not sent again for a week.
-   - **AcoustID submissions that add information.** A recording ID that
-     AcoustID itself proposed is not submitted back, and bulk-accepted
-     text-only matches are not submitted.
-   - **Maintenance.** Split `core/runtime.zig` (job worker with per-kind
-     requests and stats, tests and fakes, queue, listens, jobs and zones) and
-     `database/repository.zig` (by aggregate, with shared column helpers);
-     one set of network test doubles; a dispatch table for `orca-cli`; delete
-     the code listed above; remove comments that narrate history.
-   - **Documentation cleanup.** Bring `docs/` in line with the code:
-     `analysis.md` still describes the replaced FLAC decoder as one LSB low;
-     `storage.md` and `metadata.md` name tables that schema 8 dropped;
-     `metadata.md` misstates the journalled identity and which client edits
-     recording IDs; `ownership.md`, `frontends.md` and `audio-engine.md`
-     describe superseded stages. Contract docs keep invariants, ownership and
-     threading; measurements, reference-library figures and history move to
-     `CHANGELOG.md` or are deleted. `README.md` gains an embedding entry
-     point and a complete list of requirements.
-2. **`liborca` as a library for others.** A versioned SONAME, `orca_version`,
+1. **`liborca` as a library for others.** A versioned SONAME, `orca_version`,
    an installed `orca.pc`, and only `orca_*` symbols exported: today every
    bundled C and C++ dependency is exported from `liborca.so`, libc++'s
    `operator new` included. A last-error message for C callers, a wakeup
    callback or file descriptor so hosts need not poll on a timer, a stability
    statement in `orca.h` and [api.md](api.md), and a provider identity the
    host must supply instead of a default.
-3. **Filesystem watching** as a scan accelerator, so new files appear without
+2. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan. The Linux watcher exists; it needs a runtime entry point
    and a client.
-4. **Faster analysis.** The analysis pass decodes on one thread and reads
+3. **Faster analysis.** The analysis pass decodes on one thread and reads
    every file twice, once for a whole-file hash nothing uses. Decode on a
    bounded pool of threads, drop the hash, and compute the Chromaprint
    fingerprint in the same decode.
-5. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+4. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
    tag are reported as not writable. No writer stores an accepted recording
    ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
    `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
    it lacks tag writes, queue editing, artwork, DSP, track details, matching
    and AcoustID submission.
-6. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+5. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-7. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+6. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-8. **An optional fixed output rate with a band-limited resampler**, for
+7. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -247,12 +219,14 @@ To release:
 
 Small defects that are not yet scheduled:
 
+- An output opened for a device id PipeWire does not know, such as a stale
+  one, falls back to the default sink instead of failing, so it can play on
+  real hardware. The stream sets `target.object` without
+  `node.dont-fallback`.
 - `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
   it on change, never on a tick.
-- `orca-cli play-tracks` prints a bit depth for lossy sources ("MP3 32-bit"),
-  and `orca-cli --help` omits `--volume` and `--set-volume`.
-- `orca-cli` runs every command on an arena, so a cold scan holds about
-  23 KB per file until it exits.
+- `orca-cli` runs every command but `duplicates` on an arena, so a cold scan
+  holds memory for every file until it exits.
 - `write-tags` rewrites a file whose permissions make it read-only.
 - The scanner skips symbolic links to files without counting them.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a

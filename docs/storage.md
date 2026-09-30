@@ -9,17 +9,18 @@ size/inode/modification identity at open time, and supports offset reads without
 changing shared stream position. Provider, mobile, and permission-sensitive
 sources can implement the same contract without pretending to be local paths.
 
-Container sniffing uses source bytes rather than filename extensions. The first
-registry recognizes WAV, AIFF, FLAC, MP3, MP4, Opus, Vorbis, and WavPack magic.
+Container sniffing uses source bytes rather than filename extensions.
+`storage/format.zig` recognizes WAV, AIFF, FLAC, MPEG audio, MP4, Opus, Vorbis,
+WavPack, QOA and ADTS AAC.
 
 ## What sniffing guarantees
 
 `format.detect` answers two questions together: **which container** the bytes
 are, and **where its encoded stream begins**. The second is not always zero. An
 ID3v2 tag says nothing about what follows it, and some taggers staple one to the
-front of a FLAC stream — 104 files in the 22,060-file reference library. Reading
-`ID3` as "this is MPEG audio" handed those files to the MPEG decoder, which
-failed on the magic bytes, so they would neither play nor probe.
+front of a FLAC stream. Reading `ID3` as "this is MPEG audio" would hand those
+files to the MPEG decoder, which fails on the magic bytes, so they would neither
+play nor probe.
 
 - **The tag is measured, not guessed.** The declared size is four syncsafe bytes
   at offset 6, seven significant bits each, and excludes both the ten-byte
@@ -39,10 +40,9 @@ failed on the magic bytes, so they would neither play nor probe.
   `sniffBytes`, which is pure over a prefix and often cannot reach past the tag,
   answers the same way.
 - **Neither does the artwork reader.** `metadata/artwork.zig` resolves the
-  prefix the same way before asking a container for its cover, so the 104
-  ID3-fronted FLACs give up their `PICTURE` block like any other. The reference
-  adversarial file carries a 216,921-byte picture block behind a 219,663-byte
-  tag; read from byte zero it looks like an MPEG file with no `APIC` frame.
+  prefix the same way before asking a container for its cover, so an
+  ID3-fronted FLAC gives up its `PICTURE` block like any other. Read from byte
+  zero, such a file looks like an MPEG file with no `APIC` frame.
 - **The decoder never sees the tag.** `CodecRegistry.open` and `openDetected`
   hand the codec a `source.OffsetSource` view of the suffix when detection
   reports a non-zero payload offset, and the returned Decoder owns that view for
@@ -51,9 +51,9 @@ failed on the magic bytes, so they would neither play nor probe.
   container it already sniffed. No codec learns what a tag is.
 - **Offsets do not change identity.** An `OffsetSource` shifts reads and size
   but forwards `identity` unchanged. Identity answers "which file is this and
-  has it changed", which the scanner compares against `observed_files`; a view
-  that reported a shortened size would make every tagged file look modified on
-  every scan.
+  has it changed", which the scanner compares against the file's `locations`
+  row; a view that reported a shortened size would make every tagged file look
+  modified on every scan.
 - **Seeking is in stream frames.** Because the offset lives in the source view
   rather than in a codec, every byte position a decoder computes — a FLAC
   seektable entry, an MPEG frame index — is already relative to the start of the
@@ -63,11 +63,12 @@ failed on the magic bytes, so they would neither play nor probe.
 ## Incremental scanning
 
 The scanner recursively walks a configured root, opens candidate files through
-`LocalFileSource`, and compares path plus storage identity against the
-`observed_files` table. Unchanged files avoid format or metadata work. Changed
-audio files commit in bounded transactions through the Library's shared write
-lane; unsupported and transiently unreadable files are counted without
-invalidating successful batches.
+`LocalFileSource`, and compares path plus storage identity (inode, size and
+modification time) against the path's `present` row in `locations`
+(`LocationRepository.unchangedLocationId`). Unchanged files avoid format or
+metadata work. Changed audio files commit in bounded transactions through the
+Library's shared write lane; unsupported and transiently unreadable files are
+counted without invalidating successful batches.
 
 A changed audio file is also probed through the codec registry for what its
 container declares — the encoding identifier that becomes `files.codec`, plus
@@ -96,17 +97,17 @@ covers the layout and the disk space backups and undo need.
 Cancellation is checked before filesystem work and between entries. A cancelled
 or interrupted scan is resumable by restarting it: already committed unchanged
 identities are skipped, so no traversal-order checkpoint is required. Filesystem
-watchers will feed the same reconciliation path as hints rather than becoming an
+watchers feed the same reconciliation path as hints and are never an
 authoritative source of state.
 
 ## Repairing properties without a walk
 
 The unchanged fast path has a cost, and it is not paid at scan time. A file the
-scanner skips is never probed, so a library scanned before probing existed
-keeps null `duration_ms`, `sample_rate` and `channels` for ever — a music
-collection's bytes essentially never change, and only changed bytes are
-re-read. A Track with a null duration has nothing for a transport bar to draw
-against and shows no length in a listing.
+scanner skips is never probed, so a row written without probing keeps null
+`duration_ms`, `sample_rate` and `channels` for ever — a music collection's
+bytes essentially never change, and only changed bytes are re-read. A Track with
+a null duration has nothing for a transport bar to draw against and shows no
+length in a listing.
 
 `library/property_backfill.zig` is the repair, and it is the same shape as the
 projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
@@ -146,15 +147,8 @@ projection: keyed on `files.id`, no filesystem walk, reachable as a runtime job
   build would compute. A forced run is not restart-resumable, because a
   re-probed row still matches the selection.
 
-On the 22,060-file reference library a full backfill takes about 2.8 seconds
-and a second run 0.05 seconds. It used to leave 104 rows unrepaired: one FLAC
-whose STREAMINFO declares `total_samples = 0`, which is honestly unknown rather
-than missing, and files that begin with an ID3v2 tag in front of a stream that
-is not MPEG audio — 104 of the library's `.flac` files carry one — which were
-sniffed as MPEG audio and refused to decode. Container detection now resolves
-the tag, so those rows probe like any other; the `total_samples = 0` row is
-still honestly unknown, and a file that opens and then refuses to decode still
-raises `unreadable_file`.
+A FLAC whose STREAMINFO declares `total_samples = 0` keeps a null duration: the
+length is honestly unknown rather than missing.
 
 `library/analysis_pass.zig` is the same shape one level deeper: also keyed on
 `files.id`, also a runtime job with bounded commits and no walk, but decoding
@@ -166,7 +160,9 @@ Unread storms coalesce to one hint per root, including explicit overflow hints;
 consumers respond with normal scanner reconciliation. No watcher event directly
 inserts, removes, or mutates observed state.
 
-The Linux adapter uses nonblocking inotify and translates native changes,
-queue overflow, and root move/delete events into those hints. Watcher coverage
-is an acceleration only; startup/manual reconciliation remains responsible for
-discovering anything not represented by a delivered native event.
+The Linux adapter (`library/watch_linux.zig`) uses nonblocking inotify and
+translates native changes, queue overflow, and root move/delete events into
+those hints. It has no runtime entry point yet; see
+[roadmap.md](roadmap.md#next). Watcher coverage is an acceleration only;
+startup/manual reconciliation remains responsible for discovering anything not
+represented by a delivered native event.

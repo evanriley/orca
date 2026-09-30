@@ -107,15 +107,14 @@ distinct keys.
 
 ## The browse model
 
-Version 9 makes the library *browsable* rather than merely listable. Before it,
-the only artist reachable from a Track was the denormalized `tracks.artist`
-text, so "what else is by this artist" was a full table scan and a string
-comparison, and no query could answer it at all through the public API.
+The library is *browsable* rather than merely listable: "what else is by this
+artist" is an indexed relational query, not a scan over the denormalized
+`tracks.artist` text.
 
 `tracks.artist_id` and `releases.album_artist_id` are the relational links, and
 `artists.sort_name` is the key an Artist listing orders by. All three are
-written by `library/projection.zig` going forward and backfilled by migration 9
-for a library that already exists.
+written by `library/projection.zig`, and migration 9 backfills them for a
+library created before version 9.
 
 **One primary artist per Track, one album artist per Release, deliberately.**
 The tag data is single-valued on ARTIST and ALBUMARTIST in essentially every
@@ -123,7 +122,7 @@ file, and splitting featured credits is a metadata problem — it needs a parser
 a provenance story and a user-visible review step — not a schema one. The
 extension path is a `track_artists(track_id, artist_id, ordinal, role)` join
 table *alongside* these columns, with `artist_id` staying as the primary artist
-a listing files by. Nothing in version 9 has to be undone to get there.
+a listing files by.
 
 `artists.sort_name` is a folded **sort key**, not a display name:
 `database/text_key.zig` lowercases, collapses whitespace and drops a leading
@@ -134,31 +133,30 @@ whole listing under a BINARY collation. Hosts display `artists.name`.
 
 `TrackRepository.page` takes a `TrackQuery`: a sort key (`id`, `artist`,
 `album`, `title`, `track_number`, `duration`, `date_added`), a direction, and
-relational filters on `artist_id` and `release_id`. `ArtistRepository.page`
-and `ReleaseRepository.page` are the same shape for their own tables. All
-three return bounded, caller-owned pages of at most 512 rows and never expose a
-SQLite row or statement.
+relational filters on `artist_id` and `release_id`. `ArtistRepository.page` and
+`ReleaseRepository.page` are the same shape for their own tables. All three
+return bounded, caller-owned pages of at most `columns.max_page` (512) rows and
+never expose a SQLite row or statement.
 
 **Every generated ORDER BY ends in the row's own id.** This is not decoration.
-3,476 Tracks in the reference library share a title with another, 33 have no
-artist and 43 Releases span more than one disc; without a unique tiebreaker a
-LIMIT/OFFSET walk over a column with ties is free to return one row on two
-pages and skip a third, because SQLite may order equal keys differently between
-two evaluations of the same statement. A descending sort reverses *every* term
-including the tiebreaker, which keeps the order total and lets SQLite walk the
-same index backwards.
+Real libraries hold many Tracks that share a title, have no artist, or sit on
+multi-disc Releases; without a unique tiebreaker a LIMIT/OFFSET walk over a
+column with ties is free to return one row on two pages and skip a third,
+because SQLite may order equal keys differently between two evaluations of the
+same statement. A descending sort reverses *every* term including the
+tiebreaker, which keeps the order total and lets SQLite walk the same index
+backwards.
 
 The `id` in an ORDER BY is never named in an index. `id` is `INTEGER PRIMARY
 KEY`, so it *is* the rowid and SQLite already appends it to every index entry —
 `ORDER BY title COLLATE NOCASE, tracks.id` is satisfied straight out of
 `tracks(title COLLATE NOCASE)` with no temp B-tree.
 
-Against the 22,060-Track reference library every unfiltered sort is an ordered
-index scan, and every Artist-filtered sort but one is an indexed SEARCH. Two
-cases still build a temp B-tree, both over a bounded set and both deliberate: an
-Artist-filtered listing sorted by artist *name* (bounded by that Artist's
-Tracks; 158 at most here), and a Release-filtered listing sorted by anything
-other than disc-and-track (bounded by one Release; 81 at most). Indexing those
+Every unfiltered sort is an ordered index scan, and every Artist-filtered sort
+but one is an indexed SEARCH. Two cases build a temp B-tree, both over a
+bounded set and both deliberate: an Artist-filtered listing sorted by artist
+*name* (bounded by that Artist's Tracks), and a Release-filtered listing sorted
+by anything other than disc-and-track (bounded by one Release). Indexing those
 would cost seven more composite indexes on the largest table in the schema to
 order at most a few dozen rows.
 
@@ -204,13 +202,11 @@ same order: a MusicBrainz artist id outranks the name, and only what it cannot
 answer falls back to the folded key. `migrations.zig` registers
 `orca_artist_key` and `orca_artist_sort_key` as SQLite functions over
 `database/text_key.zig`, so the backfill executes the same Zig the projection
-executes rather than a reimplementation in SQL that would be free to drift. On
-the 22,060-Track reference library the migration takes about five seconds, and
-22,027 Tracks get an `artist_id`; the 33 that do not are exactly the Tracks
-whose artist tag is empty, and an empty name is an absent artist rather than an
-artist named "". Migrating and then reprojecting that library produces
-byte-identical `artist_id`, `album_artist_id` and `sort_name` columns — the
-convergence `library/projection.zig` asserts on a fixture and
+executes rather than a reimplementation in SQL that would be free to drift. A
+Track whose artist tag is empty gets no `artist_id`: an empty name is an absent
+artist rather than an artist named "". Migrating and then reprojecting a library
+produces byte-identical `artist_id`, `album_artist_id` and `sort_name` columns —
+the convergence `library/projection.zig` asserts on a fixture and
 `migrations.artist_backfill` exists as a separate constant to make testable.
 
 `LibraryDatabase.open` applies migrations only as far as
@@ -289,15 +285,15 @@ row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
 never stored without its delivery or queued twice.
 
 `scrobble_queue.state` is 0 pending, 1 leased, 2 delivered, 3 rejected.
-`ScrobbleQueueRepository.lease` claims rows in one `UPDATE ... RETURNING`: pending
-rows whose `next_attempt_at` has come, and leased rows whose `lease_expires_at`
-has passed, so a worker that dies mid-submit strands nothing. Every later
-mark (`markDelivered`, `markRetry`, `markRejected`, `release`) applies only
-while `state = 1 AND lease_owner = owner`; a worker whose lease expired and was
-reclaimed gets `StaleScrobbleEvent` instead of overwriting the new owner's
-result. `release` returns a row to pending without counting an attempt;
-the other marks count one. `nextAttemptAt` gives the earliest retry or lease
-expiry for a worker to sleep until.
+`ScrobbleQueueRepository.lease` claims rows in one `UPDATE ... RETURNING`:
+pending rows whose `next_attempt_at` has come, and leased rows whose
+`lease_expires_at` has passed, so a worker that dies mid-submit strands nothing.
+Every later mark (`markDelivered`, `markRetry`, `markRejected`, `release`)
+applies only while `state = 1 AND lease_owner = owner`; a worker whose lease
+expired and was reclaimed gets `StaleScrobbleEvent` instead of overwriting the
+new owner's result. `release` returns a row to pending without counting an
+attempt; the other marks count one. `nextAttemptAt` gives the earliest retry or
+lease expiry for a worker to sleep until.
 
 ## Feedback
 
@@ -330,10 +326,10 @@ Version 16 also adds the index `files_by_recording ON files(recording_id)`,
 which finds a Recording's files when looking for its MusicBrainz recording id.
 
 `TrackSummary.feedback` comes from a `LEFT JOIN feedback` on
-`tracks.recording_id` in the same statement as the page, never a query per
-row, and the same statement selects `TrackSummary.recording_id` so a host can
-tell which rows share a song. `FeedbackRepository.set` changes a bounded batch of Tracks
-(`max_page`) in one write-lane transaction and skips, and counts, Tracks
+`tracks.recording_id` in the same statement as the page, never a query per row,
+and the same statement selects `TrackSummary.recording_id` so a host can tell
+which rows share a song. `FeedbackRepository.set` changes a bounded batch of
+Tracks (`max_page`) in one write-lane transaction and skips, and counts, Tracks
 without a Recording.
 
 ## Identification proposals
@@ -373,6 +369,27 @@ accepted: `(file_id, recording_mbid)` is its primary key, with the
 Orca value for the recording id with `provider` or `user` provenance that is
 the id in effect, is not the file's tag, and has no row here for that id.
 Editing the id makes the file eligible again under the new one.
+
+## Provider state
+
+`provider_state` (version 19) holds each service's rate-limit block
+(`blocked_until_ms`) and backoff (`backoff_ms`), keyed by service name, so
+every process that opens the Library obeys one block. `provider_leases`
+(version 19) records which process may talk to each service: `owner` is a
+random id and `expires_at` is when the claim lapses. Both tables keep Unix
+milliseconds. `ProviderStateRepository.claimLease` claims in one upsert that
+applies only when the row is absent, expired or already the claimant's, so two
+processes never both hold a service. See
+[providers.md](providers.md#rules-toward-providers).
+
+`provider_cache` keeps a provider's refusal of a query beside its answers: a
+row whose `status` is not `200` is a refusal, which the provider clients
+answer as refused until it expires and never use as an answer.
+
+Version 19 also adds `identification_proposals.accepted_in_bulk`: 1 for a
+proposal accepted by `acceptConfident`, 0 for one accepted on its own and for
+every proposal accepted before version 19. AcoustID submission leaves out an
+ID whose accepted proposal was found by AcoustID or accepted in bulk.
 
 ## Concurrency
 

@@ -25,10 +25,11 @@ const orca = b.dependency("orca", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("liborca", orca.module("liborca"));
 ```
 
-The module links SQLite, libFLAC, libopusfile and libvorbisfile through the
-host's pkg-config, plus PipeWire on Linux, and compiles in its ALAC, AAC, MP3
-and QOA decoders. [`examples/embed`](../examples/embed) is a complete project
-that does this; `zig build test` builds it, so these steps stay correct.
+The module links SQLite, libFLAC, libopusfile, libvorbisfile and libsamplerate
+through the host's pkg-config, plus PipeWire on Linux, and compiles in its ALAC,
+AAC, MP3 and QOA decoders and Chromaprint. [`examples/embed`](../examples/embed)
+is a complete project that does this; `zig build test` builds it, so these steps
+stay correct.
 
 ## Surface
 
@@ -106,14 +107,16 @@ defer page.deinit();
   names the song, so a host can repaint every row of it without a query. It is sent to
   ListenBrainz while the Library scrobbles when the song has a MusicBrainz
   recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
-  the changes still waiting as `feedback_pending`.
+  the changes still waiting as `feedback_pending`, and the end of a
+  ListenBrainz block the Library records as `blocked_until`.
 - `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
   Job that searches MusicBrainz, and AcoustID by fingerprint, for the Tracks
   without a recording ID and stores proposals; its snapshot's total is the
   number of Tracks to search, and `jobMatchStats` reports its counters as
-  `MatchStats`, `matched` included while it runs, and whether AcoustID took
-  part as `AcoustIdUse`. `MatchRequest.fingerprints` (default true) includes
-  AcoustID when an application key is set. `MatchRequest.track_id` searches
+  `MatchStats`, `matched` included while it runs, whether AcoustID took
+  part as `AcoustIdUse`, and, as `BusyService`, the service another Orca
+  process held when the job failed for it. `MatchRequest.fingerprints`
+  (default true) includes AcoustID when an application key is set. `MatchRequest.track_id` searches
   that Track alone, under the same rule: one already identified, or already
   answered for by every service in scope, is not searched, and the job
   succeeds with a total of 0. At most one runs per runtime
@@ -153,7 +156,8 @@ defer page.deinit();
   holds under `acoustid_credential_service` / `acoustid_user_key_account`.
   `jobSubmissionStats` returns its `SubmissionStats`: the files examined
   while it runs, and every counter and the `SubmissionOutcome` once it has
-  finished. `libraryAcoustIdSubmittableCount` and
+  finished; `SubmissionOutcome.busy` means another Orca process held
+  AcoustID. `libraryAcoustIdSubmittableCount` and
   `libraryAcoustIdSubmittablePage(library, cursor, limit)` list what it would
   send, as `AcoustIdSubmittable`s by file id after `cursor`;
   `AcoustIdSubmittable.sendsRecordingId(file_duration_ms)` says whether the

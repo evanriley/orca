@@ -111,6 +111,16 @@
 - **Comments that narrated history, and section dividers, are removed**;
   those that held an invariant state it instead.
 
+### Documentation
+
+- **The docs match the code.** `analysis.md` no longer describes the
+  replaced FLAC decoder; `storage.md` and `metadata.md` name the current
+  tables and journalled identity; `ownership.md`, `frontends.md` and
+  `audio-engine.md` drop superseded stages. Measurements and reference-library
+  figures are removed from the contract docs.
+- **`README.md` has an Embedding section** and a complete list of
+  requirements, and warns that device 0 is real hardware.
+
 ## 0.2.0 - 2026-09-29
 
 The first tagged release. Ships Library schema version 18.

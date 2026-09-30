@@ -20,11 +20,10 @@ from mapping it back to a queue position, duration from a small serial-keyed
 ring of per-entry timeline shapes the Player records as it opens each entry, and
 position from the entry anchor below. Deriving any of the three from
 `SourceQueue.current` instead makes it describe the *next* track for the whole
-lookahead window — measured at 163 ms on a 96 kHz FLAC boundary — so identity,
-duration and position agree by construction rather than by coincidence. The
-serial is adopted only once the position published with it proves to belong to
-the current epoch: a serial published under a retired epoch describes audio a
-hard switch already discarded.
+lookahead window; resolving all three from the serial makes them agree by
+construction rather than by coincidence. The serial is adopted only once the
+position published with it proves to belong to the current epoch: a serial
+published under a retired epoch describes audio a hard switch already discarded.
 
 A paused Player is honored inside the callback: it writes silence and returns
 without consuming prepared blocks, without advancing position, and without
@@ -38,17 +37,16 @@ SQLite. Missing audio is zero-filled and counted as an underrun.
 
 Players decode canonical PCM once for all attached outputs. Fanout copies that
 PCM into independently owned Zone pools and queues, so backpressure or failure
-in one Zone cannot consume another Zone's render capacity. Player processing
-runs before fanout; Zone processing runs on each private copy afterward. Both
-scopes use fixed-capacity, allocation-free processing chains.
+in one Zone cannot consume another Zone's render capacity. All processing is
+Player-scope and runs on the engine thread before fanout; Zones apply none of
+their own.
 
-DSP nodes expose sample/rate/layout effects, algorithmic latency, lookahead,
-tail and block constraints, reset behavior, and direct-RT safety. Prepared
-ordered chains are triple-buffered: the control lane writes an unclaimed slot
-and publishes it atomically, while the render lane adopts it only at a block
-boundary. Acknowledged publication makes old node-context reclamation explicit.
-Volume changes use frame ramps; metering publishes peak/RMS snapshots without
-changing samples.
+A processing node is a `processing.Processor` (`audio/processing.zig`): a
+context and a function that process samples in place, with `Metadata`
+declaring whether it changes samples, rate or layout, its algorithmic latency,
+lookahead, tail, block constraint and real-time safety. A processor never
+allocates, locks, waits, performs I/O or retains the sample slice. `Gain`
+ramps volume changes over frames.
 
 Every Player runs one built-in DSP chain, `PlayerDsp` in `audio/dsp.zig`:
 preamp, a ten-band peaking equalizer (31 Hz to 16 kHz, one octave apart,
@@ -62,8 +60,7 @@ channel count changed, so a seek or a hard switch never rings with the old
 audio. The control lane writes the settings only while the engine is
 quiesced. Crossfeed applies to two-channel audio; other layouts pass through
 unchanged. With the equalizer and crossfeed off the chain is the volume gain
-and nothing else. The DC blocker, the ordered chains and the resampler are not
-part of it.
+and nothing else. `nodes.DcBlocker` is not part of it.
 
 User volume and loudness correction are applied in two different places
 because they are two different kinds of thing. Volume is one Player-scope
@@ -78,13 +75,16 @@ hard load, an auto-advance, a format switch and a seek re-open all carry the
 right correction without any of them republishing anything. See
 `docs/analysis.md`.
 
-The resampler interface uses caller-owned input/output buffers and reports
-partial consumption. Its current linear implementation is a streaming scalar
-reference, not a production-quality band-limited resampler. Gain and metering
-also have scalar references and tested Zig vector kernels; run
-`zig build -Doptimize=ReleaseFast dsp-bench` for host-specific evidence.
+**Playback never resamples.** Each stream opens at the entry's source rate, and
+a format change between entries reopens the output (see below). The only
+resampler is `resampler.SampleRate`, libsamplerate behind
+`audio/samplerate_shim.c`, which brings audio to 11,025 Hz for AcoustID
+fingerprints; see [analysis.md](analysis.md#acoustid-fingerprints). Gain and
+metering have scalar references and tested Zig vector kernels
+(`audio/kernels.zig`); run `zig build -Doptimize=ReleaseFast dsp-bench` for
+host-specific evidence.
 
-Signal-path reports list Player and Zone nodes, format/rate/layout conversions,
+Signal-path reports list the processing nodes, format/rate/layout conversions,
 direct-RT eligibility, and total algorithmic latency. They distinguish source
 PCM from canonical float32 working PCM and conservatively explain why a path is
 not bit-perfect. Widening an 8-, 16- or 24-bit integer source to float32 is
@@ -153,8 +153,7 @@ so generational handles protect handles, not a pointer a worker already
 dereferenced. The control lane writes an immutable `[]*ZoneRuntime` into an
 unclaimed slot and publishes it with a single atomic store; the engine adopts it
 at a pass boundary and bumps an acknowledgement counter; the control lane frees
-a Zone or closes its output only after observing that acknowledgement. This is
-the same acknowledged double-buffering used for prepared processing chains.
+a Zone or closes its output only after observing that acknowledgement.
 
 Rendered position is published as one `u64` — high 16 bits epoch, low 48 bits
 frames since that epoch — written by the callback with a single store and read by
@@ -226,19 +225,22 @@ queued and converted frames, and non-negative graph/device delay. These values
 remain distinct in Zone latency reporting rather than being collapsed into a
 zero-latency claim.
 
-The first vertical playback path uses a WAV `SourceSession` to perform bounded
-positional reads and conversion of supported integer/float samples on the
-producer lane. It primes eight preallocated blocks ahead for robust playback;
-the callback advances Player position only for frames actually rendered. The
-CLI exposes this architecture as `orca-cli play AUDIO [DEVICE_ID]`. The command
-uses server-default output when no ID is supplied and reports played frames,
-underruns, backend quantum, and device/graph delay after completion.
+A `SourceSession` performs bounded positional reads through its Decoder and
+converts samples to canonical float32 on the producer lane. Each Zone's pool
+holds `zone_runtime.block_count` (32) preallocated blocks of
+`zone_runtime.frames_per_block` (256) frames; the Zone's policy sets how many
+of them the producer fills ahead, never fewer than one device quantum's worth.
+The callback advances Player position only for frames actually rendered.
+`orca-cli play AUDIO [DEVICE_ID]` plays one file through this path and reports
+played frames, underruns and backend quantum. Without a device ID it uses
+device 0, the system default output, which is real hardware; tests pass a
+device from `scripts/silent-sink.sh`.
 
 Codec selection is owned by a bounded `CodecRegistry`. Playback sees only an
 Orca `Decoder` interface (source and canonical formats, optional frame count,
-read, seek, and lifetime); WAV parser state and conversion scratch remain
-private to its adapter. `SourceSession` therefore owns any registered Decoder
-and primes the same pool/queue path without codec-specific types.
+read, seek, and lifetime); each codec's parser state and conversion scratch
+remain private to its adapter. `SourceSession` therefore owns any registered
+Decoder and primes the same pool/queue path without codec-specific types.
 
 Every registered codec reads an Orca `ReadableSource` behind its own adapter;
 `docs/codecs.md` records which library each one wraps and why.
@@ -301,7 +303,5 @@ Gapless when formats match, gapped-but-correct when they do not. A decoder that
 fails part-way ends its entry rather than stalling the queue, and an entry that
 cannot be opened is stepped over, with consecutive failures bounded.
 
-Gapless transitions append compatible successor PCM directly. Optional
-crossfade infrastructure provides a stateful linear envelope that operates on
-caller-owned outgoing and incoming buffers, remains continuous across bounded
-chunks, and performs no allocation in the processing path.
+Gapless transitions append compatible successor PCM directly; there is no
+crossfade.
