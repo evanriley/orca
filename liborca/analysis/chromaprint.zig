@@ -145,12 +145,12 @@ pub fn fingerprintDecoder(
         frames_read += frames;
         downmix(decoded[0 .. frames * channels], channels, mono[0..frames]);
         if (converter) |*value| {
-            try resampleInto(context, value.resampler(), mono[0..frames], resampled, samples, false);
+            try resampleInto(context, value, mono[0..frames], resampled, samples, false);
         } else {
             try feed(context, mono[0..frames], samples);
         }
     }
-    if (converter) |*value| try resampleInto(context, value.resampler(), &.{}, resampled, samples, true);
+    if (converter) |*value| try resampleInto(context, value, &.{}, resampled, samples, true);
     if (orca_chromaprint_finish(context) != 0) return error.FingerprintFailed;
 
     const total_frames = if (frames_read < window_frames)
@@ -189,7 +189,7 @@ fn downmix(interleaved: []const f32, channels: usize, mono: []f32) void {
 
 fn resampleInto(
     context: ?*anyopaque,
-    converter: resampler.Resampler,
+    converter: *resampler.SampleRate,
     input: []const f32,
     resampled: []f32,
     samples: []i16,

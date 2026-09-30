@@ -5,7 +5,6 @@ pub const dsp = @import("dsp.zig");
 pub const engine = @import("engine.zig");
 pub const equalizer = @import("equalizer.zig");
 pub const fanout = @import("fanout.zig");
-pub const graph = @import("graph.zig");
 pub const kernels = @import("kernels.zig");
 pub const loaded_source = @import("loaded_source.zig");
 pub const nodes = @import("nodes.zig");
@@ -19,7 +18,6 @@ pub const resampler = @import("resampler.zig");
 pub const signal_path = @import("signal_path.zig");
 pub const source_session = @import("source_session.zig");
 pub const spsc = @import("spsc.zig");
-pub const transition = @import("transition.zig");
 pub const zone = @import("zone.zig");
 pub const zone_runtime = @import("zone_runtime.zig");
 
@@ -31,11 +29,11 @@ test {
     _ = @import("engine.zig");
     _ = @import("equalizer.zig");
     _ = @import("fanout.zig");
-    _ = @import("graph.zig");
     _ = @import("kernels.zig");
     _ = @import("loaded_source.zig");
     _ = @import("nodes.zig");
     _ = @import("output.zig");
+    _ = @import("pcm.zig");
     _ = @import("playback_queue.zig");
     _ = @import("player.zig");
     _ = @import("processing.zig");
@@ -44,7 +42,6 @@ test {
     _ = @import("signal_path.zig");
     _ = @import("source_session.zig");
     _ = @import("spsc.zig");
-    _ = @import("transition.zig");
     _ = @import("zone.zig");
     _ = @import("zone_runtime.zig");
 }

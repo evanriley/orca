@@ -51,6 +51,15 @@
   for cancellation; a `work.Registration` now carries a waker that
   `requestCancellation` calls.
 
+### Maintenance
+
+- **Removed:** the DSP graph (`Chain`, `PublishedChain`),
+  `audio/transition.zig`, the `Resampler` interface with its linear
+  implementation (`resampler.SampleRate` remains for fingerprints),
+  `published_device_delay_frames` and `applyAlgorithmicLatency`. Nothing
+  called them: the Player's DSP runs through `PlayerDsp` and playback never
+  resamples.
+
 ## 0.2.0 - 2026-09-29
 
 The first tagged release. Ships Library schema version 18.

@@ -85,7 +85,6 @@ pub const ZoneRuntime = struct {
     published_output_state: std.atomic.Value(u8) = .init(@intFromEnum(zone_model.OutputState.closed)),
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
-    published_device_delay_frames: std.atomic.Value(u64) = .init(0),
     published_graph_rate_hz: std.atomic.Value(u32) = .init(0),
 
     // ---- Engine-thread-only state ----
