@@ -230,7 +230,10 @@ and mutated only by the control lane and the engine thread — never by a render
 callback — under the same `quiesce`/`release` handshake that protects
 `SourceQueue`. Enqueueing past capacity applies backpressure rather than growing.
 The three values a host polls (entry count, audible cursor, decode cursor) are
-atomics, so reporting now-playing never has to stop the producer.
+atomics, so reporting now-playing never has to stop the producer. The engine
+stores the audible cursor after the position, duration and gain it describes,
+so a host reads the cursor first and never pairs an entry with its
+predecessor's figures.
 
 The two cursors are separate because the decode cursor leads the audible one by
 the whole render-ahead depth. The audible cursor is derived from the

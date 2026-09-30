@@ -34,6 +34,11 @@
   `playerSetEqualizer`, `playerSetCrossfeed` or `seekPlayer` every few
   milliseconds kept the output from ever opening. A quiesce now waits for one
   full pass after a release.
+- **Player status and listens no longer pair a new entry with the previous
+  entry's gain, duration or position.** The engine moved the queue cursor
+  before it published the audible entry's figures; it now publishes the
+  position, duration and gain first and the cursor last, and a status read
+  takes the cursor first.
 
 ## 0.2.0 - 2026-09-29
 

@@ -679,22 +679,11 @@ pub const PlayerEngine = struct {
         const sample = clock_zone.position.load(.acquire);
         const serial = clock_zone.rendered_entry_serial.load(.monotonic);
         const anchor = clock_zone.entry_anchor.load(.monotonic);
+        // A serial is adopted only with a position proven to belong to the
+        // current epoch: one published under a retired epoch describes audio a
+        // hard switch has already thrown away, and adopting it would drag both
+        // cursors back onto the entry that switch left behind.
         if (render.positionEpoch(sample) != @as(u16, @truncate(epoch))) return;
-        // Now-playing follows the serial the callback actually rendered, not the
-        // decode cursor, which leads it by the whole render-ahead depth. It is
-        // adopted only once the position it came with proves to belong to the
-        // current epoch: a serial published under a retired epoch describes
-        // audio a hard switch has already thrown away, and adopting it would
-        // drag both cursors back onto the entry that switch left behind.
-        //
-        // Identity, duration and position all resolve from this one value —
-        // the queue maps it to the audible entry, the Player maps it to that
-        // entry's timeline shape — so the three agree by construction.
-        if (self.queue) |queue| queue.observeRenderedSerial(serial);
-        self.player.observeRenderedSerial(serial);
-        // Republish under the serial just adopted, so duration moves in the same
-        // pass the audible entry does rather than one pass behind it.
-        self.player.publishSourceInfo();
         // The anchor's stamp is the low half of the serial that owns it. A
         // mismatch means the two were read from different moments, so the pair
         // is discarded exactly as a mismatched epoch is.
@@ -716,7 +705,15 @@ pub const PlayerEngine = struct {
         // Drop the sample if a seek landed while it was being assembled; the
         // next pass reports the new epoch's position instead of a stale one.
         if (self.player.epoch.load(.acquire) != epoch) return;
+        // Now-playing follows the serial the callback rendered, not the decode
+        // cursor. Position, duration and gain are published for it before the
+        // queue cursor, which is stored last with release: a host that reads
+        // the cursor first never pairs a new entry with the previous entry's
+        // figures.
         self.player.position_frames.store(frames, .release);
+        self.player.observeRenderedSerial(serial);
+        self.player.publishSourceInfo();
+        if (self.queue) |queue| queue.observeRenderedSerial(serial);
 
         if (self.elapsed_ns -| self.last_telemetry_ns < telemetry_interval_ns) return;
         self.last_telemetry_ns = self.elapsed_ns;

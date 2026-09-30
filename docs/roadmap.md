@@ -166,11 +166,6 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **The two intermittent test failures, fixed at their causes.** The
-     engine's `quiesce` can starve it when the control lane suspends it again
-     within one park interval, so its output never opens; and the queue
-     cursor is published before the Player's gain and duration, so a reader
-     can pair a new entry with the previous entry's figures.
    - **Provider state that survives the process.** A `429` block and its
      backoff are held in memory, so a restart or a new `orca-cli scrobble`
      sends into the block: queue rows record their retry time, and each

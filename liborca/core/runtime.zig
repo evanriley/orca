@@ -3585,11 +3585,12 @@ pub const OrcaRuntime = struct {
     };
 
     fn readStatus(object_value: *PlayerObject) StatusRead {
-        const snapshot = object_value.player.snapshot();
+        // The engine stores the cursor after the figures it describes, so it is read first.
         const queue_snapshot = object_value.queue.snapshot();
+        const current = object_value.queue.refAt(queue_snapshot.cursor);
+        const snapshot = object_value.player.snapshot();
         const rate = object_value.player.published_sample_rate.load(.acquire);
         const frames = object_value.player.published_frame_count.load(.acquire);
-        const current = object_value.queue.current();
         return .{
             .audible = current,
             .status = .{
