@@ -7,9 +7,9 @@
 //! back out. There is no history, no breadcrumb and no back button to keep in
 //! step with the listing, because the two selections *are* the position.
 //!
-//! Every pane pages exactly like the track list does, for the same reason: 2,468
-//! Artists and 2,637 Releases do not fit in liborca's 512-row bound, and a
-//! frontend that asked for them all at once would be inventing its own paging.
+//! Every pane pages exactly like the track list does, for the same reason:
+//! Artists and Releases do not fit in liborca's 512-row bound, and a frontend
+//! that asked for them all at once would be inventing its own paging.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -24,8 +24,6 @@ const BrowseObject = browse_model.BrowseObject;
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
-
-// ------------------------------------------------------------------- rows
 
 fn setupRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     const row = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -67,8 +65,6 @@ fn append(store: *gtk.ListStore, id: ?i64, name: []const u8, detail: []const u8)
     gtk.g_object_unref(row);
 }
 
-// ----------------------------------------------------------------- headers
-
 /// Each pane's header names the listing and says how big it is.
 ///
 /// The number is the engine's count of exactly what the pane is listing, taken
@@ -96,8 +92,6 @@ fn updateReleaseHeader(self: *App, total: u64) void {
         }) catch "Releases";
     gtk.gtk_label_set_text(header, text.ptr);
 }
-
-// ---------------------------------------------------------------- artists
 
 pub fn reloadArtists(self: *App) void {
     const store = self.artists orelse return;
@@ -147,8 +141,6 @@ pub fn loadNextArtistPage(self: *App) void {
     }
     self.artists_loaded += @intCast(page.items.len);
 }
-
-// ---------------------------------------------------------------- releases
 
 pub fn reloadReleases(self: *App) void {
     const store = self.releases orelse return;
@@ -205,8 +197,6 @@ pub fn loadNextReleasePage(self: *App) void {
     }
     self.releases_loaded += @intCast(page.items.len);
 }
-
-// -------------------------------------------------------------- navigation
 
 fn selectedRow(selection: ?*gtk.SingleSelection) ?*BrowseObject {
     const model = selection orelse return null;
@@ -308,8 +298,6 @@ fn releaseSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
     self.applyScopeDefaultSort();
     self.reload();
 }
-
-// ------------------------------------------------------------------ panes
 
 fn artistsScrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);

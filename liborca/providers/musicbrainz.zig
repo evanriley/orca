@@ -17,6 +17,7 @@ pub const MusicBrainz = struct {
     wall_clock: network.client.Clock,
     server: []const u8 = default_server,
     cache_ttl_seconds: i64 = 30 * 24 * 60 * 60,
+    refusal_ttl_seconds: i64 = 7 * 24 * 60 * 60,
     requests_answered: u64 = 0,
     cache_hits: u64 = 0,
 
@@ -36,6 +37,7 @@ pub const MusicBrainz = struct {
         if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| {
             defer cached.deinit();
             self.cache_hits += 1;
+            if (cached.status != 200) return error.ProviderRejectedRequest;
             return parseCandidates(allocator, cached.body, query.album);
         }
         const response = self.gateway.execute(
@@ -57,7 +59,11 @@ pub const MusicBrainz = struct {
             if (try self.stale(allocator, request_url, now_s, query.album)) |list| return list;
             return error.ProviderUnavailable;
         }
-        if (response.status != 200) return error.ProviderRejectedRequest;
+        if (response.status != 200) {
+            if (network.client.isPermanentRejection(response.status))
+                try self.cache.put(service, request_url, response.status, response.body, now_s + self.refusal_ttl_seconds);
+            return error.ProviderRejectedRequest;
+        }
         const candidates = try parseCandidates(allocator, response.body, query.album);
         errdefer candidates.deinit();
         try self.cache.put(service, request_url, response.status, response.body, now_s + self.cache_ttl_seconds);
@@ -73,6 +79,7 @@ pub const MusicBrainz = struct {
     ) !?model.CandidateList {
         const entry = try self.cache.get(allocator, service, request_url, now_s, true) orelse return null;
         defer entry.deinit();
+        if (entry.status != 200) return null;
         return try parseCandidates(allocator, entry.body, album);
     }
 
@@ -292,73 +299,31 @@ test "an answer that is not a recording search is refused as invalid" {
     try testing.expectEqual(@as(usize, 0), empty.items.len);
 }
 
-const FakeService = struct {
-    status: u16 = 200,
-    body: []const u8 = "{\"recordings\":[]}",
-    failure: ?anyerror = null,
-    calls: u32 = 0,
-    url: [512]u8 = undefined,
-    url_len: usize = 0,
-    now_ms: i64 = 1_800_000_000_000,
-
-    fn transport(self: *FakeService) network.client.Transport {
-        return .{ .context = self, .perform_fn = perform };
-    }
-
-    fn clock(self: *FakeService) network.client.Clock {
-        return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
-    }
-
-    fn lastUrl(self: *const FakeService) []const u8 {
-        return self.url[0..self.url_len];
-    }
-
-    fn perform(
-        context: *anyopaque,
-        allocator: std.mem.Allocator,
-        request: network.client.Request,
-    ) anyerror!network.client.Response {
-        const self: *FakeService = @ptrCast(@alignCast(context));
-        self.calls += 1;
-        self.url_len = @min(request.url.len, self.url.len);
-        @memcpy(self.url[0..self.url_len], request.url[0..self.url_len]);
-        if (self.failure) |err| return err;
-        return .{ .allocator = allocator, .status = self.status, .body = try allocator.dupe(u8, self.body) };
-    }
-
-    fn nowMs(context: *anyopaque) i64 {
-        return (@as(*FakeService, @ptrCast(@alignCast(context)))).now_ms;
-    }
-
-    fn sleepMs(context: *anyopaque, milliseconds: u64) anyerror!void {
-        const self: *FakeService = @ptrCast(@alignCast(context));
-        self.now_ms += @intCast(milliseconds);
-    }
-};
+const empty_answer = "{\"recordings\":[]}";
 
 const Rig = struct {
     library: database.LibraryDatabase,
-    fake: FakeService = .{},
-    gateway: network.Gateway,
+    net: network.testing.TestGateway,
     adapter: MusicBrainz,
 
     fn init(self: *Rig, uri: [:0]const u8) !void {
         self.library = try database.LibraryDatabase.open(testing.allocator, testing.io, uri);
-        self.fake = .{};
-        self.gateway = .{
-            .transport = self.fake.transport(),
-            .clock = self.fake.clock(),
-            .config = .{},
-        };
+        self.net.init(.{ .now_ms = 1_800_000_000_000 });
+        self.respond(200, empty_answer);
         self.adapter = .{
-            .gateway = &self.gateway,
+            .gateway = &self.net.gateway,
             .cache = &self.library.provider_cache,
-            .wall_clock = self.fake.clock(),
+            .wall_clock = self.net.clock.wallClock(),
         };
     }
 
     fn deinit(self: *Rig) void {
+        self.net.deinit();
         self.library.close();
+    }
+
+    fn respond(self: *Rig, status: u16, body: []const u8) void {
+        self.net.transport.otherwise = .{ .respond = .{ .status = status, .body = body } };
     }
 
     fn search(self: *Rig, query: model.Query) !model.CandidateList {
@@ -380,7 +345,7 @@ test "a title with quotes and brackets is escaped for Lucene and then for the UR
             "recording%3A%22Say%20%5C%22Hello%5C%22%20%5C%28Remix%5C%29%22" ++
             "%20AND%20artist%3A%22AC%5C%2FDC%22" ++
             "%20release%3A%22Live%5C%3A%201%5C%2B1%22",
-        rig.fake.lastUrl(),
+        rig.net.transport.lastUrl(),
     );
 }
 
@@ -391,7 +356,7 @@ test "a search without a title or an artist makes no request" {
 
     try testing.expectError(error.InsufficientIdentificationEvidence, rig.search(.{ .title = "Orca", .artist = "" }));
     try testing.expectError(error.InsufficientIdentificationEvidence, rig.search(.{ .title = " ", .artist = "Artist" }));
-    try testing.expectEqual(@as(u32, 0), rig.fake.calls);
+    try testing.expectEqual(@as(u32, 0), rig.net.transport.requestCount());
 }
 
 test "answers are cached for thirty days, empty ones too, and an expired one stands in when the service is down" {
@@ -400,49 +365,76 @@ test "answers are cached for thirty days, empty ones too, and an expired one sta
     defer rig.deinit();
     const body = try readFixture();
     defer testing.allocator.free(body);
-    rig.fake.body = body;
+    rig.respond(200, body);
 
     const first = try rig.search(.{ .title = "Under Pressure", .artist = "Queen", .album = "Hot Space" });
     defer first.deinit();
     const again = try rig.search(.{ .title = "Under Pressure", .artist = "Queen", .album = "Hot Space" });
     defer again.deinit();
-    rig.fake.body = "{\"recordings\":[]}";
+    rig.respond(200, empty_answer);
     const nothing = try rig.search(.{ .title = "Unknown", .artist = "Nobody" });
     defer nothing.deinit();
     const still_nothing = try rig.search(.{ .title = "Unknown", .artist = "Nobody" });
     defer still_nothing.deinit();
 
-    try testing.expectEqual(@as(u32, 2), rig.fake.calls);
+    try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
     try testing.expectEqual(@as(u64, 2), rig.adapter.requests_answered);
     try testing.expectEqual(@as(u64, 2), rig.adapter.cache_hits);
     try testing.expectEqual(@as(usize, 0), still_nothing.items.len);
 
-    rig.fake.now_ms += (rig.adapter.cache_ttl_seconds + 1) * 1000;
-    rig.fake.status = 503;
+    rig.net.clock.advance((rig.adapter.cache_ttl_seconds + 1) * 1000);
+    rig.respond(503, empty_answer);
     const stale = try rig.search(.{ .title = "Under Pressure", .artist = "Queen", .album = "Hot Space" });
     defer stale.deinit();
     try testing.expectEqualStrings("Hot Space", stale.items[0].album);
-    try testing.expectEqual(@as(u32, 3), rig.fake.calls);
+    try testing.expectEqual(@as(u32, 3), rig.net.transport.requestCount());
 }
 
-test "an unavailable service is reported apart from a refused query, and neither answer is cached" {
+test "an unavailable service is reported apart from a refused query, and a refusal the query did not cause is not cached" {
     var rig: Rig = undefined;
     try rig.init("file:orca-musicbrainz-failures?mode=memory&cache=shared");
     defer rig.deinit();
-    rig.gateway.config.minimum_interval_ms = 0;
+    rig.net.gateway.config.minimum_interval_ms = 0;
     const query: model.Query = .{ .title = "Orca", .artist = "Artist" };
 
-    rig.fake.status = 503;
+    rig.respond(503, empty_answer);
     try testing.expectError(error.ProviderUnavailable, rig.search(query));
-    rig.fake.status = 400;
-    try testing.expectError(error.ProviderRejectedRequest, rig.search(query));
-    rig.fake.failure = error.ConnectionRefused;
+    for ([_]u16{ 401, 403, 408 }) |status| {
+        rig.respond(status, empty_answer);
+        try testing.expectError(if (status == 408) error.ProviderUnavailable else error.ProviderRejectedRequest, rig.search(query));
+    }
+    rig.net.transport.otherwise = .{ .fail = error.ConnectionRefused };
     try testing.expectError(error.NetworkUnavailable, rig.search(query));
-    rig.fake.failure = null;
-    rig.fake.status = 429;
+    rig.respond(429, empty_answer);
     try testing.expectError(error.RateLimited, rig.search(query));
     try testing.expectError(error.RateLimited, rig.search(query));
 
-    try testing.expectEqual(@as(u32, 4), rig.fake.calls);
-    try testing.expect(try rig.library.provider_cache.get(testing.allocator, service, rig.fake.lastUrl(), 0, true) == null);
+    try testing.expectEqual(@as(u32, 6), rig.net.transport.requestCount());
+    try testing.expect(try rig.library.provider_cache.get(testing.allocator, service, rig.net.transport.lastUrl(), 0, true) == null);
+}
+
+test "a query MusicBrainz refused is refused without a request for seven days, and asked again after" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-refused?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.gateway.config.minimum_interval_ms = 0;
+    const query: model.Query = .{ .title = "Orca", .artist = "Artist" };
+    rig.respond(400, "{\"error\":\"Invalid query\"}");
+    try testing.expectError(error.ProviderRejectedRequest, rig.search(query));
+
+    rig.respond(200, empty_answer);
+    try testing.expectError(error.ProviderRejectedRequest, rig.search(query));
+    rig.net.clock.advance((rig.adapter.refusal_ttl_seconds - 1) * 1000);
+    try testing.expectError(error.ProviderRejectedRequest, rig.search(query));
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(u64, 2), rig.adapter.cache_hits);
+
+    rig.net.clock.advance(1000);
+    rig.respond(503, empty_answer);
+    try testing.expectError(error.ProviderUnavailable, rig.search(query));
+    rig.respond(200, empty_answer);
+    const answered = try rig.search(query);
+    defer answered.deinit();
+    try testing.expectEqual(@as(u32, 3), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(usize, 0), answered.items.len);
 }

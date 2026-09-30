@@ -347,18 +347,16 @@ const SeekPlan = struct {
 
 /// Chooses how to resolve a seek.
 ///
-/// Constant-bitrate streams — three MP3s in four carry no VBR header at all,
-/// and most that do carry an `Info` header, which declares CBR — resolve by
-/// arithmetic on the frame size, in constant time and exactly.
+/// Constant-bitrate streams — no VBR header, or an `Info` header, which
+/// declares CBR — resolve by arithmetic on the frame size, in constant time and
+/// exactly.
 ///
 /// A genuinely variable-bitrate stream is resolved from the lazily extended
 /// frame-header index, which is also exact. It costs one buffered walk of the
 /// frame headers between where the index already reached and the target; no
 /// audio is decoded and progress is kept, so repeated seeks stay cheap. The
-/// design document proposes using the Xing TOC here instead. Measured against
-/// this module's own VBR fixture the TOC lands roughly five percent of the
-/// duration away from the requested frame, which would make the reported
-/// position a lie and break gapless boundaries, so the TOC is kept only as
+/// Xing TOC is too coarse to land on the requested frame, which would make the
+/// reported position wrong and break gapless boundaries, so it is kept only as
 /// the fallback for a stream whose headers cannot be walked.
 ///
 /// Every path backs off far enough for the bit reservoir to refill, because

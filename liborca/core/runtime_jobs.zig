@@ -1,0 +1,322 @@
+const std = @import("std");
+const analysis_service = @import("../analysis/service.zig");
+const job = @import("job.zig");
+const work = @import("work.zig");
+const job_worker = @import("job_worker.zig");
+const runtime = @import("runtime.zig");
+const runtime_listens = @import("runtime_listens.zig");
+
+const AcoustIdSubmittablePage = runtime.AcoustIdSubmittablePage;
+const AnalysisRequest = runtime.AnalysisRequest;
+const BackfillRequest = runtime.BackfillRequest;
+const DuplicateScanRequest = runtime.DuplicateScanRequest;
+const JobHandle = runtime.JobHandle;
+const JobWorker = job_worker.JobWorker;
+const LibraryHandle = runtime.LibraryHandle;
+const MatchRequest = runtime.MatchRequest;
+const MatchStats = runtime.MatchStats;
+const OrcaRuntime = runtime.OrcaRuntime;
+const ScanRequest = runtime.ScanRequest;
+const ScanStats = runtime.ScanStats;
+const SubmissionStats = runtime.SubmissionStats;
+
+/// How many finished job records keep their scanner counters queryable. A
+/// bounded tail: a host reads the stats of the scan that just ended, not of
+/// every scan the process ever ran.
+const retained_job_records: usize = 8;
+
+pub fn startLibraryScan(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: ScanRequest,
+) !JobHandle {
+    return startJobWorker(self, library, .{ .scan = request });
+}
+
+pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
+    return startJobWorker(self, library, .projection);
+}
+
+pub fn startLibraryPropertyBackfill(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: BackfillRequest,
+) !JobHandle {
+    return startJobWorker(self, library, .{ .property_backfill = request });
+}
+
+pub fn startLibraryAnalysis(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: AnalysisRequest,
+) !JobHandle {
+    return startJobWorker(self, library, .{ .analysis = request });
+}
+
+pub fn startLibraryDuplicateScan(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: DuplicateScanRequest,
+) !JobHandle {
+    return startJobWorker(self, library, .{ .duplicate_scan = request });
+}
+
+pub fn startLibraryMatching(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: MatchRequest,
+) !JobHandle {
+    try runtime.requireRunning(self);
+    if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
+    if (runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
+    return startJobWorker(self, library, .{ .metadata_lookup = .{
+        .batch_size = request.batch_size,
+        .limit = request.limit,
+        .setup = .{
+            .io = try runtime_listens.networkIo(self),
+            .server = self.musicbrainz_server,
+            .identity = self.client_identity,
+            .hooks = self.matching_hooks,
+            .scope = if (request.track_id) |track_id| .{ .track = track_id } else .library,
+            .acoustid = if (request.fingerprints) acoustIdSetup(self) else null,
+        },
+    } });
+}
+
+pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
+    try runtime.requireRunning(self);
+    if (runningJob(self, .metadata_lookup) or runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
+    return startJobWorker(self, library, .{ .acoustid_submission = .{
+        .io = try runtime_listens.networkIo(self),
+        .identity = self.client_identity,
+        .hooks = self.matching_hooks,
+        .acoustid = acoustIdSetup(self),
+    } });
+}
+
+pub fn jobSubmissionStats(self: *OrcaRuntime, job_handle: JobHandle) !SubmissionStats {
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        return worker.submissionStats();
+    }
+    return error.StaleHandle;
+}
+
+pub fn libraryAcoustIdSubmittableCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+    return (try runtime.libraryDatabase(self, library)).acoustid_submissions.submittableCount();
+}
+
+pub fn libraryAcoustIdSubmittablePage(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    cursor: i64,
+    limit: u32,
+) !AcoustIdSubmittablePage {
+    return (try runtime.libraryDatabase(self, library)).acoustid_submissions.submittablePage(self.allocator, cursor, limit);
+}
+
+fn runningJob(self: *const OrcaRuntime, kind: job.Kind) bool {
+    for (self.job_workers.items) |worker| {
+        if (!worker.retired and worker.kind() == kind and !worker.registration.isFinished()) return true;
+    }
+    return false;
+}
+
+fn acoustIdSetup(self: *const OrcaRuntime) job_worker.AcoustIdSetup {
+    return .{
+        .server = self.acoustid_server,
+        .client_key = self.acoustid_client_key,
+        .credentials = self.credential_store,
+    };
+}
+
+/// Whether a matching job would look anything up on AcoustID: a key is set
+/// or the credential store may hold one.
+pub fn acoustIdInScope(self: *const OrcaRuntime, fingerprints: bool) bool {
+    return fingerprints and (self.acoustid_client_key != null or self.credential_store != null);
+}
+
+pub fn startJobWorker(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: job_worker.Request,
+) !JobHandle {
+    try runtime.requireRunning(self);
+    if (request.batchSize()) |batch_size| if (batch_size == 0) return error.InvalidBatchSize;
+    const library_database = try runtime.libraryDatabase(self, library);
+    pruneRetiredJobWorkers(self);
+
+    const total_units: ?u64 = switch (request) {
+        .property_backfill => |backfill| try library_database.files
+            .incompletePropertiesCount(backfill.force),
+        .analysis => try library_database.files.unanalyzedCount(
+            analysis_service.diagnosticsSelector(.{}),
+        ),
+        .duplicate_scan => try library_database.files.count(),
+        .mutation => |pending| pending.plan.actions.len,
+        .metadata_lookup => |matching| try library_database.identification_proposals.unidentifiedCount(
+            matching.setup.scope,
+            matching.setup.acoustid != null and acoustIdInScope(self, true),
+            matching.limit,
+        ),
+        .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
+        .scan, .projection => null,
+    };
+    const worker = try self.allocator.create(JobWorker);
+    errdefer self.allocator.destroy(worker);
+    const job_handle = try self.jobs.create(request.kind(), total_units);
+    errdefer self.jobs.finish(job_handle, .failed) catch {};
+    try self.jobs.start(job_handle);
+
+    const work_handle = try self.work_registry.begin(work.unowned);
+    const registration = self.work_registry.registration(work_handle) catch unreachable;
+    errdefer {
+        registration.finish();
+        self.work_registry.complete(work_handle) catch {};
+    }
+    worker.* = .{
+        .allocator = self.allocator,
+        .registration = registration,
+        .work_handle = work_handle,
+        .job = job_handle,
+        .library = library,
+        .database = library_database,
+        .request = request,
+        .stats = .init(request),
+    };
+    try self.job_workers.append(self.allocator, worker);
+    errdefer _ = self.job_workers.pop();
+    registration.thread = try std.Thread.spawn(.{}, JobWorker.run, .{worker});
+    return job_handle;
+}
+
+pub fn cancelJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+    try runtime.requireRunning(self);
+    try self.jobs.requestCancellation(job_handle);
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or !worker.job.eql(job_handle)) continue;
+        worker.token.cancel();
+        worker.registration.requestCancellation();
+    }
+}
+
+pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
+    syncJobProgress(self);
+    return self.jobs.snapshot(job_handle);
+}
+
+pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        return worker.scanStats();
+    }
+    return error.StaleHandle;
+}
+
+pub fn jobMatchStats(self: *OrcaRuntime, job_handle: JobHandle) !MatchStats {
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        return worker.matchStats();
+    }
+    return error.StaleHandle;
+}
+
+fn syncJobProgress(self: *OrcaRuntime) void {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired) continue;
+        self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+    }
+}
+
+pub fn reapFinishedJobs(self: *OrcaRuntime) void {
+    syncJobProgress(self);
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or !worker.registration.isFinished()) continue;
+        // The completion event is lossless: a full channel means the host
+        // has stopped polling, so the worker stays reapable until it drains.
+        if (!self.events.hasCapacity()) return;
+        self.work_registry.complete(worker.work_handle) catch {};
+        finalizeJobWorker(self, worker, true);
+    }
+}
+
+/// Records a joined worker's outcome. `publish` is false on the shutdown
+/// path, where no host will ever poll the event.
+fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) void {
+    worker.retired = true;
+    const state: job.State = if (worker.failed.load(.acquire))
+        .failed
+    else if (worker.wasCancelled())
+        .cancelled
+    else
+        .succeeded;
+    self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+    self.jobs.finish(worker.job, state) catch {};
+    if (!publish) return;
+    self.events.publish(.{
+        .request_id = 0,
+        .outcome = .{ .job_finished = .{ .job = worker.job, .state = state } },
+    }) catch {};
+}
+
+/// Control lane. Cancels every job worker's cooperative token. The registry
+/// flag alone cannot reach inside a scan — the scanner polls a
+/// `CancellationToken` — so the two are always set together.
+pub fn cancelJobWorkers(self: *OrcaRuntime) void {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired) continue;
+        worker.token.cancel();
+    }
+}
+
+/// Control lane, immediately after `work_registry.drain()`: every worker
+/// thread has been joined and its registration already freed, so the
+/// records are finalized without touching the Registry again.
+pub fn finalizeDrainedJobWorkers(self: *OrcaRuntime) void {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired) continue;
+        finalizeJobWorker(self, worker, false);
+    }
+}
+
+/// Retains a bounded tail of finished job records so `jobScanStats` still
+/// answers for a scan that has just completed, and no more.
+fn pruneRetiredJobWorkers(self: *OrcaRuntime) void {
+    var retired: usize = 0;
+    for (self.job_workers.items) |worker| {
+        if (worker.retired) retired += 1;
+    }
+    if (retired <= retained_job_records) return;
+    var to_drop = retired - retained_job_records;
+    var index: usize = 0;
+    while (index < self.job_workers.items.len and to_drop != 0) {
+        const worker = self.job_workers.items[index];
+        if (!worker.retired) {
+            index += 1;
+            continue;
+        }
+        _ = self.job_workers.orderedRemove(index);
+        destroyJobWorker(self, worker);
+        to_drop -= 1;
+    }
+}
+
+pub fn freeAllJobWorkers(self: *OrcaRuntime) void {
+    for (self.job_workers.items) |worker| destroyJobWorker(self, worker);
+    self.job_workers.deinit(self.allocator);
+    self.job_workers = .empty;
+}
+
+fn destroyJobWorker(self: *OrcaRuntime, worker: *JobWorker) void {
+    if (worker.tagWrite()) |pending| pending.destroy();
+    self.allocator.destroy(worker);
+}
+
+pub fn discardPendingTagWrites(self: *OrcaRuntime, library: ?LibraryHandle) void {
+    for (&self.pending_tag_writes) |*slot| {
+        const pending = slot.* orelse continue;
+        if (library) |only| if (!pending.library.eql(only)) continue;
+        pending.destroy();
+        slot.* = null;
+    }
+}

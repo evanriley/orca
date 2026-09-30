@@ -1,0 +1,533 @@
+const std = @import("std");
+const sqlite = @import("../sqlite.zig");
+const quick_hash = @import("../../storage/quick_hash.zig");
+const columns = @import("../columns.zig");
+
+const digestColumn = columns.digestColumn;
+const max_page = columns.max_page;
+const AnalysisCandidate = @import("analysis.zig").AnalysisCandidate;
+const AnalysisCandidatePage = @import("analysis.zig").AnalysisCandidatePage;
+const AnalysisSelector = @import("analysis.zig").AnalysisSelector;
+const bindAnalysisSelector = @import("analysis.zig").bindAnalysisSelector;
+const unanalyzed_predicate = @import("analysis.zig").unanalyzed_predicate;
+const DuplicateCandidate = @import("duplicates.zig").DuplicateCandidate;
+const DuplicateCandidatePage = @import("duplicates.zig").DuplicateCandidatePage;
+const DuplicatePeer = @import("duplicates.zig").DuplicatePeer;
+const StorageIdentityKey = @import("locations.zig").StorageIdentityKey;
+const WriteLane = @import("write_lane.zig").WriteLane;
+
+pub const FileUpsert = struct {
+    audio_format: u8 = 0,
+    codec: []const u8 = "",
+    size_bytes: i64 = 0,
+    sample_rate: ?i64 = null,
+    bit_depth: ?i64 = null,
+    channels: ?i64 = null,
+    duration_ms: ?i64 = null,
+    quick_hash: ?[]const u8 = null,
+    audio_hash: ?[]const u8 = null,
+    content_hash: ?[]const u8 = null,
+};
+
+/// The `files` rows a property backfill still owes a probe.
+///
+/// This is textually **one** string, shared by migration 10's partial index
+/// and by `FileRepository.incompletePropertiesPage`. SQLite uses a partial
+/// index only when the query's WHERE clause contains the index's own
+/// predicate, and it matches that by expression, not by meaning: a paraphrase
+/// here would silently turn row selection into a full scan of the largest
+/// table in the schema.
+///
+/// `bit_depth` is deliberately not one of the terms. A transform codec has no
+/// integer sample width to declare, so a null there is an answer rather than a
+/// gap, and including it would re-probe every lossy file on every run for ever.
+pub const incomplete_properties_predicate =
+    "duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec = ''";
+
+/// Audio facts a probe learned about one already-recorded file.
+///
+/// Narrower than `FileUpsert` on purpose: a backfill reads headers, so it has
+/// nothing to say about size, container or quick hash, and must not overwrite
+/// what the scanner observed about them with defaults it made up.
+pub const FilePropertyUpdate = struct {
+    codec: []const u8 = "",
+    sample_rate: ?i64 = null,
+    bit_depth: ?i64 = null,
+    channels: ?i64 = null,
+    duration_ms: ?i64 = null,
+    /// The container the probe actually found, when it disagrees with what the
+    /// row says. Null leaves the stored value alone, so a probe that could not
+    /// determine the container never overwrites a good answer with a guess.
+    audio_format: ?i64 = null,
+};
+
+/// One incomplete file and where to read it.
+pub const IncompleteFile = struct {
+    id: i64,
+    /// Empty when no location on any known volume names this file, which is a
+    /// row the backfill can only count and move past.
+    uri: []u8,
+};
+
+pub const IncompleteFilePage = struct {
+    allocator: std.mem.Allocator,
+    items: []IncompleteFile,
+
+    pub fn deinit(self: IncompleteFilePage) void {
+        for (self.items) |item| self.allocator.free(item.uri);
+        self.allocator.free(self.items);
+    }
+};
+
+/// Where a reader should open a file: a present location in preference to an
+/// unverified one, and a missing one only if there is nothing better, because
+/// a drive that is back should be read rather than skipped. Empty when no
+/// location on any known volume names the file.
+///
+/// One definition, because every pass that repairs `files` by id needs exactly
+/// this rule and two spellings of it would drift.
+const location_uri_column =
+    \\(SELECT locations.uri FROM locations WHERE locations.file_id = files.id
+    \\ ORDER BY CASE locations.state WHEN 'present' THEN 0
+    \\               WHEN 'unverified' THEN 1 ELSE 2 END, locations.id
+    \\ LIMIT 1)
+;
+
+/// Byte facts about one encoding, and the identity tiers that re-find it.
+pub const FileRepository = struct {
+    db: sqlite.Database,
+    write_lane: *WriteLane,
+
+    pub fn create(self: *FileRepository, input: FileUpsert) !i64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.createLocked(input);
+    }
+
+    pub fn createLocked(self: *FileRepository, input: FileUpsert) !i64 {
+        var statement = try self.db.prepare(
+            \\INSERT INTO files(
+            \\    audio_format, codec, size_bytes, sample_rate, bit_depth, channels,
+            \\    duration_ms, quick_hash, audio_hash, content_hash, first_seen_at
+            \\) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, unixepoch())
+            \\RETURNING id;
+        );
+        defer statement.deinit();
+        try bindFile(statement, input);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    pub fn update(self: *FileRepository, file_id: i64, input: FileUpsert) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        return self.updateLocked(file_id, input);
+    }
+
+    pub fn updateLocked(self: *FileRepository, file_id: i64, input: FileUpsert) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET audio_format=?1, codec=?2, size_bytes=?3, sample_rate=?4,
+            \\    bit_depth=?5, channels=?6, duration_ms=?7, quick_hash=?8,
+            \\    audio_hash=COALESCE(?9, audio_hash), content_hash=COALESCE(?10, content_hash)
+            \\WHERE id=?11;
+        );
+        defer statement.deinit();
+        try bindFile(statement, input);
+        try statement.bindInt64(11, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Records what a probe read from a file's headers, and nothing else.
+    ///
+    /// `update` would also rewrite `audio_format`, `size_bytes` and
+    /// `quick_hash` from a caller that never computed them. A backfill reads
+    /// headers only, so it writes only what headers say and leaves the
+    /// scanner's observations of the bytes alone.
+    pub fn updatePropertiesLocked(
+        self: *FileRepository,
+        file_id: i64,
+        input: FilePropertyUpdate,
+    ) !void {
+        var statement = try self.db.prepare(
+            \\UPDATE files SET codec=?1, sample_rate=?2, bit_depth=?3, channels=?4,
+            \\    duration_ms=?5, audio_format=COALESCE(?7, audio_format)
+            \\WHERE id=?6;
+        );
+        defer statement.deinit();
+        try statement.bindText(1, input.codec);
+        try statement.bindOptionalInt64(2, input.sample_rate);
+        try statement.bindOptionalInt64(3, input.bit_depth);
+        try statement.bindOptionalInt64(4, input.channels);
+        try statement.bindOptionalInt64(5, input.duration_ms);
+        try statement.bindInt64(6, file_id);
+        try statement.bindOptionalInt64(7, input.audio_format);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// One bounded page of files that still owe a probe, past `after_id`.
+    ///
+    /// The cursor is the file id rather than an offset, so a page whose rows
+    /// the caller could not repair does not make the next page re-serve them,
+    /// and a run interrupted half way resumes from where it stopped without
+    /// any checkpoint of its own. `all` re-serves every file regardless of
+    /// what it already declares, which is the force mode's whole meaning.
+    ///
+    /// Each row carries the location a reader should open: a present one in
+    /// preference to an unverified one, and a missing one only if there is
+    /// nothing better, because a drive that is back gets probed rather than
+    /// skipped.
+    pub fn incompletePropertiesPage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+        all: bool,
+    ) !IncompleteFilePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(if (all)
+            "SELECT files.id, " ++ location_uri_column ++
+                " FROM files WHERE files.id > ?1 ORDER BY files.id LIMIT ?2;"
+        else
+            "SELECT files.id, " ++ location_uri_column ++
+                " FROM files WHERE files.id > ?1 AND (" ++
+                incomplete_properties_predicate ++ ") ORDER BY files.id LIMIT ?2;");
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+
+        var items: std.ArrayList(IncompleteFile) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.uri);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const uri = try allocator.dupe(u8, statement.columnText(1));
+            errdefer allocator.free(uri);
+            try items.append(allocator, .{ .id = statement.columnInt64(0), .uri = uri });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// How many files still owe a probe. A backfill, unlike a filesystem walk,
+    /// has an honest denominator before it starts, so its job snapshot reports
+    /// a fraction rather than a bare count.
+    pub fn incompletePropertiesCount(self: *const FileRepository, all: bool) !u64 {
+        var statement = try self.db.prepare(if (all)
+            "SELECT count(*) FROM files;"
+        else
+            "SELECT count(*) FROM files WHERE " ++ incomplete_properties_predicate ++ ";");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// One bounded page of files that still owe the measurement `selector`
+    /// names, past `after_id`.
+    ///
+    /// The cursor is the file id for the same reason the backfill's is: a row
+    /// this run declines to measure does not make the next page re-serve it,
+    /// and an interrupted run resumes from where it stopped with no checkpoint
+    /// of its own. Which rows still owe work is a property of the rows.
+    pub fn unanalyzedPage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+        selector: AnalysisSelector,
+    ) !AnalysisCandidatePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(
+            "SELECT files.id, files.quick_hash, " ++ location_uri_column ++
+                " FROM files WHERE files.id > ?1 AND (" ++ unanalyzed_predicate ++
+                ") ORDER BY files.id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+        try bindAnalysisSelector(statement, &selector);
+
+        var items: std.ArrayList(AnalysisCandidate) = .empty;
+        errdefer {
+            for (items.items) |item| allocator.free(item.uri);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const uri = try allocator.dupe(u8, statement.columnText(2));
+            errdefer allocator.free(uri);
+            try items.append(allocator, .{
+                .id = statement.columnInt64(0),
+                .source_identity = digestColumn(statement, 1),
+                .uri = uri,
+            });
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// How many files still owe that measurement. Like the backfill and unlike
+    /// a filesystem walk, a library-wide analysis has an honest denominator
+    /// before it starts, so its job snapshot reports a fraction.
+    pub fn unanalyzedCount(
+        self: *const FileRepository,
+        selector: AnalysisSelector,
+    ) !u64 {
+        var statement = try self.db.prepare(
+            "SELECT count(*) FROM files WHERE " ++ unanalyzed_predicate ++ ";",
+        );
+        defer statement.deinit();
+        // The count asks the same question with no cursor and no limit, so ?1
+        // and ?2 are simply unbound; SQLite reads an unbound parameter as
+        // NULL, and neither appears in this statement.
+        try bindAnalysisSelector(statement, &selector);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+
+    /// One bounded page of files for a duplicate scan, past `after_id`.
+    ///
+    /// Deliberately unfiltered. A scan that selected only files carrying an
+    /// `audio_hash` would report "no duplicates" on a library nobody has
+    /// analyzed, which is a lie of omission rather than an answer; and it
+    /// would never revisit a file to retire a finding that no longer holds.
+    /// Every row is examined, and the ones nothing can be said about are
+    /// counted.
+    pub fn duplicateCandidatePage(
+        self: *const FileRepository,
+        allocator: std.mem.Allocator,
+        after_id: i64,
+        limit: u32,
+    ) !DuplicateCandidatePage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        var statement = try self.db.prepare(
+            "SELECT id, audio_hash, duration_ms, quick_hash FROM files" ++
+                " WHERE id > ?1 ORDER BY id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, after_id);
+        try statement.bindInt64(2, limit);
+
+        var items: std.ArrayList(DuplicateCandidate) = .empty;
+        errdefer items.deinit(allocator);
+        while (try statement.step() == .row) try items.append(allocator, .{
+            .id = statement.columnInt64(0),
+            .audio_hash = audioHashColumn(statement, 1),
+            .duration_ms = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
+            .source_identity = digestColumn(statement, 3),
+        });
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    /// The other files whose decoded audio hashes to exactly this, into a
+    /// caller-owned buffer.
+    ///
+    /// This is the exact-duplicate bucket, and it is a search of
+    /// `files_audio_hash` rather than a comparison against anything: two files
+    /// whose decoded samples hash identically *are* the same audio, whatever
+    /// their containers, bitrates or tags say.
+    ///
+    /// The buffer is the caller's and the query is limited to its length, so
+    /// one pathological bucket cannot allocate without bound. A returned count
+    /// equal to `buffer.len` means the bucket was truncated.
+    pub fn audioHashPeersInto(
+        self: *const FileRepository,
+        buffer: []i64,
+        audio_hash: []const u8,
+        exclude_id: i64,
+    ) !usize {
+        if (buffer.len == 0) return 0;
+        var statement = try self.db.prepare(
+            "SELECT id FROM files WHERE audio_hash = ?1 AND id <> ?2 ORDER BY id LIMIT ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindBlob(1, audio_hash);
+        try statement.bindInt64(2, exclude_id);
+        try statement.bindInt64(3, @intCast(buffer.len));
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = statement.columnInt64(0);
+        return found;
+    }
+
+    /// The other files whose duration falls inside `[low, high]`, into a
+    /// caller-owned buffer.
+    ///
+    /// This is the *plausible* bucket, the one a temporal fingerprint is then
+    /// compared inside. Length is the cheapest necessary condition for two
+    /// files being the same recording and the only one an index can answer, so
+    /// it decides who is worth comparing; the fingerprint decides whether they
+    /// match. Served by `files_duration`, which covers both columns.
+    ///
+    /// Bounded exactly like `audioHashPeersInto`, and for the same reason.
+    pub fn durationPeersInto(
+        self: *const FileRepository,
+        buffer: []DuplicatePeer,
+        low: i64,
+        high: i64,
+        exclude_id: i64,
+    ) !usize {
+        if (buffer.len == 0) return 0;
+        var statement = try self.db.prepare(
+            "SELECT id, quick_hash, audio_hash FROM files" ++
+                " WHERE duration_ms >= ?1 AND duration_ms <= ?2" ++
+                " AND id <> ?3 ORDER BY duration_ms, id LIMIT ?4;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, low);
+        try statement.bindInt64(2, high);
+        try statement.bindInt64(3, exclude_id);
+        try statement.bindInt64(4, @intCast(buffer.len));
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = .{
+            .id = statement.columnInt64(0),
+            .source_identity = digestColumn(statement, 1),
+            .audio_hash = audioHashColumn(statement, 2),
+        };
+        return found;
+    }
+
+    /// Tier 4 of the identity cascade, written by the analysis job rather than
+    /// the scanner: a hash of the audio payload alone survives Orca's own tag
+    /// writes, which change size, mtime and quick hash but not the audio.
+    pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// The same write from inside a caller's transaction, so an analysis pass
+    /// can commit a file's identity, its results and its health together.
+    pub fn setAudioHashLocked(
+        self: *FileRepository,
+        file_id: i64,
+        digest: []const u8,
+    ) !void {
+        var statement = try self.db.prepare("UPDATE files SET audio_hash=?1 WHERE id=?2;");
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Tier 1: the same path on the same volume.
+    pub fn resolveByUri(
+        self: *const FileRepository,
+        volume_id: i64,
+        uri: []const u8,
+    ) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT file_id FROM locations WHERE volume_id=?1 AND uri=?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, uri);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Tier 2: the same inode, size and mtime somewhere else on the volume —
+    /// a rename or a move within one filesystem.
+    pub fn resolveByIdentity(self: *const FileRepository, key: StorageIdentityKey) !?i64 {
+        var statement = try self.db.prepare(
+            \\SELECT file_id FROM locations
+            \\WHERE volume_id=?1 AND native_inode=?2 AND size_bytes=?3 AND modified_ns=?4
+            \\ORDER BY CASE state WHEN 'missing' THEN 0 ELSE 1 END, id
+            \\LIMIT 1;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, key.volume_id);
+        try statement.bindInt64(2, key.native_inode);
+        try statement.bindInt64(3, key.size_bytes);
+        try statement.bindInt64(4, key.modified_ns);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Tier 3: the same leading and trailing bytes and length — a copy, a
+    /// cross-volume move, or a restore from backup.
+    pub fn resolveByQuickHash(self: *const FileRepository, digest: []const u8) !?i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM files WHERE quick_hash=?1 ORDER BY id LIMIT 1;",
+        );
+        defer statement.deinit();
+        try statement.bindBlob(1, digest);
+        if (try statement.step() != .row) return null;
+        return statement.columnInt64(0);
+    }
+
+    /// Sweep after a completed, uncancelled run: locations under this root that
+    /// the run did not reach become `missing`. Never a delete — an unmounted
+    /// drive must not eat a library.
+    pub fn markMissingBelowGeneration(
+        self: *FileRepository,
+        root_id: i64,
+        generation: i64,
+    ) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE locations SET state='missing', missing_since=unixepoch()
+            \\WHERE root_id=?1 AND last_seen_generation<?2 AND state<>'missing';
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        try statement.bindInt64(2, generation);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
+    }
+
+    /// Attach a file to the performance it encodes. Written only by the
+    /// projection: a file is an encoding, and which performance it encodes is
+    /// a resolution decision, not a filesystem observation.
+    pub fn setRecordingLocked(
+        self: *FileRepository,
+        file_id: i64,
+        recording_id: ?i64,
+    ) !void {
+        var statement = try self.db.prepare(
+            "UPDATE files SET recording_id=?1 WHERE id=?2 AND recording_id IS NOT ?1;",
+        );
+        defer statement.deinit();
+        try statement.bindOptionalInt64(1, recording_id);
+        try statement.bindInt64(2, file_id);
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    pub fn count(self: *const FileRepository) !u64 {
+        var statement = try self.db.prepare("SELECT count(*) FROM files;");
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return @intCast(statement.columnInt64(0));
+    }
+};
+
+fn bindFile(statement: sqlite.Statement, input: FileUpsert) !void {
+    try statement.bindInt64(1, input.audio_format);
+    try statement.bindText(2, input.codec);
+    try statement.bindInt64(3, input.size_bytes);
+    try statement.bindOptionalInt64(4, input.sample_rate);
+    try statement.bindOptionalInt64(5, input.bit_depth);
+    try statement.bindOptionalInt64(6, input.channels);
+    try statement.bindOptionalInt64(7, input.duration_ms);
+    try bindOptionalBlob(statement, 8, input.quick_hash);
+    try bindOptionalBlob(statement, 9, input.audio_hash);
+    try bindOptionalBlob(statement, 10, input.content_hash);
+}
+
+fn bindOptionalBlob(statement: sqlite.Statement, index: c_int, value: ?[]const u8) !void {
+    if (value) |bytes| return statement.bindBlob(index, bytes);
+    return statement.bindOptionalText(index, null);
+}
+
+/// A 32-byte BLAKE3 column, or null when the row has none or the stored blob
+/// is not one. A short blob is corruption rather than an answer, and treating
+/// it as null keeps a duplicate scan from bucketing files together on a
+/// truncated key.
+fn audioHashColumn(statement: sqlite.Statement, column: c_int) ?[32]u8 {
+    const bytes = statement.columnBlob(column);
+    if (bytes.len != 32) return null;
+    var digest: [32]u8 = undefined;
+    @memcpy(&digest, bytes);
+    return digest;
+}

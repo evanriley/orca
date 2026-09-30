@@ -113,11 +113,14 @@ pub const AcoustId = struct {
     server: []const u8 = default_server,
     client_key: []const u8,
     cache_ttl_seconds: i64 = 90 * 24 * 60 * 60,
+    refusal_ttl_seconds: i64 = 7 * 24 * 60 * 60,
     requests_answered: u64 = 0,
     cache_hits: u64 = 0,
 
     /// Answers each query from the cache, or asks AcoustID about the rest in
-    /// one request. At most `max_lookup_queries` queries.
+    /// one request. A batch AcoustID refuses is asked again one query per
+    /// request, and only a single query's refusal is cached. At most
+    /// `max_lookup_queries` queries.
     pub fn lookup(self: *AcoustId, allocator: std.mem.Allocator, queries: []const LookupQuery) !LookupAnswers {
         if (queries.len > max_lookup_queries) return error.TooManyQueries;
         try validateKey(self.client_key);
@@ -142,17 +145,31 @@ pub const AcoustId = struct {
         for (queries, keys, answers, 0..) |query, key, *answer, index| {
             if (try self.cache.get(allocator, service, key, now_s, false)) |cached| {
                 defer cached.deinit();
-                answer.* = try decodeCached(allocator, cached.body, query.album);
+                if (cached.status == 200) answer.* = try decodeCached(allocator, cached.body, query.album);
                 self.cache_hits += 1;
             } else try misses.append(allocator, index);
         }
         if (misses.items.len == 0) return result;
+        if (try self.ask(allocator, queries, keys, misses.items, answers, now_s) == .answered) return result;
+        if (misses.items.len == 1) return error.ProviderRejectedRequest;
+        for (misses.items) |index| _ = try self.ask(allocator, queries, keys, &.{index}, answers, now_s);
+        return result;
+    }
 
-        const body = try self.lookupBody(allocator, queries, misses.items);
+    fn ask(
+        self: *AcoustId,
+        allocator: std.mem.Allocator,
+        queries: []const LookupQuery,
+        keys: []const []u8,
+        misses: []const usize,
+        answers: []?model.CandidateList,
+        now_s: i64,
+    ) !enum { answered, refused } {
+        const body = try self.lookupBody(allocator, queries, misses);
         defer allocator.free(body);
         const response = self.post(allocator, "/v2/lookup", body) catch |err| switch (err) {
             error.RateLimited, error.NetworkUnavailable, error.Timeout, error.Offline => {
-                if (try self.stale(allocator, queries, keys, misses.items, answers, now_s)) return result;
+                if (try self.stale(allocator, queries, keys, misses, answers, now_s)) return .answered;
                 return err;
             },
             else => return err,
@@ -160,24 +177,31 @@ pub const AcoustId = struct {
         defer response.deinit();
         self.requests_answered += 1;
         if (response.status == 408 or response.status >= 500) {
-            if (try self.stale(allocator, queries, keys, misses.items, answers, now_s)) return result;
+            if (try self.stale(allocator, queries, keys, misses, answers, now_s)) return .answered;
             return error.ProviderUnavailable;
         }
-        if (response.status != 200) return refusal(allocator, response.body);
+        if (response.status != 200) {
+            const refused = refusal(allocator, response.body);
+            if (refused != error.ProviderRejectedRequest or !network.client.isPermanentRejection(response.status))
+                return refused;
+            if (misses.len == 1)
+                try self.cache.put(service, keys[misses[0]], response.status, response.body, now_s + self.refusal_ttl_seconds);
+            return .refused;
+        }
 
         var parsed = try Parsed.init(allocator, response.body);
         defer parsed.deinit();
         for (parsed.value.fingerprints) |entry| {
             const position = std.math.cast(usize, entry.index orelse continue) orelse continue;
-            if (position >= misses.items.len) continue;
-            const index = misses.items[position];
+            if (position >= misses.len) continue;
+            const index = misses[position];
             if (answers[index] != null) continue;
             const normalized = try parsed.normalize(allocator, entry.results);
             defer allocator.free(normalized);
             try self.cache.put(service, keys[index], 200, normalized, now_s + self.cache_ttl_seconds);
             answers[index] = try decodeCached(allocator, normalized, queries[index].album);
         }
-        return result;
+        return .answered;
     }
 
     /// Sends one batch as the user whose key is `user_key`. A key AcoustID does
@@ -259,7 +283,8 @@ pub const AcoustId = struct {
     ) !bool {
         for (misses) |index| {
             const entry = try self.cache.get(allocator, service, keys[index], now_s, true) orelse return false;
-            entry.deinit();
+            defer entry.deinit();
+            if (entry.status != 200) return false;
         }
         for (misses) |index| {
             const entry = (try self.cache.get(allocator, service, keys[index], now_s, true)).?;
@@ -562,24 +587,12 @@ pub fn gzip(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
 const testing = std.testing;
 
-fn gunzip(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    var input: std.Io.Reader = .fixed(bytes);
-    const window = try allocator.alloc(u8, std.compress.flate.max_window_len);
-    defer allocator.free(window);
-    var decompressor: std.compress.flate.Decompress = .init(&input, .gzip, window);
-    var output = std.Io.Writer.Allocating.init(allocator);
-    errdefer output.deinit();
-    _ = try decompressor.reader.streamRemaining(&output.writer);
-    var list = output.toArrayList();
-    return list.toOwnedSlice(allocator);
-}
-
 test "a gzipped body decompresses to the form it was made from" {
     const form = "client=key&format=json" ++ "&fingerprint.0=AQADtMmSJEm" ** 200;
     const compressed = try gzip(testing.allocator, form);
     defer testing.allocator.free(compressed);
     try testing.expect(compressed.len < form.len / 4);
-    const restored = try gunzip(testing.allocator, compressed);
+    const restored = try network.testing.gunzip(testing.allocator, compressed);
     defer testing.allocator.free(restored);
     try testing.expectEqualStrings(form, restored);
 }
@@ -603,70 +616,45 @@ const lookup_answer =
     \\    "releasegroups":[{"id":"g1"}]}]}]}]}
 ;
 
-const FakeService = struct {
-    status: u16 = 200,
-    body: []const u8 = lookup_answer,
-    failure: ?anyerror = null,
-    calls: u32 = 0,
-    form: [8192]u8 = undefined,
-    form_len: usize = 0,
-    url: [128]u8 = undefined,
-    url_len: usize = 0,
-    now_ms: i64 = 1_800_000_000_000,
-
-    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: network.client.Request) anyerror!network.client.Response {
-        const self: *FakeService = @ptrCast(@alignCast(context));
-        self.calls += 1;
-        self.url_len = @min(request.url.len, self.url.len);
-        @memcpy(self.url[0..self.url_len], request.url[0..self.url_len]);
-        const form = try gunzip(allocator, request.body.?);
-        defer allocator.free(form);
-        self.form_len = @min(form.len, self.form.len);
-        @memcpy(self.form[0..self.form_len], form[0..self.form_len]);
-        if (self.failure) |err| return err;
-        return .{ .allocator = allocator, .status = self.status, .body = try allocator.dupe(u8, self.body) };
-    }
-
-    fn nowMs(context: *anyopaque) i64 {
-        return (@as(*FakeService, @ptrCast(@alignCast(context)))).now_ms;
-    }
-
-    fn sleepMs(context: *anyopaque, milliseconds: u64) anyerror!void {
-        const self: *FakeService = @ptrCast(@alignCast(context));
-        self.now_ms += @intCast(milliseconds);
-    }
-
-    fn lastForm(self: *const FakeService) []const u8 {
-        return self.form[0..self.form_len];
-    }
-};
+const invalid_fingerprint = "{\"status\":\"error\",\"error\":{\"code\":3,\"message\":\"invalid fingerprint\"}}";
 
 const Rig = struct {
     library: database.LibraryDatabase,
-    fake: FakeService,
-    gateway: network.Gateway,
+    net: network.testing.TestGateway,
+    refused_fingerprint: ?[]const u8,
     adapter: AcoustId,
 
     fn init(self: *Rig, uri: [:0]const u8) !void {
         self.library = try database.LibraryDatabase.open(testing.allocator, testing.io, uri);
-        self.fake = .{};
-        const clock: network.client.Clock = .{ .context = &self.fake, .now_ms_fn = FakeService.nowMs, .sleep_ms_fn = FakeService.sleepMs };
-        self.gateway = .{
-            .transport = .{ .context = &self.fake, .perform_fn = FakeService.perform },
-            .clock = clock,
-            .config = .{ .minimum_interval_ms = 0 },
-        };
+        self.net.init(.{ .config = .{ .minimum_interval_ms = 0 }, .now_ms = 1_800_000_000_000 });
+        self.refused_fingerprint = null;
+        self.respond(200, lookup_answer);
+        self.net.transport.responder = .{ .context = self, .respond_fn = refuseFingerprint };
         self.adapter = .{
-            .gateway = &self.gateway,
+            .gateway = &self.net.gateway,
             .cache = &self.library.provider_cache,
-            .wall_clock = clock,
+            .wall_clock = self.net.clock.wallClock(),
             .server = "http://127.0.0.1:5001/",
             .client_key = "app key",
         };
     }
 
     fn deinit(self: *Rig) void {
+        self.net.deinit();
         self.library.close();
+    }
+
+    fn respond(self: *Rig, status: u16, body: []const u8) void {
+        self.net.transport.otherwise = .{ .respond = .{ .status = status, .body = body } };
+    }
+
+    fn refuseFingerprint(context: *anyopaque, exchange: network.testing.Exchange, scripted: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *Rig = @ptrCast(@alignCast(context));
+        const reply = scripted orelse self.net.transport.otherwise;
+        if (reply == .fail) return reply;
+        if (self.refused_fingerprint) |refused| if (std.mem.indexOf(u8, exchange.form, refused) != null)
+            return .{ .respond = .{ .status = 400, .body = invalid_fingerprint } };
+        return reply;
     }
 };
 
@@ -682,13 +670,13 @@ test "a batched lookup asks once for every query, keys results by index and reso
     const answers = try rig.adapter.lookup(testing.allocator, &queries);
     defer answers.deinit();
 
-    try testing.expectEqual(@as(u32, 1), rig.fake.calls);
-    try testing.expectEqualStrings("http://127.0.0.1:5001/v2/lookup", rig.fake.url[0..rig.fake.url_len]);
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
+    try testing.expectEqualStrings("http://127.0.0.1:5001/v2/lookup", rig.net.transport.lastUrl());
     try testing.expectEqualStrings(
         "client=app%20key&clientversion=" ++ network.client.Identity.orca.version ++
             "&format=json&meta=recordings+releasegroups+compress&batch=1" ++
             "&duration.0=224&fingerprint.0=AQAD%20first&duration.1=225&fingerprint.1=AQAD%20second",
-        rig.fake.lastForm(),
+        rig.net.transport.lastForm(),
     );
     const first = answers.answers[0].?;
     try testing.expectEqual(@as(usize, 2), first.items.len);
@@ -722,43 +710,88 @@ test "answers are cached per query, so asking again sends nothing and a new quer
         .{ .duration_s = 224, .fingerprint = "AQAD first" },
     });
     defer again.deinit();
-    try testing.expectEqual(@as(u32, 1), rig.fake.calls);
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
     try testing.expectEqual(@as(u64, 2), rig.adapter.cache_hits);
     try testing.expectEqualStrings("Nick Drake; John Cale", again.answers[0].?.items[0].artist);
 
-    rig.fake.body = "{\"status\":\"ok\",\"fingerprints\":[{\"index\":0,\"results\":[]}]}";
+    rig.respond(200, "{\"status\":\"ok\",\"fingerprints\":[{\"index\":0,\"results\":[]}]}");
     const mixed = try rig.adapter.lookup(testing.allocator, &.{
         .{ .duration_s = 224, .fingerprint = "AQAD first" },
         .{ .duration_s = 300, .fingerprint = "AQAD third" },
     });
     defer mixed.deinit();
-    try testing.expectEqual(@as(u32, 2), rig.fake.calls);
-    try testing.expect(std.mem.endsWith(u8, rig.fake.lastForm(), "&duration.0=300&fingerprint.0=AQAD%20third"));
+    try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
+    try testing.expect(std.mem.endsWith(u8, rig.net.transport.lastForm(), "&duration.0=300&fingerprint.0=AQAD%20third"));
     try testing.expectEqual(@as(usize, 0), mixed.answers[1].?.items.len);
 }
 
-test "a refused key is told apart from a refused query and an outage, and none is cached" {
+test "a refused key is told apart from a refused query and an outage, and only the refused query is cached" {
     var rig: Rig = undefined;
     try rig.init("file:orca-acoustid-refusals?mode=memory&cache=shared");
     defer rig.deinit();
     const query = [_]LookupQuery{.{ .duration_s = 224, .fingerprint = "AQAD first" }};
 
-    rig.fake.status = 400;
-    rig.fake.body = "{\"status\":\"error\",\"error\":{\"code\":4,\"message\":\"invalid API key\"}}";
+    rig.respond(400, "{\"status\":\"error\",\"error\":{\"code\":4,\"message\":\"invalid API key\"}}");
     try testing.expectError(error.InvalidClientKey, rig.adapter.lookup(testing.allocator, &query));
-    rig.fake.body = "{\"status\":\"error\",\"error\":{\"code\":3,\"message\":\"invalid fingerprint\"}}";
+    rig.respond(401, "{\"status\":\"error\"}");
     try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookup(testing.allocator, &query));
-    rig.fake.status = 503;
+    rig.respond(503, "{\"status\":\"error\"}");
     try testing.expectError(error.ProviderUnavailable, rig.adapter.lookup(testing.allocator, &query));
-    rig.fake.failure = error.ConnectionRefused;
+    rig.net.transport.otherwise = .{ .fail = error.ConnectionRefused };
     try testing.expectError(error.NetworkUnavailable, rig.adapter.lookup(testing.allocator, &query));
-    rig.fake.failure = null;
-    rig.fake.status = 200;
-    rig.fake.body = lookup_answer;
-    const answered = try rig.adapter.lookup(testing.allocator, &query);
-    answered.deinit();
-    try testing.expectEqual(@as(u32, 5), rig.fake.calls);
+    try testing.expectEqual(@as(u32, 4), rig.net.transport.requestCount());
     try testing.expectEqual(@as(u64, 0), rig.adapter.cache_hits);
+
+    rig.respond(400, invalid_fingerprint);
+    try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookup(testing.allocator, &query));
+    rig.respond(200, lookup_answer);
+    const refused = try rig.adapter.lookup(testing.allocator, &query);
+    defer refused.deinit();
+    try testing.expect(refused.answers[0] == null);
+    try testing.expectEqual(@as(u32, 5), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(u64, 1), rig.adapter.cache_hits);
+
+    rig.net.clock.advance(rig.adapter.refusal_ttl_seconds * 1000);
+    rig.respond(503, lookup_answer);
+    try testing.expectError(error.ProviderUnavailable, rig.adapter.lookup(testing.allocator, &query));
+    rig.respond(200, lookup_answer);
+    const answered = try rig.adapter.lookup(testing.allocator, &query);
+    defer answered.deinit();
+    try testing.expect(answered.answers[0] != null);
+    try testing.expectEqual(@as(u32, 7), rig.net.transport.requestCount());
+}
+
+test "a refused batch is asked again one fingerprint at a time, so only the bad fingerprint's refusal is cached" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-acoustid-refused-batch?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.refused_fingerprint = "AQADbad";
+    const queries = [_]LookupQuery{
+        .{ .duration_s = 224, .fingerprint = "AQADfirst" },
+        .{ .duration_s = 225, .fingerprint = "AQADbad" },
+        .{ .duration_s = 226, .fingerprint = "AQADthird" },
+    };
+
+    const first = try rig.adapter.lookup(testing.allocator, &queries);
+    defer first.deinit();
+
+    try testing.expectEqual(@as(u32, 4), rig.net.transport.requestCount());
+    try testing.expect(first.answers[0] != null);
+    try testing.expect(first.answers[1] == null);
+    try testing.expect(first.answers[2] != null);
+    var refusals = try rig.library.database.prepare("SELECT count(*) FROM provider_cache WHERE provider = 'acoustid' AND status = 400;");
+    defer refusals.deinit();
+    try testing.expect(try refusals.step() == .row);
+    try testing.expectEqual(@as(i64, 1), refusals.columnInt64(0));
+
+    const again = try rig.adapter.lookup(testing.allocator, &queries);
+    defer again.deinit();
+
+    try testing.expectEqual(@as(u32, 4), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(u64, 3), rig.adapter.cache_hits);
+    try testing.expect(again.answers[0] != null);
+    try testing.expect(again.answers[1] == null);
+    try testing.expect(again.answers[2] != null);
 }
 
 test "a submission sends each item's fields under its index and returns what AcoustID took" {
@@ -784,31 +817,29 @@ test "a submission sends each item's fields under its index and returns what Aco
         .track_number = 7,
         .year = 1971,
     }));
-    rig.fake.body = "{\"status\":\"ok\",\"submissions\":[{\"id\":501,\"status\":\"pending\",\"index\":\"0\"},{\"id\":502,\"status\":\"pending\",\"index\":\"1\"}]}";
+    rig.respond(200, "{\"status\":\"ok\",\"submissions\":[{\"id\":501,\"status\":\"pending\",\"index\":\"0\"},{\"id\":502,\"status\":\"pending\",\"index\":\"1\"}]}");
 
     const outcome = try rig.adapter.submit(testing.allocator, "user key", &batch);
     defer testing.allocator.free(outcome.accepted);
 
-    try testing.expectEqualStrings("http://127.0.0.1:5001/v2/submit", rig.fake.url[0..rig.fake.url_len]);
+    try testing.expectEqualStrings("http://127.0.0.1:5001/v2/submit", rig.net.transport.lastUrl());
     try testing.expectEqualStrings(
         "client=app%20key&clientversion=" ++ network.client.Identity.orca.version ++ "&format=json&user=user%20key" ++
             "&duration.0=224&fingerprint.0=AQAD%20one&fileformat.0=FLAC&bitrate.0=900" ++
             "&mbid.0=8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" ++
             "&duration.1=300&fingerprint.1=AQAD%20two&track.1=Northern%20Sky&artist.1=Nick%20Drake" ++
             "&album.1=Bryter%20Layter&trackno.1=7&year.1=1971",
-        rig.fake.lastForm(),
+        rig.net.transport.lastForm(),
     );
     try testing.expectEqual(@as(usize, 2), outcome.accepted.len);
     try testing.expectEqual(@as(i64, 502), outcome.accepted[1].submission_id);
     try testing.expectEqual(@as(usize, 1), outcome.accepted[1].index);
 
-    rig.fake.status = 400;
-    rig.fake.body = "{\"status\":\"error\",\"error\":{\"code\":6,\"message\":\"invalid user API key\"}}";
+    rig.respond(400, "{\"status\":\"error\",\"error\":{\"code\":6,\"message\":\"invalid user API key\"}}");
     try testing.expectError(error.InvalidUserKey, rig.adapter.submit(testing.allocator, "user key", &batch));
-    rig.fake.status = 401;
+    rig.respond(401, "{\"status\":\"error\",\"error\":{\"code\":6,\"message\":\"invalid user API key\"}}");
     try testing.expectError(error.InvalidUserKey, rig.adapter.submit(testing.allocator, "user key", &batch));
-    rig.fake.status = 400;
-    rig.fake.body = "{\"status\":\"error\",\"error\":{\"code\":8,\"message\":\"invalid duration\"}}";
+    rig.respond(400, "{\"status\":\"error\",\"error\":{\"code\":8,\"message\":\"invalid duration\"}}");
     const rejected = try rig.adapter.submit(testing.allocator, "user key", &batch);
     try testing.expectEqual(@as(u16, 400), rejected.rejected);
 }

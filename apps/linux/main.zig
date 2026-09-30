@@ -102,13 +102,8 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
     _ = window.build(self, gtk.cast(gtk.Application, application));
     transport.refreshDevices(self);
-    // The output is opened on first play, not here. Opening it at launch held
-    // the user's default sink for as long as the window was open, whether or
-    // not they ever played anything -- it shows up in their mixer, and on a
-    // device that only allows one client it locks everything else out. The
-    // play path already calls `ensureOutput`, so nothing is lost but the
-    // device grab, and a machine with no audio server still reports honestly
-    // at the point a play is attempted rather than at startup.
+    // The output is opened on first play, not here: an idle window must not
+    // hold the user's default sink.
     browse.reload(self);
     self.reload();
     albums.reload(self);

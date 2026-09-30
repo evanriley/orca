@@ -52,16 +52,6 @@ pub fn listenedEnough(duration_ms: u64, listened_ms: u64) bool {
     return listened_ms >= @min(duration_ms / 2, maximum_required_ms);
 }
 
-pub const Adapter = struct {
-    service: []const u8,
-    context: *anyopaque,
-    submit_fn: *const fn (*anyopaque, []const u8) anyerror!void,
-
-    pub fn submit(self: Adapter, payload: []const u8) !void {
-        try self.submit_fn(self.context, payload);
-    }
-};
-
 pub fn enqueueEligible(
     allocator: std.mem.Allocator,
     queue: *database.ScrobbleQueueRepository,

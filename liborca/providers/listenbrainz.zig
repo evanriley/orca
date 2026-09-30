@@ -29,6 +29,7 @@ pub const State = enum {
     backing_off,
     rate_limited,
     offline,
+    busy,
 };
 
 pub const BoundedText = struct {
@@ -91,6 +92,7 @@ pub const Delivery = struct {
     token_rejected: bool = false,
     backoff_ms: u64 = 0,
     backoff_until_ms: i64 = 0,
+    busy_until_ms: i64 = 0,
     isolating: u32 = 0,
     accepted_feedback: ?struct { recording_id: i64, feedback: database.Feedback } = null,
 
@@ -114,6 +116,11 @@ pub const Delivery = struct {
 
     pub fn status(self: *const Delivery) Status {
         return self.current;
+    }
+
+    /// True while another Orca process held ListenBrainz at the last attempt.
+    pub fn waitingForLease(self: *const Delivery) bool {
+        return self.gateway.clock.nowMs() < self.busy_until_ms;
     }
 
     fn endpoint(self: *const Delivery, path: []const u8) std.mem.Allocator.Error![]u8 {
@@ -177,7 +184,7 @@ pub const Delivery = struct {
             self.current.delivered_total = try self.queue.deliveredCount(service);
             self.delivered_loaded = true;
         }
-        if (self.blocked(now_unix_s)) |result| return result;
+        if (try self.blocked(now_unix_s)) |result| return result;
         const next = try self.queue.nextAttemptAt(service);
         if (next == null or next.? > now_unix_s) {
             self.isolating = 0;
@@ -190,14 +197,17 @@ pub const Delivery = struct {
         return self.deliver(token, now_unix_s);
     }
 
-    fn blocked(self: *Delivery, now_unix_s: i64) ?StepResult {
+    fn blocked(self: *Delivery, now_unix_s: i64) !?StepResult {
         if (self.token_rejected) return self.block(.invalid_token, now_unix_s, null);
         if (self.gateway.config.offline) return self.block(.offline, now_unix_s, null);
+        try self.gateway.loadSharedState();
         const now_ms = self.gateway.clock.nowMs();
-        if (self.gateway.blockedUntilMs()) |until|
-            return self.block(.rate_limited, now_unix_s, millisecondsUntil(until, now_ms));
         if (now_ms < self.backoff_until_ms)
             return self.block(.backing_off, now_unix_s, millisecondsUntil(self.backoff_until_ms, now_ms));
+        if (self.gateway.blockedUntilMs()) |until|
+            return self.block(.rate_limited, now_unix_s, millisecondsUntil(until, now_ms));
+        if (now_ms < self.busy_until_ms)
+            return self.block(.busy, now_unix_s, millisecondsUntil(self.busy_until_ms, now_ms));
         return null;
     }
 
@@ -302,7 +312,7 @@ pub const Delivery = struct {
             self.isolating -|= @intCast(entries.len);
             return self.idleResult(.delivered, now_unix_s, count, rejected);
         }
-        if (isPermanentRejection(response.status)) {
+        if (network.client.isPermanentRejection(response.status)) {
             if (included.items.len > 1) {
                 try batch.releaseUnresolved();
                 self.isolating = @intCast(included.items.len);
@@ -319,8 +329,9 @@ pub const Delivery = struct {
             self.current.state = .idle;
             return self.idleResult(.rejected, now_unix_s, 0, rejected + 1);
         }
-        try batch.releaseUnresolved();
-        return self.responseFailed(response.status, now_unix_s, rejected);
+        const result = try self.responseFailed(response.status, now_unix_s, rejected);
+        try batch.requeueUnresolved(self.retryAt(), self.current.last_error.slice());
+        return result;
     }
 
     fn requestSucceeded(self: *Delivery) void {
@@ -330,7 +341,7 @@ pub const Delivery = struct {
         self.current.last_error.clear();
     }
 
-    fn responseFailed(self: *Delivery, http_status: u16, now_unix_s: i64, rejected: u32) StepResult {
+    fn responseFailed(self: *Delivery, http_status: u16, now_unix_s: i64, rejected: u32) !StepResult {
         if (http_status == 401 or http_status == 403) {
             self.token_rejected = true;
             self.current.state = .invalid_token;
@@ -347,7 +358,7 @@ pub const Delivery = struct {
         feedback: *database.FeedbackRepository,
         now_unix_s: i64,
     ) !StepResult {
-        if (self.blocked(now_unix_s)) |result| return result;
+        if (try self.blocked(now_unix_s)) |result| return result;
         const change = (try feedback.nextToSync(self.allocator, now_unix_s)) orelse {
             if (try feedback.pendingSyncCount() == 0) return .{ .outcome = .idle };
             return .{ .outcome = .idle, .wake_after_ms = @intCast(database.repository.feedback_settle_seconds * 1000) };
@@ -384,7 +395,7 @@ pub const Delivery = struct {
             self.requestSucceeded();
             return .{ .outcome = .delivered, .delivered = 1 };
         }
-        if (isPermanentRejection(response.status)) {
+        if (network.client.isPermanentRejection(response.status)) {
             const details = try rejectionDetails(self.allocator, response);
             defer self.allocator.free(details);
             try feedback.markRejected(change.recording_id, change.feedback, details);
@@ -396,7 +407,7 @@ pub const Delivery = struct {
     }
 
     pub fn sendNowPlaying(self: *Delivery, event: scrobble.Event, now_unix_s: i64) !StepResult {
-        if (self.blocked(now_unix_s)) |result| return result;
+        if (try self.blocked(now_unix_s)) |result| return result;
         const token = (try self.credentials.get(self.allocator, token_service, token_account)) orelse
             return .{ .outcome = .blocked };
         defer credentials.wipeAndFree(self.allocator, token);
@@ -420,7 +431,7 @@ pub const Delivery = struct {
             self.requestSucceeded();
             return .{ .outcome = .delivered, .delivered = 1 };
         }
-        if (isPermanentRejection(response.status)) {
+        if (network.client.isPermanentRejection(response.status)) {
             self.current.state = .idle;
             return .{ .outcome = .rejected, .rejected = 1 };
         }
@@ -446,8 +457,25 @@ pub const Delivery = struct {
         now_unix_s: i64,
         rejected: u32,
     ) !StepResult {
-        if (err != error.OutOfMemory) try batch.releaseUnresolved();
-        return self.requestFailed(err, now_unix_s, rejected);
+        const result = try self.requestFailed(err, now_unix_s, rejected);
+        try batch.requeueUnresolved(self.retryAt(), self.current.last_error.slice());
+        return result;
+    }
+
+    /// When the listens of a request that just failed may go out again: the
+    /// end of the backoff or block it started, or null when it started none
+    /// and they return to the queue as they were.
+    fn retryAt(self: *const Delivery) ?i64 {
+        return switch (self.current.state) {
+            .backing_off, .rate_limited => self.current.next_attempt_at,
+            else => null,
+        };
+    }
+
+    fn waitForLease(self: *Delivery, now_unix_s: i64) StepResult {
+        self.busy_until_ms = self.gateway.clock.nowMs() +| network.client.lease_duration_ms;
+        self.current.last_error.set("ListenBrainz is in use by another Orca process");
+        return self.block(.busy, now_unix_s, @intCast(network.client.lease_duration_ms));
     }
 
     fn requestFailed(self: *Delivery, err: anyerror, now_unix_s: i64, rejected: u32) !StepResult {
@@ -458,6 +486,12 @@ pub const Delivery = struct {
             },
             error.Offline => {
                 var result = self.block(.offline, now_unix_s, null);
+                result.outcome = .deferred;
+                result.rejected = rejected;
+                return result;
+            },
+            error.ProviderBusy => {
+                var result = self.waitForLease(now_unix_s);
                 result.outcome = .deferred;
                 result.rejected = rejected;
                 return result;
@@ -475,17 +509,18 @@ pub const Delivery = struct {
                 return result;
             },
             error.OutOfMemory => return err,
-            else => return self.startBackoff(now_unix_s, failureMessage(err), rejected),
+            else => return try self.startBackoff(now_unix_s, failureMessage(err), rejected),
         }
     }
 
     /// Records why `validateToken` failed. Failures that say the service is
     /// unreachable or unwell join the service's backoff, so a failing
     /// validation delays submissions as a failing submission does.
-    pub fn validationFailed(self: *Delivery, err: anyerror, now_unix_s: i64) void {
+    pub fn validationFailed(self: *Delivery, err: anyerror, now_unix_s: i64) !void {
         switch (err) {
             error.OutOfMemory, error.Canceled, error.Offline, error.RateLimited => self.current.last_error.set(@errorName(err)),
-            else => _ = self.startBackoff(now_unix_s, failureMessage(err), 0),
+            error.ProviderBusy => _ = self.waitForLease(now_unix_s),
+            else => _ = try self.startBackoff(now_unix_s, failureMessage(err), 0),
         }
     }
 
@@ -498,14 +533,16 @@ pub const Delivery = struct {
         };
     }
 
-    fn startBackoff(self: *Delivery, now_unix_s: i64, message: []const u8, rejected: u32) StepResult {
+    fn startBackoff(self: *Delivery, now_unix_s: i64, message: []const u8, rejected: u32) !StepResult {
         self.backoff_ms = if (self.backoff_ms == 0)
             initial_backoff_ms
         else
             @min(self.backoff_ms *| 2, maximum_backoff_ms);
-        self.backoff_until_ms = self.gateway.clock.nowMs() +| @as(i64, @intCast(self.backoff_ms));
+        const wait_ms = network.client.jittered(self.gateway.random, self.backoff_ms);
+        self.backoff_until_ms = self.gateway.clock.nowMs() +| @as(i64, @intCast(wait_ms));
+        try self.gateway.blockFor(wait_ms);
         self.current.last_error.set(message);
-        var result = self.block(.backing_off, now_unix_s, self.backoff_ms);
+        var result = self.block(.backing_off, now_unix_s, wait_ms);
         result.outcome = .deferred;
         result.rejected = rejected;
         return result;
@@ -553,9 +590,19 @@ const Batch = struct {
     }
 
     fn releaseUnresolved(self: *Batch) !void {
+        try self.requeueUnresolved(null, "");
+    }
+
+    /// Hands back the listens not yet delivered or rejected: due again at
+    /// `retry_at` (Unix seconds) after a failed attempt, or at once and
+    /// without counting an attempt.
+    fn requeueUnresolved(self: *Batch, retry_at: ?i64, details: []const u8) !void {
         for (self.entries, self.resolved) |entry, *resolved| {
             if (resolved.*) continue;
-            try self.delivery.queue.release(entry.id, self.delivery.owner);
+            if (retry_at) |at|
+                try self.delivery.queue.markRetry(entry.id, self.delivery.owner, at, details)
+            else
+                try self.delivery.queue.release(entry.id, self.delivery.owner);
             resolved.* = true;
         }
     }
@@ -563,10 +610,6 @@ const Batch = struct {
 
 fn millisecondsUntil(deadline_ms: i64, now_ms: i64) u64 {
     return @intCast(@max(deadline_ms - now_ms, 0));
-}
-
-fn isPermanentRejection(status: u16) bool {
-    return status >= 400 and status < 500 and status != 401 and status != 403 and status != 408 and status != 429;
 }
 
 fn secondsCeil(milliseconds: u64) i64 {
@@ -674,91 +717,17 @@ fn present(value: ?[]const u8) ?[]const u8 {
     return if (text.len == 0) null else text;
 }
 
-const TestClock = struct {
-    now: i64 = 0,
-
-    fn clock(self: *TestClock) network.client.Clock {
-        return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
-    }
-
-    fn nowMs(context: *anyopaque) i64 {
-        return (@as(*TestClock, @ptrCast(@alignCast(context)))).now;
-    }
-
-    fn sleepMs(context: *anyopaque, milliseconds: u64) !void {
-        (@as(*TestClock, @ptrCast(@alignCast(context)))).now += @intCast(milliseconds);
-    }
-};
-
-const ScriptedReply = union(enum) {
-    respond: struct { status: u16, body: []const u8 = "{}" },
-    fail: anyerror,
-};
-
-const ScriptedTransport = struct {
-    allocator: std.mem.Allocator,
-    replies: std.ArrayList(ScriptedReply) = .empty,
-    next: usize = 0,
-    reject_body_containing: ?[]const u8 = null,
-    release_before_reply: ?struct { queue: *database.ScrobbleQueueRepository, id: i64, owner: i64 } = null,
-    during_request: ?struct { context: *anyopaque, run: *const fn (*anyopaque) anyerror!void } = null,
-    bodies: std.ArrayList([]u8) = .empty,
-    urls: std.ArrayList([]u8) = .empty,
-    authorization: [64]u8 = undefined,
-    authorization_len: usize = 0,
-
-    fn deinit(self: *ScriptedTransport) void {
-        for (self.bodies.items) |body| self.allocator.free(body);
-        for (self.urls.items) |url| self.allocator.free(url);
-        self.bodies.deinit(self.allocator);
-        self.urls.deinit(self.allocator);
-        self.replies.deinit(self.allocator);
-    }
-
-    fn requestCount(self: *const ScriptedTransport) usize {
-        return self.bodies.items.len;
-    }
-
-    fn lastAuthorization(self: *const ScriptedTransport) []const u8 {
-        return self.authorization[0..self.authorization_len];
-    }
-
-    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: network.client.Request) !network.client.Response {
-        const self: *ScriptedTransport = @ptrCast(@alignCast(context));
-        try self.bodies.append(self.allocator, try self.allocator.dupe(u8, request.body orelse ""));
-        try self.urls.append(self.allocator, try self.allocator.dupe(u8, request.url));
-        const header = request.headers[0].value;
-        @memcpy(self.authorization[0..header.len], header);
-        self.authorization_len = header.len;
-        if (self.release_before_reply) |steal| try steal.queue.release(steal.id, steal.owner);
-        if (self.during_request) |hook| {
-            self.during_request = null;
-            try hook.run(hook.context);
-        }
-        var reply: ScriptedReply = .{ .respond = .{ .status = 200 } };
-        if (self.next < self.replies.items.len) {
-            reply = self.replies.items[self.next];
-            self.next += 1;
-        } else if (self.reject_body_containing) |marker| {
-            if (std.mem.indexOf(u8, request.body orelse "", marker) != null)
-                reply = .{ .respond = .{ .status = 400, .body = "{\"code\":400,\"error\":\"Invalid listen\"}" } };
-        }
-        switch (reply) {
-            .fail => |err| return err,
-            .respond => |value| return .{
-                .allocator = allocator,
-                .status = value.status,
-                .body = try allocator.dupe(u8, value.body),
-            },
-        }
-    }
-};
+const shared_state = @import("shared_state.zig");
 
 const Fixture = struct {
     library: database.LibraryDatabase,
-    transport: ScriptedTransport,
-    clock: TestClock = .{},
+    transport: network.testing.ScriptedTransport,
+    clock: network.testing.TestClock,
+    prng: std.Random.DefaultPrng,
     gateway: network.Gateway,
+    reject_body_containing: ?[]const u8,
+    release_before_reply: ?struct { queue: *database.ScrobbleQueueRepository, id: i64, owner: i64 },
+    during_request: ?struct { context: *anyopaque, run: *const fn (*anyopaque) anyerror!void },
     token: ?[]const u8 = "secret-token",
     token_lookups: usize = 0,
     delivery: Delivery,
@@ -767,15 +736,19 @@ const Fixture = struct {
 
     fn start(self: *Fixture, name: [:0]const u8, identity: network.client.Identity) !void {
         self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, name);
-        self.transport = .{ .allocator = std.testing.allocator };
         self.clock = .{};
+        self.transport = .{
+            .clock = &self.clock,
+            .keep_history = true,
+            .responder = .{ .context = self, .respond_fn = respond },
+        };
+        self.prng = .init(network.testing.default_seed);
+        self.reject_body_containing = null;
+        self.release_before_reply = null;
+        self.during_request = null;
         self.token = "secret-token";
         self.token_lookups = 0;
-        self.gateway = .{
-            .transport = .{ .context = &self.transport, .perform_fn = ScriptedTransport.perform },
-            .clock = self.clock.clock(),
-            .config = .{ .identity = identity },
-        };
+        self.gateway = network.testing.gateway(&self.transport, &self.clock, &self.prng, .{ .identity = identity });
         self.delivery = Delivery.init(
             std.testing.allocator,
             std.testing.io,
@@ -790,18 +763,35 @@ const Fixture = struct {
         self.library.close();
     }
 
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, scripted: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *Fixture = @ptrCast(@alignCast(context));
+        if (self.release_before_reply) |steal| try steal.queue.release(steal.id, steal.owner);
+        if (self.during_request) |hook| {
+            self.during_request = null;
+            try hook.run(hook.context);
+        }
+        if (scripted) |next| return next;
+        if (self.reject_body_containing) |marker| if (std.mem.indexOf(u8, exchange.form, marker) != null)
+            return .{ .respond = .{ .status = 400, .body = "{\"code\":400,\"error\":\"Invalid listen\"}" } };
+        return .{ .respond = .{} };
+    }
+
     fn getToken(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8, _: []const u8) !?[]u8 {
         const self: *Fixture = @ptrCast(@alignCast(context));
         self.token_lookups += 1;
         return if (self.token) |value| try allocator.dupe(u8, value) else null;
     }
 
-    fn reply(self: *Fixture, value: ScriptedReply) !void {
-        try self.transport.replies.append(std.testing.allocator, value);
+    fn reply(self: *Fixture, value: network.testing.Reply) !void {
+        try self.transport.script(value);
     }
 
     fn step(self: *Fixture) !StepResult {
-        return self.delivery.step(unix_now);
+        return self.delivery.step(self.unixNow());
+    }
+
+    fn unixNow(self: *const Fixture) i64 {
+        return unix_now + @divFloor(self.clock.now(), 1000);
     }
 
     fn enqueueListens(self: *Fixture, count: usize) !void {
@@ -826,7 +816,29 @@ const Fixture = struct {
     }
 
     fn advance(self: *Fixture, milliseconds: u64) void {
-        self.clock.now += @intCast(milliseconds);
+        self.clock.advance(@intCast(milliseconds));
+    }
+
+    /// Advances past a wait, to the whole second queue retry times are kept in.
+    fn waitOut(self: *Fixture, milliseconds: u64) void {
+        self.advance(@as(u64, @intCast(secondsCeil(milliseconds))) * 1000);
+    }
+
+    fn expectWakeAround(result: StepResult, milliseconds: u64) !void {
+        const wake = result.wake_after_ms.?;
+        try std.testing.expect(wake >= milliseconds / 2 and wake <= milliseconds + milliseconds / 2);
+    }
+
+    const Queued = struct { attempts: i64, next_attempt_at: i64 };
+
+    /// The first listen waiting in the queue.
+    fn queued(self: *Fixture) !Queued {
+        var statement = try self.library.database.prepare(
+            "SELECT attempt_count, next_attempt_at FROM scrobble_queue WHERE state = 0 ORDER BY id LIMIT 1;",
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.NothingQueued;
+        return .{ .attempts = statement.columnInt64(0), .next_attempt_at = statement.columnInt64(1) };
     }
 
     /// A Track of a new recording whose file carries `mbid`.
@@ -872,7 +884,7 @@ const Fixture = struct {
         const parsed = try std.json.parseFromSlice(
             std.json.Value,
             std.testing.allocator,
-            self.transport.bodies.items[self.transport.bodies.items.len - 1],
+            self.transport.history.items[self.transport.history.items.len - 1].body,
             .{},
         );
         defer parsed.deinit();
@@ -880,7 +892,8 @@ const Fixture = struct {
     }
 
     fn attemptsOfNextLease(self: *Fixture) !u32 {
-        const entries = try self.library.scrobbles.lease(std.testing.allocator, service, 42, unix_now, unix_now + 10, 1);
+        const now = self.unixNow();
+        const entries = try self.library.scrobbles.lease(std.testing.allocator, service, 42, now, now + 10, 1);
         defer {
             for (entries) |entry| entry.deinit();
             std.testing.allocator.free(entries);
@@ -908,9 +921,9 @@ test "a backlog of 250 listens goes out as three import requests of at most 100"
         try std.testing.expectEqual(@as(u32, @intCast(count)), result.delivered);
     }
     try std.testing.expectEqual(@as(usize, 3), fixture.transport.requestCount());
-    for (fixture.transport.bodies.items, expected) |body, count| {
-        try std.testing.expect(std.mem.indexOf(u8, body, "\"listen_type\":\"import\"") != null);
-        try std.testing.expectEqual(count, countOf(body, "\"listened_at\""));
+    for (fixture.transport.history.items, expected) |request, count| {
+        try std.testing.expect(std.mem.indexOf(u8, request.body, "\"listen_type\":\"import\"") != null);
+        try std.testing.expectEqual(count, countOf(request.body, "\"listened_at\""));
     }
     try std.testing.expectEqual(@as(u64, 250), try fixture.library.scrobbles.deliveredCount(service));
     const idle = try fixture.step();
@@ -940,9 +953,9 @@ test "one ready listen is sent as single with its identifiers and the host's cli
         .track_number = 4,
     });
     try std.testing.expectEqual(Outcome.delivered, (try fixture.step()).outcome);
-    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/submit-listens", fixture.transport.urls.items[0]);
+    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/submit-listens", fixture.transport.history.items[0].url);
     try std.testing.expectEqualStrings("Token secret-token", fixture.transport.lastAuthorization());
-    const body = fixture.transport.bodies.items[0];
+    const body = fixture.transport.history.items[0].body;
     try std.testing.expect(std.mem.indexOf(u8, body, "listened_ms") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "media_player") == null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
@@ -973,7 +986,7 @@ test "a listen without identifiers or album omits those fields" {
     defer fixture.stop();
     try fixture.enqueueListens(1);
     _ = try fixture.step();
-    const body = fixture.transport.bodies.items[0];
+    const body = fixture.transport.history.items[0].body;
     for ([_][]const u8{ "release_name", "recording_mbid", "release_mbid", "artist_mbids", "tracknumber", "null" }) |absent|
         try std.testing.expect(std.mem.indexOf(u8, body, absent) == null);
 }
@@ -998,7 +1011,7 @@ test "a listen over the size limit drops its optional fields and one still too l
         .track_number = 12,
     });
     try std.testing.expectEqual(Outcome.delivered, (try fixture.step()).outcome);
-    const body = fixture.transport.bodies.items[0];
+    const body = fixture.transport.history.items[0].body;
     try std.testing.expect(std.mem.indexOf(u8, body, "recording_mbid") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "submission_client") != null);
 
@@ -1037,7 +1050,7 @@ test "a legacy payload beside a good listen is dropped and the good listen is se
     try std.testing.expectEqual(Outcome.delivered, result.outcome);
     try std.testing.expectEqual(@as(u32, 1), result.delivered);
     try std.testing.expectEqual(@as(u32, 1), result.rejected);
-    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.bodies.items[0], "\"listen_type\":\"single\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.history.items[0].body, "\"listen_type\":\"single\"") != null);
 }
 
 test "no request is made without a token and delivery resumes once one exists" {
@@ -1071,7 +1084,7 @@ test "no request is made while offline" {
     try std.testing.expectEqual(@as(u64, 2), try fixture.library.scrobbles.pendingCount());
 }
 
-test "a 429 releases the rows without counting an attempt and waits until the gateway unblocks" {
+test "a 429 schedules the rows for when the block ends and waits until the gateway unblocks" {
     var fixture: Fixture = undefined;
     try fixture.start("file:orca-lb-limited?mode=memory&cache=shared", .orca);
     defer fixture.stop();
@@ -1079,17 +1092,21 @@ test "a 429 releases the rows without counting an attempt and waits until the ga
     try fixture.reply(.{ .respond = .{ .status = 429 } });
     const limited = try fixture.step();
     try std.testing.expectEqual(Outcome.deferred, limited.outcome);
-    try std.testing.expectEqual(@as(?u64, 60_000), limited.wake_after_ms);
+    try Fixture.expectWakeAround(limited, 60_000);
     try std.testing.expectEqual(State.rate_limited, fixture.delivery.status().state);
-    try std.testing.expectEqual(@as(u32, 0), try fixture.attemptsOfNextLease());
+    const wake = limited.wake_after_ms.?;
+    try std.testing.expectEqual(Fixture.Queued{
+        .attempts = 1,
+        .next_attempt_at = Fixture.unix_now + secondsCeil(wake),
+    }, try fixture.queued());
 
-    fixture.advance(30_000);
+    fixture.advance(20_000);
     const waiting = try fixture.step();
     try std.testing.expectEqual(Outcome.blocked, waiting.outcome);
-    try std.testing.expectEqual(@as(?u64, 30_000), waiting.wake_after_ms);
+    try std.testing.expectEqual(@as(?u64, wake - 20_000), waiting.wake_after_ms);
     try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
 
-    fixture.advance(30_000);
+    fixture.waitOut(wake - 20_000);
     const resumed = try fixture.step();
     try std.testing.expectEqual(Outcome.delivered, resumed.outcome);
     try std.testing.expectEqual(@as(u32, 3), resumed.delivered);
@@ -1103,21 +1120,22 @@ test "consecutive server errors double the service backoff to an hour and a succ
     try fixture.enqueueListens(2);
     const expected_ms = [_]u64{ 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000 };
     for (expected_ms) |_| try fixture.reply(.{ .respond = .{ .status = 503 } });
-    for (expected_ms) |wake| {
+    for (expected_ms) |backoff| {
         const result = try fixture.step();
         try std.testing.expectEqual(Outcome.deferred, result.outcome);
-        try std.testing.expectEqual(@as(?u64, wake), result.wake_after_ms);
+        try std.testing.expectEqual(backoff, fixture.delivery.backoff_ms);
+        try Fixture.expectWakeAround(result, backoff);
         try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
-        fixture.advance(wake);
+        fixture.waitOut(result.wake_after_ms.?);
     }
     try std.testing.expectEqual(@as(usize, expected_ms.len), fixture.transport.requestCount());
-    try std.testing.expectEqual(@as(u32, 0), try fixture.attemptsOfNextLease());
+    try std.testing.expectEqual(@as(i64, expected_ms.len), (try fixture.queued()).attempts);
     try std.testing.expectEqual(Outcome.delivered, (try fixture.step()).outcome);
 
     try fixture.enqueueTitled(5, "Later");
     try fixture.reply(.{ .respond = .{ .status = 500 } });
-    const after_reset = try fixture.step();
-    try std.testing.expectEqual(@as(?u64, 60_000), after_reset.wake_after_ms);
+    _ = try fixture.step();
+    try std.testing.expectEqual(@as(u64, 60_000), fixture.delivery.backoff_ms);
 }
 
 test "a network outage with 50 queued listens produces one request per backoff period" {
@@ -1128,19 +1146,20 @@ test "a network outage with 50 queued listens produces one request per backoff p
     for (0..4) |_| try fixture.reply(.{ .fail = error.ConnectionRefused });
     const first = try fixture.step();
     try std.testing.expectEqual(Outcome.deferred, first.outcome);
-    try std.testing.expectEqual(@as(?u64, 60_000), first.wake_after_ms);
+    try Fixture.expectWakeAround(first, 60_000);
     try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
-    for (0..20) |_| {
+    var waited: u64 = 0;
+    while (waited + 2_000 < first.wake_after_ms.?) : (waited += 2_000) {
         fixture.advance(2_000);
         try std.testing.expectEqual(Outcome.blocked, (try fixture.step()).outcome);
     }
     try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
-    fixture.advance(60_000);
+    fixture.waitOut(first.wake_after_ms.? - waited);
     const second = try fixture.step();
-    try std.testing.expectEqual(@as(?u64, 120_000), second.wake_after_ms);
+    try Fixture.expectWakeAround(second, 120_000);
     try std.testing.expectEqual(@as(usize, 2), fixture.transport.requestCount());
     try std.testing.expectEqual(@as(u64, 50), try fixture.library.scrobbles.pendingCount());
-    try std.testing.expectEqual(@as(u32, 0), try fixture.attemptsOfNextLease());
+    try std.testing.expectEqual(@as(i64, 2), (try fixture.queued()).attempts);
 }
 
 test "a timeout backs off like any other transient failure" {
@@ -1150,7 +1169,7 @@ test "a timeout backs off like any other transient failure" {
     try fixture.enqueueListens(1);
     try fixture.reply(.{ .fail = error.Timeout });
     const result = try fixture.step();
-    try std.testing.expectEqual(@as(?u64, 60_000), result.wake_after_ms);
+    try Fixture.expectWakeAround(result, 60_000);
     try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
     try std.testing.expectEqual(@as(u64, 1), try fixture.library.scrobbles.pendingCount());
 }
@@ -1172,12 +1191,12 @@ test "a 400 on a batch isolates the bad listen with single submissions and rejec
     try fixture.start("file:orca-lb-isolate?mode=memory&cache=shared", .orca);
     defer fixture.stop();
     for (0..5) |index| try fixture.enqueueTitled(index, if (index == 2) "BAD" else "Good");
-    fixture.transport.reject_body_containing = "BAD";
+    fixture.reject_body_containing = "BAD";
 
     const batch = try fixture.step();
     try std.testing.expectEqual(Outcome.isolating, batch.outcome);
     try std.testing.expectEqual(@as(?u64, 0), batch.wake_after_ms);
-    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.bodies.items[0], "\"listen_type\":\"import\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.history.items[0].body, "\"listen_type\":\"import\"") != null);
     try std.testing.expectEqual(@as(u64, 5), try fixture.library.scrobbles.pendingCount());
 
     const expected = [_]Outcome{ .delivered, .delivered, .rejected, .delivered, .delivered };
@@ -1186,15 +1205,15 @@ test "a 400 on a batch isolates the bad listen with single submissions and rejec
         try std.testing.expectEqual(outcome, result.outcome);
     }
     try std.testing.expectEqual(@as(usize, 6), fixture.transport.requestCount());
-    for (fixture.transport.bodies.items[1..]) |body|
-        try std.testing.expect(std.mem.indexOf(u8, body, "\"listen_type\":\"single\"") != null);
+    for (fixture.transport.history.items[1..]) |request|
+        try std.testing.expect(std.mem.indexOf(u8, request.body, "\"listen_type\":\"single\"") != null);
     try std.testing.expectEqual(@as(u64, 4), try fixture.library.scrobbles.deliveredCount(service));
     try std.testing.expectEqual(@as(u64, 0), try fixture.library.scrobbles.pendingCount());
 
     try fixture.enqueueTitled(5, "Good");
     try fixture.enqueueTitled(6, "Good");
     _ = try fixture.step();
-    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.bodies.items[6], "\"listen_type\":\"import\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fixture.transport.history.items[6].body, "\"listen_type\":\"import\"") != null);
 }
 
 test "a 401 stops delivery until credentials change" {
@@ -1232,7 +1251,7 @@ test "validateToken returns the user name for a valid token and null for an inva
     const name = (try fixture.delivery.validateToken("good-token")).?;
     defer allocator.free(name);
     try std.testing.expectEqualStrings("listener", name);
-    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/validate-token", fixture.transport.urls.items[0]);
+    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/validate-token", fixture.transport.history.items[0].url);
     try std.testing.expectEqualStrings("Token good-token", fixture.transport.lastAuthorization());
     try std.testing.expectEqualStrings("listener", fixture.delivery.status().user_name.slice());
     try std.testing.expectEqual(State.idle, fixture.delivery.status().state);
@@ -1259,12 +1278,12 @@ test "a server override addresses both endpoints under its base URL" {
     std.testing.allocator.free(name);
     try fixture.enqueueListens(1);
     _ = try fixture.step();
-    try std.testing.expectEqualStrings("http://127.0.0.1:8080/lb/1/validate-token", fixture.transport.urls.items[0]);
-    try std.testing.expectEqualStrings("http://127.0.0.1:8080/lb/1/submit-listens", fixture.transport.urls.items[1]);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/lb/1/validate-token", fixture.transport.history.items[0].url);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/lb/1/submit-listens", fixture.transport.history.items[1].url);
 }
 
 test "a validation that fails on the service or the network joins the service backoff" {
-    const failures = [_]ScriptedReply{
+    const failures = [_]network.testing.Reply{
         .{ .respond = .{ .status = 503 } },
         .{ .fail = error.ConnectionRefused },
     };
@@ -1277,12 +1296,12 @@ test "a validation that fails on the service or the network joins the service ba
         try fixture.enqueueListens(1);
         try fixture.reply(failure);
         const err = if (fixture.delivery.validateToken("token")) |_| return error.ExpectedFailure else |failed| failed;
-        fixture.delivery.validationFailed(err, Fixture.unix_now);
+        try fixture.delivery.validationFailed(err, Fixture.unix_now);
         try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
 
         const blocked = try fixture.step();
         try std.testing.expectEqual(Outcome.blocked, blocked.outcome);
-        try std.testing.expectEqual(@as(?u64, 60_000), blocked.wake_after_ms);
+        try Fixture.expectWakeAround(blocked, 60_000);
         try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
         try std.testing.expectEqual(@as(usize, 0), fixture.token_lookups);
     }
@@ -1294,7 +1313,7 @@ test "a validation refused by a rate limit does not start the service backoff" {
     defer fixture.stop();
     try fixture.reply(.{ .respond = .{ .status = 429 } });
     const err = if (fixture.delivery.validateToken("token")) |_| return error.ExpectedFailure else |failed| failed;
-    fixture.delivery.validationFailed(err, Fixture.unix_now);
+    try fixture.delivery.validationFailed(err, Fixture.unix_now);
     try std.testing.expect(State.backing_off != fixture.delivery.status().state);
     try std.testing.expectEqual(@as(u64, 0), fixture.delivery.backoff_ms);
 }
@@ -1324,19 +1343,61 @@ test "a queue whose only row is not yet due makes no credential lookup and repor
     try fixture.start("file:orca-lb-not-due?mode=memory&cache=shared", .orca);
     defer fixture.stop();
     try fixture.enqueueListens(1);
-    try fixture.reply(.{ .respond = .{ .status = 503 } });
-    _ = try fixture.step();
-    const lookups = fixture.token_lookups;
-    const requests = fixture.transport.requestCount();
     const entries = try fixture.library.scrobbles.lease(std.testing.allocator, service, 42, Fixture.unix_now, Fixture.unix_now + 500, 1);
     for (entries) |entry| entry.deinit();
     std.testing.allocator.free(entries);
     fixture.advance(120_000);
     const result = try fixture.step();
     try std.testing.expectEqual(Outcome.idle, result.outcome);
-    try std.testing.expectEqual(@as(?u64, 500_000), result.wake_after_ms);
-    try std.testing.expectEqual(lookups, fixture.token_lookups);
-    try std.testing.expectEqual(requests, fixture.transport.requestCount());
+    try std.testing.expectEqual(@as(?u64, 380_000), result.wake_after_ms);
+    try std.testing.expectEqual(@as(usize, 0), fixture.token_lookups);
+    try std.testing.expectEqual(@as(usize, 0), fixture.transport.requestCount());
+}
+
+test "a listen a transient failure put off is not sent before its retry time by a new Delivery" {
+    var fixture: Fixture = undefined;
+    try fixture.start("file:orca-lb-retry-time?mode=memory&cache=shared", .orca);
+    defer fixture.stop();
+    try fixture.enqueueListens(1);
+    try fixture.reply(.{ .respond = .{ .status = 503 } });
+    const failed = try fixture.step();
+    const retry_at = Fixture.unix_now + secondsCeil(failed.wake_after_ms.?);
+    try std.testing.expectEqual(Fixture.Queued{ .attempts = 1, .next_attempt_at = retry_at }, try fixture.queued());
+
+    var clock: network.testing.TestClock = .{};
+    var prng: std.Random.DefaultPrng = .init(7);
+    var gateway = network.testing.gateway(&fixture.transport, &clock, &prng, .{});
+    var restarted = Delivery.init(std.testing.allocator, std.testing.io, &gateway, .{ .context = &fixture, .get_fn = Fixture.getToken }, &fixture.library.scrobbles);
+    const early = try restarted.step(retry_at - 1);
+    try std.testing.expectEqual(Outcome.idle, early.outcome);
+    try std.testing.expectEqual(@as(?u64, 1000), early.wake_after_ms);
+    try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
+    try std.testing.expectEqual(Outcome.delivered, (try restarted.step(retry_at)).outcome);
+    try std.testing.expectEqual(@as(usize, 2), fixture.transport.requestCount());
+}
+
+test "while another process holds ListenBrainz nothing is sent, the rows stay due, and delivery resumes once it lets go" {
+    var fixture: Fixture = undefined;
+    try fixture.start("file:orca-lb-busy?mode=memory&cache=shared", .orca);
+    defer fixture.stop();
+    fixture.gateway.sharing = .{ .store = shared_state.store(&fixture.library.provider_state), .service = service };
+    try fixture.enqueueListens(2);
+    try std.testing.expect(try fixture.library.provider_state.claimLease(service, 99, fixture.clock.now(), fixture.clock.now() + network.client.lease_duration_ms));
+
+    const busy = try fixture.step();
+    try std.testing.expectEqual(Outcome.deferred, busy.outcome);
+    try std.testing.expectEqual(State.busy, fixture.delivery.status().state);
+    try std.testing.expectEqual(@as(?u64, @intCast(network.client.lease_duration_ms)), busy.wake_after_ms);
+    try std.testing.expectEqualStrings("ListenBrainz is in use by another Orca process", fixture.delivery.status().last_error.slice());
+    try std.testing.expectEqual(@as(usize, 0), fixture.transport.requestCount());
+    try std.testing.expectEqual(Fixture.Queued{ .attempts = 0, .next_attempt_at = 0 }, try fixture.queued());
+    fixture.advance(1_000);
+    try std.testing.expectEqual(Outcome.blocked, (try fixture.step()).outcome);
+    try std.testing.expect(fixture.delivery.waitingForLease());
+
+    fixture.waitOut(@intCast(network.client.lease_duration_ms));
+    try std.testing.expectEqual(Outcome.delivered, (try fixture.step()).outcome);
+    try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
 }
 
 test "a 403 stops delivery until credentials change" {
@@ -1377,7 +1438,7 @@ test "a listen whose lease was lost during the request is skipped and the others
     try fixture.start("file:orca-lb-stale?mode=memory&cache=shared", .orca);
     defer fixture.stop();
     try fixture.enqueueListens(3);
-    fixture.transport.release_before_reply = .{
+    fixture.release_before_reply = .{
         .queue = &fixture.library.scrobbles,
         .id = 1,
         .owner = fixture.delivery.owner,
@@ -1396,12 +1457,12 @@ test "an invalid network configuration backs off and the next immediate step mak
     try fixture.enqueueListens(2);
     const first = try fixture.step();
     try std.testing.expectEqual(Outcome.deferred, first.outcome);
-    try std.testing.expectEqual(@as(?u64, 60_000), first.wake_after_ms);
+    try Fixture.expectWakeAround(first, 60_000);
     try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
     try std.testing.expectEqualStrings("InvalidNetworkConfiguration", fixture.delivery.status().last_error.slice());
     try std.testing.expectEqual(Outcome.blocked, (try fixture.step()).outcome);
     try std.testing.expectEqual(@as(usize, 0), fixture.transport.requestCount());
-    try std.testing.expectEqual(@as(u32, 0), try fixture.attemptsOfNextLease());
+    try std.testing.expect((try fixture.queued()).next_attempt_at > fixture.unixNow());
 }
 
 const mbid_one = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
@@ -1417,10 +1478,10 @@ test "a love goes out as one recording-feedback request carrying the recording i
     try std.testing.expectEqual(Outcome.delivered, result.outcome);
     try std.testing.expectEqualStrings(
         "https://api.listenbrainz.org/1/feedback/recording-feedback",
-        fixture.transport.urls.items[0],
+        fixture.transport.history.items[0].url,
     );
     try std.testing.expectEqualStrings("Token secret-token", fixture.transport.lastAuthorization());
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, fixture.transport.bodies.items[0], .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, fixture.transport.history.items[0].body, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(mbid_one, parsed.value.object.get("recording_mbid").?.string);
     try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("score").?.integer);
@@ -1514,13 +1575,13 @@ test "a 429 on feedback blocks listens and feedback until the gateway unblocks" 
 
     const limited = try fixture.syncFeedback();
     try std.testing.expectEqual(Outcome.deferred, limited.outcome);
-    try std.testing.expectEqual(@as(?u64, 60_000), limited.wake_after_ms);
+    try Fixture.expectWakeAround(limited, 60_000);
     try std.testing.expectEqual(State.rate_limited, fixture.delivery.status().state);
     try std.testing.expectEqual(Outcome.blocked, (try fixture.step()).outcome);
     try std.testing.expectEqual(Outcome.blocked, (try fixture.syncFeedback()).outcome);
     try std.testing.expectEqual(@as(usize, 1), fixture.transport.requestCount());
 
-    fixture.advance(60_000);
+    fixture.waitOut(limited.wake_after_ms.?);
     try std.testing.expectEqual(Outcome.delivered, (try fixture.step()).outcome);
     try std.testing.expectEqual(Outcome.delivered, (try fixture.syncFeedback()).outcome);
 }
@@ -1536,12 +1597,12 @@ test "a server error on feedback joins the service backoff that listens obey" {
 
     const first = try fixture.syncFeedback();
     try std.testing.expectEqual(Outcome.deferred, first.outcome);
-    try std.testing.expectEqual(@as(?u64, 60_000), first.wake_after_ms);
+    try Fixture.expectWakeAround(first, 60_000);
     try std.testing.expectEqual(State.backing_off, fixture.delivery.status().state);
     try std.testing.expectEqual(Outcome.blocked, (try fixture.step()).outcome);
-    fixture.advance(60_000);
+    fixture.waitOut(first.wake_after_ms.?);
     const second = try fixture.syncFeedback();
-    try std.testing.expectEqual(@as(?u64, 120_000), second.wake_after_ms);
+    try Fixture.expectWakeAround(second, 120_000);
     try std.testing.expectEqual(@as(usize, 2), fixture.transport.requestCount());
 }
 
@@ -1598,7 +1659,7 @@ test "love, dislike and love again during a request sends the love once and ends
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
     var changer: FeedbackChanger = .{ .fixture = &fixture, .track = track, .changes = &.{ .hated, .loved } };
-    fixture.transport.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
+    fixture.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
 
     try std.testing.expectEqual(Outcome.delivered, (try fixture.syncFeedback()).outcome);
     try std.testing.expectEqual(Outcome.idle, (try fixture.syncFeedback()).outcome);
@@ -1615,7 +1676,7 @@ test "a dislike made during a love's request goes out next and the service ends 
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
     var changer: FeedbackChanger = .{ .fixture = &fixture, .track = track, .changes = &.{.hated} };
-    fixture.transport.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
+    fixture.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
 
     try std.testing.expectEqual(Outcome.delivered, (try fixture.syncFeedback()).outcome);
     try std.testing.expectEqual(@as(i64, 1), try fixture.lastScore());
@@ -1632,7 +1693,7 @@ test "a clear made during a love's request is sent next and leaves no row" {
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
     var changer: FeedbackChanger = .{ .fixture = &fixture, .track = track, .changes = &.{.none} };
-    fixture.transport.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
+    fixture.during_request = .{ .context = &changer, .run = FeedbackChanger.run };
 
     _ = try fixture.syncFeedback();
     try std.testing.expectEqual(Outcome.delivered, (try fixture.syncFeedback()).outcome);
@@ -1660,8 +1721,8 @@ test "now playing is sent as playing_now with one track and no listened_at" {
 
     const result = try fixture.delivery.sendNowPlaying(nowPlaying("Orca"), Fixture.unix_now);
     try std.testing.expectEqual(Outcome.delivered, result.outcome);
-    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/submit-listens", fixture.transport.urls.items[0]);
-    const body = fixture.transport.bodies.items[0];
+    try std.testing.expectEqualStrings("https://api.listenbrainz.org/1/submit-listens", fixture.transport.history.items[0].url);
+    const body = fixture.transport.history.items[0].body;
     try std.testing.expect(std.mem.indexOf(u8, body, "listened_at") == null);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer parsed.deinit();

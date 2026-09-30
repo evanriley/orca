@@ -9,8 +9,8 @@
 //! Nothing here caches. An embedded cover is read from the file each time it is
 //! asked for, which is the only answer that can never be stale and the only one
 //! that keeps the Library database the size of a library rather than the size
-//! of a picture collection: the 22,060-file reference library carries 6.08 GB
-//! of embedded artwork. See `docs/metadata.md` for why a cache is not here yet.
+//! of a picture collection. See `docs/metadata.md` for why a cache is not here
+//! yet.
 
 const std = @import("std");
 const model = @import("model.zig");
@@ -26,10 +26,8 @@ const source = @import("../storage/source.zig");
 ///
 /// The container is sniffed rather than assumed, and a leading ID3v2 tag in
 /// front of a stream that is not MPEG audio is stepped over exactly as the
-/// codec registry steps over it — 104 files in the reference library are FLAC
-/// behind an ID3v2 tag, and the reference adversarial case carries a
-/// 216,921-byte `PICTURE` block behind a 219,663-byte tag. Reading byte zero as
-/// the start of the stream finds no cover in any of them.
+/// codec registry steps over it: reading byte zero of FLAC behind an ID3v2 tag
+/// as the start of the stream finds no cover.
 pub fn read(
     allocator: std.mem.Allocator,
     readable: source.ReadableSource,
@@ -70,8 +68,6 @@ pub fn readDetected(
         else => null,
     };
 }
-
-// ---------------------------------------------------------------------- tests
 
 const testing = std.testing;
 

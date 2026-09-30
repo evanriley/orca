@@ -190,9 +190,6 @@ pub const DuplicateKind = enum { none, likely_recording, exact_audio, exact_file
 
 /// The one pairwise duplicate comparison in the codebase.
 ///
-/// It used to have a companion that took every candidate in a library as one
-/// slice and compared all of them, which nothing called and nothing could have
-/// called: the slice cannot be built at 22,060 files, let alone at 500,000.
 /// Finding the pairs worth comparing is an indexing problem rather than a
 /// comparison one, so it lives in `library/duplicate_pass.zig`, which bucks
 /// candidates by decoded-audio hash and by duration and calls this only inside

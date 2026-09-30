@@ -194,9 +194,6 @@ fn observedIdentity(io: std.Io, uri: []const u8) ?quick_hash.Digest {
 
 /// Marks every Location of a file as `missing`.
 ///
-
-// ---------------------------------------------------------------------- tests
-
 const testing = std.testing;
 
 fn projectSingleFile(

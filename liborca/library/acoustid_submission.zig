@@ -25,6 +25,7 @@ pub const Outcome = enum {
     needs_user_key,
     invalid_user_key,
     unavailable,
+    busy,
 };
 
 pub const Result = struct {
@@ -153,6 +154,7 @@ pub const AcoustIdSubmission = struct {
                 error.InvalidClientKey => return .invalid_client_key,
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => {
                     if (attempt + 1 >= maximum_attempts) return .unavailable;
                     if (!self.backOff(attempt)) return .cancelled;
@@ -205,7 +207,7 @@ pub const AcoustIdSubmission = struct {
     /// False when cancelled while waiting.
     fn backOff(self: *AcoustIdSubmission, attempt: u32) bool {
         const gateway = self.acoustid.gateway;
-        const backoff_ms = initial_backoff_ms << @intCast(attempt);
+        const backoff_ms = network.client.jittered(gateway.random, initial_backoff_ms << @intCast(attempt));
         var until = gateway.clock.nowMs() +| @as(i64, @intCast(backoff_ms));
         if (gateway.blockedUntilMs()) |blocked| until = @max(until, blocked);
         while (true) {

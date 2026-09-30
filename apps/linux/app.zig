@@ -18,8 +18,8 @@ const window = @import("window.zig");
 const albums = @import("albums.zig");
 const details = @import("details.zig");
 
-/// One page. The list is filled a page at a time as the user scrolls rather
-/// than all at once, so a 22,060-track library stays virtualized.
+/// The list is filled a page at a time as the user scrolls, so a large
+/// library stays virtualized.
 pub const page_size: u32 = 512;
 /// One tick drives everything: pump, event drain, transport, jobs.
 pub const tick_ms: c_uint = 100;
@@ -143,7 +143,6 @@ pub const App = struct {
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,
 
-    // library list
     tracks: ?*gtk.ListStore = null,
     selection: ?*gtk.SelectionModel = null,
     column_view: ?*gtk.ColumnView = null,
@@ -157,7 +156,6 @@ pub const App = struct {
     /// header click reports can be turned back into a sort key.
     sort_columns: [track_model.Column.all.len]?*gtk.ColumnViewColumn = @splat(null),
 
-    // browse panes
     artists: ?*gtk.ListStore = null,
     artist_selection: ?*gtk.SingleSelection = null,
     artists_loaded: u32 = 0,
@@ -183,7 +181,6 @@ pub const App = struct {
     /// would re-enter as though the user had done it.
     suppress_browse_signals: bool = false,
 
-    // chrome
     application: ?*gtk.Application = null,
     window: ?*gtk.Window = null,
     toasts: ?*adw.ToastOverlay = null,
@@ -204,7 +201,6 @@ pub const App = struct {
     browse_panes: ?*gtk.Widget = null,
     browse_toggle: ?*gtk.Widget = null,
 
-    // track details
     /// The one on/off choice the details panels share, restored from settings.
     details_visible: bool = false,
     /// Set while the window is below the breakpoint that hides the panels.
@@ -212,7 +208,6 @@ pub const App = struct {
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
     seen_recorded_listens: u64 = 0,
 
-    // albums
     album_store: ?*gtk.ListStore = null,
     albums_loaded: u32 = 0,
     albums_exhausted: bool = false,
@@ -223,7 +218,6 @@ pub const App = struct {
     open_album_pages: [open_album_page_limit]*albums.AlbumPage = undefined,
     open_album_page_count: usize = 0,
 
-    // now playing
     now_cover: ?*gtk.Widget = null,
     now_title: ?*gtk.Label = null,
     now_artist: ?*gtk.Label = null,
@@ -236,14 +230,12 @@ pub const App = struct {
     /// What the open right-click menu acts on.
     context: menu.Context = .{},
 
-    // health page
     health_list: ?*gtk.ListBox = null,
     health_note: ?*gtk.Label = null,
     health_body: ?*gtk.Stack = null,
     health_title: ?*adw.WindowTitle = null,
     health_count: ?*gtk.Label = null,
 
-    // matches page
     matches_list: ?*gtk.ListBox = null,
     matches_note: ?*gtk.Label = null,
     matches_body: ?*gtk.Stack = null,
@@ -265,12 +257,10 @@ pub const App = struct {
 
     preferences_dialog: ?*adw.Dialog = null,
 
-    // listening
     scrobbling: bool = false,
     announce_now_playing: bool = false,
     listening_controls: ListeningControls = .{},
 
-    // sound
     sound_controls: SoundControls = .{},
     /// The curve the equalizer had when last on or being edited, so switching
     /// it off and on again restores it.
@@ -283,7 +273,6 @@ pub const App = struct {
     /// that has already changed, so their signals do not re-enter as edits.
     suppress_sound_signals: bool = false,
 
-    // artists page
     artist_list_store: ?*gtk.ListStore = null,
     artist_list_loaded: u32 = 0,
     artist_list_exhausted: bool = false,
@@ -292,12 +281,10 @@ pub const App = struct {
     artist_list_search: ?*gtk.Widget = null,
     artists_navigation: ?*adw.NavigationView = null,
 
-    // scan status, at the foot of the sidebar
     scan_revealer: ?*gtk.Revealer = null,
     scan_label: ?*gtk.Label = null,
     scan_detail: ?*gtk.Label = null,
 
-    // transport
     previous_button: ?*gtk.Widget = null,
     play_button: ?*gtk.Widget = null,
     next_button: ?*gtk.Widget = null,
@@ -342,7 +329,6 @@ pub const App = struct {
     shown_transport: liborca.TransportState = .stopped,
     repeat_mode: liborca.RepeatMode = .off,
 
-    // queue page
     queue_store: ?*gtk.ListStore = null,
     queue_title: ?*adw.WindowTitle = null,
     queue_body: ?*gtk.Stack = null,

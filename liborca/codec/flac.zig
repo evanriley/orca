@@ -1,12 +1,8 @@
 //! FLAC decoding, over libFLAC behind `flac_shim.c`.
 //!
 //! The reference implementation is used rather than a pure-Zig one because
-//! FLAC's only promise is bit-exactness. The previously pinned pure-Zig
-//! package reconstructed mid-side stereo without restoring the low bit the
-//! format discards, which left roughly half of all decoded samples one LSB low
-//! on the majority of real files -- inaudible, but fatal to `files.audio_hash`,
-//! to fingerprints, and to the claim that the format is lossless at all. See
-//! `docs/codecs.md`.
+//! FLAC's only promise is bit-exactness, which `files.audio_hash` and
+//! fingerprints depend on. See `docs/codecs.md`.
 //!
 //! Nothing about libFLAC is visible here: the shim exposes an opaque handle
 //! driven by a positional read callback, so this file still sees only a
@@ -166,12 +162,9 @@ fn readSource(
 /// Whether the stream has reached its declared end, give or take a final frame
 /// that will not decode.
 ///
-/// Real files end untidily. Of 104 ID3-carrying FLACs in one library, the one
-/// examined stops 2,620 frames short of the 11,979,324 STREAMINFO declares,
-/// inside its final 4,096-frame block: the last frame header is not where it
-/// should be. `ffmpeg` reports `invalid sync code` on the same file, resyncs,
-/// and returns the audio anyway; treating that as damage lost the whole track,
-/// failing analysis outright and ending playback a breath early.
+/// Real files end untidily: some stop short of what STREAMINFO declares,
+/// inside their final block. `ffmpeg` resyncs and returns the audio anyway;
+/// treating that as damage would fail analysis and end playback early.
 ///
 /// A shortfall smaller than one maximum block is, by construction, at most the
 /// final frame -- there is nowhere else for it to hide. Accepting that is
@@ -208,10 +201,8 @@ fn readFrames(context_ptr: *anyopaque, output: []f32) !usize {
         // After a seek there is no distinction to draw: the frames before the
         // seek target were never decoded, so the running count cannot reach
         // the declared total and every correct stream would look truncated.
-        // Reporting that as a decode failure ended playback at the seek point,
-        // and because the `Decoder` contract signals end of input with zero
-        // frames rather than an error, the caller could not tell it apart from
-        // a corrupt file -- one album stalled with 8,266 underruns.
+        // Reporting that as a decode failure would end playback at the seek
+        // point.
         //
         // The cost is that a truncated file seeked into ends quietly instead
         // of erroring. That is the right trade for playback, and the unsought
@@ -306,12 +297,9 @@ fn midSideProbeSample(index: u32) [2]i16 {
 }
 
 test "mid-side stereo decodes bit-exactly rather than one LSB low" {
-    // Regression: the previously pinned pure-Zig FLAC package computed
-    // `left = mid + (side >> 1)` instead of restoring the low bit the encoder
-    // discarded, `left = ((mid << 1 | side & 1) + side) >> 1`. That is wrong by
-    // one LSB whenever `side` is odd -- half of all samples on real music, and
-    // every sample of this fixture. Inaudible, and fatal to `files.audio_hash`,
-    // to fingerprints, and to the format's only promise.
+    // Mid-side reconstruction must restore the low bit the encoder discarded,
+    // `left = ((mid << 1 | side & 1) + side) >> 1`; every sample of this
+    // fixture has an odd `side`.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/midside-reference.flac",
@@ -342,12 +330,9 @@ test "mid-side stereo decodes bit-exactly rather than one LSB low" {
 }
 
 test "reading to the end after a seek reports end of input rather than failing" {
-    // Regression: playing a real FLAC album stalled on the first track with
-    // 8,266 underruns. A stream that ends having decoded fewer frames than
-    // STREAMINFO declares is indistinguishable from a truncated one, which is
-    // unavoidable after a seek, so the engine saw a decode failure instead of
-    // the end of the track and never advanced. 90% of the target library is
-    // FLAC, so this path is the common one, not an edge case.
+    // After a seek a stream ends having decoded fewer frames than STREAMINFO
+    // declares; that must read as end of input, or the engine sees a decode
+    // failure and never advances past the track.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/generated-reference.flac",
@@ -380,8 +365,8 @@ test "a truncated stream seeked into ends cleanly rather than reporting damage" 
     // once a stream has been seeked. Frames before a seek target are never
     // decoded, so the running count cannot reach the declared total and a
     // shortfall says nothing about damage any more. The `Decoder` contract has
-    // no way to report "ended early but intact", and a caller that treated the
-    // end of a sought track as a decode failure stalled the queue.
+    // no way to report "ended early but intact", and a caller that treats the
+    // end of a sought track as a decode failure stalls the queue.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/tagged-reference.flac",
@@ -420,11 +405,9 @@ fn declareExtraFrames(bytes: []u8, shortfall: u64) void {
 }
 
 test "a stream that stops inside its final block ends cleanly rather than failing" {
-    // Real files end untidily. One of 104 ID3-carrying FLACs in a real library
-    // stops 2,620 frames short of the 11,979,324 STREAMINFO declares, inside
-    // its final 4,096-frame block. ffmpeg calls that an invalid sync code,
-    // resyncs, and returns the audio; treating it as damage lost the track,
-    // which failed analysis outright and ended playback early.
+    // Real files can stop short of what STREAMINFO declares, inside their
+    // final block. ffmpeg resyncs and returns the audio; treating it as damage
+    // would fail analysis and end playback early.
     var local = try storage.LocalFileSource.open(
         std.testing.io,
         "fixtures/audio/tagged-reference.flac",

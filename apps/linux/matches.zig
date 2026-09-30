@@ -35,8 +35,6 @@ fn rowInfo(data: ?*anyopaque) *RowInfo {
     return @ptrCast(@alignCast(data.?));
 }
 
-// ------------------------------------------------------------------ wording
-
 /// Confidence as a whole percentage, rounded down so a match shown at P% is
 /// one Accept Confident at P% takes.
 pub fn percent(confidence: f32) u32 {
@@ -77,8 +75,6 @@ fn lengthDiffers(track_ms: ?i64, proposal_ms: ?u64) bool {
     return difference > length_tolerance_ms;
 }
 
-// -------------------------------------------------------------- the badge
-
 pub fn updateCount(self: *App) void {
     const library = self.library orelse return;
     const total = self.runtime.libraryMatchReviewCount(library) catch return;
@@ -87,8 +83,6 @@ pub fn updateCount(self: *App) void {
     const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&buffer, "{f}", .{strings.grouped(total)}) catch "";
     gtk.gtk_label_set_text(label, text.ptr);
 }
-
-// ---------------------------------------------------------------- actions
 
 fn refused(self: *App, err: anyerror, fallback: [:0]const u8) void {
     if (err == error.StaleIdentificationProposal or err == error.UnknownIdentificationProposal) {
@@ -183,8 +177,6 @@ fn findClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startMatching(state(data));
 }
 
-// ------------------------------------------------------- accept confident
-
 fn noConfidentText(buffer: []u8, self: *const App) [:0]const u8 {
     return strings.format(buffer, "No song has exactly one match scoring {d}% or more", .{self.match_threshold_percent});
 }
@@ -230,8 +222,6 @@ fn acceptConfidentResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyo
         strings.format(&buffer, "Accepted {f} matches", .{strings.grouped(accepted)}));
     changed(self);
 }
-
-// ------------------------------------------------------ AcoustID submission
 
 pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
     self.acoustid_key_stored = presence == .stored;
@@ -288,8 +278,6 @@ fn submitResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) ca
     if (!std.mem.eql(u8, std.mem.span(response), "send")) return;
     jobs.startSubmission(state(data));
 }
-
-// ------------------------------------------------------------------- rows
 
 fn newLabel(text: [:0]const u8, css_class: ?[*:0]const u8) *gtk.Widget {
     const widget = gtk.gtk_label_new(text.ptr);
@@ -416,8 +404,6 @@ fn reviewRow(self: *App, item: liborca.MatchReviewItem) ?*gtk.Widget {
     _ = gtk.signalConnect(row, "notify::expanded", gtk.callback(expandedChanged), info);
     return row;
 }
-
-// ------------------------------------------------------------------- page
 
 pub fn build(self: *App) *gtk.Widget {
     const list = gtk.gtk_list_box_new();

@@ -238,8 +238,6 @@ pub fn edit(self: *App, ids: []const i64) void {
     adw.adw_dialog_present(dialog, if (self.window) |w| gtk.cast(gtk.Widget, w) else null);
 }
 
-// -------------------------------------------------------------------- write
-
 const PendingWrite = struct {
     self: *App,
     plan_id: u64,

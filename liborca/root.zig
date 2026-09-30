@@ -122,6 +122,7 @@ pub const MatchAcceptance = runtime.MatchAcceptance;
 pub const MatchReviewItem = runtime.MatchReviewItem;
 pub const MatchReviewPage = runtime.MatchReviewPage;
 pub const AcoustIdUse = runtime.AcoustIdUse;
+pub const BusyService = runtime.BusyService;
 
 // AcoustID: fingerprints, and submissions of recording IDs a person chose.
 pub const TrackFingerprint = runtime.TrackFingerprint;

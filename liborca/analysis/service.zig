@@ -11,17 +11,12 @@ const fingerprint = @import("fingerprint.zig");
 pub const diagnostics_cache_kind: u8 = 1;
 pub const fingerprint_cache_kind: u8 = 2;
 pub const diagnostics_algorithm_id = "orca.audio-diagnostics";
-/// Bumped to 2 when FLAC decoding moved to libFLAC.
-///
 /// The version covers the *input* a measurement was taken from as much as the
-/// arithmetic taken over it. Every figure stored at version 1 was measured
-/// through a FLAC decoder that reconstructed mid-side stereo one LSB low on
-/// roughly half of all samples, so loudness, peak and clipping in an existing
-/// library describe audio the decoder no longer produces. Re-measuring is
-/// cheaper than trusting a number now known to be wrong.
+/// arithmetic taken over it: bump it whenever a decoder's samples change, so
+/// stored figures are re-measured.
 pub const diagnostics_algorithm_version: u32 = 2;
 pub const fingerprint_algorithm_id = "orca.temporal-fingerprint";
-/// Bumped to 2 with the diagnostics version, and for the same reason. The
+/// Bumped with the diagnostics version, for the same reason. The
 /// fingerprint carries `decoded_audio_hash`, which becomes `files.audio_hash`
 /// and is compared for equality: a hash of subtly wrong samples cannot match
 /// a hash of correct ones, so every stored fingerprint has to be retaken.

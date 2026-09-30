@@ -10,11 +10,10 @@
 //! `JobWorker`, cancellable through the same token, bounded commits, row
 //! selection through an indexed query rather than a walk — with one difference
 //! that governs everything else: **the backfill reads headers, this decodes
-//! whole files.** Probing 22,060 files takes seconds; decoding them takes
-//! hours. So cancellation, resumption and progress are load-bearing rather
-//! than polite, the Library's write lane is never held across a decode, and a
-//! batch is small enough that an interrupted run loses a bounded amount of the
-//! most expensive work in the codebase.
+//! whole files.** So cancellation, resumption and progress are load-bearing
+//! rather than polite, the Library's write lane is never held across a decode,
+//! and a batch is small enough that an interrupted run loses a bounded amount
+//! of the most expensive work in the codebase.
 //!
 //! Like the scanner and the backfill it writes only what it owns: the analysis
 //! results, the audio hash it just computed, and the one health-issue kind
@@ -81,8 +80,8 @@ const Measurement = struct {
         unreadable: []const u8,
         /// Not reachable, not audio, or the Library's recorded identity for
         /// the file is not the file's identity any more. Counted and passed
-        /// over with no health issue: filing 22,060 defects when a drive is
-        /// unmounted would bury every real finding.
+        /// over with no health issue: filing a defect per file when a drive
+        /// is unmounted would bury every real finding.
         skipped,
 
         fn deinit(self: Outcome, allocator: std.mem.Allocator) void {
@@ -120,8 +119,7 @@ pub const LibraryAnalysis = struct {
     ///
     /// Much smaller than the backfill's 256 on purpose. A batch is the unit of
     /// work an interrupted run throws away, and here one unit is a whole file
-    /// decoded end to end rather than one header read. Thirty-two files is
-    /// seconds of loss on cancellation instead of minutes.
+    /// decoded end to end rather than one header read.
     batch_size: usize = 32,
     /// The measurement this pass produces.
     ///
@@ -339,8 +337,6 @@ pub const LibraryAnalysis = struct {
     }
 };
 
-// ---------------------------------------------------------------------- tests
-
 const testing = std.testing;
 const metadata = @import("../metadata/model.zig");
 
@@ -455,18 +451,12 @@ const Fixture = struct {
     }
 };
 
-fn scalar(library: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
-    var statement = try library.database.prepare(sql);
-    defer statement.deinit();
-    if (try statement.step() != .row) return error.SqlFailed;
-    return statement.columnInt64(0);
-}
+const scalar = database.columns.scalar;
 
 test "selecting the files that still owe an analysis is an index search, not a table scan" {
-    // The whole reason this pass can run against 500,000 rows. `files` is
-    // walked by primary key and each row costs one full-prefix probe of the
-    // analysis cache's own primary key; a paraphrase of either half would
-    // still return the right rows, silently, by reading everything twice.
+    // `files` is walked by primary key and each row costs one full-prefix probe
+    // of the analysis cache's own primary key; a paraphrase of either half
+    // would still return the right rows, silently, by reading everything twice.
     var fixture = try Fixture.init("file:orca-analysis-plan?mode=memory&cache=shared");
     defer fixture.deinit();
     var statement = try fixture.library.database.prepare(
@@ -503,13 +493,13 @@ test "an analysis measures every file once and a second pass has nothing left to
     try testing.expect(first.bytes_stored > 0);
     // Both measurements, for both files.
     try testing.expectEqual(@as(i64, 4), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM analysis_results;",
     ));
     // Tier 4 of the identity cascade, which only a pass that decoded the audio
     // can write.
     try testing.expectEqual(@as(i64, 0), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM files WHERE audio_hash IS NULL;",
     ));
 
@@ -533,7 +523,7 @@ test "a file whose recorded identity is stale is declined rather than measured" 
     try testing.expectEqual(@as(u64, 1), result.unsupported);
     try testing.expectEqual(@as(u64, 0), result.changed + result.unchanged);
     try testing.expectEqual(@as(i64, 0), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM analysis_results;",
     ));
     // Declined, not reported: a stale row is a library-state problem the
@@ -552,7 +542,7 @@ test "a file that will not decode is reported as corrupt audio and keeps no resu
     try testing.expectEqual(@as(u64, 1), result.errors);
     try testing.expectEqual(@as(u64, 0), result.changed + result.unchanged);
     try testing.expectEqual(@as(i64, 0), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM analysis_results;",
     ));
     var issues = try fixture.library.health_issues.page(testing.allocator, 8, 0);
@@ -579,7 +569,7 @@ test "a file no registered codec can decode is declined, not reported as corrupt
     try testing.expectEqual(@as(usize, 0), issues.items.len);
 }
 
-test "a file that is not there is counted without being reported as a defect" {
+test "an analysis pass counts a file that is not there without reporting it as a defect" {
     // Files go missing and drives get unmounted; `locations.state` already
     // models that. One health issue per absent file would bury every real
     // finding under a mount problem the Library has already recorded.

@@ -47,10 +47,26 @@ pub const Identity = struct {
     }
 };
 
+pub const RetryAfter = union(enum) {
+    seconds: u64,
+    /// An HTTP-date, in Unix seconds.
+    date: i64,
+
+    /// Delay-seconds, or an HTTP-date in the IMF-fixdate form. A delay too
+    /// large to represent is the largest one.
+    pub fn parse(value: []const u8) ?RetryAfter {
+        const trimmed = std.mem.trim(u8, value, " \t");
+        if (trimmed.len == 0) return null;
+        if (allDigits(trimmed))
+            return .{ .seconds = std.fmt.parseInt(u64, trimmed, 10) catch std.math.maxInt(u64) };
+        return .{ .date = parseImfFixdate(trimmed) orelse return null };
+    }
+};
+
 pub const RateLimit = struct {
     remaining: ?u32 = null,
     reset_in_s: ?u32 = null,
-    retry_after_s: ?u32 = null,
+    retry_after: ?RetryAfter = null,
 
     pub fn observe(self: *RateLimit, name: []const u8, value: []const u8) void {
         if (std.ascii.eqlIgnoreCase(name, "x-ratelimit-remaining")) {
@@ -58,17 +74,63 @@ pub const RateLimit = struct {
         } else if (std.ascii.eqlIgnoreCase(name, "x-ratelimit-reset-in")) {
             self.reset_in_s = parseWholeSeconds(value);
         } else if (std.ascii.eqlIgnoreCase(name, "retry-after")) {
-            self.retry_after_s = parseWholeSeconds(value);
+            self.retry_after = RetryAfter.parse(value);
         }
     }
 
     fn parseWholeSeconds(value: []const u8) ?u32 {
         const trimmed = std.mem.trim(u8, value, " \t");
-        if (trimmed.len == 0) return null;
-        for (trimmed) |byte| if (!std.ascii.isDigit(byte)) return null;
+        if (!allDigits(trimmed)) return null;
         return std.fmt.parseInt(u32, trimmed, 10) catch null;
     }
 };
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
+
+/// `Sun, 06 Nov 1994 08:49:37 GMT`, in Unix seconds.
+fn parseImfFixdate(text: []const u8) ?i64 {
+    const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
+    const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    if (text.len != 29) return null;
+    if (indexOfName(&day_names, text[0..3]) == null) return null;
+    if (!std.mem.eql(u8, text[3..5], ", ") or text[7] != ' ' or text[11] != ' ' or text[16] != ' ' or
+        text[19] != ':' or text[22] != ':' or !std.mem.eql(u8, text[25..29], " GMT"))
+        return null;
+    const day = twoDigits(text[5..7]) orelse return null;
+    const month = (indexOfName(&month_names, text[8..11]) orelse return null) + 1;
+    const year = (@as(u16, twoDigits(text[12..14]) orelse return null)) * 100 + (twoDigits(text[14..16]) orelse return null);
+    const hour = twoDigits(text[17..19]) orelse return null;
+    const minute = twoDigits(text[20..22]) orelse return null;
+    const second = twoDigits(text[23..25]) orelse return null;
+    if (day == 0 or day > std.time.epoch.getDaysInMonth(year, @enumFromInt(month))) return null;
+    if (hour > 23 or minute > 59 or second > 60) return null;
+    return daysSinceUnixEpoch(year, month, day) * std.time.s_per_day +
+        @as(i64, hour) * std.time.s_per_hour + @as(i64, minute) * std.time.s_per_min + second;
+}
+
+fn indexOfName(names: []const []const u8, text: []const u8) ?u8 {
+    for (names, 0..) |name, index| if (std.mem.eql(u8, name, text)) return @intCast(index);
+    return null;
+}
+
+fn twoDigits(text: []const u8) ?u8 {
+    if (!allDigits(text)) return null;
+    return (text[0] - '0') * 10 + (text[1] - '0');
+}
+
+fn daysSinceUnixEpoch(year: u16, month: u8, day: u8) i64 {
+    const shifted_year: i64 = if (month <= 2) @as(i64, year) - 1 else year;
+    const era = @divFloor(shifted_year, 400);
+    const year_of_era = shifted_year - era * 400;
+    const month_from_march: i64 = if (month > 2) month - 3 else month + 9;
+    const day_of_year = @divFloor(153 * month_from_march + 2, 5) + day - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
+    return era * 146_097 + day_of_era - 719_468;
+}
 
 pub const Request = struct {
     method: Method = .get,
@@ -143,6 +205,65 @@ pub const Config = struct {
 const cancel_poll_ms = 100;
 const maximum_inline_hold_ms = 5_000;
 
+/// How long a service stays claimed after a Gateway's last request.
+pub const lease_duration_ms: i64 = 120_000;
+
+/// A service's rate-limit state, as a `StateStore` keeps it. Times are Unix
+/// milliseconds.
+pub const SharedState = struct {
+    blocked_until_ms: ?i64 = null,
+    /// The rate-limit backoff the next refusal doubles.
+    backoff_ms: u64 = 0,
+};
+
+/// Where Gateways keep each service's rate-limit state and a lease on
+/// talking to it, so every Gateway over one store obeys the same block and
+/// only one at a time talks to a service. Times are Unix milliseconds.
+pub const StateStore = struct {
+    context: *anyopaque,
+    load_fn: *const fn (*anyopaque, []const u8) anyerror!?SharedState,
+    save_fn: *const fn (*anyopaque, []const u8, SharedState) anyerror!void,
+    claim_fn: *const fn (*anyopaque, []const u8, i64, i64, i64) anyerror!bool,
+    release_fn: *const fn (*anyopaque, []const u8, i64) anyerror!void,
+
+    pub fn load(self: StateStore, service: []const u8) !?SharedState {
+        return self.load_fn(self.context, service);
+    }
+
+    pub fn save(self: StateStore, service: []const u8, state: SharedState) !void {
+        return self.save_fn(self.context, service, state);
+    }
+
+    /// True when `owner` holds `service` until `expires_at_ms`: nobody held
+    /// it, the holder's lease ran out by `now_ms`, or `owner` already held it.
+    pub fn claim(self: StateStore, service: []const u8, owner: i64, now_ms: i64, expires_at_ms: i64) !bool {
+        return self.claim_fn(self.context, service, owner, now_ms, expires_at_ms);
+    }
+
+    pub fn release(self: StateStore, service: []const u8, owner: i64) !void {
+        return self.release_fn(self.context, service, owner);
+    }
+};
+
+pub const Sharing = struct {
+    store: StateStore,
+    service: []const u8,
+};
+
+/// Half to one and a half times `milliseconds`, for a backoff Orca chooses,
+/// so clients that failed together do not retry together.
+pub fn jittered(random: std.Random, milliseconds: u64) u64 {
+    const shortest = milliseconds - milliseconds / 2;
+    const longest = milliseconds +| milliseconds / 2;
+    return shortest + random.uintAtMost(u64, longest - shortest);
+}
+
+/// A `4xx` that sending the same request again cannot change: not a refused
+/// credential, a timeout or a rate limit.
+pub fn isPermanentRejection(status: u16) bool {
+    return status >= 400 and status < 500 and status != 401 and status != 403 and status != 408 and status != 429;
+}
+
 /// Central policy boundary for every provider request. Transport adapters only
 /// perform I/O; identification, rate limiting, retry/backoff, deadlines,
 /// response bounds, and offline behavior are enforced here. A Gateway is owned
@@ -150,13 +271,24 @@ const maximum_inline_hold_ms = 5_000;
 pub const Gateway = struct {
     transport: Transport,
     clock: Clock,
+    /// Unix time in milliseconds, which an HTTP-date `Retry-After` and a
+    /// `StateStore` are in.
+    wall_clock: Clock,
+    /// Spreads every backoff Orca chooses (`jittered`) and picks lease owners.
+    random: std.Random,
     config: Config,
     cancel: ?*const std.atomic.Value(bool) = null,
+    /// Null keeps the service's state in this Gateway alone and claims no
+    /// lease.
+    sharing: ?Sharing = null,
     last_request_ms: ?i64 = null,
     hold_until_ms: ?i64 = null,
     blocked_until_ms: ?i64 = null,
     rate_limit_backoff_ms: u64 = 0,
+    lease_owner: ?i64 = null,
 
+    /// With `sharing`, claims the service before each request and fails with
+    /// `error.ProviderBusy` while another Gateway over the store holds it.
     pub fn execute(
         self: *Gateway,
         allocator: std.mem.Allocator,
@@ -168,12 +300,14 @@ pub const Gateway = struct {
         if (self.config.offline) return error.Offline;
         try self.config.validate();
         try self.checkCanceled();
+        try self.loadSharedState();
         if (self.blockedUntilMs() != null) return error.RateLimited;
         const user_agent = try self.config.identity.userAgent(allocator);
         defer allocator.free(user_agent);
         var attempt: u8 = 0;
         var backoff = self.config.initial_backoff_ms;
         while (attempt < self.config.maximum_attempts) : (attempt += 1) {
+            try self.claimLease();
             try self.awaitTurn();
             const response = self.transport.perform(allocator, .{
                 .method = method,
@@ -190,20 +324,23 @@ pub const Gateway = struct {
                 else => {
                     if (attempt + 1 == self.config.maximum_attempts)
                         return error.NetworkUnavailable;
-                    try self.sleepCancelable(backoff);
+                    try self.sleepCancelable(jittered(self.random, backoff));
                     backoff = @min(backoff *| 2, 60_000);
                     continue;
                 },
             };
-            self.recordResponse(response);
-            if (response.status == 429) {
+            const refused = self.recordResponse(response) catch |err| {
+                response.deinit();
+                return err;
+            };
+            if (refused) {
                 response.deinit();
                 return error.RateLimited;
             }
             if (!retryableStatus(response.status) or attempt + 1 == self.config.maximum_attempts)
                 return response;
             response.deinit();
-            try self.sleepCancelable(backoff);
+            try self.sleepCancelable(jittered(self.random, backoff));
             backoff = @min(backoff *| 2, 60_000);
         }
         unreachable;
@@ -214,7 +351,69 @@ pub const Gateway = struct {
         return if (self.clock.nowMs() < until) until else null;
     }
 
-    fn recordResponse(self: *Gateway, response: Response) void {
+    /// `blockedUntilMs` as Unix time in milliseconds.
+    pub fn blockedUntilWallMs(self: *Gateway) ?i64 {
+        const until = self.blockedUntilMs() orelse return null;
+        return self.wall_clock.nowMs() +| (until -| self.clock.nowMs());
+    }
+
+    /// Holds every request to the service back for `milliseconds`, unless it
+    /// is already blocked for longer, for a failure the caller saw.
+    pub fn blockFor(self: *Gateway, milliseconds: u64) !void {
+        const until = self.clock.nowMs() +| std.math.lossyCast(i64, milliseconds);
+        self.blocked_until_ms = if (self.blockedUntilMs()) |current| @max(current, until) else until;
+        try self.saveSharedState();
+    }
+
+    /// Adopts the block and backoff the store holds for the service. A block
+    /// is never shortened.
+    pub fn loadSharedState(self: *Gateway) !void {
+        const sharing = self.sharing orelse return;
+        const stored = try sharing.store.load(sharing.service) orelse return;
+        self.rate_limit_backoff_ms = stored.backoff_ms;
+        const wall_until = stored.blocked_until_ms orelse return;
+        const until = self.monotonicFromWall(wall_until);
+        self.blocked_until_ms = if (self.blocked_until_ms) |current| @max(current, until) else until;
+    }
+
+    /// Lets another Gateway claim the service at once. A lease that cannot be
+    /// released runs out `lease_duration_ms` after its last request.
+    pub fn releaseLease(self: *Gateway) void {
+        const sharing = self.sharing orelse return;
+        const owner = self.lease_owner orelse return;
+        sharing.store.release(sharing.service, owner) catch {};
+    }
+
+    fn claimLease(self: *Gateway) !void {
+        const sharing = self.sharing orelse return;
+        const owner = self.lease_owner orelse self.random.int(i64);
+        self.lease_owner = owner;
+        const now = self.wall_clock.nowMs();
+        if (!try sharing.store.claim(sharing.service, owner, now, now +| lease_duration_ms))
+            return error.ProviderBusy;
+        try self.loadSharedState();
+        if (self.blockedUntilMs() != null) return error.RateLimited;
+    }
+
+    fn saveSharedState(self: *Gateway) !void {
+        const sharing = self.sharing orelse return;
+        try sharing.store.save(sharing.service, .{
+            .blocked_until_ms = if (self.blocked_until_ms) |until| self.wallFromMonotonic(until) else null,
+            .backoff_ms = self.rate_limit_backoff_ms,
+        });
+    }
+
+    fn monotonicFromWall(self: *Gateway, wall_ms: i64) i64 {
+        return self.clock.nowMs() +| (wall_ms -| self.wall_clock.nowMs());
+    }
+
+    fn wallFromMonotonic(self: *Gateway, monotonic_ms: i64) i64 {
+        return self.wall_clock.nowMs() +| (monotonic_ms -| self.clock.nowMs());
+    }
+
+    /// True when the response refuses requests for now: a `429`, or a `503`
+    /// with a `Retry-After`.
+    fn recordResponse(self: *Gateway, response: Response) !bool {
         const now = self.clock.nowMs();
         const limit = response.rate_limit;
         self.hold_until_ms = null;
@@ -222,17 +421,32 @@ pub const Gateway = struct {
             if (limit.reset_in_s) |seconds|
                 self.hold_until_ms = now +| @as(i64, @intCast(self.boundedMs(@as(u64, seconds) * 1000)));
         }
-        if (response.status == 429) {
+        if (response.status == 429 or (response.status == 503 and limit.retry_after != null)) {
             self.rate_limit_backoff_ms = if (self.rate_limit_backoff_ms == 0)
                 self.config.initial_rate_limit_backoff_ms
             else
                 self.boundedMs(self.rate_limit_backoff_ms *| 2);
-            const advertised_s = @max(limit.retry_after_s orelse 0, limit.reset_in_s orelse 0);
-            const block_ms = @max(@as(u64, advertised_s) * 1000, self.rate_limit_backoff_ms);
-            self.blocked_until_ms = now +| @as(i64, @intCast(self.boundedMs(block_ms)));
-        } else if (response.status >= 200 and response.status < 300) {
-            self.rate_limit_backoff_ms = 0;
+            const reset_ms = self.boundedMs(@as(u64, limit.reset_in_s orelse 0) * 1000);
+            const backoff_ms = jittered(self.random, self.rate_limit_backoff_ms);
+            var until = now +| std.math.lossyCast(i64, @max(reset_ms, backoff_ms));
+            if (limit.retry_after) |retry_after| until = @max(until, self.retryAfterUntil(retry_after));
+            self.blocked_until_ms = until;
+            try self.saveSharedState();
+            return true;
         }
+        if (response.status >= 200 and response.status < 300 and self.rate_limit_backoff_ms != 0) {
+            self.rate_limit_backoff_ms = 0;
+            // The caller gets an accepted response even when the reset cannot be stored.
+            self.saveSharedState() catch {};
+        }
+        return false;
+    }
+
+    fn retryAfterUntil(self: *Gateway, retry_after: RetryAfter) i64 {
+        return switch (retry_after) {
+            .seconds => |seconds| self.clock.nowMs() +| std.math.lossyCast(i64, seconds *| 1000),
+            .date => |unix_s| self.monotonicFromWall(unix_s *| 1000),
+        };
     }
 
     fn boundedMs(self: *Gateway, milliseconds: u64) u64 {
@@ -247,6 +461,7 @@ pub const Gateway = struct {
         if (self.hold_until_ms) |hold| {
             if (hold - now > maximum_inline_hold_ms) {
                 self.blocked_until_ms = @max(self.blocked_until_ms orelse hold, hold);
+                try self.saveSharedState();
                 return error.RateLimited;
             }
             ready = @max(ready, hold);
@@ -456,69 +671,8 @@ pub const SystemClock = struct {
 
 const test_version = std.fmt.comptimePrint("{f}", .{version.value});
 
-const ScriptedTransport = struct {
-    responses: []const Scripted,
-    clock: *TestClock,
-    calls: usize = 0,
-    request_times_ms: [16]i64 = undefined,
-    user_agent: [160]u8 = undefined,
-    user_agent_len: usize = 0,
-    timeout_ms: u64 = 0,
-    failure: ?anyerror = null,
-
-    const Scripted = struct {
-        status: u16 = 200,
-        rate_limit: RateLimit = .{},
-    };
-
-    fn transport(self: *ScriptedTransport) Transport {
-        return .{ .context = self, .perform_fn = perform };
-    }
-
-    fn lastUserAgent(self: *const ScriptedTransport) []const u8 {
-        return self.user_agent[0..self.user_agent_len];
-    }
-
-    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: Request) !Response {
-        const self: *ScriptedTransport = @ptrCast(@alignCast(context));
-        self.request_times_ms[self.calls] = self.clock.now;
-        self.calls += 1;
-        self.timeout_ms = request.timeout_ms;
-        self.user_agent_len = request.user_agent.len;
-        @memcpy(self.user_agent[0..request.user_agent.len], request.user_agent);
-        if (self.failure) |err| return err;
-        const scripted = self.responses[@min(self.calls - 1, self.responses.len - 1)];
-        return .{
-            .allocator = allocator,
-            .status = scripted.status,
-            .body = try allocator.dupe(u8, "body"),
-            .rate_limit = scripted.rate_limit,
-        };
-    }
-};
-
-const TestClock = struct {
-    now: i64 = 0,
-    slept: u64 = 0,
-
-    fn clock(self: *TestClock) Clock {
-        return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
-    }
-
-    fn nowMs(context: *anyopaque) i64 {
-        return (@as(*TestClock, @ptrCast(@alignCast(context)))).now;
-    }
-
-    fn sleepMs(context: *anyopaque, milliseconds: u64) !void {
-        const self: *TestClock = @ptrCast(@alignCast(context));
-        self.slept += milliseconds;
-        self.now += @intCast(milliseconds);
-    }
-};
-
-fn scriptedGateway(transport: *ScriptedTransport, clock: *TestClock, config: Config) Gateway {
-    return .{ .transport = transport.transport(), .clock = clock.clock(), .config = config };
-}
+const net_testing = @import("testing.zig");
+const TestGateway = net_testing.TestGateway;
 
 fn fetchOnce(gateway: *Gateway) !u16 {
     const response = try gateway.execute(std.testing.allocator, .get, "https://example.test", null, &.{});
@@ -527,26 +681,26 @@ fn fetchOnce(gateway: *Gateway) !u16 {
 }
 
 test "user agent names Orca, its version and the contact" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{ .responses = &.{.{}}, .clock = &clock };
-    var gateway = scriptedGateway(&scripted, &clock, .{});
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
     try std.testing.expectEqualStrings(
         "Orca/" ++ test_version ++ " ( evan@evanriley.com )",
-        scripted.lastUserAgent(),
+        net.transport.lastUserAgent(),
     );
 }
 
 test "user agent of a host identity is followed by liborca's" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{ .responses = &.{.{}}, .clock = &clock };
-    var gateway = scriptedGateway(&scripted, &clock, .{
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{
         .identity = .{ .name = "Player", .version = "1.2.3", .contact = "https://player.example" },
-    });
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
+    } });
+    defer net.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
     try std.testing.expectEqualStrings(
         "Player/1.2.3 ( https://player.example ) liborca/" ++ test_version,
-        scripted.lastUserAgent(),
+        net.transport.lastUserAgent(),
     );
 }
 
@@ -563,110 +717,173 @@ test "identities with empty fields, line breaks or parentheses are rejected" {
         .{ .name = "App", .version = "1", .contact = "(a@b.c" },
     };
     for (invalid) |identity| {
-        var clock: TestClock = .{};
-        var scripted: ScriptedTransport = .{ .responses = &.{.{}}, .clock = &clock };
-        var gateway = scriptedGateway(&scripted, &clock, .{ .identity = identity });
-        try std.testing.expectError(error.InvalidNetworkConfiguration, fetchOnce(&gateway));
-        try std.testing.expectEqual(@as(usize, 0), scripted.calls);
+        var net: TestGateway = undefined;
+        net.init(.{ .config = .{ .identity = identity } });
+        defer net.deinit();
+        try std.testing.expectError(error.InvalidNetworkConfiguration, fetchOnce(&net.gateway));
+        try std.testing.expectEqual(@as(u32, 0), net.transport.requestCount());
     }
 }
 
-test "rate limit headers are read case-insensitively and Retry-After only as seconds" {
+test "rate limit headers are read case-insensitively, and Retry-After as delay-seconds or an HTTP-date" {
     var limit: RateLimit = .{};
     limit.observe("X-RateLimit-Remaining", "0");
     limit.observe("x-ratelimit-reset-in", " 7 ");
     limit.observe("RETRY-AFTER", "30");
     try std.testing.expectEqual(@as(?u32, 0), limit.remaining);
     try std.testing.expectEqual(@as(?u32, 7), limit.reset_in_s);
-    try std.testing.expectEqual(@as(?u32, 30), limit.retry_after_s);
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .seconds = 30 }), limit.retry_after);
 
     var dated: RateLimit = .{};
-    dated.observe("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT");
-    dated.observe("X-RateLimit-Reset-In", "-1");
-    dated.observe("X-RateLimit-Remaining", "+3");
-    try std.testing.expectEqual(RateLimit{}, dated);
+    dated.observe("Retry-After", " Wed, 21 Oct 2026 07:28:00 GMT");
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .date = 1_792_567_680 }), dated.retry_after);
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .date = 784_111_777 }), RetryAfter.parse("Sun, 06 Nov 1994 08:49:37 GMT"));
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .date = 951_868_799 }), RetryAfter.parse("Tue, 29 Feb 2000 23:59:59 GMT"));
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .seconds = std.math.maxInt(u64) }), RetryAfter.parse("99999999999999999999999"));
+
+    var unreadable: RateLimit = .{};
+    unreadable.observe("X-RateLimit-Reset-In", "-1");
+    unreadable.observe("X-RateLimit-Remaining", "+3");
+    unreadable.observe("Retry-After", "abc");
+    try std.testing.expectEqual(RateLimit{}, unreadable);
+    for ([_][]const u8{
+        "",
+        "-5",
+        "1.5",
+        "Wed, 21 Oct 2026 07:28:00 UTC",
+        "Wednesday, 21-Oct-26 07:28:00 GMT",
+        "Wed Oct 21 07:28:00 2026",
+        "Wed, 31 Feb 2026 07:28:00 GMT",
+        "Wed, 21 Oct 2026 24:00:00 GMT",
+        "Wed, 21 Okt 2026 07:28:00 GMT",
+        "wed, 21 Oct 2026 07:28:00 GMT",
+    }) |value| try std.testing.expectEqual(@as(?RetryAfter, null), RetryAfter.parse(value));
 }
 
-fn expectBlockedFor(limit: RateLimit, expected_ms: i64) !void {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{ .{ .status = 429, .rate_limit = limit }, .{} },
-        .clock = &clock,
-    };
-    var gateway = scriptedGateway(&scripted, &clock, .{ .maximum_attempts = 3, .minimum_interval_ms = 0 });
-    try std.testing.expectError(error.RateLimited, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
-    try std.testing.expectEqual(@as(?i64, expected_ms), gateway.blockedUntilMs());
+fn expectBlockedFor(status: u16, limit: RateLimit, started_ms: i64, shortest_ms: i64, longest_ms: i64) !void {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{ .maximum_attempts = 3, .minimum_interval_ms = 0 }, .now_ms = started_ms });
+    defer net.deinit();
+    try net.transport.script(.{ .respond = .{ .status = status, .rate_limit = limit } });
+    try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+    const until = net.gateway.blockedUntilMs().?;
+    try std.testing.expect(until >= started_ms + shortest_ms);
+    try std.testing.expect(until <= started_ms + longest_ms);
 
-    clock.now = expected_ms - 1;
-    try std.testing.expectError(error.RateLimited, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+    net.clock.set(until - 1);
+    try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
 
-    clock.now = expected_ms;
-    try std.testing.expectEqual(@as(?i64, null), gateway.blockedUntilMs());
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 2), scripted.calls);
+    net.clock.set(until);
+    try std.testing.expectEqual(@as(?i64, null), net.gateway.blockedUntilMs());
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 2), net.transport.requestCount());
 }
 
-test "a 429 is not retried and blocks requests for the default backoff" {
-    try expectBlockedFor(.{}, 60_000);
+test "a 429 is not retried and blocks requests for the jittered default backoff" {
+    try expectBlockedFor(429, .{}, 0, 30_000, 90_000);
 }
 
 test "a 429 blocks requests until Retry-After when it is longer than the backoff" {
-    try expectBlockedFor(.{ .retry_after_s = 120 }, 120_000);
+    try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 120 } }, 0, 120_000, 120_000);
 }
 
 test "a 429 blocks requests until Reset-In when it is longer than the backoff" {
-    try expectBlockedFor(.{ .reset_in_s = 300, .remaining = 0 }, 300_000);
+    try expectBlockedFor(429, .{ .reset_in_s = 300, .remaining = 0 }, 0, 300_000, 300_000);
 }
 
-test "consecutive 429s double the block up to an hour and a success resets it" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{.{ .status = 429 }},
-        .clock = &clock,
-    };
-    var gateway = scriptedGateway(&scripted, &clock, .{ .minimum_interval_ms = 0 });
+test "a Retry-After of two hours, or of three years, is honoured in full" {
+    try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 2 * 60 * 60 } }, 0, 7_200_000, 7_200_000);
+    try expectBlockedFor(429, .{ .retry_after = .{ .seconds = 99_999_999 } }, 0, 99_999_999_000, 99_999_999_000);
+}
+
+test "a Retry-After date blocks requests until that date, and one in the past only for the backoff" {
+    const date_s: i64 = 1_792_567_680;
+    const now_ms = date_s * 1000 - 600_000;
+    try expectBlockedFor(429, .{ .retry_after = .{ .date = date_s } }, now_ms, 600_000, 600_000);
+    try expectBlockedFor(429, .{ .retry_after = .{ .date = date_s - 3600 } }, now_ms, 30_000, 90_000);
+}
+
+test "a 503 with Retry-After blocks the service like a 429, in either form" {
+    try expectBlockedFor(503, .{ .retry_after = .{ .seconds = 600 } }, 0, 600_000, 600_000);
+    const date_s: i64 = 1_792_567_680;
+    try expectBlockedFor(503, .{ .retry_after = .{ .date = date_s } }, date_s * 1000 - 900_000, 900_000, 900_000);
+}
+
+test "a 503 without Retry-After is returned to the caller and blocks nothing" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    net.transport.otherwise = .{ .respond = .{ .status = 503 } };
+    try std.testing.expectEqual(@as(u16, 503), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(?i64, null), net.gateway.blockedUntilMs());
+}
+
+test "consecutive 429s double the backoff up to an hour, each block jittered around it, and a success resets it" {
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{ .minimum_interval_ms = 0 } });
+    defer net.deinit();
+    net.transport.otherwise = .{ .respond = .{ .status = 429 } };
     const expected_s = [_]i64{ 60, 120, 240, 480, 960, 1920, 3600, 3600 };
     for (expected_s) |seconds| {
-        const started = clock.now;
-        try std.testing.expectError(error.RateLimited, fetchOnce(&gateway));
-        try std.testing.expectEqual(@as(?i64, started + seconds * 1000), gateway.blockedUntilMs());
-        clock.now = started + seconds * 1000;
+        const started = net.clock.now();
+        try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
+        try std.testing.expectEqual(@as(u64, @intCast(seconds * 1000)), net.gateway.rate_limit_backoff_ms);
+        const until = net.gateway.blockedUntilMs().?;
+        try std.testing.expect(until >= started + seconds * 500);
+        try std.testing.expect(until <= started + seconds * 1500);
+        net.clock.set(until);
     }
 
-    scripted.responses = &.{.{}};
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    scripted.responses = &.{.{ .status = 429 }};
-    const started = clock.now;
-    try std.testing.expectError(error.RateLimited, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(?i64, started + 60_000), gateway.blockedUntilMs());
+    net.transport.otherwise = .{ .respond = .{} };
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u64, 0), net.gateway.rate_limit_backoff_ms);
+    net.transport.otherwise = .{ .respond = .{ .status = 429 } };
+    try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u64, 60_000), net.gateway.rate_limit_backoff_ms);
+}
+
+test "a jittered backoff stays within half to one and a half times its length and spreads across it" {
+    var prng: std.Random.DefaultPrng = .init(42);
+    const random = prng.random();
+    var shortest: u64 = std.math.maxInt(u64);
+    var longest: u64 = 0;
+    for (0..1000) |_| {
+        const value = jittered(random, 60_000);
+        shortest = @min(shortest, value);
+        longest = @max(longest, value);
+    }
+    try std.testing.expect(shortest >= 30_000 and shortest < 33_000);
+    try std.testing.expect(longest <= 90_000 and longest > 87_000);
+    try std.testing.expectEqual(@as(u64, 0), jittered(random, 0));
+    try std.testing.expectEqual(@as(u64, 1), jittered(random, 1));
+    for (0..100) |_| {
+        const value = jittered(random, 3);
+        try std.testing.expect(value >= 2 and value <= 4);
+    }
 }
 
 test "an exhausted quota holds the next request until a short advertised reset" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{ .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 3 } }, .{} },
-        .clock = &clock,
-    };
-    var gateway = scriptedGateway(&scripted, &clock, .{});
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(i64, 3000), scripted.request_times_ms[1] - scripted.request_times_ms[0]);
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    try net.transport.script(.{ .respond = .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 3 } } });
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(i64, 3000), net.transport.request_times_ms[1] - net.transport.request_times_ms[0]);
 }
 
 test "an exhausted quota with a long reset is scheduled instead of slept" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{ .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 7 } }, .{} },
-        .clock = &clock,
-    };
-    var gateway = scriptedGateway(&scripted, &clock, .{});
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    try std.testing.expectError(error.RateLimited, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
-    try std.testing.expectEqual(@as(u64, 0), clock.slept);
-    try std.testing.expectEqual(@as(?i64, 7000), gateway.blockedUntilMs());
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    try net.transport.script(.{ .respond = .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 7 } } });
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+    try std.testing.expectEqual(@as(u64, 0), net.clock.slept());
+    try std.testing.expectEqual(@as(?i64, 7000), net.gateway.blockedUntilMs());
 }
 
 test "a transport without concurrency is a configuration error and is not retried" {
@@ -674,7 +891,8 @@ test "a transport without concurrency is a configuration error and is not retrie
     var transport: StandardTransport = .init(std.testing.allocator, threaded.io());
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = threaded.io() };
-    var gateway = systemGateway(&transport, &system_clock, .{ .maximum_attempts = 3, .request_timeout_ms = 5000 });
+    const random: std.Random.IoSource = .{ .io = threaded.io() };
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .maximum_attempts = 3, .request_timeout_ms = 5000 });
     const started = std.Io.Clock.awake.now(threaded.io()).toMilliseconds();
     try std.testing.expectError(error.InvalidNetworkConfiguration, gateway.execute(
         std.testing.allocator,
@@ -687,58 +905,56 @@ test "a transport without concurrency is a configuration error and is not retrie
 }
 
 test "requests are spaced by the minimum interval" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{.{ .rate_limit = .{ .remaining = 5, .reset_in_s = 7 } }},
-        .clock = &clock,
-    };
-    var gateway = scriptedGateway(&scripted, &clock, .{});
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    clock.now += 400;
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    clock.now += 2500;
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(i64, 1000), scripted.request_times_ms[1] - scripted.request_times_ms[0]);
-    try std.testing.expectEqual(@as(i64, 2500), scripted.request_times_ms[2] - scripted.request_times_ms[1]);
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    net.transport.otherwise = .{ .respond = .{ .rate_limit = .{ .remaining = 5, .reset_in_s = 7 } } };
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    net.clock.advance(400);
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    net.clock.advance(2500);
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(i64, 1000), net.transport.request_times_ms[1] - net.transport.request_times_ms[0]);
+    try std.testing.expectEqual(@as(i64, 2500), net.transport.request_times_ms[2] - net.transport.request_times_ms[1]);
 }
 
 test "server errors are retried only up to the configured attempts" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{
-        .responses = &.{ .{ .status = 503 }, .{ .status = 503 }, .{} },
-        .clock = &clock,
-    };
-    var single = scriptedGateway(&scripted, &clock, .{});
-    try std.testing.expectEqual(@as(u16, 503), try fetchOnce(&single));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+    var single: TestGateway = undefined;
+    single.init(.{});
+    defer single.deinit();
+    try single.transport.script(.{ .respond = .{ .status = 503 } });
+    try std.testing.expectEqual(@as(u16, 503), try fetchOnce(&single.gateway));
+    try std.testing.expectEqual(@as(u32, 1), single.transport.requestCount());
 
-    scripted.calls = 0;
-    var patient = scriptedGateway(&scripted, &clock, .{ .maximum_attempts = 3, .minimum_interval_ms = 100, .initial_backoff_ms = 10 });
-    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&patient));
-    try std.testing.expectEqual(@as(usize, 3), scripted.calls);
+    var patient: TestGateway = undefined;
+    patient.init(.{ .config = .{ .maximum_attempts = 3, .minimum_interval_ms = 100, .initial_backoff_ms = 10 } });
+    defer patient.deinit();
+    try patient.transport.script(.{ .respond = .{ .status = 503 } });
+    try patient.transport.script(.{ .respond = .{ .status = 503 } });
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&patient.gateway));
+    try std.testing.expectEqual(@as(u32, 3), patient.transport.requestCount());
 
-    scripted.calls = 0;
-    scripted.failure = error.ConnectionRefused;
-    try std.testing.expectError(error.NetworkUnavailable, fetchOnce(&patient));
-    try std.testing.expectEqual(@as(usize, 3), scripted.calls);
+    patient.transport.otherwise = .{ .fail = error.ConnectionRefused };
+    try std.testing.expectError(error.NetworkUnavailable, fetchOnce(&patient.gateway));
+    try std.testing.expectEqual(@as(u32, 3 + 3), patient.transport.requestCount());
 }
 
 test "offline mode, timeouts and a set cancel flag stop the gateway before or without retrying" {
-    var clock: TestClock = .{};
-    var scripted: ScriptedTransport = .{ .responses = &.{.{}}, .clock = &clock };
-    var gateway = scriptedGateway(&scripted, &clock, .{ .maximum_attempts = 3, .request_timeout_ms = 1234 });
-    scripted.failure = error.Timeout;
-    try std.testing.expectError(error.Timeout, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
-    try std.testing.expectEqual(@as(u64, 1234), scripted.timeout_ms);
+    var net: TestGateway = undefined;
+    net.init(.{ .config = .{ .maximum_attempts = 3, .request_timeout_ms = 1234 } });
+    defer net.deinit();
+    net.transport.otherwise = .{ .fail = error.Timeout };
+    try std.testing.expectError(error.Timeout, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+    try std.testing.expectEqual(@as(u64, 1234), net.transport.timeout_ms);
 
     var canceled: std.atomic.Value(bool) = .init(true);
-    gateway.cancel = &canceled;
-    try std.testing.expectError(error.Canceled, fetchOnce(&gateway));
-    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+    net.gateway.cancel = &canceled;
+    try std.testing.expectError(error.Canceled, fetchOnce(&net.gateway));
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
 
-    gateway.config.offline = true;
-    try std.testing.expectError(error.Offline, fetchOnce(&gateway));
+    net.gateway.config.offline = true;
+    try std.testing.expectError(error.Offline, fetchOnce(&net.gateway));
 }
 
 const canned_response =
@@ -792,8 +1008,14 @@ const LocalServer = struct {
     }
 };
 
-fn systemGateway(transport: *StandardTransport, clock: *SystemClock, config: Config) Gateway {
-    return .{ .transport = transport.transport(), .clock = clock.clock(), .config = config };
+fn systemGateway(transport: *StandardTransport, clock: *SystemClock, random: *const std.Random.IoSource, config: Config) Gateway {
+    return .{
+        .transport = transport.transport(),
+        .clock = clock.clock(),
+        .wall_clock = clock.wallClock(),
+        .random = random.interface(),
+        .config = config,
+    };
 }
 
 test "a real exchange yields the status, body, rate limit headers and exactly one user agent, Orca's" {
@@ -805,7 +1027,8 @@ test "a real exchange yields the status, body, rate limit headers and exactly on
     var transport: StandardTransport = .init(std.testing.allocator, io);
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, .{ .request_timeout_ms = 5000 });
+    const random: std.Random.IoSource = .{ .io = io };
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 5000 });
 
     var url_buffer: [64]u8 = undefined;
     const response = try gateway.execute(
@@ -821,7 +1044,7 @@ test "a real exchange yields the status, body, rate limit headers and exactly on
     try std.testing.expectEqualStrings("{}", response.body);
     try std.testing.expectEqual(@as(?u32, 0), response.rate_limit.remaining);
     try std.testing.expectEqual(@as(?u32, 7), response.rate_limit.reset_in_s);
-    try std.testing.expectEqual(@as(?u32, 30), response.rate_limit.retry_after_s);
+    try std.testing.expectEqual(@as(?RetryAfter, .{ .seconds = 30 }), response.rate_limit.retry_after);
     const head = server.request_head[0..server.request_head_len];
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -841,7 +1064,8 @@ test "a server that accepts but never replies makes the request time out at the 
     var transport: StandardTransport = .init(std.testing.allocator, io);
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, .{ .request_timeout_ms = 300 });
+    const random: std.Random.IoSource = .{ .io = io };
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 300 });
 
     var url_buffer: [64]u8 = undefined;
     const started = std.Io.Clock.awake.now(io).toMilliseconds();
@@ -869,7 +1093,8 @@ test "setting the cancel flag makes a hung request return promptly" {
     var transport: StandardTransport = .init(std.testing.allocator, io);
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, .{ .request_timeout_ms = 10_000 });
+    const random: std.Random.IoSource = .{ .io = io };
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 10_000 });
     var canceled: std.atomic.Value(bool) = .init(false);
     gateway.cancel = &canceled;
 

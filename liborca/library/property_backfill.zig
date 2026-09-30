@@ -59,7 +59,7 @@ const Repair = struct {
         unreadable: []const u8,
         /// Not reachable, or not audio. Counted and passed over, with no
         /// health issue: a location that is gone is already `missing`, and
-        /// filing 22,060 errors when a drive is unmounted would bury every
+        /// filing an error per file when a drive is unmounted would bury every
         /// real finding under a mount problem the library already records.
         skipped,
     };
@@ -87,7 +87,7 @@ pub const PropertyBackfill = struct {
     /// Off by default, and that is the important half. A probe that already
     /// succeeded read the container's own declarations; running it again reads
     /// the same bytes and writes the same numbers, so the default pass costs
-    /// one indexed lookup on a healthy library instead of 22,060 file opens.
+    /// one indexed lookup on a healthy library instead of a file open per row.
     /// Force exists for the case the default cannot serve — a probe
     /// implementation that got *better*, such as MPEG length gaining Xing and
     /// LAME awareness — where the stored value is present but no longer what
@@ -262,11 +262,7 @@ pub const PropertyBackfill = struct {
     }
 };
 
-/// A property too large for the column is stored as unknown rather than as a
-/// wrapped or saturated number.
-fn optionalCount(value: anytype) ?i64 {
-    return std.math.cast(i64, value orelse return null);
-}
+const optionalCount = database.columns.optionalCount;
 
 const testing = std.testing;
 const metadata = @import("../metadata/model.zig");
@@ -358,12 +354,7 @@ const reference_tags: metadata.ObservedTags = .{
     .track_number = 1,
 };
 
-fn scalar(library: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
-    var statement = try library.database.prepare(sql);
-    defer statement.deinit();
-    if (try statement.step() != .row) return error.SqlFailed;
-    return statement.columnInt64(0);
-}
+const scalar = database.columns.scalar;
 
 /// Every `detail` row of an `EXPLAIN QUERY PLAN`, joined, which is the column
 /// that names the index a step used.
@@ -427,11 +418,11 @@ test "a backfill reads only the rows whose declared properties are missing" {
     try testing.expectEqual(@as(u64, 1), result.files_seen);
     try testing.expectEqual(@as(u64, 1), result.changed);
     try testing.expectEqual(@as(u64, 2000), @as(u64, @intCast(try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT duration_ms FROM files WHERE codec='mp3';",
     ))));
     try testing.expectEqual(incomplete, try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT id FROM files WHERE codec='mp3';",
     ));
 
@@ -497,11 +488,11 @@ test "a file that will not decode leaves its row alone and is reported as unread
     try testing.expectEqual(@as(u64, 0), result.changed);
     // The row keeps exactly what it had: a probe that failed knows nothing.
     try testing.expectEqual(@as(i64, 21), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT size_bytes FROM files;",
     ));
     try testing.expectEqual(@as(i64, 1), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM files WHERE duration_ms IS NULL;",
     ));
     var issues = try fixture.library.health_issues.page(testing.allocator, 8, 0);
@@ -523,7 +514,7 @@ test "a file that will not decode leaves its row alone and is reported as unread
     try testing.expectEqual(@as(u64, 0), try fixture.library.health_issues.count());
 }
 
-test "a file that is not there is counted without being reported as a defect" {
+test "a backfill counts a file that is not there without reporting it as a defect" {
     // Files go missing, drives get unmounted, and `locations.state` already
     // models that. Filing a health issue per absent file would bury every real
     // finding under a mount problem the library has already recorded.
@@ -609,7 +600,7 @@ test "an interrupted backfill commits what it probed and resumes at the rest" {
     try testing.expectEqual(@as(u64, 3), interrupted.files_seen);
     try testing.expectEqual(@as(u64, 3), interrupted.changed);
     try testing.expectEqual(@as(i64, 3), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM files WHERE duration_ms IS NULL;",
     ));
 
@@ -621,7 +612,7 @@ test "an interrupted backfill commits what it probed and resumes at the rest" {
     try testing.expectEqual(@as(u64, 3), resumed.files_seen);
     try testing.expectEqual(@as(u64, 3), resumed.changed);
     try testing.expectEqual(@as(i64, 0), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM files WHERE duration_ms IS NULL;",
     ));
 }
@@ -643,7 +634,7 @@ test "a backfill fills the track durations derived from the rows it repaired" {
     };
     _ = try pass.run(.all);
     try testing.expectEqual(@as(i64, 1), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT count(*) FROM tracks WHERE duration_ms IS NULL;",
     ));
 
@@ -653,7 +644,7 @@ test "a backfill fills the track durations derived from the rows it repaired" {
     const result = try backfill.run();
     try testing.expectEqual(@as(u64, 1), result.projection.files_projected);
     try testing.expectEqual(@as(i64, 200), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT duration_ms FROM tracks;",
     ));
 }
@@ -679,7 +670,7 @@ test "forcing a backfill re-probes a row that already declares properties" {
     pass.force = true;
     try testing.expectEqual(@as(u64, 1), (try pass.run()).files_seen);
     try testing.expectEqual(@as(i64, 200), try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT duration_ms FROM files;",
     ));
 }
@@ -693,7 +684,7 @@ test "a row that names the wrong container is corrected by the probe that reads 
     var fixture = try Fixture.init("file:orca-backfill-container?mode=memory&cache=shared");
     defer fixture.deinit();
     try fixture.copyFixture("id3-prefixed-reference.flac");
-    // Exactly what the old sniffer wrote: ID3 at byte zero, therefore MPEG.
+    // Misfiled as MPEG because of ID3 at byte zero.
     const misfiled = try fixture.record("id3-prefixed-reference.flac", .{
         .audio_format = @intFromEnum(storage.AudioFormat.mp3),
     }, reference_tags);
@@ -705,10 +696,10 @@ test "a row that names the wrong container is corrected by the probe that reads 
 
     try testing.expectEqual(
         @as(i64, @intFromEnum(storage.AudioFormat.flac)),
-        try scalar(&fixture.library, "SELECT audio_format FROM files WHERE id = 1;"),
+        try scalar(fixture.library.database, "SELECT audio_format FROM files WHERE id = 1;"),
     );
     try testing.expectEqual(misfiled, try scalar(
-        &fixture.library,
+        fixture.library.database,
         "SELECT id FROM files WHERE codec = 'flac';",
     ));
 }

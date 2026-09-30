@@ -26,6 +26,9 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL must be https, or http to localhost",
         error.MatchingStopped => "matching stopped early: MusicBrainz or AcoustID could not be reached or kept refusing requests; run match again to continue",
         error.AcoustIdBusy => "another job is using AcoustID; wait for it to finish",
+        error.MusicBrainzInUse => "MusicBrainz is in use by another Orca process; run match again once it finishes",
+        error.AcoustIdInUse => "AcoustID is in use by another Orca process; try again once it finishes",
+        error.ListenBrainzInUse => "ListenBrainz is in use by another Orca process; try again once it finishes",
         error.InvalidAcoustIdKey => "the AcoustID application key is empty, too long or contains spaces; rebuild with -Dacoustid-key=KEY",
         error.NeedsAcoustIdUserKey => "set ORCA_ACOUSTID_USER_KEY to your AcoustID user key (https://acoustid.org/api-key)",
         error.InvalidAcoustIdUserKey => "AcoustID does not accept the user key in ORCA_ACOUSTID_USER_KEY",
@@ -51,495 +54,594 @@ fn run(init: std.process.Init) !void {
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
-    if (args.len > 1 and std.mem.eql(u8, args[1], "--version")) {
-        try stdout.print("orca-cli {f}\n", .{liborca.version});
-    } else if (args.len > 1 and std.mem.eql(u8, args[1], "demo")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-
-        const request_id = try runtime.submit(.create_player);
-        _ = runtime.processNextCommand();
-        const event = runtime.pollEvent() orelse return error.MissingCompletionEvent;
-        if (event.request_id != request_id) return error.UnexpectedCompletionEvent;
-        switch (event.outcome) {
-            .player_created => |player| try stdout.print(
-                "created Player handle {d}:{d}\n",
-                .{ player.index, player.generation },
-            ),
-            else => return error.PlayerCreationFailed,
-        }
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "scan")) {
-        // The same path the C ABI exposes: register the root, start the scan as
-        // a runtime job on a registered worker, and poll it. The scan projects
-        // as it commits, which is why there is no separate projection step here.
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        // Adding a root is an explicit user action, so this is the one place
-        // allowed to write a volume identifier to a mount root that has no
-        // filesystem UUID of its own.
-        const binding = try runtime.libraryAddRoot(library_handle, init.io, args[3]);
-        if (binding.claimed_locations != 0) try stdout.print(
-            "claimed {d} migrated locations for volume {d}\n",
-            .{ binding.claimed_locations, binding.volume_id },
-        );
-        const job_handle = try runtime.startLibraryScan(library_handle, .{
-            .root_id = binding.root_id,
+    const command = if (args.len > 1) findCommand(args[1], args.len - 2) else null;
+    if (command) |found| {
+        try found.run(.{
+            .allocator = allocator,
+            .io = init.io,
+            .environ = init.environ_map,
+            .stdout = stdout,
+            .arguments = args[2..],
         });
-        try awaitJob(&runtime, stdout, job_handle, null);
-        try printScanStats(stdout, try runtime.jobScanStats(job_handle));
-    } else if (args.len == 3 and std.mem.eql(u8, args[1], "project")) {
-        // Reprojection without a filesystem walk: this is what refreshes the
-        // library after a metadata edit or a provider acceptance, and it is why
-        // the projection is a pass of its own rather than part of the scanner.
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        const job_handle = try runtime.startLibraryProjection(library_handle);
-        try awaitJob(&runtime, stdout, job_handle, null);
-        try printScanStats(stdout, try runtime.jobScanStats(job_handle));
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "backfill")) {
-        // Repairs `files` rows whose declared audio properties are missing,
-        // with no filesystem walk. The job reprojects each repaired batch
-        // itself, which is why there is no `project` step after this one.
-        // `--cancel-after=MS` is the same kind of affordance `play-tracks`
-        // carries: the CLI is the architectural test client, and a cooperative
-        // cancellation nothing outside a unit test can trigger is not one a
-        // host can rely on.
-        var force = false;
-        var cancel_after_ms: ?u64 = null;
-        for (args[3..]) |argument| {
-            if (std.mem.eql(u8, argument, "--force")) {
-                force = true;
-            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
-                cancel_after_ms = try std.fmt.parseInt(
-                    u64,
-                    argument["--cancel-after=".len..],
-                    10,
-                );
-            } else return error.UnknownOption;
-        }
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        const job_handle = try runtime.startLibraryPropertyBackfill(library_handle, .{
-            .force = force,
-        });
-        const planned = try runtime.jobSnapshotSynced(job_handle);
-        try stdout.print("{d} files to probe\n", .{planned.total_units orelse 0});
-        try stdout.flush();
-        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
-        try printBackfillStats(stdout, try runtime.jobScanStats(job_handle));
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "analyze-library")) {
-        // The library-wide half of `analyze`. It decodes whole files, so a
-        // real run is measured in hours and `--cancel-after=MS` is not a test
-        // affordance but the ordinary way to use it: stop it, start it again,
-        // and it selects only what is left.
-        var batch_size: usize = 0;
-        var cancel_after_ms: ?u64 = null;
-        for (args[3..]) |argument| {
-            if (std.mem.startsWith(u8, argument, "--batch=")) {
-                batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
-            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
-                cancel_after_ms = try std.fmt.parseInt(
-                    u64,
-                    argument["--cancel-after=".len..],
-                    10,
-                );
-            } else return error.UnknownOption;
-        }
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        var request: liborca.AnalysisRequest = .{};
-        if (batch_size != 0) request.batch_size = batch_size;
-        const job_handle = try runtime.startLibraryAnalysis(library_handle, request);
-        const planned = try runtime.jobSnapshotSynced(job_handle);
-        try stdout.print("{d} files to analyze\n", .{planned.total_units orelse 0});
-        try stdout.flush();
-        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
-        try printAnalysisStats(stdout, try runtime.jobScanStats(job_handle));
-        try stdout.print("{d} files still to analyze\n", .{
-            try runtime.libraryUnanalyzedCount(library_handle),
-        });
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "duplicates")) {
-        // The question the analysis exists to answer, asked over the stored
-        // measurements rather than over the files. It opens nothing, so a run
-        // is seconds where the analysis behind it is hours.
-        var batch_size: usize = 0;
-        var cancel_after_ms: ?u64 = null;
-        for (args[3..]) |argument| {
-            if (std.mem.startsWith(u8, argument, "--batch=")) {
-                batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
-            } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
-                cancel_after_ms = try std.fmt.parseInt(
-                    u64,
-                    argument["--cancel-after=".len..],
-                    10,
-                );
-            } else return error.UnknownOption;
-        }
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        // Not the process arena every other subcommand uses. This job's work
-        // is a long sequence of short-lived allocations -- a fingerprint per
-        // comparison, freed as soon as it has been compared -- and an arena
-        // never returns them, so the pass's bound of two resident fingerprints
-        // would become one per comparison: about 9 KB times 14,593 on the
-        // reference library today, and unbounded at the 500,000-file target.
-        // The pass frees correctly; it needs an allocator that honours it.
-        var runtime = liborca.Runtime.init(std.heap.smp_allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        var request: liborca.DuplicateScanRequest = .{};
-        if (batch_size != 0) request.batch_size = batch_size;
-        const job_handle = try runtime.startLibraryDuplicateScan(library_handle, request);
-        const planned = try runtime.jobSnapshotSynced(job_handle);
-        try stdout.print("{d} files to examine\n", .{planned.total_units orelse 0});
-        try stdout.flush();
-        try awaitJob(&runtime, stdout, job_handle, cancel_after_ms);
-        try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "analyze")) {
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        const result = try runtime.libraryAnalyzeFile(library_handle, init.io, args[3]);
-        defer result.deinit();
-        try stdout.print(
-            "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d}\n",
-            .{
-                if (result.cache_hit) "hit" else "miss",
-                result.diagnostics.sample_peak,
-                result.diagnostics.rms,
-                result.diagnostics.clipped_samples,
-                result.diagnostics.silent_frames,
-                result.fingerprint.signatures.len,
-            },
-        );
-        if (result.diagnostics.integrated_lufs) |loudness| try stdout.print(
-            "loudness={d:.2} LUFS replay_gain={d:.2} dB\n",
-            .{ loudness, result.diagnostics.replay_gain_db.? },
-        );
-    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "health")) {
-        const database_path = try allocator.dupeSentinel(u8, args[2], 0);
-        const offset = if (args.len == 4) try std.fmt.parseInt(u32, args[3], 10) else 0;
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, database_path);
-        var page = try runtime.libraryHealthIssuePage(library_handle, 256, offset);
-        defer page.deinit();
-        for (page.items) |issue| try stdout.print(
-            "{s}\t{s}\t{s}\t{s}\n",
-            .{ @tagName(issue.severity), @tagName(issue.kind), issue.path, issue.details },
-        );
-    } else if (args.len == 3 and std.mem.eql(u8, args[1], "roots")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
-        var page = try runtime.libraryRootPage(library_handle, 512, 0);
-        defer page.deinit();
-        for (page.items) |root| try stdout.print(
-            "{d}\t{s}\t{s}\n",
-            .{ root.id, if (root.enabled) "enabled" else "disabled", root.path },
-        );
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "remove-root")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library_handle = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
-        const root_id = try std.fmt.parseInt(i64, args[3], 10);
-        const removed = try runtime.libraryRemoveRoot(library_handle, root_id);
-        try stdout.print(
-            "removed root {d}: {d} files, {d} tracks\n",
-            .{ root_id, removed.files_forgotten, removed.tracks_removed },
-        );
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artists")) {
-        try listArtists(allocator, init.io, stdout, args[2], args[3..]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "releases")) {
-        try listReleases(allocator, init.io, stdout, args[2], args[3..]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "tracks")) {
-        try listTracks(allocator, init.io, stdout, args[2], args[3..]);
-    } else if (args.len >= 4 and std.mem.eql(u8, args[1], "edit")) {
-        try editTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
-    } else if ((args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "write-tags")) {
-        try writeTags(allocator, init.io, stdout, args[2], args[3], args[4..]);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "undo-tags")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
-        const group = try std.fmt.parseInt(u64, args[3], 10);
-        try runtime.undoTagWrite(library, init.io, group);
-        try stdout.print("undid group {d}\n", .{group});
-    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "prune-backups")) {
-        const older_than_days = if (args.len == 4) days: {
-            if (!std.mem.startsWith(u8, args[3], "--older-than=")) return error.UnknownOption;
-            break :days try std.fmt.parseInt(u64, args[3]["--older-than=".len..], 10);
-        } else 0;
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library = try runtime.openLibrary(init.io, try allocator.dupeSentinel(u8, args[2], 0));
-        const pruned = try runtime.pruneTagWriteBackups(
-            library,
-            init.io,
-            try std.math.mul(u64, older_than_days, std.time.s_per_day),
-        );
-        try stdout.print("pruned {d} backups ({d} bytes)\n", .{ pruned.backups, pruned.bytes });
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "covers")) {
-        try loadCovers(allocator, init.io, stdout, args[2], args[3..]);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "track")) {
-        try showTrack(allocator, init.io, stdout, args[2], args[3]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "artwork")) {
-        try showArtwork(allocator, init.io, stdout, args[2], args[3..]);
-    } else if (args.len == 2 and std.mem.eql(u8, args[1], "devices")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        var devices: [32]liborca.Device = undefined;
-        const count = try runtime.enumerateOutputDevices(&devices);
-        for (devices[0..count]) |device|
-            try stdout.print("{d}\t{s}\n", .{ device.id, device.nameSlice() });
-    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "play")) {
-        const device_id = if (args.len == 4)
-            try std.fmt.parseInt(u64, args[3], 10)
-        else
-            0;
-        // The one object graph: a runtime Player owns the source and the single
-        // decode producer, and a runtime Zone owns the pool, pipe, render
-        // context and OutputSession. Nothing about playback lives in this frame.
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const player = try runtime.createPlayer();
-        const zone = try runtime.createZone();
-        try runtime.attachZone(zone, player);
-        try runtime.playerLoadFile(player, init.io, args[2]);
-        try runtime.zoneRequestOutput(zone, device_id);
-        try runtime.playPlayer(player);
-
-        var elapsed_ms: u64 = 0;
-        while (!try runtime.playerDrained(player)) {
-            if (elapsed_ms >= 30 * std.time.ms_per_s) return error.PlaybackStalled;
-            sleepMilliseconds(10);
-            elapsed_ms += 10;
-        }
-        // Every prepared block has been handed to the device. Pausing stops the
-        // now-empty render path from counting the tail as missing audio, and the
-        // short wait lets the device drain what it already holds.
-        try runtime.pausePlayer(player);
-        sleepMilliseconds(200);
-
-        const snapshot = try runtime.playerSnapshot(player);
-        const stats = try runtime.zoneStats(zone);
-        try stdout.print(
-            "played={d} underruns={d} state={s} recoveries={d} quantum={d}\n",
-            .{
-                snapshot.position_frames,
-                stats.underruns,
-                @tagName(stats.output_state),
-                stats.recovery_attempts,
-                stats.backend_quantum_frames,
-            },
-        );
-    } else if (args.len >= 4 and std.mem.eql(u8, args[1], "play-tracks")) {
-        try playTracks(allocator, init.io, stdout, args[2], args[3], args[4..]);
-    } else if (args.len == 5 and std.mem.eql(u8, args[1], "feedback")) {
-        try setFeedback(allocator, init.io, stdout, args[2], args[3], args[4]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "scrobble")) {
-        try scrobble(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "match")) {
-        try matchLibrary(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "matches")) {
-        try listMatches(allocator, init.io, stdout, args[2], args[3]);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "fingerprint")) {
-        try printFingerprint(allocator, init.io, stdout, args[2], args[3]);
-    } else if (args.len >= 3 and std.mem.eql(u8, args[1], "submit-acoustid")) {
-        try submitAcoustId(allocator, init.io, init.environ_map, stdout, args[2], args[3..]);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "accept-match")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
-        const proposal_id = try std.fmt.parseInt(i64, args[3], 10);
-        const acceptance = try runtime.libraryAcceptMatch(library, proposal_id);
-        try stdout.print("accepted match {d}: {s}\n", .{
-            proposal_id,
-            if (acceptance.values_written == 0) "the file's locked recording id was kept" else "recording id stored",
-        });
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "dismiss-match")) {
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
-        const proposal_id = try std.fmt.parseInt(i64, args[3], 10);
-        try runtime.libraryDismissMatch(library, proposal_id);
-        try stdout.print("dismissed match {d}\n", .{proposal_id});
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "accept-matches")) {
-        if (!std.mem.startsWith(u8, args[3], "--min-score=")) return error.UnknownOption;
-        const minimum = try std.fmt.parseFloat(f32, args[3]["--min-score=".len..]);
-        var runtime = liborca.Runtime.init(allocator);
-        defer runtime.deinit();
-        const library = try openBrowseLibrary(allocator, init.io, &runtime, args[2]);
-        const accepted = try runtime.libraryAcceptConfidentMatches(library, minimum);
-        try stdout.print("accepted {d} matches\n", .{accepted});
-    } else {
-        try stdout.writeAll(
-            \\Usage: orca-cli [--version | demo | scan DATABASE ROOT | project DATABASE
-            \\                 | backfill DATABASE [--force] [--cancel-after=MS]
-            \\                 | analyze DATABASE AUDIO
-            \\                 | analyze-library DATABASE [--batch=N] [--cancel-after=MS]
-            \\                 | duplicates DATABASE [--batch=N] [--cancel-after=MS]
-            \\                 | roots DATABASE | remove-root DATABASE ID
-            \\                 | health DATABASE [OFFSET] | devices | play AUDIO [DEVICE_ID]
-            \\                 | play-tracks DATABASE IDS [OPTIONS]
-            \\                 | scrobble DATABASE [--status] [--timeout=MS]
-            \\                 | feedback DATABASE IDS (--love | --hate | --clear)
-            \\                 | match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]
-            \\                   [--cancel-after=MS]
-            \\                 | matches DATABASE TRACK_ID
-            \\                 | fingerprint DATABASE TRACK_ID
-            \\                 | submit-acoustid DATABASE [--dry-run]
-            \\                 | accept-match DATABASE ID | dismiss-match DATABASE ID
-            \\                 | accept-matches DATABASE --min-score=SCORE
-            \\                 | artists DATABASE [OPTIONS]
-            \\                 | releases DATABASE [--artist ID] [OPTIONS]
-            \\                 | tracks DATABASE [OPTIONS]
-            \\                 | track DATABASE ID
-            \\                 | artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
-            \\                 | covers DATABASE [--limit N] [--offset N]
-            \\                 | edit DATABASE IDS [EDITS]
-            \\                 | write-tags DATABASE IDS [--approve=DIGEST]
-            \\                 | undo-tags DATABASE GROUP
-            \\                 | prune-backups DATABASE [--older-than=DAYS]]
-            \\
-            \\roots lists the registered folders. remove-root forgets one and every
-            \\file, Track, Release and Artist that exists only under it; a file also
-            \\located under another root stays. Files on disk are not touched.
-            \\
-            \\edit sets Orca's own values for a comma-separated list of Track ids;
-            \\the files are not written. With no edits it lists the values held.
-            \\  --title= --artist= --album= --album-artist= --date=
-            \\  --track=N --disc=N --compilation=0|1
-            \\  --clear=FIELD      drop Orca's value so the file's tag applies again
-            \\                     (title|artist|album|album_artist|track_number|
-            \\                      disc_number|date|compilation)
-            \\
-            \\write-tags writes Orca's values for the Tracks into their files. Without
-            \\--approve it prints the plan and its digest and writes nothing; run it
-            \\again with --approve=DIGEST to write exactly that plan. A digest from a
-            \\plan that no longer matches the library is refused. It prints the group
-            \\to pass to undo-tags, which restores the files' previous bytes.
-            \\
-            \\Each write keeps the files' previous bytes in DATABASE.orca-backups until
-            \\they are undone or pruned. prune-backups deletes the backups of every
-            \\write whose files all committed, or with --older-than=DAYS only of writes
-            \\at least that old, and prints how many it deleted and their size. A
-            \\pruned write cannot be undone.
-            \\
-            \\Browsing. artists lists Artists in sort order; releases lists Releases,
-            \\optionally one Artist's; tracks lists Tracks in a named order, optionally
-            \\scoped to one Artist or one Release. Options:
-            \\  --artist ID        only this Artist
-            \\  --release ID       only this Release (tracks only)
-            \\  --sort KEY         id|artist|album|title|track|duration|added (tracks only)
-            \\  --desc             reverse the order
-            \\  --limit N          page size, 1 to 512 (default 50)
-            \\  --offset N         rows to skip
-            \\
-            \\track prints what the Library recorded about one Track and its file: tags,
-            \\format, size, path, stored loudness and whether the file carries a cover.
-            \\It opens no file.
-            \\
-            \\play-tracks plays a comma-separated list of Track ids as a playback
-            \\queue. Options:
-            \\  --device=ID        output device (0 = server default)
-            \\  --replay-gain=off|track   loudness correction per entry (default track)
-            \\  --eq=PRESET        equalizer preset: flat|bass|treble|vocal|loudness
-            \\  --eq=G1,...,G10[:PREAMP]   ten band gains in dB (31 Hz to 16 kHz, each
-            \\                     within 12) and a preamp in dB (default: minus the
-            \\                     largest boost)
-            \\  --crossfeed=AMOUNT stereo crossfeed for headphones, 0 to 1
-            \\  --start=N          queue position to begin at
-            \\  --repeat=off|all|one
-            \\  --shuffle
-            \\  --tail=MS          on each new entry, seek to MS before its end
-            \\  --skip-after=MS    issue next MS after each entry becomes audible
-            \\  --previous-after=MS  issue previous once, MS after playback starts
-            \\  --limit=MS         stop after MS of wall clock
-            \\
-            \\play-tracks prints one `signal:` line once playback is a second in: the
-            \\source, each stage that changes the samples, the output stream, and
-            \\whether the path could be bit-perfect. It records listens in the
-            \\Library's play history and never sends them anywhere.
-            \\
-            \\scrobble sends the listens and the love/hate changes queued for
-            \\ListenBrainz. The token comes from ORCA_LISTENBRAINZ_TOKEN;
-            \\ORCA_LISTENBRAINZ_URL selects another server (https, or http to
-            \\localhost only). It works until both queues are empty, the scrobbler
-            \\needs attention, or --timeout=MS passes (default 120000), prints one
-            \\`scrobble:` line, and exits non-zero when the token is missing or
-            \\rejected. --status prints the queue counts and makes no request.
-            \\Listens are queued only while scrobbling is enabled, which the GTK
-            \\app's preferences do; play-tracks never enables it.
-            \\
-            \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
-            \\many Tracks changed and how many were skipped. It is kept in the Library;
-            \\scrobble sends it for recordings with a MusicBrainz ID.
-            \\
-            \\match searches MusicBrainz for every Track whose file has no MusicBrainz
-            \\recording ID, and fingerprints its file and looks it up on AcoustID, once
-            \\per service: a Track either service has answered for is not asked again.
-            \\It keeps what it finds as matches to review. Each service is asked at most
-            \\once a second, AcoustID about up to 20 fingerprints at a time, and answers
-            \\are cached. --limit=N searches at most N Tracks; --no-fingerprints leaves
-            \\AcoustID out. ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL select other
-            \\servers (https, or http to localhost only). matches lists a Track's
-            \\matches, most confident first: id, confidence (0 to 1), MusicBrainz's
-            \\score, source (musicbrainz, acoustid or both), AcoustID's score, recording
-            \\ID, title, artist, album, track, length and release ID. accept-match
-            \\records one match's recording ID for the Track's file, in the Library only,
-            \\and dismisses the file's other matches; dismiss-match drops one.
-            \\accept-matches accepts, for every file with exactly one match at least as
-            \\confident as --min-score, that match.
-            \\
-            \\fingerprint prints a Track's AcoustID fingerprint and length, in fpcalc's
-            \\format, decoding the first two minutes of its file unless the Library
-            \\already holds it.
-            \\
-            \\submit-acoustid sends AcoustID the fingerprints of files whose recording
-            \\ID came from an accepted match or an edit, once per file and ID, as the
-            \\user whose key is in ORCA_ACOUSTID_USER_KEY. A file whose length is more
-            \\than 30 s from its recording's is sent with its title, artist and album
-            \\instead of the ID. --dry-run lists what would be sent and makes no
-            \\request.
-            \\
-            \\analyze-library decodes every file the Library has not measured yet and
-            \\stores its loudness, peak, clipping, silence and fingerprint. That
-            \\measurement is what ReplayGain on playback reads; without it every track
-            \\plays at unity. It decodes whole files, so it is slow, and it is meant to
-            \\be stopped and restarted: --cancel-after=MS interrupts it inside a file,
-            \\the batch already measured is still committed, and the next run selects
-            \\only what is left.
-            \\
-            \\duplicates reports every file whose audio the Library also holds
-            \\somewhere else, as health issues that `health` then lists. It compares
-            \\what analyze-library measured -- it opens no files -- so it is fast, and
-            \\it is only as complete as that analysis: the uncomparable count is how
-            \\many files it could say nothing about, and a zero-finding run over a
-            \\library with a large uncomparable count means "not measured", not "no
-            \\duplicates".
-            \\
-            \\backfill re-reads the headers of files whose declared audio properties
-            \\are missing and reprojects the Tracks derived from them, without walking
-            \\a filesystem. --force also re-probes rows that already declare
-            \\properties, which is for a probe implementation that improved rather
-            \\than for ordinary use. --cancel-after=MS interrupts the job cooperatively
-            \\once it has run that long; a later run resumes what it did not finish.
-            \\
-            \\The host-independent Orca control client.
-            \\
-        );
-    }
+    } else try writeHelp(stdout);
 
     try stdout.flush();
+}
+
+const Context = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    environ: *std.process.Environ.Map,
+    stdout: *std.Io.Writer,
+    arguments: []const []const u8,
+};
+
+const Command = struct {
+    name: []const u8,
+    usage: []const u8,
+    min_arguments: usize,
+    max_arguments: ?usize,
+    run: *const fn (Context) anyerror!void,
+    shares_usage_line: bool = false,
+};
+
+const usage_indent = "                 ";
+
+const commands = [_]Command{
+    .{ .name = "--version", .usage = "--version", .min_arguments = 0, .max_arguments = null, .run = printVersion },
+    .{ .name = "demo", .usage = "demo", .min_arguments = 0, .max_arguments = null, .run = runDemo, .shares_usage_line = true },
+    .{ .name = "scan", .usage = "scan DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = scanRoot, .shares_usage_line = true },
+    .{ .name = "project", .usage = "project DATABASE", .min_arguments = 1, .max_arguments = 1, .run = projectLibrary, .shares_usage_line = true },
+    .{ .name = "backfill", .usage = "backfill DATABASE [--force] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = backfillProperties },
+    .{ .name = "analyze", .usage = "analyze DATABASE AUDIO", .min_arguments = 2, .max_arguments = 2, .run = analyzeFile },
+    .{ .name = "analyze-library", .usage = "analyze-library DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = analyzeLibrary },
+    .{ .name = "duplicates", .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = findDuplicates },
+    .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
+    .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
+    .{ .name = "health", .usage = "health DATABASE [OFFSET]", .min_arguments = 1, .max_arguments = 2, .run = listHealthIssues },
+    .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
+    .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
+    .{ .name = "play-tracks", .usage = "play-tracks DATABASE IDS [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
+    .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
+    .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
+    .{
+        .name = "match",
+        .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++ "  [--cancel-after=MS]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = matchLibrary,
+    },
+    .{ .name = "matches", .usage = "matches DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = listMatches },
+    .{ .name = "fingerprint", .usage = "fingerprint DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = printFingerprint },
+    .{ .name = "submit-acoustid", .usage = "submit-acoustid DATABASE [--dry-run]", .min_arguments = 1, .max_arguments = null, .run = submitAcoustId },
+    .{ .name = "accept-match", .usage = "accept-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = acceptMatch },
+    .{ .name = "dismiss-match", .usage = "dismiss-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = dismissMatch, .shares_usage_line = true },
+    .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
+    .{ .name = "artists", .usage = "artists DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
+    .{ .name = "releases", .usage = "releases DATABASE [--artist ID] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
+    .{ .name = "tracks", .usage = "tracks DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
+    .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
+    .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
+    .{ .name = "covers", .usage = "covers DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = null, .run = loadCovers },
+    .{ .name = "edit", .usage = "edit DATABASE IDS [EDITS]", .min_arguments = 2, .max_arguments = null, .run = editTracks },
+    .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
+    .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
+    .{ .name = "prune-backups", .usage = "prune-backups DATABASE [--older-than=DAYS]", .min_arguments = 1, .max_arguments = 2, .run = pruneBackups },
+};
+
+fn findCommand(name: []const u8, argument_count: usize) ?*const Command {
+    for (&commands) |*command| {
+        if (!std.mem.eql(u8, command.name, name)) continue;
+        if (argument_count < command.min_arguments) return null;
+        if (command.max_arguments) |maximum| if (argument_count > maximum) return null;
+        return command;
+    }
+    return null;
+}
+
+fn writeHelp(stdout: *std.Io.Writer) !void {
+    try stdout.writeAll("Usage: orca-cli [");
+    for (commands, 0..) |command, index| {
+        if (index != 0) try stdout.writeAll(if (command.shares_usage_line) " | " else "\n" ++ usage_indent ++ "| ");
+        try stdout.writeAll(command.usage);
+    }
+    try stdout.writeAll("]\n\n");
+    try stdout.writeAll(help_details);
+}
+
+const help_details =
+    \\roots lists the registered folders. remove-root forgets one and every
+    \\file, Track, Release and Artist that exists only under it; a file also
+    \\located under another root stays. Files on disk are not touched.
+    \\
+    \\edit sets Orca's own values for a comma-separated list of Track ids;
+    \\the files are not written. With no edits it lists the values held.
+    \\  --title= --artist= --album= --album-artist= --date=
+    \\  --track=N --disc=N --compilation=0|1
+    \\  --clear=FIELD      drop Orca's value so the file's tag applies again
+    \\                     (title|artist|album|album_artist|track_number|
+    \\                      disc_number|date|compilation)
+    \\
+    \\write-tags writes Orca's values for the Tracks into their files. Without
+    \\--approve it prints the plan and its digest and writes nothing; run it
+    \\again with --approve=DIGEST to write exactly that plan. A digest from a
+    \\plan that no longer matches the library is refused. It prints the group
+    \\to pass to undo-tags, which restores the files' previous bytes.
+    \\
+    \\Each write keeps the files' previous bytes in DATABASE.orca-backups until
+    \\they are undone or pruned. prune-backups deletes the backups of every
+    \\write whose files all committed, or with --older-than=DAYS only of writes
+    \\at least that old, and prints how many it deleted and their size. A
+    \\pruned write cannot be undone.
+    \\
+    \\Browsing. artists lists Artists in sort order; releases lists Releases,
+    \\optionally one Artist's; tracks lists Tracks in a named order, optionally
+    \\scoped to one Artist or one Release. Options:
+    \\  --artist ID        only this Artist
+    \\  --release ID       only this Release (tracks only)
+    \\  --sort KEY         id|artist|album|title|track|duration|added (tracks only)
+    \\  --desc             reverse the order
+    \\  --limit N          page size, 1 to 512 (default 50)
+    \\  --offset N         rows to skip
+    \\
+    \\track prints what the Library recorded about one Track and its file: tags,
+    \\format, size, path, stored loudness and whether the file carries a cover.
+    \\It opens no file.
+    \\
+    \\play-tracks plays a comma-separated list of Track ids as a playback
+    \\queue. Options:
+    \\  --device=ID        output device (0 = server default)
+    \\  --volume=LINEAR    volume as a linear gain, 0 to 4 (default 1)
+    \\  --set-volume=MS:LINEAR  set the volume to LINEAR once, MS after
+    \\                     playback starts
+    \\  --replay-gain=off|track   loudness correction per entry (default track)
+    \\  --eq=PRESET        equalizer preset: flat|bass|treble|vocal|loudness
+    \\  --eq=G1,...,G10[:PREAMP]   ten band gains in dB (31 Hz to 16 kHz, each
+    \\                     within 12) and a preamp in dB (default: minus the
+    \\                     largest boost)
+    \\  --crossfeed=AMOUNT stereo crossfeed for headphones, 0 to 1
+    \\  --start=N          queue position to begin at
+    \\  --repeat=off|all|one
+    \\  --shuffle
+    \\  --tail=MS          on each new entry, seek to MS before its end
+    \\  --skip-after=MS    issue next MS after each entry becomes audible
+    \\  --previous-after=MS  issue previous once, MS after playback starts
+    \\  --limit=MS         stop after MS of wall clock
+    \\
+    \\play-tracks prints one `signal:` line once playback is a second in: the
+    \\source, each stage that changes the samples, the output stream, and
+    \\whether the path could be bit-perfect. It records listens in the
+    \\Library's play history and never sends them anywhere.
+    \\
+    \\scrobble sends the listens and the love/hate changes queued for
+    \\ListenBrainz. The token comes from ORCA_LISTENBRAINZ_TOKEN;
+    \\ORCA_LISTENBRAINZ_URL selects another server (https, or http to
+    \\localhost only). It works until both queues are empty, the scrobbler
+    \\needs attention, or --timeout=MS passes (default 120000), prints one
+    \\`scrobble:` line, and exits non-zero when the token is missing or
+    \\rejected. --status prints the queue counts and makes no request.
+    \\Listens are queued only while scrobbling is enabled, which the GTK
+    \\app's preferences do; play-tracks never enables it.
+    \\
+    \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
+    \\many Tracks changed and how many were skipped. It is kept in the Library;
+    \\scrobble sends it for recordings with a MusicBrainz ID.
+    \\
+    \\match searches MusicBrainz for every Track whose file has no MusicBrainz
+    \\recording ID, and fingerprints its file and looks it up on AcoustID, once
+    \\per service: a Track either service has answered for is not asked again.
+    \\It keeps what it finds as matches to review. Each service is asked at most
+    \\once a second, AcoustID about up to 20 fingerprints at a time, and answers
+    \\are cached. --limit=N searches at most N Tracks; --no-fingerprints leaves
+    \\AcoustID out. ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL select other
+    \\servers (https, or http to localhost only). matches lists a Track's
+    \\matches, most confident first: id, confidence (0 to 1), MusicBrainz's
+    \\score, source (musicbrainz, acoustid or both), AcoustID's score, recording
+    \\ID, title, artist, album, track, length and release ID. accept-match
+    \\records one match's recording ID for the Track's file, in the Library only,
+    \\and dismisses the file's other matches; dismiss-match drops one.
+    \\accept-matches accepts, for every file with exactly one match at least as
+    \\confident as --min-score, that match.
+    \\
+    \\fingerprint prints a Track's AcoustID fingerprint and length, in fpcalc's
+    \\format, decoding the first two minutes of its file unless the Library
+    \\already holds it.
+    \\
+    \\submit-acoustid sends AcoustID the fingerprints of files whose recording
+    \\ID came from an accepted match or an edit, once per file and ID, as the
+    \\user whose key is in ORCA_ACOUSTID_USER_KEY. A file whose length is more
+    \\than 30 s from its recording's is sent with its title, artist and album
+    \\instead of the ID. --dry-run lists what would be sent and makes no
+    \\request.
+    \\
+    \\analyze-library decodes every file the Library has not measured yet and
+    \\stores its loudness, peak, clipping, silence and fingerprint. That
+    \\measurement is what ReplayGain on playback reads; without it every track
+    \\plays at unity. It decodes whole files, so it is slow, and it is meant to
+    \\be stopped and restarted: --cancel-after=MS interrupts it inside a file,
+    \\the batch already measured is still committed, and the next run selects
+    \\only what is left.
+    \\
+    \\duplicates reports every file whose audio the Library also holds
+    \\somewhere else, as health issues that `health` then lists. It compares
+    \\what analyze-library measured -- it opens no files -- so it is fast, and
+    \\it is only as complete as that analysis: the uncomparable count is how
+    \\many files it could say nothing about, and a zero-finding run over a
+    \\library with a large uncomparable count means "not measured", not "no
+    \\duplicates".
+    \\
+    \\backfill re-reads the headers of files whose declared audio properties
+    \\are missing and reprojects the Tracks derived from them, without walking
+    \\a filesystem. --force also re-probes rows that already declare
+    \\properties, which is for a probe implementation that improved rather
+    \\than for ordinary use. --cancel-after=MS interrupts the job cooperatively
+    \\once it has run that long; a later run resumes what it did not finish.
+    \\
+    \\The host-independent Orca control client.
+    \\
+;
+
+fn printVersion(context: Context) !void {
+    try context.stdout.print("orca-cli {f}\n", .{liborca.version});
+}
+
+fn runDemo(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+
+    const request_id = try runtime.submit(.create_player);
+    _ = runtime.processNextCommand();
+    const event = runtime.pollEvent() orelse return error.MissingCompletionEvent;
+    if (event.request_id != request_id) return error.UnexpectedCompletionEvent;
+    switch (event.outcome) {
+        .player_created => |player| try context.stdout.print(
+            "created Player handle {d}:{d}\n",
+            .{ player.index, player.generation },
+        ),
+        else => return error.PlayerCreationFailed,
+    }
+}
+
+/// The same path the C ABI exposes: register the root, start the scan as a
+/// runtime job on a registered worker, and poll it. The scan projects as it
+/// commits, which is why there is no separate projection step here.
+fn scanRoot(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    // Adding a root is an explicit user action, so this is the one place
+    // allowed to write a volume identifier to a mount root that has no
+    // filesystem UUID of its own.
+    const binding = try runtime.libraryAddRoot(library_handle, context.io, context.arguments[1]);
+    if (binding.claimed_locations != 0) try stdout.print(
+        "claimed {d} migrated locations for volume {d}\n",
+        .{ binding.claimed_locations, binding.volume_id },
+    );
+    const job_handle = try runtime.startLibraryScan(library_handle, .{
+        .root_id = binding.root_id,
+    });
+    try awaitJob(&runtime, stdout, job_handle, null);
+    try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+/// Reprojection without a filesystem walk: this is what refreshes the library
+/// after a metadata edit or a provider acceptance, and it is why the
+/// projection is a pass of its own rather than part of the scanner.
+fn projectLibrary(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startLibraryProjection(library_handle);
+    try awaitJob(&runtime, context.stdout, job_handle, null);
+    try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
+}
+
+const JobOption = enum {
+    batch,
+    limit,
+    cancel_after,
+    force,
+    no_fingerprints,
+    status,
+    timeout,
+    dry_run,
+
+    fn spelling(self: JobOption) []const u8 {
+        return switch (self) {
+            .batch => "--batch=",
+            .limit => "--limit=",
+            .cancel_after => "--cancel-after=",
+            .force => "--force",
+            .no_fingerprints => "--no-fingerprints",
+            .status => "--status",
+            .timeout => "--timeout=",
+            .dry_run => "--dry-run",
+        };
+    }
+};
+
+const JobOptions = struct {
+    batch_size: ?usize = null,
+    limit: ?u32 = null,
+    cancel_after_ms: ?u64 = null,
+    force: bool = false,
+    no_fingerprints: bool = false,
+    status: bool = false,
+    timeout_ms: ?u64 = null,
+    dry_run: bool = false,
+};
+
+fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
+    var options: JobOptions = .{};
+    next_argument: for (arguments) |argument| {
+        inline for (accepted) |option| {
+            const spelling = comptime option.spelling();
+            const takes_value = comptime std.mem.endsWith(u8, spelling, "=");
+            const matches = if (takes_value)
+                std.mem.startsWith(u8, argument, spelling)
+            else
+                std.mem.eql(u8, argument, spelling);
+            if (matches) {
+                const value = argument[spelling.len..];
+                switch (option) {
+                    .batch => options.batch_size = try std.fmt.parseInt(usize, value, 10),
+                    .limit => options.limit = try std.fmt.parseInt(u32, value, 10),
+                    .cancel_after => options.cancel_after_ms = try std.fmt.parseInt(u64, value, 10),
+                    .force => options.force = true,
+                    .no_fingerprints => options.no_fingerprints = true,
+                    .status => options.status = true,
+                    .timeout => options.timeout_ms = try std.fmt.parseInt(u64, value, 10),
+                    .dry_run => options.dry_run = true,
+                }
+                continue :next_argument;
+            }
+        }
+        return error.UnknownOption;
+    }
+    return options;
+}
+
+/// Repairs `files` rows whose declared audio properties are missing, with no
+/// filesystem walk. The job reprojects each repaired batch itself, which is
+/// why there is no `project` step after this one. `--cancel-after=MS` is the
+/// same kind of affordance `play-tracks` carries: the CLI is the
+/// architectural test client, and a cooperative cancellation nothing outside
+/// a unit test can trigger is not one a host can rely on.
+fn backfillProperties(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .force, .cancel_after });
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startLibraryPropertyBackfill(library_handle, .{
+        .force = options.force,
+    });
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} files to probe\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
+    try printBackfillStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+/// The library-wide half of `analyze`. It decodes whole files, so a real run
+/// is measured in hours and `--cancel-after=MS` is not a test affordance but
+/// the ordinary way to use it: stop it, start it again, and it selects only
+/// what is left.
+fn analyzeLibrary(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var request: liborca.AnalysisRequest = .{};
+    if (options.batch_size) |batch_size| if (batch_size != 0) {
+        request.batch_size = batch_size;
+    };
+    const job_handle = try runtime.startLibraryAnalysis(library_handle, request);
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} files to analyze\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
+    try printAnalysisStats(stdout, try runtime.jobScanStats(job_handle));
+    try stdout.print("{d} files still to analyze\n", .{
+        try runtime.libraryUnanalyzedCount(library_handle),
+    });
+}
+
+/// The question the analysis exists to answer, asked over the stored
+/// measurements rather than over the files. It opens nothing, so a run is
+/// seconds where the analysis behind it is hours.
+fn findDuplicates(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
+    const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
+    // Not the process arena: the pass frees a fingerprint per comparison, and
+    // an arena would keep every one of them.
+    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    defer runtime.deinit();
+    const library_handle = try runtime.openLibrary(context.io, database_path);
+    var request: liborca.DuplicateScanRequest = .{};
+    if (options.batch_size) |batch_size| if (batch_size != 0) {
+        request.batch_size = batch_size;
+    };
+    const job_handle = try runtime.startLibraryDuplicateScan(library_handle, request);
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} files to examine\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
+    try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+fn analyzeFile(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const result = try runtime.libraryAnalyzeFile(library_handle, context.io, context.arguments[1]);
+    defer result.deinit();
+    try context.stdout.print(
+        "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d}\n",
+        .{
+            if (result.cache_hit) "hit" else "miss",
+            result.diagnostics.sample_peak,
+            result.diagnostics.rms,
+            result.diagnostics.clipped_samples,
+            result.diagnostics.silent_frames,
+            result.fingerprint.signatures.len,
+        },
+    );
+    if (result.diagnostics.integrated_lufs) |loudness| try context.stdout.print(
+        "loudness={d:.2} LUFS replay_gain={d:.2} dB\n",
+        .{ loudness, result.diagnostics.replay_gain_db.? },
+    );
+}
+
+fn listHealthIssues(context: Context) !void {
+    const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
+    const offset = if (context.arguments.len == 2) try std.fmt.parseInt(u32, context.arguments[1], 10) else 0;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try runtime.openLibrary(context.io, database_path);
+    var page = try runtime.libraryHealthIssuePage(library_handle, 256, offset);
+    defer page.deinit();
+    for (page.items) |issue| try context.stdout.print(
+        "{s}\t{s}\t{s}\t{s}\n",
+        .{ @tagName(issue.severity), @tagName(issue.kind), issue.path, issue.details },
+    );
+}
+
+fn listRoots(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var page = try runtime.libraryRootPage(library_handle, 512, 0);
+    defer page.deinit();
+    for (page.items) |root| try context.stdout.print(
+        "{d}\t{s}\t{s}\n",
+        .{ root.id, if (root.enabled) "enabled" else "disabled", root.path },
+    );
+}
+
+fn removeRoot(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const removed = try runtime.libraryRemoveRoot(library_handle, root_id);
+    try context.stdout.print(
+        "removed root {d}: {d} files, {d} tracks\n",
+        .{ root_id, removed.files_forgotten, removed.tracks_removed },
+    );
+}
+
+fn undoTagWrite(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const group = try std.fmt.parseInt(u64, context.arguments[1], 10);
+    try runtime.undoTagWrite(library, context.io, group);
+    try context.stdout.print("undid group {d}\n", .{group});
+}
+
+fn pruneBackups(context: Context) !void {
+    const older_than_days = if (context.arguments.len == 2) days: {
+        const option = context.arguments[1];
+        if (!std.mem.startsWith(u8, option, "--older-than=")) return error.UnknownOption;
+        break :days try std.fmt.parseInt(u64, option["--older-than=".len..], 10);
+    } else 0;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const pruned = try runtime.pruneTagWriteBackups(
+        library,
+        context.io,
+        try std.math.mul(u64, older_than_days, std.time.s_per_day),
+    );
+    try context.stdout.print("pruned {d} backups ({d} bytes)\n", .{ pruned.backups, pruned.bytes });
+}
+
+fn listDevices(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    var devices: [32]liborca.Device = undefined;
+    const count = try runtime.enumerateOutputDevices(&devices);
+    for (devices[0..count]) |device|
+        try context.stdout.print("{d}\t{s}\n", .{ device.id, device.nameSlice() });
+}
+
+/// The one object graph: a runtime Player owns the source and the single
+/// decode producer, and a runtime Zone owns the pool, pipe, render context and
+/// OutputSession. Nothing about playback lives in this frame.
+fn playFile(context: Context) !void {
+    const device_id = if (context.arguments.len == 2)
+        try std.fmt.parseInt(u64, context.arguments[1], 10)
+    else
+        0;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, context.io, context.arguments[0]);
+    try runtime.zoneRequestOutput(zone, device_id);
+    try runtime.playPlayer(player);
+
+    var elapsed_ms: u64 = 0;
+    while (!try runtime.playerDrained(player)) {
+        if (elapsed_ms >= 30 * std.time.ms_per_s) return error.PlaybackStalled;
+        sleepMilliseconds(10);
+        elapsed_ms += 10;
+    }
+    // Every prepared block has been handed to the device. Pausing stops the
+    // now-empty render path from counting the tail as missing audio, and the
+    // short wait lets the device drain what it already holds.
+    try runtime.pausePlayer(player);
+    sleepMilliseconds(200);
+
+    const snapshot = try runtime.playerSnapshot(player);
+    const stats = try runtime.zoneStats(zone);
+    try context.stdout.print(
+        "played={d} underruns={d} state={s} recoveries={d} quantum={d}\n",
+        .{
+            snapshot.position_frames,
+            stats.underruns,
+            @tagName(stats.output_state),
+            stats.recovery_attempts,
+            stats.backend_quantum_frames,
+        },
+    );
+}
+
+fn acceptMatch(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const proposal_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const acceptance = try runtime.libraryAcceptMatch(library, proposal_id);
+    try context.stdout.print("accepted match {d}: {s}\n", .{
+        proposal_id,
+        if (acceptance.values_written == 0) "the file's locked recording id was kept" else "recording id stored",
+    });
+}
+
+fn dismissMatch(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const proposal_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    try runtime.libraryDismissMatch(library, proposal_id);
+    try context.stdout.print("dismissed match {d}\n", .{proposal_id});
+}
+
+fn acceptConfidentMatches(context: Context) !void {
+    const option = context.arguments[1];
+    if (!std.mem.startsWith(u8, option, "--min-score=")) return error.UnknownOption;
+    const minimum = try std.fmt.parseFloat(f32, option["--min-score=".len..]);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const accepted = try runtime.libraryAcceptConfidentMatches(library, minimum);
+    try context.stdout.print("accepted {d} matches\n", .{accepted});
 }
 
 /// A volume change scheduled mid-run. Exists so the independence of user
@@ -693,14 +795,13 @@ fn formatName(sample_format: liborca.SampleFormat) []const u8 {
 /// reports. No transport state, no notion of "which track is next", and no
 /// decoding — those all live in `liborca`, which is the whole point of using
 /// the CLI as the architectural test client.
-fn playTracks(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_list: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn playTracks(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_list = context.arguments[1];
+    const option_arguments = context.arguments[2..];
     var options: PlayTracksOptions = .{};
     for (option_arguments) |argument| try parseOption(&options, argument);
 
@@ -942,14 +1043,13 @@ const edit_options = [_]struct { flag: []const u8, field: liborca.MetadataField 
 };
 
 /// Library-only edits: Orca's own values, never written to the files.
-fn editTracks(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_list: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn editTracks(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_list = context.arguments[1];
+    const option_arguments = context.arguments[2..];
     var ids = try parseTrackIds(allocator, id_list);
     defer ids.deinit(allocator);
     var edits: std.ArrayList(liborca.TrackEdit) = .empty;
@@ -995,14 +1095,13 @@ fn editTracks(
 }
 
 /// Tag write-back through the runtime's plan, approve and undo path.
-fn writeTags(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_list: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn writeTags(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_list = context.arguments[1];
+    const option_arguments = context.arguments[2..];
     var ids = try parseTrackIds(allocator, id_list);
     defer ids.deinit(allocator);
     var approved: ?liborca.TagWriteDigest = null;
@@ -1044,13 +1143,12 @@ fn writeTags(
 }
 
 /// `orca-cli track DATABASE ID`: the details view's query, printed.
-fn showTrack(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_argument: []const u8,
-) !void {
+fn showTrack(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1171,23 +1269,6 @@ const EnvironmentCredentials = struct {
     }
 };
 
-const ScrobbleOptions = struct {
-    status_only: bool = false,
-    timeout_ms: u64 = 120_000,
-};
-
-fn parseScrobbleOptions(arguments: []const []const u8) !ScrobbleOptions {
-    var options: ScrobbleOptions = .{};
-    for (arguments) |argument| {
-        if (std.mem.eql(u8, argument, "--status")) {
-            options.status_only = true;
-        } else if (std.mem.startsWith(u8, argument, "--timeout=")) {
-            options.timeout_ms = try std.fmt.parseInt(u64, argument["--timeout=".len..], 10);
-        } else return error.UnknownOption;
-    }
-    return options;
-}
-
 fn printScrobbleLine(
     stdout: *std.Io.Writer,
     state: liborca.ScrobblerState,
@@ -1196,13 +1277,24 @@ fn printScrobbleLine(
     feedback_pending: u64,
     user_name: []const u8,
     last_error: []const u8,
+    blocked_until: ?i64,
 ) !void {
     try stdout.print(
         "scrobble: state={s} delivered={d} pending={d} feedback_pending={d}",
         .{ @tagName(state), delivered, pending, feedback_pending },
     );
     if (user_name.len != 0) try stdout.print(" user={s}", .{user_name});
+    try writeBlockedUntil(stdout, blocked_until);
     try stdout.print(" last_error={s}\n", .{if (last_error.len == 0) "-" else last_error});
+}
+
+const latest_iso_utc_seconds: i64 = 253_402_300_799;
+
+fn writeBlockedUntil(stdout: *std.Io.Writer, blocked_until: ?i64) !void {
+    const until = blocked_until orelse return;
+    try stdout.writeAll(" blocked_until=");
+    if (until > latest_iso_utc_seconds) return stdout.print("unix:{d}", .{until});
+    try writeIsoUtc(stdout, until);
 }
 
 fn awaitScrobblerState(
@@ -1231,7 +1323,7 @@ fn hasLeftOffline(status: liborca.ScrobblerStatus) bool {
 
 fn needsAttention(status: liborca.ScrobblerStatus) bool {
     return switch (status.state) {
-        .needs_token, .invalid_token, .rate_limited, .backing_off => true,
+        .needs_token, .invalid_token, .rate_limited, .backing_off, .busy => true,
         .idle => status.pending == 0 and status.feedback_pending == 0,
         .disabled, .offline, .validating, .submitting => false,
     };
@@ -1245,15 +1337,15 @@ fn needsAttention(status: liborca.ScrobblerStatus) bool {
 /// queue; going online afterwards leaves `offline` only when a pass with
 /// requests allowed has finished. `--status` starts no worker: it reports the
 /// queue as the database holds it.
-fn scrobble(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    environ: *std.process.Environ.Map,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
-    const options = try parseScrobbleOptions(option_arguments);
+fn scrobble(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const environ = context.environ;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
+    const options = try parseJobOptions(option_arguments, &.{ .status, .timeout });
+    const timeout_ms = options.timeout_ms orelse 120_000;
     var credentials: EnvironmentCredentials = try .init(allocator, environ);
     defer credentials.deinit(allocator);
 
@@ -1265,10 +1357,10 @@ fn scrobble(
     }
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
 
-    if (options.status_only) {
+    if (options.status) {
         const stored = try runtime.libraryScrobblerStatus(library);
         try stdout.print(
-            "scrobble: status state={s} pending={d} feedback_pending={d} delivered={d} token={s}\n",
+            "scrobble: status state={s} pending={d} feedback_pending={d} delivered={d} token={s}",
             .{
                 @tagName(stored.state),
                 stored.pending,
@@ -1277,12 +1369,14 @@ fn scrobble(
                 if (credentials.token != null) "set" else "unset",
             },
         );
+        try writeBlockedUntil(stdout, stored.blocked_until);
+        try stdout.writeAll("\n");
         return;
     }
 
     const waiting = try runtime.libraryScrobblerStatus(library);
     if (waiting.pending == 0 and waiting.feedback_pending == 0) {
-        try printScrobbleLine(stdout, .idle, 0, 0, 0, "", "");
+        try printScrobbleLine(stdout, .idle, 0, 0, 0, "", "", null);
         return;
     }
 
@@ -1292,8 +1386,8 @@ fn scrobble(
 
     elapsed_ms = 0;
     try runtime.librarySetScrobbling(library, true, false, false);
-    _ = try awaitScrobblerState(&runtime, library, options.timeout_ms, &elapsed_ms, hasLeftOffline);
-    const status = try awaitScrobblerState(&runtime, library, options.timeout_ms, &elapsed_ms, needsAttention);
+    _ = try awaitScrobblerState(&runtime, library, timeout_ms, &elapsed_ms, hasLeftOffline);
+    const status = try awaitScrobblerState(&runtime, library, timeout_ms, &elapsed_ms, needsAttention);
     try printScrobbleLine(
         stdout,
         status.state,
@@ -1302,23 +1396,24 @@ fn scrobble(
         status.feedback_pending,
         status.user_name.slice(),
         status.last_error.slice(),
+        status.blocked_until,
     );
     try stdout.flush();
     switch (status.state) {
         .invalid_token => return error.InvalidToken,
         .needs_token => return error.NeedsToken,
+        .busy => return error.ListenBrainzInUse,
         else => {},
     }
 }
 
-fn setFeedback(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_list: []const u8,
-    option_argument: []const u8,
-) !void {
+fn setFeedback(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_list = context.arguments[1];
+    const option_argument = context.arguments[2];
     const feedback: liborca.Feedback = if (std.mem.eql(u8, option_argument, "--love"))
         .loved
     else if (std.mem.eql(u8, option_argument, "--hate"))
@@ -1345,27 +1440,18 @@ fn configureAcoustId(allocator: std.mem.Allocator, runtime: *liborca.Runtime, en
     }
 }
 
-fn matchLibrary(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    environ: *std.process.Environ.Map,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn matchLibrary(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const environ = context.environ;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
+    const options = try parseJobOptions(option_arguments, &.{ .batch, .limit, .no_fingerprints, .cancel_after });
     var request: liborca.MatchRequest = .{};
-    var cancel_after_ms: ?u64 = null;
-    for (option_arguments) |argument| {
-        if (std.mem.startsWith(u8, argument, "--batch=")) {
-            request.batch_size = try std.fmt.parseInt(usize, argument["--batch=".len..], 10);
-        } else if (std.mem.startsWith(u8, argument, "--limit=")) {
-            request.limit = try std.fmt.parseInt(u32, argument["--limit=".len..], 10);
-        } else if (std.mem.eql(u8, argument, "--no-fingerprints")) {
-            request.fingerprints = false;
-        } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
-            cancel_after_ms = try std.fmt.parseInt(u64, argument["--cancel-after=".len..], 10);
-        } else return error.UnknownOption;
-    }
+    if (options.batch_size) |batch_size| request.batch_size = batch_size;
+    if (options.limit) |limit| request.limit = limit;
+    if (options.no_fingerprints) request.fingerprints = false;
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
@@ -1377,10 +1463,16 @@ fn matchLibrary(
     const planned = try runtime.jobSnapshotSynced(job_handle);
     try stdout.print("{d} tracks to match\n", .{planned.total_units orelse 0});
     try stdout.flush();
-    awaitJob(&runtime, stdout, job_handle, cancel_after_ms) catch |err| {
-        try printMatchStats(stdout, try runtime.jobMatchStats(job_handle));
+    awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms) catch |err| {
+        const stats = try runtime.jobMatchStats(job_handle);
+        try printMatchStats(stdout, stats);
         try stdout.flush();
-        return if (err == error.JobFailed) error.MatchingStopped else err;
+        if (err != error.JobFailed) return err;
+        return switch (stats.busy) {
+            .none => error.MatchingStopped,
+            .musicbrainz => error.MusicBrainzInUse,
+            .acoustid => error.AcoustIdInUse,
+        };
     };
     try printMatchStats(stdout, try runtime.jobMatchStats(job_handle));
 }
@@ -1405,13 +1497,12 @@ fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
     );
 }
 
-fn printFingerprint(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_argument: []const u8,
-) !void {
+fn printFingerprint(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1421,18 +1512,14 @@ fn printFingerprint(
     try stdout.print("DURATION={d}\nFINGERPRINT={s}\n", .{ outcome.fingerprint.durationSeconds(), outcome.fingerprint.encoded });
 }
 
-fn submitAcoustId(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    environ: *std.process.Environ.Map,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
-    var dry_run = false;
-    for (option_arguments) |argument| {
-        if (std.mem.eql(u8, argument, "--dry-run")) dry_run = true else return error.UnknownOption;
-    }
+fn submitAcoustId(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const environ = context.environ;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
+    const options = try parseJobOptions(option_arguments, &.{.dry_run});
     var credentials: EnvironmentCredentials = try .init(allocator, environ);
     defer credentials.deinit(allocator);
     var runtime = liborca.Runtime.init(allocator);
@@ -1441,7 +1528,7 @@ fn submitAcoustId(
     try configureAcoustId(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     try stdout.print("{d} files to submit\n", .{try runtime.libraryAcoustIdSubmittableCount(library)});
-    if (dry_run) return listSubmittable(&runtime, library, stdout);
+    if (options.dry_run) return listSubmittable(&runtime, library, stdout);
     try stdout.flush();
 
     const job_handle = try runtime.startAcoustIdSubmission(library);
@@ -1468,6 +1555,7 @@ fn submitAcoustId(
         .invalid_user_key => error.InvalidAcoustIdUserKey,
         .needs_client_key, .invalid_client_key => error.InvalidAcoustIdClientKey,
         .unavailable => error.SubmissionStopped,
+        .busy => error.AcoustIdInUse,
     };
 }
 
@@ -1494,13 +1582,12 @@ fn listSubmittable(runtime: *liborca.Runtime, library: liborca.LibraryHandle, st
     }
 }
 
-fn listMatches(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    id_argument: []const u8,
-) !void {
+fn listMatches(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const id_argument = context.arguments[1];
     const track_id = try std.fmt.parseInt(i64, id_argument, 10);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1550,13 +1637,12 @@ fn printOptionalDetail(
 /// `OrcaRuntime` entry points the GTK frontend calls, so a cover that cannot
 /// be produced here cannot be produced anywhere. `--out` writes the exact bytes
 /// so they can be compared against what an independent tool extracts.
-fn showArtwork(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn showArtwork(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
     var track_id: ?i64 = null;
     var release_id: ?i64 = null;
     var out_path: ?[]const u8 = null;
@@ -1598,13 +1684,12 @@ fn showArtwork(
     }
 }
 
-fn listArtists(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn listArtists(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
     const options = try parseBrowseOptions(option_arguments);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1634,13 +1719,12 @@ fn listArtists(
 /// `orca-cli covers DATABASE [--limit N] [--offset N]`: a page of Releases'
 /// covers, read on the runtime's artwork loader the way a GUI grid asks for
 /// them, with how long the whole page took.
-fn loadCovers(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn loadCovers(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
     const options = try parseBrowseOptions(option_arguments);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1680,13 +1764,12 @@ fn loadCovers(
     });
 }
 
-fn listReleases(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn listReleases(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
     const options = try parseBrowseOptions(option_arguments);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
@@ -1712,13 +1795,12 @@ fn listReleases(
     }
 }
 
-fn listTracks(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stdout: *std.Io.Writer,
-    database_path_argument: []const u8,
-    option_arguments: []const []const u8,
-) !void {
+fn listTracks(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const database_path_argument = context.arguments[0];
+    const option_arguments = context.arguments[1..];
     const options = try parseBrowseOptions(option_arguments);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();

@@ -1,3 +1,4 @@
+pub const columns = @import("columns.zig");
 pub const library = @import("library.zig");
 pub const migrations = @import("migrations.zig");
 pub const repository = @import("repository.zig");
@@ -65,6 +66,8 @@ pub const HealthIssuePage = repository.HealthIssuePage;
 pub const HealthIssueRepository = repository.HealthIssueRepository;
 pub const ProviderCacheEntry = repository.ProviderCacheEntry;
 pub const ProviderCacheRepository = repository.ProviderCacheRepository;
+pub const ProviderState = repository.ProviderState;
+pub const ProviderStateRepository = repository.ProviderStateRepository;
 pub const ScrobbleQueueEntry = repository.ScrobbleQueueEntry;
 pub const ScrobbleQueueRepository = repository.ScrobbleQueueRepository;
 pub const ListenInput = repository.ListenInput;
@@ -98,6 +101,7 @@ pub const AcoustIdSubmission = repository.AcoustIdSubmission;
 pub const AcoustIdSubmissionRepository = repository.AcoustIdSubmissionRepository;
 
 test {
+    _ = @import("columns.zig");
     _ = @import("library.zig");
     _ = @import("migrations.zig");
     _ = @import("repository.zig");

@@ -130,7 +130,7 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     try runtime.playerPlayTracks(player, library, std.testing.io, &ids, 0);
 
     // Render entry 0 slowly until the producer has run past its end and primed
-    // entry 1 behind it — the lookahead window the defect lived in.
+    // entry 1 behind it.
     var samples: [512]f32 = @splat(0);
     var waited: usize = 0;
     while (waited < 200_000) : (waited += 1) {
@@ -146,9 +146,8 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     // Priming the successor is not yet the divergence: the decode cursor only
     // leaves entry 0 when the producer next reads and finds it exhausted. Give
     // it the room to do that — thousands of entry 0's frames are still queued,
-    // so none of this is audible yet. The precondition this test exists to
-    // exercise is precisely that the entry being decoded is no longer the entry
-    // being heard.
+    // so none of this is audible yet. The precondition is that the entry being
+    // decoded is not the entry being heard.
     const player_state = (try runtime.players.get(player)).player;
     waited = 0;
     while (waited < 2_000) : (waited += 1) {
@@ -193,8 +192,7 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
     try std.testing.expect(status.position_ms < status.duration_ms);
 
     // And entry 1 still arrives afterwards rather than having been consumed by
-    // the seek: a fix that corrected the seek but broke the transition after it
-    // would not be a fix.
+    // the seek.
     waited = 0;
     while (waited < 200_000) : (waited += 1) {
         if (backend.liveStream()) |stream| stream.pump(&samples, 256);
@@ -215,9 +213,8 @@ test "seeking during a gapless FLAC transition stays inside the audible track" {
 test "a play that cannot open its first track leaves nothing advertised as playing" {
     // `playerPlayTracks` replaces the queue before it opens anything, so a
     // failure to open arrives with the previous queue already destroyed. The
-    // defect was that the new queue survived the failure: a host polling
-    // now-playing saw a track id and rendered a now-playing state for audio
-    // that was not playing and could not be made to play.
+    // new queue must not survive the failure, or a host polling now-playing
+    // shows a track that is not playing.
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
     var runtime = liborca.Runtime.init(std.testing.allocator);
@@ -249,8 +246,6 @@ test "a play that cannot open its first track leaves nothing advertised as playi
     try std.testing.expectEqual(@as(u32, 0), status.queue_length);
     try std.testing.expect(status.transport == .stopped);
 }
-
-// ------------------------------------------------- ReplayGain on playback
 
 /// Writes `seconds` of a 1 kHz sine at `amplitude` as 16-bit mono PCM WAV.
 ///
@@ -349,8 +344,6 @@ fn runLibraryAnalysis(
 }
 
 test "an analyzed entry plays corrected and an unanalyzed entry plays at unity" {
-    // The whole seam this feature is: `Gain.setReplayGain` was called by
-    // nothing, so a Library full of measurements changed no audio at all.
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
     var runtime = liborca.Runtime.init(std.testing.allocator);
@@ -679,7 +672,7 @@ test "a gapless auto-advance adopts the successor's own loudness correction" {
     const zone = try runtime.createZone();
     try runtime.attachZone(zone, player);
     // Full render-ahead depth, so the producer really does run a whole entry
-    // ahead of the audio — the window the defect lived in.
+    // ahead of the audio.
     try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = 8192 } }, 0);
     try runtime.playerSetVolume(player, 1);
     try runtime.playerPlayTracks(
@@ -697,14 +690,12 @@ test "a gapless auto-advance adopts the successor's own loudness correction" {
 
     // And the samples themselves, which is the assertion that cannot be
     // satisfied by reporting alone. Two tones 20 dB apart, each corrected
-    // toward the same target, must leave the output at the same level. Under
-    // the defect the successor was still being multiplied by the loud track's
-    // attenuation and rendered about 20 dB below this.
+    // toward the same target, must leave the output at the same level.
     try std.testing.expect(loud_entry.peak > 0.15 and loud_entry.peak < 0.21);
     try std.testing.expectApproxEqRel(loud_entry.peak, quiet_entry.peak, 0.05);
 
-    // The transition itself is unregressed: it stayed gapless, and nothing was
-    // stepped over or failed to decode.
+    // The transition stayed gapless, and nothing was stepped over or failed
+    // to decode.
     const stats = try runtime.playerQueueStats(player);
     try std.testing.expect(stats.gapless_transitions >= 1);
     try std.testing.expectEqual(@as(u64, 0), stats.format_switch_transitions);
@@ -713,9 +704,9 @@ test "a gapless auto-advance adopts the successor's own loudness correction" {
 }
 
 test "an unanalyzed entry reached by a gapless advance plays at unity" {
-    // The same defect in its quieter form: inheritance across the transition
-    // is silent when the successor has no measurement of its own, because
-    // nothing about the audio says it is being played at another track's level.
+    // Inheriting a correction across the transition is silent when the
+    // successor has no measurement of its own, because nothing about the audio
+    // says it is being played at another track's level.
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
     var runtime = liborca.Runtime.init(std.testing.allocator);
@@ -785,11 +776,7 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
 }
 
 test "the queue reports the rows a host displays, in the order it will play them" {
-    // The queue used to hand back Track ids and nothing readable, so the GTK
-    // pane searched whatever library rows it happened to have loaded and
-    // printed "Track 14732" for the rest. That is metadata resolution in a
-    // frontend, which this architecture forbids, and it was a linear scan of
-    // every loaded row per queue entry besides.
+    // Resolving queue rows is liborca's job, never a frontend's.
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();
     var runtime = liborca.Runtime.init(std.testing.allocator);

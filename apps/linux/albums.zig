@@ -33,8 +33,6 @@ const sorts = [_]struct { label: [*:0]const u8, sort: liborca.ReleaseSort }{
     .{ .label = "Recently Added", .sort = .recently_added },
 };
 
-// --------------------------------------------------------------------- grid
-
 fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const tile = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
@@ -258,8 +256,6 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_navigation_view_add(self.albums_navigation.?, root);
     return navigation;
 }
-
-// --------------------------------------------------------------- album page
 
 /// What an open album page plays: its tracks in listening order, and whose
 /// they are, index-aligned.

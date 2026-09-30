@@ -1,6 +1,6 @@
 //! Hand-written GTK4 / GLib / GObject bindings.
 //!
-//! `@cImport` no longer exists in this Zig, `translate-C` drowns in glib's
+//! `@cImport` does not exist in this Zig, `translate-C` drowns in glib's
 //! `_Pragma`-based deprecation macros, and `zig-gobject` does not build on this
 //! snapshot. So the frontend declares exactly the foreign symbols it calls and
 //! nothing else. This module is deliberately mechanical: no application logic
@@ -13,8 +13,6 @@
 //! the `comptime` size assertions at the bottom of the file.
 
 const std = @import("std");
-
-// ------------------------------------------------------------- basic types
 
 pub const gboolean = c_int;
 pub const GType = usize;
@@ -37,8 +35,6 @@ pub inline fn callback(handler: anytype) GCallback {
 pub inline fn cast(comptime T: type, pointer: anytype) *T {
     return @ptrCast(pointer);
 }
-
-// ------------------------------------------------------------ opaque types
 
 pub const Widget = opaque {};
 pub const Window = opaque {};
@@ -128,11 +124,6 @@ pub extern fn g_get_user_config_dir() [*:0]const u8;
 
 pub const Rectangle = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
 
-// ------------------------------------------------------------- enum values
-//
-// GTK enumerators are plain integers once the headers are out of the picture.
-// Only the ones this frontend names are declared.
-
 pub const ORIENTATION_HORIZONTAL: c_int = 0;
 pub const ORIENTATION_VERTICAL: c_int = 1;
 
@@ -187,8 +178,6 @@ pub const SOURCE_CONTINUE: gboolean = 1;
 pub inline fn variantType(comptime text: [:0]const u8) *const GVariantType {
     return @ptrCast(text.ptr);
 }
-
-// ------------------------------------------------------------ GObject core
 
 /// `struct _GObject`. Verified 24 bytes against the installed glib.
 pub const GObject = extern struct {
@@ -284,8 +273,6 @@ pub extern fn g_value_set_boolean(value: *GValue, v_boolean: gboolean) void;
 pub extern fn g_value_set_int(value: *GValue, v_int: c_int) void;
 pub extern fn g_value_unset(value: *GValue) void;
 
-// ------------------------------------------------------------------- GLib
-
 pub extern fn g_free(memory: ?*anyopaque) void;
 pub extern fn g_format_size(size: u64) [*:0]u8;
 pub extern fn g_strndup(str: [*]const u8, n: usize) ?[*:0]u8;
@@ -342,18 +329,14 @@ pub extern fn g_menu_model_get_n_items(model: *GMenuModel) c_int;
 pub extern fn g_menu_append(menu: *GMenu, label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) void;
 pub extern fn g_menu_append_section(menu: *GMenu, label: ?[*:0]const u8, section: *GMenuModel) void;
 
-// -------------------------------------------------------- images in memory
-//
 // A cover arrives from liborca as caller-owned encoded bytes, and has to
 // become something a widget can draw without ever touching the filesystem.
 // The stream and the *scaled* decode are what keep a pathological image from
 // turning a 12 MiB JPEG into hundreds of megabytes of pixels.
 
-/// Borrows `data` rather than copying it. The plain `g_bytes_new` copies, and
-/// on the largest cover in the reference library that second 11.3 MiB buffer
-/// was worth 12 MB of resident memory for the length of one decode. The borrow
-/// is sound only because the decode is synchronous and the GBytes is dropped
-/// before the borrowed buffer is.
+/// Borrows `data` rather than copying it. The borrow is sound only because
+/// the decode is synchronous and the GBytes is dropped before the borrowed
+/// buffer is.
 pub extern fn g_bytes_new_static(data: ?*const anyopaque, size: usize) *GBytes;
 pub extern fn g_bytes_unref(bytes: *GBytes) void;
 pub extern fn g_memory_input_stream_new_from_bytes(bytes: *GBytes) *GInputStream;
@@ -388,8 +371,6 @@ pub extern fn g_task_run_in_thread(task: *GTask, task_func: TaskThreadFunc) void
 pub extern fn g_task_return_pointer(task: *GTask, result: ?*anyopaque, destroy: ?*anyopaque) void;
 pub extern fn g_task_propagate_pointer(task: *GTask, err: *?*GError) ?*anyopaque;
 
-// ---------------------------------------------------------------- GVariant
-//
 // Everything here is the non-variadic form. `g_variant_new`,
 // `g_variant_get` and `g_variant_builder_add` are format-string varargs, which
 // is exactly the kind of construct a hand-written binding should not attempt:
@@ -413,8 +394,6 @@ pub extern fn g_variant_get_child_value(value: *GVariant, index: usize) *GVarian
 pub extern fn g_variant_get_int64(value: *GVariant) i64;
 pub extern fn g_variant_get_double(value: *GVariant) f64;
 pub extern fn g_variant_unref(value: *GVariant) void;
-
-// -------------------------------------------------------------------- DBus
 
 pub const GDBusNodeInfo = extern struct {
     ref_count: c_int,
@@ -507,8 +486,6 @@ pub extern fn g_bus_own_name_on_connection(
     user_data_free_func: ?*anyopaque,
 ) c_uint;
 pub extern fn g_bus_unown_name(owner_id: c_uint) void;
-
-// --------------------------------------------------------------------- GTK
 
 pub extern fn gtk_application_new(application_id: [*:0]const u8, flags: c_uint) ?*Application;
 pub extern fn gtk_application_window_new(application: *Application) *Widget;
@@ -852,8 +829,6 @@ pub extern fn gtk_file_dialog_select_folder_finish(
     result: *GAsyncResult,
     err: *?*GError,
 ) ?*GFile;
-
-// ---------------------------------------------------- layout verification
 
 comptime {
     std.debug.assert(@sizeOf(GObject) == 24);

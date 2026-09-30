@@ -285,7 +285,11 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     matches.reload(self);
     details.invalidate(self);
     if (state_value == .cancelled) return self.toast("Stopped");
-    if (state_value != .succeeded) return self.toast("MusicBrainz or AcoustID could not be reached; Find Matches continues where it stopped");
+    if (state_value != .succeeded) return self.toast(switch (if (stats) |value| value.busy else .none) {
+        .musicbrainz => "MusicBrainz is in use by another Orca process; try again once it finishes",
+        .acoustid => "AcoustID is in use by another Orca process; try again once it finishes",
+        .none => "MusicBrainz or AcoustID could not be reached; Find Matches continues where it stopped",
+    });
     if (searched != null) return self.toast(if (matched == 0) "No match found" else "Found a match to review");
     var buffer: [96]u8 = undefined;
     self.toast(if (matched == 0)
@@ -302,6 +306,7 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
         .needs_user_key => "Save your AcoustID key in Preferences first",
         .invalid_user_key => "AcoustID did not accept your key",
         .cancelled => "Stopped",
+        .busy => "AcoustID is in use by another Orca process; try again once it finishes",
         .completed, .needs_client_key, .invalid_client_key, .unavailable => "AcoustID could not be reached; try again later",
     });
     var buffer: [64]u8 = undefined;

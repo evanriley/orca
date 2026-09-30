@@ -37,8 +37,6 @@ fn columnOf(data: ?*anyopaque) Column {
     return @enumFromInt(@as(std.meta.Tag(Column), @intCast(@intFromPtr(data))));
 }
 
-// ----------------------------------------------------------------- scrolling
-
 fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.page_exhausted) return;
@@ -49,8 +47,6 @@ fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (remaining < page) self.loadNextPage();
 }
 
-// ---------------------------------------------------------------- activation
-
 fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const selection = self.selection orelse return;
@@ -58,15 +54,8 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     const chosen = gtk.gtk_selection_model_get_selection(selection);
 
     // Activation is not selection. Activating a multi-row selection plays that
-    // selection as a queue, from its first row.
-    //
-    // It used to start at the activated row, which sounds reasonable and is
-    // wrong for the way a selection is actually made. Selecting track 1 and
-    // shift-clicking track 11 leaves the cursor on 11, so GTK reports 11 as
-    // the activated position and pressing Enter began at the last track and
-    // reported the end of the queue on the next skip. The row that happens to
-    // hold the cursor is not the row the user means; the top of what they
-    // highlighted is.
+    // selection as a queue, from its first row: shift-click leaves GTK's
+    // activated position on the last row selected.
     if (gtk.gtk_bitset_get_size(chosen) > 1 and gtk.gtk_bitset_contains(chosen, position) != 0) {
         defer gtk.gtk_bitset_unref(chosen);
         var ids: std.ArrayList(i64) = .empty;
@@ -100,8 +89,6 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     const id = row.id();
     transport.playIds(self, &.{id}, 0);
 }
-
-// ------------------------------------------------------------------- columns
 
 fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const label = gtk.gtk_label_new(null);
@@ -270,8 +257,7 @@ fn makeColumn(
 /// A header click, turned into a new engine query.
 ///
 /// The whole result is re-ordered and the listing restarts at its first page,
-/// because the alternative — reordering the rows already loaded — sorts one
-/// screenful of a listing that is 22,060 rows long and calls it sorted.
+/// because reordering the rows already loaded would sort only one page.
 fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
@@ -289,8 +275,6 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
     }
     self.reload();
 }
-
-// -------------------------------------------------------------------- chrome
 
 fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
@@ -358,8 +342,6 @@ fn windowKeyPressed(
     }
     return gtk.false_;
 }
-
-// --------------------------------------------------------------- navigation
 
 const mouse_back_button: c_uint = 8;
 
@@ -555,8 +537,6 @@ fn buildSidebar(self: *App) *gtk.Widget {
     return view;
 }
 
-// -------------------------------------------------------------- tracks page
-
 fn browseToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const panes = self.browse_panes orelse return;
@@ -690,8 +670,6 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, body, .selection).widget);
     return view;
 }
-
-// ------------------------------------------------------------------- window
 
 /// Below this width the sidebar folds away behind a back button, the browse
 /// panes give their room to the list, and the player bar tightens.

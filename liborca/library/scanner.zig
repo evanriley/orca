@@ -200,12 +200,8 @@ pub const Scanner = struct {
         const audio_format = detection.format;
         // A tag reader is defined over the container it is handed, so an
         // ID3v2 tag in front of a FLAC stream has to be stepped over before
-        // asking for Vorbis comments. Without this the reader looks at byte
-        // zero, finds a tag rather than `fLaC`, and the file is filed under
-        // a filename with no artist and no album -- present in the library
-        // and invisible to every browse of it. 104 files in a real 20,000
-        // track library are shaped this way, and they carry complete
-        // Vorbis comments behind the tag.
+        // asking for Vorbis comments, or the file is filed with no artist
+        // and no album.
         //
         // `codecs.probe` needs no such help: the registry resolves the
         // prefix itself for every decoder it opens.
@@ -359,11 +355,7 @@ pub const Scanner = struct {
     }
 };
 
-/// A property too large for the column is stored as unknown rather than as a
-/// wrapped or saturated number.
-fn optionalCount(value: anytype) ?i64 {
-    return std.math.cast(i64, value orelse return null);
-}
+const optionalCount = database.columns.optionalCount;
 
 test "scanner batches audio and skips unchanged files on restart" {
     var temporary = std.testing.tmpDir(.{});
@@ -619,8 +611,7 @@ fn expectMigratedFilesClaimed(volume_options: database.VolumeOptions) !void {
     defer std.testing.allocator.free(tracked);
 
     // A version-7 library: observations keyed by path, with user state hanging
-    // off those paths, and no `library_roots` row — exactly what the field
-    // produced before this migration existed.
+    // off those paths, and no `library_roots` row.
     {
         const raw = try database.sqlite.Database.open(database_path);
         defer raw.close();
@@ -883,11 +874,8 @@ fn copyFixture(directory: std.Io.Dir, name: []const u8) !void {
 }
 
 test "rescanning an untouched library leaves every file present" {
-    // Regression: the unchanged fast path skipped a file without stamping the
-    // run's generation onto its Location, and the post-run sweep then marked
-    // everything it had skipped as `missing`. A second scan of a library nobody
-    // had touched reported every file absent, which made `has_file` false for
-    // the whole collection and left every Track unplayable.
+    // The unchanged fast path must still stamp the run's generation onto each
+    // Location, or the post-run sweep marks every skipped file `missing`.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try temporary.dir.writeFile(std.testing.io, .{
@@ -968,11 +956,6 @@ test "rescanning an untouched library leaves every file present" {
 }
 
 test "an ID3 tag in front of a FLAC stream does not hide the tags behind it" {
-    // The 104 files in the real library shaped this way carry complete Vorbis
-    // comments. Before the tag reader stepped over the ID3v2 tag it looked for
-    // them at byte zero, found the tag instead, and filed the file under a
-    // filename with no artist and no album -- present in the library and
-    // absent from every browse of it.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
 

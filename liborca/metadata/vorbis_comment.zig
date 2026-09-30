@@ -223,8 +223,7 @@ fn readPictureBlock(
         return error.TruncatedFlacStream;
     const declared = std.mem.readInt(u32, &data_length, .big);
     if (declared == 0) return null;
-    // The block must actually contain the payload it claims. Nothing checked
-    // this while artwork was only ever described.
+    // The block must actually contain the payload it claims.
     if (length_offset + 4 + @as(u64, declared) > block.length) return null;
     return .{
         .kind = artworkKind(picture_type),

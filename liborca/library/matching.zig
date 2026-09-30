@@ -23,6 +23,13 @@ pub const AcoustIdUse = enum(u8) {
     invalid_client_key,
 };
 
+/// The service another Orca process was talking to when the pass needed it.
+pub const BusyService = enum(u8) {
+    none,
+    musicbrainz,
+    acoustid,
+};
+
 pub const Result = struct {
     tracks_seen: u64 = 0,
     matched: u64 = 0,
@@ -42,6 +49,7 @@ pub const Result = struct {
     acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
     unavailable: bool = false,
+    busy: BusyService = .none,
 };
 
 /// Live counters a host may read while the pass runs.
@@ -57,6 +65,7 @@ const SearchOutcome = union(enum) {
     refused,
     cancelled,
     unavailable,
+    busy,
 };
 
 const LookupOutcome = union(enum) {
@@ -65,6 +74,7 @@ const LookupOutcome = union(enum) {
     refused: u64,
     cancelled,
     unavailable,
+    busy,
     invalid_client_key,
 };
 
@@ -140,6 +150,7 @@ pub const LibraryMatching = struct {
                 .refused => |queries| result.acoustid_refused += queries,
                 .cancelled => return self.stop(result, .cancelled),
                 .unavailable => return self.stop(result, .unavailable),
+                .busy => return self.stop(result, .acoustid_busy),
                 .invalid_client_key => {
                     result.acoustid = .invalid_client_key;
                     self.acoustid = null;
@@ -166,6 +177,7 @@ pub const LibraryMatching = struct {
                 },
                 .cancelled => return self.stop(result, .cancelled),
                 .unavailable => return self.stop(result, .unavailable),
+                .busy => return self.stop(result, .musicbrainz_busy),
             };
             if (!answered.isEmpty()) {
                 const stored = try providers.workflow.record(
@@ -186,10 +198,12 @@ pub const LibraryMatching = struct {
         return true;
     }
 
-    fn stop(_: *LibraryMatching, result: *Result, reason: enum { cancelled, unavailable }) bool {
+    fn stop(_: *LibraryMatching, result: *Result, reason: enum { cancelled, unavailable, musicbrainz_busy, acoustid_busy }) bool {
         switch (reason) {
             .cancelled => result.cancelled = true,
             .unavailable => result.unavailable = true,
+            .musicbrainz_busy => result.busy = .musicbrainz,
+            .acoustid_busy => result.busy = .acoustid,
         }
         return false;
     }
@@ -241,6 +255,7 @@ pub const LibraryMatching = struct {
                 error.ProviderRejectedRequest, error.InvalidProviderResponse => return .{ .refused = count },
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => {
                     if (attempt + 1 >= maximum_attempts) return .unavailable;
                     if (!self.backOff(service.gateway, attempt)) return .cancelled;
@@ -266,6 +281,7 @@ pub const LibraryMatching = struct {
                 error.ProviderRejectedRequest, error.InvalidProviderResponse => return .refused,
                 error.Canceled => return .cancelled,
                 error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.ProviderBusy => return .busy,
                 error.RateLimited, error.ProviderUnavailable, error.Timeout => {
                     if (attempt + 1 >= maximum_attempts) return .unavailable;
                     if (!self.backOff(self.musicbrainz.gateway, attempt)) return .cancelled;
@@ -279,7 +295,7 @@ pub const LibraryMatching = struct {
 
     /// False when cancelled while waiting.
     fn backOff(self: *LibraryMatching, gateway: *network.Gateway, attempt: u32) bool {
-        const backoff_ms = initial_backoff_ms << @intCast(attempt);
+        const backoff_ms = network.client.jittered(gateway.random, initial_backoff_ms << @intCast(attempt));
         var until = gateway.clock.nowMs() +| @as(i64, @intCast(backoff_ms));
         if (gateway.blockedUntilMs()) |blocked| until = @max(until, blocked);
         while (true) {

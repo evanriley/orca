@@ -91,8 +91,6 @@ fn panelData(data: ?*anyopaque) *Panel {
     return @ptrCast(@alignCast(data.?));
 }
 
-// --------------------------------------------------------------- shared state
-
 fn shownNow(self: *const App) bool {
     return self.details_visible and !self.window_narrow;
 }
@@ -162,8 +160,6 @@ pub fn choose(panel: *Panel, track_id: i64) void {
     panel.chosen = track_id;
     update(panel);
 }
-
-// -------------------------------------------------------------------- update
 
 fn wantedTrack(panel: *Panel) ?i64 {
     const self = panel.self;
@@ -369,8 +365,6 @@ fn setPath(panel: *Panel, path: ?[]const u8) void {
     panel.path = if (path) |value| allocator.dupeZ(u8, value) catch null else null;
 }
 
-// ------------------------------------------------------------------ wording
-
 fn optionalEql(a: ?i64, b: ?i64) bool {
     if (a) |left| return left == (b orelse return false);
     return b == null;
@@ -502,8 +496,6 @@ fn writeDecibels(writer: *std.Io.Writer, value: f32, comptime signed: bool) std.
     const sign: []const u8 = if (tenths < 0) minus else if (signed) "+" else "";
     try writer.print("{s}{d:.1}", .{ sign, @abs(tenths) });
 }
-
-// ------------------------------------------------------------------- widgets
 
 fn setLabel(label: *gtk.Widget, text: []const u8, buffer: []u8) void {
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), strings.terminated(buffer, text).ptr);

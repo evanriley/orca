@@ -291,11 +291,8 @@ test "gain ramps without discontinuity and meter does not change samples" {
 }
 
 test "a volume change is the only thing that moves the gain node" {
-    // Loudness correction used to be a second input here, and the two shared
-    // one stored value: whichever was written last silently discarded the
-    // other. It now travels with the audio instead (see `SourceSession`), so
-    // this node has exactly one input and a volume change cannot lose a
-    // correction it no longer holds.
+    // Loudness correction travels with the audio (see `SourceSession`), so
+    // this node has exactly one input.
     var gain: Gain = .{};
     gain.setLinear(0.5, 0);
     try std.testing.expectEqual(@as(f32, 0.5), gain.linear.load(.acquire));

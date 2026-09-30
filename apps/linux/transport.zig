@@ -31,8 +31,6 @@ fn boolean(value: bool) gtk.gboolean {
     return if (value) gtk.true_ else gtk.false_;
 }
 
-/// The Zig API reports why a call was refused. These are the refusals the C ABI
-/// used to flatten into `ORCA_STATUS_INVALID_STATE`.
 fn isNotReady(err: anyerror) bool {
     return switch (err) {
         error.PlayerHasNoSource,
@@ -44,8 +42,6 @@ fn isNotReady(err: anyerror) bool {
         else => false,
     };
 }
-
-// ------------------------------------------------------------------ devices
 
 const max_devices = 32;
 
@@ -163,8 +159,6 @@ pub fn selectDevice(self: *App, index: usize) void {
     if (!ensureOutput(self)) self.toast("Could not open that output device");
 }
 
-// ----------------------------------------------------------------- playback
-
 pub fn playIds(self: *App, ids: []const i64, start: u32) void {
     if (ids.len == 0) return;
     if (!ensureOutput(self)) {
@@ -265,8 +259,6 @@ fn volumeChanged(_: ?*anyopaque, value: f64, data: ?*anyopaque) callconv(.c) voi
     self.runtime.playerSetVolume(self.player, @floatCast(value)) catch {};
 }
 
-// ------------------------------------------------------------------ seeking
-//
 // `GtkRange` owns the pointer gesture on its own slider, so a drag is observed
 // through `change-value` rather than through a competing `GtkGestureClick` —
 // a click gesture added here swallows the drag entirely. While a value is
@@ -306,8 +298,6 @@ fn applySettledSeek(self: *App) void {
     self.mpris.notify();
 }
 
-// ---------------------------------------------------------------- cover art
-
 const cover_display_pixels: c_int = 56;
 
 /// Put the audible track's cover in the bar, or the placeholder. Called only
@@ -329,8 +319,6 @@ fn loveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 fn coverClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
     window.showPage(state(data), .now_playing);
 }
-
-// -------------------------------------------------------------------- build
 
 const volume_icons: [5]?[*:0]const u8 = .{
     "audio-volume-muted-symbolic",
@@ -552,8 +540,6 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_center_box_set_end_widget(gtk.cast(gtk.CenterBox, bar), buildOutputs(self));
     return bar;
 }
-
-// --------------------------------------------------------------------- tick
 
 pub fn tick(self: *App) void {
     applySettledSeek(self);

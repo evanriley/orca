@@ -646,8 +646,6 @@ pub export fn orca_player_seek(
     return .ok;
 }
 
-// ------------------------------------------------------------------ runtime
-
 pub export fn orca_runtime_pump(runtime: ?*Runtime) callconv(.c) Status {
     const box = runtimeBox(runtime) orelse return .invalid_argument;
     if (box.foreignThread()) return .wrong_thread;
@@ -681,8 +679,6 @@ pub export fn orca_runtime_poll_event(
     );
     return .ok;
 }
-
-// ------------------------------------------------------------------ library
 
 pub export fn orca_library_add_root(
     runtime: ?*Runtime,
@@ -911,8 +907,6 @@ pub export fn orca_library_scan_stats(
     };
     return .ok;
 }
-
-// ------------------------------------------------------------------- player
 
 pub export fn orca_player_set_library(
     runtime: ?*Runtime,
@@ -1220,8 +1214,6 @@ pub export fn orca_player_query_queue(
     }
     return .ok;
 }
-
-// ----------------------------------------------------------- devices, zones
 
 pub export fn orca_enumerate_output_devices(
     runtime: ?*Runtime,
@@ -1583,8 +1575,6 @@ test "a Player with nothing to play and nowhere to play it refuses to start" {
     defer orca_runtime_destroy(runtime);
     var player: Handle = undefined;
     try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
-    // The defect this boundary used to lock in: a detached state machine
-    // reported PLAYING with no source loaded and no Zone attached.
     try std.testing.expectEqual(Status.invalid_state, orca_player_play(runtime, player));
     var status: PlayerStatus = undefined;
     try std.testing.expectEqual(Status.ok, orca_player_status_get(runtime, player, &status));

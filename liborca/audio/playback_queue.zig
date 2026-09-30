@@ -164,8 +164,6 @@ pub const PlaybackQueue = struct {
         return self.refAt(self.cursorPosition());
     }
 
-    // ------------------------------------------------------------ mutation
-
     pub fn enqueue(self: *PlaybackQueue, refs: []const TrackRef) !void {
         if (self.entries.items.len + refs.len > capacity) return error.PlaybackQueueFull;
         const first_new: u32 = @intCast(self.entries.items.len);
@@ -304,8 +302,6 @@ pub const PlaybackQueue = struct {
         }
     }
 
-    // ------------------------------------------------------------ traversal
-
     /// Position a user-initiated `next` moves to. `repeat_one` deliberately
     /// does not apply: an explicit skip means "a different track", and only
     /// auto-advance repeats one.
@@ -354,8 +350,6 @@ pub const PlaybackQueue = struct {
         self.decode_position.store(position, .release);
     }
 
-    // ------------------------------------------------------- serial mapping
-
     /// Records that blocks carrying `serial` belong to queue `position`.
     pub fn noteEntrySerial(self: *PlaybackQueue, serial: u32, position: u32) void {
         if (serial == 0) return;
@@ -384,8 +378,6 @@ pub const PlaybackQueue = struct {
         self.serial_head = 0;
     }
 };
-
-// ---------------------------------------------------------------------- tests
 
 const testing = std.testing;
 const test_library: object.LibraryHandle = .{ .index = 0, .generation = 1 };

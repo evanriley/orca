@@ -24,8 +24,6 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-// --------------------------------------------------------------------- list
-
 fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
     gtk.gtk_widget_add_css_class(row, "artist-row");
@@ -222,8 +220,6 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_navigation_view_add(self.artists_navigation.?, root);
     return navigation;
 }
-
-// -------------------------------------------------------------- artist page
 
 const ArtistPage = struct {
     self: *App,

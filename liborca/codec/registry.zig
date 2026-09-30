@@ -48,9 +48,6 @@ pub const CodecRegistry = struct {
     /// Callers that already know the container — the scanner, which sniffed it
     /// once and stored it — still reach a stream that begins behind an ID3v2
     /// tag, so the prefix is resolved here as well as in `openDetected`.
-    /// Requiring every such caller to remember to detect again is how the 104
-    /// tagged FLACs in the reference library came to be sniffed correctly and
-    /// still fail to open.
     pub fn open(
         self: *const CodecRegistry,
         allocator: std.mem.Allocator,

@@ -63,6 +63,9 @@ pub const Status = struct {
     last_error: listenbrainz.BoundedText = .{},
     /// Unix seconds.
     next_attempt_at: ?i64 = null,
+    /// When ListenBrainz accepts requests again, in Unix seconds, while this
+    /// Library records it refusing them.
+    blocked_until: ?i64 = null,
     /// Queued listens not yet delivered or rejected.
     pending: u64 = 0,
     feedback_pending: u64 = 0,
@@ -73,6 +76,14 @@ pub const Status = struct {
     /// was full, the Track had gone, or the database refused the write.
     dropped: u64 = 0,
 };
+
+/// The end of a block in whole Unix seconds, or null once it has passed by
+/// `now_s`.
+pub fn blockEnd(blocked_until_ms: ?i64, now_s: i64) ?i64 {
+    const until = blocked_until_ms orelse return null;
+    const until_s = std.math.divCeil(i64, until, std.time.ms_per_s) catch unreachable;
+    return if (until_s > now_s) until_s else null;
+}
 
 pub const SampleTime = struct {
     mono_ms: i64,
@@ -94,6 +105,7 @@ pub const Hooks = struct {
     clock: ?network.client.Clock = null,
     /// Unix time in milliseconds, which the queue's retry times are in.
     wall_clock: ?network.client.Clock = null,
+    random: ?std.Random = null,
     sample_clock: ?SampleClock = null,
     /// The longest the worker sleeps between passes. Every change the control
     /// lane makes wakes it sooner.
@@ -201,11 +213,18 @@ pub const Worker = struct {
         const initial = self.listens.config.load();
         var standard: network.StandardTransport = .init(self.allocator, self.io);
         var system_clock: network.SystemClock = .{ .io = self.io };
+        const random_source: std.Random.IoSource = .{ .io = self.io };
         var gateway: network.Gateway = .{
             .transport = self.hooks.transport orelse standard.transport(),
             .clock = self.hooks.clock orelse system_clock.clock(),
+            .wall_clock = self.hooks.wall_clock orelse system_clock.wallClock(),
+            .random = self.hooks.random orelse random_source.interface(),
             .config = .{ .identity = initial.identity },
             .cancel = &self.registration.cancel,
+            .sharing = .{
+                .store = providers.shared_state.store(&self.database.provider_state),
+                .service = listenbrainz.service,
+            },
         };
         var delivery: listenbrainz.Delivery = .init(
             self.allocator,
@@ -216,6 +235,7 @@ pub const Worker = struct {
         );
         delivery.server = initial.server;
         self.serve(&gateway, &delivery, initial);
+        gateway.releaseLease();
         _ = self.drainRing(self.listens.config.load());
         standard.deinit();
         self.registration.finish();
@@ -282,7 +302,7 @@ pub const Worker = struct {
                     feedback_pending = self.feedbackPendingCount(feedback_pending);
                 };
             }
-            self.publish(delivery, pending, feedback_pending);
+            self.publish(gateway, delivery, pending, feedback_pending);
             self.sleep(signal, gateway.clock.nowMs(), if (config.enabled) wake_at_ms else null);
         }
     }
@@ -390,8 +410,14 @@ pub const Worker = struct {
         generation: u32,
         config: Config,
     ) void {
-        if (self.listens.credentials_validated.load(.monotonic) == generation) return;
-        if (config.offline or gateway.blockedUntilMs() != null) return;
+        const validated = self.listens.credentials_validated.load(.monotonic);
+        if (validated == generation) return;
+        if (config.offline or delivery.waitingForLease()) return;
+        gateway.loadSharedState() catch |err| {
+            delivery.current.last_error.set(@errorName(err));
+            return;
+        };
+        if (gateway.blockedUntilMs() != null) return;
         self.listens.credentials_validated.store(generation, .monotonic);
         const token = delivery.credentials.get(self.allocator, listenbrainz.token_service, listenbrainz.token_account) catch |err| {
             delivery.current.last_error.set(@errorName(err));
@@ -399,7 +425,9 @@ pub const Worker = struct {
         } orelse return;
         defer providers.credentials.wipeAndFree(self.allocator, token);
         const user_name = delivery.validateToken(token) catch |err| {
-            delivery.validationFailed(err, self.nowUnixSeconds());
+            if (err == error.ProviderBusy) self.listens.credentials_validated.store(validated, .monotonic);
+            delivery.validationFailed(err, self.nowUnixSeconds()) catch |failure|
+                delivery.current.last_error.set(@errorName(failure));
             return;
         };
         if (user_name) |name| self.allocator.free(name);
@@ -483,13 +511,20 @@ pub const Worker = struct {
         return self.database.feedback.pendingSyncCount() catch previous;
     }
 
-    fn publish(self: *Worker, delivery: *const listenbrainz.Delivery, pending: u64, feedback_pending: u64) void {
+    fn publish(
+        self: *Worker,
+        gateway: *network.Gateway,
+        delivery: *const listenbrainz.Delivery,
+        pending: u64,
+        feedback_pending: u64,
+    ) void {
         const current = delivery.status();
         self.listens.status.store(.{
             .state = current.state,
             .user_name = current.user_name,
             .last_error = current.last_error,
             .next_attempt_at = current.next_attempt_at,
+            .blocked_until = blockEnd(gateway.blockedUntilWallMs(), self.nowUnixSeconds()),
             .pending = pending,
             .feedback_pending = feedback_pending,
             .delivered_total = current.delivered_total,
@@ -529,21 +564,36 @@ const testing = std.testing;
 const RequestKind = enum { listens, now_playing, feedback };
 
 const TestService = struct {
-    requests: std.ArrayList(RequestKind) = .empty,
-    listens_status: u16 = 200,
-    now_playing_status: u16 = 200,
-    feedback_status: u16 = 200,
-    now: i64 = 0,
-    token_lookups: usize = 0,
+    transport: network.testing.ScriptedTransport,
+    clock: network.testing.TestClock,
+    requests: std.ArrayList(RequestKind),
+    listens_status: u16,
+    now_playing_status: u16,
+    feedback_status: u16,
+    token_lookups: usize,
 
     const wall_base_ms: i64 = 2_000_000_000_000;
 
-    fn transport(self: *TestService) network.client.Transport {
-        return .{ .context = self, .perform_fn = perform };
+    fn start(self: *TestService) void {
+        self.* = .{
+            .transport = .{},
+            .clock = .{ .wall_offset_ms = wall_base_ms },
+            .requests = .empty,
+            .listens_status = 200,
+            .now_playing_status = 200,
+            .feedback_status = 200,
+            .token_lookups = 0,
+        };
+        self.transport.responder = .{ .context = self, .respond_fn = respond };
     }
 
-    fn clock(self: *TestService) network.client.Clock {
-        return .{ .context = self, .now_ms_fn = nowMs, .sleep_ms_fn = sleepMs };
+    fn deinit(self: *TestService) void {
+        self.requests.deinit(testing.allocator);
+        self.transport.deinit();
+    }
+
+    fn now(self: *const TestService) i64 {
+        return self.clock.now();
     }
 
     fn sampleClock(self: *TestService) SampleClock {
@@ -552,11 +602,7 @@ const TestService = struct {
 
     fn sampleNow(context: *anyopaque) SampleTime {
         const self: *TestService = @ptrCast(@alignCast(context));
-        return .{ .mono_ms = self.now, .wall_s = @divFloor(wall_base_ms + self.now, 1000) };
-    }
-
-    fn wallClock(self: *TestService) network.client.Clock {
-        return .{ .context = self, .now_ms_fn = wallMs, .sleep_ms_fn = sleepMs };
+        return .{ .mono_ms = self.clock.now(), .wall_s = @divFloor(self.clock.wallNow(), 1000) };
     }
 
     fn store(self: *TestService) providers.credentials.Store {
@@ -567,12 +613,11 @@ const TestService = struct {
         return std.mem.count(RequestKind, self.requests.items, &.{kind});
     }
 
-    fn perform(context: *anyopaque, allocator: std.mem.Allocator, request: network.client.Request) anyerror!network.client.Response {
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
         const self: *TestService = @ptrCast(@alignCast(context));
-        const body = request.body orelse "";
-        const kind: RequestKind = if (std.mem.endsWith(u8, request.url, "/recording-feedback"))
+        const kind: RequestKind = if (std.mem.endsWith(u8, exchange.request.url, "/recording-feedback"))
             .feedback
-        else if (std.mem.indexOf(u8, body, "\"playing_now\"") != null)
+        else if (std.mem.indexOf(u8, exchange.form, "\"playing_now\"") != null)
             .now_playing
         else
             .listens;
@@ -582,19 +627,7 @@ const TestService = struct {
             .now_playing => self.now_playing_status,
             .feedback => self.feedback_status,
         };
-        return .{ .allocator = allocator, .status = status, .body = try allocator.dupe(u8, "{}") };
-    }
-
-    fn nowMs(context: *anyopaque) i64 {
-        return (@as(*TestService, @ptrCast(@alignCast(context)))).now;
-    }
-
-    fn wallMs(context: *anyopaque) i64 {
-        return wall_base_ms + (@as(*TestService, @ptrCast(@alignCast(context)))).now;
-    }
-
-    fn sleepMs(context: *anyopaque, milliseconds: u64) anyerror!void {
-        (@as(*TestService, @ptrCast(@alignCast(context)))).now += @intCast(milliseconds);
+        return .{ .respond = .{ .status = status } };
     }
 
     fn token(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8, _: []const u8) anyerror!?[]u8 {
@@ -608,6 +641,7 @@ const TestRig = struct {
     library: database.LibraryDatabase,
     listens: Listens,
     service: TestService,
+    prng: std.Random.DefaultPrng,
     gateway: network.Gateway,
     delivery: listenbrainz.Delivery,
     worker: Worker,
@@ -620,12 +654,9 @@ const TestRig = struct {
             "file:orca-worker-" ++ name ++ "?mode=memory&cache=shared",
         );
         self.listens = .{};
-        self.service = .{};
-        self.gateway = .{
-            .transport = self.service.transport(),
-            .clock = self.service.clock(),
-            .config = .{},
-        };
+        self.service.start();
+        self.prng = .init(network.testing.default_seed);
+        self.gateway = network.testing.gateway(&self.service.transport, &self.service.clock, &self.prng, .{});
         self.delivery = .init(testing.allocator, testing.io, &self.gateway, self.service.store(), &self.library.scrobbles);
         self.worker = .{
             .allocator = testing.allocator,
@@ -633,13 +664,13 @@ const TestRig = struct {
             .database = &self.library,
             .listens = &self.listens,
             .registration = undefined,
-            .hooks = .{ .wall_clock = self.service.wallClock(), .sample_clock = self.service.sampleClock() },
+            .hooks = .{ .wall_clock = self.service.clock.wallClock(), .sample_clock = self.service.sampleClock() },
         };
         self.now_playing = null;
     }
 
     fn stop(self: *TestRig) void {
-        self.service.requests.deinit(testing.allocator);
+        self.service.deinit();
         self.library.close();
     }
 
@@ -704,7 +735,7 @@ const TestRig = struct {
     fn announce(self: *TestRig, track_id: i64, age_ms: i64) void {
         self.now_playing = .{
             .listen = .{ .track_id = track_id, .started_at = 1_700_000_000, .listened_ms = 10_000, .duration_ms = 180_000 },
-            .heard_at_ms = self.service.now - age_ms,
+            .heard_at_ms = self.service.now() - age_ms,
         };
     }
 };
@@ -780,7 +811,7 @@ test "Now Playing refused by a rate limit is dropped, its successors are dropped
     try expectRequests(&rig, &.{.now_playing});
     try testing.expect(rig.now_playing == null);
 
-    rig.service.now += 120_000;
+    rig.service.clock.advance(120_000);
     _ = rig.pass();
     try expectRequests(&rig, &.{.now_playing});
 }
@@ -816,11 +847,11 @@ test "feedback goes out one change per pass, and a pass that sent one asks to ru
     for (1..4) |sent| {
         const wake = rig.pass();
         try testing.expectEqual(sent, rig.service.count(.feedback));
-        try testing.expect(wake <= rig.service.now);
+        try testing.expect(wake <= rig.service.now());
     }
     const idle = rig.pass();
     try testing.expectEqual(@as(usize, 3), rig.service.count(.feedback));
-    try testing.expect(idle >= rig.service.now + idle_recheck_ms);
+    try testing.expect(idle >= rig.service.now() + idle_recheck_ms);
 }
 
 test "a pass with only feedback lacking a recording id looks up no token and makes no request" {
@@ -833,7 +864,7 @@ test "a pass with only feedback lacking a recording id looks up no token and mak
 
     try expectRequests(&rig, &.{});
     try testing.expectEqual(@as(usize, 0), rig.service.token_lookups);
-    try testing.expect(wake >= rig.service.now + idle_recheck_ms);
+    try testing.expect(wake >= rig.service.now() + idle_recheck_ms);
     try testing.expectEqual(@as(u64, 0), rig.worker.feedbackPendingCount(7));
 }
 
@@ -850,9 +881,9 @@ test "a rate limit on feedback holds back listens until the block ends" {
     rig.service.feedback_status = 200;
     const wake = rig.pass();
     try expectRequests(&rig, &.{.feedback});
-    try testing.expect(wake > rig.service.now);
+    try testing.expect(wake > rig.service.now());
 
-    rig.service.now += 60_000;
+    rig.service.clock.advance(60_000);
     _ = rig.pass();
     try expectRequests(&rig, &.{ .feedback, .listens, .feedback });
 }
@@ -868,8 +899,8 @@ test "a feedback change that could not be marked is not resent and its retries b
 
     for ([_]i64{ 60_000, 120_000, 240_000 }) |backoff| {
         const wake = rig.pass();
-        try testing.expectEqual(backoff, wake - rig.service.now);
-        rig.service.now = wake;
+        try testing.expectEqual(backoff, wake - rig.service.now());
+        rig.service.clock.set(wake);
     }
     try testing.expectEqual(@as(usize, 1), rig.service.count(.feedback));
 
@@ -891,8 +922,8 @@ test "listens whose delivery cannot be marked back off 60 s, 120 s and on to an 
 
     for ([_]i64{ 60_000, 120_000, 240_000 }) |backoff| {
         const wake = rig.pass();
-        try testing.expectEqual(backoff, wake - rig.service.now);
-        rig.service.now = wake;
+        try testing.expectEqual(backoff, wake - rig.service.now());
+        rig.service.clock.set(wake);
     }
     try testing.expectEqual(@as(usize, 3), rig.service.count(.listens));
 
@@ -907,7 +938,7 @@ test "Now Playing is aged from when it was heard, not from when the worker drain
     try rig.start("now-playing-drain");
     defer rig.stop();
     const track = try rig.addTrack(null);
-    rig.service.now = 100_000;
+    rig.service.clock.set(100_000);
     const config: Config = .{ .enabled = true, .now_playing = true };
     const listen: Listen = .{ .track_id = track, .started_at = 1_700_000_000, .listened_ms = 10_000, .duration_ms = 180_000 };
 
@@ -928,6 +959,6 @@ test "repeated failures double the wait from a minute up to an hour and no furth
     defer rig.stop();
     var failures: u32 = 0;
     for ([_]i64{ 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000 }) |expected| {
-        try testing.expectEqual(expected, Worker.failureWake(&rig.gateway, &failures) - rig.service.now);
+        try testing.expectEqual(expected, Worker.failureWake(&rig.gateway, &failures) - rig.service.now());
     }
 }

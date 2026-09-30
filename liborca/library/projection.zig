@@ -8,18 +8,10 @@
 //! resolution policy, with a user lock outranking everything — and writes
 //! `artists`, `releases`, `recordings` and `tracks` from that. It is therefore
 //! re-runnable after a user edit or a provider acceptance, not only after a
-//! scan, which is the whole reason for the carve-out. See `docs/database.md`.
+//! scan. See `docs/database.md`.
 //!
-//! ## Why a folder is the unit of work
-//!
-//! Whether a Release is a compilation cannot be decided one file at a time.
-//! Rule 3 of the album-artist cascade — *every file sharing this album key in
-//! this folder names the same artist* — is a statement about a set, so the
-//! projection resolves a whole `(containing folder, album key)` group at once.
-//! The folder is also what makes reprojection incremental and indexed: a scan
-//! batch names a handful of folders, each folder is one range scan of the
-//! `locations(volume_id, uri)` index, and a scan that changed nothing names no
-//! folders and therefore does no work at all.
+//! The unit of work is a `(containing folder, album key)` group: whether a
+//! Release is a compilation is a statement about that set, not one file.
 
 const std = @import("std");
 const database = @import("../database/root.zig");
@@ -438,8 +430,8 @@ pub const Projection = struct {
                 .musicbrainz_recording_id = try dupeNullable(allocator, statement, 17),
             };
             self.applyExtraOverrides(&entry, extra);
-            // A blank row helps nobody find their music: 42 files in the
-            // reference library carry no title and the filename carries it.
+            // A blank row helps nobody find their music; the filename often
+            // carries the title the tags lack.
             if (entry.title.len == 0) {
                 entry.title = filenameStem(uri);
                 entry.title_from_filename = true;
@@ -769,14 +761,12 @@ fn year(date: []const u8) []const u8 {
 ///   already claims — a FLAC and an MP3 of one song. They share the position
 ///   and become one Track with two files, which is the point of the model.
 /// - Otherwise the file has no number, or its number is already taken by a
-///   different performance. Both are defects in the tags, and both are common:
-///   the reference library contains 108 files with no track number, an album
-///   whose two soundtracks are tagged with one title, and two files that both
-///   claim track 4. Neither case may drop a song, and neither may leave the
-///   position null — a null position has nothing to upsert on, so reprojecting
-///   would duplicate the row forever. The file takes the next free number on
-///   its disc in filename order and the fabrication is raised as a health issue
-///   rather than applied silently.
+///   different performance. Both are defects in the tags, and both are common.
+///   Neither case may drop a song, and neither may leave the position null —
+///   a null position has nothing to upsert on, so reprojecting would duplicate
+///   the row forever. The file takes the next free number on its disc in
+///   filename order and the fabrication is raised as a health issue rather
+///   than applied silently.
 fn assignPositions(allocator: std.mem.Allocator, entries: []Entry) !void {
     // Every stated number is reserved before anything is invented, so an
     // invented position can never displace one a file actually claimed.
@@ -1000,19 +990,8 @@ fn observedValue(text: ?[]const u8) ?metadata.Value {
     return .{ .text = present, .provenance = .observed_file };
 }
 
-fn dupeNullable(
-    allocator: std.mem.Allocator,
-    statement: database.sqlite.Statement,
-    column: c_int,
-) !?[]const u8 {
-    if (statement.columnIsNull(column)) return null;
-    return try allocator.dupe(u8, statement.columnText(column));
-}
-
-fn optionalInt64(statement: database.sqlite.Statement, column: c_int) ?i64 {
-    if (statement.columnIsNull(column)) return null;
-    return statement.columnInt64(column);
-}
+const dupeNullable = database.columns.dupeNullable;
+const optionalInt64 = database.columns.optionalInt64;
 
 const text_key = @import("../database/text_key.zig");
 
@@ -1074,12 +1053,7 @@ fn trackTitles(library: *database.LibraryDatabase) !database.TrackPage {
     return library.tracks.page(testing.allocator, .{ .limit = 256, .offset = 0 });
 }
 
-fn scalar(library: *database.LibraryDatabase, sql: [:0]const u8) !i64 {
-    var statement = try library.database.prepare(sql);
-    defer statement.deinit();
-    if (try statement.step() != .row) return error.SqlFailed;
-    return statement.columnInt64(0);
-}
+const scalar = database.columns.scalar;
 
 test "an explicit album artist names the release and keeps it off the compilation list" {
     var library = try openTestLibrary("file:orca-projection-albumartist?mode=memory&cache=shared");
@@ -1102,7 +1076,7 @@ test "an explicit album artist names the release and keeps it off the compilatio
     const result = try projection.run(.all);
     try testing.expectEqual(@as(u64, 2), result.tracks_written);
     try testing.expectEqual(@as(u64, 0), result.compilations);
-    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT is_compilation FROM releases;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT is_compilation FROM releases;"));
     var page = try library.tracks.page(testing.allocator, .{ .limit = 1, .offset = 0 });
     defer page.deinit();
     try testing.expectEqualStrings("The Beatles", page.items[0].album_artist);
@@ -1174,7 +1148,7 @@ test "several artists with no album artist and no flag become a compilation" {
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     const result = try projection.run(.all);
     try testing.expectEqual(@as(u64, 1), result.compilations);
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT is_compilation FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT is_compilation FROM releases;"));
 }
 
 test "two albums in one artist folder stay two releases" {
@@ -1223,7 +1197,7 @@ test "a multi-disc release records its disc count and keeps both positions" {
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
     try testing.expectEqual(@as(u64, 1), try library.releases.count());
-    try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT disc_count FROM releases;"));
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT disc_count FROM releases;"));
     try testing.expectEqual(@as(u64, 2), try library.tracks.count());
 }
 
@@ -1250,7 +1224,7 @@ test "a missing track number becomes a synthetic position and a health issue" {
     // The invented position never lands on one a file actually claimed.
     try testing.expectEqual(
         @as(i64, 2),
-        try scalar(&library, "SELECT track_number FROM tracks WHERE title='Stray';"),
+        try scalar(library.database, "SELECT track_number FROM tracks WHERE title='Stray';"),
     );
     var issues = try library.health_issues.page(testing.allocator, 16, 0);
     defer issues.deinit();
@@ -1265,8 +1239,8 @@ test "a missing track number becomes a synthetic position and a health issue" {
 test "two songs claiming one track number both stay in the library" {
     var library = try openTestLibrary("file:orca-projection-collision?mode=memory&cache=shared");
     defer library.close();
-    // The reference library's own defect: two files of one album both tagged
-    // track 4, so the position model alone would list three songs, not four.
+    // Two files of one album both tagged track 4, so the position model alone
+    // would list three songs, not four.
     for ([_][2][]const u8{
         .{ "/m/MitiS/01 Oasis (vocal mix).flac", "Oasis (vocal mix)" },
         .{ "/m/MitiS/02 For So Long.flac", "For So Long" },
@@ -1302,7 +1276,7 @@ test "two songs claiming one track number both stay in the library" {
     try testing.expectEqual(@as(u64, 4), try library.tracks.count());
     try testing.expectEqual(
         @as(i64, 3),
-        try scalar(&library, "SELECT track_number FROM tracks WHERE title LIKE '%instrumental%';"),
+        try scalar(library.database, "SELECT track_number FROM tracks WHERE title LIKE '%instrumental%';"),
     );
     var issues = try library.health_issues.page(testing.allocator, 16, 0);
     defer issues.deinit();
@@ -1349,11 +1323,11 @@ test "a FLAC and an MP3 of one song collapse to one recording with the FLAC pref
     try testing.expectEqual(@as(u64, 1), try library.recordings.count());
     try testing.expectEqual(
         flac,
-        try scalar(&library, "SELECT preferred_file_id FROM tracks;"),
+        try scalar(library.database, "SELECT preferred_file_id FROM tracks;"),
     );
     try testing.expectEqual(
         @as(i64, 2),
-        try scalar(&library, "SELECT count(*) FROM files WHERE recording_id IS NOT NULL;"),
+        try scalar(library.database, "SELECT count(*) FROM files WHERE recording_id IS NOT NULL;"),
     );
     _ = mp3;
 }
@@ -1370,7 +1344,7 @@ test "a love survives its Track being reprojected under a new id" {
     });
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    const before = try scalar(&library, "SELECT id FROM tracks;");
+    const before = try scalar(library.database, "SELECT id FROM tracks;");
     _ = try library.feedback.set(&.{before}, .loved);
 
     try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
@@ -1382,14 +1356,14 @@ test "a love survives its Track being reprojected under a new id" {
     } });
     _ = try projection.run(.all);
 
-    const after = try scalar(&library, "SELECT id FROM tracks;");
+    const after = try scalar(library.database, "SELECT id FROM tracks;");
     try testing.expect(after != before);
     try testing.expectEqual(@as(u64, 1), try library.tracks.count());
     try testing.expectEqual(database.Feedback.loved, try library.feedback.forTrack(after));
     const summary = (try library.tracks.byId(testing.allocator, after)).?;
     defer summary.deinit(testing.allocator);
     try testing.expectEqual(database.Feedback.loved, summary.feedback);
-    try testing.expectEqual(try scalar(&library, "SELECT recording_id FROM tracks;"), summary.recording_id.?);
+    try testing.expectEqual(try scalar(library.database, "SELECT recording_id FROM tracks;"), summary.recording_id.?);
 }
 
 test "a hate survives reprojecting a Track backed by two encodings" {
@@ -1406,13 +1380,13 @@ test "a hate survives reprojecting a Track backed by two encodings" {
     _ = try observe(&library, "/m/Artist/one.flac", .flac, tags);
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    const track = try scalar(&library, "SELECT id FROM tracks;");
+    const track = try scalar(library.database, "SELECT id FROM tracks;");
     _ = try library.feedback.set(&.{track}, .hated);
 
     _ = try projection.run(.all);
 
     try testing.expectEqual(database.Feedback.hated, try library.feedback.forTrack(track));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM feedback;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM feedback;"));
 }
 
 test "artist keys fold case, width and whitespace without folding distinct scripts together" {
@@ -1495,14 +1469,14 @@ test "projecting twice writes the same rows rather than duplicating them" {
     const releases = try library.releases.count();
     const recordings = try library.recordings.count();
     const artists = try library.artists.count();
-    const identifiers = try scalar(&library, "SELECT sum(id) FROM tracks;");
+    const identifiers = try scalar(library.database, "SELECT sum(id) FROM tracks;");
 
     _ = try projection.run(.all);
     try testing.expectEqual(tracks, try library.tracks.count());
     try testing.expectEqual(releases, try library.releases.count());
     try testing.expectEqual(recordings, try library.recordings.count());
     try testing.expectEqual(artists, try library.artists.count());
-    try testing.expectEqual(identifiers, try scalar(&library, "SELECT sum(id) FROM tracks;"));
+    try testing.expectEqual(identifiers, try scalar(library.database, "SELECT sum(id) FROM tracks;"));
 }
 
 test "a scoped reprojection touches only the folders its files live in" {
@@ -1658,11 +1632,11 @@ test "the preferred encoding is chosen by declared properties rather than contai
     try testing.expectEqual(@as(u64, 1), try library.tracks.count());
     try testing.expectEqual(
         flac,
-        try scalar(&library, "SELECT preferred_file_id FROM tracks;"),
+        try scalar(library.database, "SELECT preferred_file_id FROM tracks;"),
     );
     try testing.expectEqual(
         @as(i64, 213_040),
-        try scalar(&library, "SELECT duration_ms FROM tracks;"),
+        try scalar(library.database, "SELECT duration_ms FROM tracks;"),
     );
     _ = mp3;
 }
@@ -1828,17 +1802,17 @@ test "every projected track is filed under an artist row rather than a name" {
 
     try testing.expectEqual(
         @as(i64, 0),
-        try scalar(&library, "SELECT count(*) FROM tracks WHERE artist_id IS NULL;"),
+        try scalar(library.database, "SELECT count(*) FROM tracks WHERE artist_id IS NULL;"),
     );
     try testing.expectEqual(
         @as(i64, 0),
-        try scalar(&library, "SELECT count(*) FROM releases WHERE album_artist_id IS NULL;"),
+        try scalar(library.database, "SELECT count(*) FROM releases WHERE album_artist_id IS NULL;"),
     );
     // The featured credit resolves to the band, because its MusicBrainz artist
     // id outranks the name it was tagged with.
     const band = try artistIdOf(&library, "The Band");
     try testing.expectEqual(@as(i64, 3), try scalar(
-        &library,
+        library.database,
         "SELECT count(*) FROM tracks WHERE artist_id=(SELECT id FROM artists WHERE name='The Band');",
     ));
     var page = try library.tracks.page(testing.allocator, .{ .artist_id = band, .limit = 16 });
@@ -1846,7 +1820,7 @@ test "every projected track is filed under an artist row rather than a name" {
     try testing.expectEqual(@as(usize, 3), page.items.len);
 }
 
-test "a leading article does not decide where an artist files" {
+test "the artist browse order files a name by its sort key rather than its leading article" {
     var library = try openTestLibrary("file:orca-projection-sortname?mode=memory&cache=shared");
     defer library.close();
     try observeBrowseLibrary(&library);
@@ -1872,7 +1846,7 @@ test "a migrated library files every track exactly where a fresh projection does
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
 
-    const projected = try scalar(&library, browse_fingerprint);
+    const projected = try scalar(library.database, browse_fingerprint);
     // Exactly the state a version-8 database is in: the columns exist, and
     // nothing has ever filled them.
     try library.database.exec(
@@ -1880,11 +1854,11 @@ test "a migrated library files every track exactly where a fresh projection does
         \\UPDATE releases SET album_artist_id=NULL;
         \\UPDATE artists SET sort_name=NULL;
     );
-    try testing.expect(projected != try scalar(&library, browse_fingerprint));
+    try testing.expect(projected != try scalar(library.database, browse_fingerprint));
 
     try database.migrations.registerKeyFunctions(library.database);
     try library.database.exec(database.migrations.artist_backfill);
-    try testing.expectEqual(projected, try scalar(&library, browse_fingerprint));
+    try testing.expectEqual(projected, try scalar(library.database, browse_fingerprint));
 }
 
 /// One number over every value the browse model added, so "the same rows" is
@@ -2075,9 +2049,9 @@ test "a retagged file's old track, release and artist are pruned rather than lef
     try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
     try testing.expectEqual(@as(u64, 1), result.releases_pruned);
     try testing.expectEqual(@as(u64, 1), result.artists_pruned);
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM artists;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM artists;"));
     var page = try trackTitles(&library);
     defer page.deinit();
     try testing.expectEqualStrings("New Album", page.items[0].album);
@@ -2104,8 +2078,8 @@ test "a release that still has other tracks survives one of them moving away" {
     try testing.expectEqual(@as(u64, 1), result.tracks_pruned);
     try testing.expectEqual(@as(u64, 0), result.releases_pruned);
     try testing.expectEqual(@as(u64, 0), result.artists_pruned);
-    try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT count(*) FROM tracks;"));
-    try testing.expectEqual(@as(i64, 3), try scalar(&library, "SELECT max(track_number) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT max(track_number) FROM tracks;"));
 }
 
 test "locked album artist, disc, date and compilation values reach the projected release" {
@@ -2136,7 +2110,7 @@ test "locked album artist, disc, date and compilation values reach the projected
     defer page.deinit();
     try testing.expectEqualStrings("Edited Artist", page.items[0].album_artist);
     try testing.expectEqual(@as(?i64, 2), page.items[0].disc_number);
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases WHERE release_date = '2024';"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases WHERE release_date = '2024';"));
 }
 
 fn observeUnderRoot(
@@ -2190,7 +2164,7 @@ test "removing a root forgets its tracks, releases and artists" {
     _ = try observeUnderRoot(&library, kept_root, "/m/Kept/1.flac", singleArtistTags("Kept Artist", "Three", 1));
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
-    try testing.expectEqual(@as(i64, 3), try scalar(&library, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT count(*) FROM tracks;"));
 
     const removal = try library.library_roots.remove(testing.allocator, removed_root);
     defer removal.deinit();
@@ -2198,16 +2172,16 @@ test "removing a root forgets its tracks, releases and artists" {
     try testing.expectEqual(@as(u64, 2), removal.tracks_removed);
     try testing.expectEqual(@as(usize, 0), removal.surviving_file_ids.len);
 
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM artists;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM files;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM observed_file_tags;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM library_roots;"));
-    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM artists WHERE name = 'Old Artist';"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM track_search WHERE track_search MATCH 'Three';"));
-    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM track_search WHERE track_search MATCH 'One';"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM artists;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM files;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM observed_file_tags;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM locations;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM library_roots;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM artists WHERE name = 'Old Artist';"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM track_search WHERE track_search MATCH 'Three';"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM track_search WHERE track_search MATCH 'One';"));
     try expectNoForeignKeyViolations(&library);
 }
 
@@ -2236,10 +2210,10 @@ test "removing a root keeps a file that another root still locates" {
     try testing.expectEqual(@as(i64, 1), statement.columnInt64(0));
     try testing.expectEqual(@as(i64, 0), statement.columnInt64(1));
 
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM tracks;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM releases;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations WHERE uri = '/m/Kept/1.flac';"));
-    try testing.expectEqual(@as(i64, 0), try scalar(&library, "SELECT count(*) FROM locations WHERE uri LIKE '/m/Old/%';"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM locations WHERE uri = '/m/Kept/1.flac';"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM locations WHERE uri LIKE '/m/Old/%';"));
     try expectNoForeignKeyViolations(&library);
 }
 
@@ -2295,9 +2269,9 @@ test "removing a root keeps the listens of its files with no file" {
     const removal = try library.library_roots.remove(testing.allocator, removed_root);
     defer removal.deinit();
 
-    try testing.expectEqual(@as(i64, 2), try scalar(&library, "SELECT count(*) FROM listens;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NULL;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NOT NULL;"));
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM listens;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM listens WHERE file_id IS NULL;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM listens WHERE file_id IS NOT NULL;"));
     try expectNoForeignKeyViolations(&library);
 }
 
@@ -2310,6 +2284,6 @@ test "removing an unknown root is refused" {
         error.UnknownRoot,
         library.library_roots.remove(testing.allocator, root + 1000),
     );
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM locations;"));
-    try testing.expectEqual(@as(i64, 1), try scalar(&library, "SELECT count(*) FROM library_roots;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM locations;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM library_roots;"));
 }

@@ -64,7 +64,7 @@ pub const ZoneRuntime = struct {
     pipe: Pipe = .{},
     context: Context = undefined,
 
-    // ---- Zone-owned atomics read by the render callback ----
+    // Read by the render callback.
     /// Epoch the producer last submitted blocks under. Published *before* the
     /// blocks themselves, so the callback never discards audio it should keep.
     epoch: std.atomic.Value(u32) = .init(0),
@@ -77,17 +77,17 @@ pub const ZoneRuntime = struct {
     /// `frames since epoch - this`, because a gapless advance keeps the epoch.
     entry_anchor: std.atomic.Value(u64) = .init(0),
 
-    // ---- Control lane -> engine requests ----
+    // Written by the control lane, read by the engine.
     output_requested: std.atomic.Value(bool) = .init(false),
     requested_device_id: std.atomic.Value(u64) = .init(0),
 
-    // ---- Engine -> control lane published state ----
+    // Written by the engine, read by the control lane.
     published_output_state: std.atomic.Value(u8) = .init(@intFromEnum(zone_model.OutputState.closed)),
     published_recovery_attempts: std.atomic.Value(u32) = .init(0),
     published_quantum_frames: std.atomic.Value(u32) = .init(0),
     published_graph_rate_hz: std.atomic.Value(u32) = .init(0),
 
-    // ---- Engine-thread-only state ----
+    // Engine-thread-only state.
     output: ?output_api.Output = null,
     channels: u16 = 0,
     /// Canonical format the open stream was negotiated for. `RenderContext`

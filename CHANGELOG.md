@@ -40,6 +40,40 @@
   position, duration and gain first and the cursor last, and a status read
   takes the cursor first.
 
+### Providers
+
+- **Provider rate limits survive the process** (Library schema 19). A `429`
+  block and its backoff are stored per service in `provider_state`, so a
+  restart or a new `orca-cli scrobble` no longer sends into a block. A listen
+  that failed for a transient reason keeps its retry time in the queue
+  (`next_attempt_at`) instead of being released at once.
+- **One process at a time talks to each service.** A Gateway claims a
+  per-service lease in `provider_leases` before each request and releases
+  it when its job ends; a second claimant fails fast with
+  `error.ProviderBusy`. A matching or submission job fails with the new
+  `BusyService`, the listen worker reports the new `busy` state and tries
+  again after the lease runs out, and `orca-cli` prints "MusicBrainz is in
+  use by another Orca process" (breaking Zig API change: new enum values in
+  exhaustive switches).
+- **`Retry-After` is honoured uncapped, as delta-seconds or an HTTP-date, and
+  on a `503`.** It was capped at an hour, its date form was ignored, and a
+  `503`'s was ignored altogether.
+- **Every backoff Orca chooses is jittered** by a factor between 0.5 and 1.5,
+  so clients that failed together do not retry together. A server's own
+  `Retry-After` is never shortened.
+- **A query MusicBrainz or AcoustID refused is not sent again for 7 days.** A
+  `4xx` other than `401`, `403`, `408` and `429` is cached with its status. A
+  refused AcoustID lookup batch is asked again one fingerprint at a time, so
+  only the bad fingerprint's refusal is cached.
+- **`ScrobblerStatus.blocked_until`** reports when a stored block ends, also
+  when no worker is running; `orca-cli scrobble` and `scrobble --status`
+  print it.
+- **AcoustID submissions only send what AcoustID does not already know.** A
+  recording ID from an accepted proposal that AcoustID took part in is not
+  submitted back, and neither is a text-only match accepted in bulk
+  (`identification_proposals.accepted_in_bulk`). Acceptances made before
+  schema 19 count as reviewed.
+
 ### Idle power
 
 - **An idle Player makes no wakeups.** The engine thread slept 2 ms at a time
@@ -53,12 +87,29 @@
 
 ### Maintenance
 
-- **Removed:** the DSP graph (`Chain`, `PublishedChain`),
-  `audio/transition.zig`, the `Resampler` interface with its linear
-  implementation (`resampler.SampleRate` remains for fingerprints),
-  `published_device_delay_frames` and `applyAlgorithmicLatency`. Nothing
-  called them: the Player's DSP runs through `PlayerDsp` and playback never
-  resamples.
+- **`core/runtime.zig` is split** into `runtime_queue.zig`,
+  `runtime_listens.zig`, `runtime_roots.zig`, `runtime_jobs.zig`,
+  `runtime_status.zig`, `runtime_zones.zig` and `job_worker.zig`, with its
+  tests in `runtime_tests.zig` and `runtime_provider_tests.zig`. `JobWorker`
+  holds a tagged-union request and stats per job kind; the duplicate job's
+  counts are mapped into `ScanStats` only at the public boundary, as before.
+  The public API is unchanged.
+- **`database/repository.zig` is split by aggregate** into
+  `database/repository/`, and the column helpers copied across the library
+  code live once in `database/columns.zig`.
+- **One set of network test doubles** in `network/testing.zig`
+  (`ScriptedTransport`, `TestClock`) replaces the copies in each provider and
+  in the runtime tests.
+- **`orca-cli` dispatches through a command table** with one job-option
+  parser. `--help` is built from it and now lists `--volume` and
+  `--set-volume`.
+- **Removed:** the Last.fm adapter and `scrobble.Adapter`, the DSP graph
+  (`Chain`, `PublishedChain`), `audio/transition.zig`, the `Resampler`
+  interface with its linear implementation (`resampler.SampleRate` remains
+  for fingerprints), `published_device_delay_frames`, and uncalled functions
+  (`setEnabled`, `stampGeneration`, `jobSnapshot`, `applyAlgorithmicLatency`).
+- **Comments that narrated history, and section dividers, are removed**;
+  those that held an invariant state it instead.
 
 ## 0.2.0 - 2026-09-29
 

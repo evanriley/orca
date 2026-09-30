@@ -47,8 +47,6 @@ fn suffixButton(row: *gtk.Widget, label: ?[*:0]const u8, icon: ?[*:0]const u8, h
     return button;
 }
 
-// ------------------------------------------------------------------ library
-
 const PendingRemoval = struct {
     self: *App,
     root_id: i64,
@@ -252,8 +250,6 @@ fn libraryPage(self: *App) *gtk.Widget {
     return page;
 }
 
-// ----------------------------------------------------------------- playback
-
 fn replayGainChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const selected = adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row));
@@ -300,8 +296,6 @@ fn playbackPage(self: *App) *gtk.Widget {
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, output));
     return page;
 }
-
-// -------------------------------------------------------------------- sound
 
 const band_count = app.equalizer_band_count;
 const equalizer_settle_ms: c_uint = 60;
@@ -593,8 +587,6 @@ fn soundPage(self: *App) *gtk.Widget {
     return page;
 }
 
-// ---------------------------------------------------------------- listening
-
 const token_settings_url = "https://listenbrainz.org/settings/";
 const secret_capacity = 256;
 
@@ -629,8 +621,6 @@ fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     self.announce_now_playing = enabled;
     settings.save(self);
 }
-
-// -------------------------------------------------------------- credentials
 
 const Credential = struct {
     service: [:0]const u8,
@@ -881,6 +871,7 @@ fn queueText(buffer: []u8, self: *App, status: liborca.ScrobblerStatus) [:0]cons
         .invalid_token => "Token rejected",
         .rate_limited => "Waiting — ListenBrainz asked us to slow down",
         .backing_off => "Waiting — ListenBrainz could not be reached, trying again later",
+        .busy => "Waiting — another Orca process is sending to ListenBrainz",
         .offline => "Offline",
         .needs_token => "Not connected — add your user token",
         .disabled, .idle, .validating, .submitting => if (user.len != 0)
@@ -962,8 +953,6 @@ fn listeningPage(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(page, "map", gtk.callback(listeningMapped), self);
     return page;
 }
-
-// ------------------------------------------------------------------- dialog
 
 fn closeDialog(self: *App) void {
     const dialog = self.preferences_dialog orelse return;

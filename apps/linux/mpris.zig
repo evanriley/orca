@@ -402,8 +402,6 @@ pub const Mpris = struct {
     }
 };
 
-// ---------------------------------------------------------------- helpers
-
 fn boolean(value: bool) gtk.gboolean {
     return if (value) gtk.true_ else gtk.false_;
 }
@@ -441,8 +439,6 @@ fn strvVariant(allocator: std.mem.Allocator, text: []const u8) ?*gtk.GVariant {
 fn self_from(data: ?*anyopaque) *Mpris {
     return @ptrCast(@alignCast(data.?));
 }
-
-// ---------------------------------------------------------------- methods
 
 fn playerMethod(mpris: *Mpris, method: []const u8, parameters: *gtk.GVariant) void {
     const runtime = mpris.runtime orelse return;

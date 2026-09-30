@@ -587,8 +587,6 @@ fn readExact(readable: source.ReadableSource, offset: u64, buffer: []u8) !usize 
     return filled;
 }
 
-// ------------------------------------------------------------------- writing
-
 /// Bytes of padding a rewritten tag carries, so another tagger can edit it in
 /// place.
 const write_padding: usize = 1024;

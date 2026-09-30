@@ -191,8 +191,6 @@ fn storedLoudness(
     };
 }
 
-// ---------------------------------------------------------------------- tests
-
 const testing = std.testing;
 
 test "a bitrate is the file size over the duration, rounded to a kilobit" {

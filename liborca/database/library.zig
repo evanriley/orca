@@ -59,6 +59,7 @@ pub const LibraryDatabase = struct {
     analysis_cache: repository.AnalysisCacheRepository,
     health_issues: repository.HealthIssueRepository,
     provider_cache: repository.ProviderCacheRepository,
+    provider_state: repository.ProviderStateRepository,
     scrobbles: repository.ScrobbleQueueRepository,
     listens: repository.ListenRepository,
     feedback: repository.FeedbackRepository,
@@ -117,6 +118,7 @@ pub const LibraryDatabase = struct {
             .analysis_cache = .{ .db = database, .write_lane = write_lane },
             .health_issues = .{ .db = database, .write_lane = write_lane },
             .provider_cache = .{ .db = database, .write_lane = write_lane },
+            .provider_state = .{ .db = database, .write_lane = write_lane },
             .scrobbles = .{ .db = database, .write_lane = write_lane },
             .listens = .{ .db = database, .write_lane = write_lane },
             .feedback = .{ .db = database, .write_lane = write_lane },
@@ -771,8 +773,7 @@ test "observed tags round trip every field a reader can produce" {
     try std.testing.expectEqualStrings("Island", values.label.?);
     try std.testing.expectEqualStrings("GBAYE7100123", values.isrc.?);
     try std.testing.expectEqualStrings("official", values.release_status.?);
-    // The MusicBrainz release id is the projection's strongest grouping key and
-    // used to be dropped at this boundary entirely.
+    // The MusicBrainz release id is the projection's strongest grouping key.
     try std.testing.expectEqualStrings("release-id", values.musicbrainz_release_id.?);
     try std.testing.expectEqualStrings("album-artist-id", values.musicbrainz_album_artist_id.?);
     try std.testing.expectEqual(@as(u64, 51200), values.artwork.?.byte_size);
@@ -1008,8 +1009,7 @@ test "an artist's tracks include the ones on a release they are the album artist
     // The narrow definition -- credit only -- leaves an artist owning an album
     // and no songs whenever the track credit differs from the album credit,
     // which real tags do constantly: a featured artist, a collaboration, a
-    // separator convention, or simply no ARTIST tag at all. Browsing to that
-    // artist showed the album and nothing in it.
+    // separator convention, or simply no ARTIST tag at all.
     var library = try LibraryDatabase.open(
         std.testing.allocator,
         std.testing.io,
@@ -1063,8 +1063,7 @@ test "an artist's tracks include the ones on a release they are the album artist
         try library.tracks.countMatching(.{ .artist_id = headliner }),
     );
 
-    // The count and the page it counts must agree. They had separate copies of
-    // the predicate and drifted the moment this definition widened.
+    // The count and the page it counts must agree.
     var artists = try library.artists.page(std.testing.allocator, .{ .limit = 16 });
     defer artists.deinit();
     for (artists.items) |artist| {
@@ -1080,8 +1079,7 @@ test "an artist's tracks include the ones on a release they are the album artist
     );
 
     // ...but they do appear on the record, and the release listing has to say
-    // so. Defining an artist's tracks widely and their releases narrowly left
-    // 276 artists in a real library showing songs and an empty album list.
+    // so, or an artist shows songs and an empty album list.
     var featured_releases = try library.releases.page(
         std.testing.allocator,
         .{ .album_artist_id = featured },
@@ -1111,9 +1109,7 @@ test "an artist's tracks include the ones on a release they are the album artist
 
 test "an artist search matches the spelling a person types, not the one stored" {
     // The artist key folds punctuation and case, so a search has to fold the
-    // needle the same way or it is stricter than identity is: the library
-    // holds `El‐P` with U+2010 because that is what the album artist tag said,
-    // and nobody types that.
+    // needle the same way or it is stricter than identity is.
     var library = try LibraryDatabase.open(
         std.testing.allocator,
         std.testing.io,
@@ -1204,12 +1200,7 @@ test "recording a missing file declines the write lane rather than waiting for i
     );
 }
 
-fn testScalar(library: *LibraryDatabase, sql: [:0]const u8) !i64 {
-    var statement = try library.database.prepare(sql);
-    defer statement.deinit();
-    if (try statement.step() != .row) return error.SqlFailed;
-    return statement.columnInt64(0);
-}
+const testScalar = @import("columns.zig").scalar;
 
 fn testListen(file_id: i64, started_at: i64) repository.ListenInput {
     return .{
@@ -1238,7 +1229,7 @@ test "a recorded listen is counted for its Track and survives the Track being re
         .preferred_file_id = file_id,
     };
     try library.tracks.upsertTracks(&.{track});
-    const first_id = try testScalar(&library, "SELECT id FROM tracks;");
+    const first_id = try testScalar(library.database, "SELECT id FROM tracks;");
     try std.testing.expectEqual(
         repository.PlayStats{ .play_count = 0, .last_played_at = null },
         try library.listens.trackPlayStats(first_id),
@@ -1254,7 +1245,7 @@ test "a recorded listen is counted for its Track and survives the Track being re
     try library.tracks.upsertTracks(&.{.{ .title = "Filler" }});
     try library.database.exec("DELETE FROM tracks WHERE title='Northern Sky';");
     try library.tracks.upsertTracks(&.{track});
-    const second_id = try testScalar(&library, "SELECT id FROM tracks WHERE title='Northern Sky';");
+    const second_id = try testScalar(library.database, "SELECT id FROM tracks WHERE title='Northern Sky';");
     try std.testing.expect(second_id != first_id);
     try std.testing.expectEqual(
         repository.PlayStats{ .play_count = 2, .last_played_at = 1_700_001_000 },
@@ -1278,12 +1269,12 @@ test "a listen stays after its file is forgotten, with no file" {
 
     try library.database.exec("DELETE FROM files;");
 
-    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM listens;"));
     try std.testing.expectEqual(
         @as(i64, 1),
-        try testScalar(&library, "SELECT count(*) FROM listens WHERE file_id IS NULL AND title='Northern Sky';"),
+        try testScalar(library.database, "SELECT count(*) FROM listens WHERE file_id IS NULL AND title='Northern Sky';"),
     );
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM pragma_foreign_key_check;"));
 }
 
 test "recording the same file and start twice counts once and queues once" {
@@ -1300,7 +1291,7 @@ test "recording the same file and start twice counts once and queues once" {
 
     try std.testing.expect(first != null);
     try std.testing.expectEqual(@as(?i64, null), again);
-    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM listens;"));
     try std.testing.expectEqual(@as(u64, 1), try library.scrobbles.pendingCount());
     const entries = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 0, 60, 10);
     defer {
@@ -1325,11 +1316,11 @@ test "updating a listen's time heard only ever raises it" {
     _ = try library.listens.record(testListen(file_id, 1_700_000_000));
 
     try library.listens.updateListened(file_id, 1_700_000_000, 230_000);
-    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(&library, "SELECT listened_ms FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(library.database, "SELECT listened_ms FROM listens;"));
     try library.listens.updateListened(file_id, 1_700_000_000, 100_000);
-    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(&library, "SELECT listened_ms FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 230_000), try testScalar(library.database, "SELECT listened_ms FROM listens;"));
     try library.listens.updateListened(file_id, 1_700_000_001, 300_000);
-    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM listens;"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM listens;"));
 }
 
 test "a listen subject carries the Track's metadata and the file's MusicBrainz ids" {
@@ -1354,7 +1345,7 @@ test "a listen subject carries the Track's metadata and the file's MusicBrainz i
         .track_number = 8,
         .preferred_file_id = file_id,
     }});
-    const track_id = try testScalar(&library, "SELECT id FROM tracks;");
+    const track_id = try testScalar(library.database, "SELECT id FROM tracks;");
 
     const subject = (try library.listens.listenSubject(std.testing.allocator, track_id)).?;
     defer subject.deinit();
@@ -1378,7 +1369,7 @@ test "two owners never lease the same event and an expired lease can be reclaime
     defer library.close();
     try library.scrobbles.enqueue("listenbrainz", "one", "{}");
     try library.scrobbles.enqueue("listenbrainz", "two", "{}");
-    try library.scrobbles.enqueue("lastfm", "other", "{}");
+    try library.scrobbles.enqueue("other-service", "other", "{}");
 
     const first = try library.scrobbles.lease(std.testing.allocator, "listenbrainz", 1, 100, 200, 1);
     defer freeEntries(first);
@@ -1441,7 +1432,7 @@ test "releasing a leased event does not count an attempt but retrying does" {
     try std.testing.expectEqual(@as(u64, 0), try library.scrobbles.pendingCount());
     try std.testing.expectEqual(
         @as(i64, 1),
-        try testScalar(&library, "SELECT count(*) FROM scrobble_queue WHERE state=3 AND attempt_count=2 AND lease_owner IS NULL;"),
+        try testScalar(library.database, "SELECT count(*) FROM scrobble_queue WHERE state=3 AND attempt_count=2 AND lease_owner IS NULL;"),
     );
 }
 
@@ -1485,7 +1476,7 @@ fn addFeedbackTrack(library: *LibraryDatabase, title: []const u8, recording_id: 
         .preferred_file_id = file_id,
     }});
     var sql: [96]u8 = undefined;
-    return testScalar(library, try std.fmt.bufPrintSentinel(
+    return testScalar(library.database, try std.fmt.bufPrintSentinel(
         &sql,
         "SELECT id FROM tracks WHERE preferred_file_id = {d};",
         .{file_id},
@@ -1495,7 +1486,7 @@ fn addFeedbackTrack(library: *LibraryDatabase, title: []const u8, recording_id: 
 
 fn addRecording(library: *LibraryDatabase) !i64 {
     try library.database.exec("INSERT INTO recordings(title) VALUES ('Song');");
-    return testScalar(library, "SELECT max(id) FROM recordings;");
+    return testScalar(library.database, "SELECT max(id) FROM recordings;");
 }
 
 test "feedback on one Track shows on every Track of its recording, in pages and searches" {
@@ -1527,7 +1518,7 @@ test "feedback on one Track shows on every Track of its recording, in pages and 
 
     _ = try library.feedback.set(&.{compilation}, .hated);
     try std.testing.expectEqual(Feedback.hated, try library.feedback.forTrack(flac));
-    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
 }
 
 test "feedback on a Track with no recording or no row is skipped and counted" {
@@ -1541,7 +1532,7 @@ test "feedback on a Track with no recording or no row is skipped and counted" {
     try std.testing.expectEqual(@as(u32, 2), change.skipped);
     try std.testing.expectEqual(Feedback.none, try library.feedback.forTrack(bare));
     try std.testing.expectEqual(Feedback.loved, try library.feedback.forTrack(kept));
-    try std.testing.expectEqual(@as(i64, 1), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
 
     var many: [repository.max_page + 1]i64 = undefined;
     @memset(&many, kept);
@@ -1557,7 +1548,7 @@ test "clearing feedback that was never sent leaves nothing to send" {
 
     _ = try library.feedback.set(&.{track}, .none);
 
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
     try std.testing.expectEqual(@as(u64, 0), try library.feedback.pendingSyncCount());
     try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
 }
@@ -1582,7 +1573,7 @@ test "clearing feedback that was sent stays pending until the clear is sent" {
     defer clear.deinit();
     try std.testing.expectEqual(Feedback.none, clear.feedback);
     try library.feedback.markSynced(clear.recording_id, .none);
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
 }
 
 test "a change made while feedback was being sent is still pending after it is marked synced" {
@@ -1611,14 +1602,14 @@ test "a clear made while a love was being sent is sent next" {
     defer sending.deinit();
 
     _ = try library.feedback.set(&.{track}, .none);
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
     try library.feedback.markSynced(sending.recording_id, sending.feedback);
 
     const clear = (try library.feedback.nextToSync(std.testing.allocator, settled_at)).?;
     defer clear.deinit();
     try std.testing.expectEqual(Feedback.none, clear.feedback);
     try library.feedback.markSynced(clear.recording_id, .none);
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
 }
 
 test "rejected feedback is not offered again until the user changes it" {
@@ -1692,24 +1683,28 @@ const rival_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
 const match_payload = "{\"title\":\"Song\",\"artist\":\"Nick Drake\",\"album\":\"Bryter Layter\"}";
 
 fn putProposal(library: *LibraryDatabase, file_id: i64, mbid: []const u8, confidence: f32, payload: []const u8) !i64 {
+    return putProposalFrom(library, file_id, "musicbrainz", mbid, confidence, payload);
+}
+
+fn putProposalFrom(library: *LibraryDatabase, file_id: i64, provider: []const u8, mbid: []const u8, confidence: f32, payload: []const u8) !i64 {
     _ = try library.identification_proposals.put(.{
         .file_id = file_id,
-        .provider = "musicbrainz",
+        .provider = provider,
         .provider_id = mbid,
         .confidence = confidence,
         .payload = payload,
     });
-    return testScalar(library, "SELECT max(id) FROM identification_proposals;");
+    return testScalar(library.database, "SELECT max(id) FROM identification_proposals;");
 }
 
 fn playFileOf(library: *LibraryDatabase, track_id: i64) !i64 {
     var sql: [96]u8 = undefined;
-    return testScalar(library, try std.fmt.bufPrintSentinel(&sql, "SELECT preferred_file_id FROM tracks WHERE id = {d};", .{track_id}, 0));
+    return testScalar(library.database, try std.fmt.bufPrintSentinel(&sql, "SELECT preferred_file_id FROM tracks WHERE id = {d};", .{track_id}, 0));
 }
 
 fn proposalState(library: *LibraryDatabase, proposal_id: i64) !repository.ProposalState {
     var sql: [96]u8 = undefined;
-    const state = try testScalar(library, try std.fmt.bufPrintSentinel(&sql, "SELECT state FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
+    const state = try testScalar(library.database, try std.fmt.bufPrintSentinel(&sql, "SELECT state FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
     return @enumFromInt(@as(u8, @intCast(state)));
 }
 
@@ -1917,7 +1912,7 @@ test "matching selects a Track until each provider in scope has answered for its
 
 fn proposalScalar(library: *LibraryDatabase, comptime column: []const u8, proposal_id: i64) !i64 {
     var sql: [128]u8 = undefined;
-    return testScalar(library, try std.fmt.bufPrintSentinel(&sql, "SELECT " ++ column ++ " FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
+    return testScalar(library.database, try std.fmt.bufPrintSentinel(&sql, "SELECT " ++ column ++ " FROM identification_proposals WHERE id = {d};", .{proposal_id}, 0));
 }
 
 test "a search's proposals merge by recording, two providers agreeing raise the confidence, and a dismissed one stays dismissed" {
@@ -1931,7 +1926,7 @@ test "a search's proposals merge by recording, two providers agreeing raise the 
         .found_by = .{ .musicbrainz = true },
         .payload = .{ .title = "Song", .album = "Bryter Layter", .mb_score = 100, .musicbrainz_confidence = 0.8 },
     }}));
-    const merged = try testScalar(&library, "SELECT max(id) FROM identification_proposals;");
+    const merged = try testScalar(library.database, "SELECT max(id) FROM identification_proposals;");
     const legacy = try putProposal(&library, file, rival_mbid, 0.6, match_payload);
     try proposals.dismiss(legacy);
     try std.testing.expectEqual(@as(u32, 1), try proposals.recordSearch(std.testing.allocator, file, .{ .acoustid = true }, &.{
@@ -1947,8 +1942,8 @@ test "a search's proposals merge by recording, two providers agreeing raise the 
         },
     }));
 
-    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_proposals;"));
-    const page = try proposals.pendingForTrack(std.testing.allocator, try testScalar(&library, "SELECT min(id) FROM tracks;"), 10);
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(library.database, "SELECT count(*) FROM identification_proposals;"));
+    const page = try proposals.pendingForTrack(std.testing.allocator, try testScalar(library.database, "SELECT min(id) FROM tracks;"), 10);
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 1), page.items.len);
     const both = page.items[0];
@@ -1961,14 +1956,14 @@ test "a search's proposals merge by recording, two providers agreeing raise the 
     try std.testing.expectApproxEqAbs(@as(f32, 0.95), both.acoustid_score.?, 0.0001);
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, legacy));
     try std.testing.expectEqual(@as(i64, 96), try proposalScalar(&library, "CAST(round(confidence * 100) AS INTEGER)", legacy));
-    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_searches;"));
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(library.database, "SELECT count(*) FROM identification_searches;"));
 
     try std.testing.expectError(error.InvalidIdentificationProposal, proposals.recordSearch(std.testing.allocator, file, .{ .musicbrainz = true }, &.{.{
         .recording_mbid = "not-a-recording",
         .found_by = .{ .musicbrainz = true },
         .payload = .{},
     }}));
-    try std.testing.expectEqual(@as(i64, 2), try testScalar(&library, "SELECT count(*) FROM identification_searches;"));
+    try std.testing.expectEqual(@as(i64, 2), try testScalar(library.database, "SELECT count(*) FROM identification_searches;"));
 }
 
 fn setRecordingId(library: *LibraryDatabase, track_id: i64, mbid: []const u8, provenance: metadata.Provenance, locked: bool) !void {
@@ -2021,6 +2016,35 @@ test "only a recording ID Orca chose and the file's tag does not carry is offere
     defer later.deinit();
     try std.testing.expectEqual(@as(usize, 1), later.items.len);
     try std.testing.expectEqual(locked_edit, later.items[0].track_id);
+}
+
+test "a recording ID AcoustID proposed or a text-only match accepted in bulk is not offered to AcoustID, while reviewed text matches and edits are" {
+    var library = try openFeedbackLibrary("submittable-evidence");
+    defer library.close();
+    const proposals = &library.identification_proposals;
+    const fingerprinted = "{\"title\":\"Song\",\"acoustid_score\":0.97}";
+    const from_acoustid = try addFeedbackTrack(&library, "From AcoustID", try addRecording(&library), null);
+    _ = try proposals.acceptProposal(std.testing.allocator, try putProposalFrom(&library, try playFileOf(&library, from_acoustid), "acoustid", match_mbid, 0.9, fingerprinted));
+    const from_both = try addFeedbackTrack(&library, "From Both", try addRecording(&library), null);
+    _ = try proposals.acceptProposal(std.testing.allocator, try putProposalFrom(&library, try playFileOf(&library, from_both), "musicbrainz+acoustid", match_mbid, 0.9, fingerprinted));
+    const reviewed = try addFeedbackTrack(&library, "Reviewed", try addRecording(&library), null);
+    _ = try proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, reviewed), match_mbid, 0.95, match_payload));
+    const edited = try addFeedbackTrack(&library, "Edited", try addRecording(&library), null);
+    _ = try proposals.acceptProposal(std.testing.allocator, try putProposalFrom(&library, try playFileOf(&library, edited), "acoustid", match_mbid, 0.9, fingerprinted));
+    try setRecordingId(&library, edited, match_mbid, .user, false);
+    const bulk = try addFeedbackTrack(&library, "Bulk", try addRecording(&library), null);
+    const bulk_proposal = try putProposal(&library, try playFileOf(&library, bulk), match_mbid, 0.95, match_payload);
+    try std.testing.expectEqual(@as(u64, 1), try proposals.acceptConfident(std.testing.allocator, 0.9));
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, bulk_proposal));
+    const submissions = &library.acoustid_submissions;
+
+    try std.testing.expectEqual(@as(u64, 2), try submissions.submittableCount());
+    const page = try submissions.submittablePage(std.testing.allocator, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(reviewed, page.items[0].track_id);
+    try std.testing.expectEqual(edited, page.items[1].track_id);
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM identification_proposals WHERE accepted_in_bulk = 1;"));
 }
 
 fn queryPlan(library: *LibraryDatabase, comptime sql: []const u8) ![]u8 {
@@ -2079,7 +2103,7 @@ test "a change is offered only once it has stood for two seconds, and the count 
     defer library.close();
     const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), feedback_mbid);
     _ = try library.feedback.set(&.{track}, .loved);
-    const changed_at = try testScalar(&library, "SELECT updated_at FROM feedback;");
+    const changed_at = try testScalar(library.database, "SELECT updated_at FROM feedback;");
 
     try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, changed_at) == null);
     try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, changed_at + 1) == null);
@@ -2100,7 +2124,7 @@ test "clearing feedback the service refused forgets it without a clear to send" 
     const change = try library.feedback.set(&.{track}, .none);
 
     try std.testing.expectEqual(@as(u32, 1), change.updated);
-    try std.testing.expectEqual(@as(i64, 0), try testScalar(&library, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
     try std.testing.expect(try library.feedback.nextToSync(std.testing.allocator, settled_at) == null);
 }
 

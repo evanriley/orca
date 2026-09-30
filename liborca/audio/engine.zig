@@ -76,7 +76,6 @@ pub const PlayerEngine = struct {
     queue: ?*playback_queue.PlaybackQueue = null,
     opener: ?playback_queue.TrackOpener = null,
 
-    // ---- Acknowledged double-buffered zone-set publication ----
     /// Two slots, only one of which the engine can be referencing at a time.
     slots: [2][max_zones]*ZoneRuntime = undefined,
     slot_lens: [2]usize = .{ 0, 0 },
@@ -101,7 +100,7 @@ pub const PlayerEngine = struct {
     control_slot: u32 = 0,
     release_epoch: u64 = 0,
 
-    // ---- Engine-thread-only state ----
+    // Engine-thread-only state.
     adopted: []*ZoneRuntime = &.{},
     adopted_sequence: u64 = 0,
     clock_zone: ?*ZoneRuntime = null,
@@ -153,8 +152,6 @@ pub const PlayerEngine = struct {
         self.threaded.deinit();
         self.allocator.destroy(self);
     }
-
-    // ---------------------------------------------------------------- control
 
     /// Control lane. Hands the engine a new immutable zone set and does not
     /// return until the engine is provably using it, which is what makes it safe
@@ -251,8 +248,6 @@ pub const PlayerEngine = struct {
             std.Thread.yield() catch {};
         }
     }
-
-    // ----------------------------------------------------------------- engine
 
     /// Engine thread entry point. Registered with `work.Registry`, so shutdown
     /// and `destroyPlayer` cancel and join it rather than abandoning it.
@@ -849,8 +844,6 @@ fn watchOutput(runtime_zone: *ZoneRuntime, waker: ?work.Waker) void {
     active.setStateWaker(waker);
 }
 
-// ---------------------------------------------------------------------- tests
-
 const source_session = @import("source_session.zig");
 
 const RampDecoder = struct {
@@ -1310,8 +1303,6 @@ test "a lost output wakes a parked engine, which recovers it" {
     try std.testing.expectEqual(@as(usize, 2), harness.backend.opens);
 }
 
-// -------------------------------------------------------------- queue tests
-
 /// Opens a synthetic track per id. Stands in for `TrackSourceOpener` so the
 /// queue lane can be driven with no database, no filesystem and no hardware.
 const TrackPlan = struct {
@@ -1528,8 +1519,7 @@ test "reported duration follows the audible entry, not the one being decoded" {
     try harness.enqueue(&.{ 10, 11 });
     harness.player.play();
 
-    // Decode until the producer is a whole entry ahead of the audio, which is
-    // the window the defect lived in.
+    // Decode until the producer is a whole entry ahead of the audio.
     var pass: usize = 0;
     while (pass < 64 and harness.engine.gapless_transitions == 0) : (pass += 1)
         harness.step(0);
@@ -1598,8 +1588,7 @@ test "a seek during a gapless transition re-opens the audible entry" {
     try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
     try std.testing.expectEqual(target, harness.player.snapshot().position_frames);
 
-    // And the following entry still arrives afterwards, still gaplessly: a fix
-    // that corrected the seek but broke the next transition would not be one.
+    // And the following entry still arrives afterwards, still gaplessly.
     const gapless_before = harness.engine.gapless_transitions;
     pass = 0;
     while (pass < 1024 and harness.queue.cursorPosition() == 0) : (pass += 1)

@@ -1,19 +1,13 @@
 //! Finds the files a Library holds more than once, and records them where a
 //! person can act on them.
 //!
-//! `analysis/fingerprint.zig` has been able to compare two files for years.
-//! What it could not do was find the pair worth comparing: the only entry
-//! point took every candidate in the library as one slice and compared every
-//! pair, which is O(n^2) comparisons over a slice that cannot be built at
-//! 22,060 files, let alone at the plan's 500,000. Nothing called it, and
-//! nothing could have.
-//!
-//! What makes an indexed shape possible is that `library/analysis_pass.zig`
-//! now writes `files.audio_hash` — BLAKE3 over the decoded samples. Two files
-//! whose decoded audio hashes identically **are** the same audio, whatever
-//! their containers, bitrates or tags claim, and that is an index lookup
-//! rather than a comparison. Everything else the fingerprint decides, and it
-//! decides it only inside a bucket small enough to afford:
+//! Comparing every pair is O(n^2) and cannot run at 500,000 files, so
+//! candidates are found through indexes. `library/analysis_pass.zig` writes
+//! `files.audio_hash` — BLAKE3 over the decoded samples. Two files whose
+//! decoded audio hashes identically **are** the same audio, whatever their
+//! containers, bitrates or tags claim, and that is an index lookup rather than
+//! a comparison. Everything else the fingerprint decides, and it decides it
+//! only inside a bucket small enough to afford:
 //!
 //! - **selection** walks `files` by primary key, cursor-resumable, bounded;
 //! - the **exact bucket** is an equality search of `files_audio_hash`;
@@ -42,14 +36,10 @@ pub const CancellationToken = scanner.CancellationToken;
 /// comparisons one candidate can cost.
 ///
 /// This is what turns O(n^2) into O(n): the work is bounded by a constant per
-/// file rather than by the size of the library. Sixty-four is chosen against
-/// the reference library's duration density — 22,060 files spread over roughly
-/// four hundred distinct seconds of running time is about 55 files per second,
-/// so the default +/-250 ms window holds around 28 — and against the 500,000
-/// file target, where the same window holds about 62. A bucket that overflows
-/// is counted rather than silently trimmed: some pairs in it went uncompared,
-/// and a scan that quietly stopped looking would be the same lie of omission
-/// as reporting "no duplicates" for a library nobody has analyzed.
+/// file rather than by the size of the library. A bucket that overflows is
+/// counted rather than silently trimmed: some pairs in it went uncompared, and
+/// a scan that quietly stopped looking would be the same lie of omission as
+/// reporting "no duplicates" for a library nobody has analyzed.
 pub const max_bucket_peers = 64;
 
 pub const Result = struct {
@@ -136,32 +126,10 @@ pub const DuplicateScan = struct {
     /// How similar two temporal fingerprints must be before the pass will say
     /// so.
     ///
-    /// Very high on purpose, and the number is measured rather than chosen.
-    /// `likely_duplicate` is the finding that can be wrong, and a wrong one
-    /// costs a person the time to check a file that was fine.
-    ///
-    /// Two bands, both from the reference library and a corpus cut out of it:
-    ///
-    /// | pairs | similarity |
-    /// | --- | --- |
-    /// | one master as FLAC, WAV, 190k / 128k / 96k MP3 | 0.9904 – 1.0000 |
-    /// | a real FLAC and its own MP3 in the reference library | 0.98511 |
-    /// | one song, two different masters, same length | 0.8820 – 0.9260 |
-    /// | unrelated tracks inside one duration window, 11,568 real comparisons | up to 0.9590 |
-    /// | one track and its own instrumental or karaoke cut | 0.9660 – 0.9800 |
-    ///
-    /// So the fingerprint's floor for *unrelated* music is around 0.88, not 0:
-    /// four coarse bins per 50 ms block agree by chance most of the time. The
-    /// usable band is the top two percent, and 0.985 is the widest gap in it —
-    /// above every false positive observed on the real library, above a
-    /// track's own instrumental cut, and below the worst transcode of the same
-    /// master. At 0.95, which looked generous against a 116-file corpus, the
-    /// same library reported 31 findings of which most were unrelated tracks.
-    ///
-    /// The margin above the line is the thin one: 0.98511 against 0.985 is
-    /// 0.00011 of room, so this is the number to revisit if the pass ever
-    /// misses a transcode somebody knows about. Raising it is cheap; lowering
-    /// it costs false positives immediately.
+    /// `likely_duplicate` is the finding that can be wrong. Unrelated tracks
+    /// of one length score up to about 0.96, a track's own instrumental cut up
+    /// to 0.98, and transcodes of one master from about 0.985 up; the threshold
+    /// sits in that gap, and lowering it admits false positives at once.
     likely_threshold: f32 = 0.985,
 
     pub fn run(self: *DuplicateScan) !Result {
@@ -193,8 +161,7 @@ pub const DuplicateScan = struct {
         // adding one file can make an existing file a duplicate, and deleting
         // one can stop it being one, so there is no subset of rows that still
         // owes work. An interrupted run keeps everything it committed and a
-        // later run examines the library again from the start — which costs
-        // seconds, because nothing here is decoded.
+        // later run examines the library again from the start.
         var cursor: i64 = 0;
         while (true) {
             var page = try self.files.duplicateCandidatePage(
@@ -426,8 +393,6 @@ pub const DuplicateScan = struct {
     }
 };
 
-// ---------------------------------------------------------------------- tests
-
 const testing = std.testing;
 
 /// A Library holding the measurements a completed analysis pass would have
@@ -561,9 +526,8 @@ fn planOf(fixture: *Fixture, sql: [:0]const u8) ![]u8 {
 }
 
 test "selecting candidates and looking up either bucket are index searches, not scans" {
-    // The whole reason this pass is not the O(n^2) one it replaced. Selection
-    // walks the primary key, the certain bucket is an equality search of
-    // `files_audio_hash`, and the plausible bucket is a range search of
+    // Selection walks the primary key, the certain bucket is an equality search
+    // of `files_audio_hash`, and the plausible bucket is a range search of
     // `files_duration`. A paraphrase of any of the three would return the same
     // rows, silently, by reading the whole table for every candidate.
     var fixture = try Fixture.init("file:orca-duplicate-plan?mode=memory&cache=shared");
@@ -672,8 +636,7 @@ test "audio that only resembles another file is reported as likely rather than e
     defer testing.allocator.free(master);
     // Three decibels down: the same recording, re-levelled the way a lossy
     // encoder re-levels it, which moves a minority of the fingerprint's energy
-    // bins by one step and leaves the rest of the signature alone. It scores
-    // 0.99167 — similar, and not equal, on both sides of the threshold.
+    // bins by one step and leaves the rest of the signature alone.
     const transcoded = try Fixture.tone(3, 1, 0.42);
     defer testing.allocator.free(transcoded);
     const first = try fixture.recordMeasured("/music/one.flac", master);

@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 18;
+pub const current_version = 19;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -559,14 +559,14 @@ const migration_8 =
 /// here has to be undone to get there.
 ///
 /// The backfill runs the same two-step cascade `ArtistRepository.ensureLocked`
-/// runs, in the same order, because anything else would file 538 Tracks of the
-/// reference library differently from a fresh scan. A MusicBrainz artist id
-/// outranks the name — it is what recognizes "Cosmo's Midnight feat. Wave
-/// Racer" as Cosmo's Midnight — so the observed id on a Track's preferred file
-/// is tried first, and only what it cannot answer falls back to
-/// `orca_artist_key`, which is `text_key.normalizeKey`, the exact function
-/// `ArtistRepository` folds with. A migrated database and a freshly scanned one
-/// therefore agree row for row, which `library/projection.zig` asserts.
+/// runs, in the same order, because anything else would file Tracks differently
+/// from a fresh scan. A MusicBrainz artist id outranks the name — it is what
+/// recognizes "Cosmo's Midnight feat. Wave Racer" as Cosmo's Midnight — so the
+/// observed id on a Track's preferred file is tried first, and only what it
+/// cannot answer falls back to `orca_artist_key`, which is
+/// `text_key.normalizeKey`, the exact function `ArtistRepository` folds with. A
+/// migrated database and a freshly scanned one therefore agree row for row,
+/// which `library/projection.zig` asserts.
 ///
 /// None of the new indexes names `id` explicitly. `id` is `INTEGER PRIMARY
 /// KEY`, so it *is* the rowid and SQLite already appends it to every index
@@ -701,11 +701,6 @@ const migration_10 =
 /// NULL. Re-keying here repairs the key and would otherwise walk away from the
 /// links that key was supposed to make.
 ///
-/// On the real library that was two artists left holding nothing --
-/// `Eli “Paperboy” Reed` and `Tha Dogg Pound feat. Michel’le`, both keyed with
-/// typographic quotes -- one track and one release with a name and no link, and
-/// a browse listing showing "0 releases, 0 tracks" beside a real artist.
-///
 /// Anything that re-keys `artists` in future has to re-run the link in the same
 /// migration. They are one operation, not two that happen to be adjacent.
 const migration_11 =
@@ -758,28 +753,23 @@ const migration_11 =
 /// folding already-folded case and whitespace is a no-op. Only the newly
 /// folded punctuation moves.
 ///
-/// Leaving these stale was a live corruption rather than an inconsistency.
-/// `ReleaseRepository.upsert` keys on `release_key`, so the next projection of
-/// an already-projected library -- a rescan, a metadata edit, or the property
-/// backfill's per-batch reprojection -- matched nothing and built a parallel
-/// release beside each stale one. Measured on the real library: 22,060 tracks
-/// and 2,637 releases became 23,271 and 2,760 after a single backfill, every
-/// duplicate pair differing only by an apostrophe.
+/// A stale key corrupts the library: `ReleaseRepository.upsert` keys on
+/// `release_key`, so the next projection of an already-projected library -- a
+/// rescan, a metadata edit, or the property backfill's per-batch reprojection
+/// -- matches nothing and builds a parallel release beside each stale one.
 ///
 /// Unlike artists, colliding rows are skipped rather than merged. Two releases
 /// that fold together are the same album spelled two ways, and their tracks
 /// share track numbers, so repointing them would violate `tracks_position` and
 /// fail the migration -- refusing to open the library over a duplicate album
-/// is far worse than leaving two rows for a projection to reconcile. The real
-/// library has no such collision.
+/// is far worse than leaving two rows for a projection to reconcile.
 ///
-/// The guard has to cover *both* shapes of collision, which the first version
-/// did not. Rejecting a row whose folded key already belongs to another row
-/// misses the case where **two** rows both need folding and fold to the same
-/// value: both pass the guard, both update, and the still-live `releases_key`
-/// unique index rejects the second, failing the migration and leaving the
-/// library unopenable at its old version. Two releases keyed with U+2019 and
-/// U+2018 reproduce it exactly, since both fold to an apostrophe.
+/// The guard has to cover *both* shapes of collision. Rejecting a row whose
+/// folded key already belongs to another row misses the case where **two** rows
+/// both need folding and fold to the same value: both pass the guard, both
+/// update, and the still-live `releases_key` unique index rejects the second,
+/// failing the migration and leaving the library unopenable at its old version:
+/// U+2019 and U+2018 both fold to an apostrophe.
 const migration_12 =
     \\UPDATE releases
     \\   SET release_key = orca_release_key(release_key)
@@ -918,6 +908,23 @@ const migration_18 =
     \\DROP TABLE temp.ghost_releases;
     \\DROP TABLE temp.ghost_files;
     \\DROP TABLE temp.orca_temporaries;
+;
+
+/// A service's rate-limit block and backoff, and the lease that lets one
+/// process at a time talk to it, shared by every process that opens the
+/// Library. Times are Unix milliseconds.
+const migration_19 =
+    \\CREATE TABLE provider_state (
+    \\    service TEXT PRIMARY KEY,
+    \\    blocked_until_ms INTEGER,
+    \\    backoff_ms INTEGER NOT NULL DEFAULT 0
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE provider_leases (
+    \\    service TEXT PRIMARY KEY,
+    \\    owner INTEGER NOT NULL,
+    \\    expires_at INTEGER NOT NULL
+    \\) WITHOUT ROWID;
+    \\ALTER TABLE identification_proposals ADD COLUMN accepted_in_bulk INTEGER NOT NULL DEFAULT 0;
 ;
 
 /// How much stack the key functions fold a name in.
@@ -1062,6 +1069,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 16 and target_version >= 16) try db.exec(migration_16);
     if (version < 17 and target_version >= 17) try db.exec(migration_17);
     if (version < 18 and target_version >= 18) try db.exec(migration_18);
+    if (version < 19 and target_version >= 19) try db.exec(migration_19);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1172,12 +1180,7 @@ fn copyFixture(allocator: std.mem.Allocator, io: std.Io, destination: []const u8
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = destination, .data = bytes });
 }
 
-fn scalar(db: sqlite.Database, sql: [:0]const u8) !i64 {
-    var statement = try db.prepare(sql);
-    defer statement.deinit();
-    if (try statement.step() != .row) return error.SqlFailed;
-    return statement.columnInt64(0);
-}
+const scalar = @import("columns.zig").scalar;
 
 fn text(allocator: std.mem.Allocator, db: sqlite.Database, sql: [:0]const u8) ![]u8 {
     var statement = try db.prepare(sql);
@@ -1564,6 +1567,33 @@ test "upgrading from version 17 forgets the files scanned from tag-write tempora
     try checkForeignKeys(db);
 }
 
+test "upgrading from version 18 adds empty provider state and leases and counts no proposal as accepted in bulk" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v18.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 18);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10);
+        \\INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload, state, updated_at)
+        \\VALUES (1, 'musicbrainz', 'a', 0.9, x'7b7d', 1, 100);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM provider_state;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM provider_leases;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT accepted_in_bulk FROM identification_proposals;"));
+    try std.testing.expectError(
+        error.SqlFailed,
+        db.exec("INSERT INTO provider_leases(service, owner, expires_at) VALUES ('musicbrainz', NULL, 0);"),
+    );
+    try checkForeignKeys(db);
+}
+
 test "an empty database migrates straight to the current version" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -1676,9 +1706,7 @@ test "artists that merely look alike are left alone by the re-key" {
 test "release keys are stable under the fold that is current" {
     // A stale release key is not cosmetic: ReleaseRepository.upsert keys on it,
     // so the next projection of an already-projected library builds a parallel
-    // release beside every stale one. On the real library a single property
-    // backfill turned 22,060 tracks and 2,637 releases into 23,271 and 2,760,
-    // every duplicate pair differing only by an apostrophe.
+    // release beside every stale one.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "rekey.db");
@@ -1732,9 +1760,8 @@ test "re-keying an artist relinks the rows its old key could not reach" {
     // Migration 9 linked tracks and releases with
     // `artists.key = orca_artist_key(...)`: the current fold compared against a
     // key written by whichever fold was current when the row was projected. An
-    // artist stored under a pre-fold spelling never matched. Re-keying without
-    // re-linking left two artists in the real library holding nothing at all,
-    // beside a track and a release that named them.
+    // artist stored under a pre-fold spelling never matched, so re-keying must
+    // re-link.
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "relink.db");

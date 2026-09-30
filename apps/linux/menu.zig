@@ -178,8 +178,6 @@ fn countFeedback(context: *const Context) FeedbackCounts {
     return counts;
 }
 
-// ------------------------------------------------------------------ actions
-
 pub fn love(self: *App) void {
     feedback.change(self, self.context.songs.items, null, .loved);
 }

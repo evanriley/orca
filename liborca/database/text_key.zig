@@ -112,8 +112,7 @@ fn fold(point: u21) u21 {
         // while ARTIST carries what somebody typed. Without this, `El‐P`
         // (U+2010 HYPHEN) and `El-P` (ASCII hyphen-minus) are two artists --
         // one holding every release and the other holding every track, so
-        // browsing to either shows you half the artist. Six artists in a
-        // 2,474-artist library were split exactly this way.
+        // browsing to either shows you half the artist.
         0x2010...0x2015, 0x2212 => '-',
         0x2018...0x201b, 0x2032 => '\'',
         0x201c...0x201f, 0x2033 => '"',
@@ -167,8 +166,7 @@ pub fn sortKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
 const testing = std.testing;
 
 test "typographic and typed punctuation fold onto one key" {
-    // The real split this closes: the release carried U+2010, the tracks
-    // carried ASCII, and they became two artists.
+    // A release carrying U+2010 and tracks carrying ASCII must be one artist.
     const pairs = [_][2][]const u8{
         .{ "El\u{2010}P", "El-P" },
         .{ "The O\u{2019}Jays", "The O'Jays" },
@@ -192,7 +190,7 @@ test "two spellings of one name fold onto one key" {
     try testing.expectEqualStrings(left, right);
 }
 
-test "a leading article does not decide where an artist files" {
+test "a sort key drops a leading article" {
     const key = try sortKey(testing.allocator, "The Beatles");
     defer testing.allocator.free(key);
     try testing.expectEqualStrings("beatles", key);

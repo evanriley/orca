@@ -195,8 +195,6 @@ pub fn clone(source: *TrackObject) ?*TrackObject {
     return self;
 }
 
-// ---------------------------------------------------------------- sorting
-
 /// The columns the track list shows, and the engine sort key behind each one.
 ///
 /// A header click re-queries liborca with that key and starts again at the

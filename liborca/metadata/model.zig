@@ -131,10 +131,7 @@ pub const Artwork = struct {
 /// 12 MiB is chosen to sit below both containers' own ceilings and above every
 /// honest cover. A FLAC `PICTURE` block carries a 24-bit length and
 /// `id3v2.max_tag_bytes` refuses a tag past 16 MiB, so a bound at 16 MiB would
-/// be unreachable — an enforcement that can never fire is not one. Measured
-/// against the 22,060-file reference library, the largest embedded cover is
-/// 11.29 MiB, the median is 157 KB, 148 files exceed 4 MiB and 28 exceed
-/// 8 MiB. A claim past this is refused rather than grown into.
+/// be unreachable. A claim past this is refused rather than grown into.
 pub const max_image_bytes: usize = 12 << 20;
 
 pub const ArtworkReadError = error{
@@ -147,10 +144,9 @@ pub const ArtworkReadError = error{
 ///
 /// `mime_type` is resolved from the bytes rather than from what the container
 /// claimed, and it is a static string rather than an allocation. The claim is
-/// not reliable enough to hand a decoder: 93 files in the reference library
-/// declare `image/jpg`, which is not a media type, and 24 declare nothing at
-/// all. What the file *says* is an observation and stays in `Artwork`; what the
-/// bytes *are* is this.
+/// not reliable enough to hand a decoder: `image/jpg` is common and is not a
+/// media type. What the file *says* is an observation and stays in `Artwork`;
+/// what the bytes *are* is this.
 pub const EmbeddedImage = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
@@ -167,7 +163,7 @@ pub const EmbeddedImage = struct {
 ///
 /// Ownership transfers only on success. A rejection leaves the buffer to the
 /// caller, whose `errdefer` already covers it — freeing here as well is a
-/// double free, which is exactly what the first version of this did.
+/// double free.
 pub fn adoptImage(
     allocator: std.mem.Allocator,
     bytes: []u8,

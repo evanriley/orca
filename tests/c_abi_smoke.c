@@ -26,8 +26,7 @@
 /* Which output this test opens.
  *
  * Device 0 is the server default, which on a developer's machine is their
- * actual speakers - so `zig build test` used to be audible every single run,
- * which on a machine somebody is working at is unacceptable.
+ * actual speakers, and a test run must never be audible.
  *
  * Selection order:
  *   1. ORCA_TEST_DEVICE, if set, names an orca device id explicitly.
@@ -268,7 +267,6 @@ int main(void) {
         ORCA_STATUS_INVALID_ARGUMENT)
         return 16;
 
-    /* ---- roots and scanning as a job ---- */
     int64_t root_id = 0;
     if (orca_library_add_root(runtime, library, "fixtures/audio", &root_id) != ORCA_STATUS_OK)
         return 17;
@@ -324,7 +322,6 @@ int main(void) {
     if (settled != 1) return 32;
     if (projection_state != ORCA_JOB_SUCCEEDED) return 33;
 
-    /* ---- the property backfill as a job ---- */
     /* The scan above already probed every fixture, so a default backfill has
      * nothing to repair and must say so rather than reopening the library. A
      * forced one re-probes them all, which is the difference the flag names. */
@@ -367,7 +364,6 @@ int main(void) {
     if (backfill_stats.files_seen == 0) return 148;
     if (backfill_stats.changed == 0) return 149;
 
-    /* ---- the library-wide analysis as a job ---- */
     /* Nothing has been measured yet, so this has an honest total before it
      * starts and must measure every fixture. A second run must then find
      * nothing left: the selection is keyed on the results themselves, so a
@@ -416,7 +412,6 @@ int main(void) {
         return 163;
     if (analysis_stats.files_seen != 0) return 164;
 
-    /* ---- the duplicate scan as a job ---- */
     /* The fixtures were just measured, so this can actually compare them. Its
      * denominator is every file in the Library, because it examines every row
      * -- including the ones no analysis reached, which it reports as
@@ -478,7 +473,6 @@ int main(void) {
         return 184;
     if (issues_after_second != issues_after_first) return 185;
 
-    /* ---- the extended track view ---- */
     struct track_capture capture;
     memset(&capture, 0, sizeof capture);
     if (orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &capture, capture_track) !=
@@ -490,8 +484,6 @@ int main(void) {
     if (capture.first_playable_id == 0) return 38;
 
 
-    /* ---- browsing: artists -> that artist's releases -> that release's
-     * tracks, which is the path an album view walks ---- */
     uint64_t artist_count = 0;
     if (orca_library_artist_count(runtime, library, &artist_count) != ORCA_STATUS_OK) return 100;
     if (artist_count == 0) return 101;
@@ -631,12 +623,11 @@ int main(void) {
         ORCA_STATUS_INVALID_ARGUMENT)
         return 138;
 
-    /* ---- transport ---- */
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;
 
-    /* INVERTED, and this is the milestone: a Player with no playable source
-     * and no attached output must be REJECTED, not reported as PLAYING. */
+    /* A Player with no playable source and no attached output must be
+     * rejected, not reported as PLAYING. */
     if (orca_player_play(runtime, player) != ORCA_STATUS_INVALID_STATE) return 3;
     orca_player_status status;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 4;
@@ -795,11 +786,11 @@ int main(void) {
     if (orca_player_next(runtime, player, &moved) != ORCA_STATUS_OK) return 83;
     if (moved != 0) return 84;
 
-    /* ---- position is anchored to the audible entry, not to the epoch ---- */
-    /* Two copies of one entry, so both report the same duration and the only
-     * thing that can push position past the end is the queue advancing. A
-     * gapless advance deliberately keeps a single epoch, so a position derived
-     * from frames-since-epoch alone would keep climbing straight through the
+    /* Position is anchored to the audible entry, not to the epoch. Two copies
+     * of one entry, so both report the same duration and the only thing that
+     * can push position past the end is the queue advancing. A gapless advance
+     * deliberately keeps a single epoch, so a position derived from
+     * frames-since-epoch alone would keep climbing straight through the
      * second entry. Conditional on audio really rendering, like the claim
      * above: with no audio server nothing ever advances. */
     if (rendered) {

@@ -434,11 +434,10 @@ test "a gapless transition keeps the epoch and only changes the entry serial" {
 }
 
 test "each entry's frames are scaled by that entry's own correction across a transition" {
-    // The defect this shape exists to prevent: one Player-level multiplier is
-    // wrong during a gapless transition, because the pipe holds two entries'
-    // audio at once. Here one canonical read straddles the boundary, so a
-    // correction chosen per block — let alone per Player — could not be right
-    // for both halves of it.
+    // One Player-level multiplier is wrong during a gapless transition,
+    // because the pipe holds two entries' audio at once. Here one canonical
+    // read straddles the boundary, so a correction chosen per block — let
+    // alone per Player — could not be right for both halves of it.
     var first_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
