@@ -118,6 +118,7 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
     const self = state(data);
     self.runtime.playerQueueJump(self.player, position) catch return;
     self.mpris.notify();
+    self.requestTick();
 }
 
 fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -166,6 +167,7 @@ fn clearClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     self.runtime.playerClearQueue(self.player) catch return;
     self.mpris.notify();
+    self.requestTick();
 }
 
 pub fn build(self: *App) *gtk.Widget {

@@ -147,6 +147,7 @@ pub fn change(self: *App, targets: []const Target, only: ?liborca.Feedback, valu
         return;
     }
     repaint(self, &changed, value);
+    self.requestTick();
 }
 
 fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void {

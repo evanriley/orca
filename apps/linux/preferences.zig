@@ -104,6 +104,7 @@ fn removeRootResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque
         if (removed.tracks_removed == 1) "track" else "tracks",
     }));
     jobs.reloadLibraryViews(self);
+    self.requestTick();
 }
 
 fn addFolderActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -605,6 +606,7 @@ fn scrobblingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     if (self.listening_controls.now_playing_row) |now_playing|
         gtk.gtk_widget_set_sensitive(now_playing, if (enabled) gtk.true_ else gtk.false_);
     settings.save(self);
+    self.requestTick();
 }
 
 fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -620,6 +622,7 @@ fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     };
     self.announce_now_playing = enabled;
     settings.save(self);
+    self.requestTick();
 }
 
 const Credential = struct {
@@ -646,6 +649,7 @@ fn listenBrainzControls(self: *App) *app.CredentialControls {
 
 fn listenBrainzTokenChanged(self: *App) void {
     if (self.library) |library| self.runtime.libraryScrobblerCredentialsChanged(library) catch {};
+    self.requestTick();
 }
 
 fn ignorePresence(_: *App, _: secret.Presence) void {}

@@ -811,6 +811,7 @@ fn playTracks(context: Context) !void {
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
+    try identifyOrca(&runtime);
     const library = try runtime.openLibrary(io, database_path);
     const player = try runtime.createPlayer();
     const zone = try runtime.createZone();
@@ -1351,6 +1352,7 @@ fn scrobble(context: Context) !void {
 
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
+    try identifyOrca(&runtime);
     try runtime.setCredentialStore(credentials.store());
     if (environ.get("ORCA_LISTENBRAINZ_URL")) |url| {
         if (url.len > 0) try runtime.setListenBrainzServer(try allocator.dupe(u8, url));
@@ -1431,6 +1433,16 @@ fn setFeedback(context: Context) !void {
     try stdout.print("feedback: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
 }
 
+/// Names orca-cli to MusicBrainz, AcoustID and ListenBrainz and in the listen
+/// history.
+fn identifyOrca(runtime: *liborca.Runtime) !void {
+    try runtime.setClientIdentity(.{
+        .name = "Orca",
+        .version = std.fmt.comptimePrint("{f}", .{liborca.version}),
+        .contact = build_options.provider_contact,
+    });
+}
+
 /// Sets the application key and any other AcoustID server, as `match` and
 /// `submit-acoustid` both need.
 fn configureAcoustId(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
@@ -1454,6 +1466,7 @@ fn matchLibrary(context: Context) !void {
     if (options.no_fingerprints) request.fingerprints = false;
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
+    try identifyOrca(&runtime);
     if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
         if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
     }
@@ -1524,6 +1537,7 @@ fn submitAcoustId(context: Context) !void {
     defer credentials.deinit(allocator);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
+    try identifyOrca(&runtime);
     try runtime.setCredentialStore(credentials.store());
     try configureAcoustId(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);

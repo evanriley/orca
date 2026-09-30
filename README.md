@@ -65,7 +65,12 @@ devices and opens a short silent native stream. PipeWire C headers and foreign
 types remain contained in the Linux adapter.
 
 Linux builds also install the GTK4 frontend with its desktop entry, static and
-shared `liborca`, and the foreign-client header at `include/orca/orca.h`.
+shared `liborca` (`liborca.so.0`), the foreign-client header at
+`include/orca/orca.h`, and `lib/pkgconfig/orca.pc`.
+
+`orca-cli` and `orca-gtk` identify themselves to MusicBrainz, AcoustID and
+ListenBrainz with the contact given by `-Dprovider-contact=CONTACT` (default
+`evan@evanriley.com`).
 
 Online identification and scrobbling are optional. Provider traffic passes
 through one rate-limited, retrying HTTP boundary; credentials are supplied by
@@ -77,12 +82,14 @@ acceptance updates Orca metadata without writing media files.
 
 `liborca` is a library for other applications as well as Orca's own:
 
-- [docs/api.md](docs/api.md) covers the public Zig API and adding liborca as a
-  Zig package dependency.
+- [docs/api.md](docs/api.md) covers the public Zig API, adding liborca as a
+  Zig package dependency, the identity a host must supply before provider
+  work, and what stays stable between releases.
 - [examples/embed](examples/embed) is a complete Zig project that lists a
   library's tracks through that API; `zig build test` builds it.
 - [docs/frontends.md](docs/frontends.md#c-abi) covers the C ABI in
-  `liborca/orca.h` for clients in other languages.
+  `liborca/orca.h` for clients in other languages, including linking through
+  pkg-config.
 
 ## Repository layout
 

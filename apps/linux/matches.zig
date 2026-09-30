@@ -95,6 +95,7 @@ fn refused(self: *App, err: anyerror, fallback: [:0]const u8) void {
 fn changed(self: *App) void {
     reload(self);
     details.invalidate(self);
+    self.requestTick();
 }
 
 pub fn accept(self: *App, track_id: i64, proposal_id: i64) void {

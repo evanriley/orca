@@ -44,6 +44,7 @@ pub const CredentialStore = providers.credentials.Store;
 pub const ScrobblerStatus = listen_worker.Status;
 pub const ScrobblerState = providers.listenbrainz.State;
 pub const BoundedText = providers.listenbrainz.BoundedText;
+pub const HostWaker = control.HostWaker;
 
 pub const State = enum(u8) {
     running,
@@ -281,6 +282,7 @@ pub const OrcaRuntime = struct {
     commands: control.CommandQueue = .{},
     events: control.EventChannel = .{},
     telemetry: control.TelemetryChannel = .{},
+    host_signal: control.HostSignal = .{},
     /// Host audio backend. Zones reach it only through `output.Factory`, so a
     /// platform without one simply never opens a stream.
     output_host: audio.backends.Host = .{},
@@ -296,7 +298,8 @@ pub const OrcaRuntime = struct {
     job_workers: std.ArrayList(*JobWorker) = .empty,
     /// Tag-write plans awaiting approval. Control lane only.
     pending_tag_writes: [max_pending_tag_writes]?*PendingTagWrite = @splat(null),
-    client_identity: ClientIdentity = .orca,
+    /// Null until the host calls `setClientIdentity`.
+    client_identity: ?network.client.OwnedIdentity = null,
     credential_store: ?CredentialStore = null,
     listenbrainz_server: []const u8 = providers.listenbrainz.default_server,
     musicbrainz_server: []const u8 = providers.musicbrainz.default_server,
@@ -705,6 +708,7 @@ pub const OrcaRuntime = struct {
                 .allocator = self.allocator,
                 .database = library_database,
                 .registration = registration,
+                .host_signal = &self.host_signal,
             },
             .work_handle = work_handle,
         };
@@ -727,9 +731,9 @@ pub const OrcaRuntime = struct {
         }
     }
 
-    /// Names the host in its listen history and in every ListenBrainz
-    /// submission, from each listen worker's next pass. `identity`'s strings
-    /// must outlive the runtime.
+    /// Names the host to MusicBrainz, AcoustID and ListenBrainz and in its
+    /// listen history, from each listen worker's next pass. Required before
+    /// matching, AcoustID submission or scrobbling. The strings are copied.
     pub fn setClientIdentity(self: *OrcaRuntime, identity: ClientIdentity) !void {
         return runtime_listens.setClientIdentity(self, identity);
     }
@@ -1707,7 +1711,47 @@ pub const OrcaRuntime = struct {
 
     pub fn submit(self: *OrcaRuntime, action: control.Action) !control.RequestId {
         try requireRunning(self);
-        return self.commands.submit(action);
+        const request_id = try self.commands.submit(action);
+        self.host_signal.raise();
+        return request_id;
+    }
+
+    /// Installs, or with null removes, what liborca calls when the host's
+    /// loop should pump: after `submit`, and when a worker publishes a change
+    /// the host did not make. Refused once any worker thread exists, because
+    /// those threads read the waker without a lock; call it right after
+    /// `init`. The waker is never called after `deinit` returns.
+    pub fn setWaker(self: *OrcaRuntime, waker: ?HostWaker) error{ RuntimeNotRunning, WorkersRunning }!void {
+        try requireRunning(self);
+        if (self.work_registry.count() != 0) return error.WorkersRunning;
+        self.host_signal.waker = waker;
+    }
+
+    /// How long the host may wait for the waker before it pumps again: 0 to
+    /// pump now, null to wait for the waker alone. Read after draining
+    /// events and immediately before waiting. A bound Player that is playing
+    /// needs a listen sample at least every second, and a running job's
+    /// progress is worth reading every `job_progress_interval_ms`.
+    pub fn nextPumpTimeoutMs(self: *OrcaRuntime) ?u64 {
+        if (self.state.load(.acquire) != .running) return null;
+        if (self.host_signal.isPending() or self.commands.count() != 0 or
+            self.events.count() != 0 or self.telemetry.count() != 0) return 0;
+        const listen_due = runtime_listens.listenSampleDueMs(self);
+        const jobs_due = runtime_jobs.jobPumpDueMs(self);
+        if (listen_due) |listen| {
+            if (jobs_due) |jobs| return @min(listen, jobs);
+            return listen;
+        }
+        return jobs_due;
+    }
+
+    /// One turn of the host's loop: executes the commands already submitted,
+    /// at most the command queue's capacity so a host that keeps submitting
+    /// cannot trap its loop here, then joins finished job workers.
+    pub fn pump(self: *OrcaRuntime) void {
+        var executed: usize = 0;
+        while (executed < control.CommandQueue.capacity and self.processNextCommand()) executed += 1;
+        self.reapFinishedJobs();
     }
 
     /// Executes at most one command on the runtime's serialized logical control
@@ -1716,6 +1760,7 @@ pub const OrcaRuntime = struct {
     /// `listen_sample_interval_ms`.
     pub fn processNextCommand(self: *OrcaRuntime) bool {
         if (self.state.load(.acquire) != .running) return false;
+        self.host_signal.clear();
         runtime_listens.sampleListens(self);
         if (!self.events.hasCapacity()) return false;
         const command = self.commands.pop() orelse return false;

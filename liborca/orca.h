@@ -9,6 +9,26 @@ extern "C" {
 #endif
 
 /*
+ * Stability.
+ *
+ * liborca is pre-1.0. This C ABI is versioned by ORCA_ABI_VERSION and by the
+ * shared library's SONAME, liborca.so.ORCA_ABI_VERSION. Within one ABI
+ * version:
+ *
+ * - functions are only added, never removed or changed;
+ * - a reserved field gains a meaning only as an addition for which zero keeps
+ *   the old behaviour;
+ * - enum values are only added.
+ *
+ * Anything else raises ORCA_ABI_VERSION. The ABI version is separate from the
+ * product version orca_version reports.
+ *
+ * liborca's Zig API may break in any minor release; CHANGELOG.md records each
+ * break.
+ */
+#define ORCA_ABI_VERSION 0
+
+/*
  * Threading contract.
  *
  * Every orca_* function must be called from ONE thread for the lifetime of a
@@ -25,6 +45,9 @@ extern "C" {
  * Every orca_string_view handed to a callback is valid only for the duration
  * of that callback: copy what you need. Re-entering the ABI from inside a
  * callback is not supported.
+ *
+ * The one exception is the wake callback of orca_runtime_set_wake_callback,
+ * which liborca also calls from its own threads.
  */
 
 typedef struct orca_runtime orca_runtime;
@@ -440,9 +463,25 @@ typedef struct orca_event {
 
 /* -------------------------------------------------------------- runtime */
 
-/* The caller owns the returned runtime and must destroy it exactly once. */
+/* liborca's version, such as "0.2.0". Static storage; callable from any
+ * thread. */
+const char *orca_version(void);
+
+/* The caller owns the returned runtime and must destroy it exactly once.
+ * NULL means out of memory. */
 orca_runtime *orca_runtime_create(void);
 void orca_runtime_destroy(orca_runtime *runtime);
+
+/*
+ * Why the most recent call on `runtime` failed, as "<function>: <reason>", for
+ * logs and bug reports rather than for parsing. Empty after a call that
+ * returned ORCA_STATUS_OK, and for a NULL runtime. At most 255 bytes, longer
+ * messages truncated; NUL-terminated. Valid until the next orca_* call on
+ * `runtime`.
+ *
+ * A call refused with ORCA_STATUS_WRONG_THREAD does not change it.
+ */
+const char *orca_runtime_last_error(const orca_runtime *runtime);
 
 /* Drives the serialized control lane: executes submitted commands and joins
  * background workers that have finished. Call it before polling events. */
@@ -456,6 +495,47 @@ orca_status orca_runtime_poll_event(
     orca_event *event,
     uint32_t *remaining
 );
+
+/*
+ * Wakeup: a host sleeps in its own event loop until liborca has something for
+ * it, instead of pumping on a timer.
+ *
+ * liborca calls `callback(context)` when the host should pump: after a
+ * command is submitted, and when a Player, Zone, job, listen or scrobbler
+ * changes in a way the host did not cause. It is called at most once between
+ * two calls to orca_runtime_pump.
+ *
+ * It is the one exception to the threading contract: it is called from
+ * liborca's own threads, and from inside other orca_* calls on the owning
+ * thread, sometimes from two threads at once. It must only signal the host's
+ * loop - write to an eventfd or a pipe, CFRunLoopSourceSignal and
+ * CFRunLoopWakeUp, notify a condition variable - and return. It must not call
+ * any orca_* function and must not block. It is never called from an audio render callback, and never after
+ * orca_runtime_destroy has returned. `context` must stay valid until then.
+ *
+ * Call it right after orca_runtime_create: once any worker thread exists (a
+ * Player's engine, a job, a listen worker or an artwork loader) it returns
+ * ORCA_STATUS_INVALID_STATE. A NULL callback removes the callback, under the
+ * same rule.
+ */
+typedef void (*orca_wake_fn)(void *context);
+orca_status orca_runtime_set_wake_callback(orca_runtime *runtime, orca_wake_fn callback, void *context);
+
+#define ORCA_PUMP_NO_TIMEOUT (-1)
+
+/*
+ * How long the host may wait for the wake callback before pumping anyway:
+ * 0 to pump now, ORCA_PUMP_NO_TIMEOUT to wait for the callback alone.
+ * Otherwise at most 1000 ms while a Player bound to a Library plays, since
+ * its listens must be sampled (its position wakes usually pump sooner), and
+ * at most 100 ms while a job runs, so its progress can be read.
+ *
+ * Read it after pumping and draining events, immediately before waiting. A
+ * host whose wake primitive does not count wakes, such as a flag or a
+ * condition variable, must read it to avoid losing a wake that arrived while
+ * it was pumping.
+ */
+orca_status orca_runtime_pump_timeout(orca_runtime *runtime, int64_t *timeout_ms);
 
 /* -------------------------------------------------------------- library */
 

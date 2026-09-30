@@ -32,11 +32,14 @@ pub const stored_counts_reuse_ms: i64 = 1000;
 
 /// How often the control lane samples bound Players for listens.
 const listen_sample_interval_ms: i64 = 100;
+/// The pump timeout a playing Player asks for. Its position hints already
+/// wake the host about every `listen_sample_interval_ms`, and every pump
+/// samples; this only covers a Player whose output stalls.
+const listen_fallback_interval_ms: i64 = 1000;
 
 pub fn setClientIdentity(self: *OrcaRuntime, identity: ClientIdentity) !void {
     try runtime.requireRunning(self);
-    try identity.validate();
-    self.client_identity = identity;
+    self.client_identity = try .init(identity);
     publishListenSettings(self);
 }
 
@@ -100,6 +103,7 @@ pub fn librarySetScrobbling(
     const object_value = try self.libraries.get(library);
     if (object_value.database == null) return error.LibraryHasNoDatabase;
     if (enabled) {
+        if (self.client_identity == null) return error.ClientIdentityRequired;
         if (self.scrobbling_library) |other| {
             if (!other.eql(library)) return error.ScrobblingEnabledElsewhere;
         }
@@ -254,7 +258,7 @@ pub fn libraryTrackPlayStats(self: *OrcaRuntime, library: LibraryHandle, track_i
 fn ensureListens(self: *OrcaRuntime, object_value: *LibraryObject) !*listen_worker.Listens {
     if (object_value.listens) |existing| return existing;
     const created = try self.allocator.create(listen_worker.Listens);
-    created.* = .{};
+    created.* = .{ .host_signal = &self.host_signal };
     created.configure(self.control_threaded.io(), withListenSettings(self, .{}));
     object_value.listens = created;
     return created;
@@ -384,6 +388,22 @@ pub fn sampleListens(self: *OrcaRuntime) void {
         });
         queueListen(self, opener.library, emission, now.mono_ms);
     }
+}
+
+/// Milliseconds until a listen sample is owed if no position hint pumps
+/// first, or null while no bound Player is playing. A Player whose queue has played out still reports
+/// playing, and counts until a sample has ended its listen.
+pub fn listenSampleDueMs(self: *OrcaRuntime) ?u64 {
+    for (self.players.slots.items) |*slot| {
+        const object_value = if (slot.value) |*value| value else continue;
+        if (object_value.opener == null) continue;
+        if (object_value.player.state.load(.acquire) != .playing) continue;
+        if (object_value.player.drained.load(.acquire) and object_value.listens.open == null) continue;
+        break;
+    } else return null;
+    const last = self.last_listen_sample_ms orelse return 0;
+    const remaining = listen_fallback_interval_ms - (sampleTime(self).mono_ms - last);
+    return @intCast(std.math.clamp(remaining, 0, listen_fallback_interval_ms));
 }
 
 /// Ends the listen a Player is in and hands its final time to `library`'s

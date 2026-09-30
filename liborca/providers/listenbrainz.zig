@@ -911,7 +911,7 @@ fn countOf(haystack: []const u8, needle: []const u8) usize {
 
 test "a backlog of 250 listens goes out as three import requests of at most 100" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-backlog?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-backlog?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(250);
     const expected = [_]usize{ 100, 100, 50 };
@@ -982,7 +982,7 @@ test "one ready listen is sent as single with its identifiers and the host's cli
 
 test "a listen without identifiers or album omits those fields" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-bare?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-bare?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(1);
     _ = try fixture.step();
@@ -993,7 +993,7 @@ test "a listen without identifiers or album omits those fields" {
 
 test "a listen over the size limit drops its optional fields and one still too large is rejected unsent" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-oversize?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-oversize?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const allocator = std.testing.allocator;
     const long_title = try allocator.alloc(u8, 10_000);
@@ -1028,7 +1028,7 @@ test "a listen over the size limit drops its optional fields and one still too l
 
 test "a legacy empty payload is rejected without a request" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-legacy?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-legacy?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.library.scrobbles.enqueue(service, "listen:1", "{}");
     const result = try fixture.step();
@@ -1042,7 +1042,7 @@ test "a legacy empty payload is rejected without a request" {
 
 test "a legacy payload beside a good listen is dropped and the good listen is sent" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-mixed?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-mixed?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.library.scrobbles.enqueue(service, "listen:1", "{}");
     try fixture.enqueueTitled(1, "Track");
@@ -1055,7 +1055,7 @@ test "a legacy payload beside a good listen is dropped and the good listen is se
 
 test "no request is made without a token and delivery resumes once one exists" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-token?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-token?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(2);
     fixture.token = null;
@@ -1071,7 +1071,7 @@ test "no request is made without a token and delivery resumes once one exists" {
 
 test "no request is made while offline" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-offline?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-offline?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(2);
     fixture.gateway.config.offline = true;
@@ -1086,7 +1086,7 @@ test "no request is made while offline" {
 
 test "a 429 schedules the rows for when the block ends and waits until the gateway unblocks" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-limited?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-limited?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(3);
     try fixture.reply(.{ .respond = .{ .status = 429 } });
@@ -1115,7 +1115,7 @@ test "a 429 schedules the rows for when the block ends and waits until the gatew
 
 test "consecutive server errors double the service backoff to an hour and a success resets it" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-doubling?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-doubling?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(2);
     const expected_ms = [_]u64{ 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000 };
@@ -1140,7 +1140,7 @@ test "consecutive server errors double the service backoff to an hour and a succ
 
 test "a network outage with 50 queued listens produces one request per backoff period" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-outage?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-outage?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(50);
     for (0..4) |_| try fixture.reply(.{ .fail = error.ConnectionRefused });
@@ -1164,7 +1164,7 @@ test "a network outage with 50 queued listens produces one request per backoff p
 
 test "a timeout backs off like any other transient failure" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-timeout?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-timeout?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(1);
     try fixture.reply(.{ .fail = error.Timeout });
@@ -1176,7 +1176,7 @@ test "a timeout backs off like any other transient failure" {
 
 test "a canceled request releases its rows and reports cancellation" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-canceled?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-canceled?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(3);
     try fixture.reply(.{ .fail = error.Canceled });
@@ -1188,7 +1188,7 @@ test "a canceled request releases its rows and reports cancellation" {
 
 test "a 400 on a batch isolates the bad listen with single submissions and rejects only it" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-isolate?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-isolate?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     for (0..5) |index| try fixture.enqueueTitled(index, if (index == 2) "BAD" else "Good");
     fixture.reject_body_containing = "BAD";
@@ -1218,7 +1218,7 @@ test "a 400 on a batch isolates the bad listen with single submissions and rejec
 
 test "a 401 stops delivery until credentials change" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-unauthorized?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-unauthorized?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(2);
     try fixture.reply(.{ .respond = .{ .status = 401, .body = "{\"code\":401}" } });
@@ -1241,7 +1241,7 @@ test "a 401 stops delivery until credentials change" {
 
 test "validateToken returns the user name for a valid token and null for an invalid one" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-validate?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-validate?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const allocator = std.testing.allocator;
     try fixture.reply(.{ .respond = .{
@@ -1270,7 +1270,7 @@ test "validateToken returns the user name for a valid token and null for an inva
 
 test "a server override addresses both endpoints under its base URL" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-server?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-server?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     fixture.delivery.server = "http://127.0.0.1:8080/lb/";
     try fixture.reply(.{ .respond = .{ .status = 200, .body = "{\"valid\":true,\"user_name\":\"listener\"}" } });
@@ -1291,7 +1291,7 @@ test "a validation that fails on the service or the network joins the service ba
         var name: [64:0]u8 = undefined;
         _ = try std.fmt.bufPrintSentinel(&name, "file:orca-lb-validate-backoff-{d}?mode=memory&cache=shared", .{index}, 0);
         var fixture: Fixture = undefined;
-        try fixture.start(&name, .orca);
+        try fixture.start(&name, network.testing.test_identity);
         defer fixture.stop();
         try fixture.enqueueListens(1);
         try fixture.reply(failure);
@@ -1309,7 +1309,7 @@ test "a validation that fails on the service or the network joins the service ba
 
 test "a validation refused by a rate limit does not start the service backoff" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-validate-limited-backoff?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-validate-limited-backoff?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.reply(.{ .respond = .{ .status = 429 } });
     const err = if (fixture.delivery.validateToken("token")) |_| return error.ExpectedFailure else |failed| failed;
@@ -1320,7 +1320,7 @@ test "a validation refused by a rate limit does not start the service backoff" {
 
 test "validateToken reports a rate limit as an error and keeps the previous state" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-validate-limited?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-validate-limited?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.reply(.{ .respond = .{ .status = 429 } });
     try std.testing.expectError(error.RateLimited, fixture.delivery.validateToken("token"));
@@ -1329,7 +1329,7 @@ test "validateToken reports a rate limit as an error and keeps the previous stat
 
 test "an empty queue makes no credential lookup and no request" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-empty?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-empty?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const result = try fixture.step();
     try std.testing.expectEqual(Outcome.idle, result.outcome);
@@ -1340,7 +1340,7 @@ test "an empty queue makes no credential lookup and no request" {
 
 test "a queue whose only row is not yet due makes no credential lookup and reports when to wake" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-not-due?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-not-due?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(1);
     const entries = try fixture.library.scrobbles.lease(std.testing.allocator, service, 42, Fixture.unix_now, Fixture.unix_now + 500, 1);
@@ -1356,7 +1356,7 @@ test "a queue whose only row is not yet due makes no credential lookup and repor
 
 test "a listen a transient failure put off is not sent before its retry time by a new Delivery" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-retry-time?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-retry-time?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(1);
     try fixture.reply(.{ .respond = .{ .status = 503 } });
@@ -1366,7 +1366,7 @@ test "a listen a transient failure put off is not sent before its retry time by 
 
     var clock: network.testing.TestClock = .{};
     var prng: std.Random.DefaultPrng = .init(7);
-    var gateway = network.testing.gateway(&fixture.transport, &clock, &prng, .{});
+    var gateway = network.testing.gateway(&fixture.transport, &clock, &prng, .{ .identity = network.testing.test_identity });
     var restarted = Delivery.init(std.testing.allocator, std.testing.io, &gateway, .{ .context = &fixture, .get_fn = Fixture.getToken }, &fixture.library.scrobbles);
     const early = try restarted.step(retry_at - 1);
     try std.testing.expectEqual(Outcome.idle, early.outcome);
@@ -1378,7 +1378,7 @@ test "a listen a transient failure put off is not sent before its retry time by 
 
 test "while another process holds ListenBrainz nothing is sent, the rows stay due, and delivery resumes once it lets go" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-busy?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-busy?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     fixture.gateway.sharing = .{ .store = shared_state.store(&fixture.library.provider_state), .service = service };
     try fixture.enqueueListens(2);
@@ -1402,7 +1402,7 @@ test "while another process holds ListenBrainz nothing is sent, the rows stay du
 
 test "a 403 stops delivery until credentials change" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-forbidden?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-forbidden?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(2);
     try fixture.reply(.{ .respond = .{ .status = 403 } });
@@ -1419,7 +1419,7 @@ test "a 403 stops delivery until credentials change" {
 test "a 413 or 422 on a single listen rejects it and it is never resent" {
     inline for (.{ 413, 422 }) |status| {
         var fixture: Fixture = undefined;
-        try fixture.start("file:orca-lb-permanent-" ++ std.fmt.comptimePrint("{d}", .{status}) ++ "?mode=memory&cache=shared", .orca);
+        try fixture.start("file:orca-lb-permanent-" ++ std.fmt.comptimePrint("{d}", .{status}) ++ "?mode=memory&cache=shared", network.testing.test_identity);
         defer fixture.stop();
         try fixture.enqueueListens(1);
         try fixture.reply(.{ .respond = .{ .status = status } });
@@ -1435,7 +1435,7 @@ test "a 413 or 422 on a single listen rejects it and it is never resent" {
 test "a listen whose lease was lost during the request is skipped and the others are delivered" {
     std.testing.log_level = .err;
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-stale?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-stale?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(3);
     fixture.release_before_reply = .{
@@ -1469,7 +1469,7 @@ const mbid_one = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
 
 test "a love goes out as one recording-feedback request carrying the recording id and score" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-love?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-love?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1494,7 +1494,7 @@ test "a love goes out as one recording-feedback request carrying the recording i
 
 test "a hate is sent as score -1" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-hate?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-hate?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.setFeedback(try fixture.track(mbid_one), .hated);
     _ = try fixture.syncFeedback();
@@ -1503,7 +1503,7 @@ test "a hate is sent as score -1" {
 
 test "feedback without a recording id makes no token lookup and no request" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-untagged?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-untagged?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(null);
     try fixture.setFeedback(track, .loved);
@@ -1517,7 +1517,7 @@ test "feedback without a recording id makes no token lookup and no request" {
 
 test "clearing a synced love sends score 0 once and leaves no row, and clearing an unsent one sends nothing" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-clear?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-clear?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const synced = try fixture.track(mbid_one);
     try fixture.setFeedback(synced, .loved);
@@ -1542,7 +1542,7 @@ test "clearing a synced love sends score 0 once and leaves no row, and clearing 
 
 test "a permanent 4xx on feedback is recorded and the change is not sent again" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-rejected?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-rejected?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1567,7 +1567,7 @@ test "a permanent 4xx on feedback is recorded and the change is not sent again" 
 
 test "a 429 on feedback blocks listens and feedback until the gateway unblocks" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-limited?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-limited?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.setFeedback(try fixture.track(mbid_one), .loved);
     try fixture.enqueueListens(1);
@@ -1588,7 +1588,7 @@ test "a 429 on feedback blocks listens and feedback until the gateway unblocks" 
 
 test "a server error on feedback joins the service backoff that listens obey" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-outage?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-outage?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.setFeedback(try fixture.track(mbid_one), .loved);
     try fixture.enqueueListens(1);
@@ -1608,7 +1608,7 @@ test "a server error on feedback joins the service backoff that listens obey" {
 
 test "a 401 on feedback stops all delivery until credentials change" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-unauthorized?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-unauthorized?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.setFeedback(try fixture.track(mbid_one), .loved);
     try fixture.enqueueListens(1);
@@ -1626,7 +1626,7 @@ test "a 401 on feedback stops all delivery until credentials change" {
 
 test "no feedback request is made offline or without a token" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-gated?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-gated?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.setFeedback(try fixture.track(mbid_one), .loved);
     fixture.gateway.config.offline = true;
@@ -1654,7 +1654,7 @@ const FeedbackChanger = struct {
 
 test "love, dislike and love again during a request sends the love once and ends loved" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-flip?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-flip?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1671,7 +1671,7 @@ test "love, dislike and love again during a request sends the love once and ends
 
 test "a dislike made during a love's request goes out next and the service ends hated" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-overtaken?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-overtaken?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1688,7 +1688,7 @@ test "a dislike made during a love's request goes out next and the service ends 
 
 test "a clear made during a love's request is sent next and leaves no row" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-cleared-in-flight?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-cleared-in-flight?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1716,7 +1716,7 @@ fn nowPlaying(title: []const u8) scrobble.Event {
 
 test "now playing is sent as playing_now with one track and no listened_at" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-now-playing?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-now-playing?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
 
     const result = try fixture.delivery.sendNowPlaying(nowPlaying("Orca"), Fixture.unix_now);
@@ -1739,7 +1739,7 @@ test "now playing is sent as playing_now with one track and no listened_at" {
 
 test "a 429 on now playing blocks every request and the update is not sent again" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-now-playing-limited?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-now-playing-limited?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.enqueueListens(1);
     try fixture.reply(.{ .respond = .{ .status = 429 } });
@@ -1754,7 +1754,7 @@ test "a 429 on now playing blocks every request and the update is not sent again
 
 test "now playing makes no request while backing off, offline or without a token" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-now-playing-gated?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-now-playing-gated?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     fixture.token = null;
     try std.testing.expectEqual(Outcome.blocked, (try fixture.delivery.sendNowPlaying(nowPlaying("Orca"), Fixture.unix_now)).outcome);
@@ -1773,7 +1773,7 @@ test "now playing makes no request while backing off, offline or without a token
 
 test "a now playing update the service refuses is dropped without touching the backoff" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-now-playing-refused?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-now-playing-refused?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     try fixture.reply(.{ .respond = .{ .status = 400 } });
     const result = try fixture.delivery.sendNowPlaying(nowPlaying("Orca"), Fixture.unix_now);
@@ -1791,7 +1791,7 @@ fn changedAt(fixture: *Fixture) !i64 {
 
 test "a change is not sent until it has stood for two seconds, and only its final state is" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-settle?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-settle?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1816,7 +1816,7 @@ test "a change is not sent until it has stood for two seconds, and only its fina
 
 test "changes that end where the service already is send nothing" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-settle-noop?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-settle-noop?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);
@@ -1835,7 +1835,7 @@ test "changes that end where the service already is send nothing" {
 
 test "a change the service accepted but that could not be marked is not sent again" {
     var fixture: Fixture = undefined;
-    try fixture.start("file:orca-lb-feedback-mark-fails?mode=memory&cache=shared", .orca);
+    try fixture.start("file:orca-lb-feedback-mark-fails?mode=memory&cache=shared", network.testing.test_identity);
     defer fixture.stop();
     const track = try fixture.track(mbid_one);
     try fixture.setFeedback(track, .loved);

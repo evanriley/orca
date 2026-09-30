@@ -626,7 +626,7 @@ const Rig = struct {
 
     fn init(self: *Rig, uri: [:0]const u8) !void {
         self.library = try database.LibraryDatabase.open(testing.allocator, testing.io, uri);
-        self.net.init(.{ .config = .{ .minimum_interval_ms = 0 }, .now_ms = 1_800_000_000_000 });
+        self.net.init(.{ .config = .{ .identity = network.testing.test_identity, .minimum_interval_ms = 0 }, .now_ms = 1_800_000_000_000 });
         self.refused_fingerprint = null;
         self.respond(200, lookup_answer);
         self.net.transport.responder = .{ .context = self, .respond_fn = refuseFingerprint };
@@ -673,7 +673,7 @@ test "a batched lookup asks once for every query, keys results by index and reso
     try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
     try testing.expectEqualStrings("http://127.0.0.1:5001/v2/lookup", rig.net.transport.lastUrl());
     try testing.expectEqualStrings(
-        "client=app%20key&clientversion=" ++ network.client.Identity.orca.version ++
+        "client=app%20key&clientversion=" ++ network.testing.test_identity.version ++
             "&format=json&meta=recordings+releasegroups+compress&batch=1" ++
             "&duration.0=224&fingerprint.0=AQAD%20first&duration.1=225&fingerprint.1=AQAD%20second",
         rig.net.transport.lastForm(),
@@ -824,7 +824,7 @@ test "a submission sends each item's fields under its index and returns what Aco
 
     try testing.expectEqualStrings("http://127.0.0.1:5001/v2/submit", rig.net.transport.lastUrl());
     try testing.expectEqualStrings(
-        "client=app%20key&clientversion=" ++ network.client.Identity.orca.version ++ "&format=json&user=user%20key" ++
+        "client=app%20key&clientversion=" ++ network.testing.test_identity.version ++ "&format=json&user=user%20key" ++
             "&duration.0=224&fingerprint.0=AQAD%20one&fileformat.0=FLAC&bitrate.0=900" ++
             "&mbid.0=8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" ++
             "&duration.1=300&fingerprint.1=AQAD%20two&track.1=Northern%20Sky&artist.1=Nick%20Drake" ++

@@ -25,6 +25,8 @@ const SubmissionStats = runtime.SubmissionStats;
 /// every scan the process ever ran.
 const retained_job_records: usize = 8;
 
+pub const job_progress_interval_ms: u64 = 100;
+
 pub fn startLibraryScan(
     self: *OrcaRuntime,
     library: LibraryHandle,
@@ -67,6 +69,7 @@ pub fn startLibraryMatching(
     request: MatchRequest,
 ) !JobHandle {
     try runtime.requireRunning(self);
+    const identity = self.client_identity orelse return error.ClientIdentityRequired;
     if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
     if (runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
     return startJobWorker(self, library, .{ .metadata_lookup = .{
@@ -75,7 +78,7 @@ pub fn startLibraryMatching(
         .setup = .{
             .io = try runtime_listens.networkIo(self),
             .server = self.musicbrainz_server,
-            .identity = self.client_identity,
+            .identity = identity,
             .hooks = self.matching_hooks,
             .scope = if (request.track_id) |track_id| .{ .track = track_id } else .library,
             .acoustid = if (request.fingerprints) acoustIdSetup(self) else null,
@@ -85,10 +88,11 @@ pub fn startLibraryMatching(
 
 pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
     try runtime.requireRunning(self);
+    const identity = self.client_identity orelse return error.ClientIdentityRequired;
     if (runningJob(self, .metadata_lookup) or runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
     return startJobWorker(self, library, .{ .acoustid_submission = .{
         .io = try runtime_listens.networkIo(self),
-        .identity = self.client_identity,
+        .identity = identity,
         .hooks = self.matching_hooks,
         .acoustid = acoustIdSetup(self),
     } });
@@ -183,6 +187,7 @@ pub fn startJobWorker(
         .database = library_database,
         .request = request,
         .stats = .init(request),
+        .host_signal = &self.host_signal,
     };
     try self.job_workers.append(self.allocator, worker);
     errdefer _ = self.job_workers.pop();
@@ -226,6 +231,19 @@ fn syncJobProgress(self: *OrcaRuntime) void {
         if (worker.retired) continue;
         self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
     }
+}
+
+/// Zero while a finished worker waits to be reaped, which a full event
+/// channel can defer past the wake its finish raised;
+/// `job_progress_interval_ms` while one runs; null when none is live.
+pub fn jobPumpDueMs(self: *const OrcaRuntime) ?u64 {
+    var due: ?u64 = null;
+    for (self.job_workers.items) |worker| {
+        if (worker.retired) continue;
+        if (worker.registration.isFinished()) return 0;
+        due = job_progress_interval_ms;
+    }
+    return due;
 }
 
 pub fn reapFinishedJobs(self: *OrcaRuntime) void {

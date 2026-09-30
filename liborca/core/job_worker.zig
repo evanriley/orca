@@ -1,5 +1,6 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
+const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const library_pass = @import("../library/root.zig");
@@ -12,7 +13,7 @@ const work = @import("work.zig");
 const LibraryHandle = object.LibraryHandle;
 const JobHandle = object.JobHandle;
 const WorkHandle = work.WorkHandle;
-const ClientIdentity = network.client.Identity;
+const OwnedIdentity = network.client.OwnedIdentity;
 const CredentialStore = providers.credentials.Store;
 
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
@@ -74,7 +75,7 @@ pub const AcoustIdSetup = struct {
 pub const MatchingSetup = struct {
     io: std.Io,
     server: []const u8,
-    identity: ClientIdentity,
+    identity: OwnedIdentity,
     hooks: MatchingHooks,
     scope: database.MatchScope,
     /// Null when the job looks nothing up on AcoustID.
@@ -83,7 +84,7 @@ pub const MatchingSetup = struct {
 
 pub const SubmissionSetup = struct {
     io: std.Io,
-    identity: ClientIdentity,
+    identity: OwnedIdentity,
     hooks: MatchingHooks,
     acoustid: AcoustIdSetup,
 };
@@ -397,10 +398,11 @@ pub const Stats = union(enum) {
 /// One background worker behind a `JobHandle`.
 ///
 /// Threading contract, the same one `core/work.zig` states: the worker thread
-/// touches only this struct and the Library database it was handed. It never
-/// resolves a handle, never reads a `handle.Pool`, and never touches the
-/// runtime. The control lane cancels it, joins it through `work.Registry`, and
-/// only then reads anything that is not an atomic here.
+/// touches only this struct, the Library database it was handed and the
+/// runtime's `host_signal`. It never resolves a handle, never reads a
+/// `handle.Pool`, and touches nothing else of the runtime. The control lane
+/// cancels it, joins it through `work.Registry`, and only then reads anything
+/// that is not an atomic here.
 pub const JobWorker = struct {
     allocator: std.mem.Allocator,
     registration: *work.Registration,
@@ -424,11 +426,16 @@ pub const JobWorker = struct {
     failed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
+    /// Raised after `finish`, which is safe only because the control lane
+    /// joins the thread, not merely waits for `finish`, before it frees this
+    /// struct or the runtime.
+    host_signal: *control.HostSignal,
 
     pub fn run(self: *JobWorker) void {
         defer {
             self.threaded.deinit();
             self.registration.finish();
+            self.host_signal.raise();
         }
         switch (self.request) {
             .scan => |request| self.runScan(request),
@@ -603,7 +610,7 @@ pub const JobWorker = struct {
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
-            .config = .{ .identity = setup.identity },
+            .config = .{ .identity = setup.identity.view() },
             .cancel = &self.registration.cancel,
             .sharing = .{ .store = shared_state, .service = providers.musicbrainz.service },
         };
@@ -619,7 +626,7 @@ pub const JobWorker = struct {
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
-            .config = .{ .identity = setup.identity },
+            .config = .{ .identity = setup.identity.view() },
             .cancel = &self.registration.cancel,
             .sharing = .{ .store = shared_state, .service = providers.acoustid.service },
         };
@@ -696,7 +703,7 @@ pub const JobWorker = struct {
             .clock = setup.hooks.clock orelse system_clock.clock(),
             .wall_clock = wall_clock,
             .random = setup.hooks.random orelse random_source.interface(),
-            .config = .{ .identity = setup.identity },
+            .config = .{ .identity = setup.identity.view() },
             .cancel = &self.registration.cancel,
             .sharing = .{
                 .store = providers.shared_state.store(&self.database.provider_state),

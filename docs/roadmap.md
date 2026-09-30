@@ -14,10 +14,13 @@ scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
 submission. Filesystem watching is built but not connected. `liborca`
 builds for aarch64 macOS, but macOS has no audio output yet.
 
-The next milestone is `liborca` as a library for others: a versioned shared
-library that exports only `orca_*` symbols, a stability statement, and the
-other host-facing pieces in step 1 of [Next](#next). Filesystem watching comes
-after it.
+`liborca` is usable as a library for others: the SONAME `liborca.so.0`
+versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
+exports limited to the functions `orca.h` declares, a last-error message for C
+callers, a stability statement in `orca.h` and [api.md](api.md), a provider
+identity the host must supply, and a wake callback with a pump timeout, which
+`orca-gtk` sleeps on instead of polling. The next milestone is filesystem
+watching.
 
 ## Works today
 
@@ -136,7 +139,9 @@ after it.
   toasts, a shortcuts dialog, MPRIS, ListenBrainz submission with play counts
   in the details panel, love and dislike, MusicBrainz and AcoustID match
   review, and AcoustID submission.
-- C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`.
+- C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
+  with `liborca.so.0` exporting exactly its functions and `orca.pc` for
+  pkg-config.
 
 ### Builds
 
@@ -162,33 +167,26 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **`liborca` as a library for others.** A versioned SONAME, `orca_version`,
-   an installed `orca.pc`, and only `orca_*` symbols exported: today every
-   bundled C and C++ dependency is exported from `liborca.so`, libc++'s
-   `operator new` included. A last-error message for C callers, a wakeup
-   callback or file descriptor so hosts need not poll on a timer, a stability
-   statement in `orca.h` and [api.md](api.md), and a provider identity the
-   host must supply instead of a default.
-2. **Filesystem watching** as a scan accelerator, so new files appear without
+1. **Filesystem watching** as a scan accelerator, so new files appear without
    a manual rescan. The Linux watcher exists; it needs a runtime entry point
    and a client.
-3. **Faster analysis.** The analysis pass decodes on one thread and reads
+2. **Faster analysis.** The analysis pass decodes on one thread and reads
    every file twice, once for a whole-file hash nothing uses. Decode on a
    bounded pool of threads, drop the hash, and compute the Chromaprint
    fingerprint in the same decode.
-4. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+3. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
    tag are reported as not writable. No writer stores an accepted recording
    ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
    `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
    it lacks tag writes, queue editing, artwork, DSP, track details, matching
    and AcoustID submission.
-5. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+4. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-6. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-7. **An optional fixed output rate with a band-limited resampler**, for
+6. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -225,6 +223,8 @@ Small defects that are not yet scheduled:
   `node.dont-fallback`.
 - `playerSignalPath` pauses the engine for a few milliseconds, so hosts read
   it on change, never on a tick.
+- `Telemetry.job_progress` is never published, so `ORCA_EVENT_JOB_PROGRESS`
+  never fires; `Runtime.publishTelemetry` has no callers.
 - `orca-cli` runs every command but `duplicates` on an arena, so a cold scan
   holds memory for every file until it exits.
 - `write-tags` rewrites a file whose permissions make it read-only.

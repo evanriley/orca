@@ -8,6 +8,7 @@
 //! handed, and the control lane drains it before that database can close.
 
 const std = @import("std");
+const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const metadata = @import("../metadata/root.zig");
 const storage = @import("../storage/root.zig");
@@ -55,6 +56,7 @@ pub const Loader = struct {
     /// Borrowed. The control lane drains this loader before the database closes.
     database: *database.LibraryDatabase,
     registration: *work.Registration,
+    host_signal: ?*control.HostSignal = null,
     threaded: std.Io.Threaded = .init_single_threaded,
     requests: spsc.Queue(Request, capacity) = .{},
     results: spsc.Queue(Result, capacity) = .{},
@@ -152,7 +154,9 @@ pub const Loader = struct {
         if (!self.results.push(.{ .request = next.id, .subject = next.subject, .image = image })) {
             if (image) |present| present.deinit();
             _ = self.outstanding.fetchSub(1, .acq_rel);
+            return true;
         }
+        if (self.host_signal) |signal| signal.raise();
         return true;
     }
 };
@@ -234,6 +238,38 @@ test "a cancelled request is skipped and the rest arrive in order" {
     try std.testing.expectEqual(third, b.request);
     try std.testing.expect(a.image == null and b.image == null);
     try std.testing.expectEqual(@as(u32, 0), loader.outstanding.load(.acquire));
+}
+
+test "each finished request wakes the host, and a skipped one does not" {
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-artwork-loader-wake?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var registration: work.Registration = .{};
+    var counter: control.CountingWaker = .{};
+    var signal: control.HostSignal = .{ .waker = counter.waker() };
+    var loader: Loader = .{
+        .allocator = std.testing.allocator,
+        .database = &library,
+        .registration = &registration,
+        .host_signal = &signal,
+    };
+    defer loader.deinit();
+    _ = try loader.request(std.testing.io, .{ .release = 1 });
+    const skipped = try loader.request(std.testing.io, .{ .track = 2 });
+    _ = try loader.request(std.testing.io, .{ .release = 3 });
+    loader.cancel(skipped);
+
+    try std.testing.expect(loader.step(std.testing.io));
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+    signal.clear();
+    try std.testing.expect(loader.step(std.testing.io));
+    try std.testing.expect(!signal.isPending());
+    try std.testing.expect(loader.step(std.testing.io));
+    try std.testing.expectEqual(@as(u32, 2), counter.count());
+    try std.testing.expect(!loader.step(std.testing.io));
 }
 
 test "requests beyond capacity are refused until results are taken" {

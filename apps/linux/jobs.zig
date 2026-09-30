@@ -54,6 +54,7 @@ fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u
     if (self.scan_label) |label| gtk.gtk_label_set_text(label, title);
     if (self.scan_detail) |label| gtk.gtk_label_set_text(label, "Starting…");
     self.updateTracksBody();
+    self.requestTick();
 }
 
 /// Everything shown from the library, rebuilt after its contents changed.

@@ -157,6 +157,7 @@ pub const RequestId = control.RequestId;
 pub const Event = control.Event;
 pub const Telemetry = control.Telemetry;
 pub const Failure = control.Failure;
+pub const HostWaker = runtime.HostWaker;
 
 comptime {
     // Keep exported C symbols reachable when this root builds as liborca.so.

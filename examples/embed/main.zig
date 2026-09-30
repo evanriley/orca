@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
 
     var runtime = orca.Runtime.init(allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(.{ .name = "EmbedExample", .version = "0.1.0", .contact = "https://example.invalid" });
     const database_path = try allocator.dupeSentinel(u8, args[1], 0);
     defer allocator.free(database_path);
     const library = try runtime.openLibrary(init.io, database_path);

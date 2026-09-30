@@ -3,6 +3,14 @@ const client = @import("client.zig");
 
 pub const default_seed: u64 = 0x0ca;
 
+/// Orca's own name and version, which `Identity.isOrca` recognizes, with a
+/// contact that reaches nobody.
+pub const test_identity: client.Identity = .{
+    .name = "Orca",
+    .version = client.liborca_version,
+    .contact = "https://orca.invalid",
+};
+
 pub const TestClock = struct {
     now_ms: std.atomic.Value(i64) = .init(0),
     wall_offset_ms: i64 = 0,
@@ -274,7 +282,7 @@ pub fn gateway(
 }
 
 pub const TestGatewayOptions = struct {
-    config: client.Config = .{},
+    config: client.Config = .{ .identity = test_identity },
     now_ms: i64 = 0,
     wall_offset_ms: i64 = 0,
     seed: u64 = default_seed,

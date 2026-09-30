@@ -471,6 +471,7 @@ pub fn ensureEngine(self: *OrcaRuntime, player: PlayerHandle) !*audio.engine.Pla
         .player = object_state.player,
         .handle = player,
         .telemetry = &self.telemetry,
+        .host_signal = &self.host_signal,
         .factory = factory,
         .queue = object_state.queue,
         .opener = if (object_state.opener) |opener| opener.opener() else null,

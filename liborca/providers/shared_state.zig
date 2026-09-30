@@ -76,7 +76,7 @@ const Process = struct {
             .clock = self.monotonic.clock(),
             .wall_clock = service.clock.wallClock(),
             .random = self.prng.random(),
-            .config = .{ .minimum_interval_ms = 0 },
+            .config = .{ .identity = network.testing.test_identity, .minimum_interval_ms = 0 },
             .sharing = .{ .store = store(&self.library.provider_state), .service = "musicbrainz" },
         };
     }

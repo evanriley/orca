@@ -114,11 +114,12 @@ var unsized_popover: ?*gtk.Popover = null;
 /// only a parent that re-presents it on allocation corrects that; a column
 /// view cell does not, so the menu stayed a row short. `gtk_popover_present`
 /// re-sends the size only while an allocation is pending.
-pub fn tick() void {
-    const popover = unsized_popover orelse return;
+fn presentUnsized(_: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const popover = unsized_popover orelse return gtk.SOURCE_REMOVE;
     unsized_popover = null;
     gtk.gtk_widget_queue_resize(gtk.cast(gtk.Widget, popover));
     gtk.gtk_popover_present(popover);
+    return gtk.SOURCE_REMOVE;
 }
 
 fn closed(popover: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
@@ -138,6 +139,7 @@ pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
     _ = gtk.signalConnect(popover, "closed", gtk.callback(closed), null);
     gtk.gtk_popover_popup(gtk.cast(gtk.Popover, popover));
     unsized_popover = gtk.cast(gtk.Popover, popover);
+    _ = gtk.g_idle_add(presentUnsized, null);
 }
 
 /// A right-button click gesture on `widget`, calling `handler` with the
@@ -201,6 +203,7 @@ pub fn play(self: *App) void {
             self.runtime.playerQueueJump(self.player, position) catch
                 self.toast("Could not play that entry");
             self.mpris.notify();
+            self.requestTick();
         },
         else => transport.playIds(self, self.context.tracks.items, 0),
     }
@@ -213,6 +216,7 @@ pub fn playNext(self: *App) void {
     self.runtime.playerQueueInsertNext(self.player, library, self.context.tracks.items) catch
         return self.toast("Could not queue that");
     self.toast(if (self.context.tracks.items.len == 1) "Playing next" else "Playing these next");
+    self.requestTick();
 }
 
 pub fn enqueue(self: *App) void {
@@ -222,6 +226,7 @@ pub fn enqueue(self: *App) void {
     self.runtime.playerEnqueueTracksBound(self.player, library, self.context.tracks.items) catch
         return self.toast("Could not queue that");
     self.toast("Added to the queue");
+    self.requestTick();
 }
 
 pub fn remove(self: *App) void {
@@ -230,4 +235,5 @@ pub fn remove(self: *App) void {
         error.QueueEntryInUse => self.toast("That song is already playing or up next"),
         else => self.toast("Could not remove that entry"),
     };
+    self.requestTick();
 }

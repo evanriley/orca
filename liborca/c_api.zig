@@ -15,6 +15,7 @@ const control = @import("core/control.zig");
 const core = @import("core/root.zig");
 const database = @import("database/root.zig");
 const job = @import("core/job.zig");
+const version = @import("version.zig");
 
 pub const Runtime = opaque {};
 
@@ -296,9 +297,35 @@ const RuntimeBox = struct {
     /// it. Recorded unconditionally; only checked in debug builds, where the
     /// cost of one comparison per call buys a whole class of bug report.
     owner_thread: std.Thread.Id,
+    last_error: [last_error_capacity:0]u8 = @splat(0),
 
     fn io(self: *RuntimeBox) std.Io {
         return self.threaded.io();
+    }
+
+    fn reject(
+        self: *RuntimeBox,
+        comptime source: std.builtin.SourceLocation,
+        status: Status,
+        message: []const u8,
+    ) Status {
+        self.recordError(source.fn_name, message);
+        return status;
+    }
+
+    fn fail(self: *RuntimeBox, comptime source: std.builtin.SourceLocation, err: anyerror) Status {
+        self.recordError(source.fn_name, @errorName(err));
+        return mapError(err);
+    }
+
+    fn recordError(self: *RuntimeBox, function: []const u8, message: []const u8) void {
+        var length: usize = 0;
+        for ([_][]const u8{ function, ": ", message }) |part| {
+            const copied = @min(part.len, last_error_capacity - length);
+            @memcpy(self.last_error[length..][0..copied], part[0..copied]);
+            length += copied;
+        }
+        if (length < last_error_capacity) self.last_error[length] = 0;
     }
 
     /// True when the caller is violating the single-thread contract. Release
@@ -309,6 +336,18 @@ const RuntimeBox = struct {
         return std.Thread.getCurrentId() != self.owner_thread;
     }
 };
+
+const last_error_capacity = 255;
+
+pub export fn orca_version() callconv(.c) [*:0]const u8 {
+    return std.fmt.comptimePrint("{f}", .{version.value});
+}
+
+pub export fn orca_runtime_last_error(runtime: ?*const Runtime) callconv(.c) [*:0]const u8 {
+    const box: *const RuntimeBox = @ptrCast(@alignCast(runtime orelse return ""));
+    if (box.foreignThread()) return "";
+    return &box.last_error;
+}
 
 pub export fn orca_runtime_create() callconv(.c) ?*Runtime {
     const box = std.heap.c_allocator.create(RuntimeBox) catch return null;
@@ -332,20 +371,18 @@ pub export fn orca_library_open(
     path: ?[*:0]const u8,
     output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const path_pointer = path orelse return .invalid_argument;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const path_pointer = path orelse return box.reject(@src(), .invalid_argument, "path is null");
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const library = box.runtime.openLibrary(box.io(), std.mem.span(path_pointer)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = exportLibraryHandle(library);
     return .ok;
 }
 
 pub export fn orca_library_close(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.destroyLibrary(importLibrary(library)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.destroyLibrary(importLibrary(library)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -354,11 +391,10 @@ pub export fn orca_library_track_count(
     library: Handle,
     output: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryTrackCount(importLibrary(library)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -372,22 +408,21 @@ pub export fn orca_library_query_tracks(
     context: ?*anyopaque,
     callback: ?TrackCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     const query = if (query_pointer) |pointer|
         pointer[0..query_length]
     else if (query_length == 0)
         ""
     else
-        return .invalid_argument;
+        return box.reject(@src(), .invalid_argument, "query is null and query_length is not zero");
     var page = box.runtime.libraryTrackPage(
         importLibrary(library),
         query,
         limit,
         offset,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view = trackView(item);
@@ -401,11 +436,10 @@ pub export fn orca_library_health_issue_count(
     library: Handle,
     output: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryHealthIssueCount(importLibrary(library)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -417,15 +451,14 @@ pub export fn orca_library_query_health_issues(
     context: ?*anyopaque,
     callback: ?HealthIssueCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     var page = box.runtime.libraryHealthIssuePage(
         importLibrary(library),
         limit,
         offset,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view: HealthIssueView = .{
@@ -444,11 +477,10 @@ pub export fn orca_library_artist_count(
     library: Handle,
     output: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryArtistCount(importLibrary(library)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -460,15 +492,14 @@ pub export fn orca_library_query_artists(
     context: ?*anyopaque,
     callback: ?ArtistCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     var page = box.runtime.libraryArtistPage(importLibrary(library), .{
         .limit = limit,
         .offset = offset,
     }) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view = artistView(item);
@@ -484,11 +515,10 @@ pub export fn orca_library_artist_get(
     context: ?*anyopaque,
     callback: ?ArtistCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     const found = box.runtime.libraryArtist(importLibrary(library), artist_id) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     const item = found orelse return .ok;
     defer item.deinit(box.runtime.allocator);
     const view = artistView(item);
@@ -501,11 +531,10 @@ pub export fn orca_library_release_count(
     library: Handle,
     output: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryReleaseCount(importLibrary(library)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -518,15 +547,14 @@ pub export fn orca_library_query_releases(
     context: ?*anyopaque,
     callback: ?ReleaseCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     var page = box.runtime.libraryReleasePage(importLibrary(library), .{
         .album_artist_id = optionalId(album_artist_id),
         .limit = limit,
         .offset = offset,
-    }) catch |err| return mapError(err);
+    }) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view = releaseView(item);
@@ -542,11 +570,10 @@ pub export fn orca_library_release_get(
     context: ?*anyopaque,
     callback: ?ReleaseCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     const found = box.runtime.libraryRelease(importLibrary(library), release_id) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     const item = found orelse return .ok;
     defer item.deinit(box.runtime.allocator);
     const view = releaseView(item);
@@ -561,13 +588,13 @@ pub export fn orca_library_browse_tracks(
     context: ?*anyopaque,
     callback: ?TrackCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    const request = importTrackQuery(query orelse return .invalid_argument) orelse
-        return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importTrackQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_track_query);
     var page = box.runtime.libraryTrackQuery(importLibrary(library), "", request) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view = trackView(item);
@@ -582,13 +609,13 @@ pub export fn orca_library_track_match_count(
     query: ?*const TrackQueryView,
     output: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
-    const request = importTrackQuery(query orelse return .invalid_argument) orelse
-        return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importTrackQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_track_query);
     destination.* = box.runtime.libraryTrackMatchCount(importLibrary(library), request) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -596,39 +623,34 @@ pub export fn orca_player_create(
     runtime: ?*Runtime,
     output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
-    const player = box.runtime.createPlayer() catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const player = box.runtime.createPlayer() catch |err| return box.fail(@src(), err);
     destination.* = exportHandle(player);
     return .ok;
 }
 
 pub export fn orca_player_destroy(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.destroyPlayer(importPlayer(player)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.destroyPlayer(importPlayer(player)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
 pub export fn orca_player_play(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.playPlayer(importPlayer(player)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playPlayer(importPlayer(player)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
 pub export fn orca_player_pause(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.pausePlayer(importPlayer(player)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.pausePlayer(importPlayer(player)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
 pub export fn orca_player_stop(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.stopPlayer(importPlayer(player)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.stopPlayer(importPlayer(player)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -638,22 +660,16 @@ pub export fn orca_player_seek(
     frame: u64,
     generation: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const next = box.runtime.seekPlayer(importPlayer(player), frame) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     if (generation) |output| output.* = next;
     return .ok;
 }
 
 pub export fn orca_runtime_pump(runtime: ?*Runtime) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    // Bounded: one pump drains at most the command queue's capacity, so a host
-    // that keeps submitting can never trap its own event loop in here.
-    var executed: usize = 0;
-    while (executed < 256 and box.runtime.processNextCommand()) executed += 1;
-    box.runtime.reapFinishedJobs();
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.pump();
     return .ok;
 }
 
@@ -662,9 +678,8 @@ pub export fn orca_runtime_poll_event(
     event: ?*Event,
     remaining: ?*u32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = event orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = event orelse return box.reject(@src(), .invalid_argument, "event is null");
     destination.* = .{ .kind = @intFromEnum(EventKind.none), .payload = undefined };
     // Lossless completions first, coalesced hints second: a host must never
     // learn that a job finished before it learns the command that started it
@@ -680,20 +695,44 @@ pub export fn orca_runtime_poll_event(
     return .ok;
 }
 
+pub const WakeCallback = *const fn (?*anyopaque) callconv(.c) void;
+
+pub export fn orca_runtime_set_wake_callback(
+    runtime: ?*Runtime,
+    callback: ?WakeCallback,
+    context: ?*anyopaque,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const waker: ?control.HostWaker = if (callback) |wake| .{ .context = context, .wake_fn = wake } else null;
+    box.runtime.setWaker(waker) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub const pump_no_timeout: i64 = -1;
+
+pub export fn orca_runtime_pump_timeout(runtime: ?*Runtime, timeout_ms: ?*i64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = timeout_ms orelse return box.reject(@src(), .invalid_argument, "timeout_ms is null");
+    destination.* = if (box.runtime.nextPumpTimeoutMs()) |milliseconds|
+        std.math.cast(i64, milliseconds) orelse std.math.maxInt(i64)
+    else
+        pump_no_timeout;
+    return .ok;
+}
+
 pub export fn orca_library_add_root(
     runtime: ?*Runtime,
     library: Handle,
     path: ?[*:0]const u8,
     root_id: ?*i64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const path_pointer = path orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const path_pointer = path orelse return box.reject(@src(), .invalid_argument, "path is null");
     const binding = box.runtime.libraryAddRoot(
         importLibrary(library),
         box.io(),
         std.mem.span(path_pointer),
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     if (root_id) |output| output.* = binding.root_id;
     return .ok;
 }
@@ -703,10 +742,9 @@ pub export fn orca_library_remove_root(
     library: Handle,
     root_id: i64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     _ = box.runtime.libraryRemoveRoot(importLibrary(library), root_id) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -718,12 +756,11 @@ pub export fn orca_library_query_roots(
     context: ?*anyopaque,
     callback: ?RootCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     var page = box.runtime.libraryRootPage(importLibrary(library), limit, offset) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
         const view: RootView = .{
@@ -744,9 +781,8 @@ pub export fn orca_library_start_scan(
     options: ?*const ScanOptions,
     job_output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = job_output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
     var request: core.runtime.ScanRequest = .{
         .root_id = if (root_id < 0) null else root_id,
     };
@@ -754,7 +790,7 @@ pub export fn orca_library_start_scan(
         if (value.batch_size != 0) request.batch_size = value.batch_size;
     }
     const started = box.runtime.startLibraryScan(importLibrary(library), request) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -764,11 +800,10 @@ pub export fn orca_library_start_projection(
     library: Handle,
     job_output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = job_output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
     const started = box.runtime.startLibraryProjection(importLibrary(library)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -785,9 +820,8 @@ pub export fn orca_library_start_property_backfill(
     options: ?*const BackfillOptions,
     job_output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = job_output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
     var request: core.runtime.BackfillRequest = .{};
     if (options) |value| {
         if (value.batch_size != 0) request.batch_size = value.batch_size;
@@ -796,7 +830,7 @@ pub export fn orca_library_start_property_backfill(
     const started = box.runtime.startLibraryPropertyBackfill(
         importLibrary(library),
         request,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -813,9 +847,8 @@ pub export fn orca_library_start_analysis(
     options: ?*const AnalysisOptions,
     job_output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = job_output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
     var request: core.runtime.AnalysisRequest = .{};
     if (options) |value| {
         if (value.batch_size != 0) request.batch_size = value.batch_size;
@@ -823,7 +856,7 @@ pub export fn orca_library_start_analysis(
     const started = box.runtime.startLibraryAnalysis(
         importLibrary(library),
         request,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
@@ -840,9 +873,8 @@ pub export fn orca_library_start_duplicate_scan(
     options: ?*const DuplicateScanOptions,
     job_output: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = job_output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
     var request: core.runtime.DuplicateScanRequest = .{};
     if (options) |value| {
         if (value.batch_size != 0) request.batch_size = value.batch_size;
@@ -850,15 +882,14 @@ pub export fn orca_library_start_duplicate_scan(
     const started = box.runtime.startLibraryDuplicateScan(
         importLibrary(library),
         request,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
     return .ok;
 }
 
 pub export fn orca_job_cancel(runtime: ?*Runtime, job_handle: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.cancelJob(importJob(job_handle)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.cancelJob(importJob(job_handle)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -867,11 +898,10 @@ pub export fn orca_job_snapshot_get(
     job_handle: Handle,
     output: ?*JobSnapshot,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const snapshot = box.runtime.jobSnapshotSynced(importJob(job_handle)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = .{
         .kind = exportJobKind(snapshot.kind),
         .state = @intFromEnum(snapshot.state),
@@ -887,11 +917,10 @@ pub export fn orca_library_scan_stats(
     job_handle: Handle,
     output: ?*ScanStats,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.jobScanStats(importJob(job_handle)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = .{
         .files_seen = stats.files_seen,
         .changed = stats.changed,
@@ -913,13 +942,12 @@ pub export fn orca_player_set_library(
     player: Handle,
     library: Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.playerBindLibrary(
         importPlayer(player),
         importLibrary(library),
         box.io(),
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -929,16 +957,15 @@ pub export fn orca_player_play_track(
     track_id: i64,
     request_id: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const player_handle = importPlayer(player);
     const library = (box.runtime.playerLibrary(player_handle) catch |err|
-        return mapError(err)) orelse return .invalid_state;
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
     const submitted = box.runtime.submit(.{ .play_track = .{
         .player = player_handle,
         .library = library,
         .track_id = track_id,
-    } }) catch |err| return mapError(err);
+    } }) catch |err| return box.fail(@src(), err);
     if (request_id) |output| output.* = submitted;
     return .ok;
 }
@@ -950,14 +977,14 @@ pub export fn orca_player_play_tracks(
     count: usize,
     start: u32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const player_handle = importPlayer(player);
     const library = (box.runtime.playerLibrary(player_handle) catch |err|
-        return mapError(err)) orelse return .invalid_state;
-    const list = trackIdSlice(ids, count) orelse return .invalid_argument;
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    const list = trackIdSlice(ids, count) orelse
+        return box.reject(@src(), .invalid_argument, "ids is null or count exceeds the queue capacity");
     box.runtime.playerPlayTracksBound(player_handle, library, list, start) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -967,14 +994,14 @@ pub export fn orca_player_enqueue_tracks(
     ids: ?[*]const i64,
     count: usize,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const player_handle = importPlayer(player);
     const library = (box.runtime.playerLibrary(player_handle) catch |err|
-        return mapError(err)) orelse return .invalid_state;
-    const list = trackIdSlice(ids, count) orelse return .invalid_argument;
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    const list = trackIdSlice(ids, count) orelse
+        return box.reject(@src(), .invalid_argument, "ids is null or count exceeds the queue capacity");
     box.runtime.playerEnqueueTracksBound(player_handle, library, list) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -983,10 +1010,9 @@ pub export fn orca_player_next(
     player: Handle,
     moved: ?*u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const advanced = box.runtime.playerNext(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     if (moved) |output| output.* = @intFromBool(advanced);
     return .ok;
 }
@@ -996,18 +1022,16 @@ pub export fn orca_player_previous(
     player: Handle,
     moved: ?*u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const advanced = box.runtime.playerPrevious(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     if (moved) |output| output.* = @intFromBool(advanced);
     return .ok;
 }
 
 pub export fn orca_player_clear_queue(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.playerClearQueue(importPlayer(player)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerClearQueue(importPlayer(player)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1016,13 +1040,12 @@ pub export fn orca_player_set_repeat(
     player: Handle,
     mode: u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    if (mode > 2) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    if (mode > 2) return box.reject(@src(), .invalid_argument, "mode must be 0, 1 or 2");
     box.runtime.playerSetRepeat(
         importPlayer(player),
         @enumFromInt(mode),
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1031,10 +1054,9 @@ pub export fn orca_player_set_shuffle(
     player: Handle,
     enabled: u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.playerSetShuffle(importPlayer(player), enabled != 0) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1043,10 +1065,9 @@ pub export fn orca_player_set_volume(
     player: Handle,
     linear: f32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.playerSetVolume(importPlayer(player), linear) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1055,11 +1076,10 @@ pub export fn orca_player_volume(
     player: Handle,
     output: ?*f32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.playerVolume(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1071,15 +1091,14 @@ pub export fn orca_player_set_replay_gain_mode(
     player: Handle,
     mode: u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const resolved: audio.processing.ReplayGainMode = switch (mode) {
         0 => .off,
         1 => .track,
-        else => return .invalid_argument,
+        else => return box.reject(@src(), .invalid_argument, "mode must be 0 or 1"),
     };
     box.runtime.playerSetReplayGainMode(importPlayer(player), resolved) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1088,11 +1107,10 @@ pub export fn orca_player_replay_gain_mode(
     player: Handle,
     output: ?*u8,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = @intFromEnum(mode);
     return .ok;
 }
@@ -1105,11 +1123,10 @@ pub export fn orca_player_effective_gain(
     player: Handle,
     output: ?*f32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.playerEffectiveGain(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1119,10 +1136,9 @@ pub export fn orca_player_seek_ms(
     milliseconds: u64,
     epoch: ?*u64,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const next = box.runtime.playerSeekMs(importPlayer(player), milliseconds) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     if (epoch) |output| output.* = next;
     return .ok;
 }
@@ -1132,11 +1148,10 @@ pub export fn orca_player_status_get(
     player: Handle,
     output: ?*PlayerStatus,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     destination.* = .{
         .transport = @intFromEnum(status.transport),
         .repeat = @intFromEnum(status.repeat),
@@ -1159,16 +1174,15 @@ pub export fn orca_player_now_playing(
     context: ?*anyopaque,
     callback: ?NowPlayingCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     const player_handle = importPlayer(player);
     const current = (box.runtime.playerNowPlaying(player_handle) catch |err|
-        return mapError(err)) orelse return .ok;
+        return box.fail(@src(), err)) orelse return .ok;
     const summary = (box.runtime.libraryTrackSummary(
         current.library,
         current.track_id,
-    ) catch |err| return mapError(err)) orelse return .ok;
+    ) catch |err| return box.fail(@src(), err)) orelse return .ok;
     defer summary.deinit(box.runtime.allocator);
     const view: NowPlayingView = .{
         .track_id = summary.id,
@@ -1191,18 +1205,17 @@ pub export fn orca_player_query_queue(
     context: ?*anyopaque,
     callback: ?QueueEntryCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
-    if (limit == 0 or limit > max_page) return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
     const player_handle = importPlayer(player);
-    const status = box.runtime.playerStatus(player_handle) catch |err| return mapError(err);
+    const status = box.runtime.playerStatus(player_handle) catch |err| return box.fail(@src(), err);
     var entries: [max_page]core.runtime.TrackRef = undefined;
     const count = box.runtime.playerQueuePage(
         player_handle,
         offset,
         entries[0..limit],
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     for (entries[0..count], 0..) |entry, index| {
         const position: u32 = offset + @as(u32, @intCast(index));
         const view: QueueEntryView = .{
@@ -1220,12 +1233,11 @@ pub export fn orca_enumerate_output_devices(
     context: ?*anyopaque,
     callback: ?DeviceCallback,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const visit = callback orelse return .invalid_argument;
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     var devices: [max_devices]audio.backend.Device = undefined;
     const count = box.runtime.enumerateOutputDevices(&devices) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     for (devices[0..count]) |*device| {
         const view: DeviceView = .{ .id = device.id, .name = stringView(device.nameSlice()) };
         visit(context, &view);
@@ -1234,18 +1246,16 @@ pub export fn orca_enumerate_output_devices(
 }
 
 pub export fn orca_zone_create(runtime: ?*Runtime, output: ?*Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
-    const zone = box.runtime.createZone() catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const zone = box.runtime.createZone() catch |err| return box.fail(@src(), err);
     destination.* = exportZoneHandle(zone);
     return .ok;
 }
 
 pub export fn orca_zone_destroy(runtime: ?*Runtime, zone: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.destroyZone(importZone(zone)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.destroyZone(importZone(zone)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1254,17 +1264,15 @@ pub export fn orca_zone_attach_player(
     zone: Handle,
     player: Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.attachZone(importZone(zone), importPlayer(player)) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     return .ok;
 }
 
 pub export fn orca_zone_detach(runtime: ?*Runtime, zone: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.detachZone(importZone(zone)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.detachZone(importZone(zone)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1275,26 +1283,24 @@ pub export fn orca_zone_open_output(
     policy: u8,
     latency_frames: u32,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const render_policy: audio.zone.RenderPolicy = switch (policy) {
         0 => .robust,
         1 => .interactive,
-        else => return .invalid_argument,
+        else => return box.reject(@src(), .invalid_argument, "policy must be 0 or 1"),
     };
     box.runtime.zoneOpenOutput(
         importZone(zone),
         device_id,
         render_policy,
         latency_frames,
-    ) catch |err| return mapError(err);
+    ) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
 pub export fn orca_zone_close_output(runtime: ?*Runtime, zone: Handle) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    box.runtime.zoneCloseOutput(importZone(zone)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.zoneCloseOutput(importZone(zone)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -1303,10 +1309,9 @@ pub export fn orca_zone_status_get(
     zone: Handle,
     output: ?*ZoneStatus,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
-    const destination = output orelse return .invalid_argument;
-    const stats = box.runtime.zoneStats(importZone(zone)) catch |err| return mapError(err);
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.zoneStats(importZone(zone)) catch |err| return box.fail(@src(), err);
     destination.* = .{
         .output_state = @intFromEnum(stats.output_state),
         .recovery_attempts = stats.recovery_attempts,
@@ -1324,16 +1329,28 @@ pub export fn orca_player_open_default_output(
     device_id: u64,
     zone_out: ?*Handle,
 ) callconv(.c) Status {
-    const box = runtimeBox(runtime) orelse return .invalid_argument;
-    if (box.foreignThread()) return .wrong_thread;
+    const box = enter(runtime) orelse return refusal(runtime);
     const zone = box.runtime.playerOpenDefaultOutput(importPlayer(player), device_id) catch |err|
-        return mapError(err);
+        return box.fail(@src(), err);
     if (zone_out) |output| output.* = exportZoneHandle(zone);
     return .ok;
 }
 
 fn runtimeBox(runtime: ?*Runtime) ?*RuntimeBox {
     return @ptrCast(@alignCast(runtime orelse return null));
+}
+
+/// A call refused for its thread must not write the last error: the owning
+/// thread may be reading it.
+fn enter(runtime: ?*Runtime) ?*RuntimeBox {
+    const box = runtimeBox(runtime) orelse return null;
+    if (box.foreignThread()) return null;
+    box.last_error[0] = 0;
+    return box;
+}
+
+fn refusal(runtime: ?*Runtime) Status {
+    return if (runtime == null) .invalid_argument else .wrong_thread;
 }
 
 fn exportHandle(handle: core.PlayerHandle) Handle {
@@ -1359,6 +1376,8 @@ fn stringView(value: []const u8) StringView {
 fn optionalId(value: i64) ?i64 {
     return if (value < 0) null else value;
 }
+
+const invalid_track_query = "query limit must be between 1 and 512 and sort a known orca_track_sort";
 
 /// Reject a malformed query at the boundary rather than clamping it: a limit
 /// of zero or a sort byte this build does not know is a caller bug, and
@@ -1551,6 +1570,7 @@ fn mapError(err: anyerror) Status {
         error.ZoneOwnedByEngine,
         error.InvalidJobTransition,
         error.JobAlreadyFinished,
+        error.WorkersRunning,
         => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot => .not_found,
         error.PlaybackQueueFull, error.LibraryJobRunning => .busy,
@@ -1653,6 +1673,102 @@ test "C ABI library query is bounded and callback-scoped" {
     ));
     try std.testing.expectEqual(@as(usize, 1), visited);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "the wake callback fires on a submitted command and the pump timeout follows it" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var counter: control.CountingWaker = .{};
+    const waker = counter.waker();
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_wake_callback(runtime, waker.wake_fn, waker.context));
+    var timeout: i64 = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_pump_timeout(runtime, null));
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump_timeout(runtime, &timeout));
+    try std.testing.expectEqual(pump_no_timeout, timeout);
+
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-wake?mode=memory&cache=shared", &library));
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.ok, orca_player_set_library(runtime, player, library));
+    var request_id: u64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_player_play_track(runtime, player, 1, &request_id));
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump_timeout(runtime, &timeout));
+    try std.testing.expectEqual(@as(i64, 0), timeout);
+
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump(runtime));
+    var event: Event = undefined;
+    var completed = false;
+    while (true) {
+        try std.testing.expectEqual(Status.ok, orca_runtime_poll_event(runtime, &event, null));
+        if (event.kind == @intFromEnum(EventKind.none)) break;
+        if (event.kind == @intFromEnum(EventKind.command_completed) and
+            event.payload.command_completed.request_id == request_id) completed = true;
+    }
+    try std.testing.expect(completed);
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump_timeout(runtime, &timeout));
+    try std.testing.expectEqual(pump_no_timeout, timeout);
+
+    try std.testing.expectEqual(Status.invalid_state, orca_runtime_set_wake_callback(runtime, null, null));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_set_wake_callback: WorkersRunning",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+}
+
+test "orca_version is liborca's version" {
+    try std.testing.expectEqualStrings(
+        std.fmt.comptimePrint("{f}", .{version.value}),
+        std.mem.span(orca_version()),
+    );
+}
+
+test "a failing call leaves its function and reason as the last error, and the next successful call clears it" {
+    try std.testing.expectEqualStrings("", std.mem.span(orca_runtime_last_error(null)));
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    try std.testing.expectEqualStrings("", std.mem.span(orca_runtime_last_error(runtime)));
+
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_open(runtime, null, &library));
+    try std.testing.expectEqualStrings("orca_library_open: path is null", std.mem.span(orca_runtime_last_error(runtime)));
+
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqualStrings("", std.mem.span(orca_runtime_last_error(runtime)));
+
+    try std.testing.expectEqual(Status.invalid_state, orca_player_play(runtime, player));
+    try std.testing.expectEqualStrings("orca_player_play: PlayerHasNoSource", std.mem.span(orca_runtime_last_error(runtime)));
+}
+
+test "a call refused for its thread leaves the owner's last error untouched" {
+    if (builtin.mode != .Debug) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_open(runtime, null, &library));
+
+    var status: Status = .ok;
+    const thread = try std.Thread.spawn(.{}, playFromAnotherThread, .{ runtime, &status });
+    thread.join();
+
+    try std.testing.expectEqual(Status.wrong_thread, status);
+    try std.testing.expectEqualStrings("orca_library_open: path is null", std.mem.span(orca_runtime_last_error(runtime)));
+}
+
+fn playFromAnotherThread(runtime: *Runtime, status: *Status) void {
+    status.* = orca_player_play(runtime, .{ .index = 0, .generation = 0 });
+}
+
+test "a last error longer than its buffer is truncated and stays terminated" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    box.recordError("orca_library_open", "x" ** 400);
+    const message = std.mem.span(orca_runtime_last_error(runtime));
+    try std.testing.expectEqual(@as(usize, last_error_capacity), message.len);
+    try std.testing.expect(std.mem.startsWith(u8, message, "orca_library_open: xxx"));
 }
 
 fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {

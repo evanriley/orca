@@ -55,7 +55,15 @@ defer page.deinit();
   `ZoneStats`, ...), jobs (`ScanRequest`, `JobSnapshot`, `ScanStats`, ...), tag
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
   (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
-  `Telemetry`, `Failure`).
+  `Telemetry`, `Failure`, `HostWaker`).
+- A host's event loop sleeps until liborca has something for it:
+  `setWaker(HostWaker)`, called right after `init` and refused with
+  `error.WorkersRunning` once a worker thread exists, installs the function
+  liborca calls when the loop should pump;
+  `pump` executes the submitted commands and publishes finished jobs; and
+  `nextPumpTimeoutMs` returns how long the loop may sleep, 0 to pump now or
+  null to wait for the waker alone. See
+  [control-plane.md](control-plane.md#waking-the-host).
 - `playerSetEqualizer` and `playerSetCrossfeed` (and their getters) set a
   Player's ten-band `Equalizer` (or an `EqualizerPreset`) and stereo crossfeed;
   `playerSignalPath` returns a `SignalPath`: the source, ReplayGain, DSP, volume
@@ -88,7 +96,8 @@ defer page.deinit();
   at most one Library per runtime. The token comes from the `CredentialStore`
   given to `setCredentialStore`; `libraryScrobblerCredentialsChanged` has it
   validated once, and `libraryScrobblerStatus` returns a `ScrobblerStatus`.
-  `setClientIdentity` names the host in submissions and
+  `setClientIdentity` names the host to every provider and in the listen
+  history; see [Client identity](#client-identity).
   `setListenBrainzServer` points them at a compatible server: `https`, or
   `http` only to `127.0.0.1`, `[::1]` or `localhost`, and
   `error.InvalidServerUrl` otherwise. The three setters may be called at any
@@ -170,7 +179,42 @@ defer page.deinit();
 Threading and ordering rules are the runtime's, documented in
 [ownership.md](ownership.md) and [control-plane.md](control-plane.md).
 
+## Client identity
+
+liborca has no identity of its own toward MusicBrainz, AcoustID and
+ListenBrainz: the host names itself before any provider work.
+
+```zig
+try runtime.setClientIdentity(.{
+    .name = "MyPlayer",
+    .version = "1.2.0",
+    .contact = "https://myplayer.example",
+});
+```
+
+- Until it is set, `startLibraryMatching`, `startAcoustIdSubmission` and
+  `librarySetScrobbling(library, true, ...)` return
+  `error.ClientIdentityRequired`. Turning scrobbling off, and
+  `libraryTrackFingerprint`, need none.
+- The three strings are copied, so the caller's buffers may be freed after the
+  call. A later call replaces the identity; running workers adopt it on their
+  next pass.
+- Each field must be non-empty, free of control characters and parentheses,
+  and the three together at most 256 bytes; otherwise the call returns
+  `error.InvalidNetworkConfiguration`.
+- The `User-Agent` is `Name/version ( contact ) liborca/<version>`. The suffix
+  is left out only for the name `Orca` at liborca's own version, which is how
+  `orca-cli` and `orca-gtk` identify themselves.
+
 ## Stability
 
-liborca is pre-1.0. The API changes when the design needs it; every change to
-a top-level declaration is recorded in `CHANGELOG.md`.
+liborca is pre-1.0. The C ABI in `orca.h` is versioned by `ORCA_ABI_VERSION`
+and the shared library's SONAME, `liborca.so.<ORCA_ABI_VERSION>`. Within one
+ABI version:
+
+- functions are only added, never removed or changed;
+- a reserved field gains a meaning only as an addition for which zero keeps
+  the old behaviour;
+- enum values are only added.
+
+The Zig API may break in any minor release; `CHANGELOG.md` records each break.

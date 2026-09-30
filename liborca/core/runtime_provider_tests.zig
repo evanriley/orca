@@ -1,11 +1,13 @@
 const std = @import("std");
 const audio = @import("../audio/root.zig");
+const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const listen_worker = @import("listen_worker.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 const work = @import("work.zig");
+const runtime_jobs = @import("runtime_jobs.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_module = @import("runtime.zig");
 const runtime_tests = @import("runtime_tests.zig");
@@ -120,6 +122,7 @@ const ListenRig = struct {
 
     fn init(self: *ListenRig) void {
         self.* = .{ .runtime = .init(std.testing.allocator) };
+        self.runtime.setClientIdentity(network.testing.test_identity) catch unreachable;
         self.listenbrainz.attach();
         self.runtime.listen_hooks = .{
             .transport = self.listenbrainz.transport.transport(),
@@ -329,6 +332,45 @@ test "a queue that plays out keeps the whole time heard on its last listen" {
         if (try statement.step() == .row and statement.columnInt64(0) == 180_000) return;
     }
     return error.PlayedOutListenNotFinished;
+}
+
+test "a bound Player that plays asks for a pump within a second of its last listen sample" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-timeout?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime.nextPumpTimeoutMs());
+
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try std.testing.expectEqual(@as(?u64, 0), rig.runtime.nextPumpTimeoutMs());
+    rig.runtime.pump();
+    try std.testing.expectEqual(@as(?u64, 1000), rig.runtime.nextPumpTimeoutMs());
+    rig.clock.advance(300);
+    try std.testing.expectEqual(@as(?u64, 700), rig.runtime.nextPumpTimeoutMs());
+    rig.clock.advance(700);
+    try std.testing.expectEqual(@as(?u64, 0), rig.runtime.nextPumpTimeoutMs());
+
+    try rig.runtime.pausePlayer(player);
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime.nextPumpTimeoutMs());
+}
+
+test "a played-out queue stops asking for listen samples once its listen has ended" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-timeout-played-out?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 1_000);
+
+    (try rig.runtime.players.get(player)).player.drained.store(true, .release);
+    rig.clock.advance(1000);
+    try std.testing.expectEqual(@as(?u64, 0), rig.runtime.nextPumpTimeoutMs());
+    rig.runtime.pump();
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime.nextPumpTimeoutMs());
 }
 
 test "a Library with no listen worker reports the queue stored in its database and starts none" {
@@ -546,7 +588,7 @@ test "a changed token is validated once, and only once scrobbling is on" {
     try std.testing.expectEqual(@as(u32, 1), rig.listenbrainz.token_lookups.load(.acquire));
 }
 
-test "identity, token store and server set while a worker runs apply to its next submission" {
+test "identity, token store and server set while a worker runs apply to its next submission, the identity as a copy" {
     var rig: ListenRig = undefined;
     rig.init();
     defer rig.runtime.deinit();
@@ -560,7 +602,9 @@ test "identity, token store and server set while a worker runs apply to its next
         error.InvalidNetworkConfiguration,
         rig.runtime.setClientIdentity(.{ .name = "Player (beta)", .version = "1", .contact = "a@b.c" }),
     );
-    try rig.runtime.setClientIdentity(.{ .name = "Player", .version = "1.0", .contact = "https://player.example" });
+    var name = "Player".*;
+    try rig.runtime.setClientIdentity(.{ .name = &name, .version = "1.0", .contact = "https://player.example" });
+    @memset(&name, 'x');
     try rig.runtime.setCredentialStore(rig.listenbrainz.store());
     try rig.runtime.setListenBrainzServer("http://127.0.0.1:8080");
 
@@ -948,6 +992,7 @@ test "a matching job proposes recordings for the Tracks without one, one search 
     } };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     try std.testing.expectError(error.InvalidServerUrl, runtime.setMusicBrainzServer("http://musicbrainz.org"));
     try runtime.setMusicBrainzServer("http://127.0.0.1:5000");
@@ -1080,6 +1125,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }}, .hang_from = 1 };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-cancel?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
@@ -1110,6 +1156,59 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
 }
 
+test "a job worker keeps the pump timeout at 100 ms until it is reaped" {
+    var fake: FakeMusicBrainz = .{ .hang_from = 0 };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var counter: control.CountingWaker = .{};
+    try runtime.setWaker(counter.waker());
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-timeout?mode=memory&cache=shared");
+    _ = try addMatchTrack(try libraryDatabase(&runtime, library), "Northern Sky", "Nick Drake", null);
+    try std.testing.expectEqual(@as(?u64, null), runtime.nextPumpTimeoutMs());
+
+    const job_handle = try runtime.startLibraryMatching(library, .{});
+    try fake.awaitRequests(1);
+    try std.testing.expectEqual(@as(?u64, runtime_jobs.job_progress_interval_ms), runtime.nextPumpTimeoutMs());
+    try std.testing.expectEqual(@as(u32, 0), counter.count());
+
+    try runtime.cancelJob(job_handle);
+    var deadline: runtime_tests.TestDeadline = .init(5_000);
+    while (counter.count() == 0 and deadline.tick()) {}
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+    try std.testing.expectEqual(@as(?u64, 0), runtime.nextPumpTimeoutMs());
+    runtime.pump();
+    var finished = false;
+    while (runtime.pollEvent()) |event| switch (event.outcome) {
+        .job_finished => |value| finished = finished or value.job.eql(job_handle),
+        else => {},
+    };
+    try std.testing.expect(finished);
+    try std.testing.expectEqual(@as(?u64, null), runtime.nextPumpTimeoutMs());
+}
+
+test "matching, AcoustID submission and scrobbling are refused until the host names itself, and nothing is sent" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-anonymous?mode=memory&cache=shared");
+    _ = try addMatchTrack(try libraryDatabase(&runtime, library), "Northern Sky", "Nick Drake", null);
+
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.startLibraryMatching(library, .{}));
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.startAcoustIdSubmission(library));
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.librarySetScrobbling(library, true, false, false));
+    try runtime.librarySetScrobbling(library, false, false, false);
+    try std.testing.expectEqual(@as(usize, 0), runtime.job_workers.items.len);
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+
+    try runtime.setClientIdentity(network.testing.test_identity);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.startsWith(u8, fake.transport.lastUserAgent(), "Orca/"));
+}
+
 test "a refused search is waited out and retried, and an unreachable MusicBrainz stops the job without marking the Track" {
     var fake: FakeMusicBrainz = .{
         .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }},
@@ -1117,6 +1216,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-backoff?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
@@ -1153,6 +1253,7 @@ test "a search MusicBrainz refused counts as refused, and the next job counts it
     };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-refused?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
@@ -1178,6 +1279,7 @@ test "a matching job fails as busy while another process holds MusicBrainz, and 
     var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }} };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-busy?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
@@ -1216,6 +1318,7 @@ test "a tag write leaves out the recording id Orca holds for a file" {
     defer temporary.cleanup();
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     const library = try runtime_tests.scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-mbid?mode=memory&cache=shared");
     const ids = try runtime_tests.allTrackIds(&runtime, library);
     defer std.testing.allocator.free(ids);
@@ -1278,6 +1381,7 @@ const review_payload = "{\"title\":\"Northern Sky\",\"artist\":\"Nick Drake\",\"
 test "the review list holds each Track awaiting review once, by artist, album and position, with its best match" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-review?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
     const later_on_album = try addReviewTrack(library_database, "Northern Sky", "Nick Drake", "Bryter Layter", 8);
@@ -1318,6 +1422,7 @@ test "the review list holds each Track awaiting review once, by artist, album an
 test "the confident count is exactly how many matches accepting confident ones then accepts" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-confident?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
     const alone = try addReviewTrack(library_database, "Northern Sky", "Nick Drake", "Bryter Layter", 8);
@@ -1351,6 +1456,7 @@ test "a single-Track matching job searches only that Track, and one already iden
     } };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = fake.hooks();
     const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-single?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
@@ -1487,6 +1593,7 @@ test "a matching job fingerprints each file, asks AcoustID about them in one req
     var acoustid: FakeAcoustId = .{ .lookup_body = two_fingerprint_answer };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = musicbrainz.hooks();
     runtime.matching_hooks.acoustid_transport = acoustid.transport();
     try std.testing.expectError(error.InvalidAcoustIdKey, runtime.setAcoustIdClientKey("with space"));
@@ -1552,6 +1659,7 @@ test "a file that fails to decode is not fingerprinted and its Track is still se
     var acoustid: FakeAcoustId = .{};
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = musicbrainz.hooks();
     runtime.matching_hooks.acoustid_transport = acoustid.transport();
     try runtime.setAcoustIdClientKey("test-client");
@@ -1586,6 +1694,7 @@ test "a submission fails as busy while another process holds AcoustID and marks 
     var user: AcoustIdUserKey = .{ .key = "user key" };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = musicbrainz.hooks();
     runtime.matching_hooks.acoustid_transport = acoustid.transport();
     try runtime.setAcoustIdClientKey("test-client");
@@ -1626,6 +1735,7 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     var user: AcoustIdUserKey = .{ .key = null };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
     runtime.matching_hooks = musicbrainz.hooks();
     runtime.matching_hooks.acoustid_transport = acoustid.transport();
     try runtime.setAcoustIdClientKey("test-client");

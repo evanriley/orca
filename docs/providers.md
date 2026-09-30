@@ -9,13 +9,15 @@ not a tuning choice.
 ## Rules toward providers
 
 - **Identification.** Every request carries exactly one `User-Agent`, of the
-  form `Name/version ( contact )`. Orca's is
-  `Orca/0.2.0 ( evan@evanriley.com )`. The contact is the maintainer's
-  email because the repository is private; it becomes the repository URL when
-  the repository is public. A host embedding liborca replaces the name,
-  version and contact with `Runtime.setClientIdentity`, and liborca's version
-  is appended. Names and contacts are validated: empty, control characters and
-  parentheses are refused.
+  form `Name/version ( contact )`. The host supplies the name, version and
+  contact with `Runtime.setClientIdentity`, and liborca's version is appended;
+  liborca itself carries no identity and refuses provider work until one is
+  set ([Client identity](api.md#client-identity)). `orca-cli` and `orca-gtk`
+  send `Orca/0.2.0 ( evan@evanriley.com )`, with the contact taken from the
+  `-Dprovider-contact` build option. That contact is the maintainer's email
+  because the repository is private; it becomes the repository URL when the
+  repository is public. Names and contacts are validated: empty, control
+  characters and parentheses are refused.
 - **Rate.** At most one request per second per service. The gateway honours
   `X-RateLimit-Remaining` and `X-RateLimit-Reset-In` when a response carries
   them, and waits out the window instead of sending into it.

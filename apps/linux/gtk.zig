@@ -302,6 +302,13 @@ pub extern fn g_timeout_add(
     data: ?*anyopaque,
 ) c_uint;
 pub extern fn g_source_remove(tag: c_uint) gboolean;
+pub const IO_IN: c_uint = 1;
+pub extern fn g_unix_fd_add(
+    fd: c_int,
+    condition: c_uint,
+    function: *const fn (c_int, c_uint, ?*anyopaque) callconv(.c) gboolean,
+    data: ?*anyopaque,
+) c_uint;
 pub extern fn g_clear_error(err: *?*GError) void;
 
 pub extern fn g_list_model_get_n_items(list: ?*ListModel) c_uint;

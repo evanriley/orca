@@ -13,13 +13,12 @@ pub const Identity = struct {
     version: []const u8,
     contact: []const u8,
 
-    pub const orca: Identity = .{
-        .name = "Orca",
-        .version = std.fmt.comptimePrint("{f}", .{version.value}),
-        .contact = "evan@evanriley.com",
-    };
+    /// The three fields together, so an `OwnedIdentity` holds any valid one.
+    pub const max_bytes = 256;
 
     pub fn validate(self: Identity) error{InvalidNetworkConfiguration}!void {
+        if (self.name.len + self.version.len + self.contact.len > max_bytes)
+            return error.InvalidNetworkConfiguration;
         inline for (.{ self.name, self.version, self.contact }) |field| {
             if (field.len == 0) return error.InvalidNetworkConfiguration;
             for (field) |byte| {
@@ -29,21 +28,57 @@ pub const Identity = struct {
         }
     }
 
+    /// Orca's own applications, which need no `liborca/x` suffix naming the
+    /// library they are.
     pub fn isOrca(self: Identity) bool {
-        return std.mem.eql(u8, self.name, orca.name) and
-            std.mem.eql(u8, self.version, orca.version) and
-            std.mem.eql(u8, self.contact, orca.contact);
+        return std.mem.eql(u8, self.name, "Orca") and
+            std.mem.eql(u8, self.version, liborca_version);
     }
 
     pub fn userAgent(self: Identity, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         if (self.isOrca())
             return std.fmt.allocPrint(allocator, "{s}/{s} ( {s} )", .{ self.name, self.version, self.contact });
-        return std.fmt.allocPrint(allocator, "{s}/{s} ( {s} ) liborca/{f}", .{
+        return std.fmt.allocPrint(allocator, "{s}/{s} ( {s} ) liborca/{s}", .{
             self.name,
             self.version,
             self.contact,
-            version.value,
+            liborca_version,
         });
+    }
+};
+
+pub const liborca_version = std.fmt.comptimePrint("{f}", .{version.value});
+
+/// An `Identity` whose text lives inside the value, so threads copy it whole
+/// and no copy dangles when the host sets another.
+pub const OwnedIdentity = struct {
+    bytes: [Identity.max_bytes]u8,
+    name_len: u16,
+    version_len: u16,
+    contact_len: u16,
+
+    pub fn init(identity: Identity) error{InvalidNetworkConfiguration}!OwnedIdentity {
+        try identity.validate();
+        var owned: OwnedIdentity = .{
+            .bytes = undefined,
+            .name_len = @intCast(identity.name.len),
+            .version_len = @intCast(identity.version.len),
+            .contact_len = @intCast(identity.contact.len),
+        };
+        @memcpy(owned.bytes[0..identity.name.len], identity.name);
+        @memcpy(owned.bytes[owned.name_len..][0..identity.version.len], identity.version);
+        @memcpy(owned.bytes[owned.name_len + owned.version_len ..][0..identity.contact.len], identity.contact);
+        return owned;
+    }
+
+    pub fn view(self: *const OwnedIdentity) Identity {
+        const version_start = self.name_len;
+        const contact_start = version_start + self.version_len;
+        return .{
+            .name = self.bytes[0..self.name_len],
+            .version = self.bytes[version_start..contact_start],
+            .contact = self.bytes[contact_start..][0..self.contact_len],
+        };
     }
 };
 
@@ -178,7 +213,7 @@ pub const Clock = struct {
 };
 
 pub const Config = struct {
-    identity: Identity = .orca,
+    identity: Identity,
     minimum_interval_ms: u64 = 1000,
     maximum_attempts: u8 = 1,
     initial_backoff_ms: u64 = 250,
@@ -669,8 +704,6 @@ pub const SystemClock = struct {
     }
 };
 
-const test_version = std.fmt.comptimePrint("{f}", .{version.value});
-
 const net_testing = @import("testing.zig");
 const TestGateway = net_testing.TestGateway;
 
@@ -686,7 +719,7 @@ test "user agent names Orca, its version and the contact" {
     defer net.deinit();
     try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
     try std.testing.expectEqualStrings(
-        "Orca/" ++ test_version ++ " ( evan@evanriley.com )",
+        "Orca/" ++ liborca_version ++ " ( https://orca.invalid )",
         net.transport.lastUserAgent(),
     );
 }
@@ -699,7 +732,7 @@ test "user agent of a host identity is followed by liborca's" {
     defer net.deinit();
     try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&net.gateway));
     try std.testing.expectEqualStrings(
-        "Player/1.2.3 ( https://player.example ) liborca/" ++ test_version,
+        "Player/1.2.3 ( https://player.example ) liborca/" ++ liborca_version,
         net.transport.lastUserAgent(),
     );
 }
@@ -715,6 +748,7 @@ test "identities with empty fields, line breaks or parentheses are rejected" {
         .{ .name = "App (x)", .version = "1", .contact = "a@b.c" },
         .{ .name = "App", .version = "1)", .contact = "a@b.c" },
         .{ .name = "App", .version = "1", .contact = "(a@b.c" },
+        .{ .name = "A" ** 200, .version = "1", .contact = "a" ** 56 },
     };
     for (invalid) |identity| {
         var net: TestGateway = undefined;
@@ -723,6 +757,25 @@ test "identities with empty fields, line breaks or parentheses are rejected" {
         try std.testing.expectError(error.InvalidNetworkConfiguration, fetchOnce(&net.gateway));
         try std.testing.expectEqual(@as(u32, 0), net.transport.requestCount());
     }
+}
+
+test "an owned identity keeps its text after the caller's buffer changes" {
+    var name = "Player".*;
+    const owned: OwnedIdentity = try .init(.{ .name = &name, .version = "1.2.3", .contact = "https://player.example" });
+    @memset(&name, 'x');
+    const identity = owned.view();
+    try std.testing.expectEqualStrings("Player", identity.name);
+    try std.testing.expectEqualStrings("1.2.3", identity.version);
+    try std.testing.expectEqualStrings("https://player.example", identity.contact);
+    try std.testing.expectError(error.InvalidNetworkConfiguration, OwnedIdentity.init(.{ .name = "", .version = "1", .contact = "a" }));
+}
+
+test "Orca under another version is a host identity and names liborca too" {
+    const identity: Identity = .{ .name = "Orca", .version = "0.0.1", .contact = "https://orca.invalid" };
+    try std.testing.expect(!identity.isOrca());
+    const user_agent = try identity.userAgent(std.testing.allocator);
+    defer std.testing.allocator.free(user_agent);
+    try std.testing.expectEqualStrings("Orca/0.0.1 ( https://orca.invalid ) liborca/" ++ liborca_version, user_agent);
 }
 
 test "rate limit headers are read case-insensitively, and Retry-After as delay-seconds or an HTTP-date" {
@@ -762,7 +815,7 @@ test "rate limit headers are read case-insensitively, and Retry-After as delay-s
 
 fn expectBlockedFor(status: u16, limit: RateLimit, started_ms: i64, shortest_ms: i64, longest_ms: i64) !void {
     var net: TestGateway = undefined;
-    net.init(.{ .config = .{ .maximum_attempts = 3, .minimum_interval_ms = 0 }, .now_ms = started_ms });
+    net.init(.{ .config = .{ .identity = net_testing.test_identity, .maximum_attempts = 3, .minimum_interval_ms = 0 }, .now_ms = started_ms });
     defer net.deinit();
     try net.transport.script(.{ .respond = .{ .status = status, .rate_limit = limit } });
     try std.testing.expectError(error.RateLimited, fetchOnce(&net.gateway));
@@ -822,7 +875,7 @@ test "a 503 without Retry-After is returned to the caller and blocks nothing" {
 
 test "consecutive 429s double the backoff up to an hour, each block jittered around it, and a success resets it" {
     var net: TestGateway = undefined;
-    net.init(.{ .config = .{ .minimum_interval_ms = 0 } });
+    net.init(.{ .config = .{ .identity = net_testing.test_identity, .minimum_interval_ms = 0 } });
     defer net.deinit();
     net.transport.otherwise = .{ .respond = .{ .status = 429 } };
     const expected_s = [_]i64{ 60, 120, 240, 480, 960, 1920, 3600, 3600 };
@@ -892,7 +945,7 @@ test "a transport without concurrency is a configuration error and is not retrie
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = threaded.io() };
     const random: std.Random.IoSource = .{ .io = threaded.io() };
-    var gateway = systemGateway(&transport, &system_clock, &random, .{ .maximum_attempts = 3, .request_timeout_ms = 5000 });
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .identity = net_testing.test_identity, .maximum_attempts = 3, .request_timeout_ms = 5000 });
     const started = std.Io.Clock.awake.now(threaded.io()).toMilliseconds();
     try std.testing.expectError(error.InvalidNetworkConfiguration, gateway.execute(
         std.testing.allocator,
@@ -927,7 +980,7 @@ test "server errors are retried only up to the configured attempts" {
     try std.testing.expectEqual(@as(u32, 1), single.transport.requestCount());
 
     var patient: TestGateway = undefined;
-    patient.init(.{ .config = .{ .maximum_attempts = 3, .minimum_interval_ms = 100, .initial_backoff_ms = 10 } });
+    patient.init(.{ .config = .{ .identity = net_testing.test_identity, .maximum_attempts = 3, .minimum_interval_ms = 100, .initial_backoff_ms = 10 } });
     defer patient.deinit();
     try patient.transport.script(.{ .respond = .{ .status = 503 } });
     try patient.transport.script(.{ .respond = .{ .status = 503 } });
@@ -941,7 +994,7 @@ test "server errors are retried only up to the configured attempts" {
 
 test "offline mode, timeouts and a set cancel flag stop the gateway before or without retrying" {
     var net: TestGateway = undefined;
-    net.init(.{ .config = .{ .maximum_attempts = 3, .request_timeout_ms = 1234 } });
+    net.init(.{ .config = .{ .identity = net_testing.test_identity, .maximum_attempts = 3, .request_timeout_ms = 1234 } });
     defer net.deinit();
     net.transport.otherwise = .{ .fail = error.Timeout };
     try std.testing.expectError(error.Timeout, fetchOnce(&net.gateway));
@@ -1028,7 +1081,7 @@ test "a real exchange yields the status, body, rate limit headers and exactly on
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
     const random: std.Random.IoSource = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 5000 });
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .identity = net_testing.test_identity, .request_timeout_ms = 5000 });
 
     var url_buffer: [64]u8 = undefined;
     const response = try gateway.execute(
@@ -1049,7 +1102,7 @@ test "a real exchange yields the status, body, rate limit headers and exactly on
     try std.testing.expect(std.mem.indexOf(
         u8,
         head,
-        "user-agent: Orca/" ++ test_version ++ " ( evan@evanriley.com )\r\n",
+        "user-agent: Orca/" ++ liborca_version ++ " ( https://orca.invalid )\r\n",
     ) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, head, "user-agent:"));
     try std.testing.expect(std.mem.indexOf(u8, head, "Authorization: Token secret\r\n") != null);
@@ -1065,7 +1118,7 @@ test "a server that accepts but never replies makes the request time out at the 
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
     const random: std.Random.IoSource = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 300 });
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .identity = net_testing.test_identity, .request_timeout_ms = 300 });
 
     var url_buffer: [64]u8 = undefined;
     const started = std.Io.Clock.awake.now(io).toMilliseconds();
@@ -1094,7 +1147,7 @@ test "setting the cancel flag makes a hung request return promptly" {
     defer transport.deinit();
     var system_clock: SystemClock = .{ .io = io };
     const random: std.Random.IoSource = .{ .io = io };
-    var gateway = systemGateway(&transport, &system_clock, &random, .{ .request_timeout_ms = 10_000 });
+    var gateway = systemGateway(&transport, &system_clock, &random, .{ .identity = net_testing.test_identity, .request_timeout_ms = 10_000 });
     var canceled: std.atomic.Value(bool) = .init(false);
     gateway.cancel = &canceled;
 

@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### liborca as a library for others
+
+- **Breaking (Zig API): the host names itself before provider work.**
+  liborca no longer carries Orca's identity as a default. Until
+  `Runtime.setClientIdentity` is called, `startLibraryMatching`,
+  `startAcoustIdSubmission` and `librarySetScrobbling(library, true, ...)`
+  return `error.ClientIdentityRequired`; turning scrobbling off and
+  `libraryTrackFingerprint` need none. `setClientIdentity` copies its strings,
+  so they no longer have to outlive the runtime, and refuses an identity longer
+  than 256 bytes in all. `network.client.Identity.orca` is gone,
+  `network.client.Config.identity` has no default, and a listen recorded before
+  an identity is set has an empty `player_client`. An identity named `Orca` at
+  liborca's own version sends no `liborca/x` suffix whatever its contact.
+- **`orca-cli` and `orca-gtk` take their provider contact from
+  `-Dprovider-contact`** (default `evan@evanriley.com`); `match`, `scrobble`,
+  `submit-acoustid` and `play-tracks` identify as `Orca/<version>`.
+- **Versioned shared library.** `liborca.so` has the SONAME `liborca.so.0` and
+  installs as `liborca.so.0.0.0` with `liborca.so.0` and `liborca.so` links.
+  The number is `ORCA_ABI_VERSION`, new in `orca.h` and separate from the
+  product version.
+- **`liborca.so` exports only the functions `orca.h` declares.** It exported
+  1,513 symbols, among them the C shims, libxaac, Chromaprint and libc++'s
+  `operator new`. A version script generated from the header hides the rest,
+  a declared function liborca does not define fails the link, and the new
+  `abi-exports` step in `zig build test` (`scripts/check-exports.sh`) fails
+  when the exports and the header differ.
+- **`orca_version()`** returns liborca's version.
+- **`orca_runtime_last_error()`** describes why the last call on a runtime
+  failed, as `"<function>: <reason>"`: the Zig error name, or which argument
+  was refused. It was lost behind `ORCA_STATUS_INTERNAL` and
+  `ORCA_STATUS_INVALID_ARGUMENT`.
+- **Hosts can sleep until liborca wakes them.**
+  `orca_runtime_set_wake_callback` (`Runtime.setWaker` with a `HostWaker`)
+  installs a callback liborca calls, at most once between two pumps, after a
+  command is submitted and when a Player's position or end of queue, a Zone's
+  output state, a finished job, an artwork result, a recorded listen or the
+  scrobbler status changes. `orca_runtime_pump_timeout`
+  (`Runtime.nextPumpTimeoutMs`) gives how long the host may sleep without it:
+  0, at most one second while a bound Player plays and 100 ms while a job
+  runs, or
+  `ORCA_PUMP_NO_TIMEOUT`. An idle runtime asks for no timeout and makes no
+  wake. The callback is the one exception to the threading contract: it runs
+  on liborca's threads, must only signal the host's loop, is never called from
+  a render callback or after `orca_runtime_destroy` returns, and can be set
+  only before any worker thread exists. `Runtime.pump` is the loop's pump,
+  which `orca_runtime_pump` now calls.
+- **`orca-gtk` sleeps until liborca wakes it.** Its 100 ms timer is gone: the
+  waker writes an eventfd the GTK main loop watches, and the pump timeout is
+  re-armed after each tick. An idle window makes no wakeups. Handlers that
+  change what the window shows request a tick themselves, a seek drag applies
+  on its own settle timer, and a context menu is re-presented on idle.
+- **`lib/pkgconfig/orca.pc`** is installed, so C hosts build with
+  `pkg-config --cflags --libs orca`, or `--static` for the static library and
+  its dependencies, libc++ included.
+- **A stability statement** in `orca.h` and `docs/api.md`: within one ABI
+  version functions and enum values are only added and reserved fields gain
+  zero-compatible meanings; the Zig API may break in any minor release.
+
 ### Parser hardening
 
 - **A crafted MP4 no longer overflows the sample-table arithmetic.** Media

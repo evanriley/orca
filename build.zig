@@ -8,8 +8,14 @@ pub fn build(b: *std.Build) void {
         "acoustid-key",
         "AcoustID application key orca-cli and orca-gtk use for lookups and submissions",
     ) orelse "AqlfLksN1K";
+    const provider_contact = b.option(
+        []const u8,
+        "provider-contact",
+        "Contact orca-cli and orca-gtk give MusicBrainz, AcoustID and ListenBrainz in their User-Agent",
+    ) orelse "evan@evanriley.com";
     const app_options = b.addOptions();
     app_options.addOption([]const u8, "acoustid_key", acoustid_key);
+    app_options.addOption([]const u8, "provider_contact", provider_contact);
     const app_options_module = app_options.createModule();
 
     const sqlite_translate = b.addTranslateC(.{
@@ -103,12 +109,27 @@ pub fn build(b: *std.Build) void {
     const lib_step = b.step("lib", "Build the static liborca and orca.h");
     lib_step.dependOn(&b.addInstallArtifact(liborca, .{}).step);
 
+    const header = @embedFile("liborca/orca.h");
     const liborca_shared = b.addLibrary(.{
         .name = "orca",
         .linkage = .dynamic,
         .root_module = liborca_module,
+        .version = .{ .major = abiVersion(header), .minor = 0, .patch = 0 },
     });
+    if (target.result.ofmt == .elf) {
+        const version_script = b.addWriteFiles().add("orca.map", versionScript(b, header));
+        liborca_shared.setVersionScript(version_script);
+        // Zig's own ELF linker ignores version scripts.
+        liborca_shared.use_llvm = true;
+        liborca_shared.use_lld = true;
+    }
     b.installArtifact(liborca_shared);
+    const pkg_config = b.addInstallFile(
+        b.addWriteFiles().add("orca.pc", pkgConfigFile(b, target.result.os.tag)),
+        "lib/pkgconfig/orca.pc",
+    );
+    b.getInstallStep().dependOn(&pkg_config.step);
+    lib_step.dependOn(&pkg_config.step);
 
     const cli = b.addExecutable(.{
         .name = "orca-cli",
@@ -178,6 +199,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
+    if (target.result.os.tag == .linux) {
+        const check_exports = b.addSystemCommand(&.{"bash"});
+        check_exports.addFileArg(b.path("scripts/check-exports.sh"));
+        check_exports.addArtifactArg(liborca_shared);
+        check_exports.addFileArg(b.path("liborca/orca.h"));
+        const abi_exports_step = b.step("abi-exports", "Check liborca.so exports exactly the functions orca.h declares");
+        abi_exports_step.dependOn(&check_exports.step);
+        test_step.dependOn(&check_exports.step);
+    }
 
     const fuzz_tests = b.addTest(.{
         .root_module = liborca_module,
@@ -301,6 +331,63 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_dsp_benchmark.addArgs(args);
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
+}
+
+fn abiVersion(header: []const u8) u32 {
+    const marker = "#define ORCA_ABI_VERSION ";
+    const start = (std.mem.indexOf(u8, header, marker) orelse @panic("orca.h defines no ORCA_ABI_VERSION")) + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, header, start, '\n') orelse header.len;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, header[start..end], " \t\r"), 10) catch
+        @panic("ORCA_ABI_VERSION in orca.h is not a number");
+}
+
+fn declaredFunctions(b: *std.Build, header: []const u8) []const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, header, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 or !(std.ascii.isAlphabetic(line[0]) or line[0] == '_')) continue;
+        if (std.mem.startsWith(u8, line, "typedef")) continue;
+        const open = std.mem.indexOfScalar(u8, line, '(') orelse continue;
+        var start = open;
+        while (start > 0 and (std.ascii.isAlphanumeric(line[start - 1]) or line[start - 1] == '_')) start -= 1;
+        const name = line[start..open];
+        if (!std.mem.startsWith(u8, name, "orca_")) continue;
+        names.append(b.allocator, name) catch @panic("OOM");
+    }
+    return names.items;
+}
+
+/// Exports only what orca.h declares. A declared function liborca does not
+/// define fails the link.
+fn versionScript(b: *std.Build, header: []const u8) []const u8 {
+    var script: std.ArrayList(u8) = .empty;
+    script.appendSlice(b.allocator, "{\n  global:\n") catch @panic("OOM");
+    for (declaredFunctions(b, header)) |name| {
+        script.print(b.allocator, "    {s};\n", .{name}) catch @panic("OOM");
+    }
+    script.appendSlice(b.allocator, "  local: *;\n};\n") catch @panic("OOM");
+    return script.items;
+}
+
+fn pkgConfigFile(b: *std.Build, os: std.Target.Os.Tag) []const u8 {
+    return b.fmt(
+        \\prefix={s}
+        \\libdir=${{prefix}}/lib
+        \\includedir=${{prefix}}/include
+        \\
+        \\Name: orca
+        \\Description: Headless engine of the Orca music player
+        \\Version: {s}
+        \\Cflags: -I${{includedir}}
+        \\Libs: -L${{libdir}} -lorca
+        \\Requires.private: sqlite3 flac opusfile vorbisfile samplerate{s}
+        \\Libs.private: -lc++ -lm
+        \\
+    , .{
+        b.install_prefix,
+        @import("build.zig.zon").version,
+        if (os == .linux) " libpipewire-0.3" else "",
+    });
 }
 
 // `-ffuzz` would give the C libraries clang's coverage tables, whose layout

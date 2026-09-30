@@ -53,13 +53,8 @@ fn failureText(failure: liborca.Failure) [:0]const u8 {
 /// control lane, drains the event channels, then refreshes transport and scan
 /// presentation from authoritative snapshots. Nothing here runs on a worker —
 /// the runtime owns exactly one calling thread, and this is it.
-fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    const self: *App = @ptrCast(@alignCast(data.?));
-    // Bounded: one pump drains at most the command queue's capacity, so a burst
-    // of submissions can never trap the event loop in here.
-    var executed: usize = 0;
-    while (executed < 256 and self.runtime.processNextCommand()) executed += 1;
-    self.runtime.reapFinishedJobs();
+fn tick(self: *App) void {
+    self.runtime.pump();
 
     while (self.runtime.pollEvent()) |event| {
         if (self.pending_play_request != 0 and event.request_id == self.pending_play_request) {
@@ -75,13 +70,44 @@ fn tick(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     while (self.runtime.pollTelemetry()) |_| {}
 
     art.tick(self);
-    menu.tick();
     transport.tick(self);
     queue.tick(self);
     jobs.tick(self);
     preferences.tick(self);
     details.tick(self);
+    armTimeout(self);
+}
+
+fn armTimeout(self: *App) void {
+    if (self.timeout_source != 0) {
+        _ = gtk.g_source_remove(self.timeout_source);
+        self.timeout_source = 0;
+    }
+    const timeout_ms = self.runtime.nextPumpTimeoutMs() orelse return;
+    const interval = std.math.cast(c_uint, timeout_ms) orelse std.math.maxInt(c_uint);
+    self.timeout_source = gtk.g_timeout_add(interval, timeoutFired, self);
+}
+
+fn timeoutFired(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    self.timeout_source = 0;
+    tick(self);
+    return gtk.SOURCE_REMOVE;
+}
+
+fn onWake(wake_fd: c_int, _: c_uint, data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    var count: u64 = 0;
+    _ = std.os.linux.read(wake_fd, std.mem.asBytes(&count), @sizeOf(u64));
+    tick(self);
     return gtk.SOURCE_CONTINUE;
+}
+
+fn openWakeFd() ?std.os.linux.fd_t {
+    const linux = std.os.linux;
+    const result = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
+    if (linux.errno(result) != .SUCCESS) return null;
+    return @intCast(result);
 }
 
 fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -112,6 +138,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     matches.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
     gtk.gtk_window_present(self.window.?);
+    self.requestTick();
 }
 
 fn activatePlayPause(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -325,20 +352,36 @@ pub fn main(init: std.process.Init) !u8 {
     browse_model.allocator = allocator;
 
     var runtime: liborca.Runtime = .init(allocator);
+    const wake_fd = openWakeFd() orelse {
+        runtime.deinit();
+        return 1;
+    };
     var self: App = .{
         .allocator = allocator,
         .io = init.io,
         .runtime = &runtime,
+        .wake_fd = wake_fd,
     };
     defer self.deinit();
+    runtime.setWaker(self.waker()) catch {
+        runtime.deinit();
+        _ = std.os.linux.close(wake_fd);
+        return 1;
+    };
 
     self.player = runtime.createPlayer() catch {
         runtime.deinit();
+        _ = std.os.linux.close(wake_fd);
         return 2;
     };
 
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
+    runtime.setClientIdentity(.{
+        .name = "Orca",
+        .version = std.fmt.comptimePrint("{f}", .{liborca.version}),
+        .contact = build_options.provider_contact,
+    }) catch {};
     runtime.setCredentialStore(secret.credential_store) catch {};
     runtime.setAcoustIdClientKey(build_options.acoustid_key) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_LISTENBRAINZ_URL")) |server|
@@ -360,6 +403,7 @@ pub fn main(init: std.process.Init) !u8 {
         gtk.APPLICATION_DEFAULT_FLAGS,
     ) orelse {
         runtime.deinit();
+        _ = std.os.linux.close(wake_fd);
         return 1;
     });
     self.application = application;
@@ -393,9 +437,9 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
 
-    self.mpris.init(&runtime, self.player, g_application, self.io);
+    self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);
-    const tick_source = gtk.g_timeout_add(app.tick_ms, tick, &self);
+    const wake_source = gtk.g_unix_fd_add(wake_fd, gtk.IO_IN, onWake, &self);
 
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
     var argv = try init.arena.allocator().alloc(?[*:0]const u8, arguments.len + 1);
@@ -403,14 +447,18 @@ pub fn main(init: std.process.Init) !u8 {
     argv[arguments.len] = null;
     const status = gtk.g_application_run(g_application, @intCast(arguments.len), argv.ptr);
 
-    // Tear the timer down before the runtime: a GUI timer racing runtime
-    // destruction is a real use-after-free, not a theoretical one.
-    _ = gtk.g_source_remove(tick_source);
+    // Tear the loop's sources down before the runtime: a GUI callback racing
+    // runtime destruction is a real use-after-free, not a theoretical one.
+    _ = gtk.g_source_remove(wake_source);
+    if (self.timeout_source != 0) _ = gtk.g_source_remove(self.timeout_source);
+    self.timeout_source = 0;
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};
     runtime.destroyPlayer(self.player) catch {};
     if (self.library) |library| runtime.destroyLibrary(library) catch {};
     runtime.deinit();
+    // liborca's threads write the eventfd until deinit has joined them.
+    _ = std.os.linux.close(wake_fd);
     return @intCast(status);
 }

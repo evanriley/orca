@@ -39,6 +39,7 @@ pub const Options = struct {
     player: *player_api.Player,
     handle: object.PlayerHandle,
     telemetry: ?*control.TelemetryChannel = null,
+    host_signal: ?*control.HostSignal = null,
     factory: ?output_api.Factory = null,
     queue: ?*playback_queue.PlaybackQueue = null,
     opener: ?playback_queue.TrackOpener = null,
@@ -67,6 +68,7 @@ pub const PlayerEngine = struct {
     player: *player_api.Player,
     handle: object.PlayerHandle,
     telemetry: ?*control.TelemetryChannel,
+    host_signal: ?*control.HostSignal,
     factory: ?output_api.Factory,
     registration: ?*work.Registration = null,
     dsp: ?*dsp_api.PlayerDsp = null,
@@ -137,6 +139,7 @@ pub const PlayerEngine = struct {
             .player = options.player,
             .handle = options.handle,
             .telemetry = options.telemetry,
+            .host_signal = options.host_signal,
             .factory = options.factory,
             .queue = options.queue,
             .opener = options.opener,
@@ -512,7 +515,6 @@ pub const PlayerEngine = struct {
     /// Closes any Zone output whose negotiated format the current source can no
     /// longer feed. `serviceOutputs` reopens it later in the same pass.
     fn reopenOnFormatChange(self: *PlayerEngine, zones: []*ZoneRuntime, format: ?pcm.Format) void {
-        _ = self;
         const format_value = format orelse return;
         for (zones) |runtime_zone| {
             if (runtime_zone.output == null) continue;
@@ -521,7 +523,7 @@ pub const PlayerEngine = struct {
             runtime_zone.resetPipe();
             runtime_zone.zone.close();
             runtime_zone.stalled_passes = 0;
-            runtime_zone.publishState();
+            self.publishZoneState(runtime_zone);
         }
     }
 
@@ -634,7 +636,7 @@ pub const PlayerEngine = struct {
                     runtime_zone.resetPipe();
                     runtime_zone.zone.close();
                     runtime_zone.stalled_passes = 0;
-                    runtime_zone.publishState();
+                    self.publishZoneState(runtime_zone);
                 }
                 continue;
             }
@@ -657,7 +659,7 @@ pub const PlayerEngine = struct {
                             } else |_| {
                                 runtime_zone.zone.output_state = .active;
                             }
-                            runtime_zone.publishState();
+                            self.publishZoneState(runtime_zone);
                         }
                     },
                     .connecting => {},
@@ -676,7 +678,7 @@ pub const PlayerEngine = struct {
                 if (runtime_zone.zone.recovery_attempts >= zone_runtime.max_recovery_attempts) {
                     if (runtime_zone.zone.output_state != .failed) {
                         runtime_zone.zone.output_state = .failed;
-                        runtime_zone.publishState();
+                        self.publishZoneState(runtime_zone);
                     }
                     continue;
                 }
@@ -685,7 +687,7 @@ pub const PlayerEngine = struct {
             } else if (runtime_zone.zone.output_state != .opening) {
                 runtime_zone.zone.beginOpen(runtime_zone.requested_device_id.load(.acquire));
             }
-            runtime_zone.publishState();
+            self.publishZoneState(runtime_zone);
 
             runtime_zone.openOutput(
                 factory,
@@ -697,7 +699,7 @@ pub const PlayerEngine = struct {
                 else
                     runtime_zone.zone.deviceLost();
                 runtime_zone.recovery_wait_ns = recovery_backoff_ns;
-                runtime_zone.publishState();
+                self.publishZoneState(runtime_zone);
                 continue;
             };
             watchOutput(runtime_zone, self.waker());
@@ -712,17 +714,24 @@ pub const PlayerEngine = struct {
             } else |_| {
                 runtime_zone.zone.output_state = .active;
             }
-            runtime_zone.publishState();
+            self.publishZoneState(runtime_zone);
         }
     }
 
     fn loseOutput(self: *PlayerEngine, runtime_zone: *ZoneRuntime) void {
-        _ = self;
         runtime_zone.closeOutput();
         runtime_zone.zone.deviceLost();
         runtime_zone.recovery_wait_ns = recovery_backoff_ns;
         runtime_zone.stalled_passes = 0;
-        runtime_zone.publishState();
+        self.publishZoneState(runtime_zone);
+    }
+
+    fn publishZoneState(self: *PlayerEngine, runtime_zone: *ZoneRuntime) void {
+        if (runtime_zone.publishStateChanged()) self.raiseHost();
+    }
+
+    fn raiseHost(self: *PlayerEngine) void {
+        if (self.host_signal) |signal| signal.raise();
     }
 
     /// Derives authoritative position from the clock Zone and publishes a
@@ -809,6 +818,7 @@ pub const PlayerEngine = struct {
         } }) catch return;
         self.hinted_frames = frames;
         self.hint_owed = false;
+        self.raiseHost();
     }
 
     fn publishDrained(self: *PlayerEngine, zones: []*ZoneRuntime) void {
@@ -827,7 +837,7 @@ pub const PlayerEngine = struct {
                 return;
             }
         }
-        self.player.drained.store(true, .release);
+        if (!self.player.drained.swap(true, .release)) self.raiseHost();
     }
 
     fn park(self: *PlayerEngine, io: std.Io, seen: u32, idle: bool) void {
@@ -1055,6 +1065,75 @@ test "a lost output recovers within bounded attempts and then stays failed" {
         zone_runtime.max_recovery_attempts,
         runtime_zone.published_recovery_attempts.load(.acquire),
     );
+}
+
+test "a position hint wakes the host once per pump" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var telemetry: control.TelemetryChannel = .{};
+    var counter: control.CountingWaker = .{};
+    var signal: control.HostSignal = .{ .waker = counter.waker() };
+    harness.engine.telemetry = &telemetry;
+    harness.engine.host_signal = &signal;
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+    try std.testing.expectEqual(@as(usize, 0), telemetry.count());
+    signal.clear();
+    const woken = counter.count();
+
+    const stream = liveStreamFor(&harness.backend, runtime_zone).?;
+    var samples: [frames_per_block]f32 = undefined;
+    for (0..2) |_| {
+        stream.pump(&samples, frames_per_block);
+        harness.engine.elapsed_ns += telemetry_interval_ns;
+        harness.engine.pass();
+    }
+    try std.testing.expectEqual(woken + 1, counter.count());
+    try std.testing.expectEqual(@as(usize, 1), telemetry.count());
+
+    signal.clear();
+    stream.pump(&samples, frames_per_block);
+    harness.engine.elapsed_ns += telemetry_interval_ns;
+    harness.engine.pass();
+    try std.testing.expectEqual(woken + 2, counter.count());
+}
+
+test "a lost output wakes the host once, and an unchanged Zone does not" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var counter: control.CountingWaker = .{};
+    var signal: control.HostSignal = .{ .waker = counter.waker() };
+    harness.engine.host_signal = &signal;
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+
+    signal.clear();
+    for (0..latency_refresh_passes) |_| harness.engine.pass();
+    try std.testing.expect(!signal.isPending());
+
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.lost, runtime_zone.outputState());
+    try std.testing.expectEqual(@as(u32, 2), counter.count());
+
+    signal.clear();
+    harness.engine.pass();
+    try std.testing.expect(!signal.isPending());
 }
 
 test "pausing silences a Zone without discarding its prepared blocks" {

@@ -1,9 +1,10 @@
 //! Shared frontend state and the library paging that fills the track list.
 //!
 //! Threading: every liborca call in this application happens on the GTK main
-//! thread, from a signal handler or the `g_timeout_add` tick. There is no worker
-//! thread here and there must not be one — the runtime is genuinely
-//! multithreaded behind the control lane, and its object pools take no lock.
+//! thread, from a signal handler or the tick that liborca's waker schedules.
+//! There is no worker thread here and there must not be one — the runtime is
+//! genuinely multithreaded behind the control lane, and its object pools take
+//! no lock. The waker itself only writes `wake_fd`.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -21,8 +22,6 @@ const details = @import("details.zig");
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
 pub const page_size: u32 = 512;
-/// One tick drives everything: pump, event drain, transport, jobs.
-pub const tick_ms: c_uint = 100;
 pub const page_history_depth = 16;
 pub const open_album_page_limit = 32;
 
@@ -112,6 +111,8 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime: *liborca.Runtime,
+    wake_fd: std.os.linux.fd_t,
+    timeout_source: c_uint = 0,
 
     /// Optionals rather than `has_*` flags: an absent Library is `null`, and
     /// there is no second field to keep in step with it.
@@ -318,7 +319,7 @@ pub const App = struct {
     /// applied once the value settles.
     seeking: bool = false,
     seek_pending_ms: i64 = 0,
-    seek_changed_at_us: i64 = 0,
+    seek_settle_timer: c_uint = 0,
     suppress_widget_writeback: bool = false,
     last_seen_duration_ms: u64 = 0,
     /// What the now-playing labels currently show, so the resolve query only
@@ -340,6 +341,14 @@ pub const App = struct {
     queue_visible: bool = false,
 
     mpris: mpris.Mpris = .{},
+
+    pub fn requestTick(self: *App) void {
+        writeWake(&self.wake_fd);
+    }
+
+    pub fn waker(self: *App) liborca.HostWaker {
+        return .{ .context = &self.wake_fd, .wake_fn = writeWake };
+    }
 
     pub fn toast(self: *App, message: [:0]const u8) void {
         const overlay = self.toasts orelse return;
@@ -547,6 +556,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
+        if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
         self.query.clear(self.allocator);
         self.artist_filter.clear(self.allocator);
         self.artist_scope_name.clear(self.allocator);
@@ -561,5 +571,11 @@ pub const App = struct {
         if (self.library_path) |path| self.allocator.free(path);
     }
 };
+
+fn writeWake(context: ?*anyopaque) callconv(.c) void {
+    const wake_fd: *const std.os.linux.fd_t = @ptrCast(@alignCast(context.?));
+    const increment: u64 = 1;
+    _ = std.os.linux.write(wake_fd.*, std.mem.asBytes(&increment), @sizeOf(u64));
+}
 
 var empty_text: [0:0]u8 = .{};

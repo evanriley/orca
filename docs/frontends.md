@@ -18,7 +18,8 @@ single-consumer. Debug builds record the creating thread and return
 `ORCA_STATUS_WRONG_THREAD` on a violation. The runtime behind the boundary is
 genuinely multithreaded — a decode engine per Player, a registered worker per
 scan — and its object pools take no lock, so a GUI timer racing
-`orca_runtime_destroy` is a real use-after-free.
+`orca_runtime_destroy` is a real use-after-free. The one exception is the wake
+callback, which liborca calls from its own threads; see [Wakeup](#wakeup).
 
 The boundary covers the whole engine, not a fragment of it:
 
@@ -34,7 +35,8 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_runtime_poll_event` drains the lossless completion channel and the
   coalescing telemetry channel into a tagged POD with a named `extern union`
   payload. Events are hints and correlations; authoritative consumers read
-  snapshots.
+  snapshots. `orca_runtime_set_wake_callback` and `orca_runtime_pump_timeout`
+  tell the host's loop when to pump; see [Wakeup](#wakeup).
 - **Transport and queue.** Play by Track id, enqueue, next/previous, clear,
   repeat, shuffle, volume, `seek_ms`, paged queue listing, and
   `orca_player_status`, which carries transport, epoch, position, duration,
@@ -49,12 +51,135 @@ The boundary covers the whole engine, not a fragment of it:
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while
 nothing renders is a defect, not a state.
 
+### Errors
+
+Every function returns an `orca_status`. After a call that did not return
+`ORCA_STATUS_OK`, `orca_runtime_last_error(runtime)` describes it as
+`"<function>: <reason>"`, for example `"orca_library_open: path is null"` or
+`"orca_player_play: PlayerHasNoSource"`. The message is for logs and bug
+reports, not for parsing. It is empty after a call that succeeded, holds at
+most 255 bytes, and is valid until the next `orca_*` call on that runtime. A
+call refused with `ORCA_STATUS_WRONG_THREAD` leaves it unchanged.
+`orca_runtime_create` returning `NULL` means out of memory.
+
+### Wakeup
+
+A host sleeps in its own event loop and pumps when liborca wakes it, instead of
+on a timer. liborca calls the wake callback when the loop should pump, and
+`orca_runtime_pump_timeout` gives the longest the loop may sleep without it:
+0 to pump now, `ORCA_PUMP_NO_TIMEOUT` (-1) to wait for the callback alone, and
+otherwise at most one second while a Player bound to a Library plays and
+100 ms while a job runs. With an eventfd on Linux:
+
+```c
+static void wake(void *context) {
+    uint64_t one = 1;
+    write(*(int *)context, &one, sizeof one);
+}
+
+int wake_fd = eventfd(0, EFD_NONBLOCK);
+orca_runtime *runtime = orca_runtime_create();
+orca_runtime_set_wake_callback(runtime, wake, &wake_fd);
+
+for (;;) {
+    orca_runtime_pump(runtime);
+    /* Drain orca_runtime_poll_event and refresh the snapshots on screen. */
+    int64_t timeout_ms;
+    orca_runtime_pump_timeout(runtime, &timeout_ms);
+    struct pollfd ready = {.fd = wake_fd, .events = POLLIN};
+    if (poll(&ready, 1, (int)timeout_ms) > 0) {
+        uint64_t count;
+        read(wake_fd, &count, sizeof count);
+    }
+}
+```
+
+`poll` takes -1 as "no timeout", so `ORCA_PUMP_NO_TIMEOUT` passes straight
+through. On macOS the callback signals a `CFRunLoopSource` and calls
+`CFRunLoopWakeUp`.
+
+The callback is the one exception to the threading contract:
+
+- It is called from liborca's engine, job, listen and artwork threads, and
+  from inside `orca_*` calls on the owning thread, sometimes from two threads
+  at once. It must only signal the host's loop and return: no `orca_*` call,
+  nothing that blocks.
+- It is called at most once between two pumps. The pump clears the pending
+  wake, so a host reads `orca_runtime_pump_timeout` after pumping and draining
+  events, immediately before it sleeps; a wake that arrived during the pump
+  then reads as 0 rather than being lost, even when the host's wake primitive
+  does not count.
+- It is never called from an audio render callback, and never after
+  `orca_runtime_destroy` returns, which joins every thread that calls it. The
+  `context` must stay valid until then.
+- `orca_runtime_set_wake_callback` returns `ORCA_STATUS_INVALID_STATE` once any
+  worker thread exists — a Player's engine, a job, a listen worker or an
+  artwork loader — because those threads read the callback without a lock.
+  Install it right after `orca_runtime_create`. A `NULL` callback removes it
+  under the same rule.
+
+[control-plane.md](control-plane.md#waking-the-host) lists what wakes the host
+and what the timeout covers.
+
+### Versions
+
+`orca_version()` returns liborca's version, such as `"0.2.0"`.
+`ORCA_ABI_VERSION` in `orca.h` is the C ABI's version, which is separate from
+it and follows the rules in [api.md](api.md#stability). The shared library's
+SONAME carries the ABI version:
+
+```text
+lib/liborca.so.0.0.0
+lib/liborca.so.0 -> liborca.so.0.0.0
+lib/liborca.so   -> liborca.so.0
+```
+
+`liborca.so` exports exactly the functions `orca.h` declares; a version script
+hides everything else, and `zig build test` fails when the two differ
+(`scripts/check-exports.sh`).
+
+### Linking
+
+`zig build` installs `lib/pkgconfig/orca.pc` beside the libraries, with the
+header at `include/orca/orca.h`:
+
+```c
+#include <orca/orca.h>
+```
+
+Against the shared library:
+
+```sh
+cc host.c $(pkg-config --cflags --libs orca)
+```
+
+Against the static library, which needs its dependencies and the C++ runtime
+the ALAC and Chromaprint code uses:
+
+```sh
+cc host.c $(pkg-config --static --cflags --libs orca)
+```
+
+The static link line expands to `-lorca` plus SQLite, libFLAC, libopusfile,
+libvorbisfile, libsamplerate, PipeWire on Linux, `-lc++` and `-lm`. Set
+`PKG_CONFIG_PATH` to the install's `lib/pkgconfig` when it is not a system
+prefix.
+
 ## Linux GTK4
 
 `orca-gtk` is a Zig client of liborca's public Zig API, built on GTK 4 and
 libadwaita, both bound by hand in `apps/linux/gtk.zig` and `apps/linux/adw.zig`.
 Every liborca call happens on the GTK main thread, from a signal handler or the
-100 ms tick.
+tick.
+
+The tick pumps the runtime, drains events and telemetry, and refreshes the
+window from snapshots. It runs when liborca's waker writes the app's eventfd,
+watched with `g_unix_fd_add`, and when the `nextPumpTimeoutMs` timeout re-armed
+after each tick expires. A handler whose own runtime call changes what the tick
+shows, such as play, pause, a seek or a queue edit, writes the same eventfd
+(`App.requestTick`), since liborca does not wake the host for the host's own
+calls. An idle window makes no wakeups; a playing one ticks on each position
+hint, about ten times a second, and a running job every 100 ms.
 
 ```sh
 zig build run-linux                                   # library in $XDG_DATA_HOME/orca
@@ -292,7 +417,8 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   looking up the token from Preferences, on the main loop, may show an unlock
   prompt.
 - `Runtime.setClientIdentity` to name the host in submissions and in the
-  history. The default is Orca's.
+  history. Scrobbling cannot be turned on before it is set; see
+  [Client identity](api.md#client-identity).
 - `Runtime.setListenBrainzServer` only to select a self-hosted or compatible
   server.
 - `Runtime.librarySetScrobbling` (its last argument turns Now Playing on),
@@ -303,10 +429,10 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   `orca-gtk` repaints the heart, the rows and the details panel after each
   change rather than waiting for a reload.
 
-The identity, the store's context and the server string are borrowed and must
-outlive the runtime. The setters may be called at any time and reach each
-listen worker on its next pass; a host that sets them before binding a Player
-to a Library avoids a first pass with the defaults. Listens are sampled inside
+The identity is copied. The store's context and the server string are
+borrowed and must outlive the runtime. The setters may be called at any time
+and reach each listen worker on its next pass; a host that sets them before
+binding a Player to a Library avoids a first pass with the defaults. Listens are sampled inside
 `processNextCommand`, so a host pumps it as it already does. The C ABI does not
 expose listening yet. [providers.md](providers.md) describes what a listen is
 and what is sent.

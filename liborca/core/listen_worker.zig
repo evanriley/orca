@@ -8,6 +8,7 @@
 //! the next listen with nothing lost.
 
 const std = @import("std");
+const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
@@ -47,7 +48,8 @@ pub const Config = struct {
     enabled: bool = false,
     offline: bool = false,
     now_playing: bool = false,
-    identity: network.client.Identity = .orca,
+    /// Null until the host names itself; scrobbling cannot be enabled before.
+    identity: ?network.client.OwnedIdentity = null,
     credentials: ?providers.credentials.Store = null,
     server: []const u8 = listenbrainz.default_server,
     /// Bumped by the control lane whenever `identity`, `credentials` or
@@ -75,6 +77,19 @@ pub const Status = struct {
     /// Listens heard since the Library was opened and not recorded: the ring
     /// was full, the Track had gone, or the database refused the write.
     dropped: u64 = 0,
+
+    fn eql(a: Status, b: Status) bool {
+        inline for (@typeInfo(Status).@"struct".fields) |field| {
+            const left = @field(a, field.name);
+            const right = @field(b, field.name);
+            const same = if (field.type == listenbrainz.BoundedText)
+                std.mem.eql(u8, left.slice(), right.slice())
+            else
+                std.meta.eql(left, right);
+            if (!same) return false;
+        }
+        return true;
+    }
 };
 
 /// The end of a block in whole Unix seconds, or null once it has passed by
@@ -150,6 +165,7 @@ pub const Listens = struct {
     credentials_validated: std.atomic.Value(u32) = .init(0),
     recorded: std.atomic.Value(u64) = .init(0),
     dropped: std.atomic.Value(u64) = .init(0),
+    host_signal: ?*control.HostSignal = null,
     /// Control lane only.
     worker: ?*Worker = null,
 
@@ -186,6 +202,10 @@ pub const Listens = struct {
         io.futexWake(u32, &self.signal.raw, 1);
     }
 
+    fn raiseHost(self: *Listens) void {
+        if (self.host_signal) |signal| signal.raise();
+    }
+
     /// Control lane.
     pub fn snapshot(self: *Listens) Status {
         var status = self.status.load();
@@ -206,10 +226,14 @@ pub const Worker = struct {
     listens: *Listens,
     registration: *work.Registration,
     hooks: Hooks,
+    /// What `gateway.config.identity` points into.
+    identity: ?network.client.OwnedIdentity = null,
     listen_failures: u32 = 0,
     feedback_failures: u32 = 0,
+    published: Status = .{},
 
     pub fn run(self: *Worker) void {
+        self.published = self.listens.status.load();
         const initial = self.listens.config.load();
         var standard: network.StandardTransport = .init(self.allocator, self.io);
         var system_clock: network.SystemClock = .{ .io = self.io };
@@ -219,7 +243,7 @@ pub const Worker = struct {
             .clock = self.hooks.clock orelse system_clock.clock(),
             .wall_clock = self.hooks.wall_clock orelse system_clock.wallClock(),
             .random = self.hooks.random orelse random_source.interface(),
-            .config = .{ .identity = initial.identity },
+            .config = .{ .identity = unidentified },
             .cancel = &self.registration.cancel,
             .sharing = .{
                 .store = providers.shared_state.store(&self.database.provider_state),
@@ -234,11 +258,20 @@ pub const Worker = struct {
             &self.database.scrobbles,
         );
         delivery.server = initial.server;
+        self.adoptIdentity(&gateway, initial);
         self.serve(&gateway, &delivery, initial);
         gateway.releaseLease();
         _ = self.drainRing(self.listens.config.load());
         standard.deinit();
         self.registration.finish();
+    }
+
+    /// A gateway given no identity refuses every request.
+    const unidentified: network.client.Identity = .{ .name = "", .version = "", .contact = "" };
+
+    fn adoptIdentity(self: *Worker, gateway: *network.Gateway, config: Config) void {
+        self.identity = config.identity;
+        gateway.config.identity = if (self.identity) |*owned| owned.view() else unidentified;
     }
 
     fn serve(self: *Worker, gateway: *network.Gateway, delivery: *listenbrainz.Delivery, initial: Config) void {
@@ -258,7 +291,7 @@ pub const Worker = struct {
             if (current.enabled and (!config.enabled or (config.offline and !current.offline)))
                 wake_at_ms = now_ms;
             if (current.settings != config.settings) {
-                gateway.config.identity = current.identity;
+                self.adoptIdentity(gateway, current);
                 if (!sameDestination(current, config)) {
                     delivery.server = current.server;
                     delivery.credentials = self.credentialStore(current);
@@ -443,10 +476,14 @@ pub const Worker = struct {
         var drained: Drained = .{};
         while (self.listens.ring.pop()) |entry| switch (entry.kind) {
             .eligible => switch (self.record(entry.listen, config)) {
-                .dropped => _ = self.listens.dropped.fetchAdd(1, .monotonic),
+                .dropped => {
+                    _ = self.listens.dropped.fetchAdd(1, .monotonic);
+                    self.listens.raiseHost();
+                },
                 .duplicate => {},
                 .recorded, .queued => |outcome| {
                     _ = self.listens.recorded.fetchAdd(1, .monotonic);
+                    self.listens.raiseHost();
                     drained.recorded = true;
                     drained.queued = drained.queued or outcome == .queued;
                 },
@@ -476,7 +513,7 @@ pub const Worker = struct {
             .artist = subject.artist,
             .album = subject.album,
             .recording_mbid = subject.recording_mbid,
-            .player_client = config.identity.name,
+            .player_client = if (config.identity) |*owned| owned.view().name else "",
         };
         if (config.enabled) {
             var event = providers.scrobble.Event.fromSubject(&subject, listen.started_at, listen.listened_ms);
@@ -519,7 +556,7 @@ pub const Worker = struct {
         feedback_pending: u64,
     ) void {
         const current = delivery.status();
-        self.listens.status.store(.{
+        const status: Status = .{
             .state = current.state,
             .user_name = current.user_name,
             .last_error = current.last_error,
@@ -528,7 +565,11 @@ pub const Worker = struct {
             .pending = pending,
             .feedback_pending = feedback_pending,
             .delivered_total = current.delivered_total,
-        });
+        };
+        if (status.eql(self.published)) return;
+        self.published = status;
+        self.listens.status.store(status);
+        self.listens.raiseHost();
     }
 
     fn sleep(self: *Worker, seen_signal: u32, now_ms: i64, wake_at_ms: ?i64) void {
@@ -656,7 +697,7 @@ const TestRig = struct {
         self.listens = .{};
         self.service.start();
         self.prng = .init(network.testing.default_seed);
-        self.gateway = network.testing.gateway(&self.service.transport, &self.service.clock, &self.prng, .{});
+        self.gateway = network.testing.gateway(&self.service.transport, &self.service.clock, &self.prng, .{ .identity = network.testing.test_identity });
         self.delivery = .init(testing.allocator, testing.io, &self.gateway, self.service.store(), &self.library.scrobbles);
         self.worker = .{
             .allocator = testing.allocator,
@@ -832,6 +873,47 @@ test "Now Playing is not sent offline, without a token or after the token was re
 
     try expectRequests(&rig, &.{});
     try testing.expectEqual(@as(usize, 0), rig.service.token_lookups);
+}
+
+test "a worker pass wakes the host only when its status changes" {
+    var rig: TestRig = undefined;
+    try rig.start("wake-on-change");
+    defer rig.stop();
+    var counter: control.CountingWaker = .{};
+    var signal: control.HostSignal = .{ .waker = counter.waker() };
+    rig.listens.host_signal = &signal;
+    try rig.queueListens(1);
+
+    rig.worker.publish(&rig.gateway, &rig.delivery, rig.worker.pendingCount(0), 0);
+    try testing.expectEqual(@as(u32, 1), counter.count());
+    signal.clear();
+    rig.worker.publish(&rig.gateway, &rig.delivery, rig.worker.pendingCount(0), 0);
+    try testing.expect(!signal.isPending());
+
+    _ = rig.pass();
+    rig.worker.publish(&rig.gateway, &rig.delivery, rig.worker.pendingCount(0), 0);
+    try testing.expectEqual(@as(u32, 2), counter.count());
+    try testing.expectEqual(@as(u64, 1), rig.listens.snapshot().delivered_total);
+    signal.clear();
+    _ = rig.pass();
+    rig.worker.publish(&rig.gateway, &rig.delivery, rig.worker.pendingCount(0), 0);
+    try testing.expect(!signal.isPending());
+}
+
+test "a recorded listen wakes the host" {
+    var rig: TestRig = undefined;
+    try rig.start("wake-on-record");
+    defer rig.stop();
+    var counter: control.CountingWaker = .{};
+    var signal: control.HostSignal = .{ .waker = counter.waker() };
+    rig.listens.host_signal = &signal;
+    const track = try rig.addTrack(null);
+    const listen: Listen = .{ .track_id = track, .started_at = 1_700_000_000, .listened_ms = 100_000, .duration_ms = 180_000 };
+    _ = rig.listens.ring.push(.{ .kind = .eligible, .listen = listen });
+
+    try testing.expect(rig.worker.drainRing(.{}).recorded);
+    try testing.expectEqual(@as(u32, 1), counter.count());
+    try testing.expectEqual(@as(u64, 1), rig.listens.recorded.load(.monotonic));
 }
 
 test "feedback goes out one change per pass, and a pass that sent one asks to run again at once" {

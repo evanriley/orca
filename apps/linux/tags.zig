@@ -135,6 +135,7 @@ fn save(editor: *Editor) bool {
     } else |_| {}
     jobs.reloadLibraryViews(self);
     popPages(self);
+    self.requestTick();
     return true;
 }
 
@@ -348,5 +349,6 @@ pub fn undoLastWrite(self: *App) void {
     });
     self.tag_write_group = 0;
     jobs.reloadLibraryViews(self);
+    self.requestTick();
     self.toast("The files are back as they were");
 }

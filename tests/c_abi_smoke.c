@@ -13,15 +13,20 @@
  * ORCA_OUTPUT_ACTIVE.
  */
 
-/* nanosleep under -std=c11 */
+/* pipe, poll and clock_gettime under -std=c11 */
 #define _POSIX_C_SOURCE 200809L
 
 #include "orca.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /* Which output this test opens.
  *
@@ -76,11 +81,69 @@ static uint64_t test_device_id(orca_runtime *runtime) {
     return 0;
 }
 
-static void sleep_ms(long milliseconds) {
-    struct timespec duration;
-    duration.tv_sec = milliseconds / 1000;
-    duration.tv_nsec = (milliseconds % 1000) * 1000000L;
-    nanosleep(&duration, 0);
+/* The host's loop sleeps on a self-pipe, as a GUI main loop sleeps on an
+ * eventfd, and the wake callback writes one byte to it. */
+static int wake_pipe[2] = {-1, -1};
+static atomic_uint wake_calls;
+static atomic_int runtime_destroyed;
+
+static void on_wake(void *context) {
+    (void)context;
+    if (atomic_load(&runtime_destroyed)) abort();
+    atomic_fetch_add(&wake_calls, 1);
+    const char byte = 1;
+    if (write(wake_pipe[1], &byte, 1) < 0 && errno != EAGAIN) abort();
+}
+
+static int open_wake_pipe(void) {
+    if (pipe(wake_pipe) != 0) return -1;
+    for (int end = 0; end < 2; end += 1) {
+        int flags = fcntl(wake_pipe[end], F_GETFL);
+        if (flags < 0 || fcntl(wake_pipe[end], F_SETFL, flags | O_NONBLOCK) != 0) return -1;
+    }
+    return 0;
+}
+
+static void drain_wake_pipe(void) {
+    char bytes[64];
+    while (read(wake_pipe[0], bytes, sizeof bytes) > 0) {
+    }
+}
+
+static long now_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* One turn of a host's loop: sleep until the wake callback fires or the pump
+ * timeout passes, but not past `deadline`, then pump. Returns 1 when told to
+ * wait for the callback alone and none came before `deadline`, 0 when it
+ * pumped otherwise, -1 when a call failed. */
+static int wait_for_runtime(orca_runtime *runtime, long deadline) {
+    int64_t timeout = 0;
+    if (orca_runtime_pump_timeout(runtime, &timeout) != ORCA_STATUS_OK) return -1;
+    long remaining = deadline - now_ms();
+    if (remaining < 0) remaining = 0;
+    long wait = remaining;
+    if (timeout != ORCA_PUMP_NO_TIMEOUT && timeout < remaining) wait = (long)timeout;
+    struct pollfd wake;
+    wake.fd = wake_pipe[0];
+    wake.events = POLLIN;
+    wake.revents = 0;
+    int ready = poll(&wake, 1, (int)wait);
+    if (ready < 0 && errno != EINTR) return -1;
+    drain_wake_pipe();
+    if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return -1;
+    return ready == 0 && timeout == ORCA_PUMP_NO_TIMEOUT ? 1 : 0;
+}
+
+static int drain_events(orca_runtime *runtime) {
+    for (;;) {
+        orca_event event;
+        if (orca_runtime_poll_event(runtime, &event, 0) != ORCA_STATUS_OK) return -1;
+        if (event.kind == ORCA_EVENT_NONE) return 0;
+    }
 }
 
 struct track_capture {
@@ -236,14 +299,40 @@ static int job_settled(orca_runtime *runtime, orca_handle job, uint8_t *state,
     return 0;
 }
 
+/* Waits for the job the way a host does: woken by liborca, never sleeping on a
+ * timer. A job still running keeps the pump timeout finite, so a wait for the
+ * callback alone that times out is a lost wake. */
+static int await_job(orca_runtime *runtime, orca_handle job, uint8_t *state,
+                     uint8_t expect_total, long limit_ms) {
+    long deadline = now_ms() + limit_ms;
+    for (;;) {
+        int settled = job_settled(runtime, job, state, expect_total);
+        if (settled != 0) return settled;
+        if (now_ms() >= deadline) return 0;
+        if (wait_for_runtime(runtime, deadline) != 0) return -1;
+    }
+}
+
 int main(void) {
+    if (orca_version()[0] == 0) return 186;
     orca_runtime *runtime = orca_runtime_create();
     if (runtime == 0) return 1;
+    if (orca_runtime_last_error(runtime)[0] != 0) return 187;
+    if (open_wake_pipe() != 0) return 191;
+    if (orca_runtime_set_wake_callback(runtime, on_wake, 0) != ORCA_STATUS_OK) return 192;
 
     orca_handle library;
+    if (orca_library_open(runtime, "/nonexistent/orca-c-smoke/library.db", &library) ==
+        ORCA_STATUS_OK)
+        return 188;
+    printf("failed open reports: %s\n", orca_runtime_last_error(runtime));
+    if (strncmp(orca_runtime_last_error(runtime), "orca_library_open: ", 19) != 0 ||
+        orca_runtime_last_error(runtime)[19] == 0)
+        return 189;
     if (orca_library_open(runtime, "file:orca-c-smoke?mode=memory&cache=shared", &library) !=
         ORCA_STATUS_OK)
         return 8;
+    if (orca_runtime_last_error(runtime)[0] != 0) return 190;
 
     uint64_t track_count = 1;
     if (orca_library_track_count(runtime, library, &track_count) != ORCA_STATUS_OK) return 9;
@@ -287,12 +376,7 @@ int main(void) {
     /* start_scan is nonblocking: this loop is the proof, because the job is
      * still running on its own worker while this thread polls. */
     uint8_t scan_state = ORCA_JOB_RUNNING;
-    int settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, scan_job, &scan_state, 0);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    int settled = await_job(runtime, scan_job, &scan_state, 0, 60000);
     if (settled != 1) return 22;
     if (scan_state != ORCA_JOB_SUCCEEDED) return 23;
 
@@ -313,12 +397,7 @@ int main(void) {
     if (orca_library_start_projection(runtime, library, &projection_job) != ORCA_STATUS_OK)
         return 31;
     uint8_t projection_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, projection_job, &projection_state, 0);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, projection_job, &projection_state, 0, 60000);
     if (settled != 1) return 32;
     if (projection_state != ORCA_JOB_SUCCEEDED) return 33;
 
@@ -333,12 +412,7 @@ int main(void) {
                                              &backfill_job) != ORCA_STATUS_OK)
         return 139;
     uint8_t backfill_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, backfill_job, &backfill_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, backfill_job, &backfill_state, 1, 60000);
     if (settled != 1) return 140;
     if (backfill_state != ORCA_JOB_SUCCEEDED) return 141;
     orca_scan_stats backfill_stats;
@@ -351,12 +425,7 @@ int main(void) {
                                              &backfill_job) != ORCA_STATUS_OK)
         return 144;
     backfill_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, backfill_job, &backfill_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, backfill_job, &backfill_state, 1, 60000);
     if (settled != 1) return 145;
     if (backfill_state != ORCA_JOB_SUCCEEDED) return 146;
     if (orca_library_scan_stats(runtime, backfill_job, &backfill_stats) != ORCA_STATUS_OK)
@@ -382,12 +451,7 @@ int main(void) {
     if (analysis_planned.has_total == 0) return 153;
     if (analysis_planned.total_units == 0) return 154;
     uint8_t analysis_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 120000; elapsed += 10) {
-        settled = job_settled(runtime, analysis_job, &analysis_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, analysis_job, &analysis_state, 1, 120000);
     if (settled != 1) return 155;
     if (analysis_state != ORCA_JOB_SUCCEEDED) return 156;
     orca_scan_stats analysis_stats;
@@ -400,12 +464,7 @@ int main(void) {
         ORCA_STATUS_OK)
         return 160;
     analysis_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 120000; elapsed += 10) {
-        settled = job_settled(runtime, analysis_job, &analysis_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, analysis_job, &analysis_state, 1, 120000);
     if (settled != 1) return 161;
     if (analysis_state != ORCA_JOB_SUCCEEDED) return 162;
     if (orca_library_scan_stats(runtime, analysis_job, &analysis_stats) != ORCA_STATUS_OK)
@@ -431,12 +490,7 @@ int main(void) {
     if (duplicate_planned.has_total == 0) return 173;
     if (duplicate_planned.total_units == 0) return 174;
     uint8_t duplicate_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, duplicate_job, &duplicate_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, duplicate_job, &duplicate_state, 1, 60000);
     if (settled != 1) return 175;
     if (duplicate_state != ORCA_JOB_SUCCEEDED) return 176;
     orca_scan_stats duplicate_stats;
@@ -459,12 +513,7 @@ int main(void) {
                                           &duplicate_job) != ORCA_STATUS_OK)
         return 181;
     duplicate_state = ORCA_JOB_RUNNING;
-    settled = 0;
-    for (int elapsed = 0; elapsed < 60000; elapsed += 10) {
-        settled = job_settled(runtime, duplicate_job, &duplicate_state, 1);
-        if (settled != 0) break;
-        sleep_ms(10);
-    }
+    settled = await_job(runtime, duplicate_job, &duplicate_state, 1, 60000);
     if (settled != 1) return 182;
     if (duplicate_state != ORCA_JOB_SUCCEEDED) return 183;
     uint64_t issues_after_second = 0;
@@ -673,7 +722,9 @@ int main(void) {
     if (orca_player_set_repeat(runtime, player, 9) != ORCA_STATUS_INVALID_ARGUMENT) return 47;
     if (orca_player_set_shuffle(runtime, player, 0) != ORCA_STATUS_OK) return 48;
 
-    /* Play by id, through the control lane, correlated by request id. */
+    /* Play by id, through the control lane, correlated by request id. The
+     * submission itself wakes the host. */
+    unsigned wakes_before_play = atomic_load(&wake_calls);
     uint64_t request_id = 0;
     if (orca_player_play_track(runtime, player, capture.first_playable_id, &request_id) !=
         ORCA_STATUS_OK)
@@ -682,8 +733,9 @@ int main(void) {
 
     int completed = 0;
     uint8_t outcome = 255;
-    for (int elapsed = 0; elapsed < 5000 && !completed; elapsed += 10) {
-        if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return 51;
+    long play_deadline = now_ms() + 5000;
+    while (!completed && now_ms() < play_deadline) {
+        if (wait_for_runtime(runtime, play_deadline) != 0) return 51;
         for (;;) {
             orca_event event;
             uint32_t remaining = 0;
@@ -696,10 +748,13 @@ int main(void) {
                 break;
             }
         }
-        if (!completed) sleep_ms(10);
     }
     if (!completed) return 53;
     if (outcome != ORCA_OUTCOME_TRACK_PLAYING) return 54;
+    if (atomic_load(&wake_calls) == wakes_before_play) return 193;
+    /* Engine and listen worker threads now read the callback without a lock. */
+    if (orca_runtime_set_wake_callback(runtime, on_wake, 0) != ORCA_STATUS_INVALID_STATE)
+        return 194;
 
     /* Correction is off for this Player, so the render lane's multiplier is
      * exactly the volume the host set. Anything else here would mean an
@@ -739,8 +794,9 @@ int main(void) {
      * skipped rather than faked. */
     int rendered = 0;
     int saw_position_event = 0;
-    for (int elapsed = 0; elapsed < 4000; elapsed += 20) {
-        if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return 69;
+    long render_deadline = now_ms() + 4000;
+    while (now_ms() < render_deadline) {
+        if (wait_for_runtime(runtime, render_deadline) != 0) return 69;
         for (;;) {
             orca_event event;
             uint32_t remaining = 0;
@@ -753,7 +809,6 @@ int main(void) {
         /* Position hints are coalesced and published on a 100 ms cadence, so
          * the loop keeps running past the first moved sample to see one. */
         if (rendered && saw_position_event) break;
-        sleep_ms(20);
     }
 
     orca_zone_status zone_status;
@@ -801,30 +856,27 @@ int main(void) {
         int advanced = 0;
         int past_end = 0;
         uint64_t last_position = 0;
-        int settled_ms = 0;
-        for (int elapsed = 0; elapsed < 3000; elapsed += 20) {
-            if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return 92;
-            for (;;) {
-                orca_event event;
-                uint32_t remaining = 0;
-                if (orca_runtime_poll_event(runtime, &event, &remaining) != ORCA_STATUS_OK)
-                    return 93;
-                if (event.kind == ORCA_EVENT_NONE) break;
-            }
+        long gapless_deadline = now_ms() + 3000;
+        long last_moved = now_ms();
+        while (now_ms() < gapless_deadline) {
+            /* A clock that has stopped for good wakes nobody, so each wait
+             * ends where the position would count as settled. */
+            long settle_at = last_moved + 300;
+            if (wait_for_runtime(runtime, settle_at < gapless_deadline ? settle_at
+                                                                       : gapless_deadline) < 0)
+                return 92;
+            if (drain_events(runtime) != 0) return 93;
             if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 94;
             if (status.duration_ms > 0 && status.position_ms > status.duration_ms + 100)
                 past_end = 1;
             if (status.queue_index == 1) advanced = 1;
-            if (status.position_ms == last_position) {
-                settled_ms += 20;
-            } else {
+            if (status.position_ms != last_position) {
                 last_position = status.position_ms;
-                settled_ms = 0;
+                last_moved = now_ms();
             }
             /* The whole queue has played out once the second entry is current
              * and the clock has stopped moving. */
-            if (advanced && settled_ms >= 300) break;
-            sleep_ms(20);
+            if (advanced && now_ms() - last_moved >= 300) break;
         }
         /* Elapsed time that runs past the end of the track it belongs to is
          * exactly what a transport bar cannot survive. */
@@ -837,11 +889,37 @@ int main(void) {
     if (status.queue_length != 0) return 87;
     if (status.transport != ORCA_TRANSPORT_STOPPED) return 88;
 
+    /* Idle costs nothing. With the queue cleared, an output still open, and
+     * engine and listen worker threads alive, liborca asks for no timeout and
+     * wakes the host not once. A failure here is a wake leaking from some
+     * thread, not a timing margin to widen. */
+    long settle_deadline = now_ms() + 300;
+    while (now_ms() < settle_deadline) {
+        if (wait_for_runtime(runtime, settle_deadline) < 0) return 195;
+        if (drain_events(runtime) != 0) return 196;
+    }
+    if (orca_runtime_pump(runtime) != ORCA_STATUS_OK) return 197;
+    if (drain_events(runtime) != 0) return 198;
+    drain_wake_pipe();
+    unsigned wakes_when_idle = atomic_load(&wake_calls);
+    int64_t idle_timeout = 0;
+    if (orca_runtime_pump_timeout(runtime, &idle_timeout) != ORCA_STATUS_OK) return 199;
+    if (idle_timeout != ORCA_PUMP_NO_TIMEOUT) return 200;
+    struct pollfd idle_wake;
+    idle_wake.fd = wake_pipe[0];
+    idle_wake.events = POLLIN;
+    idle_wake.revents = 0;
+    if (poll(&idle_wake, 1, 300) != 0) return 201;
+    if (atomic_load(&wake_calls) != wakes_when_idle) return 202;
+
     if (orca_zone_destroy(runtime, zone) != ORCA_STATUS_OK) return 89;
     if (orca_player_destroy(runtime, player) != ORCA_STATUS_OK) return 6;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_STALE_HANDLE) return 7;
     if (orca_library_close(runtime, library) != ORCA_STATUS_OK) return 90;
 
     orca_runtime_destroy(runtime);
+    atomic_store(&runtime_destroyed, 1);
+    close(wake_pipe[0]);
+    close(wake_pipe[1]);
     return 0;
 }

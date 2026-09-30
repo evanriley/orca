@@ -157,6 +157,7 @@ pub fn selectDevice(self: *App, index: usize) void {
     self.runtime.destroyZone(zone) catch {};
     self.zone = null;
     if (!ensureOutput(self)) self.toast("Could not open that output device");
+    self.requestTick();
 }
 
 pub fn playIds(self: *App, ids: []const i64, start: u32) void {
@@ -171,7 +172,7 @@ pub fn playIds(self: *App, ids: []const i64, start: u32) void {
     };
     if (ids.len == 1) {
         // Async through the control lane: the outcome arrives as a completion
-        // event correlated by this request id, drained on the app tick.
+        // event correlated by this request id, drained on the tick `submit` wakes.
         const request = self.runtime.submit(.{ .play_track = .{
             .player = self.player,
             .library = library,
@@ -187,6 +188,7 @@ pub fn playIds(self: *App, ids: []const i64, start: u32) void {
         self.toast("Could not start playback");
         return;
     };
+    self.requestTick();
 }
 
 pub fn toggle(self: *App) void {
@@ -199,6 +201,7 @@ pub fn toggle(self: *App) void {
         if (isNotReady(err)) self.toast("Nothing to play yet — double-click a track");
     };
     self.mpris.notify();
+    self.requestTick();
 }
 
 fn playClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -208,12 +211,14 @@ fn playClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 pub fn previous(self: *App) void {
     _ = self.runtime.playerPrevious(self.player) catch {};
     self.mpris.notify();
+    self.requestTick();
 }
 
 pub fn next(self: *App) void {
     const moved = self.runtime.playerNext(self.player) catch true;
     if (!moved) self.toast("End of the queue");
     self.mpris.notify();
+    self.requestTick();
 }
 
 fn previousClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -229,6 +234,7 @@ fn shuffleToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (self.suppress_widget_writeback) return;
     const active = gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) != 0;
     self.runtime.playerSetShuffle(self.player, active) catch {};
+    self.requestTick();
 }
 
 fn repeatClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -262,12 +268,12 @@ fn volumeChanged(_: ?*anyopaque, value: f64, data: ?*anyopaque) callconv(.c) voi
 // `GtkRange` owns the pointer gesture on its own slider, so a drag is observed
 // through `change-value` rather than through a competing `GtkGestureClick` —
 // a click gesture added here swallows the drag entirely. While a value is
-// settling the 100 ms tick stops writing the slider, otherwise the timer fights
+// settling the tick stops writing the slider, otherwise position updates fight
 // the gesture, and the seek is issued once the user stops moving. Suppressing
 // the write is presentation; the position itself always comes from
 // `playerStatus`.
 
-const seek_settle_us: i64 = 220_000;
+const seek_settle_ms: c_uint = 220;
 
 fn seekChangeValue(
     _: ?*anyopaque,
@@ -279,7 +285,8 @@ fn seekChangeValue(
     const clamped = if (value < 0) 0 else value;
     self.seeking = true;
     self.seek_pending_ms = @intFromFloat(clamped);
-    self.seek_changed_at_us = gtk.g_get_monotonic_time();
+    if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
+    self.seek_settle_timer = gtk.g_timeout_add(seek_settle_ms, seekSettled, self);
     if (self.elapsed_label) |label| {
         var buffer: [32]u8 = undefined;
         gtk.gtk_label_set_text(
@@ -290,18 +297,20 @@ fn seekChangeValue(
     return gtk.false_;
 }
 
-fn applySettledSeek(self: *App) void {
-    if (!self.seeking) return;
-    if (gtk.g_get_monotonic_time() - self.seek_changed_at_us < seek_settle_us) return;
+fn seekSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    self.seek_settle_timer = 0;
     self.seeking = false;
-    _ = self.runtime.playerSeekMs(self.player, @intCast(self.seek_pending_ms)) catch return;
+    defer self.requestTick();
+    _ = self.runtime.playerSeekMs(self.player, @intCast(self.seek_pending_ms)) catch return gtk.SOURCE_REMOVE;
     self.mpris.notify();
+    return gtk.SOURCE_REMOVE;
 }
 
 const cover_display_pixels: c_int = 56;
 
 /// Put the audible track's cover in the bar, or the placeholder. Called only
-/// when the audible Track changes, never on the 100 ms tick.
+/// when the audible Track changes, never on every tick.
 fn refreshCover(self: *App, track_id: ?i64) void {
     const cover = self.now_playing_art orelse return;
     const id = track_id orelse {
@@ -542,7 +551,6 @@ pub fn build(self: *App) *gtk.Widget {
 }
 
 pub fn tick(self: *App) void {
-    applySettledSeek(self);
     const status = self.runtime.playerStatus(self.player) catch return;
 
     if (self.play_button) |play| gtk.gtk_button_set_icon_name(

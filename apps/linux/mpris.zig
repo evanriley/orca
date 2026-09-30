@@ -87,11 +87,17 @@ pub const Mpris = struct {
     art_path: ?[:0]u8 = null,
     player: liborca.PlayerHandle = .{ .index = 0, .generation = 0 },
     application: ?*gtk.GApplication = null,
+    request_tick: ?liborca.HostWaker = null,
     connection: ?*gtk.GDBusConnection = null,
     node: ?*gtk.GDBusNodeInfo = null,
     owner_id: c_uint = 0,
     root_registration: c_uint = 0,
     player_registration: c_uint = 0,
+
+    fn requestTick(self: *Mpris) void {
+        const waker = self.request_tick orelse return;
+        waker.wake_fn(waker.context);
+    }
 
     fn status(self: *Mpris) ?liborca.PlayerStatus {
         const runtime = self.runtime orelse return null;
@@ -223,6 +229,7 @@ pub const Mpris = struct {
         else
             runtime.playPlayer(self.player) catch {};
         self.notify();
+        self.requestTick();
     }
 
     fn emitSeeked(self: *Mpris) void {
@@ -250,6 +257,7 @@ pub const Mpris = struct {
             @intCast(@divTrunc(microseconds, 1000));
         _ = runtime.playerSeekMs(self.player, milliseconds) catch return;
         self.emitSeeked();
+        self.requestTick();
     }
 
     /// MPRIS carries a *URL*, not bytes, so a cover has to exist as a file for
@@ -330,12 +338,14 @@ pub const Mpris = struct {
         player: liborca.PlayerHandle,
         application: *gtk.GApplication,
         io: std.Io,
+        request_tick: liborca.HostWaker,
     ) void {
         self.* = .{
             .runtime = runtime,
             .player = player,
             .application = application,
             .io = io,
+            .request_tick = request_tick,
         };
         var err: ?*gtk.GError = null;
         self.connection = gtk.g_bus_get_sync(gtk.BUS_TYPE_SESSION, null, &err);
@@ -469,6 +479,7 @@ fn playerMethod(mpris: *Mpris, method: []const u8, parameters: *gtk.GVariant) vo
         return;
     }
     mpris.notify();
+    mpris.requestTick();
 }
 
 fn childInt64(parameters: *gtk.GVariant, index: usize) i64 {
@@ -579,6 +590,7 @@ fn setProperty(
     const requested = std.math.clamp(gtk.g_variant_get_double(value), 0.0, 4.0);
     runtime.playerSetVolume(mpris.player, @floatCast(requested)) catch return gtk.false_;
     mpris.notify();
+    mpris.requestTick();
     return gtk.true_;
 }
 

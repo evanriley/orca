@@ -464,6 +464,80 @@ test "commands complete asynchronously through bounded events" {
     }
 }
 
+test "submit wakes the host and the pump timeout is zero until pumped" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var counter: control.CountingWaker = .{};
+    try runtime.setWaker(counter.waker());
+    try std.testing.expectEqual(@as(?u64, null), runtime.nextPumpTimeoutMs());
+
+    _ = try runtime.submit(.create_player);
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+    try std.testing.expectEqual(@as(?u64, 0), runtime.nextPumpTimeoutMs());
+    runtime.pump();
+    _ = runtime.pollEvent() orelse return error.MissingEvent;
+    try std.testing.expectEqual(@as(?u64, null), runtime.nextPumpTimeoutMs());
+
+    _ = try runtime.submit(.create_player);
+    _ = try runtime.submit(.create_player);
+    try std.testing.expectEqual(@as(u32, 2), counter.count());
+}
+
+test "commands left queued by event backpressure keep the pump timeout at zero" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    for (0..256) |_| _ = try runtime.submit(.create_player);
+    runtime.pump();
+    _ = try runtime.submit(.create_player);
+    runtime.pump();
+    while (runtime.pollEvent()) |_| {}
+    try std.testing.expectEqual(@as(?u64, 0), runtime.nextPumpTimeoutMs());
+    runtime.pump();
+    while (runtime.pollEvent()) |_| {}
+    try std.testing.expectEqual(@as(?u64, null), runtime.nextPumpTimeoutMs());
+}
+
+test "setWaker is refused once a worker runs" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    var counter: control.CountingWaker = .{};
+    try runtime.setWaker(counter.waker());
+
+    const player = try runtime.createPlayer();
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try std.testing.expectError(error.WorkersRunning, runtime.setWaker(null));
+    try runtime.destroyPlayer(player);
+    try runtime.setWaker(null);
+}
+
+test "a finished job wakes the host" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var counter: control.CountingWaker = .{};
+    try runtime.setWaker(counter.waker());
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-scan-job-wake?mode=memory&cache=shared",
+    );
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    const job_handle = try runtime.startLibraryScan(library, .{ .root_id = binding.root_id });
+    try runtime.cancelJob(job_handle);
+
+    var deadline: TestDeadline = .init(5_000);
+    while (counter.count() == 0 and deadline.tick()) {}
+    try std.testing.expectEqual(@as(u32, 1), counter.count());
+    runtime.reapFinishedJobs();
+    var finished = false;
+    while (runtime.pollEvent()) |event| switch (event.outcome) {
+        .job_finished => |value| finished = finished or value.job.eql(job_handle),
+        else => {},
+    };
+    try std.testing.expect(finished);
+}
+
 test "slow completion consumers apply bounded backpressure" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

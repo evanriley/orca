@@ -22,10 +22,11 @@ the next listen, bind or scrobbling enable starts a new one. Closing a Library
 restarts the scrobbling Library's worker at once, so its queue keeps its retry
 times. A worker records everything in its ring before it finishes.
 
-The `ClientIdentity`, `CredentialStore` and server URL passed to
-`setClientIdentity`, `setCredentialStore` and `setListenBrainzServer` are
-borrowed: their strings and context must outlive the runtime, because a worker
-may read them at any time. `CredentialStore.get` is called on a listen worker's
+The `CredentialStore` and server URL passed to `setCredentialStore` and
+`setListenBrainzServer` are borrowed: their strings and context must outlive
+the runtime, because a worker may read them at any time. `setClientIdentity`
+copies its strings into the runtime, and each worker holds its own copy, so a
+later call never frees text a worker is reading. `CredentialStore.get` is called on a listen worker's
 thread, never on the caller's.
 
 Listen workers share one network `std.Io`, created with the first worker and
@@ -50,5 +51,7 @@ work → Zones → Players → Libraries:
 
 Each step releases an object's nested resources before its handle pool discards
 the slot, and no object is freed while a worker that holds a pointer into it
-can still run. `deinit` runs `shutdown`, then frees the handle pools, the work
+can still run. The host's waker is never called once `shutdown` returns: every
+thread that calls it is joined in step 2, and `submit` refuses a runtime that
+is shutting down. `deinit` runs `shutdown`, then frees the handle pools, the work
 registry and the network `std.Io`.

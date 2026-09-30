@@ -159,14 +159,22 @@ pub const ZoneRuntime = struct {
     }
 
     pub fn publishState(self: *ZoneRuntime) void {
-        self.published_output_state.store(@intFromEnum(self.zone.output_state), .release);
-        self.published_recovery_attempts.store(self.zone.recovery_attempts, .release);
-        self.published_quantum_frames.store(self.zone.latency.backend_quantum_frames, .release);
+        _ = self.publishStateChanged();
+    }
+
+    pub fn publishStateChanged(self: *ZoneRuntime) bool {
+        const output_state = @intFromEnum(self.zone.output_state);
+        const recovery_attempts = self.zone.recovery_attempts;
+        const quantum_frames = self.zone.latency.backend_quantum_frames;
         const graph_rate_hz = if (self.zone.output_state == .active)
             self.zone.latency.graph_rate_hz orelse 0
         else
             0;
-        self.published_graph_rate_hz.store(graph_rate_hz, .release);
+        var changed = self.published_output_state.swap(output_state, .release) != output_state;
+        changed = self.published_recovery_attempts.swap(recovery_attempts, .release) != recovery_attempts or changed;
+        changed = self.published_quantum_frames.swap(quantum_frames, .release) != quantum_frames or changed;
+        changed = self.published_graph_rate_hz.swap(graph_rate_hz, .release) != graph_rate_hz or changed;
+        return changed;
     }
 
     /// Producer-side view of this Zone for one fanout pass. The render-ahead
