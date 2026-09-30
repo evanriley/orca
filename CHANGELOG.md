@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Parser hardening
+
+- **A crafted MP4 no longer overflows the sample-table arithmetic.** Media
+  time, packet lookup, chunk offsets, the edit list's conversion to media
+  time, frame counts and the probe's duration are checked, and a value that
+  does not fit is `error.InvalidMp4` rather than a panic in safe builds and
+  undefined behaviour in `ReleaseFast`. The movie-box walk in `iso_bmff.zig`
+  checks its offset arithmetic the same way.
+
 ## 0.2.0 - 2026-09-29
 
 The first tagged release. Ships Library schema version 18.

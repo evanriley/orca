@@ -92,7 +92,8 @@ pub fn readMovie(allocator: std.mem.Allocator, readable: source.ReadableSource) 
     const file_size = readable.size();
     var offset: u64 = 0;
     for (0..max_top_level_boxes) |_| {
-        if (offset + 8 > file_size) return error.Mp4MovieMissing;
+        const header_end = std.math.add(u64, offset, 8) catch return error.InvalidMp4;
+        if (header_end > file_size) return error.Mp4MovieMissing;
         var header: [16]u8 = undefined;
         const got = try readable.readAt(offset, &header);
         if (got < 8) return error.TruncatedMp4;
@@ -109,7 +110,8 @@ pub fn readMovie(allocator: std.mem.Allocator, readable: source.ReadableSource) 
         if (std.mem.eql(u8, header[4..8], "moov")) {
             const body_size = size - header_bytes;
             if (body_size > max_movie_bytes) return error.Mp4MovieTooLarge;
-            if (offset + size > file_size) return error.TruncatedMp4;
+            const end = std.math.add(u64, offset, size) catch return error.InvalidMp4;
+            if (end > file_size) return error.TruncatedMp4;
             const body = try allocator.alloc(u8, @intCast(body_size));
             errdefer allocator.free(body);
             if (try readable.readAt(offset + header_bytes, body) != body.len)
@@ -157,4 +159,9 @@ test "the movie box is found behind media data without reading the media" {
 test "a file with no movie box is reported as such" {
     var memory = source.MemorySource{ .bytes = "\x00\x00\x00\x10ftypM4A \x00\x00\x02\x00" };
     try std.testing.expectError(error.Mp4MovieMissing, readMovie(std.testing.allocator, memory.readable()));
+}
+
+test "a top-level box that walks the offset to the end of the address space is invalid" {
+    var memory = source.MemorySource{ .bytes = "\x00\x00\x00\x01free\xff\xff\xff\xff\xff\xff\xff\xfc" };
+    try std.testing.expectError(error.InvalidMp4, readMovie(std.testing.allocator, memory.readable()));
 }

@@ -58,29 +58,40 @@ pub const Track = struct {
     }
 
     /// Total media time of every packet.
-    pub fn mediaTime(self: *const Track) u64 {
+    pub fn mediaTime(self: *const Track) error{InvalidMp4}!u64 {
         var total: u64 = 0;
-        for (self.time_runs) |run| total += @as(u64, run.count) * run.delta;
+        for (self.time_runs) |run| total = try checkedAdd(total, @as(u64, run.count) * run.delta);
         return total;
     }
 
     /// The first packet whose span contains `time`, and the media time that
     /// packet starts at. Past the end, the packet count and the total time.
-    pub fn packetAt(self: *const Track, time: u64) struct { index: usize, start: u64 } {
+    pub fn packetAt(self: *const Track, time: u64) error{InvalidMp4}!PacketTime {
         var index: usize = 0;
         var start: u64 = 0;
         for (self.time_runs) |run| {
             const span = @as(u64, run.count) * run.delta;
-            if (run.delta != 0 and time < start + span) {
+            const end = try checkedAdd(start, span);
+            if (run.delta != 0 and time < end) {
                 const into: u64 = (time - start) / run.delta;
                 return .{ .index = index + @as(usize, @intCast(into)), .start = start + into * run.delta };
             }
             index += run.count;
-            start += span;
+            start = end;
         }
         return .{ .index = index, .start = start };
     }
 };
+
+pub const PacketTime = struct { index: usize, start: u64 };
+
+fn checkedAdd(a: u64, b: u64) error{InvalidMp4}!u64 {
+    return std.math.add(u64, a, b) catch error.InvalidMp4;
+}
+
+fn rescale(time: u64, rate: u32, timescale: u32) error{InvalidMp4}!u64 {
+    return std.math.cast(u64, @as(u128, time) * rate / timescale) orelse error.InvalidMp4;
+}
 
 pub const ParseError = error{
     InvalidMp4,
@@ -288,7 +299,7 @@ fn readSamples(allocator: std.mem.Allocator, table: []const u8) ![]Sample {
             for (0..per_chunk) |_| {
                 if (sample_index == samples.len) return error.InvalidMp4;
                 samples[sample_index].offset = offset;
-                offset += samples[sample_index].size;
+                offset = try checkedAdd(offset, samples[sample_index].size);
                 sample_index += 1;
             }
         }
@@ -359,7 +370,7 @@ fn applyGaplessBounds(track: *Track, trak: []const u8, movie: []const u8, movie_
         if (try firstPresentedEdit(elst.body)) |edit| {
             track.start_time = edit.media_time;
             // Segment duration is in movie time; convert to media time.
-            track.play_time = @intCast(@as(u128, edit.duration) * track.timescale / movie_timescale);
+            track.play_time = try rescale(edit.duration, track.timescale, movie_timescale);
             return;
         }
     }
@@ -439,10 +450,10 @@ pub fn probeTrack(track: *const Track) !@import("registry.zig").Properties {
         .aac => |config| aacOutput(config, track),
     };
     if (output.sample_rate == 0 or output.channels == 0) return error.InvalidMp4;
-    const start = @as(u128, track.start_time) * output.sample_rate / track.timescale;
-    const available = (@as(u128, track.mediaTime()) * output.sample_rate / track.timescale) -| start;
-    const frames: u128 = if (track.play_time) |time|
-        @min(@as(u128, time) * output.sample_rate / track.timescale, available)
+    const start = try rescale(track.start_time, output.sample_rate, track.timescale);
+    const available = try rescale(try track.mediaTime(), output.sample_rate, track.timescale) -| start;
+    const frames = if (track.play_time) |time|
+        @min(try rescale(time, output.sample_rate, track.timescale), available)
     else
         available;
     return .{
@@ -450,7 +461,7 @@ pub fn probeTrack(track: *const Track) !@import("registry.zig").Properties {
         .sample_rate = output.sample_rate,
         .channels = output.channels,
         .bit_depth = output.bit_depth,
-        .duration_ms = @intCast(frames * std.time.ms_per_s / output.sample_rate),
+        .duration_ms = try rescale(frames, std.time.ms_per_s, output.sample_rate),
     };
 }
 
@@ -569,10 +580,10 @@ pub fn openTrack(allocator: std.mem.Allocator, source: storage.ReadableSource, t
     context.pcm = try allocator.alloc(f32, @as(usize, engine.max_packet_frames) * engine.channels);
     errdefer allocator.free(context.pcm);
 
-    context.start_frame = context.toFrames(context.track.start_time);
-    const available = context.toFrames(context.track.mediaTime()) -| context.start_frame;
+    context.start_frame = try context.toFrames(context.track.start_time);
+    const available = try context.toFrames(try context.track.mediaTime()) -| context.start_frame;
     context.total_frames = if (context.track.play_time) |time|
-        @min(context.toFrames(time), available)
+        @min(try context.toFrames(time), available)
     else
         available;
     try context.position(0);
@@ -635,35 +646,35 @@ const Context = struct {
 
     /// Media time converted to frames at the engine's output rate, which SBR
     /// makes twice an HE-AAC track's media timescale.
-    fn toFrames(self: *const Context, time: u64) u64 {
-        return @intCast(@as(u128, time) * self.engine.sample_rate / self.track.timescale);
+    fn toFrames(self: *const Context, time: u64) !u64 {
+        return rescale(time, self.engine.sample_rate, self.track.timescale);
     }
 
-    fn toTime(self: *const Context, frames: u64) u64 {
-        return @intCast(@as(u128, frames) * self.track.timescale / self.engine.sample_rate);
+    fn toTime(self: *const Context, frames: u64) !u64 {
+        return rescale(frames, self.track.timescale, self.engine.sample_rate);
     }
 
     /// Positions the timeline at `frame` frames past the audible start.
     fn position(self: *Context, frame: u64) !void {
-        const target = self.start_frame + frame;
-        const found = self.track.packetAt(self.toTime(target));
+        const target = try checkedAdd(self.start_frame, frame);
+        const found = try self.track.packetAt(try self.toTime(target));
         const first = found.index -| self.engine.preroll_packets;
-        const first_start = self.packetStart(first);
+        const first_start = try self.packetStart(first);
         self.engine.reset();
         self.next_packet = first;
-        self.skip_frames = target - @min(target, self.toFrames(first_start));
+        self.skip_frames = target - @min(target, try self.toFrames(first_start));
         self.remaining_frames = self.total_frames -| frame;
         self.pending_start = 0;
         self.pending_end = 0;
     }
 
     /// Media time at which packet `index` starts.
-    fn packetStart(self: *const Context, index: usize) u64 {
+    fn packetStart(self: *const Context, index: usize) !u64 {
         var remaining = index;
         var start: u64 = 0;
         for (self.track.time_runs) |run| {
             const taken = @min(remaining, run.count);
-            start += @as(u64, taken) * run.delta;
+            start = try checkedAdd(start, @as(u64, taken) * run.delta);
             remaining -= taken;
             if (remaining == 0) break;
         }
@@ -676,16 +687,17 @@ const Context = struct {
     /// back as silence at the front; they are encoder priming or seek
     /// pre-roll, and are skipped. The last packet is exempt: it is legitimately
     /// shorter than its successors' spacing.
-    fn alignToPacket(self: *Context, index: usize, frames: u64) u64 {
+    fn alignToPacket(self: *Context, index: usize, frames: u64) !u64 {
         if (index + 1 >= self.track.samples.len) return frames;
-        const expected = self.toFrames(self.packetStart(index + 1) - self.packetStart(index));
+        const expected = try self.toFrames(try self.packetStart(index + 1) - try self.packetStart(index));
         const capacity = self.pcm.len / self.engine.channels;
         if (frames >= expected or expected > capacity) return frames;
         const channels = self.engine.channels;
-        const missing = expected - frames;
-        const decoded = self.pcm[0..@intCast(frames * channels)];
-        std.mem.copyBackwards(f32, self.pcm[@intCast(missing * channels)..][0..decoded.len], decoded);
-        @memset(self.pcm[0..@intCast(missing * channels)], 0);
+        const decoded_frames: usize = @intCast(frames);
+        const missing: usize = @intCast(expected - frames);
+        const decoded = self.pcm[0 .. decoded_frames * channels];
+        std.mem.copyBackwards(f32, self.pcm[missing * channels ..][0..decoded.len], decoded);
+        @memset(self.pcm[0 .. missing * channels], 0);
         return expected;
     }
 
@@ -697,7 +709,7 @@ const Context = struct {
             const bytes = self.packet[0..sample.size];
             if (try self.source.readAt(sample.offset, bytes) != bytes.len) return error.TruncatedMp4;
             var frames: u64 = try self.engine.decode(bytes, self.pcm);
-            frames = self.alignToPacket(index, frames);
+            frames = try self.alignToPacket(index, frames);
             const dropped = @min(frames, self.skip_frames);
             self.skip_frames -= dropped;
             if (frames == dropped) continue;
@@ -761,7 +773,7 @@ test "an ALAC track exposes its configuration and packet table" {
     try std.testing.expectEqual(@as(u32, 44_100), track.sample_rate);
     try std.testing.expectEqual(@as(u32, 44_100), track.timescale);
     try std.testing.expectEqual(@as(usize, 3), track.samples.len);
-    try std.testing.expectEqual(@as(u64, 8_820), track.mediaTime());
+    try std.testing.expectEqual(@as(u64, 8_820), try track.mediaTime());
     try std.testing.expectEqual(@as(u64, 0), track.start_time);
     try std.testing.expectEqual(@as(?u64, 8_820), track.play_time);
 }
@@ -780,9 +792,9 @@ test "an AAC track's edit list trims encoder priming to the source length" {
 test "a packet is found by the media time it contains" {
     var track = try openFixture("fixtures/audio/tagged-reference-aac.m4a");
     defer track.deinit();
-    const first = track.packetAt(0);
+    const first = try track.packetAt(0);
     try std.testing.expectEqual(@as(usize, 0), first.index);
-    const later = track.packetAt(2_500);
+    const later = try track.packetAt(2_500);
     try std.testing.expectEqual(@as(usize, 2), later.index);
     try std.testing.expectEqual(@as(u64, 2_048), later.start);
 }
@@ -956,4 +968,108 @@ test "a movie with no audio track is reported as such" {
     const movie_header = "\x00\x00\x00\x1cmvhd" ++ "\x00" ** 12 ++ "\x00\x00\x03\xe8" ++ "\x00" ** 4;
     var memory = storage.MemorySource{ .bytes = "\x00\x00\x00\x24moov" ++ movie_header };
     try std.testing.expectError(error.Mp4HasNoAudio, readTrack(std.testing.allocator, memory.readable()));
+}
+
+fn be32(comptime value: u32) [4]u8 {
+    return std.mem.toBytes(std.mem.nativeToBig(u32, value));
+}
+
+fn be64(comptime value: u64) [8]u8 {
+    return std.mem.toBytes(std.mem.nativeToBig(u64, value));
+}
+
+fn testBox(comptime kind: *const [4]u8, comptime body: []const u8) []const u8 {
+    return be32(8 + body.len) ++ kind.* ++ body;
+}
+
+const TestMovie = struct {
+    movie_timescale: u32 = 1000,
+    media_timescale: u32 = 44_100,
+    sample_count: u32 = 3,
+    sample_size: u32 = 32,
+    time_runs: []const [2]u32 = &.{.{ 3, 4096 }},
+    chunk_offsets: []const u8 = testBox("stco", "\x00" ** 4 ++ be32(1) ++ be32(0)),
+    edits: []const u8 = "",
+
+    fn bytes(comptime self: TestMovie) []const u8 {
+        comptime {
+            const full_box = "\x00" ** 4;
+            const alac_config = be32(4096) ++ [_]u8{ 0, 16, 40, 10, 14, 2 } ++ be32(255 << 16)[0..2].* ++
+                be32(0) ++ be32(0) ++ be32(44_100);
+            const sample_entry = testBox(
+                "alac",
+                "\x00" ** 6 ++ "\x00\x01" ++ "\x00" ** 8 ++ "\x00\x02\x00\x10" ++ "\x00" ** 4 ++
+                    be32(44_100 << 16) ++ testBox("alac", full_box ++ alac_config),
+            );
+            var runs: []const u8 = "";
+            for (self.time_runs) |run| runs = runs ++ be32(run[0]) ++ be32(run[1]);
+            const table = testBox("stsd", full_box ++ be32(1) ++ sample_entry) ++
+                testBox("stts", full_box ++ be32(self.time_runs.len) ++ runs) ++
+                testBox("stsz", full_box ++ be32(self.sample_size) ++ be32(self.sample_count)) ++
+                testBox("stsc", full_box ++ be32(1) ++ be32(1) ++ be32(self.sample_count) ++ be32(1)) ++
+                self.chunk_offsets;
+            const media = testBox("mdhd", full_box ++ "\x00" ** 8 ++ be32(self.media_timescale) ++ "\x00" ** 8) ++
+                testBox("hdlr", full_box ++ "\x00" ** 4 ++ "soun" ++ "\x00" ** 12) ++
+                testBox("minf", testBox("stbl", table));
+            const movie_header = testBox("mvhd", full_box ++ "\x00" ** 8 ++ be32(self.movie_timescale) ++ "\x00" ** 4);
+            return testBox("moov", movie_header ++ testBox("trak", self.edits ++ testBox("mdia", media)));
+        }
+    }
+};
+
+test "a hand-assembled movie reads as the track it declares" {
+    var memory = storage.MemorySource{ .bytes = comptime (TestMovie{}).bytes() };
+    var track = try readTrack(std.testing.allocator, memory.readable());
+    defer track.deinit();
+    try std.testing.expectEqual(@as(usize, 3), track.samples.len);
+    try std.testing.expectEqual(@as(u64, 64), track.samples[2].offset);
+    try std.testing.expectEqual(@as(u64, 3 * 4096), try track.mediaTime());
+}
+
+test "a media time too long to count in frames is invalid rather than a crash" {
+    var memory = storage.MemorySource{ .bytes = comptime (TestMovie{
+        .media_timescale = 1,
+        .sample_count = 1 << 17,
+        .time_runs = &.{.{ 1 << 17, 0xffff_ffff }},
+    }).bytes() };
+    try std.testing.expectError(error.InvalidMp4, openDecoder(std.testing.allocator, memory.readable()));
+    try std.testing.expectError(error.InvalidMp4, probe(std.testing.allocator, memory.readable()));
+}
+
+test "a chunk offset that runs a packet past 2^64 is invalid" {
+    var memory = storage.MemorySource{ .bytes = comptime (TestMovie{
+        .sample_count = 1,
+        .time_runs = &.{.{ 1, 4096 }},
+        .chunk_offsets = testBox("co64", "\x00" ** 4 ++ be32(1) ++ be64(0xffff_ffff_ffff_fff0)),
+    }).bytes() };
+    try std.testing.expectError(error.InvalidMp4, readTrack(std.testing.allocator, memory.readable()));
+}
+
+test "an edit too long to convert to media time is invalid" {
+    var memory = storage.MemorySource{ .bytes = comptime (TestMovie{
+        .movie_timescale = 1,
+        .media_timescale = 96_000,
+        .edits = testBox("edts", testBox("elst", "\x01\x00\x00\x00" ++ be32(1) ++
+            be64(std.math.maxInt(u64)) ++ be64(0) ++ "\x00\x01\x00\x00")),
+    }).bytes() };
+    try std.testing.expectError(error.InvalidMp4, readTrack(std.testing.allocator, memory.readable()));
+}
+
+test "time runs whose total overflows a u64 are invalid" {
+    var samples = [_]Sample{};
+    var time_runs = [_]TimeRun{ .{ .count = 0xffff_ffff, .delta = 0xffff_ffff }, .{ .count = 3, .delta = 0xffff_ffff } };
+    const track: Track = .{
+        .allocator = std.testing.allocator,
+        .movie = &.{},
+        .codec = .{ .alac = "" },
+        .channels = 2,
+        .sample_rate = 44_100,
+        .timescale = 44_100,
+        .samples = &samples,
+        .time_runs = &time_runs,
+        .start_time = 0,
+        .play_time = null,
+    };
+    try std.testing.expectError(error.InvalidMp4, track.mediaTime());
+    try std.testing.expectError(error.InvalidMp4, track.packetAt(std.math.maxInt(u64)));
 }
