@@ -15,6 +15,13 @@
   evaluates the NixOS module.**
 - The dev shell provides Python, `ffprobe` and the `sqlite3` shell.
 
+### Fixed
+
+- **`orca-gtk` renders on the GPU again on current NixOS.** The pinned
+  nixpkgs carried glibc 2.42, older than the system's GPU drivers need, so
+  the Vulkan loader rejected them and GTK drew in software: the album grid
+  lagged, more so the wider the window. nixpkgs is updated to glibc 2.44.
+
 ## 0.4.0 - 2026-09-30
 
 Ships Library schema version 19.
