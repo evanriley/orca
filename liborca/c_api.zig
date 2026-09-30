@@ -242,6 +242,7 @@ pub const EventKind = enum(u8) {
     job_progress = 2,
     job_finished = 3,
     player_position = 4,
+    library_changed = 5,
 };
 
 pub const CommandCompletedEvent = extern struct {
@@ -272,6 +273,10 @@ pub const PlayerPositionEvent = extern struct {
     frames: u64,
 };
 
+pub const LibraryChangedEvent = extern struct {
+    library: Handle,
+};
+
 /// A named `extern union` rather than opaque a/b/c fields: ABI-stable, it
 /// imports cleanly into Swift, and it keeps the header self-documenting.
 pub const EventPayload = extern union {
@@ -279,6 +284,25 @@ pub const EventPayload = extern union {
     job_progress: JobProgressEvent,
     job_finished: JobFinishedEvent,
     player_position: PlayerPositionEvent,
+    library_changed: LibraryChangedEvent,
+};
+
+pub const WatchOptions = extern struct {
+    quiet_ms: u32,
+    max_delay_ms: u32,
+    degraded_rescan_ms: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const WatchStatus = extern struct {
+    state: u8,
+    watch_limit_reached: u8,
+    reconcile_pending: u8,
+    reconcile_running: u8,
+    roots_watched: u32,
+    roots_unavailable: u32,
+    roots_degraded: u32,
+    directories_watched: u64,
 };
 
 pub const Event = extern struct {
@@ -793,6 +817,80 @@ pub export fn orca_library_start_scan(
     const started = box.runtime.startLibraryScan(importLibrary(library), request) catch |err|
         return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+/// Walks `count` directories under root `root_id`, or the whole root when
+/// `count` is zero, and marks missing only what was under what it walked.
+pub export fn orca_library_start_reconcile(
+    runtime: ?*Runtime,
+    library: Handle,
+    root_id: i64,
+    directories: ?[*]const ?[*:0]const u8,
+    count: usize,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    var request: core.runtime.ReconcileRequest = .{ .root_id = root_id };
+    const subtrees = std.heap.c_allocator.alloc([]const u8, count) catch |err| return box.fail(@src(), err);
+    defer std.heap.c_allocator.free(subtrees);
+    if (count != 0) {
+        const pointers = directories orelse return box.reject(@src(), .invalid_argument, "directories is null and count is not zero");
+        for (subtrees, pointers[0..count]) |*subtree, pointer| {
+            subtree.* = std.mem.span(pointer orelse return box.reject(@src(), .invalid_argument, "a directory is null"));
+        }
+        request.scope = .{ .subtrees = subtrees };
+    }
+    const started = box.runtime.startLibraryReconcile(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+/// Watches the Library's enabled roots. `options` may be null, and a zero
+/// field selects its default.
+pub export fn orca_library_watch(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const WatchOptions,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    var watch_options: core.runtime.WatchOptions = .{};
+    if (options) |value| {
+        if (value.quiet_ms != 0) watch_options.quiet_ms = value.quiet_ms;
+        if (value.max_delay_ms != 0) watch_options.max_delay_ms = value.max_delay_ms;
+        if (value.degraded_rescan_ms != 0) watch_options.degraded_rescan_ms = value.degraded_rescan_ms;
+    }
+    box.runtime.libraryWatch(importLibrary(library), watch_options) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_unwatch(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryUnwatch(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_watch_status(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*WatchStatus,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const status = box.runtime.libraryWatchStatus(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .state = exportWatchState(status.state),
+        .watch_limit_reached = @intFromBool(status.watch_limit_reached),
+        .reconcile_pending = @intFromBool(status.reconcile_pending),
+        .reconcile_running = @intFromBool(status.reconcile_running),
+        .roots_watched = status.roots_watched,
+        .roots_unavailable = status.roots_unavailable,
+        .roots_degraded = status.roots_degraded,
+        .directories_watched = status.directories_watched,
+    };
     return .ok;
 }
 
@@ -1473,6 +1571,15 @@ fn importZone(handle: Handle) core.ZoneHandle {
     return .{ .index = handle.index, .generation = handle.generation };
 }
 
+fn exportWatchState(state: core.runtime.WatchState) u8 {
+    return switch (state) {
+        .off => 0,
+        .watching => 1,
+        .degraded => 2,
+        .unsupported => 3,
+    };
+}
+
 fn exportJobKind(kind: job.Kind) u8 {
     return switch (kind) {
         .scan => 0,
@@ -1480,6 +1587,7 @@ fn exportJobKind(kind: job.Kind) u8 {
         .property_backfill => 2,
         .analysis => 3,
         .duplicate_scan => 4,
+        .reconcile => 5,
         else => 255,
     };
 }
@@ -1555,7 +1663,10 @@ fn exportTelemetry(telemetry: control.Telemetry) ?Event {
                 .total_units = progress.total_units orelse 0,
             } },
         },
-        .library_changed => null,
+        .library_changed => |changed| .{
+            .kind = @intFromEnum(EventKind.library_changed),
+            .payload = .{ .library_changed = .{ .library = exportLibraryHandle(changed.library) } },
+        },
     };
 }
 
@@ -1574,13 +1685,20 @@ fn mapError(err: anyerror) Status {
         error.JobAlreadyFinished,
         error.WorkersRunning,
         => .invalid_state,
+        error.AlreadyWatching => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot => .not_found,
         error.PlaybackQueueFull, error.LibraryJobRunning, error.LibraryScanRunning => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,
+        error.WatchingUnsupported,
         => .unsupported,
-        error.InvalidVolume, error.InvalidBatchSize, error.InvalidLibraryRoot => .invalid_argument,
+        error.InvalidVolume,
+        error.InvalidBatchSize,
+        error.InvalidLibraryRoot,
+        error.InvalidWatchOptions,
+        error.InvalidReconcileDirectory,
+        => .invalid_argument,
         else => .internal,
     };
 }

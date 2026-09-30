@@ -33,6 +33,7 @@ const settings = @import("settings.zig");
 const tags = @import("tags.zig");
 const art = @import("art.zig");
 const secret = @import("secret.zig");
+const watching = @import("watching.zig");
 
 const stylesheet = @embedFile("style.css");
 
@@ -65,9 +66,17 @@ fn tick(self: *App) void {
             }
         }
     }
-    // Coalesced position and progress hints. Authoritative state is read from
-    // snapshots below, so these are drained rather than interpreted.
-    while (self.runtime.pollTelemetry()) |_| {}
+    // Coalesced hints. Authoritative state is read from snapshots below, so
+    // these are drained rather than interpreted, except that a library the
+    // watcher changed is reread once however many changes arrived.
+    var library_changed = false;
+    while (self.runtime.pollTelemetry()) |telemetry| switch (telemetry) {
+        .library_changed => |changed| if (self.library) |library| {
+            if (changed.library.eql(library)) library_changed = true;
+        },
+        else => {},
+    };
+    if (library_changed) jobs.reloadLibraryViews(self);
 
     art.tick(self);
     transport.tick(self);
@@ -397,6 +406,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else |_| {}
     }
     settings.load(&self);
+    _ = watching.apply(&self);
 
     const application: *gtk.Application = @ptrCast(adw.adw_application_new(
         application_id,

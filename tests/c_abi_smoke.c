@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -313,6 +314,180 @@ static int await_job(orca_runtime *runtime, orca_handle job, uint8_t *state,
     }
 }
 
+static int copy_file(const char *source, const char *destination) {
+    char buffer[65536];
+    FILE *input = fopen(source, "rb");
+    if (input == 0) return -1;
+    FILE *output = fopen(destination, "wb");
+    if (output == 0) {
+        fclose(input);
+        return -1;
+    }
+    int result = 0;
+    size_t length;
+    while ((length = fread(buffer, 1, sizeof buffer, input)) > 0) {
+        if (fwrite(buffer, 1, length, output) != length) result = -1;
+    }
+    if (ferror(input)) result = -1;
+    fclose(input);
+    if (fclose(output) != 0) result = -1;
+    return result;
+}
+
+/* Pumps like a host until the watcher's reconcile reports that `library`
+ * changed, or `deadline` passes. */
+static int await_library_changed(orca_runtime *runtime, orca_handle library, long deadline) {
+    for (;;) {
+        for (;;) {
+            orca_event event;
+            if (orca_runtime_poll_event(runtime, &event, 0) != ORCA_STATUS_OK) return -1;
+            if (event.kind == ORCA_EVENT_NONE) break;
+            if (event.kind == ORCA_EVENT_LIBRARY_CHANGED &&
+                event.payload.library_changed.library.index == library.index &&
+                event.payload.library_changed.library.generation == library.generation)
+                return 1;
+        }
+        if (now_ms() >= deadline) return 0;
+        if (wait_for_runtime(runtime, deadline) < 0) return -1;
+    }
+}
+
+/* Watches a root in a temporary directory, adds an album to it, and waits
+ * for the Library to change without any scan being started. */
+static int watch_smoke(orca_runtime *runtime) {
+    char root[] = ".zig-cache/tmp/orca-c-smoke-watch-XXXXXX";
+    char album[sizeof root + 16];
+    char track[sizeof album + 16];
+    if (mkdir(".zig-cache/tmp", 0700) != 0 && errno != EEXIST) return 210;
+    if (mkdtemp(root) == 0) return 211;
+    snprintf(album, sizeof album, "%s/Album", root);
+    snprintf(track, sizeof track, "%s/one.flac", album);
+    int result = 0;
+
+    orca_handle library;
+    if (orca_library_open(runtime, "file:orca-c-smoke-watch?mode=memory&cache=shared",
+                          &library) != ORCA_STATUS_OK) {
+        rmdir(root);
+        return 212;
+    }
+    int64_t root_id = 0;
+    orca_watch_options options;
+    memset(&options, 0, sizeof options);
+    options.quiet_ms = 50;
+    orca_watch_status watch_status;
+    orca_status watched = ORCA_STATUS_INTERNAL;
+    if (orca_library_add_root(runtime, library, root, &root_id) != ORCA_STATUS_OK) {
+        result = 213;
+        goto close;
+    }
+    watched = orca_library_watch(runtime, library, &options);
+    if (watched == ORCA_STATUS_UNSUPPORTED) {
+        if (orca_library_watch_status(runtime, library, &watch_status) != ORCA_STATUS_OK ||
+            watch_status.state != ORCA_WATCH_STATE_UNSUPPORTED)
+            result = 214;
+        goto close;
+    }
+    if (watched != ORCA_STATUS_OK) {
+        result = 215;
+        goto close;
+    }
+    if (orca_library_watch(runtime, library, 0) != ORCA_STATUS_INVALID_STATE) {
+        result = 216;
+        goto unwatch;
+    }
+
+    long deadline = now_ms() + 10000;
+    memset(&watch_status, 0, sizeof watch_status);
+    while (watch_status.roots_watched != 1) {
+        if (now_ms() >= deadline) {
+            result = 217;
+            goto unwatch;
+        }
+        if (wait_for_runtime(runtime, now_ms() + 10) < 0 || drain_events(runtime) != 0 ||
+            orca_library_watch_status(runtime, library, &watch_status) != ORCA_STATUS_OK) {
+            result = 218;
+            goto unwatch;
+        }
+    }
+    if (watch_status.state != ORCA_WATCH_STATE_WATCHING) {
+        result = 219;
+        goto unwatch;
+    }
+
+    uint64_t before = 0;
+    if (orca_library_track_count(runtime, library, &before) != ORCA_STATUS_OK) {
+        result = 220;
+        goto unwatch;
+    }
+    if (mkdir(album, 0700) != 0 || copy_file("fixtures/audio/tagged-reference.flac", track) != 0) {
+        result = 221;
+        goto unwatch;
+    }
+    if (await_library_changed(runtime, library, now_ms() + 10000) != 1) {
+        result = 222;
+        goto unwatch;
+    }
+    uint64_t after = 0;
+    if (orca_library_track_count(runtime, library, &after) != ORCA_STATUS_OK || after <= before) {
+        result = 223;
+        goto unwatch;
+    }
+
+    const char *directories[1] = {"Album"};
+    const char *escaping[1] = {"../Album"};
+    orca_handle reconcile_job;
+    if (orca_library_start_reconcile(runtime, library, root_id, escaping, 1, &reconcile_job) !=
+        ORCA_STATUS_INVALID_ARGUMENT) {
+        result = 224;
+        goto unwatch;
+    }
+    if (orca_library_start_reconcile(runtime, library, root_id, directories, 1,
+                                     &reconcile_job) != ORCA_STATUS_OK) {
+        result = 225;
+        goto unwatch;
+    }
+    orca_job_snapshot reconcile_snapshot;
+    if (orca_job_snapshot_get(runtime, reconcile_job, &reconcile_snapshot) != ORCA_STATUS_OK ||
+        reconcile_snapshot.kind != ORCA_JOB_KIND_RECONCILE) {
+        result = 226;
+        goto unwatch;
+    }
+    uint8_t reconcile_state = ORCA_JOB_RUNNING;
+    if (await_job(runtime, reconcile_job, &reconcile_state, 0, 60000) != 1 ||
+        reconcile_state != ORCA_JOB_SUCCEEDED) {
+        result = 227;
+        goto unwatch;
+    }
+    orca_scan_stats reconcile_stats;
+    if (orca_library_scan_stats(runtime, reconcile_job, &reconcile_stats) != ORCA_STATUS_OK ||
+        reconcile_stats.files_seen != 1 || reconcile_stats.unchanged != 1) {
+        result = 228;
+        goto unwatch;
+    }
+
+    if (orca_library_watch_status(runtime, library, &watch_status) != ORCA_STATUS_OK ||
+        watch_status.state != ORCA_WATCH_STATE_WATCHING || watch_status.roots_watched != 1 ||
+        watch_status.directories_watched != 2 || watch_status.roots_unavailable != 0 ||
+        watch_status.roots_degraded != 0) {
+        result = 229;
+        goto unwatch;
+    }
+
+unwatch:
+    if (orca_library_unwatch(runtime, library) != ORCA_STATUS_OK && result == 0) result = 230;
+    if (orca_library_watch_status(runtime, library, &watch_status) != ORCA_STATUS_OK ||
+        watch_status.state != ORCA_WATCH_STATE_OFF) {
+        if (result == 0) result = 231;
+    }
+close:
+    if (drain_events(runtime) != 0 && result == 0) result = 232;
+    if (orca_library_close(runtime, library) != ORCA_STATUS_OK && result == 0) result = 233;
+    unlink(track);
+    rmdir(album);
+    rmdir(root);
+    return result;
+}
+
 int main(void) {
     if (orca_version()[0] == 0) return 186;
     orca_runtime *runtime = orca_runtime_create();
@@ -521,6 +696,9 @@ int main(void) {
         ORCA_STATUS_OK)
         return 184;
     if (issues_after_second != issues_after_first) return 185;
+
+    int watch_result = watch_smoke(runtime);
+    if (watch_result != 0) return watch_result;
 
     struct track_capture capture;
     memset(&capture, 0, sizeof capture);

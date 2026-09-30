@@ -135,6 +135,34 @@ processes scanning the same database are not coordinated.
 `ScanStats.marked_missing` counts the locations a scan or reconcile marked
 `missing`.
 
+## Volume check before a walk
+
+A drive that is not mounted leaves its mount point as an empty directory on
+the parent filesystem. A walk of it would find nothing and its sweep would
+mark every file on the drive `missing`. So before every scan or reconcile of a
+root, host-started or automatic, the job resolves the volume the root's path
+lies on now and compares it with the volume the root was bound to
+(`library/volume_check.zig`):
+
+- The current volume is resolved as `ensureRoot` resolves it, with
+  `allow_persist` off: nothing is written, and no `volumes` row is created.
+- A root bound to a filesystem UUID (`uuid:`) or a persisted volume marker
+  (`ulid:`, from `.orca-volume-id` at the mount root) passes only when its
+  path resolves to that same key.
+- A root bound to its own `root:<id>` key, because the platform named no
+  volume when it was added, passes while the platform still names none for
+  its path. Such a root on an unmounted drive whose parent filesystem has no
+  UUID either is not caught.
+- A root on the legacy volume (`volumes.id` 1, from migration 8) records no
+  identity and always passes.
+
+A root that fails the check is neither walked nor swept: the job counts one
+error, ends `failed`, and marks nothing `missing`. Other roots of the same
+scan are still walked. The check runs for `startLibraryScan`,
+`startLibraryReconcile` and automatic reconciles; `orca-cli scan DATABASE
+ROOT` first adds the root again, which binds it to whatever volume its path
+resolves to, so only an already registered root is protected there.
+
 ## Repairing properties without a walk
 
 The unchanged fast path has a cost, and it is not paid at scan time. A file the
@@ -224,6 +252,9 @@ reconcile still finds anything no event reported.
 - A dirty directory is reconciled recursively, so a file created in a new
   directory before the directory was watched is still found, and a directory
   that is gone has everything under it marked missing.
+- Arming a root first checks its path against its recorded volume, as a
+  [walk does](#volume-check-before-a-walk); a root on another volume is
+  reported unavailable and not armed.
 - A root's changes are published once the root has been quiet for
   `WatchOptions.quiet_ms` (default 2000), or `max_delay_ms` (default 30000)
   after its first unpublished change. A root holds at most 64 dirty
@@ -237,8 +268,10 @@ reconcile still finds anything no event reported.
 ### Invariants
 
 1. The watcher thread touches only its own state, its two descriptors, the
-   queues between it and the control lane, and the host signal. It never
-   touches a database, a handle pool or the work registry.
+   queues between it and the control lane, the host signal, and the
+   directories, mount table and volume markers it reads. It never touches a
+   database, a handle pool or the work registry: the control lane hands it
+   each root's recorded volume key with the root.
 2. Hints are advisory. Only the scanner, run by the reconcile job, writes
    files and locations.
 3. A Library runs at most one automatic reconcile, and never starts one while
@@ -252,14 +285,24 @@ reconcile still finds anything no event reported.
 4. Every arm marks its root dirty as a whole and publishes it at once:
    nothing that changed while the root was unwatched produced an event. This
    is also how a Library catches up after a drain rebuilds its watcher.
-5. A root that is deleted, moved or unmounted, or cannot be watched when it
-   is armed, is reported unavailable and is never reconciled; its running
-   automatic reconcile is cancelled. Its locations keep their state, so an
-   unmounted drive never empties a library. It stays unwatched until the
-   Library is watched again or the root is added again.
-6. Everything is bounded: 16 commands to the watcher, 256 hints from it, 64
+5. A root that is deleted, moved or unmounted, is on another volume than the
+   one recorded, or cannot be watched when it is armed, is reported
+   unavailable and is never reconciled; its running automatic reconcile is
+   cancelled. Its locations keep their state, so an unmounted drive never
+   empties a library. An automatic reconcile that fails the volume check
+   makes its root unavailable in the same way, rather than being started
+   again by every event.
+6. Every `WatchOptions.degraded_rescan_ms` (default 15 minutes) the watcher
+   tries each unavailable root again: once its path is a directory on its
+   recorded volume, the root is armed, and so reconciled whole. A root the
+   watch limit left partly unwatched is degraded: on the same interval, and
+   only while it stays degraded, the watcher walks it again, adding the
+   watches it can, and publishes it whole. The timer lives on the watcher
+   thread, in its poll timeout, and raises the host signal only when it
+   publishes; `nextPumpTimeoutMs` does not wake for it.
+7. Everything is bounded: 16 commands to the watcher, 256 hints from it, 64
    directories per root and a 64 KiB read buffer.
-7. Orca's own files never dirty anything: tag-write temporaries
+8. Orca's own files never dirty anything: tag-write temporaries
    (`isOrcaTemporaryName`), the volume marker `.orca-volume-id`, the database
    file and its `-wal`, `-shm` and `-journal` files, and the backup directory,
    which is neither watched nor walked into. These names are matched anywhere
@@ -271,8 +314,11 @@ reconcile still finds anything no event reported.
 
 - Watches are per directory and count against
   `fs.inotify.max_user_watches`. When `inotify_add_watch` fails with
-  `ENOSPC`, the watcher keeps the watches it has, leaves the rest unwatched
-  and reports `watch_limit_reached`, and the Library's state is `degraded`.
+  `ENOSPC`, the watcher keeps the watches it has, leaves the rest unwatched,
+  counts the root in `roots_degraded` and reports `watch_limit_reached`, and
+  the Library's state is `degraded`. The root is then reconciled whole every
+  `degraded_rescan_ms` until a walk adds every watch it needs, for example
+  after the limit is raised.
 - Each watched Library uses one inotify instance, counted against
   `fs.inotify.max_user_instances`; `libraryWatch` returns
   `error.WatchInstanceLimit` when none is left.
@@ -284,6 +330,9 @@ reconcile still finds anything no event reported.
   was armed first.
 - An unmount below a root drops the watches on the unmounted filesystem and
   dirties nothing; those directories are watched again when the Library is.
+- The periodic retry and rescan are at most every `degraded_rescan_ms`: an
+  unavailable root that returns is picked up that late, and a degraded root's
+  changes in unwatched directories are found that late.
 - On `IN_Q_OVERFLOW`, events were lost: every root is walked again for new
   directories and reconciled whole.
 - When a command cannot be queued to the watcher, because 16 are waiting, the

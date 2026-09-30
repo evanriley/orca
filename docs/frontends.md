@@ -31,6 +31,19 @@ The boundary covers the whole engine, not a fragment of it:
   processed with `has_total = 0` — a walk has no honest denominator until it has
   finished. A scan projects as it commits;
   `orca_library_start_projection` reprojects without a walk.
+  `orca_library_start_reconcile` walks only the given directories of one
+  root, or the whole root when given none, and reports as
+  `ORCA_JOB_KIND_RECONCILE`.
+- **Watching.** `orca_library_watch` watches a Library's roots, with an
+  `orca_watch_options` or NULL for the defaults, and returns
+  `ORCA_STATUS_UNSUPPORTED` off Linux; `orca_library_unwatch` stops it and
+  `orca_library_watch_status` fills an `orca_watch_status`. The reconciles it
+  starts run from `orca_runtime_pump` and report `ORCA_EVENT_JOB_FINISHED`
+  like any job, with handles the host never started. One that recorded or
+  marked missing a file also posts `ORCA_EVENT_LIBRARY_CHANGED`, whose
+  `library_changed.library` names the Library: the host rereads whatever it
+  shows from that Library, once however many arrive between two drains.
+  See [storage.md](storage.md#watching-roots).
 - **Events.** `orca_runtime_pump` drives the control lane and
   `orca_runtime_poll_event` drains the lossless completion channel and the
   coalescing telemetry channel into a tagged POD with a named `extern union`
@@ -296,7 +309,20 @@ gives it a new id.
 
 **Preferences** (Ctrl+,) lists the library's folders with Add, Remove and
 Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
-and the output device. Scans, measurement, duplicate finding, tag writes,
+and the output device.
+
+**Watch folders for changes**, on by default and saved in `settings.ini`,
+calls `libraryWatch` with the default `WatchOptions` once the library opens
+and whenever it is switched on, and `libraryUnwatch` when it is switched off.
+Where watching is unsupported the switch is not shown. Its subtitle shows
+`libraryWatchStatus`, refreshed on each tick while Preferences is open: how
+many folders are watched and how many are unavailable, and, when the watch
+limit was reached, that `fs.inotify.max_user_watches` must be raised (on
+NixOS through `boot.kernel.sysctl`). The tick rereads every library view once
+for each drain that brought a `Telemetry.library_changed` for the open
+library. Automatic reconciles never take the status card, which follows only
+jobs this frontend started, and a Rescan or other job started from the
+frontend pre-empts a running one. Scans, measurement, duplicate finding, tag writes,
 matching and AcoustID submission share the status card at the foot of the
 sidebar, one at a time. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)

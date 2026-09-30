@@ -3,9 +3,10 @@
 //! Only choices a host keeps for itself live here: which output to open, the
 //! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
-//! Accept Confident takes, and whether matching uses audio fingerprints.
-//! Nothing about the library does, and never the ListenBrainz token or the
-//! AcoustID key, which live in the Secret Service.
+//! Accept Confident takes, whether matching uses audio fingerprints, and
+//! whether the music folders are watched. Nothing about the library does, and
+//! never the ListenBrainz token or the AcoustID key, which live in the Secret
+//! Service.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -143,6 +144,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.match_fingerprints = isEnabled(std.mem.span(value));
     }
+    if (getString(keys, "library", "watch")) |value| {
+        defer gtk.g_free(value);
+        self.watch_folders = isEnabled(std.mem.span(value));
+    }
     if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
         defer gtk.g_free(value);
         self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
@@ -171,6 +176,7 @@ pub fn save(self: *App) void {
     var threshold_buffer: [8]u8 = undefined;
     gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "matching", "fingerprints", if (self.match_fingerprints) "true" else "false");
+    gtk.g_key_file_set_string(keys, "library", "watch", if (self.watch_folders) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

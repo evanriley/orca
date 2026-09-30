@@ -15,6 +15,7 @@ const WatchOptions = runtime_module.WatchOptions;
 const awaitJob = runtime_tests.awaitJob;
 const copyFixtureInto = runtime_tests.copyFixtureInto;
 const libraryDatabase = runtime_module.libraryDatabase;
+const recordRootOnAnotherVolume = runtime_tests.recordRootOnAnotherVolume;
 
 const io = std.testing.io;
 const fast: WatchOptions = .{ .quiet_ms = 50, .max_delay_ms = 1000 };
@@ -46,6 +47,11 @@ const WatchFixture = struct {
     };
 
     fn init(self: *WatchFixture, location: Database, options: WatchOptions) !void {
+        return self.initLimited(location, options, null);
+    }
+
+    /// As `init`, with the watcher refusing watches past `watch_limit`.
+    fn initLimited(self: *WatchFixture, location: Database, options: WatchOptions, watch_limit: ?u32) !void {
         self.temporary = std.testing.tmpDir(.{});
         errdefer self.temporary.cleanup();
         self.data = std.testing.tmpDir(.{});
@@ -66,6 +72,7 @@ const WatchFixture = struct {
         self.library = try self.runtime.openLibrary(io, database_path);
         self.root_id = (try self.runtime.libraryAddRoot(self.library, io, self.root)).root_id;
         try std.testing.expectEqual(job.State.succeeded, try awaitJob(&self.runtime, try self.runtime.startLibraryScan(self.library, .{ .root_id = self.root_id })));
+        self.runtime.watch_limit = watch_limit;
         try self.runtime.libraryWatch(self.library, options);
         const armed = try self.awaitReconcile();
         try std.testing.expectEqual(job.State.succeeded, armed.state);
@@ -443,6 +450,94 @@ test "a watched root that disappears is reported and never swept" {
     try std.testing.expectEqual(runtime_module.WatchState.degraded, status.state);
     try fixture.expectNoReconcile(300);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.locationState("A/one.flac")).?);
+}
+
+test "an automatic reconcile of a root no longer on its recorded volume sweeps nothing and leaves the root unavailable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var fixture: WatchFixture = undefined;
+    try fixture.init(.{ .memory = "file:orca-watch-other-volume?mode=memory&cache=shared" }, fast);
+    defer fixture.deinit();
+
+    try recordRootOnAnotherVolume(&fixture.runtime, fixture.library, fixture.root_id);
+    try fixture.temporary.dir.deleteFile(io, "A/one.flac");
+    const finished = try fixture.awaitReconcile();
+    try std.testing.expectEqual(job.State.failed, finished.state);
+    try std.testing.expectEqual(@as(u64, 0), finished.stats.marked_missing);
+    const status = try fixture.awaitStatus("roots_unavailable", @as(u32, 1));
+    try std.testing.expectEqual(runtime_module.WatchState.degraded, status.state);
+    try std.testing.expectEqual(@as(u32, 0), status.roots_watched);
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A-two.m4a");
+    try fixture.expectNoReconcile(300);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.locationState("A/one.flac")).?);
+    try std.testing.expectEqual(@as(u32, 0), fixture.library_changed);
+}
+
+test "a root not on its recorded volume when watching starts is reported unavailable and never reconciled" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var fixture: WatchFixture = undefined;
+    try fixture.init(.{ .memory = "file:orca-watch-arm-other-volume?mode=memory&cache=shared" }, fast);
+    defer fixture.deinit();
+
+    try fixture.runtime.libraryUnwatch(fixture.library);
+    try recordRootOnAnotherVolume(&fixture.runtime, fixture.library, fixture.root_id);
+    try fixture.temporary.dir.deleteFile(io, "A/one.flac");
+    try fixture.runtime.libraryWatch(fixture.library, fast);
+    _ = try fixture.awaitStatus("roots_unavailable", @as(u32, 1));
+    try fixture.expectNoReconcile(300);
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.runtime.libraryWatchStatus(fixture.library)).directories_watched);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.locationState("A/one.flac")).?);
+}
+
+test "a root the watch limit left partly unwatched is reconciled whole again after the rescan interval" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var fixture: WatchFixture = undefined;
+    try fixture.initLimited(
+        .{ .memory = "file:orca-watch-limit-rescan?mode=memory&cache=shared" },
+        .{ .quiet_ms = 50, .max_delay_ms = 1000, .degraded_rescan_ms = 200 },
+        1,
+    );
+    defer fixture.deinit();
+
+    const status = try fixture.runtime.libraryWatchStatus(fixture.library);
+    try std.testing.expectEqual(runtime_module.WatchState.degraded, status.state);
+    try std.testing.expectEqual(@as(u32, 1), status.roots_degraded);
+    try std.testing.expect(status.watch_limit_reached);
+    try std.testing.expectEqual(@as(u64, 1), status.directories_watched);
+
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A/two.m4a");
+    const rescanned = try fixture.awaitLocation("A/two.m4a", .present);
+    try std.testing.expectEqual(@as(u64, 2), rescanned.stats.files_seen);
+    const again = try fixture.awaitReconcile();
+    try std.testing.expectEqual(job.State.succeeded, again.state);
+    try std.testing.expectEqual(@as(u64, 2), again.stats.unchanged);
+}
+
+test "a root that was unavailable and comes back is armed again and reconciled whole" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var fixture: WatchFixture = undefined;
+    try fixture.init(
+        .{ .memory = "file:orca-watch-root-back?mode=memory&cache=shared" },
+        .{ .quiet_ms = 50, .max_delay_ms = 1000, .degraded_rescan_ms = 200 },
+    );
+    defer fixture.deinit();
+
+    const moved = try std.fmt.allocPrint(std.testing.allocator, "{s}-moved", .{fixture.root});
+    defer std.testing.allocator.free(moved);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), fixture.root, std.Io.Dir.cwd(), moved, io);
+    _ = try fixture.awaitStatus("roots_unavailable", @as(u32, 1));
+    const moved_dir = try std.Io.Dir.cwd().openDir(io, moved, .{});
+    try copyFixtureInto(moved_dir, "fixtures/audio/tagged-reference-aac.m4a", "A/two.m4a");
+    moved_dir.close(io);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), moved, std.Io.Dir.cwd(), fixture.root, io);
+
+    const rearmed = try fixture.awaitLocation("A/two.m4a", .present);
+    try std.testing.expectEqual(@as(u64, 2), rearmed.stats.files_seen);
+    const status = try fixture.runtime.libraryWatchStatus(fixture.library);
+    try std.testing.expectEqual(runtime_module.WatchState.watching, status.state);
+    try std.testing.expectEqual(@as(u32, 1), status.roots_watched);
+
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference.ogg", "A/three.ogg");
+    _ = try fixture.awaitLocation("A/three.ogg", .present);
 }
 
 test "watching is refused where there is no watcher" {

@@ -14,6 +14,7 @@ const settings = @import("settings.zig");
 const secret = @import("secret.zig");
 const transport = @import("transport.zig");
 const matches = @import("matches.zig");
+const watching = @import("watching.zig");
 
 const App = app.App;
 
@@ -119,6 +120,40 @@ fn rescanActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.rescan(self);
 }
 
+fn watchSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.watch_folders) return;
+    self.watch_folders = enabled;
+    if (watching.apply(self) == .failed) {
+        self.watch_folders = !enabled;
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), if (self.watch_folders) gtk.true_ else gtk.false_);
+        dialogToast(self, if (enabled) "Could not watch the music folders" else "Could not stop watching the music folders");
+        return;
+    }
+    settings.save(self);
+    showWatchStatus(self);
+    self.requestTick();
+}
+
+fn watchStatusText(buffer: []u8, self: *App) [:0]const u8 {
+    if (!self.watch_folders) return "";
+    const library = self.library orelse return "";
+    const status = self.runtime.libraryWatchStatus(library) catch return "";
+    if (status.state == .off) return "The music folders could not be watched";
+    return watching.statusText(buffer, status);
+}
+
+fn showWatchStatus(self: *App) void {
+    const row = self.watch_row orelse return;
+    var buffer: [320]u8 = undefined;
+    const text = watchStatusText(&buffer, self);
+    if (std.mem.eql(u8, text, self.watch_status_text[0..self.watch_status_len])) return;
+    @memcpy(self.watch_status_text[0..text.len], text);
+    self.watch_status_len = text.len;
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), text.ptr);
+}
+
 fn measureClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     closeDialog(self);
@@ -220,6 +255,17 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_button_row_set_start_icon_name(rescan, "view-refresh-symbolic");
     _ = gtk.signalConnect(rescan, "activated", gtk.callback(rescanActivated), self);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), rescan);
+    if (watching.supported(self)) {
+        const watch = adw.adw_switch_row_new();
+        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, watch), "Watch folders for changes");
+        adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, watch), 4);
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, watch), if (self.watch_folders) gtk.true_ else gtk.false_);
+        _ = gtk.signalConnect(watch, "notify::active", gtk.callback(watchSwitched), self);
+        adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), watch);
+        self.watch_row = watch;
+        self.watch_status_len = 0;
+        showWatchStatus(self);
+    }
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, folders));
 
     const maintenance = group("Maintenance", null);
@@ -910,6 +956,7 @@ fn showListeningStatus(self: *App) void {
 pub fn tick(self: *App) void {
     if (self.preferences_dialog == null) return;
     showListeningStatus(self);
+    showWatchStatus(self);
 }
 
 fn listeningPage(self: *App) *gtk.Widget {
@@ -969,6 +1016,7 @@ fn dialogClosed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.sound_controls = .{};
     self.listening_controls = .{};
     self.acoustid_controls = .{};
+    self.watch_row = null;
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
 }
 

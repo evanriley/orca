@@ -74,11 +74,17 @@ defer page.deinit();
   `error.WatchingUnsupported` off Linux. `libraryUnwatch` stops it, and
   `libraryWatchStatus` returns a `WatchStatus`: its `WatchState` (`off`,
   `watching`, `degraded` or `unsupported`), the roots and directories
-  watched, the roots unavailable, whether the watch limit was reached, and
-  whether a reconcile waits or runs. A reconcile that recorded or marked
-  missing a file publishes `Telemetry.library_changed`, and
-  `jobReconcileRoot` names the root a reconcile job walks. See
+  watched, the roots unavailable, the roots degraded by the watch limit,
+  whether the watch limit was reached, and whether a reconcile waits or
+  runs. `WatchOptions.degraded_rescan_ms` sets how often degraded roots are
+  reconciled whole and unavailable roots tried again. A reconcile that
+  recorded or marked missing a file publishes `Telemetry.library_changed`,
+  and `jobReconcileRoot` names the root a reconcile job walks. See
   [storage.md](storage.md#watching-roots).
+- A scan or reconcile of a root whose path now lies on another volume than
+  the one recorded, as an unmounted drive's mount point does, walks and
+  sweeps nothing and ends `failed`. See
+  [storage.md](storage.md#volume-check-before-a-walk).
 - `playerSetEqualizer` and `playerSetCrossfeed` (and their getters) set a
   Player's ten-band `Equalizer` (or an `EqualizerPreset`) and stereo crossfeed;
   `playerSignalPath` returns a `SignalPath`: the source, ReplayGain, DSP, volume

@@ -18,13 +18,38 @@
   `Telemetry.library_changed`. A root that is deleted, moved or unmounted is
   reported, never marked missing. `libraryUnwatch` and `libraryWatchStatus`
   complete it, `jobReconcileRoot` names a reconcile job's root, and
-  `orca-cli watch DATABASE` runs it. The C ABI does not carry watching yet
-  and skips `library_changed`. The unconnected `RootWatcher` and
+  `orca-cli watch DATABASE` runs it. The unconnected `RootWatcher` and
   `watch_hints.Channel` are gone.
+- **Degraded and unavailable roots are retried.** A root the watch limit left
+  partly unwatched is walked again and reconciled whole every
+  `WatchOptions.degraded_rescan_ms` (default 15 minutes) while it stays so,
+  and an unavailable root is armed again on the same interval once its path
+  is back on its recorded volume. `WatchStatus.roots_degraded` counts the
+  degraded roots.
+- **`orca-gtk` watches the music folders.** Preferences > Library > Watch
+  folders for changes, on by default and saved in `settings.ini`, watches
+  the open library; the views reload when a watcher's reconcile changes it,
+  and the switch's subtitle reports what is watched, what is unavailable and
+  when `fs.inotify.max_user_watches` must be raised.
+- **C ABI: watching and reconciling.** `orca_library_watch`,
+  `orca_library_unwatch`, `orca_library_watch_status` with
+  `orca_watch_options`, `orca_watch_status` and `ORCA_WATCH_STATE_*`;
+  `orca_library_start_reconcile`; `ORCA_EVENT_LIBRARY_CHANGED` with an
+  `orca_library_changed_event` payload; and `ORCA_JOB_KIND_RECONCILE`, which
+  reconcile jobs report instead of `ORCA_JOB_KIND_OTHER`. All are additions
+  within ABI version 0. `orca_scan_stats` does not carry `marked_missing`:
+  the struct has no reserved room for a 64-bit field, and growing it would
+  change its size.
 - **Breaking (Zig API):** `Telemetry` has a `library_changed` variant, so an
   exhaustive switch over it needs an arm for it.
 
 ### Fixed
+
+- **A scan of an unmounted drive's root no longer marks its files missing.**
+  Every scan and reconcile, host-started or automatic, first checks that the
+  root's path still resolves to the volume the root was recorded on; a root
+  that does not is neither walked nor swept, and the job ends `failed`. A
+  watched root that fails the check is reported unavailable until it is back.
 
 - **Two scans of one Library could mark present files missing.** A second
   scan or reconcile of a Library while one runs is now refused with

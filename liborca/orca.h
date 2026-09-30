@@ -118,6 +118,7 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_PROPERTY_BACKFILL = 2,
     ORCA_JOB_KIND_ANALYSIS = 3,
     ORCA_JOB_KIND_DUPLICATE_SCAN = 4,
+    ORCA_JOB_KIND_RECONCILE = 5,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -390,6 +391,9 @@ typedef enum orca_event_kind {
     ORCA_EVENT_JOB_FINISHED = 3,
     /* Coalesced hint. Authoritative position comes from orca_player_status. */
     ORCA_EVENT_PLAYER_POSITION = 4,
+    /* Coalesced hint. A reconcile the Library's watcher started recorded or
+     * marked missing a file; reread what is shown from the Library. */
+    ORCA_EVENT_LIBRARY_CHANGED = 5,
 } orca_event_kind;
 
 typedef enum orca_outcome_kind {
@@ -446,6 +450,10 @@ typedef struct orca_player_position_event {
     uint64_t frames;
 } orca_player_position_event;
 
+typedef struct orca_library_changed_event {
+    orca_handle library;
+} orca_library_changed_event;
+
 /* A named extern union rather than opaque a/b/c fields: it is ABI-stable,
  * imports cleanly into Swift, and keeps the header self-documenting. */
 typedef union orca_event_payload {
@@ -453,6 +461,7 @@ typedef union orca_event_payload {
     orca_job_progress_event job_progress;
     orca_job_finished_event job_finished;
     orca_player_position_event player_position;
+    orca_library_changed_event library_changed;
 } orca_event_payload;
 
 typedef struct orca_event {
@@ -696,6 +705,97 @@ orca_status orca_library_start_projection(
     orca_runtime *runtime,
     orca_handle library,
     orca_handle *job
+);
+
+/*
+ * Starts a reconcile of one registered root: walks `count` directories under
+ * it, each relative to the root ("Artist/Album", no leading or trailing
+ * slash, no "." or ".." component), or the whole root when `count` is zero,
+ * and marks missing only the files under what it walked. `directories` may
+ * be null when `count` is zero. The strings need not outlive the call.
+ *
+ * INVALID_ARGUMENT for a directory not in that form, BUSY while a scan or
+ * reconcile of the library runs. Its stats are read through
+ * orca_library_scan_stats, with a scan's meaning.
+ *
+ * No scan or reconcile walks a root whose path now resolves to another
+ * volume than the one recorded when it was added, as the empty mount point
+ * of an unmounted drive does: the job fails, counts an error, and marks
+ * nothing missing.
+ */
+orca_status orca_library_start_reconcile(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t root_id,
+    const char *const *directories,
+    size_t count,
+    orca_handle *job
+);
+
+/* ------------------------------------------------------------- watching */
+
+typedef enum orca_watch_state {
+    /* Not watched, or the watcher stopped on an error. */
+    ORCA_WATCH_STATE_OFF = 0,
+    ORCA_WATCH_STATE_WATCHING = 1,
+    /* Watching, but a root is unavailable or the watch limit was reached. */
+    ORCA_WATCH_STATE_DEGRADED = 2,
+    /* No watcher on this platform. */
+    ORCA_WATCH_STATE_UNSUPPORTED = 3,
+} orca_watch_state;
+
+/* Zero in a field selects its default. */
+typedef struct orca_watch_options {
+    /* A root's changes are reconciled once it has been quiet this long.
+     * Default 2000. */
+    uint32_t quiet_ms;
+    /* ...or once this long has passed since its first unreconciled change.
+     * Default 30000; at least quiet_ms. */
+    uint32_t max_delay_ms;
+    /* How often a root the watch limit left partly unwatched is reconciled
+     * whole, and an unavailable root is tried again. Default 900000. */
+    uint32_t degraded_rescan_ms;
+    uint8_t reserved[4];
+} orca_watch_options;
+
+typedef struct orca_watch_status {
+    uint8_t state;  /* orca_watch_state */
+    /* fs.inotify.max_user_watches was reached; see roots_degraded. */
+    uint8_t watch_limit_reached;
+    uint8_t reconcile_pending;
+    uint8_t reconcile_running;
+    uint32_t roots_watched;
+    /* Deleted, moved, unmounted, on another volume than the one recorded, or
+     * not watchable. Tried again every degraded_rescan_ms. */
+    uint32_t roots_unavailable;
+    /* Partly unwatched because the watch limit was reached. Reconciled whole
+     * every degraded_rescan_ms while they stay so. */
+    uint32_t roots_degraded;
+    uint64_t directories_watched;
+} orca_watch_status;
+
+/*
+ * Watches every enabled root of the Library and reconciles what changes under
+ * them on background jobs that orca_runtime_pump starts. Each reports
+ * ORCA_EVENT_JOB_FINISHED like any job, and one that recorded or marked
+ * missing a file also posts ORCA_EVENT_LIBRARY_CHANGED. Arming
+ * reconciles each root whole. A scan, reconcile or tag write the host starts
+ * pre-empts a running automatic reconcile. `options` may be null.
+ *
+ * UNSUPPORTED where there is no watcher (only Linux has one), INVALID_STATE
+ * for a Library already watched, INVALID_ARGUMENT for inconsistent options.
+ */
+orca_status orca_library_watch(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_watch_options *options
+);
+/* Stops watching and joins the watcher and any reconcile it started. */
+orca_status orca_library_unwatch(orca_runtime *runtime, orca_handle library);
+orca_status orca_library_watch_status(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_watch_status *output
 );
 
 /*

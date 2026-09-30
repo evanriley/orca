@@ -21,6 +21,9 @@ pub const WatchOptions = struct {
     quiet_ms: u32 = 2000,
     /// ...or once this long has passed since its first unreconciled change.
     max_delay_ms: u32 = 30_000,
+    /// How often a root the watch limit left partly unwatched is reconciled
+    /// whole, and a root that is unavailable is tried again.
+    degraded_rescan_ms: u32 = 15 * 60 * 1000,
 };
 
 pub const WatchState = enum {
@@ -36,10 +39,15 @@ pub const WatchState = enum {
 pub const WatchStatus = struct {
     state: WatchState,
     roots_watched: u32 = 0,
-    /// Roots that were deleted, moved or unmounted, or could not be watched.
-    /// They stay unwatched until the Library is watched again.
+    /// Roots that were deleted, moved or unmounted, are on another volume
+    /// than the one recorded, or could not be watched. Each is tried again
+    /// every `WatchOptions.degraded_rescan_ms`.
     roots_unavailable: u32 = 0,
+    /// Roots the watch limit left partly unwatched. Each is reconciled whole
+    /// every `WatchOptions.degraded_rescan_ms` while it stays so.
+    roots_degraded: u32 = 0,
     directories_watched: u64 = 0,
+    /// Some root is degraded: `fs.inotify.max_user_watches` was reached.
     watch_limit_reached: bool = false,
     /// Changes wait for a reconcile.
     reconcile_pending: bool = false,
@@ -164,7 +172,8 @@ pub const LibraryWatch = struct {
 pub fn libraryWatch(self: *OrcaRuntime, library: LibraryHandle, options: WatchOptions) !void {
     try runtime.requireRunning(self);
     if (!watch.supported) return error.WatchingUnsupported;
-    if (options.quiet_ms == 0 or options.max_delay_ms < options.quiet_ms) return error.InvalidWatchOptions;
+    if (options.quiet_ms == 0 or options.max_delay_ms < options.quiet_ms or options.degraded_rescan_ms == 0)
+        return error.InvalidWatchOptions;
     const object_value = try self.libraries.get(library);
     const library_database = object_value.database orelse return error.LibraryHasNoDatabase;
     if (object_value.watch) |existing| {
@@ -197,6 +206,7 @@ pub fn libraryWatchStatus(self: *OrcaRuntime, library: LibraryHandle) !WatchStat
             .watching,
         .roots_watched = status.roots_watched,
         .roots_unavailable = status.roots_unavailable,
+        .roots_degraded = status.roots_degraded,
         .directories_watched = status.directories_watched,
         .watch_limit_reached = status.watch_limit_reached,
         .reconcile_pending = library_watch.pending.items.len != 0,
@@ -213,13 +223,19 @@ fn startWatch(
     const allocator = self.allocator;
     var listed = try library_database.library_roots.list(allocator);
     defer listed.deinit();
+    var keys: std.heap.ArenaAllocator = .init(allocator);
+    defer keys.deinit();
     var roots: std.ArrayList(watch.Root) = .empty;
     defer roots.deinit(allocator);
     var watched: std.ArrayList(WatchedRoot) = .empty;
     errdefer watched.deinit(allocator);
     for (listed.items) |listed_root| {
         if (!listed_root.enabled) continue;
-        try roots.append(allocator, .{ .id = listed_root.id, .path = listed_root.path });
+        try roots.append(allocator, .{
+            .id = listed_root.id,
+            .path = listed_root.path,
+            .volume_key = try library_database.recordedVolumeKey(keys.allocator(), listed_root.volume_id),
+        });
         try watched.append(allocator, .{ .id = listed_root.id });
     }
 
@@ -235,7 +251,12 @@ fn startWatch(
         allocator,
         registration,
         &self.host_signal,
-        .{ .quiet_ms = options.quiet_ms, .max_delay_ms = options.max_delay_ms },
+        .{
+            .quiet_ms = options.quiet_ms,
+            .max_delay_ms = options.max_delay_ms,
+            .degraded_rescan_ms = options.degraded_rescan_ms,
+            .watch_limit = self.watch_limit,
+        },
         ignoreFor(library_database),
         roots.items,
     );
@@ -325,29 +346,56 @@ pub fn jobFinalized(self: *OrcaRuntime, worker: *JobWorker, state: job.State) vo
             const active = library_watch.active orelse return;
             if (!active.job.eql(worker.job)) return;
             library_watch.active = null;
+            if (worker.volume_changed.load(.acquire)) return rootOnOtherVolume(self, object_value, active.root_id);
             if (state == .cancelled) library_watch.requeue(self.allocator, active.root_id);
         },
         .host => library_watch.uncover(self.allocator, worker.job, state == .succeeded),
     }
 }
 
-pub fn rootAdded(self: *OrcaRuntime, library: LibraryHandle, root_id: i64, path: []const u8) void {
+fn rootOnOtherVolume(self: *OrcaRuntime, object_value: *LibraryObject, root_id: i64) void {
+    const library_watch = object_value.watch orelse return;
+    const known = library_watch.root(root_id) orelse return;
+    known.available = false;
+    library_watch.dropPending(self.allocator, root_id);
+    library_watch.dropCovered(root_id);
+    if (!library_watch.watcher.send(.{ .root_unavailable = root_id })) restartWatch(self, object_value);
+}
+
+pub fn rootAdded(self: *OrcaRuntime, library: LibraryHandle, binding: database.RootBinding, path: []const u8) void {
     const object_value = self.libraries.get(library) catch return;
     const library_watch = object_value.watch orelse return;
+    const library_database = object_value.database orelse return;
+    const root_id = binding.root_id;
     if (library_watch.root(root_id)) |known| {
         known.available = true;
     } else library_watch.roots.append(self.allocator, .{ .id = root_id }) catch {
         restartWatch(self, object_value);
         return;
     };
-    const owned = self.allocator.dupe(u8, path) catch {
+    const command = armCommand(self.allocator, library_database, binding, path) catch {
         restartWatch(self, object_value);
         return;
     };
-    if (!library_watch.watcher.send(.{ .arm_root = .{ .root_id = root_id, .path = owned } })) {
-        self.allocator.free(owned);
+    if (!library_watch.watcher.send(command)) {
+        command.deinit(self.allocator);
         restartWatch(self, object_value);
     }
+}
+
+fn armCommand(
+    allocator: std.mem.Allocator,
+    library_database: *database.LibraryDatabase,
+    binding: database.RootBinding,
+    path: []const u8,
+) !hints.Command {
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+    return .{ .arm_root = .{
+        .root_id = binding.root_id,
+        .path = owned_path,
+        .volume_key = try library_database.recordedVolumeKey(allocator, binding.volume_id),
+    } };
 }
 
 pub fn rootRemoved(self: *OrcaRuntime, library: LibraryHandle, root_id: i64) void {

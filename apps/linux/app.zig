@@ -258,6 +258,11 @@ pub const App = struct {
 
     preferences_dialog: ?*adw.Dialog = null,
 
+    watch_folders: bool = true,
+    watch_row: ?*gtk.Widget = null,
+    watch_status_text: [320]u8 = undefined,
+    watch_status_len: usize = 0,
+
     scrobbling: bool = false,
     announce_now_playing: bool = false,
     listening_controls: ListeningControls = .{},

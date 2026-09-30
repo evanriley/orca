@@ -2026,3 +2026,45 @@ test "a reconciled directory names each file with the uri a full scan gave it" {
     try std.testing.expectEqual(locations, try fixture.locationCount());
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/b/c/deep.m4a")).?.state);
 }
+
+/// Binds the root's recorded volume to a key the platform resolves for no
+/// path, which is how an unmounted drive's mount point looks to a walk.
+pub fn recordRootOnAnotherVolume(runtime: *OrcaRuntime, library: LibraryHandle, root_id: i64) !void {
+    const library_database = try libraryDatabase(runtime, library);
+    var statement = try library_database.database.prepare(
+        "UPDATE volumes SET stable_key='uuid:orca-test-elsewhere' WHERE id=(SELECT volume_id FROM library_roots WHERE id=?1);",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, root_id);
+    if (try statement.step() != .done) return error.SqlFailed;
+}
+
+test "a scan of a root no longer on its recorded volume fails and marks nothing missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-scan-other-volume?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
+    try recordRootOnAnotherVolume(&fixture.runtime, fixture.library, fixture.root_id);
+
+    const job_handle = try fixture.runtime.startLibraryScan(fixture.library, .{});
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&fixture.runtime, job_handle));
+    const stats = try fixture.runtime.jobScanStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.errors);
+    try std.testing.expectEqual(@as(u64, 0), stats.files_seen);
+    try std.testing.expectEqual(@as(u64, 0), stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+}
+
+test "a subtree reconcile of a root no longer on its recorded volume fails and marks nothing missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-other-volume?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteTree(std.testing.io, "A");
+    try recordRootOnAnotherVolume(&fixture.runtime, fixture.library, fixture.root_id);
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.failed, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.errors);
+    try std.testing.expectEqual(@as(u64, 0), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+}

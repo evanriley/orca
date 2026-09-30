@@ -508,6 +508,7 @@ pub const JobWorker = struct {
     progress: std.atomic.Value(u64) = .init(0),
     stats: Stats,
     failed: std.atomic.Value(bool) = .init(false),
+    volume_changed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
     /// Raised after `finish`, which is safe only because the control lane
@@ -932,6 +933,7 @@ pub const JobWorker = struct {
         batch_size: usize,
     ) !void {
         self.progress.store(0, .release);
+        try self.requireRecordedVolume(io, root);
         const scan_run = try self.database.scan_runs.begin(root.id);
         var pass: library_pass.Projection = .{
             .allocator = self.allocator,
@@ -955,6 +957,18 @@ pub const JobWorker = struct {
         _ = self.stats.scan.marked_missing.fetchAdd(marked_missing, .acq_rel);
     }
 
+    /// A root whose path now resolves to another volume, as the mount point
+    /// of an unmounted drive does, is neither walked nor swept: the sweep
+    /// would mark every file on the drive missing.
+    fn requireRecordedVolume(self: *JobWorker, io: std.Io, root: database.repository.LibraryRoot) !void {
+        const recorded = try self.database.recordedVolumeKey(self.allocator, root.volume_id);
+        defer if (recorded) |key| self.allocator.free(key);
+        if (library_pass.volume_check.onRecordedVolume(self.allocator, io, root.path, recorded)) return;
+        _ = self.stats.scan.errors.fetchAdd(1, .acq_rel);
+        self.volume_changed.store(true, .release);
+        return error.RootVolumeChanged;
+    }
+
     /// Walks each directory under one run of the root, then sweeps only the
     /// directories whose walk finished: a directory that failed or was cut
     /// short keeps every location it holds.
@@ -966,6 +980,7 @@ pub const JobWorker = struct {
         batch_size: usize,
     ) !void {
         const stats = &self.stats.scan;
+        try self.requireRecordedVolume(io, root);
         const walked = try self.allocator.alloc(bool, subtrees.len);
         defer self.allocator.free(walked);
         @memset(walked, false);

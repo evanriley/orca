@@ -11,16 +11,17 @@ designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
 editing with undo, track details, a local play history, ListenBrainz
 scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
-submission. Filesystem watching is built but not connected. `liborca`
-builds for aarch64 macOS, but macOS has no audio output yet.
+submission, and watching of the music folders, so new, changed and removed
+files show up without a rescan. `liborca` builds for aarch64 macOS, but macOS
+has no audio output or filesystem watcher yet.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`
 versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is filesystem
-watching.
+`orca-gtk` sleeps on instead of polling. The next milestone is faster
+analysis.
 
 ## Works today
 
@@ -34,6 +35,15 @@ watching.
 - Projection into artists, releases, recordings and tracks, with FTS5 search
   and bounded browse pages by artist, release and track.
 - Property backfill for rows scanned before audio properties were recorded.
+- Folder-scoped reconciles, and filesystem watching on Linux (inotify) that
+  reconciles what changes under each root, reconciles roots the watch limit
+  left partly unwatched every 15 minutes, and tries unavailable roots again
+  on the same interval. Reachable through `orca-cli reconcile` and `watch`,
+  the `orca-gtk` preference "Watch folders for changes" (on by default), and
+  the C ABI.
+- No scan or reconcile walks a root whose path now lies on another volume
+  than the one recorded, so an unmounted drive's files are never marked
+  missing.
 - Embedded cover art extraction.
 
 ### Formats
@@ -161,32 +171,28 @@ entry point and a client before it counts as working.
 - Setting a recording ID by hand: `libraryEditTracks` accepts a locked
   MusicBrainz recording ID, but neither `orca-cli edit` nor the `orca-gtk` tag
   editor offers the field.
-- The Linux filesystem watcher.
 
 ## Next
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Filesystem watching** as a scan accelerator, so new files appear without
-   a manual rescan. The Linux watcher exists; it needs a runtime entry point
-   and a client.
-2. **Faster analysis.** The analysis pass decodes on one thread and reads
+1. **Faster analysis.** The analysis pass decodes on one thread and reads
    every file twice, once for a whole-file hash nothing uses. Decode on a
    bounded pool of threads, drop the hash, and compute the Chromaprint
    fingerprint in the same decode.
-3. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+2. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
    tag are reported as not writable. No writer stores an accepted recording
    ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
    `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
    it lacks tag writes, queue editing, artwork, DSP, track details, matching
    and AcoustID submission.
-4. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+3. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+4. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-6. **An optional fixed output rate with a band-limited resampler**, for
+5. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -270,6 +276,9 @@ are sniffed or not recognized until then:
 - macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
   client rebuilt against the current C ABI. `liborca` compiles for macOS;
   without this output it cannot play there.
+- A macOS filesystem watcher (FSEvents) behind the same `library/watch.zig`
+  contract; until then `libraryWatch` returns `error.WatchingUnsupported`
+  there.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.

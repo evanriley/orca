@@ -17,12 +17,20 @@ pub const Watcher = if (supported) @import("watch_linux.zig").Watcher else Unsup
 pub const Options = struct {
     quiet_ms: u32,
     max_delay_ms: u32,
+    /// How often a root the watch limit left partly unwatched is walked
+    /// again, and a root that is unavailable is tried again.
+    degraded_rescan_ms: u32,
+    /// Refuses watches past this many, as the kernel's watch limit would.
+    watch_limit: ?u32 = null,
 };
 
-/// A root to arm. The watcher copies the path.
+/// A root to arm. The watcher copies the path and the key.
 pub const Root = struct {
     id: i64,
     path: []const u8,
+    /// The stable key of the volume the root is bound to, or null when the
+    /// Library records none. See `volume_check.onRecordedVolume`.
+    volume_key: ?[]const u8,
 };
 
 /// Names whose changes never dirty anything, because Orca itself writes them.
@@ -50,6 +58,8 @@ pub const Ignore = struct {
 pub const Status = struct {
     roots_watched: u32,
     roots_unavailable: u32,
+    /// Roots the watch limit left partly unwatched.
+    roots_degraded: u32,
     directories_watched: u64,
     watch_limit_reached: bool,
     /// The thread ended on an error it could not recover from.

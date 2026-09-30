@@ -8,6 +8,7 @@ pub const projection = @import("projection.zig");
 pub const property_backfill = @import("property_backfill.zig");
 pub const scanner = @import("scanner.zig");
 pub const tag_reader = @import("tag_reader.zig");
+pub const volume_check = @import("volume_check.zig");
 pub const watch = @import("watch.zig");
 pub const watch_hints = @import("watch_hints.zig");
 pub const watch_linux = if (builtin.os.tag == .linux) @import("watch_linux.zig") else struct {};
@@ -32,6 +33,7 @@ test {
     _ = @import("property_backfill.zig");
     _ = @import("scanner.zig");
     _ = @import("tag_reader.zig");
+    _ = @import("volume_check.zig");
     _ = @import("watch.zig");
     _ = @import("watch_hints.zig");
     if (builtin.os.tag == .linux) _ = @import("watch_linux.zig");

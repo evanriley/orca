@@ -422,7 +422,10 @@ fn watchLibrary(context: Context) !void {
         }
         if (status.watch_limit_reached and !limit_reported) {
             limit_reported = true;
-            try stdout.print("watch-limit directories={d}; raise fs.inotify.max_user_watches\n", .{status.directories_watched});
+            try stdout.print("watch-limit roots={d} directories={d}; raise fs.inotify.max_user_watches\n", .{
+                status.roots_degraded,
+                status.directories_watched,
+            });
         }
         try stdout.flush();
         if (options.once and changed) return;

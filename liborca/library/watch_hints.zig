@@ -6,7 +6,8 @@ pub const Reason = enum {
     whole_root,
     /// The root was deleted, moved or unmounted, or could not be watched.
     root_unavailable,
-    /// The kernel's watch limit was reached; some directories are unwatched.
+    /// The kernel's watch limit was reached under the root; some of its
+    /// directories are unwatched.
     watch_limit,
 };
 
@@ -24,17 +25,31 @@ pub const Hint = struct {
     path: ?[]u8 = null,
 };
 
-/// Control lane to watcher. `arm_root.path` is allocated with the watcher's
-/// allocator and owned by the command: the watcher keeps it, and `destroy`
-/// frees commands the watcher never read.
+/// Control lane to watcher. `arm_root.path` and `arm_root.volume_key` are
+/// allocated with the watcher's allocator and owned by the command: the
+/// watcher keeps them, and `destroy` frees commands the watcher never read.
 pub const Command = union(enum) {
     arm_root: ArmRoot,
     disarm_root: i64,
+    /// A reconcile found the root on another volume: unwatch it and report it
+    /// unavailable until it is back.
+    root_unavailable: i64,
+
+    pub fn deinit(self: Command, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .arm_root => |arm| {
+                allocator.free(arm.path);
+                if (arm.volume_key) |key| allocator.free(key);
+            },
+            .disarm_root, .root_unavailable => {},
+        }
+    }
 };
 
 pub const ArmRoot = struct {
     root_id: i64,
     path: []u8,
+    volume_key: ?[]u8,
 };
 
 pub const max_directories = 64;

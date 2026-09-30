@@ -120,8 +120,8 @@ fn startScan(self: *App, root_id: ?i64) void {
     begin(self, .scan, job, "Scanning your music");
 }
 
-/// Walks every enabled root again. Unchanged files cost a stat each, so this
-/// is how new and changed files are picked up until watching arrives.
+/// Walks every enabled root again. Unchanged files cost a stat each; this
+/// finds whatever watching did not, and everything when watching is off.
 pub fn rescan(self: *App) void {
     if (self.library == null or !idle(self)) return;
     startScan(self, null);

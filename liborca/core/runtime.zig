@@ -336,6 +336,9 @@ pub const OrcaRuntime = struct {
     /// Replaced by tests that must not reach a network or wait in real time.
     listen_hooks: listen_worker.Hooks = .{},
     matching_hooks: MatchingHooks = .{},
+    /// Caps the watches each watcher adds, as `fs.inotify.max_user_watches`
+    /// would, so tests can reach the limit.
+    watch_limit: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator) OrcaRuntime {
         return .{

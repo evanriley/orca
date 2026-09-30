@@ -221,13 +221,13 @@ pub const LibraryDatabase = struct {
         var provisional_buffer: [64]u8 = undefined;
         const provisional = try std.fmt.bufPrint(
             &provisional_buffer,
-            "root:pending:{x}",
+            root_volume_key_prefix ++ "pending:{x}",
             .{std.hash.Wyhash.hash(0, path)},
         );
         const provisional_volume = try self.volumes.ensure(.{ .stable_key = provisional });
         const root_id = try self.library_roots.add(provisional_volume, path);
         var key_buffer: [32]u8 = undefined;
-        const key = try std.fmt.bufPrint(&key_buffer, "root:{d}", .{root_id});
+        const key = try std.fmt.bufPrint(&key_buffer, root_volume_key_prefix ++ "{d}", .{root_id});
         if (try self.volumes.find(key)) |established| {
             try self.bindRootVolume(root_id, established);
             try self.dropVolume(provisional_volume);
@@ -308,6 +308,17 @@ pub const LibraryDatabase = struct {
     /// The volume every path with no better identity falls back to. It exists
     /// from migration 8 onward, and pre-identity rows already point at it.
     pub const null_volume: i64 = 1;
+
+    /// The prefix of the key a root takes as its own volume when the platform
+    /// names none: `root:<library_roots.id>`.
+    pub const root_volume_key_prefix = "root:";
+
+    /// The stable key of the volume a root is bound to, or null for the
+    /// legacy volume, which records none. The caller owns the key.
+    pub fn recordedVolumeKey(self: *LibraryDatabase, allocator: std.mem.Allocator, volume_id: i64) !?[]u8 {
+        if (volume_id == null_volume) return null;
+        return try self.volumes.stableKey(allocator, volume_id) orelse error.UnknownVolume;
+    }
 
     fn rootVolume(self: *LibraryDatabase, path: []const u8) !?RootBinding {
         var statement = try self.database.prepare(

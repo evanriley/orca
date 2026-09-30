@@ -97,7 +97,7 @@ pub fn libraryAddRoot(
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
     const binding = try library_database.ensureRoot(io, path, .{ .allow_persist = true });
-    runtime_watch.rootAdded(self, library, binding.root_id, path);
+    runtime_watch.rootAdded(self, library, binding, path);
     return binding;
 }
 

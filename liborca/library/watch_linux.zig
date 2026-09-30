@@ -4,6 +4,7 @@ const control = @import("../core/control.zig");
 const spsc = @import("../audio/spsc.zig");
 const work = @import("../core/work.zig");
 const hints = @import("watch_hints.zig");
+const volume_check = @import("volume_check.zig");
 const watch = @import("watch.zig");
 
 const directory_mask: u32 = linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO |
@@ -27,6 +28,7 @@ const RootState = enum { arming, armed, unavailable };
 const WatchedRoot = struct {
     id: i64,
     path: []u8,
+    volume_key: ?[]u8,
     state: RootState = .arming,
     root_watch: ?i32 = null,
     dirty: hints.DirtySet = .{},
@@ -34,10 +36,21 @@ const WatchedRoot = struct {
     last_change_ms: i64 = 0,
     publish_now: bool = false,
     unavailable_unreported: bool = false,
+    limit_reached: bool = false,
+    fallback_due_ms: ?i64 = null,
 
     fn deinit(self: *WatchedRoot, allocator: std.mem.Allocator) void {
         self.dirty.deinit(allocator);
         allocator.free(self.path);
+        if (self.volume_key) |key| allocator.free(key);
+    }
+
+    fn needsFallback(self: *const WatchedRoot) bool {
+        return switch (self.state) {
+            .unavailable => true,
+            .armed => self.limit_reached,
+            .arming => false,
+        };
     }
 };
 
@@ -63,6 +76,7 @@ pub const Watcher = struct {
     hint_queue: spsc.Queue(hints.Hint, watch.hint_capacity) = .{},
     roots_watched: std.atomic.Value(u32) = .init(0),
     roots_unavailable: std.atomic.Value(u32) = .init(0),
+    roots_degraded: std.atomic.Value(u32) = .init(0),
     directories_watched: std.atomic.Value(u64) = .init(0),
     watch_limit_reached: std.atomic.Value(bool) = .init(false),
     stopped: std.atomic.Value(bool) = .init(false),
@@ -119,7 +133,10 @@ pub const Watcher = struct {
         if (ignore.backup_name) |name| self.ignore.backup_name = try allocator.dupe(u8, name);
         try self.roots.ensureTotalCapacity(allocator, roots.len);
         for (roots) |root| {
-            self.roots.appendAssumeCapacity(.{ .id = root.id, .path = try allocator.dupe(u8, root.path) });
+            const path = try allocator.dupe(u8, root.path);
+            errdefer allocator.free(path);
+            const volume_key = if (root.volume_key) |key| try allocator.dupe(u8, key) else null;
+            self.roots.appendAssumeCapacity(.{ .id = root.id, .path = path, .volume_key = volume_key });
         }
         return self;
     }
@@ -136,10 +153,7 @@ pub const Watcher = struct {
 
     fn freeState(self: *Watcher) void {
         const allocator = self.allocator;
-        while (self.commands.pop()) |command| switch (command) {
-            .arm_root => |arm| allocator.free(arm.path),
-            .disarm_root => {},
-        };
+        while (self.commands.pop()) |command| command.deinit(allocator);
         while (self.hint_queue.pop()) |hint| if (hint.path) |path| allocator.free(path);
         for (self.roots.items) |*root| root.deinit(allocator);
         self.roots.deinit(allocator);
@@ -188,6 +202,7 @@ pub const Watcher = struct {
         return .{
             .roots_watched = self.roots_watched.load(.acquire),
             .roots_unavailable = self.roots_unavailable.load(.acquire),
+            .roots_degraded = self.roots_degraded.load(.acquire),
             .directories_watched = self.directories_watched.load(.acquire),
             .watch_limit_reached = self.watch_limit_reached.load(.acquire),
             .stopped = self.stopped.load(.acquire),
@@ -210,12 +225,15 @@ pub const Watcher = struct {
         const io = self.threaded.io();
         while (!self.cancelled()) {
             self.takeCommands();
+            self.runDueFallbacks(io, nowMs(io));
             self.armWaitingRoots(io);
             if (self.cancelled()) return;
             try self.readEvents(io);
             if (self.cancelled()) return;
-            const timeout_ms = self.publishDue(nowMs(io));
-            try self.waitForActivity(timeout_ms);
+            const now = nowMs(io);
+            const publish_ms = self.publishDue(now);
+            const fallback_ms = self.fallbackDue(now);
+            try self.waitForActivity(if (fallback_ms) |due| earliest(publish_ms, due) else publish_ms);
         }
     }
 
@@ -223,11 +241,14 @@ pub const Watcher = struct {
         while (self.commands.pop()) |command| switch (command) {
             .arm_root => |arm| {
                 self.removeRoot(arm.root_id);
-                self.roots.append(self.allocator, .{ .id = arm.root_id, .path = arm.path }) catch {
-                    self.allocator.free(arm.path);
-                };
+                self.roots.append(self.allocator, .{
+                    .id = arm.root_id,
+                    .path = arm.path,
+                    .volume_key = arm.volume_key,
+                }) catch command.deinit(self.allocator);
             },
             .disarm_root => |root_id| self.removeRoot(root_id),
+            .root_unavailable => |root_id| if (self.rootById(root_id)) |root| self.rootLost(root),
         };
         self.publishCounts();
     }
@@ -242,9 +263,16 @@ pub const Watcher = struct {
     }
 
     /// Every arm marks the whole root dirty, published at once: nothing that
-    /// changed while the root was unwatched produced an event.
+    /// changed while the root was unwatched produced an event. A root whose
+    /// path is on another volume than the one recorded is never armed.
     fn armRoot(self: *Watcher, io: std.Io, root: *WatchedRoot) void {
         root.state = .armed;
+        root.limit_reached = false;
+        if (!self.onRecordedVolume(io, root)) {
+            self.rootLost(root);
+            self.publishCounts();
+            return;
+        }
         self.watchTree(io, root, "");
         if (root.root_watch == null) {
             self.rootLost(root);
@@ -253,6 +281,57 @@ pub const Watcher = struct {
             root.publish_now = true;
         }
         self.publishCounts();
+    }
+
+    fn onRecordedVolume(self: *Watcher, io: std.Io, root: *const WatchedRoot) bool {
+        return volume_check.onRecordedVolume(self.allocator, io, root.path, root.volume_key);
+    }
+
+    fn runDueFallbacks(self: *Watcher, io: std.Io, now: i64) void {
+        for (self.roots.items) |*root| {
+            const due = root.fallback_due_ms orelse continue;
+            if (due > now or self.cancelled()) continue;
+            root.fallback_due_ms = null;
+            switch (root.state) {
+                .unavailable => if (self.isArmable(io, root)) {
+                    root.state = .arming;
+                },
+                .armed => if (root.limit_reached) self.rewatch(io, root, now),
+                .arming => {},
+            }
+        }
+    }
+
+    fn isArmable(self: *Watcher, io: std.Io, root: *const WatchedRoot) bool {
+        const directory = std.Io.Dir.cwd().openDir(io, root.path, .{}) catch return false;
+        directory.close(io);
+        return self.onRecordedVolume(io, root);
+    }
+
+    fn rewatch(self: *Watcher, io: std.Io, root: *WatchedRoot, now: i64) void {
+        root.limit_reached = false;
+        self.watchTree(io, root, "");
+        if (root.root_watch == null) {
+            self.rootLost(root);
+        } else {
+            self.markWholeRoot(root, now);
+            root.publish_now = true;
+        }
+        self.publishCounts();
+    }
+
+    fn fallbackDue(self: *Watcher, now: i64) ?u64 {
+        var next: ?u64 = null;
+        for (self.roots.items) |*root| {
+            if (!root.needsFallback()) {
+                root.fallback_due_ms = null;
+                continue;
+            }
+            const due = root.fallback_due_ms orelse now +| self.options.degraded_rescan_ms;
+            root.fallback_due_ms = due;
+            next = earliest(next, @intCast(@max(due - now, 0)));
+        }
+        return next;
     }
 
     fn removeRoot(self: *Watcher, root_id: i64) void {
@@ -277,6 +356,7 @@ pub const Watcher = struct {
         self.unwatchTree(root.id, "");
         root.state = .unavailable;
         root.root_watch = null;
+        root.limit_reached = false;
         root.dirty.clear(self.allocator);
         root.publish_now = false;
         root.unavailable_unreported = true;
@@ -286,13 +366,19 @@ pub const Watcher = struct {
     fn publishCounts(self: *Watcher) void {
         var watched: u32 = 0;
         var unavailable: u32 = 0;
+        var degraded: u32 = 0;
         for (self.roots.items) |root| switch (root.state) {
-            .armed => watched += 1,
+            .armed => {
+                watched += 1;
+                if (root.limit_reached) degraded += 1;
+            },
             .unavailable => unavailable += 1,
             .arming => {},
         };
         self.roots_watched.store(watched, .release);
         self.roots_unavailable.store(unavailable, .release);
+        self.roots_degraded.store(degraded, .release);
+        self.watch_limit_reached.store(degraded != 0, .release);
         self.directories_watched.store(self.watches.count(), .release);
     }
 
@@ -306,13 +392,16 @@ pub const Watcher = struct {
         const rc = linux.inotify_add_watch(self.inotify_fd, path.ptr, directory_mask);
         switch (linux.errno(rc)) {
             .SUCCESS => {},
-            .NOSPC => {
-                if (!self.watch_limit_reached.swap(true, .acq_rel)) self.limit_unreported = root.id;
-                return .limit;
-            },
+            .NOSPC => return self.limitReached(root),
             else => return .skipped,
         }
         const descriptor: i32 = @intCast(rc);
+        if (self.options.watch_limit) |limit| {
+            if (!self.watches.contains(descriptor) and self.watches.count() >= limit) {
+                _ = linux.inotify_rm_watch(self.inotify_fd, descriptor);
+                return self.limitReached(root);
+            }
+        }
         if (self.watches.get(descriptor)) |existing| {
             if (existing.root_id == root.id and std.mem.eql(u8, existing.relative, relative)) return .known;
             if (relative.len == 0) root.root_watch = descriptor;
@@ -330,6 +419,14 @@ pub const Watcher = struct {
         if (relative.len == 0) root.root_watch = descriptor;
         self.directories_watched.store(self.watches.count(), .release);
         return .added;
+    }
+
+    fn limitReached(self: *Watcher, root: *WatchedRoot) Added {
+        if (!root.limit_reached) {
+            root.limit_reached = true;
+            self.limit_unreported = root.id;
+        }
+        return .limit;
     }
 
     /// Watches `relative` and every directory below it. Symbolic links and
@@ -597,9 +694,9 @@ const TestWatcher = struct {
             std.testing.allocator,
             &self.registration,
             null,
-            .{ .quiet_ms = 20, .max_delay_ms = 1000 },
+            .{ .quiet_ms = 20, .max_delay_ms = 1000, .degraded_rescan_ms = 60_000 },
             ignore,
-            &.{.{ .id = 7, .path = self.path }},
+            &.{.{ .id = 7, .path = self.path, .volume_key = null }},
         );
         errdefer self.watcher.destroy();
         self.registration.waker = self.watcher.waker();
@@ -735,9 +832,9 @@ test "a root that does not exist is reported unavailable when armed" {
         std.testing.allocator,
         &registration,
         null,
-        .{ .quiet_ms = 20, .max_delay_ms = 1000 },
+        .{ .quiet_ms = 20, .max_delay_ms = 1000, .degraded_rescan_ms = 60_000 },
         .{},
-        &.{.{ .id = 3, .path = ".zig-cache/tmp/orca-watch-no-such-root" }},
+        &.{.{ .id = 3, .path = ".zig-cache/tmp/orca-watch-no-such-root", .volume_key = null }},
     );
     defer watcher.destroy();
     registration.waker = watcher.waker();
