@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-30
+
+Ships Library schema version 19.
+
 ### liborca as a library for others
 
 - **Breaking (Zig API): the host names itself before provider work.**
