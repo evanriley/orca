@@ -8,6 +8,77 @@ native frontends are thin clients of it. The project is pre-release; the
 The [architecture overview](docs/architecture.md) describes the design and
 links each subsystem's contract.
 
+## Install with Nix
+
+The flake at `github:evanriley/orca` packages Orca for `x86_64-linux` and
+`aarch64-darwin`. The package installs `orca-cli`, `orca-gtk` (Linux only),
+static and shared `liborca`, `include/orca/orca.h`, `lib/pkgconfig/orca.pc`,
+the desktop entry and the icons.
+
+Run it without installing:
+
+```sh
+nix run github:evanriley/orca   # orca-gtk; orca-cli on macOS
+nix run github:evanriley/orca#orca-cli -- --version
+```
+
+### NixOS
+
+```nix
+{
+  inputs.orca.url = "github:evanriley/orca";
+
+  outputs =
+    { nixpkgs, orca, ... }:
+    {
+      nixosConfigurations.HOSTNAME = nixpkgs.lib.nixosSystem {
+        modules = [
+          ./configuration.nix
+          orca.nixosModules.default
+          { programs.orca.enable = true; }
+        ];
+      };
+    };
+}
+```
+
+`programs.orca.enable` adds `programs.orca.package` to
+`environment.systemPackages`.
+
+### Home Manager
+
+Import `orca.homeModules.default` into the Home Manager configuration and set
+`programs.orca.enable = true;`; the package goes into `home.packages`:
+
+```nix
+home-manager.lib.homeManagerConfiguration {
+  inherit pkgs;
+  modules = [
+    ./home.nix
+    orca.homeModules.default
+    { programs.orca.enable = true; }
+  ];
+}
+```
+
+### Overlay
+
+`orca.overlays.default` adds `pkgs.orca`, built against the nixpkgs it is
+applied to. That nixpkgs must provide Zig 0.16 as `pkgs.zig`. The modules'
+default package and `orca.packages.<system>.orca` are built against the
+nixpkgs pinned in this flake's `flake.lock` instead.
+
+### Runtime requirements
+
+- A PipeWire audio server, for playback on Linux. The modules do not enable
+  one; on NixOS, set `services.pipewire.enable = true;`.
+- A Secret Service provider, such as GNOME Keyring, for the ListenBrainz token
+  and the AcoustID user key `orca-gtk` stores. `orca-cli` reads them from
+  `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
+- On Linux distributions other than NixOS, `orca-gtk` may need
+  [nixGL](https://github.com/nix-community/nixGL) to find the host's OpenGL
+  drivers.
+
 ## Requirements
 
 Every platform:
@@ -26,8 +97,10 @@ Linux only:
   (`gdk-pixbuf-2.0`) and libsecret (`libsecret-1`)
 
 The names in parentheses are the pkg-config packages `build.zig` asks for. With
-Nix, `nix develop` (or direnv) provides all of these, and `nix build` builds the
-package.
+Nix, `nix develop` (or direnv) provides all of these, plus the tools the
+scripts and checks use (Python, `ffprobe`, the `sqlite3` shell), and
+`nix build` builds the package described in
+[Install with Nix](#install-with-nix).
 
 ## Build and test
 

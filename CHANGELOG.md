@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- **The flake installs Orca on NixOS and Home Manager.** `nix/package.nix`
+  holds the package, `packages.orca` (also `default`) builds it, and
+  `nix run` starts `orca-gtk` (`orca-cli` on macOS);
+  `nix run .#orca-cli` runs the CLI. `nixosModules.default` and
+  `homeModules.default` add `programs.orca.enable` and
+  `programs.orca.package`, and `overlays.default` adds `pkgs.orca` built
+  against the overlaid nixpkgs.
+- **`nix flake check` builds the package, runs `zig fmt --check` and
+  evaluates the NixOS module.**
+- The dev shell provides Python, `ffprobe` and the `sqlite3` shell.
+
 ## 0.4.0 - 2026-09-30
 
 Ships Library schema version 19.

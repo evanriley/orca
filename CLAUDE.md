@@ -48,7 +48,7 @@ No path under `/usr` is assumed, so the same build works on NixOS and FHS
 distributions. The Zig package dependencies are `alac`, `libxaac` and
 `chromaprint` (built by `build/chromaprint.zig`);
 `nix build` fetches them through `zig.fetchDeps`. When `build.zig.zon`
-dependencies change, set that hash in `flake.nix` to `pkgs.lib.fakeHash` and
+dependencies change, set that hash in `nix/package.nix` to `lib.fakeHash` and
 rebuild to learn the new one: an unchanged hash makes Nix reuse the old
 dependency directory, and the sandboxed build then fails trying to fetch the
 new packages.
