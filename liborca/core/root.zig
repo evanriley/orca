@@ -14,6 +14,8 @@ pub const runtime_queue = @import("runtime_queue.zig");
 pub const runtime_roots = @import("runtime_roots.zig");
 pub const runtime_status = @import("runtime_status.zig");
 pub const runtime_tests = @import("runtime_tests.zig");
+pub const runtime_watch = @import("runtime_watch.zig");
+pub const runtime_watch_tests = @import("runtime_watch_tests.zig");
 pub const runtime_zones = @import("runtime_zones.zig");
 pub const track_details = @import("track_details.zig");
 pub const track_source = @import("track_source.zig");
@@ -43,6 +45,8 @@ test {
     _ = @import("runtime_roots.zig");
     _ = @import("runtime_status.zig");
     _ = @import("runtime_tests.zig");
+    _ = @import("runtime_watch.zig");
+    _ = @import("runtime_watch_tests.zig");
     _ = @import("runtime_zones.zig");
     _ = @import("track_details.zig");
     _ = @import("track_source.zig");

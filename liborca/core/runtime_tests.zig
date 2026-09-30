@@ -1447,7 +1447,7 @@ test "a library edit regroups a track without touching its file, and clearing it
     try std.testing.expectEqual(@as(u64, 1), try library_database.artists.count());
 }
 
-fn copyFixtureInto(dir: std.Io.Dir, fixture: []const u8, name: []const u8) !void {
+pub fn copyFixtureInto(dir: std.Io.Dir, fixture: []const u8, name: []const u8) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture, std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(bytes);
     try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });

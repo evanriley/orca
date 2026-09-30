@@ -21,6 +21,7 @@ const runtime_queue = @import("runtime_queue.zig");
 const runtime_roots = @import("runtime_roots.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
 const runtime_status = @import("runtime_status.zig");
+const runtime_watch = @import("runtime_watch.zig");
 const track_details = @import("track_details.zig");
 const track_source = @import("track_source.zig");
 const work = @import("work.zig");
@@ -62,12 +63,21 @@ pub const LibraryObject = struct {
     /// drain.
     listens: ?*listen_worker.Listens = null,
     stored_counts: ?runtime_listens.StoredCounts = null,
+    /// Null while the Library is not watched, and between a drain and the
+    /// re-arm that follows it.
+    watch: ?*runtime_watch.LibraryWatch = null,
+    /// Set while the host wants the Library watched; survives drains.
+    watch_options: ?runtime_watch.WatchOptions = null,
 };
 
 pub const ArtworkLoader = struct {
     loader: artwork.Loader,
     work_handle: WorkHandle,
 };
+
+pub const WatchOptions = runtime_watch.WatchOptions;
+pub const WatchState = runtime_watch.WatchState;
+pub const WatchStatus = runtime_watch.WatchStatus;
 
 pub const ArtworkSubject = artwork.Subject;
 pub const ArtworkResult = artwork.Result;
@@ -386,6 +396,7 @@ pub const OrcaRuntime = struct {
         runtime_jobs.finalizeDrainedJobWorkers(self);
         self.releaseDrainedArtworkLoaders();
         runtime_listens.releaseDrainedListenWorkers(self);
+        runtime_watch.releaseDrainedWatchers(self);
         runtime_jobs.freeAllJobWorkers(self);
         runtime_jobs.discardPendingTagWrites(self, null);
         self.jobs.cancelAndDrain();
@@ -435,6 +446,7 @@ pub const OrcaRuntime = struct {
         // the same trade `joinWorkersBeforeDestroy` documents.
         runtime_jobs.cancelJobWorkers(self);
         self.joinWorkersBeforeDestroy();
+        defer runtime_watch.rearmWatchers(self);
         runtime_queue.reapStoppedEngines(self);
         runtime_jobs.finalizeDrainedJobWorkers(self);
         // Openers hold a pointer into the Library they resolve through, so
@@ -1540,6 +1552,30 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobScanStats(self, job_handle);
     }
 
+    /// The root a reconcile job walks, or null for a job of another kind.
+    pub fn jobReconcileRoot(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
+        return runtime_jobs.jobReconcileRoot(self, job_handle);
+    }
+
+    /// Watches the Library's roots and reconciles what changes under them,
+    /// one reconcile at a time and never beside a scan, reconcile,
+    /// projection or tag write of the Library. Each root is reconciled whole once armed. Linux only: elsewhere this
+    /// returns `error.WatchingUnsupported`. A Library already watched returns
+    /// `error.AlreadyWatching`. The reconciles start from `pump`.
+    pub fn libraryWatch(self: *OrcaRuntime, library: LibraryHandle, options: WatchOptions) !void {
+        return runtime_watch.libraryWatch(self, library, options);
+    }
+
+    /// Stops watching: joins the watcher and any reconcile it started, and
+    /// drops the changes still waiting.
+    pub fn libraryUnwatch(self: *OrcaRuntime, library: LibraryHandle) !void {
+        return runtime_watch.libraryUnwatch(self, library);
+    }
+
+    pub fn libraryWatchStatus(self: *OrcaRuntime, library: LibraryHandle) !WatchStatus {
+        return runtime_watch.libraryWatchStatus(self, library);
+    }
+
     /// A matching job's counters, live while it runs and retained for a
     /// bounded number of finished jobs afterwards.
     pub fn jobMatchStats(self: *OrcaRuntime, job_handle: JobHandle) !MatchStats {
@@ -1750,22 +1786,23 @@ pub const OrcaRuntime = struct {
         if (self.state.load(.acquire) != .running) return null;
         if (self.host_signal.isPending() or self.commands.count() != 0 or
             self.events.count() != 0 or self.telemetry.count() != 0) return 0;
-        const listen_due = runtime_listens.listenSampleDueMs(self);
-        const jobs_due = runtime_jobs.jobPumpDueMs(self);
-        if (listen_due) |listen| {
-            if (jobs_due) |jobs| return @min(listen, jobs);
-            return listen;
+        var due: ?u64 = runtime_listens.listenSampleDueMs(self);
+        for ([_]?u64{ runtime_jobs.jobPumpDueMs(self), runtime_watch.watchPumpDueMs(self) }) |candidate| {
+            const value = candidate orelse continue;
+            due = if (due) |current| @min(current, value) else value;
         }
-        return jobs_due;
+        return due;
     }
 
     /// One turn of the host's loop: executes the commands already submitted,
     /// at most the command queue's capacity so a host that keeps submitting
-    /// cannot trap its loop here, then joins finished job workers.
+    /// cannot trap its loop here, joins finished job workers, then takes
+    /// what watchers reported and starts their reconciles.
     pub fn pump(self: *OrcaRuntime) void {
         var executed: usize = 0;
         while (executed < control.CommandQueue.capacity and self.processNextCommand()) executed += 1;
         self.reapFinishedJobs();
+        runtime_watch.pumpWatchers(self);
     }
 
     /// Executes at most one command on the runtime's serialized logical control
@@ -1849,6 +1886,7 @@ pub const OrcaRuntime = struct {
         self.work_registry.drain();
         self.releaseDrainedArtworkLoaders();
         runtime_listens.releaseDrainedListenWorkers(self);
+        runtime_watch.releaseDrainedWatchers(self);
     }
 
     fn closeLibraryDatabase(self: *OrcaRuntime, library: *LibraryObject) void {

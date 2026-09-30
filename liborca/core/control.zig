@@ -81,6 +81,11 @@ pub const Telemetry = union(enum) {
         completed_units: u64,
         total_units: ?u64,
     },
+    /// A reconcile the Library's watcher started changed what the Library
+    /// holds; a host rereads what it shows.
+    library_changed: struct {
+        library: object.LibraryHandle,
+    },
 
     fn hasSameKey(a: Telemetry, b: Telemetry) bool {
         return switch (a) {
@@ -90,6 +95,10 @@ pub const Telemetry = union(enum) {
             },
             .job_progress => |left| switch (b) {
                 .job_progress => |right| left.job.eql(right.job),
+                else => false,
+            },
+            .library_changed => |left| switch (b) {
+                .library_changed => |right| left.library.eql(right.library),
                 else => false,
             },
         };

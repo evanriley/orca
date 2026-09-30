@@ -96,9 +96,9 @@ covers the layout and the disk space backups and undo need.
 
 Cancellation is checked before filesystem work and between entries. A cancelled
 or interrupted scan is resumable by restarting it: already committed unchanged
-identities are skipped, so no traversal-order checkpoint is required. Filesystem
-watchers feed the same reconciliation path as hints and are never an
-authoritative source of state.
+identities are skipped, so no traversal-order checkpoint is required.
+[Watching roots](#watching-roots) drives the same reconciliation from
+filesystem events.
 
 ## Folder-scoped reconciliation
 
@@ -190,14 +190,102 @@ length is honestly unknown rather than missing.
 whole files rather than reading headers, which changes what "bounded" and
 "resumable" have to mean. `docs/analysis.md` covers it.
 
-Platform watcher adapters submit root-scoped hints through a bounded channel.
-Unread storms coalesce to one hint per root, including explicit overflow hints;
-consumers respond with normal scanner reconciliation. No watcher event directly
-inserts, removes, or mutates observed state.
+## Watching roots
 
-The Linux adapter (`library/watch_linux.zig`) uses nonblocking inotify and
-translates native changes, queue overflow, and root move/delete events into
-those hints. It has no runtime entry point yet; see
-[roadmap.md](roadmap.md#next). Watcher coverage is an acceleration only;
-startup/manual reconciliation remains responsible for discovering anything not
-represented by a delivered native event.
+`Runtime.libraryWatch(library, WatchOptions)` watches every enabled root of a
+Library and reconciles what changes under them through the
+[folder-scoped reconcile](#folder-scoped-reconciliation).
+`Runtime.libraryUnwatch` stops it, `Runtime.libraryWatchStatus` reports it,
+and `orca-cli watch DATABASE` runs it. Only Linux has a watcher; elsewhere
+`libraryWatch` returns `error.WatchingUnsupported`.
+
+Watching speeds reconciliation up and replaces none of it: a scan or
+reconcile still finds anything no event reported.
+
+### How it works
+
+- Each watched Library has one watcher thread (`library/watch_linux.zig`),
+  registered with the work registry. It blocks in poll(2) on a nonblocking
+  inotify descriptor and an eventfd; cancellation and every command from the
+  control lane write the eventfd.
+- Arming a root walks it on the watcher thread and adds one watch per
+  directory, for `IN_CREATE`, `IN_DELETE`, `IN_MOVED_FROM`, `IN_MOVED_TO`,
+  `IN_CLOSE_WRITE`, `IN_ATTRIB`, `IN_DELETE_SELF` and `IN_MOVE_SELF`, with
+  `IN_ONLYDIR`, `IN_DONT_FOLLOW` and `IN_EXCL_UNLINK`. `IN_MODIFY` is not
+  watched: a file being written is reported once, when it is closed. The walk
+  checks for cancellation between entries.
+- Each event marks a directory, relative to the root, dirty:
+  - a file created, written and closed, changed in metadata, deleted or moved:
+    the directory holding it;
+  - a directory created or moved in: that directory, once it and every
+    directory already inside it are watched;
+  - a directory deleted or moved out: that directory, once its watches and
+    those below it are dropped.
+- A dirty directory is reconciled recursively, so a file created in a new
+  directory before the directory was watched is still found, and a directory
+  that is gone has everything under it marked missing.
+- A root's changes are published once the root has been quiet for
+  `WatchOptions.quiet_ms` (default 2000), or `max_delay_ms` (default 30000)
+  after its first unpublished change. A root holds at most 64 dirty
+  directories: a directory inside another is absorbed, and one more makes the
+  whole root dirty.
+- `Runtime.pump` takes what the watchers published, merges it per root under
+  the same rules, and starts a `reconcile` job for one root at a time. The job
+  reports `job_finished` like any other; one that recorded or marked missing
+  a file also publishes `Telemetry.library_changed`.
+
+### Invariants
+
+1. The watcher thread touches only its own state, its two descriptors, the
+   queues between it and the control lane, and the host signal. It never
+   touches a database, a handle pool or the work registry.
+2. Hints are advisory. Only the scanner, run by the reconcile job, writes
+   files and locations.
+3. A Library runs at most one automatic reconcile, and never starts one while
+   a scan, reconcile, projection or tag write of the Library runs. Analysis,
+   duplicate finding, matching and AcoustID submission run for hours without
+   walking or rewriting files, so a reconcile runs beside them. A host's scan, reconcile or tag write
+   first cancels and joins a running automatic reconcile, without a
+   `job_finished` event, and its root waits again as a whole root. A host's
+   scan of a whole root takes over the root's waiting changes, and returns
+   them as the whole root if it does not succeed.
+4. Every arm marks its root dirty as a whole and publishes it at once:
+   nothing that changed while the root was unwatched produced an event. This
+   is also how a Library catches up after a drain rebuilds its watcher.
+5. A root that is deleted, moved or unmounted, or cannot be watched when it
+   is armed, is reported unavailable and is never reconciled; its running
+   automatic reconcile is cancelled. Its locations keep their state, so an
+   unmounted drive never empties a library. It stays unwatched until the
+   Library is watched again or the root is added again.
+6. Everything is bounded: 16 commands to the watcher, 256 hints from it, 64
+   directories per root and a 64 KiB read buffer.
+7. Orca's own files never dirty anything: tag-write temporaries
+   (`isOrcaTemporaryName`), the volume marker `.orca-volume-id`, the database
+   file and its `-wal`, `-shm` and `-journal` files, and the backup directory,
+   which is neither watched nor walked into. These names are matched anywhere
+   under a root. A tag write still dirties its file's directory once, when the
+   staged copy is renamed over the file; the reconcile that follows finds the
+   file as the write job already recorded it.
+
+### Limits
+
+- Watches are per directory and count against
+  `fs.inotify.max_user_watches`. When `inotify_add_watch` fails with
+  `ENOSPC`, the watcher keeps the watches it has, leaves the rest unwatched
+  and reports `watch_limit_reached`, and the Library's state is `degraded`.
+- Each watched Library uses one inotify instance, counted against
+  `fs.inotify.max_user_instances`; `libraryWatch` returns
+  `error.WatchInstanceLimit` when none is left.
+- A directory the watcher cannot read is not watched.
+- Symbolic links are not followed, as the scan does not follow them. A
+  directory reachable by two paths, through a bind mount, is watched once,
+  under the first path found, and its events are reported under that path
+  only. A root inside another watched root is watched as part of whichever
+  was armed first.
+- An unmount below a root drops the watches on the unmounted filesystem and
+  dirties nothing; those directories are watched again when the Library is.
+- On `IN_Q_OVERFLOW`, events were lost: every root is walked again for new
+  directories and reconciled whole.
+- When a command cannot be queued to the watcher, because 16 are waiting, the
+  control lane rebuilds the watcher from the Library's roots rather than drop
+  the command, and every root is armed and reconciled again.

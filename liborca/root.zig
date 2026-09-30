@@ -153,6 +153,11 @@ pub const JobSnapshot = job.Snapshot;
 pub const JobKind = job.Kind;
 pub const JobState = job.State;
 
+// Filesystem watching: automatic reconciles of what changed under a root.
+pub const WatchOptions = runtime.WatchOptions;
+pub const WatchState = runtime.WatchState;
+pub const WatchStatus = runtime.WatchStatus;
+
 // The control lane: commands in, completions and telemetry out.
 pub const Action = control.Action;
 pub const RequestId = control.RequestId;

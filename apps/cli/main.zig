@@ -23,6 +23,10 @@ fn describe(err: anyerror) []const u8 {
         error.LibraryJobRunning => "a job is running on this library",
         error.LibraryScanRunning => "a scan is already running on this library; wait for it to finish",
         error.InvalidReconcileDirectory => "each DIR must be a path relative to the root, with no '.', '..', empty or trailing component",
+        error.WatchingUnsupported => "watching folders needs Linux",
+        error.InvalidWatchOptions => "--quiet must be at least 1 and --max-delay at least --quiet",
+        error.WatchInstanceLimit => "too many inotify instances are open; raise fs.inotify.max_user_instances",
+        error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL must be https, or http to localhost",
@@ -94,6 +98,13 @@ const commands = [_]Command{
     .{ .name = "demo", .usage = "demo", .min_arguments = 0, .max_arguments = null, .run = runDemo, .shares_usage_line = true },
     .{ .name = "scan", .usage = "scan DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = scanRoot, .shares_usage_line = true },
     .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
+    .{
+        .name = "watch",
+        .usage = "watch DATABASE [--quiet=MS] [--max-delay=MS] [--once]\n" ++ usage_indent ++ "  [--limit=MS]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = watchLibrary,
+    },
     .{ .name = "project", .usage = "project DATABASE", .min_arguments = 1, .max_arguments = 1, .run = projectLibrary, .shares_usage_line = true },
     .{ .name = "backfill", .usage = "backfill DATABASE [--force] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = backfillProperties },
     .{ .name = "analyze", .usage = "analyze DATABASE AUDIO", .min_arguments = 2, .max_arguments = 2, .run = analyzeFile },
@@ -158,6 +169,18 @@ const help_details =
     \\marks missing only files under what it walked. A directory that is gone
     \\has everything under it marked missing; one that cannot be read is left
     \\as it was and the command fails. missing= counts the files marked.
+    \\
+    \\watch watches every registered root and reconciles each folder that
+    \\changes under one, until --limit=MS of wall clock passes (default
+    \\600000). Arming a root reconciles it whole first. It prints `watching`
+    \\once every root is armed, with how long arming took; one `reconcile`
+    \\line per reconcile, with the counters scan prints; and `library-changed`
+    \\when a reconcile recorded or marked missing a file. A root's changes are
+    \\reconciled once it has been quiet for --quiet=MS (default 2000), or
+    \\--max-delay=MS (default 30000) after its first change. --once exits after
+    \\the first reconcile that recorded or marked missing a file, the arming
+    \\one included. A root that is deleted, moved or unmounted is reported as
+    \\unavailable and never marked missing. Linux only.
     \\
     \\roots lists the registered folders. remove-root forgets one and every
     \\file, Track, Release and Artist that exists only under it; a file also
@@ -349,6 +372,78 @@ fn reconcileRoot(context: Context) !void {
     try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
 }
 
+fn watchLibrary(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit });
+    const limit_ms: u64 = options.limit orelse 10 * 60 * 1000;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const root_count = try enabledRootCount(&runtime, library);
+    const started_ms = monotonicMs(context.io);
+    try runtime.libraryWatch(library, .{
+        .quiet_ms = options.quiet_ms orelse 2000,
+        .max_delay_ms = options.max_delay_ms orelse 30_000,
+    });
+    var armed = false;
+    var unavailable: u32 = 0;
+    var limit_reported = false;
+    while (monotonicMs(context.io) - started_ms < limit_ms) {
+        runtime.pump();
+        var changed = false;
+        while (runtime.pollEvent()) |event| switch (event.outcome) {
+            .job_finished => |finished| {
+                const root_id = try runtime.jobReconcileRoot(finished.job) orelse continue;
+                const stats = try runtime.jobScanStats(finished.job);
+                try stdout.print("reconcile root={d} state={t} ", .{ root_id, finished.state });
+                try printScanCounters(stdout, stats);
+                changed = changed or stats.changed + stats.marked_missing != 0;
+            },
+            else => {},
+        };
+        while (runtime.pollTelemetry()) |telemetry| switch (telemetry) {
+            .library_changed => try stdout.writeAll("library-changed\n"),
+            else => {},
+        };
+        const status = try runtime.libraryWatchStatus(library);
+        if (status.state == .off) return error.WatcherStopped;
+        if (!armed and status.roots_watched + status.roots_unavailable >= root_count) {
+            armed = true;
+            try stdout.print("watching roots={d} unavailable={d} directories={d} armed_in={d}ms\n", .{
+                status.roots_watched,
+                status.roots_unavailable,
+                status.directories_watched,
+                monotonicMs(context.io) - started_ms,
+            });
+        }
+        if (armed and status.roots_unavailable != unavailable) {
+            unavailable = status.roots_unavailable;
+            try stdout.print("unavailable roots={d}\n", .{unavailable});
+        }
+        if (status.watch_limit_reached and !limit_reported) {
+            limit_reported = true;
+            try stdout.print("watch-limit directories={d}; raise fs.inotify.max_user_watches\n", .{status.directories_watched});
+        }
+        try stdout.flush();
+        if (options.once and changed) return;
+        sleepMilliseconds(@intCast(@min(runtime.nextPumpTimeoutMs() orelse 50, 50)));
+    }
+}
+
+fn enabledRootCount(runtime: *liborca.Runtime, library: liborca.LibraryHandle) !u32 {
+    var roots = try runtime.libraryRootPage(library, 512, 0);
+    defer roots.deinit();
+    var count: u32 = 0;
+    for (roots.items) |root| {
+        if (root.enabled) count += 1;
+    }
+    return count;
+}
+
+fn monotonicMs(io: std.Io) u64 {
+    return @intCast(std.Io.Clock.awake.now(io).toMilliseconds());
+}
+
 /// Reprojection without a filesystem walk: this is what refreshes the library
 /// after a metadata edit or a provider acceptance, and it is why the
 /// projection is a pass of its own rather than part of the scanner.
@@ -370,6 +465,9 @@ const JobOption = enum {
     status,
     timeout,
     dry_run,
+    quiet,
+    max_delay,
+    once,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -381,6 +479,9 @@ const JobOption = enum {
             .status => "--status",
             .timeout => "--timeout=",
             .dry_run => "--dry-run",
+            .quiet => "--quiet=",
+            .max_delay => "--max-delay=",
+            .once => "--once",
         };
     }
 };
@@ -394,6 +495,9 @@ const JobOptions = struct {
     status: bool = false,
     timeout_ms: ?u64 = null,
     dry_run: bool = false,
+    quiet_ms: ?u32 = null,
+    max_delay_ms: ?u32 = null,
+    once: bool = false,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
@@ -417,6 +521,9 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .status => options.status = true,
                     .timeout => options.timeout_ms = try std.fmt.parseInt(u64, value, 10),
                     .dry_run => options.dry_run = true,
+                    .quiet => options.quiet_ms = try std.fmt.parseInt(u32, value, 10),
+                    .max_delay => options.max_delay_ms = try std.fmt.parseInt(u32, value, 10),
+                    .once => options.once = true,
                 }
                 continue :next_argument;
             }
@@ -1992,6 +2099,22 @@ fn printScanStats(
     stdout: *std.Io.Writer,
     stats: liborca.ScanStats,
 ) !void {
+    try printScanCounters(stdout, stats);
+    try stdout.print(
+        "projected folders={d} files={d} tracks={d} releases={d}\n",
+        .{
+            stats.folders_visited,
+            stats.files_projected,
+            stats.tracks_written,
+            stats.releases_written,
+        },
+    );
+}
+
+fn printScanCounters(
+    stdout: *std.Io.Writer,
+    stats: liborca.ScanStats,
+) !void {
     try stdout.print(
         "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}\n",
         .{
@@ -2002,15 +2125,6 @@ fn printScanStats(
             stats.errors,
             stats.batches_committed,
             stats.marked_missing,
-        },
-    );
-    try stdout.print(
-        "projected folders={d} files={d} tracks={d} releases={d}\n",
-        .{
-            stats.folders_visited,
-            stats.files_projected,
-            stats.tracks_written,
-            stats.releases_written,
         },
     );
 }

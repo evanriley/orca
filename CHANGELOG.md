@@ -11,6 +11,18 @@
   kind is `reconcile`.
 - `ScanStats.marked_missing` counts the locations a scan or reconcile marked
   missing; `orca-cli scan` prints it as `missing=`.
+- **Filesystem watching on Linux.** `Runtime.libraryWatch(library,
+  WatchOptions)` watches every root of a Library with inotify and, from
+  `pump`, reconciles each directory that changes once its root has been quiet
+  for `quiet_ms`. A reconcile that changed the Library publishes
+  `Telemetry.library_changed`. A root that is deleted, moved or unmounted is
+  reported, never marked missing. `libraryUnwatch` and `libraryWatchStatus`
+  complete it, `jobReconcileRoot` names a reconcile job's root, and
+  `orca-cli watch DATABASE` runs it. The C ABI does not carry watching yet
+  and skips `library_changed`. The unconnected `RootWatcher` and
+  `watch_hints.Channel` are gone.
+- **Breaking (Zig API):** `Telemetry` has a `library_changed` variant, so an
+  exhaustive switch over it needs an arm for it.
 
 ### Fixed
 

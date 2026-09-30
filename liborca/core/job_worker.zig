@@ -476,6 +476,8 @@ pub const Stats = union(enum) {
     }
 };
 
+pub const Origin = enum { host, watcher };
+
 /// One background worker behind a `JobHandle`.
 ///
 /// Threading contract, the same one `core/work.zig` states: the worker thread
@@ -494,6 +496,7 @@ pub const JobWorker = struct {
     /// belongs to can be closed, which is what makes the raw pointer safe.
     database: *database.LibraryDatabase,
     request: Request,
+    origin: Origin = .host,
     /// The worker's own `std.Io`. The ABI's belongs to the calling thread and
     /// is never borrowed across a thread boundary.
     threaded: std.Io.Threaded = .init_single_threaded,

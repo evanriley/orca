@@ -9,7 +9,8 @@ changing the public command contract.
 Completion events are lossless and bounded. When their channel fills, command
 processing applies backpressure rather than mutating state without delivering a
 completion. High-frequency telemetry uses a separate bounded channel that
-coalesces unread Player-position and Job-progress hints by stable handle.
+coalesces unread Player-position, Job-progress and Library-changed hints by
+stable handle.
 Authoritative consumers query snapshots instead of reconstructing state from
 events.
 
@@ -18,7 +19,8 @@ events.
 A host sleeps in its own event loop and pumps only when liborca has something
 for it, rather than on a timer. `Runtime.setWaker` installs a `HostWaker`
 (`orca_runtime_set_wake_callback` in the C ABI); `Runtime.pump` executes the
-submitted commands and joins finished jobs; `Runtime.nextPumpTimeoutMs`
+submitted commands, joins finished jobs and starts the reconciles watchers
+asked for; `Runtime.nextPumpTimeoutMs`
 (`orca_runtime_pump_timeout`) says how long the host may sleep. A host's loop:
 
 1. Pump, then drain events and telemetry and read the snapshots it shows.
@@ -49,6 +51,8 @@ These wake the host:
 - a job worker, after `finish`, so the next pump reaps it and publishes
   `job_finished`;
 - an artwork loader, after it queues a result;
+- a Library's watcher, after it publishes changed directories, an unavailable
+  root or the watch limit, and when it stops on an error;
 - a listen worker, after it records or drops a listen, and after it publishes a
   scrobbler status that differs from the last one it published. The periodic
   recheck of an idle worker changes nothing and wakes nobody.
@@ -70,13 +74,17 @@ Some work needs a clock rather than an event, and the pump timeout covers it:
 - While a job worker runs, the timeout is `job_progress_interval_ms` (100 ms),
   so a host showing progress rereads it. A finished worker not yet reaped, or
   commands left queued by event backpressure, make it 0.
+- A watcher's published changes, or waiting changes that could start a
+  reconcile now, make it 0. Changes held back by a running job of their
+  Library wait on that job's timeout, and the pump that reaps the job starts
+  their reconcile.
 
 A waker installed with `setWaker` is read by worker threads without a lock, so
 it is refused with `error.WorkersRunning` (`ORCA_STATUS_INVALID_STATE`) once any
-worker thread exists: a Player's engine, a job, a listen worker or an artwork
-loader. Every such thread is registered with `work.Registry` before it is
-spawned, so the registry's count is the test; hosts install the waker right
-after creating the runtime. The waker is never called after `shutdown` or
+worker thread exists: a Player's engine, a job, a listen worker, an artwork
+loader or a Library's watcher. Every such thread is registered with
+`work.Registry` before it is spawned, so the registry's count is the test;
+hosts install the waker right after creating the runtime. The waker is never called after `shutdown` or
 `deinit` returns, because every thread that raises is joined by the registry's
 drain, and `submit` refuses a runtime that is not running. A job worker raises
 after `finish`; the pump joins its thread, rather than only waiting for

@@ -22,6 +22,16 @@ the next listen, bind or scrobbling enable starts a new one. Closing a Library
 restarts the scrobbling Library's worker at once, so its queue keeps its retry
 times. A worker records everything in its ring before it finishes.
 
+Each watched Library has a watcher thread; see
+[storage.md](storage.md#watching-roots). The Library keeps whether it is
+watched, and with which `WatchOptions`; the watcher, its queues and the
+changes waiting for a reconcile belong to the watcher's record and go with
+it. A full drain joins and releases every watcher. `destroyLibrary` drains
+every worker in the process, so once the Library is gone it starts a watcher
+again for every other Library still watched, and each of their roots is
+reconciled whole, since the drain may have cancelled a reconcile or missed an
+event. Destroying the watched Library itself leaves nothing to restart.
+
 The `CredentialStore` and server URL passed to `setCredentialStore` and
 `setListenBrainzServer` are borrowed: their strings and context must outlive
 the runtime, because a worker may read them at any time. `setClientIdentity`
@@ -40,9 +50,9 @@ work → Zones → Players → Libraries:
 
 1. Stop accepting commands and enter `shutting_down`.
 2. End open listens, stop every Player's engine thread, cancel job workers and
-   all other registered work (listen workers, artwork loaders), and block until
-   every worker has finished. Then release the drained workers, discard tag
-   write plans awaiting approval, and cancel and drain Jobs.
+   all other registered work (listen workers, artwork loaders, watchers), and
+   block until every worker has finished. Then release the drained workers,
+   discard tag write plans awaiting approval, and cancel and drain Jobs.
 3. Destroy Zones, closing their output sessions; Zones depend on Players and
    output resources.
 4. Free Players.

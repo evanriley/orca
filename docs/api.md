@@ -55,7 +55,8 @@ defer page.deinit();
   `ZoneStats`, ...), jobs (`ScanRequest`, `ReconcileRequest`, `JobSnapshot`,
   `ScanStats`, ...), tag
   write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
-  (`ArtworkSubject`, `ArtworkResult`) and the control lane (`Action`, `Event`,
+  (`ArtworkSubject`, `ArtworkResult`), watching (`WatchOptions`,
+  `WatchStatus`, `WatchState`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`, `HostWaker`).
 - A host's event loop sleeps until liborca has something for it:
   `setWaker(HostWaker)`, called right after `init` and refused with
@@ -65,6 +66,19 @@ defer page.deinit();
   `nextPumpTimeoutMs` returns how long the loop may sleep, 0 to pump now or
   null to wait for the waker alone. See
   [control-plane.md](control-plane.md#waking-the-host).
+- `libraryWatch(library, WatchOptions)` watches the Library's roots and
+  reconciles each directory that changes under one, from `pump`, one
+  reconcile at a time and never beside a scan, reconcile, projection or tag
+  write of the Library. It
+  returns `error.AlreadyWatching` for a Library already watched and
+  `error.WatchingUnsupported` off Linux. `libraryUnwatch` stops it, and
+  `libraryWatchStatus` returns a `WatchStatus`: its `WatchState` (`off`,
+  `watching`, `degraded` or `unsupported`), the roots and directories
+  watched, the roots unavailable, whether the watch limit was reached, and
+  whether a reconcile waits or runs. A reconcile that recorded or marked
+  missing a file publishes `Telemetry.library_changed`, and
+  `jobReconcileRoot` names the root a reconcile job walks. See
+  [storage.md](storage.md#watching-roots).
 - `playerSetEqualizer` and `playerSetCrossfeed` (and their getters) set a
   Player's ten-band `Equalizer` (or an `EqualizerPreset`) and stereo crossfeed;
   `playerSignalPath` returns a `SignalPath`: the source, ReplayGain, DSP, volume

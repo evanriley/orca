@@ -686,8 +686,9 @@ pub export fn orca_runtime_poll_event(
     // succeeded.
     if (box.runtime.pollEvent()) |completion| {
         destination.* = exportCompletion(completion);
-    } else if (box.runtime.pollTelemetry()) |telemetry| {
-        destination.* = exportTelemetry(telemetry);
+    } else while (box.runtime.pollTelemetry()) |telemetry| {
+        destination.* = exportTelemetry(telemetry) orelse continue;
+        break;
     }
     if (remaining) |output| output.* = @intCast(
         box.runtime.events.count() + box.runtime.telemetry.count(),
@@ -1536,7 +1537,7 @@ fn exportCompletion(event: control.Event) Event {
     };
 }
 
-fn exportTelemetry(telemetry: control.Telemetry) Event {
+fn exportTelemetry(telemetry: control.Telemetry) ?Event {
     return switch (telemetry) {
         .player_position => |position| .{
             .kind = @intFromEnum(EventKind.player_position),
@@ -1554,6 +1555,7 @@ fn exportTelemetry(telemetry: control.Telemetry) Event {
                 .total_units = progress.total_units orelse 0,
             } },
         },
+        .library_changed => null,
     };
 }
 

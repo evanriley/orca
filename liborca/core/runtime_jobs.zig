@@ -5,6 +5,7 @@ const work = @import("work.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_watch = @import("runtime_watch.zig");
 
 const AcoustIdSubmittablePage = runtime.AcoustIdSubmittablePage;
 const AnalysisRequest = runtime.AnalysisRequest;
@@ -172,6 +173,22 @@ pub fn startJobWorker(
     request: job_worker.Request,
 ) !JobHandle {
     try runtime.requireRunning(self);
+    switch (request.kind()) {
+        .scan, .reconcile, .mutation => runtime_watch.preemptAutoReconcile(self, library),
+        else => {},
+    }
+    const job_handle = try spawnJobWorker(self, library, request, .host);
+    runtime_watch.hostJobStarted(self, library, job_handle, request);
+    return job_handle;
+}
+
+pub fn spawnJobWorker(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: job_worker.Request,
+    origin: job_worker.Origin,
+) !JobHandle {
+    try runtime.requireRunning(self);
     if (request.batchSize()) |batch_size| if (batch_size == 0) return error.InvalidBatchSize;
     const library_database = try runtime.libraryDatabase(self, library);
     if (walksLibrary(request.kind()) and walkRunning(self, library)) return error.LibraryScanRunning;
@@ -213,6 +230,7 @@ pub fn startJobWorker(
         .library = library,
         .database = library_database,
         .request = request,
+        .origin = origin,
         .stats = .init(request),
         .host_signal = &self.host_signal,
     };
@@ -241,6 +259,15 @@ pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
     for (self.job_workers.items) |worker| {
         if (!worker.job.eql(job_handle)) continue;
         return worker.scanStats();
+    }
+    return error.StaleHandle;
+}
+
+pub fn jobReconcileRoot(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        const pending = worker.pendingReconcile() orelse return null;
+        return pending.request.root_id;
     }
     return error.StaleHandle;
 }
@@ -285,9 +312,17 @@ pub fn reapFinishedJobs(self: *OrcaRuntime) void {
     }
 }
 
-/// Records a joined worker's outcome. `publish` is false on the shutdown
-/// path, where no host will ever poll the event.
-fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) void {
+pub fn libraryJobRunning(self: *const OrcaRuntime, library: LibraryHandle) bool {
+    for (self.job_workers.items) |worker| {
+        if (!worker.retired and worker.library.eql(library)) return true;
+    }
+    return false;
+}
+
+/// Records a joined worker's outcome. `publish` is false where no host
+/// should see the event: on the shutdown path, where none will poll it, and
+/// for an automatic reconcile the runtime stopped itself.
+pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) void {
     worker.retired = true;
     const state: job.State = if (worker.failed.load(.acquire))
         .failed
@@ -297,6 +332,7 @@ fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) void
         .succeeded;
     self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
     self.jobs.finish(worker.job, state) catch {};
+    runtime_watch.jobFinalized(self, worker, state);
     if (!publish) return;
     self.events.publish(.{
         .request_id = 0,

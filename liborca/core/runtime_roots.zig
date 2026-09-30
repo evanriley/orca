@@ -7,6 +7,7 @@ const track_details = @import("track_details.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
+const runtime_watch = @import("runtime_watch.zig");
 
 const EditedTracks = runtime.EditedTracks;
 const JobHandle = runtime.JobHandle;
@@ -95,7 +96,9 @@ pub fn libraryAddRoot(
 ) !database.RootBinding {
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
-    return library_database.ensureRoot(io, path, .{ .allow_persist = true });
+    const binding = try library_database.ensureRoot(io, path, .{ .allow_persist = true });
+    runtime_watch.rootAdded(self, library, binding.root_id, path);
+    return binding;
 }
 
 pub fn libraryRemoveRoot(
@@ -105,11 +108,11 @@ pub fn libraryRemoveRoot(
 ) !RemovedRoot {
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
-    for (self.job_workers.items) |worker| {
-        if (!worker.retired and worker.library.eql(library)) return error.LibraryJobRunning;
-    }
+    runtime_watch.preemptAutoReconcile(self, library);
+    if (runtime_jobs.libraryJobRunning(self, library)) return error.LibraryJobRunning;
     const removal = try library_database.library_roots.remove(self.allocator, root_id);
     defer removal.deinit();
+    runtime_watch.rootRemoved(self, library, root_id);
     var pass: library_pass.Projection = .{
         .allocator = self.allocator,
         .library = library_database,
