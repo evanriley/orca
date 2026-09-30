@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- **Folder-scoped reconciliation.** `Runtime.startLibraryReconcile(library,
+  ReconcileRequest)` walks a registered root, or only some directories under
+  it, and marks missing only files under the directories whose walk
+  completed. `orca-cli reconcile DATABASE ROOT_ID [DIR...]` runs it. The job
+  kind is `reconcile`.
+- `ScanStats.marked_missing` counts the locations a scan or reconcile marked
+  missing; `orca-cli scan` prints it as `missing=`.
+
+### Fixed
+
+- **Two scans of one Library could mark present files missing.** A second
+  scan or reconcile of a Library while one runs is now refused with
+  `error.LibraryScanRunning`, `ORCA_STATUS_BUSY` through the C ABI.
+
 ## 0.3.0 - 2026-09-30
 
 Ships Library schema version 19.

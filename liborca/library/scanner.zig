@@ -99,13 +99,39 @@ pub const Scanner = struct {
     }
 
     pub fn scan(self: *Scanner, root_path: []const u8) !Result {
+        return self.walk(root_path, null);
+    }
+
+    /// Walks `root_path/subtree` as `scan` walks the whole root, recording
+    /// each file under the same uri a full scan gives it. A subtree that is
+    /// not there, or is no longer a directory, is a completed walk that found
+    /// nothing.
+    pub fn scanSubtree(self: *Scanner, root_path: []const u8, subtree: []const u8) !Result {
+        try validateSubtree(subtree);
+        return self.walk(root_path, subtree);
+    }
+
+    fn walk(self: *Scanner, root_path: []const u8, subtree: ?[]const u8) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
         if (self.cancellation) |token| {
             if (token.isCancelled()) return .{ .cancelled = true };
         }
         const root = try std.Io.Dir.cwd().openDir(self.io, root_path, .{ .iterate = true });
         defer root.close(self.io);
-        var walker = try root.walk(self.allocator);
+        const start = if (subtree) |relative|
+            root.openDir(self.io, relative, .{ .iterate = true }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => return .{},
+                else => return err,
+            }
+        else
+            root;
+        defer if (subtree != null) start.close(self.io);
+        const start_path = if (subtree) |relative|
+            try pathUnder(self.allocator, root_path, relative)
+        else
+            root_path;
+        defer if (subtree != null) self.allocator.free(start_path);
+        var walker = try start.walk(self.allocator);
         defer walker.deinit();
 
         var builtin_codecs = codec.CodecRegistry.builtins();
@@ -128,11 +154,7 @@ pub const Scanner = struct {
             result.files_seen += 1;
             if (self.progress) |counter| counter.store(result.files_seen, .release);
 
-            const path = try std.fmt.allocPrint(
-                self.allocator,
-                "{s}/{s}",
-                .{ root_path, entry.path },
-            );
+            const path = try pathUnder(self.allocator, start_path, entry.path);
             try self.examine(path, codecs, &pending, &result, .skip_unchanged);
         }
         if (pending.items.len > 0) {
@@ -356,6 +378,23 @@ pub const Scanner = struct {
 };
 
 const optionalCount = database.columns.optionalCount;
+
+/// The uri a file or directory `relative` to a root is stored under. Every
+/// walk builds uris through this, so a subtree walk and a full scan name the
+/// same file identically.
+pub fn pathUnder(allocator: std.mem.Allocator, root_path: []const u8, relative: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ root_path, relative });
+}
+
+pub fn validateSubtree(subtree: []const u8) error{InvalidReconcileDirectory}!void {
+    if (subtree.len == 0) return error.InvalidReconcileDirectory;
+    var components = std.mem.splitScalar(u8, subtree, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or
+            std.mem.eql(u8, component, ".") or
+            std.mem.eql(u8, component, "..")) return error.InvalidReconcileDirectory;
+    }
+}
 
 test "scanner batches audio and skips unchanged files on restart" {
     var temporary = std.testing.tmpDir(.{});

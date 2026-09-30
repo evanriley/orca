@@ -16,6 +16,7 @@ const LibraryHandle = runtime.LibraryHandle;
 const MatchRequest = runtime.MatchRequest;
 const MatchStats = runtime.MatchStats;
 const OrcaRuntime = runtime.OrcaRuntime;
+const ReconcileRequest = runtime.ReconcileRequest;
 const ScanRequest = runtime.ScanRequest;
 const ScanStats = runtime.ScanStats;
 const SubmissionStats = runtime.SubmissionStats;
@@ -33,6 +34,16 @@ pub fn startLibraryScan(
     request: ScanRequest,
 ) !JobHandle {
     return startJobWorker(self, library, .{ .scan = request });
+}
+
+pub fn startLibraryReconcile(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: ReconcileRequest,
+) !JobHandle {
+    const pending = try job_worker.PendingReconcile.create(self.allocator, request);
+    errdefer pending.destroy();
+    return startJobWorker(self, library, .{ .reconcile = pending });
 }
 
 pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
@@ -126,6 +137,21 @@ fn runningJob(self: *const OrcaRuntime, kind: job.Kind) bool {
     return false;
 }
 
+fn walksLibrary(kind: job.Kind) bool {
+    return kind == .scan or kind == .reconcile;
+}
+
+/// One walk per Library at a time: a walk stamps each location it reaches
+/// with its own generation, and a second walk's later stamp or sweep would
+/// mark files the other just saw as missing.
+fn walkRunning(self: *const OrcaRuntime, library: LibraryHandle) bool {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or worker.registration.isFinished()) continue;
+        if (worker.library.eql(library) and walksLibrary(worker.kind())) return true;
+    }
+    return false;
+}
+
 fn acoustIdSetup(self: *const OrcaRuntime) job_worker.AcoustIdSetup {
     return .{
         .server = self.acoustid_server,
@@ -148,6 +174,7 @@ pub fn startJobWorker(
     try runtime.requireRunning(self);
     if (request.batchSize()) |batch_size| if (batch_size == 0) return error.InvalidBatchSize;
     const library_database = try runtime.libraryDatabase(self, library);
+    if (walksLibrary(request.kind()) and walkRunning(self, library)) return error.LibraryScanRunning;
     pruneRetiredJobWorkers(self);
 
     const total_units: ?u64 = switch (request) {
@@ -164,7 +191,7 @@ pub fn startJobWorker(
             matching.limit,
         ),
         .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
-        .scan, .projection => null,
+        .scan, .reconcile, .projection => null,
     };
     const worker = try self.allocator.create(JobWorker);
     errdefer self.allocator.destroy(worker);
@@ -327,6 +354,7 @@ pub fn freeAllJobWorkers(self: *OrcaRuntime) void {
 
 fn destroyJobWorker(self: *OrcaRuntime, worker: *JobWorker) void {
     if (worker.tagWrite()) |pending| pending.destroy();
+    if (worker.pendingReconcile()) |pending| pending.destroy();
     self.allocator.destroy(worker);
 }
 

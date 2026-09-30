@@ -44,6 +44,16 @@ pub const FileUpsert = struct {
 pub const incomplete_properties_predicate =
     "duration_ms IS NULL OR sample_rate IS NULL OR channels IS NULL OR codec = ''";
 
+/// `uri` in `[prefix/, prefix0)` is exactly the uris below `prefix/`, because
+/// `0` is the byte after `/`, and as a range on the `(volume_id, uri)` unique
+/// index it reads only that directory's rows. `+root_id` keeps the planner off
+/// `locations_sweep`, which would read every row of the root.
+pub const mark_missing_under_sql =
+    \\UPDATE locations SET state='missing', missing_since=unixepoch()
+    \\WHERE volume_id=?1 AND uri>=?2 || '/' AND uri<?2 || '0'
+    \\    AND +root_id=?3 AND last_seen_generation<?4 AND state<>'missing';
+;
+
 /// Audio facts a probe learned about one already-recorded file.
 ///
 /// Narrower than `FileUpsert` on purpose: a backfill reads headers, so it has
@@ -473,6 +483,29 @@ pub const FileRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, root_id);
         try statement.bindInt64(2, generation);
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
+    }
+
+    /// The same sweep, limited to one directory: locations under `prefix`, the
+    /// directory's own uri, that a completed walk of that directory did not
+    /// reach. A sibling whose name merely starts with the directory's is not
+    /// under it.
+    pub fn markMissingBelowGenerationUnder(
+        self: *FileRepository,
+        volume_id: i64,
+        root_id: i64,
+        generation: i64,
+        prefix: []const u8,
+    ) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(mark_missing_under_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, volume_id);
+        try statement.bindText(2, prefix);
+        try statement.bindInt64(3, root_id);
+        try statement.bindInt64(4, generation);
         if (try statement.step() != .done) return error.SqlFailed;
         return self.db.changes();
     }

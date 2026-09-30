@@ -26,6 +26,79 @@ pub const ScanRequest = struct {
     batch_size: usize = 256,
 };
 
+pub const ReconcileScope = union(enum) {
+    whole_root,
+    /// Directories relative to the root, in normal form: see
+    /// `library.scanner.validateSubtree`.
+    subtrees: []const []const u8,
+};
+
+pub const ReconcileRequest = struct {
+    root_id: i64,
+    scope: ReconcileScope = .whole_root,
+    batch_size: usize = 256,
+};
+
+/// A reconcile request whose directories the runtime owns, validated and with
+/// every directory already inside another one dropped. The caller's slices
+/// need not outlive `startLibraryReconcile`.
+pub const PendingReconcile = struct {
+    arena: std.heap.ArenaAllocator,
+    request: ReconcileRequest,
+
+    pub fn create(allocator: std.mem.Allocator, request: ReconcileRequest) !*PendingReconcile {
+        const self = try allocator.create(PendingReconcile);
+        errdefer allocator.destroy(self);
+        self.* = .{ .arena = .init(allocator), .request = request };
+        errdefer self.arena.deinit();
+        switch (request.scope) {
+            .whole_root => {},
+            .subtrees => |subtrees| self.request.scope = .{
+                .subtrees = try outermostSubtrees(self.arena.allocator(), subtrees),
+            },
+        }
+        return self;
+    }
+
+    pub fn destroy(self: *PendingReconcile) void {
+        const allocator = self.arena.child_allocator;
+        self.arena.deinit();
+        allocator.destroy(self);
+    }
+};
+
+/// Copies of `subtrees` with duplicates and every directory inside another
+/// listed one removed, since walking the outer one already walks it.
+fn outermostSubtrees(arena: std.mem.Allocator, subtrees: []const []const u8) ![]const []const u8 {
+    if (subtrees.len == 0) return error.InvalidReconcileDirectory;
+    for (subtrees) |subtree| try library_pass.scanner.validateSubtree(subtree);
+    const sorted = try arena.dupe([]const u8, subtrees);
+    std.mem.sort([]const u8, sorted, {}, ancestorsFirst);
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (sorted) |subtree| {
+        if (kept.items.len != 0 and isWithin(subtree, kept.items[kept.items.len - 1])) continue;
+        try kept.append(arena, try arena.dupe(u8, subtree));
+    }
+    return kept.items;
+}
+
+/// Byte order with `/` lowest, so a directory's descendants sort directly
+/// after it and before any sibling whose name extends its own.
+fn ancestorsFirst(_: void, left: []const u8, right: []const u8) bool {
+    for (left[0..@min(left.len, right.len)], right[0..@min(left.len, right.len)]) |a, b| {
+        if (a == b) continue;
+        if (a == '/') return true;
+        if (b == '/') return false;
+        return a < b;
+    }
+    return left.len < right.len;
+}
+
+fn isWithin(subtree: []const u8, ancestor: []const u8) bool {
+    if (!std.mem.startsWith(u8, subtree, ancestor)) return false;
+    return subtree.len == ancestor.len or subtree[ancestor.len] == '/';
+}
+
 pub const BackfillRequest = struct {
     batch_size: usize = 256,
     /// Re-probe rows that already declare properties. See
@@ -165,6 +238,8 @@ pub const MatchingRequest = struct {
 
 pub const Request = union(enum) {
     scan: ScanRequest,
+    /// The worker owns the request once started.
+    reconcile: *PendingReconcile,
     projection,
     property_backfill: BackfillRequest,
     analysis: AnalysisRequest,
@@ -177,6 +252,7 @@ pub const Request = union(enum) {
     pub fn kind(self: Request) job.Kind {
         return switch (self) {
             .scan => .scan,
+            .reconcile => .reconcile,
             .projection => .projection,
             .property_backfill => .property_backfill,
             .analysis => .analysis,
@@ -190,6 +266,7 @@ pub const Request = union(enum) {
     pub fn batchSize(self: Request) ?usize {
         return switch (self) {
             .scan => |request| request.batch_size,
+            .reconcile => |pending| pending.request.batch_size,
             .property_backfill => |request| request.batch_size,
             .analysis => |request| request.batch_size,
             .duplicate_scan => |request| request.batch_size,
@@ -214,6 +291,8 @@ pub const ScanStats = struct {
     files_projected: u64 = 0,
     tracks_written: u64 = 0,
     releases_written: u64 = 0,
+    /// Locations the job's completed walks no longer found.
+    marked_missing: u64 = 0,
 };
 
 /// The same counters as the worker publishes them: monotonic atomics, so the
@@ -230,6 +309,7 @@ const LiveScanStats = struct {
     files_projected: std.atomic.Value(u64) = .init(0),
     tracks_written: std.atomic.Value(u64) = .init(0),
     releases_written: std.atomic.Value(u64) = .init(0),
+    marked_missing: std.atomic.Value(u64) = .init(0),
 
     fn read(self: *const LiveScanStats, in_flight: u64) ScanStats {
         return .{
@@ -244,6 +324,7 @@ const LiveScanStats = struct {
             .files_projected = self.files_projected.load(.acquire),
             .tracks_written = self.tracks_written.load(.acquire),
             .releases_written = self.releases_written.load(.acquire),
+            .marked_missing = self.marked_missing.load(.acquire),
         };
     }
 };
@@ -387,7 +468,7 @@ pub const Stats = union(enum) {
 
     pub fn init(request: Request) Stats {
         return switch (request) {
-            .scan, .projection, .property_backfill, .analysis, .mutation => .{ .scan = .{} },
+            .scan, .reconcile, .projection, .property_backfill, .analysis, .mutation => .{ .scan = .{} },
             .duplicate_scan => .{ .duplicates = .{} },
             .metadata_lookup => .{ .matching = .{} },
             .acoustid_submission => .{ .submission = .{} },
@@ -439,6 +520,7 @@ pub const JobWorker = struct {
         }
         switch (self.request) {
             .scan => |request| self.runScan(request),
+            .reconcile => |pending| self.runReconcile(pending.request),
             .projection => self.runProjection(),
             .property_backfill => |request| self.runPropertyBackfill(request),
             .analysis => |request| self.runAnalysis(request),
@@ -451,6 +533,13 @@ pub const JobWorker = struct {
 
     pub fn kind(self: *const JobWorker) job.Kind {
         return self.request.kind();
+    }
+
+    pub fn pendingReconcile(self: *const JobWorker) ?*PendingReconcile {
+        return switch (self.request) {
+            .reconcile => |pending| pending,
+            else => null,
+        };
     }
 
     pub fn tagWrite(self: *const JobWorker) ?*PendingTagWrite {
@@ -785,23 +874,34 @@ pub const JobWorker = struct {
         }
     }
 
-    /// One root, walked exactly as `orca-cli scan` walks it: observe, project
-    /// each committed batch, close the run, and — only on a run that finished —
-    /// name the locations the walk never reached.
-    fn scanRoot(
+    fn runReconcile(self: *JobWorker, request: ReconcileRequest) void {
+        const io = self.threaded.io();
+        var roots = self.database.library_roots.list(self.allocator) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        defer roots.deinit();
+        const root = for (roots.items) |candidate| {
+            if (candidate.id == request.root_id and candidate.enabled) break candidate;
+        } else {
+            self.failed.store(true, .release);
+            return;
+        };
+        switch (request.scope) {
+            .whole_root => self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release),
+            .subtrees => |subtrees| self.reconcileSubtrees(io, root, subtrees, request.batch_size) catch self.failed.store(true, .release),
+        }
+    }
+
+    fn rootScanner(
         self: *JobWorker,
         io: std.Io,
         root: database.repository.LibraryRoot,
+        generation: i64,
         batch_size: usize,
-    ) !void {
-        const stats = &self.stats.scan;
-        self.progress.store(0, .release);
-        const scan_run = try self.database.scan_runs.begin(root.id);
-        var pass: library_pass.Projection = .{
-            .allocator = self.allocator,
-            .library = self.database,
-        };
-        var scanner: library_pass.Scanner = .{
+        pass: *library_pass.Projection,
+    ) library_pass.Scanner {
+        return .{
             .allocator = self.allocator,
             .io = io,
             .files = &self.database.files,
@@ -811,31 +911,112 @@ pub const JobWorker = struct {
             .database_handle = self.database.database,
             .volume_id = root.volume_id,
             .root_id = root.id,
-            .generation = scan_run.generation,
+            .generation = generation,
             .cancellation = &self.token,
             .batch_size = batch_size,
             .progress = &self.progress,
-            .projection = &pass,
+            .projection = pass,
         };
+    }
+
+    /// One root, walked exactly as `orca-cli scan` walks it: observe, project
+    /// each committed batch, close the run, and — only on a run that finished —
+    /// name the locations the walk never reached.
+    fn scanRoot(
+        self: *JobWorker,
+        io: std.Io,
+        root: database.repository.LibraryRoot,
+        batch_size: usize,
+    ) !void {
+        self.progress.store(0, .release);
+        const scan_run = try self.database.scan_runs.begin(root.id);
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
         defer scanner.deinit();
         const result = try scanner.scan(root.path);
         try self.database.scan_runs.finish(
             scan_run.id,
             if (result.cancelled) .cancelled else .completed,
-            .{
-                .files_seen = result.files_seen,
-                .changed = result.changed,
-                .unchanged = result.unchanged,
-                .unsupported = result.unsupported,
-                .errors = result.errors,
-            },
+            scanCounters(result),
         );
         // Never on a cancelled run: a partial walk must not mark the files it
         // did not reach as missing.
-        if (!result.cancelled) _ = try self.database.files.markMissingBelowGeneration(
+        const marked_missing = if (result.cancelled) 0 else try self.database.files.markMissingBelowGeneration(
             root.id,
             scan_run.generation,
         );
+        self.noteScan(result);
+        _ = self.stats.scan.marked_missing.fetchAdd(marked_missing, .acq_rel);
+    }
+
+    /// Walks each directory under one run of the root, then sweeps only the
+    /// directories whose walk finished: a directory that failed or was cut
+    /// short keeps every location it holds.
+    fn reconcileSubtrees(
+        self: *JobWorker,
+        io: std.Io,
+        root: database.repository.LibraryRoot,
+        subtrees: []const []const u8,
+        batch_size: usize,
+    ) !void {
+        const stats = &self.stats.scan;
+        const walked = try self.allocator.alloc(bool, subtrees.len);
+        defer self.allocator.free(walked);
+        @memset(walked, false);
+        const scan_run = try self.database.scan_runs.begin(root.id);
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
+        defer scanner.deinit();
+        var totals: library_pass.scanner.Result = .{};
+        var walk_failed = false;
+        for (subtrees, walked) |subtree, *completed| {
+            if (self.cancelled()) {
+                totals.cancelled = true;
+                break;
+            }
+            self.progress.store(0, .release);
+            const result = scanner.scanSubtree(root.path, subtree) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    walk_failed = true;
+                    totals.errors += 1;
+                    continue;
+                },
+            };
+            accumulate(&totals, result);
+            if (result.cancelled) break;
+            completed.* = true;
+        }
+        try self.database.scan_runs.finish(
+            scan_run.id,
+            if (totals.cancelled) .cancelled else if (walk_failed) .failed else .completed,
+            scanCounters(totals),
+        );
+        if (!totals.cancelled) {
+            for (subtrees, walked) |subtree, completed| {
+                if (!completed) continue;
+                const prefix = try library_pass.scanner.pathUnder(self.allocator, root.path, subtree);
+                defer self.allocator.free(prefix);
+                _ = stats.marked_missing.fetchAdd(try self.database.files.markMissingBelowGenerationUnder(
+                    root.volume_id,
+                    root.id,
+                    scan_run.generation,
+                    prefix,
+                ), .acq_rel);
+            }
+        }
+        self.noteScan(totals);
+        if (walk_failed) self.failed.store(true, .release);
+    }
+
+    fn noteScan(self: *JobWorker, result: library_pass.scanner.Result) void {
+        const stats = &self.stats.scan;
         self.progress.store(0, .release);
         _ = stats.files_seen.fetchAdd(result.files_seen, .acq_rel);
         _ = stats.changed.fetchAdd(result.changed, .acq_rel);
@@ -920,3 +1101,53 @@ pub const JobWorker = struct {
         };
     }
 };
+
+fn scanCounters(result: library_pass.scanner.Result) database.repository.ScanCounters {
+    return .{
+        .files_seen = result.files_seen,
+        .changed = result.changed,
+        .unchanged = result.unchanged,
+        .unsupported = result.unsupported,
+        .errors = result.errors,
+    };
+}
+
+fn accumulate(totals: *library_pass.scanner.Result, result: library_pass.scanner.Result) void {
+    totals.files_seen += result.files_seen;
+    totals.changed += result.changed;
+    totals.unchanged += result.unchanged;
+    totals.unsupported += result.unsupported;
+    totals.errors += result.errors;
+    totals.batches_committed += result.batches_committed;
+    totals.cancelled = totals.cancelled or result.cancelled;
+    totals.projection.folders_visited += result.projection.folders_visited;
+    totals.projection.files_projected += result.projection.files_projected;
+    totals.projection.tracks_written += result.projection.tracks_written;
+    totals.projection.releases_written += result.projection.releases_written;
+}
+
+test "nested and repeated reconcile directories collapse to the outermost, and a name-prefix sibling is kept" {
+    const pending = try PendingReconcile.create(std.testing.allocator, .{
+        .root_id = 1,
+        .scope = .{ .subtrees = &.{ "A/B", "A-x", "A", "A/B/C", "A", "B" } },
+    });
+    defer pending.destroy();
+    const kept = pending.request.scope.subtrees;
+    try std.testing.expectEqual(@as(usize, 3), kept.len);
+    try std.testing.expectEqualStrings("A", kept[0]);
+    try std.testing.expectEqualStrings("A-x", kept[1]);
+    try std.testing.expectEqualStrings("B", kept[2]);
+}
+
+test "a reconcile directory that is empty, absolute, escapes its root or is not in normal form is refused" {
+    for ([_][]const u8{ "", "/A", "A/", "A//B", "A/../B", "..", "./A" }) |subtree| {
+        try std.testing.expectError(error.InvalidReconcileDirectory, PendingReconcile.create(std.testing.allocator, .{
+            .root_id = 1,
+            .scope = .{ .subtrees = &.{subtree} },
+        }));
+    }
+    try std.testing.expectError(error.InvalidReconcileDirectory, PendingReconcile.create(std.testing.allocator, .{
+        .root_id = 1,
+        .scope = .{ .subtrees = &.{} },
+    }));
+}

@@ -211,6 +211,8 @@ pub const ZoneStats = struct {
 };
 
 pub const ScanRequest = job_worker.ScanRequest;
+pub const ReconcileRequest = job_worker.ReconcileRequest;
+pub const ReconcileScope = job_worker.ReconcileScope;
 pub const BackfillRequest = job_worker.BackfillRequest;
 pub const AnalysisRequest = job_worker.AnalysisRequest;
 pub const DuplicateScanRequest = job_worker.DuplicateScanRequest;
@@ -1409,6 +1411,18 @@ pub const OrcaRuntime = struct {
         request: ScanRequest,
     ) !JobHandle {
         return runtime_jobs.startLibraryScan(self, library, request);
+    }
+
+    /// Starts a scan of one root, or of some directories under it, that marks
+    /// missing only what those walks no longer found. Refused with
+    /// `error.LibraryScanRunning` while a scan or reconcile of the Library
+    /// runs, as `startLibraryScan` is.
+    pub fn startLibraryReconcile(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: ReconcileRequest,
+    ) !JobHandle {
+        return runtime_jobs.startLibraryReconcile(self, library, request);
     }
 
     pub fn startLibraryProjection(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {

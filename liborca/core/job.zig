@@ -4,6 +4,9 @@ const object = @import("object.zig");
 
 pub const Kind = enum {
     scan,
+    /// A scan of a root, or of some directories under it, that also names
+    /// what those walks no longer found.
+    reconcile,
     /// Turning observed files into artists, releases and tracks. A pass of its
     /// own, because a metadata edit reprojects without walking a filesystem.
     projection,

@@ -100,6 +100,41 @@ identities are skipped, so no traversal-order checkpoint is required. Filesystem
 watchers feed the same reconciliation path as hints and are never an
 authoritative source of state.
 
+## Folder-scoped reconciliation
+
+`Runtime.startLibraryReconcile(library, ReconcileRequest)` starts a `reconcile`
+Job over one registered root. With `.whole_root` it is a scan of that root.
+With `.subtrees`, it walks only the named directories, given relative to the
+root, and marks missing only locations under them. `orca-cli reconcile
+DATABASE ROOT_ID [DIR...]` runs it.
+
+- Directories are in normal form: not empty, not absolute, and no empty, `.`
+  or `..` component. Anything else is refused with
+  `error.InvalidReconcileDirectory`. A directory inside another listed one is
+  walked once, as part of the outer one.
+- A subtree walk builds each uri as a full scan does, so a file keeps the
+  location a full scan gave it.
+- One scan run, and one generation, covers all of a job's directories.
+- A directory that is gone, or is no longer a directory, counts as a completed
+  walk that found nothing. Everything recorded under it becomes `missing`.
+- A directory is swept only if its recursive walk completed and the job was
+  not cancelled. A directory whose walk failed, for example on an unreadable
+  subdirectory, keeps every location it holds, and the job ends `failed`. The
+  other directories are still walked and swept.
+- The sweep is bounded by `volume_id` and the uri range `[prefix/, prefix0)`
+  on the `(volume_id, uri)` unique index, so a sibling such as `A/Newer` is
+  never swept for `A/New`, and the sweep reads only that directory's rows.
+
+A runtime refuses a second scan or reconcile of a Library while one runs, with
+`error.LibraryScanRunning` (`ORCA_STATUS_BUSY` through the C ABI). Each walk
+stamps the locations it reaches with its own generation, so a second walk
+could overwrite the first walk's stamp and the first walk's sweep would then
+mark present files `missing`. The check covers jobs in one runtime only; two
+processes scanning the same database are not coordinated.
+
+`ScanStats.marked_missing` counts the locations a scan or reconcile marked
+`missing`.
+
 ## Repairing properties without a walk
 
 The unchanged fast path has a cost, and it is not paid at scan time. A file the

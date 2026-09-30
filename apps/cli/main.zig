@@ -21,6 +21,8 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidCharacter, error.Overflow => "expected a number",
         error.UnknownOption => "unknown option",
         error.LibraryJobRunning => "a job is running on this library",
+        error.LibraryScanRunning => "a scan is already running on this library; wait for it to finish",
+        error.InvalidReconcileDirectory => "each DIR must be a path relative to the root, with no '.', '..', empty or trailing component",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL must be https, or http to localhost",
@@ -91,6 +93,7 @@ const commands = [_]Command{
     .{ .name = "--version", .usage = "--version", .min_arguments = 0, .max_arguments = null, .run = printVersion },
     .{ .name = "demo", .usage = "demo", .min_arguments = 0, .max_arguments = null, .run = runDemo, .shares_usage_line = true },
     .{ .name = "scan", .usage = "scan DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = scanRoot, .shares_usage_line = true },
+    .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
     .{ .name = "project", .usage = "project DATABASE", .min_arguments = 1, .max_arguments = 1, .run = projectLibrary, .shares_usage_line = true },
     .{ .name = "backfill", .usage = "backfill DATABASE [--force] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = backfillProperties },
     .{ .name = "analyze", .usage = "analyze DATABASE AUDIO", .min_arguments = 2, .max_arguments = 2, .run = analyzeFile },
@@ -150,6 +153,12 @@ fn writeHelp(stdout: *std.Io.Writer) !void {
 }
 
 const help_details =
+    \\reconcile walks the registered root ROOT_ID (see roots) again, or with
+    \\DIRs only those directories under it, given relative to the root, and
+    \\marks missing only files under what it walked. A directory that is gone
+    \\has everything under it marked missing; one that cannot be read is left
+    \\as it was and the command fails. missing= counts the files marked.
+    \\
     \\roots lists the registered folders. remove-root forgets one and every
     \\file, Track, Release and Artist that exists only under it; a file also
     \\located under another root stays. Files on disk are not touched.
@@ -323,6 +332,21 @@ fn scanRoot(context: Context) !void {
     });
     try awaitJob(&runtime, stdout, job_handle, null);
     try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+/// Walks a registered root, or only the given directories under it, and marks
+/// missing only the files under what it walked.
+fn reconcileRoot(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const directories = context.arguments[2..];
+    const job_handle = try runtime.startLibraryReconcile(library_handle, .{
+        .root_id = try std.fmt.parseInt(i64, context.arguments[1], 10),
+        .scope = if (directories.len == 0) .whole_root else .{ .subtrees = directories },
+    });
+    try awaitJob(&runtime, context.stdout, job_handle, null);
+    try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
 }
 
 /// Reprojection without a filesystem walk: this is what refreshes the library
@@ -1969,7 +1993,7 @@ fn printScanStats(
     stats: liborca.ScanStats,
 ) !void {
     try stdout.print(
-        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d}\n",
+        "seen={d} changed={d} unchanged={d} unsupported={d} errors={d} batches={d} missing={d}\n",
         .{
             stats.files_seen,
             stats.changed,
@@ -1977,6 +2001,7 @@ fn printScanStats(
             stats.unsupported,
             stats.errors,
             stats.batches_committed,
+            stats.marked_missing,
         },
     );
     try stdout.print(

@@ -36,6 +36,7 @@ pub const ScanRun = scan_runs.ScanRun;
 pub const ScanCounters = scan_runs.ScanCounters;
 pub const FileUpsert = files.FileUpsert;
 pub const incomplete_properties_predicate = files.incomplete_properties_predicate;
+pub const mark_missing_under_sql = files.mark_missing_under_sql;
 pub const FilePropertyUpdate = files.FilePropertyUpdate;
 pub const IncompleteFile = files.IncompleteFile;
 pub const IncompleteFilePage = files.IncompleteFilePage;

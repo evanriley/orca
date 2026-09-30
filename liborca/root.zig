@@ -143,6 +143,8 @@ pub const listenbrainz_token_account = internal.providers.listenbrainz.token_acc
 
 // Jobs.
 pub const ScanRequest = runtime.ScanRequest;
+pub const ReconcileRequest = runtime.ReconcileRequest;
+pub const ReconcileScope = runtime.ReconcileScope;
 pub const BackfillRequest = runtime.BackfillRequest;
 pub const AnalysisRequest = runtime.AnalysisRequest;
 pub const DuplicateScanRequest = runtime.DuplicateScanRequest;

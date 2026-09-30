@@ -963,6 +963,61 @@ test "a completed run marks only the locations it did not reach as missing" {
     try std.testing.expectEqual(@as(u64, 2), try library.files.count());
 }
 
+test "a directory sweep marks only unreached locations below that directory, never a sibling sharing its name's prefix" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-sweep-under?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const binding = try library.ensureRoot(std.testing.io, "/music", .{
+        .stable_key = "uuid:sweep-under",
+    });
+    const Row = struct { uri: []const u8, generation: i64, expected: repository.LocationState };
+    const rows = [_]Row{
+        .{ .uri = "/music/A/New/gone.flac", .generation = 3, .expected = .missing },
+        .{ .uri = "/music/A/New/deep/gone.flac", .generation = 3, .expected = .missing },
+        .{ .uri = "/music/A/New/kept.flac", .generation = 4, .expected = .present },
+        .{ .uri = "/music/A/Newer/other.flac", .generation = 3, .expected = .present },
+        .{ .uri = "/music/A/New.flac", .generation = 3, .expected = .present },
+        .{ .uri = "/music/A/Nevv/other.flac", .generation = 3, .expected = .present },
+        .{ .uri = "/music/B/other.flac", .generation = 3, .expected = .present },
+    };
+    var ids: [rows.len]i64 = undefined;
+    for (rows, &ids, 0..) |row, *id, index| id.* = try library.locations.upsert(.{
+        .file_id = try library.files.create(.{ .size_bytes = @intCast(index + 1) }),
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+        .uri = row.uri,
+        .last_seen_generation = row.generation,
+    });
+
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        try library.files.markMissingBelowGenerationUnder(binding.volume_id, binding.root_id, 4, "/music/A/New"),
+    );
+    for (rows, ids) |row, id| {
+        try std.testing.expectEqual(row.expected, try library.locations.stateOf(id));
+    }
+    try std.testing.expectEqual(
+        @as(i64, 3),
+        try testScalar(library.database, "SELECT last_seen_generation FROM locations WHERE uri='/music/A/Newer/other.flac';"),
+    );
+}
+
+test "a directory sweep reads a uri range of the volume's unique index, never the whole root" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-sweep-under-plan?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const plan = try queryPlan(&library, repository.mark_missing_under_sql);
+    defer std.testing.allocator.free(plan);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "sqlite_autoindex_locations_1 (volume_id=? AND uri>? AND uri<?)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "locations_sweep") == null);
+}
+
 test "opening a version-7 library recovers its journal before the schema moves" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

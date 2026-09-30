@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const analysis_service = @import("../analysis/service.zig");
 const artwork = @import("artwork.zig");
 const audio = @import("../audio/root.zig");
@@ -1821,4 +1822,207 @@ test "a root cannot be removed while a job runs on its library, and afterwards i
     try std.testing.expectEqual(@as(usize, 0), roots.items.len);
     try std.testing.expectError(error.UnknownRoot, runtime.libraryRemoveRoot(library, binding.root_id));
     try std.Io.Dir.cwd().access(std.testing.io, root, .{});
+}
+
+/// A library over a temporary root holding `A/one.flac` and `B/two.mp3`,
+/// scanned once in full.
+const ReconcileFixture = struct {
+    temporary: std.testing.TmpDir,
+    runtime: OrcaRuntime,
+    root: []u8,
+    library: LibraryHandle,
+    root_id: i64,
+
+    fn init(self: *ReconcileFixture, name: [:0]const u8) !void {
+        self.temporary = std.testing.tmpDir(.{});
+        errdefer self.temporary.cleanup();
+        try self.temporary.dir.createDirPath(std.testing.io, "A");
+        try self.temporary.dir.createDirPath(std.testing.io, "B");
+        try copyFixtureInto(self.temporary.dir, "fixtures/audio/tagged-reference.flac", "A/one.flac");
+        try copyFixtureInto(self.temporary.dir, "fixtures/audio/covered-reference.mp3", "B/two.mp3");
+        self.root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
+        errdefer std.testing.allocator.free(self.root);
+        self.runtime = OrcaRuntime.init(std.testing.allocator);
+        errdefer self.runtime.deinit();
+        self.library = try self.runtime.openLibrary(std.testing.io, name);
+        self.root_id = (try self.runtime.libraryAddRoot(self.library, std.testing.io, self.root)).root_id;
+        try std.testing.expectEqual(job.State.succeeded, try awaitJob(&self.runtime, try self.runtime.startLibraryScan(self.library, .{ .root_id = self.root_id })));
+    }
+
+    fn deinit(self: *ReconcileFixture) void {
+        self.runtime.deinit();
+        std.testing.allocator.free(self.root);
+        self.temporary.cleanup();
+    }
+
+    fn reconcile(self: *ReconcileFixture, subtrees: []const []const u8) !struct { state: job.State, stats: runtime_module.ScanStats } {
+        const job_handle = try self.runtime.startLibraryReconcile(self.library, .{
+            .root_id = self.root_id,
+            .scope = .{ .subtrees = subtrees },
+        });
+        const state = try awaitJob(&self.runtime, job_handle);
+        return .{ .state = state, .stats = try self.runtime.jobScanStats(job_handle) };
+    }
+
+    fn location(self: *ReconcileFixture, relative: []const u8) !?StoredLocation {
+        const uri = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ self.root, relative });
+        defer std.testing.allocator.free(uri);
+        const library_database = try libraryDatabase(&self.runtime, self.library);
+        var statement = try library_database.database.prepare(
+            "SELECT state, last_seen_generation, file_id FROM locations WHERE uri=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, uri);
+        if (try statement.step() != .row) return null;
+        return .{
+            .state = database.LocationState.parse(statement.columnText(0)).?,
+            .generation = statement.columnInt64(1),
+            .file_id = statement.columnInt64(2),
+        };
+    }
+
+    fn locationCount(self: *ReconcileFixture) !u64 {
+        return (try libraryDatabase(&self.runtime, self.library)).locations.count();
+    }
+};
+
+const StoredLocation = struct {
+    state: database.LocationState,
+    generation: i64,
+    file_id: i64,
+};
+
+test "a subtree reconcile records a file added under that directory and leaves sibling directories' locations untouched" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-added?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const sibling_before = (try fixture.location("B/two.mp3")).?;
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/New");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A/New/three.m4a");
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.changed);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.unchanged);
+    try std.testing.expectEqual(@as(u64, 0), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/New/three.m4a")).?.state);
+    try std.testing.expectEqual(sibling_before, (try fixture.location("B/two.mp3")).?);
+}
+
+test "a subtree reconcile marks a deleted file under the directory missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-deleted?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+}
+
+test "reconciling a deleted directory marks everything under it missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-deleted-directory?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.deleteTree(std.testing.io, "A");
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 0), outcome.stats.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("B/two.mp3")).?.state);
+}
+
+test "a rename within a reconciled directory keeps the file's identity at its new uri and marks the old one missing" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-rename?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const before = (try fixture.location("A/one.flac")).?;
+    try std.Io.Dir.rename(fixture.temporary.dir, "A/one.flac", fixture.temporary.dir, "A/renamed.flac", std.testing.io);
+
+    const outcome = try fixture.reconcile(&.{"A"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    const renamed = (try fixture.location("A/renamed.flac")).?;
+    try std.testing.expectEqual(database.LocationState.present, renamed.state);
+    try std.testing.expectEqual(before.file_id, renamed.file_id);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/one.flac")).?.state);
+}
+
+test "reconciling a directory never sweeps a sibling whose name starts with the directory's" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-prefix?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/New");
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/Newer");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A/New/three.m4a");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference.ogg", "A/Newer/four.ogg");
+    try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/New/three.m4a");
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/Newer/four.ogg");
+
+    const outcome = try fixture.reconcile(&.{"A/New"});
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("A/New/three.m4a")).?.state);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/Newer/four.ogg")).?.state);
+}
+
+test "an unreadable subdirectory fails the reconcile and sweeps nothing under its directory, while the other directories are swept" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-unreadable?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/locked");
+    try fixture.temporary.dir.deleteFile(std.testing.io, "A/one.flac");
+    try fixture.temporary.dir.deleteFile(std.testing.io, "B/two.mp3");
+    try fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .fromMode(0), .{});
+    defer fixture.temporary.dir.setFilePermissions(std.testing.io, "A/locked", .default_dir, .{}) catch {};
+
+    const outcome = try fixture.reconcile(&.{ "A", "B" });
+    try std.testing.expectEqual(job.State.failed, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.errors);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.marked_missing);
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
+    try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
+}
+
+test "a second scan or reconcile of a library is refused while one runs" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-concurrent?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const library_database = try libraryDatabase(&fixture.runtime, fixture.library);
+    library_database.write_lane.acquire();
+    const running = fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id }) catch |err| {
+        library_database.write_lane.release();
+        return err;
+    };
+    const second_scan = fixture.runtime.startLibraryScan(fixture.library, .{});
+    const reconcile = fixture.runtime.startLibraryReconcile(fixture.library, .{ .root_id = fixture.root_id });
+    library_database.write_lane.release();
+    try std.testing.expectError(error.LibraryScanRunning, second_scan);
+    try std.testing.expectError(error.LibraryScanRunning, reconcile);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, running));
+    try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
+}
+
+test "a reconciled directory names each file with the uri a full scan gave it" {
+    var fixture: ReconcileFixture = undefined;
+    try fixture.init("file:orca-reconcile-uris?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.temporary.dir.createDirPath(std.testing.io, "A/b/c");
+    try copyFixtureInto(fixture.temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "A/b/c/deep.m4a");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, try fixture.runtime.startLibraryScan(fixture.library, .{ .root_id = fixture.root_id })));
+    const locations = try fixture.locationCount();
+
+    const outcome = try fixture.reconcile(&.{ "A/b", "A/b/c" });
+    try std.testing.expectEqual(job.State.succeeded, outcome.state);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), outcome.stats.unchanged);
+    try std.testing.expectEqual(@as(u64, 0), outcome.stats.changed);
+    try std.testing.expectEqual(locations, try fixture.locationCount());
+    try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/b/c/deep.m4a")).?.state);
 }
