@@ -10,6 +10,12 @@
   does not fit is `error.InvalidMp4` rather than a panic in safe builds and
   undefined behaviour in `ReleaseFast`. The movie-box walk in `iso_bmff.zig`
   checks its offset arithmetic the same way.
+- **Fuzz targets for every parser that reads untrusted bytes**: ID3v2, MP4
+  and ISO-BMFF, Vorbis comments (FLAC, Ogg and bare), WAV, AIFF, ADTS, the
+  MP3 stream reader, and the scanner's detect, probe and artwork path
+  (`liborca/fuzz.zig`). `zig build test` replays their seeds, including every
+  input under `fixtures/fuzz/`; `zig build fuzz --fuzz[=N]` fuzzes them. A
+  single allocation above the largest designed bound fails the input.
 
 ## 0.2.0 - 2026-09-29
 

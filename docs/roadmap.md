@@ -166,9 +166,6 @@ These have no planned client and are deleted in the maintenance milestone:
 In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Correctness and maintenance.** No new features until these land:
-   - **Parser hardening.** Checked arithmetic in `codec/mp4.zig`, where a
-     crafted sample table overflows, and fuzz targets for ID3v2, MP4 and
-     ISO-BMFF, Vorbis comments, WAV, AIFF, ADTS and the MP3 stream reader.
    - **The two intermittent test failures, fixed at their causes.** The
      engine's `quiesce` can starve it when the control lane suspends it again
      within one park interval, so its output never opens; and the queue

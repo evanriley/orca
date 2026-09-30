@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
         }
         liborca_module.linkSystemLibrary("pipewire-0.3", .{ .use_pkg_config = .no });
     }
+    excludeCFromFuzzing(b, liborca_module);
 
     const liborca = b.addLibrary(.{
         .name = "orca",
@@ -177,6 +178,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&embed_example.step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_c_abi_smoke.step);
+
+    const fuzz_tests = b.addTest(.{
+        .root_module = liborca_module,
+        .filters = &.{"fuzz:"},
+        .use_llvm = true,
+        .test_runner = .{ .path = b.path("build/test_runner.zig"), .mode = .server },
+    });
+    const fuzz_step = b.step("fuzz", "Replay fuzz seeds; add --fuzz to fuzz");
+    fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
     if (target.result.os.tag == .linux) {
         // The GTK4 frontend is Zig and consumes liborca's Zig-facing API
@@ -291,6 +301,17 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_dsp_benchmark.addArgs(args);
     const dsp_benchmark_step = b.step("dsp-bench", "Compare scalar and SIMD DSP kernels");
     dsp_benchmark_step.dependOn(&run_dsp_benchmark.step);
+}
+
+// `-ffuzz` would give the C libraries clang's coverage tables, whose layout
+// Zig's fuzzer runtime rejects at startup; they are not fuzz targets anyway.
+fn excludeCFromFuzzing(b: *std.Build, module: *std.Build.Module) void {
+    const flag: []const []const u8 = &.{"-fno-sanitize=fuzzer-no-link"};
+    for (module.link_objects.items) |object| switch (object) {
+        .c_source_file => |source| source.flags = std.mem.concat(b.allocator, []const u8, &.{ source.flags, flag }) catch @panic("OOM"),
+        .c_source_files => |sources| sources.flags = std.mem.concat(b.allocator, []const u8, &.{ sources.flags, flag }) catch @panic("OOM"),
+        else => {},
+    };
 }
 
 /// Only `-I` paths are taken from pkg-config: PipeWire's full `--cflags`

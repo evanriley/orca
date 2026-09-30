@@ -165,4 +165,5 @@ comptime {
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(internal);
+    _ = @import("fuzz.zig");
 }
