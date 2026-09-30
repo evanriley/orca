@@ -97,6 +97,7 @@ pub const PlayerEngine = struct {
     /// Control-lane mirrors of the publication state.
     control_sequence: u64 = 0,
     control_slot: u32 = 0,
+    release_epoch: u64 = 0,
 
     // ---- Engine-thread-only state ----
     adopted: []*ZoneRuntime = &.{},
@@ -179,18 +180,30 @@ pub const PlayerEngine = struct {
     /// Two completed iterations are the proof: the second of them must have
     /// started after `suspend_requested` was published, so it took the idle
     /// branch, and every later iteration does the same while the flag is set.
+    ///
+    /// A quiesce that follows a `release` first waits two iterations with the
+    /// flag clear, so the engine completes a pass however soon the control lane
+    /// suspends it again. Both proofs order a store on one thread before a load
+    /// on the other, which is why the flag and epoch accesses are `seq_cst`.
     pub fn quiesce(self: *PlayerEngine) void {
-        self.suspend_requested.store(true, .release);
-        if (!self.running.load(.acquire)) return;
-        const target = self.pass_epoch.load(.acquire) + 2;
-        while (self.running.load(.acquire) and self.pass_epoch.load(.acquire) < target) {
+        while (self.running.load(.acquire) and
+            self.pass_epoch.load(.seq_cst) < self.release_epoch)
+        {
+            self.wakeUp();
+            std.Thread.yield() catch {};
+        }
+        self.suspend_requested.store(true, .seq_cst);
+        if (!self.running.load(.seq_cst)) return;
+        const target = self.pass_epoch.load(.seq_cst) + 2;
+        while (self.running.load(.acquire) and self.pass_epoch.load(.seq_cst) < target) {
             self.wakeUp();
             std.Thread.yield() catch {};
         }
     }
 
     pub fn release(self: *PlayerEngine) void {
-        self.suspend_requested.store(false, .release);
+        self.suspend_requested.store(false, .seq_cst);
+        self.release_epoch = self.pass_epoch.load(.seq_cst) + 2;
         self.wakeUp();
     }
 
@@ -228,10 +241,10 @@ pub const PlayerEngine = struct {
     /// and `destroyPlayer` cancel and join it rather than abandoning it.
     pub fn run(self: *PlayerEngine) void {
         const registration = self.registration.?;
-        self.running.store(true, .release);
+        self.running.store(true, .seq_cst);
         while (!registration.cancellationRequested()) {
-            if (!self.suspend_requested.load(.acquire)) self.pass();
-            _ = self.pass_epoch.fetchAdd(1, .acq_rel);
+            if (!self.suspend_requested.load(.seq_cst)) self.pass();
+            _ = self.pass_epoch.fetchAdd(1, .seq_cst);
             self.park();
         }
         // A final adopt releases a control lane blocked in awaitAcknowledgement,
@@ -1089,6 +1102,33 @@ test "unpublishing a Zone is acknowledged before the control lane frees it" {
     harness.registration.awaitCompletion();
     keep.closeOutput();
     keep.resetPipe();
+}
+
+test "a control lane that quiesces back to back still lets the engine run" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    harness.registration.thread = try std.Thread.spawn(.{}, PlayerEngine.run, .{harness.engine});
+    while (!harness.engine.running.load(.acquire)) std.Thread.yield() catch {};
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+
+    const suspensions = 50;
+    for (0..suspensions) |_| {
+        harness.engine.quiesce();
+        harness.engine.release();
+    }
+
+    harness.registration.requestCancellation();
+    harness.registration.awaitCompletion();
+    runtime_zone.closeOutput();
+    runtime_zone.resetPipe();
+    try std.testing.expect(harness.engine.passes >= suspensions);
 }
 
 // -------------------------------------------------------------- queue tests

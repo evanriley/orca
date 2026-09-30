@@ -119,7 +119,9 @@ decodes one canonical block per Zone budget, fans it out, services output
 opening and bounded recovery, publishes position, and parks briefly so
 play/pause/seek take effect within a device quantum. The Player's `SourceQueue`
 is plain state rather than an atomic, so loading a source or seeking quiesces the
-engine first.
+engine first. A quiesce that follows a release waits for one full engine pass
+before suspending it again, so back-to-back control calls cannot starve the
+engine.
 
 The engine thread never resolves a handle. `core/handle.zig` performs no locking,
 so generational handles protect handles, not a pointer a worker already

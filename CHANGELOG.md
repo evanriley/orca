@@ -26,6 +26,15 @@
   allocated.** The declared size, up to 16 MiB, was allocated first and only
   then found to be short.
 
+### Playback engine
+
+- **Back-to-back control calls no longer starve the engine.** A quiesce that
+  came within one park interval of the previous release suspended the engine
+  before it ran a pass, so a host calling `playerSignalPath`,
+  `playerSetEqualizer`, `playerSetCrossfeed` or `seekPlayer` every few
+  milliseconds kept the output from ever opening. A quiesce now waits for one
+  full pass after a release.
+
 ## 0.2.0 - 2026-09-29
 
 The first tagged release. Ships Library schema version 18.
