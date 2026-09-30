@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-30
+
+Ships Library schema version 19.
+
 ### Added
 
 - **Folder-scoped reconciliation.** `Runtime.startLibraryReconcile(library,
