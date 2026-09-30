@@ -96,6 +96,7 @@ fn loadTag(
     // ID3v2.2 frame identifiers are three bytes wide and a different frame set;
     // it is deliberately not read here, and neither is any future major.
     if (major < 3 or major > 4) return null;
+    if (size > readable.size() - header.len) return error.TruncatedId3v2Tag;
 
     const body = try allocator.alloc(u8, size);
     errdefer allocator.free(body);
@@ -1109,6 +1110,14 @@ test "truncated and malformed ID3v2 tags are rejected without reading past the e
     try mixed.appendSlice(allocator, "\xfe\xfe\xfe\xfe\x00\x00\x00\x02\x00\x00zz");
     const tags = (try expectTags(allocator, try buildTag(allocator, 4, 0, mixed.items))).?;
     try std.testing.expectEqualStrings("Kept", tags.title.?);
+}
+
+test "a tag declaring more bytes than the stream holds is rejected before any allocation" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.TruncatedId3v2Tag,
+        expectTags(failing.allocator(), "ID3\x04\x00\x00\x01\x00\x00\x00short"),
+    );
 }
 
 test "tagged MP3 fixture reads its real ID3v2 frames" {

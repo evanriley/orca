@@ -22,6 +22,9 @@
 - **ALAC rejects a configuration of more than 8 channels or 65,536 frames per
   packet.** The decoder's buffers were sized from the declared frame length,
   so a crafted cookie could demand gigabytes.
+- **An ID3v2 tag larger than its file is rejected before its body is
+  allocated.** The declared size, up to 16 MiB, was allocated first and only
+  then found to be short.
 
 ## 0.2.0 - 2026-09-29
 
