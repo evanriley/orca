@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- **Tag writes store the release, release-group, release-track and
+  album-artist MusicBrainz IDs.** `metadata.Field` gains
+  `musicbrainz_release_id`, `musicbrainz_release_group_id`,
+  `musicbrainz_release_track_id` and `musicbrainz_album_artist_id`, which
+  `libraryEditTracks` and a tag-write plan accept only as lowercase UUIDs.
+  FLAC writes them as `MUSICBRAINZ_ALBUMID`, `MUSICBRAINZ_RELEASEGROUPID`,
+  `MUSICBRAINZ_RELEASETRACKID` and `MUSICBRAINZ_ALBUMARTISTID`; MP3 and ADTS
+  as Picard's `TXXX` frames, replacing only a `TXXX` under a description the
+  reader takes the ID from and keeping every other frame byte for byte, in
+  ID3v2.3 and 2.4.
+
 ### Fixed
 
 - **A second Orca process no longer deletes the WAL under a live Library on

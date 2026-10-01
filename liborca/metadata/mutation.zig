@@ -89,11 +89,18 @@ pub const Plan = struct {
             .write_tags => |write| {
                 if (write.path.len == 0 or write.changes.len == 0)
                     return error.InvalidMutationPlan;
-                for (write.changes) |change| {
-                    if (change.field != .musicbrainz_recording_id) continue;
-                    const value = change.after orelse continue;
-                    if (!model.isMusicBrainzId(value)) return error.InvalidMutationPlan;
-                }
+                for (write.changes) |change| switch (change.field) {
+                    .musicbrainz_recording_id,
+                    .musicbrainz_release_id,
+                    .musicbrainz_release_group_id,
+                    .musicbrainz_release_track_id,
+                    .musicbrainz_album_artist_id,
+                    => {
+                        const value = change.after orelse continue;
+                        if (!model.isMusicBrainzId(value)) return error.InvalidMutationPlan;
+                    },
+                    .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => {},
+                };
             },
             .move => |move| {
                 if (move.source_path.len == 0 or move.destination_path.len == 0 or
@@ -332,6 +339,30 @@ test "a plan writes a recording id only when it is a MusicBrainz id" {
         .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8F3471B5-7E6A-48DA-86A9-C1C07A0F5B4A" }},
     } }};
     try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &uppercase));
+}
+
+test "a plan writes a release, release-group, release-track or album-artist id only when it is a MusicBrainz id" {
+    for ([_]Field{
+        .musicbrainz_release_id,
+        .musicbrainz_release_group_id,
+        .musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id,
+    }) |field| {
+        const valid = [_]Action{.{ .write_tags = .{
+            .path = "/music/example.flac",
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .changes = &.{.{ .field = field, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }},
+        } }};
+        var plan = try Plan.init(std.testing.allocator, 42, &valid);
+        plan.deinit();
+
+        const invalid = [_]Action{.{ .write_tags = .{
+            .path = "/music/example.flac",
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .changes = &.{.{ .field = field, .before = null, .after = "Some Album" }},
+        } }};
+        try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &invalid));
+    }
 }
 
 test "an approved plan cannot be altered through a caller-held alias" {

@@ -327,15 +327,15 @@ fn applyUserText(
     if (value.len == 0) return;
     if (eqlAny(description, recording_id_descriptions))
         return claim(&tags.musicbrainz_recording_id, value);
-    if (eqlAny(description, &.{ "MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID" }))
+    if (eqlAny(description, release_id_descriptions))
         return claim(&tags.musicbrainz_release_id, value);
-    if (eqlAny(description, &.{ "MusicBrainz Release Group Id", "MUSICBRAINZ_RELEASEGROUPID" }))
+    if (eqlAny(description, release_group_id_descriptions))
         return claim(&tags.musicbrainz_release_group_id, value);
-    if (eqlAny(description, &.{ "MusicBrainz Release Track Id", "MUSICBRAINZ_RELEASETRACKID" }))
+    if (eqlAny(description, release_track_id_descriptions))
         return claim(&tags.musicbrainz_release_track_id, value);
     if (eqlAny(description, &.{ "MusicBrainz Artist Id", "MUSICBRAINZ_ARTISTID" }))
         return claim(&tags.musicbrainz_artist_id, value);
-    if (eqlAny(description, &.{ "MusicBrainz Album Artist Id", "MUSICBRAINZ_ALBUMARTISTID" }))
+    if (eqlAny(description, album_artist_id_descriptions))
         return claim(&tags.musicbrainz_album_artist_id, value);
     if (eqlAny(description, &.{ "MusicBrainz Album Type", "RELEASETYPE" }))
         return claim(&tags.release_type, value);
@@ -354,6 +354,10 @@ fn applyUserText(
 }
 
 const recording_id_descriptions: []const []const u8 = &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" };
+const release_id_descriptions: []const []const u8 = &.{ "MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID" };
+const release_group_id_descriptions: []const []const u8 = &.{ "MusicBrainz Release Group Id", "MUSICBRAINZ_RELEASEGROUPID" };
+const release_track_id_descriptions: []const []const u8 = &.{ "MusicBrainz Release Track Id", "MUSICBRAINZ_RELEASETRACKID" };
+const album_artist_id_descriptions: []const []const u8 = &.{ "MusicBrainz Album Artist Id", "MUSICBRAINZ_ALBUMARTISTID" };
 const musicbrainz_ufid_owner = "http://musicbrainz.org";
 
 fn applyUniqueFileIdentifier(
@@ -726,6 +730,10 @@ fn currentValue(allocator: std.mem.Allocator, tags: model.ObservedTags, field: m
         .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
         .musicbrainz_recording_id => tags.musicbrainz_recording_id,
+        .musicbrainz_release_id => tags.musicbrainz_release_id,
+        .musicbrainz_release_group_id => tags.musicbrainz_release_group_id,
+        .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
     };
 }
 
@@ -741,44 +749,62 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .disc_number => &.{"TPOS"},
         .compilation => &.{"TCMP"},
         .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT", "TIME", "TRDA" },
-        .musicbrainz_recording_id => &.{},
+        .musicbrainz_recording_id,
+        .musicbrainz_release_id,
+        .musicbrainz_release_group_id,
+        .musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id,
+        => &.{},
     };
 }
 
-/// Whether a change replaces `frame`. A recording ID lives in a `UFID` frame
-/// owned by MusicBrainz or a `TXXX` frame under a description the reader
-/// accepts, so those two frame types are told apart by owner and description,
-/// and every other owner or description is kept.
+/// The `TXXX` descriptions the reader takes `field` from; a write uses the
+/// first.
+fn userTextDescriptions(field: mutation.Field) []const []const u8 {
+    return switch (field) {
+        .musicbrainz_recording_id => recording_id_descriptions,
+        .musicbrainz_release_id => release_id_descriptions,
+        .musicbrainz_release_group_id => release_group_id_descriptions,
+        .musicbrainz_release_track_id => release_track_id_descriptions,
+        .musicbrainz_album_artist_id => album_artist_id_descriptions,
+        .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => &.{},
+    };
+}
+
+/// Whether a change replaces `frame`. MusicBrainz IDs live in `TXXX` frames
+/// under a description the reader accepts, and a recording ID also in a `UFID`
+/// frame owned by MusicBrainz, so those two frame types are told apart by
+/// description and owner, and every other description or owner is kept.
 fn replaced(allocator: std.mem.Allocator, frame: []const u8, major: u8, changes: []const mutation.Change) !bool {
     const identifier = frame[0..4];
     for (changes) |change| {
-        if (change.field == .musicbrainz_recording_id) {
-            if (try carriesRecordingId(allocator, frame, major)) return true;
-            continue;
-        }
         for (fieldFrames(change.field, major)) |candidate| {
             if (std.mem.eql(u8, identifier, candidate)) return true;
         }
+        if (try carriesUserText(allocator, frame, major, userTextDescriptions(change.field))) return true;
+        if (change.field == .musicbrainz_recording_id and try carriesMusicBrainzUfid(allocator, frame, major))
+            return true;
     }
     return false;
 }
 
-fn carriesRecordingId(allocator: std.mem.Allocator, frame: []const u8, major: u8) !bool {
-    const identifier = frame[0..4];
-    const is_unique_identifier = std.mem.eql(u8, identifier, "UFID");
-    if (!is_unique_identifier and !std.mem.eql(u8, identifier, "TXXX")) return false;
+fn carriesMusicBrainzUfid(allocator: std.mem.Allocator, frame: []const u8, major: u8) !bool {
+    if (!std.mem.eql(u8, frame[0..4], "UFID")) return false;
     const payload = try framePayload(allocator, frame, major) orelse return false;
-    if (is_unique_identifier) {
-        const split = std.mem.indexOfScalar(u8, payload, 0) orelse return false;
-        return std.mem.eql(u8, payload[0..split], musicbrainz_ufid_owner);
-    }
+    const split = std.mem.indexOfScalar(u8, payload, 0) orelse return false;
+    return std.mem.eql(u8, payload[0..split], musicbrainz_ufid_owner);
+}
+
+fn carriesUserText(allocator: std.mem.Allocator, frame: []const u8, major: u8, descriptions: []const []const u8) !bool {
+    if (descriptions.len == 0 or !std.mem.eql(u8, frame[0..4], "TXXX")) return false;
+    const payload = try framePayload(allocator, frame, major) orelse return false;
     var values = decodeTextValues(allocator, payload) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return false,
     };
     defer values.deinit(allocator);
     if (values.items.len == 0) return false;
-    return eqlAny(values.items[0], recording_id_descriptions);
+    return eqlAny(values.items[0], descriptions);
 }
 
 /// A whole frame's payload with the prefixes its format flags announce
@@ -873,6 +899,11 @@ fn appendChangedFrames(
         },
         .title, .artist, .album, .album_artist, .compilation => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
         .musicbrainz_recording_id => try appendUniqueFileIdentifier(allocator, body, major, musicbrainz_ufid_owner, value),
+        .musicbrainz_release_id,
+        .musicbrainz_release_group_id,
+        .musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id,
+        => try appendUserText(allocator, body, major, userTextDescriptions(field)[0], value),
     }
 }
 
@@ -911,27 +942,54 @@ fn appendTextFrame(
         try payload.append(allocator, 3);
         try payload.appendSlice(allocator, value);
     } else {
-        try payload.appendSlice(allocator, &.{ 1, 0xff, 0xfe });
-        var units = (try std.unicode.Utf8View.init(value)).iterator();
-        while (units.nextCodepoint()) |codepoint| {
-            var encoded: [2]u16 = undefined;
-            const count: usize = if (codepoint < 0x10000) blk: {
-                encoded[0] = @intCast(codepoint);
-                break :blk 1;
-            } else blk: {
-                const offset = codepoint - 0x10000;
-                encoded[0] = @intCast(0xd800 + (offset >> 10));
-                encoded[1] = @intCast(0xdc00 + (offset & 0x3ff));
-                break :blk 2;
-            };
-            for (encoded[0..count]) |unit| {
-                var little: [2]u8 = undefined;
-                std.mem.writeInt(u16, &little, unit, .little);
-                try payload.appendSlice(allocator, &little);
-            }
-        }
+        try payload.append(allocator, 1);
+        try appendUtf16(allocator, &payload, value);
     }
     try appendFrame(allocator, body, major, identifier, payload.items);
+}
+
+fn appendUserText(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    description: []const u8,
+    value: []const u8,
+) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    if (major >= 4) {
+        try payload.append(allocator, 3);
+        try payload.appendSlice(allocator, description);
+        try payload.append(allocator, 0);
+        try payload.appendSlice(allocator, value);
+    } else {
+        try payload.append(allocator, 1);
+        try appendUtf16(allocator, &payload, description);
+        try payload.appendSlice(allocator, &.{ 0, 0 });
+        try appendUtf16(allocator, &payload, value);
+    }
+    try appendFrame(allocator, body, major, "TXXX", payload.items);
+}
+
+fn appendUtf16(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), text: []const u8) !void {
+    try payload.appendSlice(allocator, &.{ 0xff, 0xfe });
+    var units = (try std.unicode.Utf8View.init(text)).iterator();
+    while (units.nextCodepoint()) |codepoint| {
+        var encoded: [2]u16 = undefined;
+        const count: usize = if (codepoint < 0x10000) blk: {
+            encoded[0] = @intCast(codepoint);
+            break :blk 1;
+        } else blk: {
+            const offset = codepoint - 0x10000;
+            encoded[0] = @intCast(0xd800 + (offset >> 10));
+            encoded[1] = @intCast(0xdc00 + (offset & 0x3ff));
+            break :blk 2;
+        };
+        for (encoded[0..count]) |unit| {
+            var little: [2]u8 = undefined;
+            std.mem.writeInt(u16, &little, unit, .little);
+            try payload.appendSlice(allocator, &little);
+        }
+    }
 }
 
 fn appendFrame(
@@ -975,7 +1033,15 @@ fn updatedTrailer(legacy: id3v1.Tag, original: [128]u8, changes: []const mutatio
                 std.fmt.parseUnsigned(u8, text, 10) catch return original
             else
                 null,
-            .album_artist, .disc_number, .compilation, .musicbrainz_recording_id => {},
+            .album_artist,
+            .disc_number,
+            .compilation,
+            .musicbrainz_recording_id,
+            .musicbrainz_release_id,
+            .musicbrainz_release_group_id,
+            .musicbrainz_release_track_id,
+            .musicbrainz_album_artist_id,
+            => {},
         }
     }
     return id3v1.encode(tag) catch original;
@@ -1585,4 +1651,200 @@ test "a title change to a cover-only ID3v2 tag is checked against the trailer ti
         .{ .field = .title, .before = "Song", .after = "Anthem" },
     });
     try expectTrailerValues((try expectTags(allocator, written)).?, "Anthem", "1999");
+}
+
+fn countUserText(allocator: std.mem.Allocator, bytes: []const u8, descriptions: []const []const u8) !usize {
+    var memory = source.MemorySource{ .bytes = bytes };
+    const tag = try loadTag(allocator, memory.readable()) orelse return 0;
+    defer tag.deinit();
+    var frames: FrameIterator = .{ .body = tag.span, .major = tag.major };
+    var count: usize = 0;
+    while (try frames.next()) |frame| {
+        if (!std.mem.eql(u8, &frame.identifier, "TXXX")) continue;
+        var values = try decodeTextValues(allocator, frame.data);
+        defer values.deinit(allocator);
+        if (values.items.len > 0 and eqlAny(values.items[0], descriptions)) count += 1;
+    }
+    return count;
+}
+
+fn asciiUtf16Le(comptime ascii: []const u8) [ascii.len * 2]u8 {
+    var bytes: [ascii.len * 2]u8 = undefined;
+    for (ascii, 0..) |byte, index| bytes[index * 2 ..][0..2].* = .{ byte, 0 };
+    return bytes;
+}
+
+fn expectedUserTextFrame(
+    allocator: std.mem.Allocator,
+    comptime major: u8,
+    comptime description: []const u8,
+    comptime value: []const u8,
+) ![]u8 {
+    const payload = comptime if (major >= 4)
+        "\x03" ++ description ++ "\x00" ++ value
+    else
+        "\x01\xff\xfe" ++ asciiUtf16Le(description) ++ "\x00\x00\xff\xfe" ++ asciiUtf16Le(value);
+    return buildFrame(allocator, "TXXX", major, payload);
+}
+
+const ReleaseIds = struct {
+    release: []const u8,
+    release_group: []const u8,
+    release_track: []const u8,
+    album_artist: []const u8,
+};
+
+const first_release_ids: ReleaseIds = .{
+    .release = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a",
+    .release_group = "0b6a3a3e-3b2c-4c8e-9a51-1f2d3c4b5a69",
+    .release_track = "c2f7b3a4-5d6e-4f80-9a1b-2c3d4e5f6a7b",
+    .album_artist = "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+};
+
+const second_release_ids: ReleaseIds = .{
+    .release = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    .release_group = "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+    .release_track = "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+    .album_artist = "4d5e6f7a-8b9c-4d0e-9f2a-3b4c5d6e7f80",
+};
+
+fn releaseIdChanges(before: ?ReleaseIds, after: ReleaseIds) [4]mutation.Change {
+    return .{
+        .{ .field = .musicbrainz_release_id, .before = if (before) |ids| ids.release else null, .after = after.release },
+        .{ .field = .musicbrainz_release_group_id, .before = if (before) |ids| ids.release_group else null, .after = after.release_group },
+        .{ .field = .musicbrainz_release_track_id, .before = if (before) |ids| ids.release_track else null, .after = after.release_track },
+        .{ .field = .musicbrainz_album_artist_id, .before = if (before) |ids| ids.album_artist else null, .after = after.album_artist },
+    };
+}
+
+fn expectReleaseIds(tags: model.ObservedTags, ids: ReleaseIds) !void {
+    try std.testing.expectEqualStrings(ids.release, tags.musicbrainz_release_id.?);
+    try std.testing.expectEqualStrings(ids.release_group, tags.musicbrainz_release_group_id.?);
+    try std.testing.expectEqualStrings(ids.release_track, tags.musicbrainz_release_track_id.?);
+    try std.testing.expectEqualStrings(ids.album_artist, tags.musicbrainz_album_artist_id.?);
+}
+
+fn expectReleaseIdRewrite(comptime major: u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_id = "11111111-2222-4333-8444-555555555555";
+    const new_id = first_release_ids.release;
+    const release_group_id = first_release_ids.release_group;
+    const recording_id = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    const title = try buildFrame(allocator, "TIT2", major, "\x00Kept");
+    const foreign_ufid = try buildFrame(allocator, "UFID", major, "http://www.cddb.com/id3/taginfo1.html\x003CD3N42R04-1");
+    const release_group = try buildFrame(allocator, "TXXX", major, "\x00MusicBrainz Release Group Id\x00" ++ release_group_id);
+    const recording = try buildFrame(allocator, "TXXX", major, "\x00MusicBrainz Track Id\x00" ++ recording_id);
+    const replay_gain = try buildFrame(allocator, "TXXX", major, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const cover = try buildFrame(allocator, "APIC", major, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, title);
+    try frames.appendSlice(allocator, foreign_ufid);
+    try frames.appendSlice(allocator, release_group);
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TXXX", major, "\x00MUSICBRAINZ_ALBUMID\x00" ++ old_id));
+    try frames.appendSlice(allocator, recording);
+    try frames.appendSlice(allocator, replay_gain);
+    try frames.appendSlice(allocator, cover);
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, major, 0, frames.items), "\xff\xfb\x90\x64audio" });
+    try std.testing.expectEqualStrings(old_id, (try expectTags(allocator, original)).?.musicbrainz_release_id.?);
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_release_id, .before = old_id, .after = new_id },
+    });
+    try std.testing.expectEqual(major, written[3]);
+    for ([_][]const u8{ title, foreign_ufid, release_group, recording, replay_gain, cover }) |kept|
+        try std.testing.expect(std.mem.indexOf(u8, written, kept) != null);
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings(new_id, after.musicbrainz_release_id.?);
+    try std.testing.expectEqualStrings(release_group_id, after.musicbrainz_release_group_id.?);
+    try std.testing.expectEqualStrings(recording_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    try std.testing.expectEqual(@as(u64, 32), after.artwork.?.byte_size);
+    try std.testing.expect(std.mem.indexOf(u8, written, "MUSICBRAINZ_ALBUMID") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, old_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), try countUserText(allocator, written, release_id_descriptions));
+    const expected = try expectedUserTextFrame(allocator, major, "MusicBrainz Album Id", first_release_ids.release);
+    try std.testing.expect(std.mem.indexOf(u8, written, expected) != null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+}
+
+test "a release id is written as Picard's TXXX in 2.4, replacing the uppercase spelling and keeping every other description, owner and cover" {
+    try expectReleaseIdRewrite(4);
+}
+
+test "a release id is written as Picard's TXXX in 2.3, replacing the uppercase spelling and keeping every other description, owner and cover" {
+    try expectReleaseIdRewrite(3);
+}
+
+fn expectEveryReleaseIdRoundTrips(comptime major: u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const title = try buildFrame(allocator, "TIT2", major, "\x00Kept");
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, major, 0, title), "\xff\xfb\x90\x64audio" });
+
+    const first = try applyRewrite(allocator, original, &releaseIdChanges(null, first_release_ids));
+    try std.testing.expectEqual(major, first[3]);
+    const once = (try expectTags(allocator, first)).?;
+    try expectReleaseIds(once, first_release_ids);
+    try std.testing.expectEqualStrings("Kept", once.title.?);
+
+    const second = try applyRewrite(allocator, first, &releaseIdChanges(first_release_ids, second_release_ids));
+    try expectReleaseIds((try expectTags(allocator, second)).?, second_release_ids);
+    for ([_][]const []const u8{
+        release_id_descriptions,
+        release_group_id_descriptions,
+        release_track_id_descriptions,
+        album_artist_id_descriptions,
+    }) |descriptions| try std.testing.expectEqual(@as(usize, 1), try countUserText(allocator, second, descriptions));
+    try std.testing.expect(std.mem.indexOf(u8, second, title) != null);
+}
+
+test "every release-level MusicBrainz id written to a 2.4 tag reads back, and writing it again replaces it" {
+    try expectEveryReleaseIdRoundTrips(4);
+}
+
+test "every release-level MusicBrainz id written to a 2.3 tag reads back, and writing it again replaces it" {
+    try expectEveryReleaseIdRoundTrips(3);
+}
+
+test "release ids written to a cover-only ID3v2.3 tag keep the cover and ReplayGain byte for byte and gain the trailer values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const replay_gain = try buildFrame(allocator, "TXXX", 3, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 3, 0, try std.mem.concat(allocator, u8, &.{ cover, replay_gain })),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+    try std.testing.expect(!(try expectTags(allocator, original)).?.hasValuesBesidesArtwork());
+
+    const written = try applyRewrite(allocator, original, &releaseIdChanges(null, first_release_ids));
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    try std.testing.expectEqualSlices(u8, cover, written[10 .. 10 + cover.len]);
+    try std.testing.expectEqualSlices(u8, replay_gain, written[10 + cover.len .. 10 + cover.len + replay_gain.len]);
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Song", "1999");
+    try expectReleaseIds(after, first_release_ids);
+    try std.testing.expectEqual(@as(u64, 32), after.artwork.?.byte_size);
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+}
+
+test "release ids given to a trailer-only stream keep every trailer value in the new ID3v2 tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{ "\xff\xfb\x90\x64audio", &trailer });
+
+    const written = try applyRewrite(allocator, original, &releaseIdChanges(null, first_release_ids));
+    try std.testing.expectEqual(@as(u8, 4), written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Song", "1999");
+    try expectReleaseIds(after, first_release_ids);
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
 }

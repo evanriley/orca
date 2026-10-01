@@ -1762,6 +1762,119 @@ test "an approved tag write rewrites the files, the rescan agrees, and undo rest
     try runtime.discardTagWrite(library, again.plan_id);
 }
 
+const release_id_edits = [_]runtime_module.TrackEdit{
+    .{ .field = .musicbrainz_release_id, .value = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" },
+    .{ .field = .musicbrainz_release_group_id, .value = "0b6a3a3e-3b2c-4c8e-9a51-1f2d3c4b5a69" },
+    .{ .field = .musicbrainz_release_track_id, .value = "c2f7b3a4-5d6e-4f80-9a1b-2c3d4e5f6a7b" },
+    .{ .field = .musicbrainz_album_artist_id, .value = "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70" },
+};
+
+fn expectObservedReleaseIds(library_database: *database.LibraryDatabase, file_id: i64) !void {
+    const stored = (try library_database.observed_tags.get(std.testing.allocator, file_id)).?;
+    defer stored.deinit();
+    try std.testing.expectEqualStrings(release_id_edits[0].value.?, stored.values.musicbrainz_release_id.?);
+    try std.testing.expectEqualStrings(release_id_edits[1].value.?, stored.values.musicbrainz_release_group_id.?);
+    try std.testing.expectEqualStrings(release_id_edits[2].value.?, stored.values.musicbrainz_release_track_id.?);
+    try std.testing.expectEqualStrings(release_id_edits[3].value.?, stored.values.musicbrainz_album_artist_id.?);
+}
+
+test "release-level MusicBrainz ids are written into FLAC and MP3 files, a rescan reads them back, and undo restores the bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const library_database = try libraryDatabase(&runtime, library);
+    const names = [_][]const u8{ "a.mp3", "b.flac" };
+    var originals: [names.len][]u8 = undefined;
+    for (names, &originals) |name, *original|
+        original.* = try temporary.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+    defer for (originals) |original| std.testing.allocator.free(original);
+
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectError(error.InvalidEditValue, runtime.libraryEditTracks(
+        library,
+        ids,
+        &.{.{ .field = .musicbrainz_release_id, .value = "Some Album" }},
+    ));
+    const edited = try runtime.libraryEditTracks(library, ids, &release_id_edits);
+    defer edited.deinit();
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    for (preview.files) |file| {
+        try std.testing.expect(std.mem.endsWith(u8, file.path, "a.mp3") or std.mem.endsWith(u8, file.path, "b.flac"));
+        try std.testing.expectEqual(release_id_edits.len, file.changes.len);
+        for (file.changes) |change| try std.testing.expect(change.before == null);
+    }
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+
+    try rescan(&runtime, library);
+    for (preview.files) |file| try expectObservedReleaseIds(library_database, file.file_id);
+    for (names, originals) |name, original| {
+        const written = try temporary.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(written);
+        try std.testing.expect(!std.mem.eql(u8, original, written));
+    }
+
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+    for (names, originals) |name, original| {
+        const restored = try temporary.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(restored);
+        try std.testing.expectEqualSlices(u8, original, restored);
+    }
+}
+
+test "a value stored under a field number this build does not know is skipped by edits, tag-write planning and the projection" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-unknown-field?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Known Album" }});
+    defer edited.deinit();
+    try library_database.database.exec(
+        \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
+        \\SELECT id, 99, 'from a newer build', 1, 1, unixepoch() FROM files;
+    );
+    try std.testing.expectEqual(@as(i64, 3), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM orca_metadata_values WHERE field = 99;",
+    ));
+
+    for (edited.ids) |track_id| {
+        var values = try runtime.libraryTrackEdits(library, track_id);
+        defer values.deinit();
+        try std.testing.expectEqual(@as(usize, 1), values.items.len);
+        try std.testing.expectEqual(metadata.Field.album, values.items[0].field);
+    }
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    for (preview.files) |file| {
+        try std.testing.expectEqual(@as(usize, 1), file.changes.len);
+        try std.testing.expectEqual(metadata.Field.album, file.changes[0].field);
+    }
+    try runtime.discardTagWrite(library, preview.plan_id);
+
+    var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+    _ = try projection.run(.all);
+    var page = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 3), page.items.len);
+    for (page.items) |item| try std.testing.expectEqualStrings("Known Album", item.album);
+}
+
 test "pruned tag-write backups free their space and leave the write impossible to undo" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

@@ -32,8 +32,9 @@ survives rescans; a cleared value lets the tags apply again. The edited files
 are reprojected before the call returns, which moves a Track to another Release
 or Artist when the edit says so. Editable fields are title, artist, album, album
 artist, track number, disc number, date and compilation, the fields the
-projection groups and orders by, and the MusicBrainz recording ID, which must be
-a lowercase UUID; `metadata.Field` appends new ones, because
+projection groups and orders by, and the MusicBrainz recording, release,
+release-group, release-track and album-artist IDs, which must be lowercase
+UUIDs; `metadata.Field` appends new ones, because
 `orca_metadata_values.field` stores them by number. `orca-cli edit` and the
 `orca-gtk` tag editor drive it; the recording ID is `--recording-id` there,
 and the editor's MusicBrainz Recording field for a single track.
@@ -420,10 +421,20 @@ Writers keep what they do not understand:
   keeps a `n/total` total, and updates an existing ID3v1 trailer. A file with no
   ID3v2 tag gets a 2.4 one. A recording ID replaces only the MusicBrainz `UFID`
   and the `TXXX` frames the reader takes one from (`MusicBrainz Track Id`,
-  `MUSICBRAINZ_TRACKID`); other `UFID` owners and `TXXX` descriptions are
-  kept byte for byte.
+  `MUSICBRAINZ_TRACKID`). The release, release-group, release-track and
+  album-artist IDs are written as `TXXX` frames under Picard's descriptions,
+  `MusicBrainz Album Id`, `MusicBrainz Release Group Id`,
+  `MusicBrainz Release Track Id` and `MusicBrainz Album Artist Id`, and each
+  replaces only the `TXXX` frames under that description or its Vorbis
+  spelling, such as `MUSICBRAINZ_ALBUMID`, in any case. Other `UFID` owners
+  and `TXXX` descriptions are kept byte for byte. In 2.3 a `TXXX` frame is
+  UTF-16 with a byte-order mark on each string; in 2.4 it is UTF-8.
 - Vorbis comments in FLAC match fields by the same aliases and canonical values
   the reader uses, so a write never duplicates a field under another spelling.
+  The release-level IDs are `MUSICBRAINZ_ALBUMID`,
+  `MUSICBRAINZ_RELEASEGROUPID`, `MUSICBRAINZ_RELEASETRACKID` and
+  `MUSICBRAINZ_ALBUMARTISTID`. A write replaces every entry under the key, in
+  any case, with one.
 - The audio bytes are copied unchanged; only the tag region is rewritten.
 
 From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,

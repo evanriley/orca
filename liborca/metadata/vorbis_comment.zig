@@ -541,6 +541,10 @@ fn fieldMatches(field: mutation.Field, key: []const u8) bool {
         .date => &.{ "DATE", "YEAR" },
         .compilation => &.{"COMPILATION"},
         .musicbrainz_recording_id => &.{"MUSICBRAINZ_TRACKID"},
+        .musicbrainz_release_id => &.{"MUSICBRAINZ_ALBUMID"},
+        .musicbrainz_release_group_id => &.{"MUSICBRAINZ_RELEASEGROUPID"},
+        .musicbrainz_release_track_id => &.{"MUSICBRAINZ_RELEASETRACKID"},
+        .musicbrainz_album_artist_id => &.{"MUSICBRAINZ_ALBUMARTISTID"},
     };
     return matches(key, spellings);
 }
@@ -570,6 +574,10 @@ fn fieldKey(field: mutation.Field) []const u8 {
         .date => "DATE",
         .compilation => "COMPILATION",
         .musicbrainz_recording_id => "MUSICBRAINZ_TRACKID",
+        .musicbrainz_release_id => "MUSICBRAINZ_ALBUMID",
+        .musicbrainz_release_group_id => "MUSICBRAINZ_RELEASEGROUPID",
+        .musicbrainz_release_track_id => "MUSICBRAINZ_RELEASETRACKID",
+        .musicbrainz_album_artist_id => "MUSICBRAINZ_ALBUMARTISTID",
     };
 }
 
@@ -944,4 +952,73 @@ test "a recording id rewrite replaces the existing MUSICBRAINZ_TRACKID in place 
     try std.testing.expectEqualStrings("Kept", after.title.?);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, old_id) == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rewritten, "MUSICBRAINZ_TRACKID="));
+}
+
+fn countEntries(payload: []const u8, key: []const u8) !usize {
+    var entries = try Entries.init(payload);
+    var count: usize = 0;
+    while (try entries.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key, key)) count += 1;
+    }
+    return count;
+}
+
+test "a release id rewrite replaces every MUSICBRAINZ_ALBUMID entry in any case with one and keeps the other keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_id = "11111111-2222-4333-8444-555555555555";
+    const second_old_id = "22222222-3333-4444-8555-666666666666";
+    const new_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    const recording_id = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    const payload = try commentPayload(allocator, &.{
+        "TITLE=Kept",
+        "musicbrainz_albumid=" ++ old_id,
+        "MUSICBRAINZ_TRACKID=" ++ recording_id,
+        "MusicBrainz_AlbumId=" ++ second_old_id,
+        "CUSTOM=preserved",
+    });
+    try std.testing.expectEqualStrings(old_id, (try parse(allocator, payload)).musicbrainz_release_id.?);
+
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .musicbrainz_release_id, .before = old_id, .after = new_id },
+    });
+    const after = try parse(allocator, rewritten);
+    try std.testing.expectEqualStrings(new_id, after.musicbrainz_release_id.?);
+    try std.testing.expectEqualStrings(recording_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "MUSICBRAINZ_TRACKID=" ++ recording_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "CUSTOM=preserved") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, old_id) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, second_old_id) == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "MUSICBRAINZ_ALBUMID=" ++ new_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), try countEntries(rewritten, "MUSICBRAINZ_ALBUMID"));
+    try std.testing.expectEqual(@as(u32, 4), (try Entries.init(rewritten)).remaining);
+}
+
+test "every release-level MusicBrainz id is written under Picard's Vorbis key and read back" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const release_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    const release_group_id = "0b6a3a3e-3b2c-4c8e-9a51-1f2d3c4b5a69";
+    const release_track_id = "c2f7b3a4-5d6e-4f80-9a1b-2c3d4e5f6a7b";
+    const album_artist_id = "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70";
+    const created = try create(allocator, &.{
+        .{ .field = .musicbrainz_release_id, .before = null, .after = release_id },
+        .{ .field = .musicbrainz_release_group_id, .before = null, .after = release_group_id },
+        .{ .field = .musicbrainz_release_track_id, .before = null, .after = release_track_id },
+        .{ .field = .musicbrainz_album_artist_id, .before = null, .after = album_artist_id },
+    });
+    const tags = try parse(allocator, created);
+    try std.testing.expectEqualStrings(release_id, tags.musicbrainz_release_id.?);
+    try std.testing.expectEqualStrings(release_group_id, tags.musicbrainz_release_group_id.?);
+    try std.testing.expectEqualStrings(release_track_id, tags.musicbrainz_release_track_id.?);
+    try std.testing.expectEqualStrings(album_artist_id, tags.musicbrainz_album_artist_id.?);
+    for ([_][]const u8{
+        "MUSICBRAINZ_ALBUMID=" ++ release_id,
+        "MUSICBRAINZ_RELEASEGROUPID=" ++ release_group_id,
+        "MUSICBRAINZ_RELEASETRACKID=" ++ release_track_id,
+        "MUSICBRAINZ_ALBUMARTISTID=" ++ album_artist_id,
+    }) |entry| try std.testing.expect(std.mem.indexOf(u8, created, entry) != null);
 }

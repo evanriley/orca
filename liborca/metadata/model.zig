@@ -20,6 +20,10 @@ pub const Field = enum {
     date,
     compilation,
     musicbrainz_recording_id,
+    musicbrainz_release_id,
+    musicbrainz_release_group_id,
+    musicbrainz_release_track_id,
+    musicbrainz_album_artist_id,
 };
 
 pub fn isMusicBrainzId(text: []const u8) bool {

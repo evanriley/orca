@@ -38,7 +38,12 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
         },
         .compilation => if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1"))
             return error.InvalidEditValue,
-        .musicbrainz_recording_id => if (!metadata.isMusicBrainzId(value)) return error.InvalidEditValue,
+        .musicbrainz_recording_id,
+        .musicbrainz_release_id,
+        .musicbrainz_release_group_id,
+        .musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id,
+        => if (!metadata.isMusicBrainzId(value)) return error.InvalidEditValue,
         .title, .artist, .album, .album_artist, .date => {},
     }
 }
@@ -55,6 +60,10 @@ fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field
         .disc_number => if (tags.disc_number) |n| try std.fmt.allocPrint(allocator, "{d}", .{n}) else null,
         .compilation => if (tags.compilation) |flag| (if (flag) "1" else "0") else null,
         .musicbrainz_recording_id => tags.musicbrainz_recording_id,
+        .musicbrainz_release_id => tags.musicbrainz_release_id,
+        .musicbrainz_release_group_id => tags.musicbrainz_release_group_id,
+        .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
+        .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
     };
 }
 

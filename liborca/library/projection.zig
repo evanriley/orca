@@ -396,7 +396,12 @@ pub const Projection = struct {
                     .disc_number => extra.disc_number = value,
                     .date => extra.date = value,
                     .compilation => extra.compilation = value,
-                    .musicbrainz_recording_id => {},
+                    .musicbrainz_recording_id,
+                    .musicbrainz_release_id,
+                    .musicbrainz_release_group_id,
+                    .musicbrainz_release_track_id,
+                    .musicbrainz_album_artist_id,
+                    => {},
                 }
             }
             try overrides.reset();
