@@ -6,7 +6,7 @@ the rule in [architecture.md](architecture.md).
 
 ## Status
 
-Released `0.4.0`. `orca-gtk` is a daily-usable player on Linux: a
+Released `0.5.0`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
 editing with undo, track details, a local play history, ListenBrainz

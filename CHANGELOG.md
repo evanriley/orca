@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-30
+
 Ships Library schema version 20.
 
 ### Added
