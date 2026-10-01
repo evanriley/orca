@@ -1442,9 +1442,9 @@ test "the confident count is exactly how many matches accepting confident ones t
     const lower = try runtime.libraryConfidentMatchCount(library, 0.6);
     const accepted = try runtime.libraryAcceptConfidentMatches(library, 0.9);
 
-    try std.testing.expectEqual(@as(u64, 2), counted);
+    try std.testing.expectEqual(@as(u64, 3), counted);
     try std.testing.expectEqual(counted, accepted);
-    try std.testing.expectEqual(@as(u64, 3), lower);
+    try std.testing.expectEqual(@as(u64, 4), lower);
     try std.testing.expectEqual(@as(u64, 0), try runtime.libraryConfidentMatchCount(library, 0.9));
     try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryConfidentMatchCount(library, 0));
 }

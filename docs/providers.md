@@ -297,9 +297,10 @@ cache or failed, the AcoustID requests, cache hits and refused queries, and
 `libraryMatchProposals` lists a Track's pending proposals, most confident
 first, with their source and AcoustID score. `libraryAcceptMatch` accepts one
 and `libraryDismissMatch` dismisses one.
-`libraryAcceptConfidentMatches(minimum)` accepts, for every file where
-exactly one pending proposal has a confidence of at least `minimum`, that
-proposal; it is an explicit user action, never run by a job.
+`libraryAcceptConfidentMatches(minimum)` accepts each file's best pending
+proposal with a confidence of at least `minimum`, chosen as
+[metadata.md](metadata.md#musicbrainz-recording-ids) describes; it is an
+explicit user action, never run by a job.
 
 ### MusicBrainz search
 

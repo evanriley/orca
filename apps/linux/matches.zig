@@ -179,7 +179,7 @@ fn findClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn noConfidentText(buffer: []u8, self: *const App) [:0]const u8 {
-    return strings.format(buffer, "No song has exactly one match scoring {d}% or more", .{self.match_threshold_percent});
+    return strings.format(buffer, "No song has a clear best match scoring {d}% or more", .{self.match_threshold_percent});
 }
 
 fn acceptConfidentClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -196,7 +196,7 @@ fn acceptConfidentClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     var body_buffer: [256]u8 = undefined;
     const body = strings.format(
         &body_buffer,
-        "Each song has exactly one match scoring {d}% or more. This records MusicBrainz recording IDs in your library and never changes your files.",
+        "Each song gets its best match scoring {d}% or more, preferring one its audio fingerprint confirms. This records MusicBrainz recording IDs in your library and never changes your files.",
         .{self.match_threshold_percent},
     );
     const dialog = adw.adw_alert_dialog_new(heading.ptr, body.ptr);
@@ -492,7 +492,7 @@ fn showAcceptConfident(self: *App, library: liborca.LibraryHandle) void {
     const tooltip = if (count == 0)
         noConfidentText(&buffer, self)
     else
-        strings.format(&buffer, "Accept each song's only match scoring {d}% or more", .{self.match_threshold_percent});
+        strings.format(&buffer, "Accept each song's best match scoring {d}% or more", .{self.match_threshold_percent});
     gtk.gtk_widget_set_tooltip_text(accept_confident, tooltip.ptr);
     gtk.gtk_widget_set_sensitive(accept_confident, if (count == 0) gtk.false_ else gtk.true_);
 }

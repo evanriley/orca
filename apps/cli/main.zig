@@ -288,8 +288,13 @@ const help_details =
     \\ID, title, artist, album, track, length and release ID. accept-match
     \\records one match's recording ID for the Track's file, in the Library only,
     \\and dismisses the file's other matches; dismiss-match drops one.
-    \\accept-matches accepts, for every file with exactly one match at least as
-    \\confident as --min-score, that match.
+    \\accept-matches accepts each file's best match at least as confident as
+    \\--min-score. A match AcoustID found with a fingerprint score of at least
+    \\0.9 comes first; among those, the higher percent, then the Track's own
+    \\track number, then one MusicBrainz found too, the higher MusicBrainz
+    \\score, the closer length and the lowest recording ID. Without one, the
+    \\most confident match is accepted only when no other match of the file
+    \\has as high a percent.
     \\
     \\match --release=ID searches only that Release's Tracks. With
     \\--accept-min-score=SCORE it then accepts the Release's matches as

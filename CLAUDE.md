@@ -165,7 +165,7 @@ zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per pro
 zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FINGERPRINT=
 zig build run -- accept-match DATABASE PROPOSAL_ID   # records the recording ID in the library only
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
-zig build run -- accept-matches DATABASE --min-score=0.9   # files with exactly one match that confident
+zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to

@@ -165,8 +165,9 @@ defer page.deinit();
   `provider` (`musicbrainz`, `acoustid` or `musicbrainz+acoustid`) and
   `acoustid_score`; `libraryAcceptMatch` accepts one and returns a
   `MatchAcceptance`, `libraryDismissMatch` dismisses one, and
-  `libraryAcceptConfidentMatches(library, minimum)` accepts, for every file
-  with exactly one pending proposal at least that confident, that proposal.
+  `libraryAcceptConfidentMatches(library, minimum)` accepts each file's best
+  pending proposal at least that confident, chosen as
+  [metadata.md](metadata.md#musicbrainz-recording-ids) describes.
   `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
   the same rules as `setListenBrainzServer`, from the next job.
   `setAcoustIdClientKey(key)` sets the AcoustID application key; the key

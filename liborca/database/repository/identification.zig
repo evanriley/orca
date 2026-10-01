@@ -130,6 +130,96 @@ pub const ProviderSet = struct {
     }
 };
 
+/// The AcoustID fingerprint similarity at which a proposal counts as the
+/// file's own audio.
+const fingerprint_minimum: f32 = 0.9;
+
+/// A confidence as the Matches page shows it, in whole percent.
+fn confidencePercent(confidence: f32) u32 {
+    return @intFromFloat(@floor(std.math.clamp(confidence, 0, 1) * 100));
+}
+
+fn validMinimumConfidence(minimum_confidence: f32) bool {
+    return std.math.isFinite(minimum_confidence) and minimum_confidence > 0 and minimum_confidence <= 1;
+}
+
+/// A pending proposal whose recording id and payload read back.
+const ConfidentCandidate = struct {
+    id: i64,
+    recording_mbid: []const u8,
+    confidence: f32,
+    found_by: ProviderSet,
+    payload: ProposalPayload,
+
+    fn fingerprintBacked(self: ConfidentCandidate) bool {
+        const score = self.payload.acoustid_score orelse return false;
+        return self.found_by.acoustid and score >= fingerprint_minimum;
+    }
+};
+
+/// What the library knows of the song a file holds.
+const SongFacts = struct {
+    track_number: ?u32 = null,
+    duration_ms: ?u64 = null,
+};
+
+/// The proposal bulk acceptance takes for one file, or null. When a proposal
+/// at least `minimum_confidence` is backed by the file's fingerprint, the best
+/// such one by `outranks`; otherwise the most confident proposal, only when it
+/// reaches `minimum_confidence` and shows a higher percent than every other.
+fn chooseConfident(candidates: []const ConfidentCandidate, song: SongFacts, minimum_confidence: f32) ?i64 {
+    var fingerprinted: ?ConfidentCandidate = null;
+    for (candidates) |candidate| {
+        if (candidate.confidence < minimum_confidence or !candidate.fingerprintBacked()) continue;
+        if (fingerprinted == null or outranks(candidate, fingerprinted.?, song)) fingerprinted = candidate;
+    }
+    if (fingerprinted) |winner| return winner.id;
+
+    var best: ?ConfidentCandidate = null;
+    var best_shared = false;
+    for (candidates) |candidate| {
+        const percent = confidencePercent(candidate.confidence);
+        if (best) |current| {
+            const current_percent = confidencePercent(current.confidence);
+            if (percent < current_percent) continue;
+            if (percent == current_percent) {
+                best_shared = true;
+                continue;
+            }
+        }
+        best = candidate;
+        best_shared = false;
+    }
+    const winner = best orelse return null;
+    if (best_shared or winner.confidence < minimum_confidence) return null;
+    return winner.id;
+}
+
+fn outranks(a: ConfidentCandidate, b: ConfidentCandidate, song: SongFacts) bool {
+    const percent = std.math.order(confidencePercent(a.confidence), confidencePercent(b.confidence));
+    if (percent != .eq) return percent == .gt;
+    if (song.track_number) |number| {
+        const a_position = a.payload.track_number == number;
+        const b_position = b.payload.track_number == number;
+        if (a_position != b_position) return a_position;
+    }
+    if (a.found_by.musicbrainz != b.found_by.musicbrainz) return a.found_by.musicbrainz;
+    const a_score: i16 = a.payload.mb_score orelse -1;
+    const b_score: i16 = b.payload.mb_score orelse -1;
+    if (a_score != b_score) return a_score > b_score;
+    if (song.duration_ms) |duration| {
+        const a_distance = durationDistance(a.payload.duration_ms, duration);
+        const b_distance = durationDistance(b.payload.duration_ms, duration);
+        if (a_distance != b_distance) return a_distance < b_distance;
+    }
+    return std.mem.order(u8, a.recording_mbid, b.recording_mbid) == .lt;
+}
+
+fn durationDistance(proposed: ?u64, song_duration_ms: u64) u64 {
+    const duration = proposed orelse return std.math.maxInt(u64);
+    return @max(duration, song_duration_ms) - @min(duration, song_duration_ms);
+}
+
 /// What one search found for one recording: which providers found it, and
 /// what they said, with each finder's confidence filled in.
 pub const ProposalEvidence = struct {
@@ -487,20 +577,19 @@ pub const IdentificationProposalRepository = struct {
         minimum_confidence: f32,
         release_id: ?i64,
     ) !u64 {
-        if (!std.math.isFinite(minimum_confidence) or minimum_confidence <= 0 or minimum_confidence > 1)
-            return error.InvalidMinimumConfidence;
+        if (!validMinimumConfidence(minimum_confidence)) return error.InvalidMinimumConfidence;
         var accepted: u64 = 0;
         var cursor: i64 = 0;
         var batch: [max_page]i64 = undefined;
         while (true) {
-            const selected = try self.confidentBatch(minimum_confidence, cursor, release_id, &batch);
-            if (selected.len == 0) return accepted;
-            cursor = selected[selected.len - 1];
+            const selection = try self.confidentBatch(allocator, minimum_confidence, cursor, release_id, &batch);
+            cursor = selection.last_file_id orelse return accepted;
+            if (selection.chosen.len == 0) continue;
             self.write_lane.acquire();
             defer self.write_lane.release();
             try self.db.exec("BEGIN IMMEDIATE;");
             errdefer self.db.exec("ROLLBACK;") catch {};
-            for (selected) |proposal_id| {
+            for (selection.chosen) |proposal_id| {
                 _ = self.acceptLocked(allocator, proposal_id, .bulk) catch |err| switch (err) {
                     error.InvalidProposalPayload, error.StaleIdentificationProposal => continue,
                     else => return err,
@@ -511,49 +600,101 @@ pub const IdentificationProposalRepository = struct {
         }
     }
 
+    /// The next page of files after `cursor` with a pending proposal at least
+    /// `minimum_confidence`, and the proposal `chooseConfident` picks for each
+    /// file that has one.
     fn confidentBatch(
         self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
         minimum_confidence: f32,
         cursor: i64,
         release_id: ?i64,
         batch: *[max_page]i64,
-    ) ![]i64 {
-        var statement = try self.db.prepare(if (release_id == null) confident_batch_sql else confident_release_batch_sql);
+    ) !struct { chosen: []i64, last_file_id: ?i64 } {
+        var files: [max_page]i64 = undefined;
+        var file_count: usize = 0;
+        {
+            var statement = try self.db.prepare(if (release_id == null) confident_files_sql else confident_release_files_sql);
+            defer statement.deinit();
+            if (release_id) |id| try statement.bindInt64(5, id);
+            try statement.bindDouble(1, minimum_confidence);
+            try statement.bindInt64(2, cursor);
+            try statement.bindInt64(3, files.len);
+            try statement.bindInt64(4, @intFromEnum(ProposalState.pending));
+            while (try statement.step() == .row) : (file_count += 1) files[file_count] = statement.columnInt64(0);
+        }
+        var chosen_count: usize = 0;
+        for (files[0..file_count]) |file_id| {
+            if (try self.chooseConfidentForFile(allocator, file_id, minimum_confidence)) |proposal_id| {
+                batch[chosen_count] = proposal_id;
+                chosen_count += 1;
+            }
+        }
+        return .{
+            .chosen = batch[0..chosen_count],
+            .last_file_id = if (file_count == 0) null else files[file_count - 1],
+        };
+    }
+
+    fn chooseConfidentForFile(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+        minimum_confidence: f32,
+    ) !?i64 {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const owned = arena.allocator();
+        const proposals = try self.pending(owned, file_id, max_page);
+        var candidates: std.ArrayList(ConfidentCandidate) = .empty;
+        for (proposals) |proposal| {
+            if (!metadata.isMusicBrainzId(proposal.provider_id)) continue;
+            const payload = ProposalPayload.parse(owned, proposal.payload) catch |err| switch (err) {
+                error.InvalidProposalPayload => continue,
+                error.OutOfMemory => return err,
+            };
+            try candidates.append(owned, .{
+                .id = proposal.id,
+                .recording_mbid = proposal.provider_id,
+                .confidence = proposal.confidence,
+                .found_by = ProviderSet.parse(proposal.provider),
+                .payload = payload.value,
+            });
+        }
+        return chooseConfident(candidates.items, try self.songFacts(file_id), minimum_confidence);
+    }
+
+    /// The track number and duration of the lowest-numbered Track that plays
+    /// this file.
+    fn songFacts(self: *IdentificationProposalRepository, file_id: i64) !SongFacts {
+        var statement = try self.db.prepare(
+            "SELECT track_number, duration_ms FROM tracks WHERE " ++ track_play_file ++ " = ?1\n" ++
+                "ORDER BY tracks.id LIMIT 1;",
+        );
         defer statement.deinit();
-        if (release_id) |id| try statement.bindInt64(5, id);
-        try statement.bindDouble(1, minimum_confidence);
-        try statement.bindInt64(2, cursor);
-        try statement.bindInt64(3, batch.len);
-        try statement.bindInt64(4, @intFromEnum(ProposalState.pending));
-        var count: usize = 0;
-        while (try statement.step() == .row) : (count += 1) batch[count] = statement.columnInt64(0);
-        return batch[0..count];
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return .{};
+        return .{
+            .track_number = if (optionalInt64(statement, 0)) |value| std.math.cast(u32, value) else null,
+            .duration_ms = if (optionalInt64(statement, 1)) |value| std.math.cast(u64, value) else null,
+        };
     }
 
     /// How many proposals `acceptConfident` would accept now: the same
-    /// selection, read back the same way.
+    /// selection.
     pub fn confidentCount(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         minimum_confidence: f32,
     ) !u64 {
-        if (!std.math.isFinite(minimum_confidence) or minimum_confidence <= 0 or minimum_confidence > 1)
-            return error.InvalidMinimumConfidence;
+        if (!validMinimumConfidence(minimum_confidence)) return error.InvalidMinimumConfidence;
         var acceptable: u64 = 0;
         var cursor: i64 = 0;
         var batch: [max_page]i64 = undefined;
         while (true) {
-            const selected = try self.confidentBatch(minimum_confidence, cursor, null, &batch);
-            if (selected.len == 0) return acceptable;
-            cursor = selected[selected.len - 1];
-            for (selected) |proposal_id| {
-                const readable = self.readAcceptable(allocator, proposal_id) catch |err| switch (err) {
-                    error.InvalidProposalPayload, error.StaleIdentificationProposal => continue,
-                    else => return err,
-                };
-                allocator.free(readable.recording_mbid);
-                acceptable += 1;
-            }
+            const selection = try self.confidentBatch(allocator, minimum_confidence, cursor, null, &batch);
+            cursor = selection.last_file_id orelse return acceptable;
+            acceptable += selection.chosen.len;
         }
     }
 
@@ -824,25 +965,20 @@ fn readMatchProposal(owned: std.mem.Allocator, statement: sqlite.Statement, firs
     };
 }
 
-/// Pending proposals (state ?4) after id ?2 with confidence at least ?1 that
-/// are their file's only one that confident, and with `in_release` only
-/// those for the play files of Release ?5's Tracks.
-fn confidentBatchSql(comptime in_release: bool) [:0]const u8 {
-    return "SELECT candidate.id FROM identification_proposals AS candidate\n" ++
-        "WHERE candidate.state = ?4 AND candidate.confidence >= ?1 AND candidate.id > ?2\n" ++
+/// Files after id ?2 with a pending proposal (state ?4) at least ?1, by id,
+/// and with `in_release` only the play files of Release ?5's Tracks.
+fn confidentFilesSql(comptime in_release: bool) [:0]const u8 {
+    return "SELECT DISTINCT file_id FROM identification_proposals\n" ++
+        "WHERE state = ?4 AND confidence >= ?1 AND file_id > ?2\n" ++
         (if (in_release)
-            "  AND candidate.file_id IN (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id = ?5)\n"
+            "  AND file_id IN (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id = ?5)\n"
         else
             "") ++
-        "  AND NOT EXISTS (\n" ++
-        "    SELECT 1 FROM identification_proposals AS rival\n" ++
-        "    WHERE rival.file_id = candidate.file_id AND rival.state = ?4\n" ++
-        "      AND rival.confidence >= ?1 AND rival.id <> candidate.id)\n" ++
-        "ORDER BY candidate.id LIMIT ?3;";
+        "ORDER BY file_id LIMIT ?3;";
 }
 
-const confident_batch_sql = confidentBatchSql(false);
-const confident_release_batch_sql = confidentBatchSql(true);
+const confident_files_sql = confidentFilesSql(false);
+const confident_release_files_sql = confidentFilesSql(true);
 
 /// The best pending proposal (state ?3) for the Track in scope as `tracks`, in
 /// the order `pendingForTrack` lists them.
@@ -904,3 +1040,130 @@ pub const unidentified_page_sql = unidentifiedPageSql(false);
 pub const unidentified_count_sql = unidentifiedCountSql(false);
 pub const unidentified_release_page_sql = unidentifiedPageSql(true);
 pub const unidentified_release_count_sql = unidentifiedCountSql(true);
+
+const testing = std.testing;
+const mbid_a = "aaaaaaaa-0000-4000-8000-000000000000";
+const mbid_b = "bbbbbbbb-0000-4000-8000-000000000000";
+const fingerprinted_by_both: ProviderSet = .{ .musicbrainz = true, .acoustid = true };
+
+fn fingerprintedCandidate(id: i64, recording_mbid: []const u8, confidence: f32) ConfidentCandidate {
+    return .{
+        .id = id,
+        .recording_mbid = recording_mbid,
+        .confidence = confidence,
+        .found_by = fingerprinted_by_both,
+        .payload = .{ .acoustid_score = 0.95 },
+    };
+}
+
+fn textCandidate(id: i64, recording_mbid: []const u8, confidence: f32) ConfidentCandidate {
+    return .{
+        .id = id,
+        .recording_mbid = recording_mbid,
+        .confidence = confidence,
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{ .mb_score = 100 },
+    };
+}
+
+test "a fingerprint-backed proposal is chosen over a more confident text-only rival" {
+    const candidates = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.97), fingerprintedCandidate(2, mbid_b, 0.85) };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "fingerprint backing needs AcoustID among the finders and a fingerprint score of at least 0.9" {
+    var weak = fingerprintedCandidate(2, mbid_b, 0.85);
+    weak.payload.acoustid_score = 0.89;
+    var unscored = fingerprintedCandidate(2, mbid_b, 0.85);
+    unscored.payload.acoustid_score = null;
+    var musicbrainz_only = fingerprintedCandidate(2, mbid_b, 0.85);
+    musicbrainz_only.found_by = .{ .musicbrainz = true };
+    for ([_]ConfidentCandidate{ weak, unscored, musicbrainz_only }) |rival| {
+        const candidates = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.97), rival };
+        try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{}, 0.8));
+    }
+    var exact = fingerprintedCandidate(2, mbid_b, 0.85);
+    exact.payload.acoustid_score = fingerprint_minimum;
+    const candidates = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.97), exact };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "a fingerprint-backed proposal below the threshold leaves the choice to the confidence rule" {
+    const candidates = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.97), fingerprintedCandidate(2, mbid_b, 0.7) };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "without fingerprint backing the best proposal is taken only when its percent is above every other's" {
+    const clear = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.95), textCandidate(2, mbid_b, 0.92) };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&clear, .{}, 0.9));
+    const tied = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.951), textCandidate(2, mbid_b, 0.959) };
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&tied, .{}, 0.9));
+    const tied_below = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.95), textCandidate(2, mbid_b, 0.85), textCandidate(3, mbid_b, 0.85) };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&tied_below, .{}, 0.9));
+    const below_threshold = [_]ConfidentCandidate{textCandidate(1, mbid_a, 0.85)};
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&below_threshold, .{}, 0.9));
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&.{}, .{}, 0.9));
+}
+
+test "a choice without fingerprint backing holds as the threshold rises until the threshold passes it" {
+    const candidates = [_]ConfidentCandidate{ textCandidate(1, mbid_a, 0.95), textCandidate(2, mbid_b, 0.92) };
+    for ([_]f32{ 0.8, 0.92, 0.95 }) |minimum| try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{}, minimum));
+    try testing.expectEqual(@as(?i64, null), chooseConfident(&candidates, .{}, 0.96));
+}
+
+test "fingerprint-backed proposals are ranked by displayed percent first" {
+    const candidates = [_]ConfidentCandidate{ fingerprintedCandidate(1, mbid_a, 0.91), fingerprintedCandidate(2, mbid_b, 0.92) };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{ .track_number = 3 }, 0.8));
+}
+
+test "fingerprint-backed proposals of equal percent prefer the song's own track number" {
+    var on_track = fingerprintedCandidate(2, mbid_b, 0.912);
+    on_track.payload.track_number = 3;
+    var other_track = fingerprintedCandidate(1, mbid_a, 0.918);
+    other_track.payload.track_number = 4;
+    other_track.payload.mb_score = 100;
+    const candidates = [_]ConfidentCandidate{ other_track, on_track };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{ .track_number = 3 }, 0.8));
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "fingerprint-backed proposals of equal percent and position prefer one MusicBrainz found too" {
+    var acoustid_only = fingerprintedCandidate(1, mbid_a, 0.91);
+    acoustid_only.found_by = .{ .acoustid = true };
+    acoustid_only.payload.mb_score = 100;
+    const candidates = [_]ConfidentCandidate{ acoustid_only, fingerprintedCandidate(2, mbid_b, 0.91) };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&candidates, .{}, 0.8));
+}
+
+test "fingerprint-backed proposals otherwise equal prefer the higher MusicBrainz score, an unknown one lowest" {
+    var higher = fingerprintedCandidate(2, mbid_b, 0.91);
+    higher.payload.mb_score = 90;
+    var lower = fingerprintedCandidate(1, mbid_a, 0.91);
+    lower.payload.mb_score = 0;
+    lower.payload.duration_ms = 200_000;
+    const scored = [_]ConfidentCandidate{ lower, higher };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&scored, .{ .duration_ms = 200_000 }, 0.8));
+    var zero = fingerprintedCandidate(4, mbid_b, 0.91);
+    zero.payload.mb_score = 0;
+    const unscored = [_]ConfidentCandidate{ fingerprintedCandidate(3, mbid_a, 0.91), zero };
+    try testing.expectEqual(@as(?i64, 4), chooseConfident(&unscored, .{}, 0.8));
+}
+
+test "fingerprint-backed proposals otherwise equal prefer the closer duration, an unknown one last" {
+    var close = fingerprintedCandidate(2, mbid_b, 0.91);
+    close.payload.duration_ms = 201_000;
+    var far = fingerprintedCandidate(1, mbid_a, 0.91);
+    far.payload.duration_ms = 195_000;
+    const known = [_]ConfidentCandidate{ far, close };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&known, .{ .duration_ms = 200_000 }, 0.8));
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&known, .{}, 0.8));
+    const unknown = [_]ConfidentCandidate{ fingerprintedCandidate(1, mbid_a, 0.91), close };
+    try testing.expectEqual(@as(?i64, 2), chooseConfident(&unknown, .{ .duration_ms = 200_000 }, 0.8));
+}
+
+test "fingerprint-backed proposals equal in every other way go to the lowest recording ID, in any order" {
+    const forward = [_]ConfidentCandidate{ fingerprintedCandidate(1, mbid_a, 0.91), fingerprintedCandidate(2, mbid_b, 0.91) };
+    const backward = [_]ConfidentCandidate{ fingerprintedCandidate(2, mbid_b, 0.91), fingerprintedCandidate(1, mbid_a, 0.91) };
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&forward, .{}, 0.8));
+    try testing.expectEqual(@as(?i64, 1), chooseConfident(&backward, .{}, 0.8));
+}

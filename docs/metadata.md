@@ -86,9 +86,26 @@ transaction:
 
 Only the recording ID is stored. The candidate's title, artist and album are
 there for a person to review and change nothing. No media file is written.
-`acceptConfident` accepts, for every file where exactly one pending proposal
-reaches the given confidence, that proposal, in commits of at most 512, and
-passes over a proposal it cannot read.
+`acceptConfident` accepts at most one pending proposal per file, in commits
+of at most 512, and passes over a proposal whose payload or recording ID it
+cannot read. Of the file's proposals that reach the given confidence, those
+found by AcoustID with a fingerprint score of at least 0.9 are backed by the
+file's own audio. When any is, the first of them in this order is accepted:
+
+1. the higher percent, `floor(confidence × 100)` as the Matches page shows it;
+2. the track number of the Track that plays the file, when both are known;
+3. found by MusicBrainz too;
+4. the higher MusicBrainz score, an unknown one lowest;
+5. the length closest to the Track's, when known, an unknown one last;
+6. the lowest recording ID.
+
+A text-only rival, such as a live version of the song, never blocks such a
+match, and AcoustID naming several MusicBrainz recordings of the same audio
+still yields one. When none is backed, the file's most confident proposal is
+accepted only when it reaches the given confidence and shows a higher percent
+than every other pending proposal of the file. A file accepted at one
+confidence is therefore accepted at every lower one. `confidentCount` runs
+the same selection, so it is what `acceptConfident` accepts.
 
 ## Cover art
 

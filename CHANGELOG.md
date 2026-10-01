@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed
+
+- **Accept Confident takes each file's best match.** Before, a file's match
+  was accepted in bulk only when it was the file's one pending proposal at the
+  threshold, so a text-only MusicBrainz rival such as a live version, or
+  AcoustID naming several MusicBrainz recordings of the same audio, left the
+  file unaccepted, and raising the threshold could accept more. Now a match
+  AcoustID found with a fingerprint score of at least 0.9 wins, ties going to
+  the higher percent, the Track's own track number, one MusicBrainz found too,
+  the higher MusicBrainz score, the closer length and the lowest recording ID.
+  Without one, the most confident match is accepted when its percent is above
+  every other's. `acceptConfident`, `acceptConfidentInRelease` (Match Album)
+  and `confidentCount` share the selection, and a higher threshold never
+  accepts more.
+
 ## 0.5.0 - 2026-09-30
 
 Ships Library schema version 20.

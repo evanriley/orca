@@ -242,7 +242,7 @@ The window is an `AdwNavigationSplitView`:
   Find Matches starts the matching job, which shares the status card and,
   unless Match by audio fingerprint is off in Preferences, also asks
   AcoustID by fingerprint with the application key the app sets at startup.
-  Accept Confident asks first, then accepts each song's only proposal at or
+  Accept Confident asks first, then accepts each song's best proposal at or
   above the threshold set in Preferences (90% by default,
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
   the page offers Find Matches, or says every song has a recording ID.

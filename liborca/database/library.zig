@@ -1865,31 +1865,81 @@ test "a proposal whose payload or recording id cannot be read is refused and lea
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, corrupt));
 }
 
-test "confident proposals are accepted in bulk only where a file has exactly one" {
+test "confident proposals are accepted in bulk where a file's best one shows a higher percent than every other" {
     var library = try openFeedbackLibrary("accept-confident");
     defer library.close();
-    var files: [5]i64 = undefined;
+    var files: [6]i64 = undefined;
     for (&files) |*file| file.* = try playFileOf(&library, try addFeedbackTrack(&library, "Song", try addRecording(&library), null));
     const alone = try putProposal(&library, files[0], match_mbid, 0.95, match_payload);
     const contested = try putProposal(&library, files[1], match_mbid, 0.95, match_payload);
-    _ = try putProposal(&library, files[1], rival_mbid, 0.92, match_payload);
+    const runner_up = try putProposal(&library, files[1], rival_mbid, 0.92, match_payload);
     const ahead = try putProposal(&library, files[2], match_mbid, 0.95, match_payload);
     const behind = try putProposal(&library, files[2], rival_mbid, 0.6, match_payload);
     const doubtful = try putProposal(&library, files[3], match_mbid, 0.7, match_payload);
     const unreadable = try putProposal(&library, files[4], match_mbid, 0.99, "[");
+    const tied = try putProposal(&library, files[5], match_mbid, 0.951, match_payload);
+    const also_tied = try putProposal(&library, files[5], rival_mbid, 0.958, match_payload);
 
+    try std.testing.expectEqual(@as(u64, 3), try library.identification_proposals.confidentCount(std.testing.allocator, 0.9));
     const accepted = try library.identification_proposals.acceptConfident(std.testing.allocator, 0.9);
 
-    try std.testing.expectEqual(@as(u64, 2), accepted);
+    try std.testing.expectEqual(@as(u64, 3), accepted);
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, alone));
-    try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, contested));
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, contested));
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, runner_up));
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, ahead));
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, behind));
     try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, doubtful));
     try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, unreadable));
+    try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, tied));
+    try std.testing.expectEqual(repository.ProposalState.pending, try proposalState(&library, also_tied));
+    try std.testing.expectEqual(@as(u64, 0), try library.identification_proposals.confidentCount(std.testing.allocator, 0.9));
     for ([_]f32{ 0, -0.5, 1.5, std.math.nan(f32) }) |invalid| {
         try std.testing.expectError(error.InvalidMinimumConfidence, library.identification_proposals.acceptConfident(std.testing.allocator, invalid));
+        try std.testing.expectError(error.InvalidMinimumConfidence, library.identification_proposals.confidentCount(std.testing.allocator, invalid));
     }
+}
+
+const fingerprinted_payload = "{\"title\":\"Song\",\"acoustid_score\":0.95}";
+
+test "a match the file's fingerprint backs is accepted in bulk over a more confident text-only rival" {
+    var library = try openFeedbackLibrary("accept-fingerprinted");
+    defer library.close();
+    const file = try playFileOf(&library, try addFeedbackTrack(&library, "Song", try addRecording(&library), null));
+    const live_version = try putProposal(&library, file, rival_mbid, 0.97, match_payload);
+    const fingerprinted = try putProposalFrom(&library, file, "acoustid", match_mbid, 0.85, fingerprinted_payload);
+
+    try std.testing.expectEqual(@as(u64, 1), try library.identification_proposals.confidentCount(std.testing.allocator, 0.8));
+    try std.testing.expectEqual(@as(u64, 1), try library.identification_proposals.acceptConfident(std.testing.allocator, 0.8));
+
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, fingerprinted));
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, live_version));
+    const stored = (try library.orca_metadata.get(std.testing.allocator, file, .musicbrainz_recording_id)).?;
+    defer stored.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(match_mbid, stored.text);
+}
+
+test "duplicate recordings the fingerprint backs equally resolve to the song's track number, else the lowest recording ID" {
+    var library = try openFeedbackLibrary("accept-duplicates");
+    defer library.close();
+    const numbered_track = try addFeedbackTrack(&library, "Song", try addRecording(&library), null);
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE tracks SET track_number = 2 WHERE id = {d};", .{numbered_track}, 0));
+    const numbered = try playFileOf(&library, numbered_track);
+    const unnumbered = try playFileOf(&library, try addFeedbackTrack(&library, "Song", try addRecording(&library), null));
+    const on_track = "{\"title\":\"Song\",\"track_number\":2,\"acoustid_score\":0.95}";
+    const elsewhere = "{\"title\":\"Song\",\"track_number\":7,\"acoustid_score\":0.95}";
+    const numbered_rival = try putProposalFrom(&library, numbered, "musicbrainz+acoustid", rival_mbid, 0.93, on_track);
+    const numbered_match = try putProposalFrom(&library, numbered, "musicbrainz+acoustid", match_mbid, 0.935, elsewhere);
+    const unnumbered_rival = try putProposalFrom(&library, unnumbered, "musicbrainz+acoustid", rival_mbid, 0.93, on_track);
+    const unnumbered_match = try putProposalFrom(&library, unnumbered, "musicbrainz+acoustid", match_mbid, 0.935, elsewhere);
+
+    try std.testing.expectEqual(@as(u64, 2), try library.identification_proposals.acceptConfident(std.testing.allocator, 0.9));
+
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, numbered_rival));
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, numbered_match));
+    try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, unnumbered_rival));
+    try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, unnumbered_match));
 }
 
 test "a Track's proposals come most confident first, old payloads included, and a dismissed one is not offered" {

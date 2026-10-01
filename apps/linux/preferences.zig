@@ -314,7 +314,7 @@ fn libraryPage(self: *App) *gtk.Widget {
     const range = settings.threshold_range;
     const threshold = adw.adw_spin_row_new_with_range(@floatFromInt(range[0]), @floatFromInt(range[1]), 1);
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threshold), "Accept confident matches at");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a song's only match scoring this or more.");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a song's best match scoring this or more.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threshold), 3);
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));

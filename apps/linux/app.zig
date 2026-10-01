@@ -252,7 +252,7 @@ pub const App = struct {
     matches_open_track: ?i64 = null,
     /// The open row, focused once laid out so the list scrolls to it.
     matches_focus_row: ?*gtk.Widget = null,
-    /// Accept Confident takes a song's only match at or above this.
+    /// Accept Confident takes a song's best match at or above this.
     match_threshold_percent: u8 = default_match_threshold_percent,
     match_fingerprints: bool = true,
     acoustid_key_stored: bool = false,
