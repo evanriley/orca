@@ -219,7 +219,10 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    Re-identify matches a track or album again, ignoring the tagged ID and
    earlier searches. Both are reachable from `orca-cli` and the song and
    album menus, and verification results are kept per file until its bytes
-   change.
+   change. Match Album's release vote breaks a tie the files' tags leave
+   open by the lowest MBID, which picks an arbitrary edition, such as a
+   reissue over the original; a tie is to go to an official release, then
+   the one whose track count equals the album's, then the earliest date.
 2. **Actionable Health.** Each issue offers the action that resolves it
    through the existing approved paths: review a verify proposal and preview
    the tag write, match or edit missing tags, compare duplicates, analyse,
