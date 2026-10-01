@@ -303,12 +303,28 @@ are sniffed or not recognized until then:
 - Opt-in writing of the AcoustID track ID (`ACOUSTID_ID`, `TXXX:Acoustid
   Id`) for matches accepted with a fingerprint, never the fingerprint
   itself.
+- Similar artists in the details sidebar for a track, album or artist, from
+  ListenBrainz's `labs.api.listenbrainz.org/similar-artists` (no account or
+  token; only the seed artist's MusicBrainz ID leaves the machine), cached for
+  a week to match its weekly refresh, with artists already in the library
+  marked. The endpoint is experimental and takes a required `algorithm` name
+  that may change, so a failed lookup hides the list rather than erroring.
+- A release calendar: new and upcoming releases by artists in the library,
+  from ListenBrainz's `/1/explore/fresh-releases` filtered locally by owned
+  artist MusicBrainz IDs, fetched at most daily.
+- Radio and mixes from the library, in the manner of Plexamp: a queue that
+  keeps extending from a seed track, album or artist, scored in `liborca` from
+  local data only — shared artist, tags, genre and era, play history and
+  feedback — optionally boosted by cached ListenBrainz similar-artist data.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.
 - Secure, verified CD ripping.
 - Windows, then iOS and Android.
 - Streaming sources and cross-device sync.
+- Audio-feature similarity for radio, analysed from the audio itself. The
+  extractor and any models must be permissively licensed; Essentia's code is
+  AGPL and its models are non-commercial.
 
 ## Not planned
 
