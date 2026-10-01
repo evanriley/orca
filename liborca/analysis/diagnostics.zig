@@ -146,10 +146,9 @@ pub const Analyzer = struct {
                 self.found_audible = true;
                 self.trailing_silence_frames = 0;
             }
-            const frame_energy = weighted_energy / self.channels;
             self.loudness_window_energy -= self.loudness_window[self.loudness_window_index];
-            self.loudness_window_energy += frame_energy;
-            self.loudness_window[self.loudness_window_index] = frame_energy;
+            self.loudness_window_energy += weighted_energy;
+            self.loudness_window[self.loudness_window_index] = weighted_energy;
             self.loudness_window_index = (self.loudness_window_index + 1) % self.loudness_window.len;
             const completed_frames = self.frame_index + 1;
             if (completed_frames >= self.loudness_window.len and
@@ -261,7 +260,7 @@ fn highPass(sample_rate: u32) Biquad {
     };
 }
 
-test "streaming diagnostics measure loudness peak clipping silence and waveform" {
+test "streaming diagnostics measure peak clipping silence and waveform" {
     const allocator = std.testing.allocator;
     const sample_rate = 48_000;
     var samples: [sample_rate * 2]f32 = undefined;
@@ -286,6 +285,49 @@ test "streaming diagnostics measure loudness peak clipping silence and waveform"
     try std.testing.expectEqual(@as(u64, 1), result.clipped_samples);
     try std.testing.expectEqual(@as(u64, 480), result.leading_silence_frames);
     try std.testing.expectEqual(@as(u64, 960), result.trailing_silence_frames);
-    try std.testing.expect(result.integrated_lufs.? > -20 and result.integrated_lufs.? < -5);
     try std.testing.expectEqual(@as(usize, 100), result.waveform.len);
+}
+
+const SineChannels = enum { mono, left_only, both };
+
+fn measureHalfScaleSine(layout: SineChannels) !f32 {
+    const allocator = std.testing.allocator;
+    const sample_rate = 48_000;
+    const frames: usize = sample_rate * 5;
+    const channels: u16 = if (layout == .mono) 1 else 2;
+    const samples = try allocator.alloc(f32, frames * channels);
+    defer allocator.free(samples);
+    for (0..frames) |frame| {
+        const phase = 2 * std.math.pi * 997 * @as(f64, @floatFromInt(frame)) / sample_rate;
+        const value: f32 = @floatCast(0.5 * @sin(phase));
+        switch (layout) {
+            .mono => samples[frame] = value,
+            .left_only => {
+                samples[frame * 2] = value;
+                samples[frame * 2 + 1] = 0;
+            },
+            .both => {
+                samples[frame * 2] = value;
+                samples[frame * 2 + 1] = value;
+            },
+        }
+    }
+    var analyzer = try Analyzer.init(allocator, sample_rate, channels, frames, .{});
+    defer analyzer.deinit();
+    try analyzer.process(samples);
+    const result = try analyzer.finish();
+    defer result.deinit();
+    return result.integrated_lufs.?;
+}
+
+test "a half-scale mono sine measures -9.03 LUFS" {
+    try std.testing.expectApproxEqAbs(@as(f32, -9.03), try measureHalfScaleSine(.mono), 0.05);
+}
+
+test "a stereo sine in one channel measures the same loudness as the mono sine" {
+    try std.testing.expectApproxEqAbs(@as(f32, -9.03), try measureHalfScaleSine(.left_only), 0.05);
+}
+
+test "a stereo sine in both channels sums their energies to 3.01 LU louder" {
+    try std.testing.expectApproxEqAbs(@as(f32, -6.02), try measureHalfScaleSine(.both), 0.05);
 }

@@ -1,7 +1,8 @@
 # Audio analysis
 
 `analysis/` measures what a file's audio *is*: integrated loudness (a gated
-ITU-R BS.1770 mean), a ReplayGain figure derived from it, sample peak, RMS,
+ITU-R BS.1770 mean, summing every channel's K-weighted energy with weight
+1.0), a ReplayGain figure derived from it, sample peak, RMS,
 clipped samples, leading/trailing/total silence, a bucketed waveform, a
 temporal fingerprint with a decoded-audio hash, and the AcoustID fingerprint.
 `analysis/service.zig` runs all of that in one streaming pass over a

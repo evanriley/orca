@@ -15,9 +15,9 @@ pub const diagnostics_algorithm_id = "orca.audio-diagnostics";
 /// The version covers the *input* a measurement was taken from as much as the
 /// arithmetic taken over it: bump it whenever a decoder's samples change, so
 /// stored figures are re-measured.
-pub const diagnostics_algorithm_version: u32 = 2;
+pub const diagnostics_algorithm_version: u32 = 3;
 pub const fingerprint_algorithm_id = "orca.temporal-fingerprint";
-/// Bumped with the diagnostics version, for the same reason. The
+/// Bumped whenever a decoder's samples change, as the diagnostics version is. The
 /// fingerprint carries `decoded_audio_hash`, which becomes `files.audio_hash`
 /// and is compared for equality: a hash of subtly wrong samples cannot match
 /// a hash of correct ones, so every stored fingerprint has to be retaken.

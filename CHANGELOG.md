@@ -63,6 +63,13 @@
   file had no title, artist, album, year, track or genre. Such a tag now
   falls back to them and keeps its cover, and a tag write to it carries the
   trailer's values into the new tag.
+- **Loudness and ReplayGain are correct for stereo files.** Integrated
+  loudness averaged the channels' K-weighted energy where ITU-R BS.1770 sums
+  it, so a stereo file measured 3.01 LU too quiet and was played 3.01 dB too
+  loud. `diagnostics_algorithm_version` is now 3: measurements taken before
+  are ignored until `orca-cli analyze-library` measures the files again, and
+  until then playback applies no measured correction to them. Channels are
+  summed at weight 1.0; surround weighting waits for a channel layout.
 
 ## 0.5.0 - 2026-09-30
 

@@ -258,6 +258,6 @@ there is no second fixture to drift.
 
 Measurements taken through the pure-Zig decoder carry version 1 of
 `diagnostics_algorithm_version` and `fingerprint_algorithm_version`; the
-current version of both is 2, so the analysis pass re-selects those files.
+current versions are 3 and 2, so the analysis pass re-selects those files.
 `orca-cli analyze-library DATABASE`, followed by `orca-cli duplicates DATABASE`,
 brings such a library up to date.
