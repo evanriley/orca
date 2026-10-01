@@ -30,12 +30,21 @@ pub fn attachZone(self: *OrcaRuntime, zone: ZoneHandle, player: PlayerHandle) !v
     _ = try self.players.get(player);
     const object_value = try self.zones.get(zone);
     const previous = object_value.attached_player;
-    object_value.attached_player = player;
-    errdefer object_value.attached_player = previous;
     if (previous) |old| {
-        if (!old.eql(player)) try runtime_queue.republishZones(self, old);
+        if (old.eql(player)) return;
+        object_value.attached_player = null;
+        runtime_queue.republishZones(self, old) catch |err| {
+            object_value.attached_player = old;
+            return err;
+        };
+        object_value.zone.retire();
     }
-    try runtime_queue.republishZones(self, player);
+    object_value.attached_player = player;
+    runtime_queue.republishZones(self, player) catch |err| {
+        object_value.attached_player = previous;
+        if (previous) |old| try runtime_queue.republishZones(self, old);
+        return err;
+    };
 }
 
 pub fn detachZone(self: *OrcaRuntime, zone: ZoneHandle) !void {
@@ -46,11 +55,7 @@ pub fn detachZone(self: *OrcaRuntime, zone: ZoneHandle) !void {
     try runtime_queue.republishZones(self, attached);
     const detached = try self.zones.get(zone);
     detached.zone.output_requested.store(false, .release);
-    detached.zone.silenced.store(true, .release);
-    detached.zone.closeOutput();
-    detached.zone.resetPipe();
-    detached.zone.zone.close();
-    detached.zone.publishState();
+    detached.zone.retire();
 }
 
 pub fn zoneRequestOutput(self: *OrcaRuntime, zone: ZoneHandle, device_id: u64) !void {

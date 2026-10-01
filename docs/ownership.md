@@ -13,7 +13,10 @@ that decodes for it. A runtime Zone owns its render path — pool, pipe, render
 context, selected device, output session and output recovery state. Zones reach
 their Player's engine only through an acknowledged published snapshot, never by
 resolving a handle: `core/handle.zig` does no locking, so a worker thread must
-never touch a Pool.
+never touch a Pool. Moving a Zone to another Player waits for the previous
+engine's acknowledgement, then closes the output and resets the render path on
+the control lane before the new engine is handed the Zone; see
+[audio-engine.md](audio-engine.md).
 
 Each Library that a Player has been bound to, or that scrobbles, has a listen
 worker. Its bounded ring, configuration and published status belong to the

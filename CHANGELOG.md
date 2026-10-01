@@ -100,6 +100,17 @@
   request, were kept only by the job's own Gateway, so the next matching or
   submission job could send at once. Both are now stored with the service's
   block and backoff and honoured by every later Gateway.
+- **An output that failed for good no longer stops a Player's other
+  outputs.** A Zone whose recovery attempts were exhausted kept its queued
+  audio, so a change of sample rate or channel count waited for it for ever
+  and the healthy Zones went silent, and the Player never reported its queue
+  drained. Such a Zone now gives back its audio and takes no part in
+  draining, and closing its output and requesting it again opens it afresh.
+- **Moving a Zone to another Player no longer plays the previous Player's
+  audio.** `attachZone` kept the Zone's output, queued audio and published
+  position, which the new Player could take for its own. Moving a Zone now
+  closes its output and forgets that state; the new Player reopens it in its
+  own format. Detaching a Zone and destroying a Player forget it too.
 
 ## 0.5.0 - 2026-09-30
 

@@ -1021,6 +1021,14 @@ int main(int argc, char **argv) {
         return 74;
     }
 
+    orca_handle second_player;
+    if (orca_player_create(runtime, &second_player) != ORCA_STATUS_OK) return 235;
+    if (orca_zone_attach_player(runtime, zone, second_player) != ORCA_STATUS_OK) return 236;
+    if (orca_zone_status_get(runtime, zone, &zone_status) != ORCA_STATUS_OK) return 237;
+    if (zone_status.output_state == ORCA_OUTPUT_ACTIVE) return 238;
+    if (orca_zone_attach_player(runtime, zone, player) != ORCA_STATUS_OK) return 239;
+    if (orca_player_destroy(runtime, second_player) != ORCA_STATUS_OK) return 240;
+
     if (orca_player_pause(runtime, player) != ORCA_STATUS_OK) return 75;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 76;
     if (status.transport != ORCA_TRANSPORT_PAUSED) return 77;

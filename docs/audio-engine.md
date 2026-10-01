@@ -110,6 +110,18 @@ Player detach and the real-time thread cannot re-resolve a generational handle.
 The producer publishes the Player's epoch into the Zone's own epoch atomic
 immediately before submitting blocks under it.
 
+Epochs and entry serials are numbered per Player, so a Zone's render path
+means nothing to another Player. Moving a Zone to another Player is a hard
+discontinuity handled on the control lane: once the previous Player's engine
+has acknowledged a zone set without the Zone, the control lane closes its
+output, returns every prepared block to its pool and forgets the timeline its
+callback published (epoch, position, rendered entry serial, entry anchor and
+the callback's private copies of them). Only then is the Zone published to
+the new Player, whose engine reopens the output in its own format. The Zone
+keeps its output request, device, policy and diagnostics. Attaching a Zone to
+the Player it is already on changes nothing. Detaching a Zone and destroying
+its Player retire it the same way.
+
 One `PlayerEngine` thread per Player is the single decode producer: SPSC queues
 require exactly one producer and fanout is one-producer-many-consumers. It is
 spawned lazily when a Player first receives a source and registered with
@@ -128,14 +140,14 @@ next pass would do nothing:
 
 - no seek is waiting to be serviced and no format-switch successor is held;
 - the Player is not playing, or it is playing with its queue decoded, every Zone
-  drained and no further entry to open;
+  taking part in the drain drained and no further entry to open;
 - the clock Zone's position, when it has one in the current epoch, has been
   sent as a telemetry hint;
 - every attached Zone is settled: its output is active in the format being
   decoded and is either silenced or holds no blocks, or it has no output and
-  nothing to open one for (no source, or recovery attempts exhausted). A Zone
-  that is opening, lost or waiting out its recovery backoff keeps the engine
-  busy, and so does a suspended engine.
+  nothing to open one for (no source, or recovery attempts exhausted and every
+  block handed back). A Zone that is opening, lost or waiting out its recovery
+  backoff keeps the engine busy, and so does a suspended engine.
 
 Everything that can end idleness wakes the engine, after the write it must act
 on: `wakeUp` (play, pause and output requests call it), zone publication,
@@ -214,7 +226,18 @@ reported in the signal path as `device_rate`, which adds the
 PipeWire stream-state changes are translated into an atomic Orca status. A lost
 output is closed and reopened with bounded attempts while its Player epoch and
 prepared render path remain intact. Recovery state belongs to each Zone;
-another Zone remains active if reopening ultimately fails.
+another Zone remains active if reopening ultimately fails. Once
+`zone_runtime.max_recovery_attempts` reopens have failed, the Zone reports
+`failed` and returns every prepared block to its pool. It stays failed until
+the host closes its output and, once the Zone reports `closed`, requests it
+again, which opens it afresh with a new set of attempts.
+
+A Zone takes part in a drain while its output is requested and its recovery
+is not exhausted. A format switch waits for every such Zone to hand back its
+blocks, and a Player reports drained only once they all have. Zones that are
+opening, lost, recovering or silenced take part, bounded by the recovery
+attempts; a Zone whose recovery is exhausted does not, so it cannot stall the
+Zones that still play.
 
 Device discovery returns bounded Orca-owned snapshots and uses PipeWire object
 serials for stream targeting; device ID zero delegates selection to the server.
@@ -297,8 +320,9 @@ draining into the pipe.
 
 Auto-advance runs on the engine thread: at `current.eof` with no successor it
 resolves the next entry, opens it, and primes it. A canonical format mismatch is
-not fatal — the successor is held opened but unprimed until every Zone has
-drained, then the outputs are reopened at the new format and it is hard-loaded.
+not fatal — the successor is held opened but unprimed until every Zone taking
+part in the drain has drained, then the outputs are reopened at the new format
+and it is hard-loaded.
 Gapless when formats match, gapped-but-correct when they do not. A decoder that
 fails part-way ends its entry rather than stalling the queue, and an entry that
 cannot be opened is stepped over, with consecutive failures bounded.

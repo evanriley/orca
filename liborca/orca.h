@@ -1054,6 +1054,10 @@ orca_status orca_enumerate_output_devices(
 
 orca_status orca_zone_create(orca_runtime *runtime, orca_handle *output);
 orca_status orca_zone_destroy(orca_runtime *runtime, orca_handle zone);
+/* Attaching a Zone to another Player closes its output and discards the
+ * previous Player's prepared audio before returning; the new Player reopens
+ * the output in its own format. Attaching it to the Player it is already on
+ * changes nothing. */
 orca_status orca_zone_attach_player(
     orca_runtime *runtime,
     orca_handle zone,
@@ -1070,6 +1074,8 @@ orca_status orca_zone_open_output(
     uint8_t policy,
     uint32_t latency_frames
 );
+/* A Zone whose output is FAILED stays failed. Closing its output and, once its
+ * status reports CLOSED, opening it again retries with fresh attempts. */
 orca_status orca_zone_close_output(orca_runtime *runtime, orca_handle zone);
 orca_status orca_zone_status_get(
     orca_runtime *runtime,

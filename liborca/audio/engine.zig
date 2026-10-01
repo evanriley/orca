@@ -349,8 +349,7 @@ pub const PlayerEngine = struct {
             return runtime_zone.silenced.load(.acquire) or runtime_zone.quiescent();
         }
         if (self.factory == null or format == null) return true;
-        return runtime_zone.zone.output_state == .failed and
-            runtime_zone.zone.recovery_attempts >= zone_runtime.max_recovery_attempts;
+        return runtime_zone.recoveryExhausted() and runtime_zone.quiescent();
     }
 
     /// Drops a successor the engine opened but never handed to the Player.
@@ -479,9 +478,9 @@ pub const PlayerEngine = struct {
     }
 
     /// A successor in a different canonical format waits here until the current
-    /// one has decoded out *and* every Zone has handed back every block. Only
-    /// then can the outputs be reopened without truncating audio the listener
-    /// has not heard yet.
+    /// one has decoded out *and* every draining Zone has handed back every
+    /// block. Only then can the outputs be reopened without truncating audio
+    /// the listener has not heard yet.
     fn completeFormatSwitch(
         self: *PlayerEngine,
         zones: []*ZoneRuntime,
@@ -489,8 +488,7 @@ pub const PlayerEngine = struct {
     ) void {
         if (!self.player.finishedDecoding()) return;
         for (zones) |runtime_zone| {
-            if (!runtime_zone.output_requested.load(.acquire)) continue;
-            if (!runtime_zone.quiescent()) return;
+            if (zoneDrains(runtime_zone) and !runtime_zone.quiescent()) return;
         }
         const pending = self.pending_source.?;
         self.pending_source = null;
@@ -634,7 +632,10 @@ pub const PlayerEngine = struct {
         for (zones) |runtime_zone| runtime_zone.recovery_wait_ns -|= since_last_pass_ns;
         for (zones) |runtime_zone| {
             if (!runtime_zone.output_requested.load(.acquire)) {
-                if (runtime_zone.output != null) {
+                if (runtime_zone.output != null or
+                    runtime_zone.zone.output_state != .closed or
+                    !runtime_zone.quiescent())
+                {
                     runtime_zone.closeOutput();
                     runtime_zone.resetPipe();
                     runtime_zone.zone.close();
@@ -683,6 +684,7 @@ pub const PlayerEngine = struct {
                         runtime_zone.zone.output_state = .failed;
                         self.publishZoneState(runtime_zone);
                     }
+                    if (!runtime_zone.quiescent()) runtime_zone.resetPipe();
                     continue;
                 }
                 if (runtime_zone.recovery_wait_ns > 0) continue;
@@ -834,8 +836,7 @@ pub const PlayerEngine = struct {
             return;
         }
         for (zones) |runtime_zone| {
-            if (!runtime_zone.output_requested.load(.acquire)) continue;
-            if (!runtime_zone.quiescent()) {
+            if (zoneDrains(runtime_zone) and !runtime_zone.quiescent()) {
                 self.player.drained.store(false, .monotonic);
                 return;
             }
@@ -855,6 +856,10 @@ pub const PlayerEngine = struct {
 fn watchOutput(runtime_zone: *ZoneRuntime, waker: ?work.Waker) void {
     const active = runtime_zone.output orelse return;
     active.setStateWaker(waker);
+}
+
+fn zoneDrains(runtime_zone: *const ZoneRuntime) bool {
+    return runtime_zone.output_requested.load(.acquire) and !runtime_zone.recoveryExhausted();
 }
 
 const source_session = @import("source_session.zig");
@@ -896,6 +901,43 @@ const RampDecoder = struct {
 
     fn seekTo(context: *anyopaque, frame: u64) !void {
         const self: *RampDecoder = @ptrCast(@alignCast(context));
+        self.position = frame;
+    }
+
+    fn release(_: *anyopaque) void {}
+};
+
+const ConstantDecoder = struct {
+    value: f32,
+    position: u64 = 0,
+    total: u64 = 1_000_000,
+
+    fn decoder(self: *ConstantDecoder) @import("../codec/decoder.zig").Decoder {
+        return .{
+            .context = self,
+            .codec = @import("../codec/decoder.zig").codec_id.pcm_float,
+            .vtable = &.{ .read_frames = read, .seek = seekTo, .deinit = release },
+            .format = .{
+                .sample_format = .float_32,
+                .channels = 1,
+                .sample_rate = 48_000,
+                .bits_per_sample = 32,
+                .bytes_per_frame = 4,
+            },
+            .frame_count = self.total,
+        };
+    }
+
+    fn read(context: *anyopaque, output: []f32) !usize {
+        const self: *ConstantDecoder = @ptrCast(@alignCast(context));
+        const frames = @min(output.len, self.total - self.position);
+        @memset(output[0..frames], self.value);
+        self.position += frames;
+        return frames;
+    }
+
+    fn seekTo(context: *anyopaque, frame: u64) !void {
+        const self: *ConstantDecoder = @ptrCast(@alignCast(context));
         self.position = frame;
     }
 
@@ -950,6 +992,23 @@ fn openZone(allocator: std.mem.Allocator) !*ZoneRuntime {
     const runtime_zone = try ZoneRuntime.create(allocator);
     runtime_zone.output_requested.store(true, .release);
     return runtime_zone;
+}
+
+fn moveZone(runtime_zone: *ZoneRuntime, from: *PlayerEngine, to: *PlayerEngine) !void {
+    try from.publishZones(&.{});
+    runtime_zone.retire();
+    try to.publishZones(&.{runtime_zone});
+}
+
+fn exhaustRecovery(harness: *Harness, runtime_zone: *ZoneRuntime) !void {
+    harness.backend.fail_next_open = true;
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    for (0..4 * zone_runtime.max_recovery_attempts) |_| {
+        if (runtime_zone.recoveryExhausted()) return;
+        runtime_zone.recovery_wait_ns = 0;
+        harness.engine.pass();
+    }
+    if (!runtime_zone.recoveryExhausted()) return error.RecoveryNeverExhausted;
 }
 
 test "two Zones fed by one Player receive independent audio" {
@@ -1068,6 +1127,177 @@ test "a lost output recovers within bounded attempts and then stays failed" {
         zone_runtime.max_recovery_attempts,
         runtime_zone.published_recovery_attempts.load(.acquire),
     );
+}
+
+test "a Zone whose recovery is exhausted hands back every block it held" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    harness.player.pause();
+    harness.engine.pass();
+    try std.testing.expect(!runtime_zone.quiescent());
+
+    harness.backend.fail_next_open = true;
+    liveStreamFor(&harness.backend, runtime_zone).?.markLost();
+    var pass: usize = 0;
+    while (!runtime_zone.recoveryExhausted() and pass < 16) : (pass += 1) {
+        try std.testing.expect(!runtime_zone.quiescent());
+        runtime_zone.recovery_wait_ns = 0;
+        harness.engine.pass();
+    }
+    try std.testing.expect(runtime_zone.recoveryExhausted());
+    try std.testing.expect(!harness.engine.isIdle());
+
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.failed, runtime_zone.outputState());
+    try std.testing.expect(runtime_zone.quiescent());
+    try std.testing.expect(harness.engine.isIdle());
+}
+
+test "closing a failed Zone's output and requesting it again opens it afresh" {
+    const allocator = std.testing.allocator;
+    var harness = try Harness.init(allocator);
+    defer harness.deinit();
+    var decoder: RampDecoder = .{ .total = 1_000_000 };
+    try harness.player.loadSource(source_session.SourceSession.init(decoder.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try harness.engine.publishZones(&.{runtime_zone});
+    harness.player.play();
+    harness.engine.pass();
+    try exhaustRecovery(harness, runtime_zone);
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.failed, runtime_zone.outputState());
+
+    runtime_zone.output_requested.store(false, .release);
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.closed, runtime_zone.outputState());
+    try std.testing.expectEqual(@as(u32, 0), runtime_zone.published_recovery_attempts.load(.acquire));
+
+    harness.backend.fail_next_open = false;
+    runtime_zone.output_requested.store(true, .release);
+    harness.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+    var samples: [frames_per_block]f32 = @splat(0);
+    liveStreamFor(&harness.backend, runtime_zone).?.pump(&samples, frames_per_block);
+    try std.testing.expect(std.mem.max(f32, &samples) > 0);
+}
+
+test "a Zone moved to another Player never renders the previous Player's audio" {
+    const allocator = std.testing.allocator;
+    var previous = try Harness.init(allocator);
+    defer previous.deinit();
+    var next = try Harness.init(allocator);
+    defer next.deinit();
+    next.engine.factory = previous.backend.factory();
+    var previous_audio: ConstantDecoder = .{ .value = 0.25 };
+    var next_audio: ConstantDecoder = .{ .value = 0.75 };
+    try previous.player.loadSource(source_session.SourceSession.init(previous_audio.decoder()));
+    try next.player.loadSource(source_session.SourceSession.init(next_audio.decoder()));
+    try std.testing.expectEqual(previous.player.snapshot().epoch, next.player.snapshot().epoch);
+    try std.testing.expectEqual(previous.player.entrySerial(), next.player.entrySerial());
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try previous.engine.publishZones(&.{runtime_zone});
+    previous.player.play();
+    next.player.play();
+    var samples: [frames_per_block]f32 = undefined;
+    previous.engine.pass();
+    liveStreamFor(&previous.backend, runtime_zone).?.pump(&samples, frames_per_block);
+    try std.testing.expectEqual(@as(f32, 0.25), samples[0]);
+    previous.engine.pass();
+    try std.testing.expect(!runtime_zone.quiescent());
+
+    try moveZone(runtime_zone, previous.engine, next.engine);
+    for (0..2 * block_count) |_| {
+        next.engine.pass();
+        const stream = liveStreamFor(&previous.backend, runtime_zone) orelse
+            return error.OutputNeverReopened;
+        stream.pump(&samples, frames_per_block);
+        for (samples) |sample| try std.testing.expect(sample != 0.25);
+    }
+    try std.testing.expectEqual(@as(f32, 0.75), samples[0]);
+}
+
+test "a Zone moved between Players reports position from zero under the new Player" {
+    const allocator = std.testing.allocator;
+    var previous = try Harness.init(allocator);
+    defer previous.deinit();
+    var next = try Harness.init(allocator);
+    defer next.deinit();
+    next.engine.factory = previous.backend.factory();
+    var previous_audio: ConstantDecoder = .{ .value = 0.25 };
+    var next_audio: ConstantDecoder = .{ .value = 0.75 };
+    try previous.player.loadSource(source_session.SourceSession.init(previous_audio.decoder()));
+    try next.player.loadSource(source_session.SourceSession.init(next_audio.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try previous.engine.publishZones(&.{runtime_zone});
+    previous.player.play();
+    next.player.play();
+    var samples: [frames_per_block]f32 = undefined;
+    for (0..8) |_| {
+        previous.engine.pass();
+        liveStreamFor(&previous.backend, runtime_zone).?.pump(&samples, frames_per_block);
+    }
+    previous.engine.pass();
+    try std.testing.expectEqual(
+        @as(u64, 8 * frames_per_block),
+        previous.player.snapshot().position_frames,
+    );
+
+    try moveZone(runtime_zone, previous.engine, next.engine);
+    next.engine.pass();
+    try std.testing.expectEqual(@as(u64, 0), next.player.snapshot().position_frames);
+    liveStreamFor(&previous.backend, runtime_zone).?.pump(&samples, frames_per_block);
+    next.engine.pass();
+    try std.testing.expectEqual(
+        @as(u64, frames_per_block),
+        next.player.snapshot().position_frames,
+    );
+}
+
+test "a Zone transferred to a Player in another format opens at that Player's format" {
+    const allocator = std.testing.allocator;
+    var previous = try Harness.init(allocator);
+    defer previous.deinit();
+    var next = try Harness.init(allocator);
+    defer next.deinit();
+    next.engine.factory = previous.backend.factory();
+    var previous_audio: RampDecoder = .{ .total = 1_000_000 };
+    var next_audio: RampDecoder = .{ .total = 1_000_000, .channels = 2, .sample_rate = 44_100 };
+    try previous.player.loadSource(source_session.SourceSession.init(previous_audio.decoder()));
+    try next.player.loadSource(source_session.SourceSession.init(next_audio.decoder()));
+
+    const runtime_zone = try openZone(allocator);
+    defer runtime_zone.destroy();
+    try previous.engine.publishZones(&.{runtime_zone});
+    previous.player.play();
+    next.player.play();
+    previous.engine.pass();
+    try std.testing.expectEqual(@as(u32, 48_000), runtime_zone.open_format.?.sample_rate);
+
+    try moveZone(runtime_zone, previous.engine, next.engine);
+    next.engine.pass();
+    try std.testing.expectEqual(zone_model.OutputState.active, runtime_zone.outputState());
+    const stream = liveStreamFor(&previous.backend, runtime_zone) orelse
+        return error.OutputNeverReopened;
+    try std.testing.expectEqual(@as(u32, 44_100), stream.request.format.sample_rate);
+    try std.testing.expectEqual(@as(u16, 2), stream.request.format.channels);
+    var samples: [frames_per_block * 2]f32 = @splat(0);
+    stream.pump(&samples, frames_per_block);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1 }, samples[2..4]);
 }
 
 test "a position hint wakes the host once per pump" {
@@ -1472,6 +1702,7 @@ const QueueHarness = struct {
     engine: *PlayerEngine = undefined,
     registration: work.Registration = .{},
     runtime_zone: *ZoneRuntime = undefined,
+    second_zone: ?*ZoneRuntime = null,
 
     fn init(allocator: std.mem.Allocator, plans: []const TrackPlan) !*QueueHarness {
         const self = try allocator.create(QueueHarness);
@@ -1497,10 +1728,19 @@ const QueueHarness = struct {
         self.engine.releasePending();
         self.engine.destroy();
         self.runtime_zone.destroy();
+        if (self.second_zone) |runtime_zone| runtime_zone.destroy();
         self.player.deinit();
         self.queue.deinit();
         self.backend.deinit();
         allocator.destroy(self);
+    }
+
+    fn addZone(self: *QueueHarness, device_id: u64) !*ZoneRuntime {
+        const runtime_zone = try openZone(self.allocator);
+        runtime_zone.requested_device_id.store(device_id, .release);
+        self.second_zone = runtime_zone;
+        try self.engine.publishZones(&.{ self.runtime_zone, runtime_zone });
+        return runtime_zone;
     }
 
     fn enqueue(self: *QueueHarness, ids: []const i64) !void {
@@ -1515,11 +1755,15 @@ const QueueHarness = struct {
     fn step(self: *QueueHarness, callback_frames: u32) void {
         self.engine.pass();
         if (callback_frames == 0) return;
-        if (liveStreamFor(&self.backend, self.runtime_zone)) |stream| {
-            var samples: [frames_per_block * 2]f32 = undefined;
-            const channels = @max(1, self.runtime_zone.channels);
-            stream.pump(samples[0 .. callback_frames * channels], callback_frames);
-        }
+        self.render(self.runtime_zone, callback_frames);
+        if (self.second_zone) |runtime_zone| self.render(runtime_zone, callback_frames);
+    }
+
+    fn render(self: *QueueHarness, runtime_zone: *ZoneRuntime, callback_frames: u32) void {
+        const stream = liveStreamFor(&self.backend, runtime_zone) orelse return;
+        var samples: [frames_per_block * 2]f32 = undefined;
+        const channels = @max(1, runtime_zone.channels);
+        stream.pump(samples[0 .. callback_frames * channels], callback_frames);
     }
 
     fn run(self: *QueueHarness, passes: usize, callback_frames: u32) void {
@@ -1831,6 +2075,71 @@ test "position restarts for an entry reached through a format switch" {
     try std.testing.expect(highest[0] <= entry_frames);
     try std.testing.expect(highest[1] <= entry_frames);
     try std.testing.expect(highest[1] >= entry_frames - 128);
+}
+
+test "a format switch completes for a healthy Zone when another Zone's output has failed for good" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block, .sample_rate = 48_000 },
+        .{ .track_id = 11, .frames = 1_000_000, .sample_rate = 44_100 },
+    });
+    defer harness.deinit();
+    const healthy = harness.runtime_zone;
+    const failing = try harness.addZone(2);
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    harness.step(0);
+    try std.testing.expectEqual(zone_model.OutputState.active, failing.outputState());
+    try std.testing.expect(!failing.quiescent());
+
+    harness.backend.fail_device_id = 2;
+    liveStreamFor(&harness.backend, failing).?.markLost();
+    harness.run(200, frames_per_block);
+    try std.testing.expect(harness.engine.pending_source != null);
+    try std.testing.expectEqual(zone_model.OutputState.lost, failing.outputState());
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.format_switch_transitions);
+
+    var pass: usize = 0;
+    while (!failing.recoveryExhausted() and pass < 16) : (pass += 1) {
+        try std.testing.expectEqual(@as(u64, 0), harness.engine.format_switch_transitions);
+        failing.recovery_wait_ns = 0;
+        harness.step(frames_per_block);
+    }
+    try std.testing.expect(failing.recoveryExhausted());
+
+    harness.run(200, frames_per_block);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.format_switch_transitions);
+    try std.testing.expectEqual(zone_model.OutputState.active, healthy.outputState());
+    try std.testing.expectEqual(@as(u32, 44_100), healthy.open_format.?.sample_rate);
+    const underruns = healthy.pipe.underruns.load(.monotonic);
+    harness.run(64, frames_per_block);
+    try std.testing.expectEqual(underruns, healthy.pipe.underruns.load(.monotonic));
+    try std.testing.expectEqual(zone_model.OutputState.failed, failing.outputState());
+    try std.testing.expect(failing.quiescent());
+}
+
+test "a Player reports drained when its live Zone has drained and another Zone has failed for good" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block },
+    });
+    defer harness.deinit();
+    const failing = try harness.addZone(2);
+    try harness.enqueue(&.{10});
+    harness.player.play();
+    harness.step(0);
+    try std.testing.expect(!failing.quiescent());
+
+    harness.backend.fail_device_id = 2;
+    liveStreamFor(&harness.backend, failing).?.markLost();
+    for (0..64) |_| {
+        failing.recovery_wait_ns = 0;
+        harness.step(frames_per_block);
+    }
+    try std.testing.expect(failing.recoveryExhausted());
+    try std.testing.expect(harness.runtime_zone.quiescent());
+    try std.testing.expect(harness.player.drained.load(.acquire));
+    try std.testing.expect(harness.engine.isIdle());
 }
 
 test "repeat_one re-primes a fresh session instead of seeking the draining one" {

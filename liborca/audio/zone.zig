@@ -95,6 +95,7 @@ pub const Zone = struct {
 
     pub fn close(self: *Zone) void {
         self.output_state = .closed;
+        self.recovery_attempts = 0;
     }
 };
 

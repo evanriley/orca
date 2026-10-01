@@ -927,6 +927,110 @@ test "destroying a Zone is acknowledged by the engine before its path is freed" 
     try std.testing.expectError(error.StaleHandle, runtime.zoneOutputState(removed));
 }
 
+fn awaitZoneActive(runtime: *OrcaRuntime, zone: ZoneHandle) !void {
+    var deadline: TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active) {
+        if (!deadline.tick()) return error.OutputNeverOpened;
+    }
+}
+
+test "attaching a Zone to another Player closes its output and reopens it for the new Player" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const previous = try runtime.createPlayer();
+    const next = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, previous);
+    try runtime.playerLoadFile(previous, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.playerLoadFile(next, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(previous);
+    try awaitZoneActive(&runtime, zone);
+    const previous_stream = backend.liveStream() orelse return error.OutputNeverOpened;
+
+    try runtime.attachZone(zone, next);
+    try std.testing.expect(previous_stream.closed);
+    try awaitZoneActive(&runtime, zone);
+    try std.testing.expectEqual(@as(usize, 2), backend.opens);
+    const next_stream = backend.liveStream() orelse return error.OutputNeverReopened;
+    try std.testing.expect(next_stream != previous_stream);
+
+    try runtime.playPlayer(next);
+    var samples: [512]f32 = undefined;
+    var deadline: TestDeadline = .init(5_000);
+    while ((try runtime.playerSnapshot(next)).position_frames == 0 and deadline.tick())
+        next_stream.pump(&samples, 256);
+    try std.testing.expect((try runtime.playerSnapshot(next)).position_frames > 0);
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(next);
+    try runtime.destroyPlayer(previous);
+}
+
+test "re-attaching a Zone to the Player it is already on does not interrupt its output" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    try awaitZoneActive(&runtime, zone);
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+
+    try runtime.attachZone(zone, player);
+    try std.testing.expect(!stream.closed);
+    try std.testing.expectEqual(audio.zone.OutputState.active, try runtime.zoneOutputState(zone));
+    try std.testing.expectEqual(@as(usize, 1), backend.opens);
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(player);
+}
+
+test "detaching a Zone forgets the timeline its callback published" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerLoadFile(player, std.testing.io, "fixtures/audio/generated-reference.wav");
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    try awaitZoneActive(&runtime, zone);
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+    var samples: [512]f32 = undefined;
+    var deadline: TestDeadline = .init(5_000);
+    while ((try runtime.zoneStats(zone)).rendered_entry_serial == 0 and deadline.tick())
+        stream.pump(&samples, 256);
+    try std.testing.expect((try runtime.zoneStats(zone)).rendered_entry_serial != 0);
+
+    try runtime.detachZone(zone);
+    const stats = try runtime.zoneStats(zone);
+    try std.testing.expectEqual(audio.zone.OutputState.closed, stats.output_state);
+    try std.testing.expectEqual(@as(u32, 0), stats.rendered_entry_serial);
+    const detached = (try runtime.zones.get(zone)).zone;
+    try std.testing.expectEqual(@as(u64, 0), detached.position.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), detached.entry_anchor.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), detached.context.published_position);
+    try std.testing.expect(detached.quiescent());
+
+    try runtime.destroyZone(zone);
+    try runtime.destroyPlayer(player);
+}
+
 test "engine-owned Zone output state is not mutable from the control lane" {
     var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
     defer backend.deinit();

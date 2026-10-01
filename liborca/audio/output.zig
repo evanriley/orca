@@ -97,6 +97,7 @@ pub const TestBackend = struct {
     stream_count: usize = 0,
     /// When set, the next `open` fails. Models a device that will not reopen.
     fail_next_open: bool = false,
+    fail_device_id: ?u64 = null,
     opens: usize = 0,
 
     pub const max_streams = 8;
@@ -162,6 +163,9 @@ pub const TestBackend = struct {
         const self: *TestBackend = @ptrCast(@alignCast(context.?));
         self.opens += 1;
         if (self.fail_next_open) return error.TestOutputUnavailable;
+        if (self.fail_device_id) |device_id| {
+            if (request.device_id == device_id) return error.TestOutputUnavailable;
+        }
         if (self.stream_count == max_streams) return error.TestOutputUnavailable;
         const stream = try self.allocator.create(Stream);
         stream.* = .{

@@ -997,11 +997,7 @@ pub const OrcaRuntime = struct {
                     if (attached.eql(player)) {
                         zone.attached_player = null;
                         zone.zone.output_requested.store(false, .release);
-                        zone.zone.silenced.store(true, .release);
-                        zone.zone.closeOutput();
-                        zone.zone.resetPipe();
-                        zone.zone.zone.close();
-                        zone.zone.publishState();
+                        zone.zone.retire();
                     }
                 }
             }
@@ -1021,6 +1017,10 @@ pub const OrcaRuntime = struct {
         return runtime_zones.destroyZone(self, zone);
     }
 
+    /// Moving a Zone to another Player closes its output and discards the
+    /// previous Player's prepared audio before returning; the new Player
+    /// reopens the output in its own format. Attaching a Zone to the Player it
+    /// is already on changes nothing.
     pub fn attachZone(self: *OrcaRuntime, zone: ZoneHandle, player: PlayerHandle) !void {
         return runtime_zones.attachZone(self, zone, player);
     }
@@ -1114,7 +1114,8 @@ pub const OrcaRuntime = struct {
         return runtime_queue.playerLoadFile(self, player, io, path);
     }
 
-    /// True once the source has decoded to its end and every Zone has handed
+    /// True once the source has decoded to its end and every Zone with a
+    /// requested output, other than one whose recovery is exhausted, has handed
     /// back every block it was given.
     pub fn playerDrained(self: *OrcaRuntime, player: PlayerHandle) !bool {
         return runtime_queue.playerDrained(self, player);

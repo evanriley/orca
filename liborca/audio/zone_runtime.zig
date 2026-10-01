@@ -215,6 +215,11 @@ pub const ZoneRuntime = struct {
         return self.pool.free_len == block_count;
     }
 
+    pub fn recoveryExhausted(self: *const ZoneRuntime) bool {
+        return self.zone.output_state == .failed and
+            self.zone.recovery_attempts >= max_recovery_attempts;
+    }
+
     /// Engine thread. Opening allocates and blocks, so it is deliberately on
     /// this lane and never inside a render callback.
     pub fn openOutput(
@@ -271,6 +276,35 @@ pub const ZoneRuntime = struct {
             self.pipe.current = null;
         }
         self.pipe.current_frame = 0;
+    }
+
+    /// Clears what the callback published and its private mirrors of it, so a
+    /// later Player never reads them as its own. Legal only while no callback
+    /// can be running and no engine can reach this Zone.
+    pub fn forgetTimeline(self: *ZoneRuntime) void {
+        std.debug.assert(self.output == null);
+        self.pipe.published_entry_serial = 0;
+        self.pipe.entry_started = false;
+        self.pipe.entry_start_offset = 0;
+        self.pipe.rendered_entry_serial.store(0, .monotonic);
+        self.context.published_position = 0;
+        self.context.entry_start_frames = 0;
+        self.epoch.store(0, .monotonic);
+        self.position.store(0, .monotonic);
+        self.rendered_entry_serial.store(0, .monotonic);
+        self.entry_anchor.store(0, .monotonic);
+    }
+
+    /// Control lane, once no engine can reach this Zone.
+    pub fn retire(self: *ZoneRuntime) void {
+        self.silenced.store(true, .release);
+        self.closeOutput();
+        self.resetPipe();
+        self.forgetTimeline();
+        self.zone.close();
+        self.stalled_passes = 0;
+        self.recovery_wait_ns = 0;
+        self.publishState();
     }
 };
 
