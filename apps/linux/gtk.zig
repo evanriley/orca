@@ -135,6 +135,7 @@ pub const ALIGN_CENTER: c_int = 3;
 pub const ELLIPSIZE_NONE: c_int = 0;
 pub const ELLIPSIZE_MIDDLE: c_int = 2;
 pub const ELLIPSIZE_END: c_int = 3;
+pub const WRAP_WORD_CHAR: c_int = 2;
 
 pub const PHASE_NONE: c_int = 0;
 pub const PHASE_CAPTURE: c_int = 1;
@@ -571,6 +572,7 @@ pub extern fn gtk_menu_button_set_menu_model(button: *MenuButton, menu_model: ?*
 pub extern fn gtk_menu_button_set_primary(button: *MenuButton, primary: gboolean) void;
 pub extern fn gtk_toggle_button_set_active(button: *ToggleButton, active: gboolean) void;
 pub extern fn gtk_label_set_wrap(label: *Label, wrap: gboolean) void;
+pub extern fn gtk_label_set_wrap_mode(label: *Label, wrap_mode: c_int) void;
 pub extern fn gtk_label_set_lines(label: *Label, lines: c_int) void;
 pub extern fn gtk_label_set_justify(label: *Label, justify: c_int) void;
 pub extern fn gtk_widget_set_cursor_from_name(widget: *Widget, name: ?[*:0]const u8) void;

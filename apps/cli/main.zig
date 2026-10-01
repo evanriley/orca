@@ -205,12 +205,17 @@ const help_details =
     \\edit sets Orca's own values for a comma-separated list of Track ids;
     \\the files are not written. With no edits it lists the values held.
     \\  --title= --artist= --album= --album-artist= --date=
-    \\  --track=N --disc=N --compilation=0|1
+    \\  --track=N --disc=N --compilation=0|1 --recording-id=MBID
     \\  --clear=FIELD      drop Orca's value so the file's tag applies again
     \\                     (title|artist|album|album_artist|track_number|
-    \\                      disc_number|date|compilation)
+    \\                      disc_number|date|compilation|
+    \\                      musicbrainz_recording_id)
     \\
-    \\write-tags writes Orca's values for the Tracks into their files. Without
+    \\write-tags writes Orca's values for the Tracks into their files: an edit
+    \\wherever it differs from the file's tag, a match only where the file has
+    \\no tag for its field. Each change is labelled edit or match. A match the
+    \\file's tag disagrees with is printed as a conflict and not written; edit
+    \\the field to lock your choice, then write again. Without
     \\--approve it prints the plan and its digest and writes nothing; run it
     \\again with --approve=DIGEST to write exactly that plan. A digest from a
     \\plan that no longer matches the library is refused. It prints the group
@@ -1270,6 +1275,7 @@ const edit_options = [_]struct { flag: []const u8, field: liborca.MetadataField 
     .{ .flag = "--disc", .field = .disc_number },
     .{ .flag = "--date", .field = .date },
     .{ .flag = "--compilation", .field = .compilation },
+    .{ .flag = "--recording-id", .field = .musicbrainz_recording_id },
 };
 
 /// Library-only edits: Orca's own values, never written to the files.
@@ -1354,10 +1360,14 @@ fn writeTags(context: Context) !void {
     for (plan.files) |file| {
         try stdout.print("file\t{d}\t{s}\n", .{ file.file_id, file.path });
         for (file.changes) |change| try stdout.print(
-            "\t{t}\t{s} -> {s}\n",
-            .{ change.field, change.before orelse "(none)", change.after orelse "(none)" },
+            "\t{t}\t{s} -> {s}\t{s}\n",
+            .{ change.field, change.before orelse "(none)", change.after orelse "(none)", provenanceLabel(change.provenance) },
         );
     }
+    for (plan.conflicts) |conflict| try stdout.print(
+        "conflict\t{d}\t{t}\tfile {s}\torca {s}\t{s}\t{s}\n",
+        .{ conflict.file_id, conflict.field, conflict.file_value, conflict.orca_value, provenanceLabel(conflict.provenance), conflict.path },
+    );
     if (plan.files.len == 0) {
         try stdout.print("nothing to write\n", .{});
         return;
@@ -1370,6 +1380,14 @@ fn writeTags(context: Context) !void {
     try awaitJob(&runtime, stdout, job_handle, null);
     const stats = try runtime.jobScanStats(job_handle);
     try stdout.print("wrote {d} files as group {d}\n", .{ stats.changed, plan.plan_id });
+}
+
+fn provenanceLabel(provenance: liborca.Provenance) []const u8 {
+    return switch (provenance) {
+        .user => "edit",
+        .provider => "match",
+        else => @tagName(provenance),
+    };
 }
 
 /// `orca-cli track DATABASE ID`: the details view's query, printed.

@@ -2,7 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- **Write Tags to Files from the context menu, with recording IDs.** A track
+  or album menu in `orca-gtk` has Write Tags to Files…, which shows the plan
+  and writes it once confirmed. Tag writes now store the MusicBrainz
+  recording ID: FLAC as `MUSICBRAINZ_TRACKID`, MP3 and ADTS as a MusicBrainz
+  `UFID` frame, replacing a legacy `TXXX:MusicBrainz Track Id` and keeping
+  other `UFID` owners and `TXXX` frames byte for byte, in ID3v2.3 and 2.4.
+  The Edit Tags dialog has a MusicBrainz Recording field for a single track,
+  and `orca-cli edit` a `--recording-id` option.
+
 ### Changed
+
+- **A tag write never overwrites a file's tag with an automatic value.** A
+  locked value, a user's edit, is written wherever it differs from the file;
+  an unlocked one, such as an accepted match, only where the file has no tag
+  for its field. One that disagrees with the file's tag is reported in
+  `TagWritePlan.conflicts` (`TagWriteConflict`) and not written, and each
+  `TagWriteChange` carries the `provenance` of Orca's value. `orca-cli
+  write-tags` labels changes `edit` or `match` and prints a `conflict` line
+  per conflict; `orca-gtk`'s confirmation lists both. `isMusicBrainzId` is
+  exported.
+- **Library schema version 21.** `orca_metadata_values.written_at` records
+  when a tag write put a value into its file, so a recording ID Orca wrote
+  stays eligible for AcoustID submission; IDs Orca did not choose are still
+  never sent.
 
 - **Accept Confident takes each file's best match.** Before, a file's match
   was accepted in bulk only when it was the file's one pending proposal at the

@@ -325,7 +325,7 @@ fn applyUserText(
     const description = values.items[0];
     const value = values.items[1];
     if (value.len == 0) return;
-    if (eqlAny(description, &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" }))
+    if (eqlAny(description, recording_id_descriptions))
         return claim(&tags.musicbrainz_recording_id, value);
     if (eqlAny(description, &.{ "MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID" }))
         return claim(&tags.musicbrainz_release_id, value);
@@ -353,6 +353,9 @@ fn applyUserText(
     }
 }
 
+const recording_id_descriptions: []const []const u8 = &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" };
+const musicbrainz_ufid_owner = "http://musicbrainz.org";
+
 fn applyUniqueFileIdentifier(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -360,7 +363,7 @@ fn applyUniqueFileIdentifier(
 ) !void {
     const split = std.mem.indexOfScalar(u8, data, 0) orelse return;
     const owner = data[0..split];
-    if (!std.mem.eql(u8, owner, "http://musicbrainz.org")) return;
+    if (!std.mem.eql(u8, owner, musicbrainz_ufid_owner)) return;
     const identifier = data[split + 1 ..];
     if (identifier.len == 0 or identifier.len > 128) return;
     for (identifier) |byte| if (byte < 0x20 or byte > 0x7e) return;
@@ -651,7 +654,6 @@ pub fn rewrite(
 
     const current = try currentTags(scratch, loaded, trailer);
     for (changes) |change| {
-        if (!change.field.writesToFiles()) return error.UnwritableMetadataField;
         if (change.before) |expected| {
             const value = try currentValue(scratch, current, change.field) orelse
                 return error.MetadataPreconditionChanged;
@@ -735,13 +737,59 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
     };
 }
 
-fn replaced(identifier: *const [4]u8, major: u8, changes: []const mutation.Change) bool {
+/// Whether a change replaces `frame`. A recording ID lives in a `UFID` frame
+/// owned by MusicBrainz or a `TXXX` frame under a description the reader
+/// accepts, so those two frame types are told apart by owner and description,
+/// and every other owner or description is kept.
+fn replaced(allocator: std.mem.Allocator, frame: []const u8, major: u8, changes: []const mutation.Change) !bool {
+    const identifier = frame[0..4];
     for (changes) |change| {
-        for (fieldFrames(change.field, major)) |frame| {
-            if (std.mem.eql(u8, identifier, frame)) return true;
+        if (change.field == .musicbrainz_recording_id) {
+            if (try carriesRecordingId(allocator, frame, major)) return true;
+            continue;
+        }
+        for (fieldFrames(change.field, major)) |candidate| {
+            if (std.mem.eql(u8, identifier, candidate)) return true;
         }
     }
     return false;
+}
+
+fn carriesRecordingId(allocator: std.mem.Allocator, frame: []const u8, major: u8) !bool {
+    const identifier = frame[0..4];
+    const is_unique_identifier = std.mem.eql(u8, identifier, "UFID");
+    if (!is_unique_identifier and !std.mem.eql(u8, identifier, "TXXX")) return false;
+    const payload = try framePayload(allocator, frame, major) orelse return false;
+    if (is_unique_identifier) {
+        const split = std.mem.indexOfScalar(u8, payload, 0) orelse return false;
+        return std.mem.eql(u8, payload[0..split], musicbrainz_ufid_owner);
+    }
+    var values = decodeTextValues(allocator, payload) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return false,
+    };
+    defer values.deinit(allocator);
+    if (values.items.len == 0) return false;
+    return eqlAny(values.items[0], recording_id_descriptions);
+}
+
+/// A whole frame's payload with the prefixes its format flags announce
+/// removed, or null when it is compressed or encrypted. Per-frame
+/// unsynchronization is undone on a copy, so the frame itself can still be
+/// copied verbatim.
+fn framePayload(allocator: std.mem.Allocator, frame: []const u8, major: u8) !?[]const u8 {
+    const format_flags = frame[9];
+    var data = frame[10..];
+    if (major >= 4) {
+        if (format_flags & 0x0c != 0) return null;
+        if (format_flags & 0x40 != 0) data = if (data.len >= 1) data[1..] else return null;
+        if (format_flags & 0x01 != 0) data = if (data.len >= 4) data[4..] else return null;
+        if (format_flags & 0x02 != 0) return unsynchronize(try allocator.dupe(u8, data));
+    } else {
+        if (format_flags & 0xc0 != 0) return null;
+        if (format_flags & 0x20 != 0) data = if (data.len >= 1) data[1..] else return null;
+    }
+    return data;
 }
 
 /// Every frame no change replaces, header and payload as they were.
@@ -763,7 +811,7 @@ fn copyUnchangedFrames(
         if (declared > tag.span.len - position - 10) return error.TruncatedId3v2Tag;
         const frame = tag.span[position .. position + 10 + declared];
         position += frame.len;
-        if (replaced(identifier, tag.major, changes)) continue;
+        if (try replaced(allocator, frame, tag.major, changes)) continue;
         try body.appendSlice(allocator, frame);
     }
 }
@@ -790,8 +838,23 @@ fn appendChangedFrames(
                 if (isAllDigits(&day_month)) try appendTextFrame(allocator, body, major, "TDAT", &day_month);
             }
         },
-        else => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
+        .title, .artist, .album, .album_artist, .compilation => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
+        .musicbrainz_recording_id => try appendUniqueFileIdentifier(allocator, body, major, musicbrainz_ufid_owner, value),
     }
+}
+
+/// A `UFID` frame: the owner, a terminator, and the identifier's bytes, with
+/// no encoding byte.
+fn appendUniqueFileIdentifier(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    owner: []const u8,
+    identifier: []const u8,
+) !void {
+    if (identifier.len == 0 or identifier.len > 64) return error.InvalidTagValue;
+    const payload = try std.mem.concat(allocator, u8, &.{ owner, "\x00", identifier });
+    try appendFrame(allocator, body, major, "UFID", payload);
 }
 
 /// `n/total` when the file stated a total, so editing a track number does not
@@ -835,15 +898,25 @@ fn appendTextFrame(
             }
         }
     }
+    try appendFrame(allocator, body, major, identifier, payload.items);
+}
+
+fn appendFrame(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    identifier: *const [4]u8,
+    payload: []const u8,
+) !void {
     try body.appendSlice(allocator, identifier);
     var size: [4]u8 = undefined;
     if (major >= 4)
-        writeSyncsafe(&size, @intCast(payload.items.len))
+        writeSyncsafe(&size, @intCast(payload.len))
     else
-        std.mem.writeInt(u32, &size, @intCast(payload.items.len), .big);
+        std.mem.writeInt(u32, &size, @intCast(payload.len), .big);
     try body.appendSlice(allocator, &size);
     try body.appendSlice(allocator, &.{ 0, 0 });
-    try body.appendSlice(allocator, payload.items);
+    try body.appendSlice(allocator, payload);
 }
 
 fn writeSyncsafe(destination: *[4]u8, value: u32) void {
@@ -1255,4 +1328,73 @@ test "clearing a field removes its frame" {
     const after = (try expectTags(arena.allocator(), written)).?;
     try std.testing.expect(after.album == null);
     try std.testing.expectEqualStrings(before.title.?, after.title.?);
+}
+
+fn expectRecordingIdRewrite(comptime major: u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_id = "11111111-2222-4333-8444-555555555555";
+    const new_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    const legacy_description = if (major >= 4) "\x03MusicBrainz Track Id\x00" else "\x00MusicBrainz Track Id\x00";
+    const foreign_ufid = try buildFrame(allocator, "UFID", major, "http://www.cddb.com/id3/taginfo1.html\x003CD3N42R04-1");
+    const replay_gain = try buildFrame(allocator, "TXXX", major, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const title = try buildFrame(allocator, "TIT2", major, "\x00Kept");
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, title);
+    try frames.appendSlice(allocator, foreign_ufid);
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TXXX", major, legacy_description ++ old_id));
+    try frames.appendSlice(allocator, replay_gain);
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, major, 0, frames.items), "\xff\xfb\x90\x64audio" });
+    try std.testing.expectEqualStrings(old_id, (try expectTags(allocator, original)).?.musicbrainz_recording_id.?);
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_recording_id, .before = old_id, .after = new_id },
+    });
+    try std.testing.expectEqual(major, written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings(new_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    try std.testing.expect(std.mem.indexOf(u8, written, title) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, foreign_ufid) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, replay_gain) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "MusicBrainz Track Id") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, old_id) == null);
+    const musicbrainz_ufid = try buildFrame(allocator, "UFID", major, "http://musicbrainz.org\x00" ++ new_id);
+    try std.testing.expect(std.mem.indexOf(u8, written, musicbrainz_ufid) != null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+}
+
+test "a recording id is written as a MusicBrainz UFID in 2.4, replacing the legacy TXXX and keeping other owners and descriptions" {
+    try expectRecordingIdRewrite(4);
+}
+
+test "a recording id is written as a MusicBrainz UFID in 2.3, replacing the legacy TXXX and keeping other owners and descriptions" {
+    try expectRecordingIdRewrite(3);
+}
+
+test "a recording id is added to a tag that had none, and an earlier MusicBrainz UFID is replaced" {
+    const original = try readFixtureBytes("fixtures/audio/covered-reference.mp3");
+    defer std.testing.allocator.free(original);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const before = (try expectTags(allocator, original)).?;
+    try std.testing.expect(before.musicbrainz_recording_id == null);
+    const first_id = "11111111-2222-4333-8444-555555555555";
+    const second_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+    const first = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_recording_id, .before = null, .after = first_id },
+    });
+    const once = (try expectTags(allocator, first)).?;
+    try std.testing.expectEqualStrings(first_id, once.musicbrainz_recording_id.?);
+    try std.testing.expectEqualDeep(before.title, once.title);
+    try std.testing.expectEqual(before.artwork.?.byte_size, once.artwork.?.byte_size);
+
+    const second = try applyRewrite(allocator, first, &.{
+        .{ .field = .musicbrainz_recording_id, .before = first_id, .after = second_id },
+    });
+    try std.testing.expectEqualStrings(second_id, (try expectTags(allocator, second)).?.musicbrainz_recording_id.?);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, second, "http://musicbrainz.org"));
 }

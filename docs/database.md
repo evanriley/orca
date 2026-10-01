@@ -367,8 +367,14 @@ accepted: `(file_id, recording_mbid)` is its primary key, with the
 `submission_id` AcoustID returned and `submitted_at`. Rows go with their file.
 `repository.acoustid_submittable` selects the files a submission sends: an
 Orca value for the recording id with `provider` or `user` provenance that is
-the id in effect, is not the file's tag, and has no row here for that id.
-Editing the id makes the file eligible again under the new one.
+the id in effect, is not the file's tag unless Orca wrote it there, and has
+no row here for that id. Editing the id makes the file eligible again under
+the new one.
+
+`orca_metadata_values.written_at` (version 21) is when a tag write last put
+the value into its file, or null. Changing the value clears it; undoing the
+write does not. The submission query reads it to tell a tag Orca wrote from
+one the file already had.
 
 ## Provider state
 

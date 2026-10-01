@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 20;
+pub const current_version = 21;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -940,6 +940,10 @@ const migration_20 =
     \\);
 ;
 
+const migration_21 =
+    \\ALTER TABLE orca_metadata_values ADD COLUMN written_at INTEGER;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1084,6 +1088,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 18 and target_version >= 18) try db.exec(migration_18);
     if (version < 19 and target_version >= 19) try db.exec(migration_19);
     if (version < 20 and target_version >= 20) try db.exec(migration_20);
+    if (version < 21 and target_version >= 21) try db.exec(migration_21);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1897,5 +1902,26 @@ test "a version-19 library gains release artwork, whose row goes when its releas
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM release_artwork;"));
     try db.exec("DELETE FROM releases WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM release_artwork;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-20 library gains a write time on Orca's values, unset for every existing value" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "written.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 20);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10);
+        \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
+        \\VALUES (1, 8, '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 2, 0, 1800000000);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM orca_metadata_values WHERE written_at IS NULL;"));
     try checkForeignKeys(db);
 }

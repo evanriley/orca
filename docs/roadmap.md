@@ -103,15 +103,15 @@ for the remaining formats and the C ABI's catch-up.
 
 ### Identification
 
-- MusicBrainz matching: a cancellable job searches MusicBrainz for every
-  Track whose file has no recording ID, one request a second with answers
-  cached for 30 days, and stores reviewable proposals. Accepting one records
-  the recording ID in the Library only, so loves and listens can be sent under
-  it; bulk acceptance of confident matches is an explicit action. Reachable
-  through `orca-cli match`, `matches`, `accept-match`, `dismiss-match` and
-  `accept-matches`, and in `orca-gtk` through the Matches page, the details
-  panel's MusicBrainz section (with a single-song Find Match) and the
-  confidence threshold in Preferences. See
+- MusicBrainz matching: a cancellable job searches MusicBrainz for every Track
+  whose file has no recording ID, one request a second with answers cached for
+  30 days, and stores reviewable proposals. Accepting one records the recording
+  ID in the Library, so loves and listens can be sent under it, and a tag write
+  stores it in files that have none; bulk acceptance of confident matches is an
+  explicit action. Reachable through `orca-cli match`, `matches`,
+  `accept-match`, `dismiss-match` and `accept-matches`, and in `orca-gtk`
+  through the Matches page, the details panel's MusicBrainz section (with a
+  single-song Find Match) and the confidence threshold in Preferences. See
   [providers.md](providers.md#matching).
 - AcoustID matching: the same job fingerprints each file with Chromaprint and
   looks up to 20 fingerprints at a time on AcoustID, merging both services'
@@ -153,11 +153,11 @@ for the remaining formats and the C ABI's catch-up.
   submission.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
-  menus, tag editing with write-back and undo, Preferences, a Health page, a
-  player bar with cover art and an output menu, job progress, a welcome page,
-  toasts, a shortcuts dialog, MPRIS, ListenBrainz submission with play counts
-  in the details panel, love and dislike, MusicBrainz and AcoustID match
-  review, and AcoustID submission.
+  menus, tag editing with write-back and undo (Write Tags to Files on track and
+  album menus), Preferences, a Health page, a player bar with cover art and an
+  output menu, job progress, a welcome page, toasts, a shortcuts dialog, MPRIS,
+  ListenBrainz submission with play counts in the details panel, love and
+  dislike, MusicBrainz and AcoustID match review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
   with `liborca.so.0` exporting exactly its functions and `orca.pc` for
   pkg-config.
@@ -177,9 +177,6 @@ entry point and a client before it counts as working.
 
 - File moves through the journaled `MutationPlan` executor. Tag writes are
   reachable; moves are not.
-- Setting a recording ID by hand: `libraryEditTracks` accepts a locked
-  MusicBrainz recording ID, but neither `orca-cli edit` nor the `orca-gtk` tag
-  editor offers the field.
 
 ## Next
 
@@ -187,11 +184,9 @@ In priority order. Each step leaves `orca-gtk` usable every day.
 
 1. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
-   tag are reported as not writable. No writer stores an accepted recording
-   ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
-   `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
-   it lacks tag writes, queue editing, artwork, DSP, track details, matching
-   and AcoustID submission.
+   tag are reported as not writable. The C ABI covers about a third of the
+   Zig API: it lacks tag writes, queue editing, artwork, DSP, track details,
+   matching and AcoustID submission.
 2. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
 3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
@@ -200,7 +195,13 @@ In priority order. Each step leaves `orca-gtk` usable every day.
 4. **Apply MusicBrainz metadata from accepted matches.** An accepted match
    records only the recording ID; its title, artist, track number and the
    rest should become Orca metadata too, under the same lock and provenance
-   rules.
+   rules. Matching parses and carries the release, release-group,
+   release-track and album-artist MusicBrainz IDs and the matched text as
+   unlocked provider values, which tag writes then store where the files
+   have none. Release-level IDs are stored and written only when every file
+   of the Release agrees on the release, a consensus generalising the tally
+   in `release_artwork.zig`. Artist IDs follow once `ObservedTags` holds
+   multiple values.
 5. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
@@ -296,9 +297,12 @@ are sniffed or not recognized until then:
 - A macOS filesystem watcher (FSEvents) behind the same `library/watch.zig`
   contract; until then `libraryWatch` returns `error.WatchingUnsupported`
   there.
-- A preference to also write fetched cover art into files: embedded through
-  the tag writer's approved `MutationPlan`, or as `cover.jpg` in the album
-  folder.
+- Opt-in per write: embedding a Release's fetched cover only in files with no
+  embedded picture, as one front cover, stored once per plan and referenced
+  by digest from each action rather than copied into every action.
+- Opt-in writing of the AcoustID track ID (`ACOUSTID_ID`, `TXXX:Acoustid
+  Id`) for matches accepted with a fingerprint, never the fingerprint
+  itself.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.

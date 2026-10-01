@@ -156,6 +156,9 @@ pub const TagWritePlan = struct {
     digest: metadata.mutation.Digest,
     files: []const TagWriteFile,
     skipped: []const TagWriteSkip,
+    /// Orca values that are not written because the file's own tag says
+    /// something else and the value is not locked.
+    conflicts: []const TagWriteConflict,
 
     pub fn deinit(self: TagWritePlan) void {
         const child = self.arena.child_allocator;
@@ -174,6 +177,18 @@ pub const TagWriteChange = struct {
     field: metadata.Field,
     before: ?[]const u8,
     after: ?[]const u8,
+    /// Where Orca's value came from: `user` for an edit, `provider` for an
+    /// accepted match.
+    provenance: metadata.Provenance,
+};
+
+pub const TagWriteConflict = struct {
+    file_id: i64,
+    path: []const u8,
+    field: metadata.Field,
+    file_value: []const u8,
+    orca_value: []const u8,
+    provenance: metadata.Provenance,
 };
 
 pub const TagWriteSkip = struct {
@@ -1379,10 +1394,13 @@ pub const OrcaRuntime = struct {
     }
 
     /// Builds and seals a plan that writes Orca's values for `track_ids` into
-    /// their files, and returns it for approval. Nothing is written. A file is
-    /// left out when it has nothing to write, and reported in `skipped` when it
-    /// cannot be written now. The plan waits in the runtime for
-    /// `startTagWrite`; at most eight wait at once.
+    /// their files, and returns it for approval. Nothing is written. A locked
+    /// value is written when it differs from the file's tag; an unlocked one
+    /// only when the file has no tag for its field, and otherwise is reported
+    /// in `conflicts` and left out. A file is left out when it has nothing to
+    /// write, and reported in `skipped` when it cannot be written now. The
+    /// plan waits in the runtime for `startTagWrite`; at most eight wait at
+    /// once.
     pub fn planTagWrite(
         self: *OrcaRuntime,
         library: LibraryHandle,

@@ -31,6 +31,7 @@ const fields = [_]Field{
     .{ .field = .date, .label = "Date" },
     .{ .field = .track_number, .label = "Track", .single_only = true },
     .{ .field = .disc_number, .label = "Disc" },
+    .{ .field = .musicbrainz_recording_id, .label = "MusicBrainz Recording", .single_only = true },
 };
 
 const Editor = struct {
@@ -76,6 +77,12 @@ fn sharedValue(self: *App, ids: []const i64, field: liborca.MetadataField) ?[:0]
         if (self.runtime.libraryTrackSummary(library, id) catch null) |summary| {
             defer summary.deinit(self.allocator);
             value = summaryValue(self.allocator, summary, field);
+        }
+        if (field == .musicbrainz_recording_id) {
+            if (self.runtime.libraryTrackDetails(library, id) catch null) |details| {
+                defer details.deinit();
+                if (details.musicbrainz_recording_id) |recording_id| value = self.allocator.dupe(u8, recording_id) catch null;
+            }
         }
         if (value == null and field == .date) {
             if (self.runtime.libraryTrackEdits(library, id)) |page_value| {
@@ -124,6 +131,13 @@ fn save(editor: *Editor) bool {
     defer edits.deinit(self.allocator);
     collectEdits(editor, &edits) catch return false;
     if (edits.items.len == 0) return true;
+    for (edits.items) |item| {
+        if (item.field != .musicbrainz_recording_id) continue;
+        const value = item.value orelse continue;
+        if (liborca.isMusicBrainzId(value)) continue;
+        self.toast("A MusicBrainz recording ID is a lowercase UUID");
+        return false;
+    }
     const edited = self.runtime.libraryEditTracks(library, editor.ids, edits.items) catch |err| {
         self.toast(if (err == error.InvalidEditValue) "Track and disc must be whole numbers" else "Could not save the tags");
         return false;
@@ -250,6 +264,24 @@ fn fieldLabel(field: liborca.MetadataField) []const u8 {
     return @tagName(field);
 }
 
+fn sourceLabel(provenance: liborca.Provenance) []const u8 {
+    return switch (provenance) {
+        .user => "your edit",
+        .provider => "match",
+        else => @tagName(provenance),
+    };
+}
+
+fn appendLine(list: *gtk.Widget, text: [:0]const u8, css_class: [*:0]const u8) void {
+    const label = gtk.gtk_label_new(text.ptr);
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, label), gtk.true_);
+    gtk.gtk_label_set_wrap_mode(gtk.cast(gtk.Label, label), gtk.WRAP_WORD_CHAR);
+    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, label), 30);
+    gtk.gtk_widget_add_css_class(label, css_class);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, list), label);
+}
+
 fn basename(path: []const u8) []const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
     return path[slash + 1 ..];
@@ -273,10 +305,12 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
     const plan = self.runtime.planTagWrite(library, self.io, ids) catch return self.toast("Could not plan the write");
     defer plan.deinit();
     if (plan.files.len == 0) {
-        return self.toast(if (plan.skipped.len != 0)
+        return self.toast(if (plan.conflicts.len != 0)
+            "The files' own tags disagree with Orca's matches; edit a field to lock your choice"
+        else if (plan.skipped.len != 0)
             "Those files can't be written yet"
         else
-            "The files already say this");
+            "No changes to write");
     }
 
     const list = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
@@ -288,22 +322,43 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
         gtk.gtk_widget_add_css_class(name, "heading");
         gtk.gtk_box_append(gtk.cast(gtk.Box, list), name);
         for (file.changes) |change| {
-            const line = strings.printZ(&buffer, "{s}: {s} → {s}", .{
+            const line = strings.printZ(&buffer, "{s}: {s} → {s} ({s})", .{
                 fieldLabel(change.field),
                 change.before orelse "(none)",
                 change.after orelse "(the file's own)",
+                sourceLabel(change.provenance),
             }) catch continue;
-            const label = gtk.gtk_label_new(line.ptr);
-            gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
-            gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-            gtk.gtk_widget_add_css_class(label, "dim-label");
-            gtk.gtk_box_append(gtk.cast(gtk.Box, list), label);
+            appendLine(list, line, "dim-label");
         }
     }
     if (plan.files.len > 6) {
         const more = gtk.gtk_label_new(strings.format(&buffer, "and {d} more", .{plan.files.len - 6}).ptr);
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, more), 0.0);
         gtk.gtk_box_append(gtk.cast(gtk.Box, list), more);
+    }
+    if (plan.conflicts.len != 0) {
+        const heading = gtk.gtk_label_new(strings.format(&buffer, "Not written: {d} {s} the file disagrees with", .{
+            plan.conflicts.len,
+            if (plan.conflicts.len == 1) "match" else "matches",
+        }).ptr);
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 0.0);
+        gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, heading), gtk.true_);
+        gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, heading), 30);
+        gtk.gtk_widget_add_css_class(heading, "heading");
+        gtk.gtk_widget_set_margin_top(heading, 6);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, list), heading);
+        for (plan.conflicts[0..@min(plan.conflicts.len, 6)]) |conflict| {
+            const line = strings.printZ(&buffer, "{s} — {s}: file {s}, Orca {s} ({s})", .{
+                basename(conflict.path),
+                fieldLabel(conflict.field),
+                conflict.file_value,
+                conflict.orca_value,
+                sourceLabel(conflict.provenance),
+            }) catch continue;
+            appendLine(list, line, "dim-label");
+        }
+        if (plan.conflicts.len > 6)
+            appendLine(list, strings.format(&buffer, "and {d} more", .{plan.conflicts.len - 6}), "dim-label");
     }
     if (plan.skipped.len != 0) {
         const skipped = gtk.gtk_label_new(strings.format(&buffer, "{d} {s} skipped: not a format Orca writes yet, missing, or changed since the last scan.", .{
@@ -319,7 +374,7 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), list);
     gtk.gtk_scrolled_window_set_propagate_natural_height(gtk.cast(gtk.ScrolledWindow, scroller), gtk.true_);
-    gtk.gtk_scrolled_window_set_max_content_height(gtk.cast(gtk.ScrolledWindow, scroller), 280);
+    gtk.gtk_scrolled_window_set_max_content_height(gtk.cast(gtk.ScrolledWindow, scroller), 400);
 
     const heading: [:0]const u8 = strings.printZ(&buffer, "Write tags to {d} {s}?", .{
         plan.files.len,

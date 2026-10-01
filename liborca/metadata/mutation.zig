@@ -90,7 +90,9 @@ pub const Plan = struct {
                 if (write.path.len == 0 or write.changes.len == 0)
                     return error.InvalidMutationPlan;
                 for (write.changes) |change| {
-                    if (!change.field.writesToFiles()) return error.InvalidMutationPlan;
+                    if (change.field != .musicbrainz_recording_id) continue;
+                    const value = change.after orelse continue;
+                    if (!model.isMusicBrainzId(value)) return error.InvalidMutationPlan;
                 }
             },
             .move => |move| {
@@ -314,13 +316,22 @@ test "mutation preview is inert and execution requires exact approval" {
     try std.testing.expectEqual(State.completed, plan.state);
 }
 
-test "a plan that would write a recording id into a file is refused" {
-    const actions = [_]Action{.{ .write_tags = .{
+test "a plan writes a recording id only when it is a MusicBrainz id" {
+    const valid = [_]Action{.{ .write_tags = .{
         .path = "/music/example.flac",
         .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
         .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }},
     } }};
-    try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &actions));
+    var plan = try Plan.init(std.testing.allocator, 42, &valid);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.preview().field_changes);
+
+    const uppercase = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .changes = &.{.{ .field = .musicbrainz_recording_id, .before = null, .after = "8F3471B5-7E6A-48DA-86A9-C1C07A0F5B4A" }},
+    } }};
+    try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 42, &uppercase));
 }
 
 test "an approved plan cannot be altered through a caller-held alias" {

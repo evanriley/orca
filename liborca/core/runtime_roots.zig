@@ -17,6 +17,7 @@ const PendingTagWrite = job_worker.PendingTagWrite;
 const PruneSummary = runtime.PruneSummary;
 const RemovedRoot = runtime.RemovedRoot;
 const TagWriteChange = runtime.TagWriteChange;
+const TagWriteConflict = runtime.TagWriteConflict;
 const TagWriteFile = runtime.TagWriteFile;
 const TagWritePlan = runtime.TagWritePlan;
 const TagWriteSkip = runtime.TagWriteSkip;
@@ -226,7 +227,14 @@ pub fn planTagWrite(
 
     const preview_arena = try self.allocator.create(std.heap.ArenaAllocator);
     preview_arena.* = .init(self.allocator);
-    var preview: TagWritePlan = .{ .arena = preview_arena, .plan_id = 0, .digest = @splat(0), .files = &.{}, .skipped = &.{} };
+    var preview: TagWritePlan = .{
+        .arena = preview_arena,
+        .plan_id = 0,
+        .digest = @splat(0),
+        .files = &.{},
+        .skipped = &.{},
+        .conflicts = &.{},
+    };
     errdefer preview.deinit();
     const owned = preview_arena.allocator();
 
@@ -245,6 +253,8 @@ pub fn planTagWrite(
     var locations: std.ArrayList(database.repository.PresentLocation) = .empty;
     var files: std.ArrayList(TagWriteFile) = .empty;
     var skipped: std.ArrayList(TagWriteSkip) = .empty;
+    var conflicts: std.ArrayList(TagWriteConflict) = .empty;
+    var written_file_ids: std.ArrayList(i64) = .empty;
     for (file_ids.items) |file_id| {
         const location = try library_database.locations.presentOf(scratch, file_id) orelse {
             try skipped.append(owned, .{ .file_id = file_id, .path = "", .reason = .missing });
@@ -262,14 +272,27 @@ pub fn planTagWrite(
         var changes: std.ArrayList(metadata.mutation.Change) = .empty;
         var shown: std.ArrayList(TagWriteChange) = .empty;
         for (values.items) |value| {
-            if (!value.field.writesToFiles()) continue;
             const before = try observedText(scratch, tags, value.field);
-            if (before) |current| if (std.mem.eql(u8, current, value.text)) continue;
+            if (before) |current| {
+                if (std.mem.eql(u8, current, value.text)) continue;
+                if (!value.locked) {
+                    try conflicts.append(owned, .{
+                        .file_id = file_id,
+                        .path = try owned.dupe(u8, location.uri),
+                        .field = value.field,
+                        .file_value = try owned.dupe(u8, current),
+                        .orca_value = try owned.dupe(u8, value.text),
+                        .provenance = value.provenance,
+                    });
+                    continue;
+                }
+            }
             try changes.append(scratch, .{ .field = value.field, .before = before, .after = value.text });
             try shown.append(owned, .{
                 .field = value.field,
                 .before = if (before) |text| try owned.dupe(u8, text) else null,
                 .after = try owned.dupe(u8, value.text),
+                .provenance = value.provenance,
             });
         }
         if (changes.items.len == 0) continue;
@@ -279,9 +302,11 @@ pub fn planTagWrite(
             .changes = changes.items,
         } });
         try locations.append(scratch, location);
+        try written_file_ids.append(scratch, file_id);
         try files.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .changes = shown.items });
     }
     preview.skipped = skipped.items;
+    preview.conflicts = conflicts.items;
     if (actions.items.len == 0) return preview;
 
     const slot = for (&self.pending_tag_writes) |*candidate| {
@@ -302,6 +327,7 @@ pub fn planTagWrite(
         .library = library,
         .plan = try metadata.mutation.Plan.init(self.allocator, plan_id, actions.items),
         .locations = &.{},
+        .file_ids = &.{},
     };
     errdefer {
         pending.plan.deinit();
@@ -313,6 +339,7 @@ pub fn planTagWrite(
         held.uri = try pending.arena.allocator().dupe(u8, location.uri);
     }
     pending.locations = held_locations;
+    pending.file_ids = try pending.arena.allocator().dupe(i64, written_file_ids.items);
 
     preview.files = files.items;
     preview.plan_id = plan_id;

@@ -241,6 +241,11 @@ fn activateContextEditTags(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) ca
     tags.edit(self, self.context.tracks.items);
 }
 
+fn activateContextWriteTags(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    tags.confirmWrite(self, self.context.tracks.items);
+}
+
 fn activateQuit(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self: *App = @ptrCast(@alignCast(data.?));
     const application = self.application orelse return;
@@ -446,6 +451,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "preferences", activatePreferences, "<Control>comma", &self);
     addAction(application, "undo-tags", activateUndoTags, null, &self);
     addAction(application, "ctx-edit-tags", activateContextEditTags, null, &self);
+    addAction(application, "ctx-write-tags", activateContextWriteTags, null, &self);
     addAction(application, "ctx-play", activateContextPlay, null, &self);
     addAction(application, "ctx-play-next", activateContextPlayNext, null, &self);
     addAction(application, "ctx-enqueue", activateContextEnqueue, null, &self);

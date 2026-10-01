@@ -68,12 +68,14 @@ pub const TrackEdit = runtime.TrackEdit;
 pub const TrackEditPage = runtime.TrackEditPage;
 pub const EditedTracks = runtime.EditedTracks;
 pub const MetadataField = internal.metadata.Field;
+pub const isMusicBrainzId = internal.metadata.isMusicBrainzId;
 pub const Provenance = internal.metadata.Provenance;
 
 // Tag write-back: a sealed plan, previewed, then approved by its digest.
 pub const TagWritePlan = runtime.TagWritePlan;
 pub const TagWriteFile = runtime.TagWriteFile;
 pub const TagWriteChange = runtime.TagWriteChange;
+pub const TagWriteConflict = runtime.TagWriteConflict;
 pub const TagWriteSkip = runtime.TagWriteSkip;
 pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
 pub const TagWriteDigest = internal.metadata.mutation.Digest;

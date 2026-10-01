@@ -20,10 +20,6 @@ pub const Field = enum {
     date,
     compilation,
     musicbrainz_recording_id,
-
-    pub fn writesToFiles(self: Field) bool {
-        return self != .musicbrainz_recording_id;
-    }
 };
 
 pub fn isMusicBrainzId(text: []const u8) bool {

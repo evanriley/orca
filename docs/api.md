@@ -54,7 +54,8 @@ defer page.deinit();
   (`PlayerStatus`, `RepeatMode`, `ReplayGainMode`, ...), outputs (`Device`,
   `ZoneStats`, ...), jobs (`ScanRequest`, `ReconcileRequest`, `JobSnapshot`,
   `ScanStats`, ...), tag
-  write-back (`TagWritePlan`, `TagWriteDigest`, ...), artwork
+  write-back (`TagWritePlan`, `TagWriteConflict`, `TagWriteDigest`, ...),
+  artwork
   (`ArtworkSubject`, `ArtworkResult`), watching (`WatchOptions`,
   `WatchStatus`, `WatchState`) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`, `HostWaker`).
@@ -97,6 +98,11 @@ defer page.deinit();
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
   back afterwards. An edit that moves a track to another album or position
   reprojects it under a new id.
+- `planTagWrite` returns a `TagWritePlan`: each file's `TagWriteChange`s with
+  the `Provenance` of Orca's value, the `TagWriteConflict`s it leaves out
+  because an unlocked value disagrees with the file's tag, and the files it
+  skips. `isMusicBrainzId` is the check `libraryEditTracks` applies to a
+  recording ID, for a client to validate input before saving.
 - The queue can be edited in place: `playerQueueJump` plays an entry now,
   `playerQueueInsertNext` queues Tracks after the current one, and
   `playerQueueRemove` removes an entry. The entry playing, and one the engine

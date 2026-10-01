@@ -352,8 +352,9 @@ whose recording ID Orca chose, so other people's copies of the recording can
 be identified. It is started only by a person; no job starts it.
 
 - **What is sent.** Files whose recording ID in effect is an Orca value from
-  an accepted match or an edit, differs from the file's own tag, and has not
-  been sent for that file. Tagged IDs are never sent. A file is sent once per
+  an accepted match or an edit, differs from the file's own tag or was written
+  into it by Orca, and has not been sent for that file. IDs Orca did not
+  choose are never sent. A file is sent once per
   recording ID: after the ID is edited, the new ID is sent again. An ID from
   an accepted match is not sent when AcoustID was among the match's sources,
   since AcoustID already knows it, or when the match was accepted by

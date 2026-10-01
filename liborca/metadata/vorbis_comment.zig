@@ -523,7 +523,6 @@ fn parseEntry(entry: []const u8) !Entry {
 
 fn validateChanges(changes: []const mutation.Change) !void {
     for (changes, 0..) |change, index| {
-        if (!change.field.writesToFiles()) return error.UnwritableMetadataField;
         for (changes[0..index]) |previous| if (previous.field == change.field)
             return error.DuplicateMetadataFieldChange;
     }
@@ -921,4 +920,28 @@ test "a rewrite matches what the reader saw: aliased keys, n/total numbers and t
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "ALBUM ARTIST=") == null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "YEAR=") == null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "COMMENT=kept") != null);
+}
+
+test "a recording id rewrite replaces the existing MUSICBRAINZ_TRACKID in place of adding one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const old_id = "11111111-2222-4333-8444-555555555555";
+    const new_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    const payload = try commentPayload(allocator, &.{
+        "TITLE=Kept",
+        "musicbrainz_trackid=" ++ old_id,
+        "MUSICBRAINZ_RELEASETRACKID=release-track-uuid",
+    });
+    try std.testing.expectEqualStrings(old_id, (try parse(allocator, payload)).musicbrainz_recording_id.?);
+
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .musicbrainz_recording_id, .before = old_id, .after = new_id },
+    });
+    const after = try parse(allocator, rewritten);
+    try std.testing.expectEqualStrings(new_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqualStrings("release-track-uuid", after.musicbrainz_release_track_id.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, old_id) == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rewritten, "MUSICBRAINZ_TRACKID="));
 }

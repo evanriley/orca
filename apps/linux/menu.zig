@@ -94,6 +94,8 @@ fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
     if (context.kind != .artist) {
         const editing = gtk.g_menu_new();
         gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
+        if (context.kind == .tracks or context.kind == .album)
+            gtk.g_menu_append(editing, "Write Tags to Files…", "app.ctx-write-tags");
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
         gtk.g_object_unref(editing);
     }

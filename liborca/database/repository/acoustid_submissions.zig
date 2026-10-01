@@ -68,8 +68,8 @@ pub const AcoustIdSubmissionRepository = struct {
     write_lane: *WriteLane,
 
     /// Files after `cursor`, by id, whose recording ID in effect is Orca's own
-    /// value from an accepted match or an edit, differs from the file's tag,
-    /// and has not been sent for that file.
+    /// value from an accepted match or an edit, differs from the file's tag or
+    /// was written into it by Orca, and has not been sent for that file.
     pub fn submittablePage(
         self: *const AcoustIdSubmissionRepository,
         allocator: std.mem.Allocator,
@@ -164,7 +164,8 @@ fn bindAcoustIdSubmittable(statement: sqlite.Statement) !void {
 }
 
 /// Files with ids above ?1 whose recording ID in effect is an Orca value of
-/// field ?3 with provenance ?4 or ?5, not the file's own tag, not yet sent.
+/// field ?3 with provenance ?4 or ?5, not the file's own tag unless Orca
+/// wrote it there, not yet sent.
 /// A provider value is left out when its accepted proposal (state ?6) came
 /// from AcoustID, or was accepted in bulk: without AcoustID a proposal has no
 /// fingerprint score, so a bulk acceptance of it rests on text alone.
@@ -175,8 +176,8 @@ pub const acoustid_submittable =
     "WHERE chosen.file_id > ?1 AND chosen.field = ?3 AND chosen.provenance IN (?4, ?5)\n" ++
     "  AND NULLIF(chosen.value, '') IS NOT NULL\n" ++
     "  AND " ++ effectiveRecordingMbid("files.id") ++ " = chosen.value\n" ++
-    "  AND NOT EXISTS (SELECT 1 FROM observed_file_tags WHERE observed_file_tags.file_id = files.id\n" ++
-    "      AND observed_file_tags.musicbrainz_recording_id = chosen.value)\n" ++
+    "  AND (chosen.written_at IS NOT NULL OR NOT EXISTS (SELECT 1 FROM observed_file_tags\n" ++
+    "      WHERE observed_file_tags.file_id = files.id AND observed_file_tags.musicbrainz_recording_id = chosen.value))\n" ++
     "  AND NOT EXISTS (SELECT 1 FROM acoustid_submissions WHERE acoustid_submissions.file_id = files.id\n" ++
     "      AND acoustid_submissions.recording_mbid = chosen.value)\n" ++
     "  AND NOT (chosen.provenance = ?4 AND EXISTS (SELECT 1 FROM identification_proposals AS accepted\n" ++

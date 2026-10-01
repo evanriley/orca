@@ -485,7 +485,9 @@ pub const IdentificationProposalRepository = struct {
             \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
             \\VALUES (?1, ?2, ?3, ?4, 0, unixepoch())
             \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
-            \\    provenance=excluded.provenance, updated_at=excluded.updated_at
+            \\    provenance=excluded.provenance, updated_at=excluded.updated_at,
+            \\    written_at=CASE WHEN orca_metadata_values.value=excluded.value
+            \\        THEN orca_metadata_values.written_at END
             \\WHERE orca_metadata_values.locked=0;
         );
         defer store.deinit();

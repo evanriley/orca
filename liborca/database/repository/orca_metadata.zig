@@ -56,7 +56,9 @@ pub const OrcaMetadataRepository = struct {
             \\    value=excluded.value,
             \\    provenance=excluded.provenance,
             \\    locked=excluded.locked,
-            \\    updated_at=excluded.updated_at
+            \\    updated_at=excluded.updated_at,
+            \\    written_at=CASE WHEN orca_metadata_values.value=excluded.value
+            \\        THEN orca_metadata_values.written_at END
             \\WHERE orca_metadata_values.locked=0 OR excluded.provenance=?6;
         );
         defer statement.deinit();
@@ -66,6 +68,22 @@ pub const OrcaMetadataRepository = struct {
         try statement.bindInt64(4, @intFromEnum(input.provenance));
         try statement.bindInt64(5, @intFromBool(input.locked));
         try statement.bindInt64(6, @intFromEnum(metadata.Provenance.user));
+        if (try statement.step() != .done) return error.SqlFailed;
+    }
+
+    /// Records that a tag write put `value` into the file, unless Orca's
+    /// value has changed since the write was planned.
+    pub fn markWritten(self: *OrcaMetadataRepository, file_id: i64, field: metadata.Field, value: []const u8) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var statement = try self.db.prepare(
+            \\UPDATE orca_metadata_values SET written_at=unixepoch()
+            \\WHERE file_id=?1 AND field=?2 AND value=?3;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try statement.bindInt64(2, @intFromEnum(field));
+        try statement.bindText(3, value);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 

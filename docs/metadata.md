@@ -35,8 +35,8 @@ artist, track number, disc number, date and compilation, the fields the
 projection groups and orders by, and the MusicBrainz recording ID, which must be
 a lowercase UUID; `metadata.Field` appends new ones, because
 `orca_metadata_values.field` stores them by number. `orca-cli edit` and the
-`orca-gtk` tag editor drive it. Neither offers the recording ID; see
-[roadmap.md](roadmap.md#built-but-not-reachable).
+`orca-gtk` tag editor drive it; the recording ID is `--recording-id` there,
+and the editor's MusicBrainz Recording field for a single track.
 
 Writing those values back into the files is a separate, explicit mutation; see
 below.
@@ -59,12 +59,14 @@ listen subject and the three feedback queries all use it.
 `TrackDetails.musicbrainz_recording_id` and its source: `tag`, `match` or
 `edit`. `orca-cli track` prints both. A file that gains a tag on a rescan
 therefore uses the tag at once, and matching does not search for it. A
-recording ID from an accepted match or an edit, and never a tagged one, may be
-sent to AcoustID with the file's fingerprint; see
+recording ID from an accepted match or an edit may be sent to AcoustID with
+the file's fingerprint, and a tag Orca did not write never is; see
 [providers.md](providers.md#acoustid-submission).
 
 The projection does not read the field, so accepting a match reprojects
-nothing. Tag writes leave it out: no writer stores a recording ID yet.
+nothing. A tag write stores it under the write rule in
+[Writing tags back](#writing-tags-back): FLAC as `MUSICBRAINZ_TRACKID`, MP3
+and ADTS as a `UFID` frame owned by `http://musicbrainz.org`, as Picard does.
 
 ### Accepting a match
 
@@ -294,9 +296,22 @@ orca-cli prune-backups DATABASE [--older-than=DAYS]
 ## Writing tags back
 
 `Runtime.planTagWrite` compares each Track file's Orca values with its observed
-tags and seals a `MutationPlan` of the fields that differ. It writes nothing.
-The returned `TagWritePlan` lists each file's changes, the files it left out
-and why, and the plan's ID and digest:
+tags and seals a `MutationPlan` of the values to write. It writes nothing. A
+value is written only when it is the one in effect, so a file's own tag is
+never replaced by an automatic value:
+
+- A locked value, which is a user's edit, is written when it differs from the
+  file's tag.
+- An unlocked value, such as an accepted match, is written only when the file
+  has no tag for its field.
+- An unlocked value that differs from the file's tag is a conflict. It is
+  listed in `TagWritePlan.conflicts` with both values and not written; the
+  file's other changes are. Editing the field locks the user's choice, which
+  the next write applies.
+
+The returned `TagWritePlan` lists each file's changes with the provenance of
+Orca's value (`user` for an edit, `provider` for a match), the conflicts, the
+files it left out and why, and the plan's ID and digest:
 
 - `missing`: no present location to write to.
 - `format_not_writable`: no writer for the sniffed format yet. FLAC, MP3 and
@@ -315,18 +330,28 @@ files now say. The plan ID is the journal group, and
 `Runtime.undoTagWrite(group)` restores those files' previous bytes and
 re-observes them. Orca's values survive both directions: after a write the
 library still holds the locked edit, and after an undo it still shows it.
+When a write commits, each value it wrote is marked with
+`orca_metadata_values.written_at`; changing the value clears the mark. The
+mark keeps a recording ID that Orca wrote into a file eligible for AcoustID
+submission, since the file's tag then holds Orca's choice.
 
 Writers keep what they do not understand:
 
 - ID3v2 keeps the file's version (2.3 or 2.4), copies unchanged frames verbatim,
   keeps a `n/total` total, and updates an existing ID3v1 trailer. A file with no
-  ID3v2 tag gets a 2.4 one.
+  ID3v2 tag gets a 2.4 one. A recording ID replaces only the MusicBrainz `UFID`
+  and the `TXXX` frames the reader takes one from (`MusicBrainz Track Id`,
+  `MUSICBRAINZ_TRACKID`); other `UFID` owners and `TXXX` descriptions are
+  kept byte for byte.
 - Vorbis comments in FLAC match fields by the same aliases and canonical values
   the reader uses, so a write never duplicates a field under another spelling.
 - The audio bytes are copied unchanged; only the tag region is rewritten.
 
-From the command line, `orca-cli write-tags DATABASE IDS` prints the plan and
-its digest, `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
+From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,
+each change labelled `edit` or `match`, a `conflict` line per conflict, and
+the digest; `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
 writes it if the digest still matches, `orca-cli undo-tags DATABASE GROUP`
 undoes it, and `orca-cli prune-backups DATABASE` deletes the backups that make
 undo possible; see [Pruning backups](#pruning-backups).
+In `orca-gtk`, Write Tags to Files… on a track or album menu, and Save and
+Write to Files… in Edit Tags, show the plan and write it once confirmed.

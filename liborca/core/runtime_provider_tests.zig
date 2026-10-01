@@ -4,6 +4,7 @@ const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const listen_worker = @import("listen_worker.zig");
+const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 const work = @import("work.zig");
@@ -1313,32 +1314,139 @@ test "a matching job fails as busy while another process holds MusicBrainz, and 
     ));
 }
 
-test "a tag write leaves out the recording id Orca holds for a file" {
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    var runtime = OrcaRuntime.init(std.testing.allocator);
-    defer runtime.deinit();
-    try runtime.setClientIdentity(network.testing.test_identity);
-    const library = try runtime_tests.scannedTempLibrary(&runtime, &temporary, "file:orca-runtime-tag-write-mbid?mode=memory&cache=shared");
-    const ids = try runtime_tests.allTrackIds(&runtime, library);
-    defer std.testing.allocator.free(ids);
-    const library_database = try libraryDatabase(&runtime, library);
-    for (ids) |track_id| {
+fn setRecordingIds(
+    library_database: *database.LibraryDatabase,
+    track_ids: []const i64,
+    value: []const u8,
+    provenance: metadata.Provenance,
+) !void {
+    for (track_ids) |track_id| {
         const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
         defer std.testing.allocator.free(file_ids);
         for (file_ids) |file_id| try library_database.orca_metadata.upsert(.{
             .file_id = file_id,
             .field = .musicbrainz_recording_id,
-            .value = northern_sky_mbid,
-            .provenance = .provider,
+            .value = value,
+            .provenance = provenance,
+            .locked = provenance == .user,
         });
     }
+}
+
+fn writePlan(runtime: *OrcaRuntime, library: LibraryHandle, ids: []const i64) !void {
+    const plan = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer plan.deinit();
+    try std.testing.expect(plan.files.len > 0);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, try runtime.startTagWrite(library, plan.plan_id, plan.digest)));
+}
+
+fn tagWriteDatabasePath(data: *std.testing.TmpDir) ![:0]u8 {
+    return std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/library.db", .{data.sub_path}, 0);
+}
+
+test "a matched recording id is written into files without one, and they stay submittable to AcoustID" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tagWriteDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime_tests.scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const library_database = try libraryDatabase(&runtime, library);
+    try setRecordingIds(library_database, ids, northern_sky_mbid, .provider);
+    const submittable = try runtime.libraryAcoustIdSubmittableCount(library);
+    try std.testing.expectEqual(@as(u64, 3), submittable);
 
     const preview = try runtime.planTagWrite(library, std.testing.io, ids);
     defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    try std.testing.expectEqual(@as(usize, 0), preview.conflicts.len);
+    for (preview.files) |file| {
+        try std.testing.expectEqual(@as(usize, 1), file.changes.len);
+        const change = file.changes[0];
+        try std.testing.expectEqual(.musicbrainz_recording_id, change.field);
+        try std.testing.expect(change.before == null);
+        try std.testing.expectEqualStrings(northern_sky_mbid, change.after.?);
+        try std.testing.expectEqual(.provider, change.provenance);
+    }
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
 
-    try std.testing.expectEqual(@as(u64, 0), preview.plan_id);
-    try std.testing.expectEqual(@as(usize, 0), preview.files.len);
+    for (preview.files) |file| {
+        const stored = (try library_database.observed_tags.get(std.testing.allocator, file.file_id)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualStrings(northern_sky_mbid, stored.values.musicbrainz_recording_id.?);
+    }
+    try std.testing.expectEqual(@as(i64, 2), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM orca_metadata_values WHERE written_at IS NOT NULL;",
+    ));
+    try std.testing.expectEqual(submittable, try runtime.libraryAcoustIdSubmittableCount(library));
+
+    const again = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(usize, 0), again.files.len);
+    try std.testing.expectEqual(@as(usize, 0), again.conflicts.len);
+
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+    try std.testing.expectEqual(submittable, try runtime.libraryAcoustIdSubmittableCount(library));
+}
+
+test "a matched recording id that disagrees with the file's tag is a conflict, and the file's locked edits are still written" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tagWriteDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime_tests.scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const library_database = try libraryDatabase(&runtime, library);
+    const tagged_mbid = "11111111-2222-4333-8444-555555555555";
+    try setRecordingIds(library_database, ids, tagged_mbid, .user);
+    try writePlan(&runtime, library, ids);
+    try std.testing.expectEqual(@as(u64, 3), try runtime.libraryAcoustIdSubmittableCount(library));
+
+    for (ids) |track_id| {
+        const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+        defer std.testing.allocator.free(file_ids);
+        for (file_ids) |file_id| try library_database.orca_metadata.remove(file_id, .musicbrainz_recording_id);
+    }
+    try setRecordingIds(library_database, ids, northern_sky_mbid, .provider);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Locked Title" }});
+    defer edited.deinit();
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    for (preview.files) |file| {
+        try std.testing.expectEqual(@as(usize, 1), file.changes.len);
+        try std.testing.expectEqual(.title, file.changes[0].field);
+        try std.testing.expectEqual(.user, file.changes[0].provenance);
+    }
+    try std.testing.expectEqual(@as(usize, 2), preview.conflicts.len);
+    for (preview.conflicts) |conflict| {
+        try std.testing.expectEqual(.musicbrainz_recording_id, conflict.field);
+        try std.testing.expectEqualStrings(tagged_mbid, conflict.file_value);
+        try std.testing.expectEqualStrings(northern_sky_mbid, conflict.orca_value);
+        try std.testing.expectEqual(.provider, conflict.provenance);
+        try std.testing.expect(conflict.path.len > 0);
+    }
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    for (preview.files) |file| {
+        const stored = (try library_database.observed_tags.get(std.testing.allocator, file.file_id)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualStrings("Locked Title", stored.values.title.?);
+        try std.testing.expectEqualStrings(tagged_mbid, stored.values.musicbrainz_recording_id.?);
+    }
 }
 
 fn addReviewTrack(

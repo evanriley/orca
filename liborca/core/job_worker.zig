@@ -203,6 +203,9 @@ pub const PendingTagWrite = struct {
     plan: metadata.mutation.Plan,
     /// Index-aligned with `plan.actions`, allocated in `arena`.
     locations: []database.repository.PresentLocation,
+    /// The file each action writes, index-aligned with `plan.actions`,
+    /// allocated in `arena`.
+    file_ids: []const i64,
 
     pub fn destroy(self: *PendingTagWrite) void {
         const allocator = self.arena.child_allocator;
@@ -1161,6 +1164,9 @@ pub const JobWorker = struct {
         };
         if (executor.executePlan(&pending.plan, pending.plan.id)) {
             _ = stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
+            self.markWritten(pending) catch {
+                _ = stats.errors.fetchAdd(1, .acq_rel);
+            };
         } else |_| {
             _ = stats.errors.fetchAdd(1, .acq_rel);
             self.failed.store(true, .release);
@@ -1170,6 +1176,16 @@ pub const JobWorker = struct {
                 _ = stats.errors.fetchAdd(1, .acq_rel);
             };
         }
+    }
+
+    fn markWritten(self: *JobWorker, pending: *const PendingTagWrite) !void {
+        for (pending.plan.actions, pending.file_ids) |action, file_id| switch (action) {
+            .write_tags => |write| for (write.changes) |change| {
+                const value = change.after orelse continue;
+                try self.database.orca_metadata.markWritten(file_id, change.field, value);
+            },
+            .move => {},
+        };
     }
 
     fn noteProjection(self: *JobWorker, result: library_pass.projection.Result) void {
