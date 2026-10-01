@@ -6,13 +6,14 @@ the rule in [architecture.md](architecture.md).
 
 ## Status
 
-Released `0.6.0`. `orca-gtk` is a daily-usable player on Linux: a
+Released `0.7.0`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
-editing with undo, track details, a local play history, ListenBrainz
-scrobbling, MusicBrainz and AcoustID matching with review, and AcoustID
-submission, and watching of the music folders, so new, changed and removed
-files show up without a rescan. `liborca` builds for aarch64 macOS, but macOS
+editing with undo, track details, a local play history, star ratings,
+playlists with M3U import and export, ListenBrainz scrobbling, MusicBrainz
+and AcoustID matching with review, and AcoustID submission, and watching of
+the music folders, so new, changed and removed files show up without a
+rescan. `liborca` builds for aarch64 macOS, but macOS
 has no audio output or filesystem watcher yet.
 
 `liborca` is usable as a library for others: the SONAME `liborca.so.0`

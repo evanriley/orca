@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-01
+
+Ships Library schema version 27. Close every Orca process before upgrading.
+
 ### Added
 
 - **Star ratings.** `librarySetRating` rates the song behind each Track from
