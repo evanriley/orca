@@ -216,6 +216,7 @@ pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) v
     if (!idle(self)) return;
     const job = self.runtime.startTagWrite(library, plan_id, digest) catch |err| return self.toast(switch (err) {
         error.NoBackupDirectory => "This library has no database file to keep the originals beside",
+        error.MutationInProgress => "Another Orca is writing tags",
         else => "Could not write the tags",
     });
     self.tag_write_group = plan_id;

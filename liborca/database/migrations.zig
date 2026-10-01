@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 25;
+pub const current_version = 26;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -991,6 +991,13 @@ const migration_25 =
     \\);
 ;
 
+const migration_26 =
+    \\UPDATE mutation_operations SET state = 6
+    \\WHERE state = 2
+    \\  AND group_id IN (SELECT group_id FROM mutation_operations WHERE state = 3)
+    \\  AND group_id NOT IN (SELECT group_id FROM mutation_operations WHERE state IN (0, 1, 4, 5));
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1098,13 +1105,15 @@ pub fn apply(db: sqlite.Database) sqlite.Error!void {
     return applyThrough(db, current_version);
 }
 
+pub fn userVersion(db: sqlite.Database) sqlite.Error!i64 {
+    var statement = try db.prepare("PRAGMA user_version;");
+    defer statement.deinit();
+    if (try statement.step() != .row) return error.SqlFailed;
+    return statement.columnInt64(0);
+}
+
 pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void {
-    const version = blk: {
-        var statement = try db.prepare("PRAGMA user_version;");
-        defer statement.deinit();
-        if (try statement.step() != .row) return error.SqlFailed;
-        break :blk statement.columnInt64(0);
-    };
+    const version = try userVersion(db);
     if (version > current_version) return error.SchemaVersionTooNew;
     if (version >= target_version) return;
     try registerKeyFunctions(db);
@@ -1140,6 +1149,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 23 and target_version >= 23) try db.exec(migration_23);
     if (version < 24 and target_version >= 24) try db.exec(migration_24);
     if (version < 25 and target_version >= 25) try db.exec(migration_25);
+    if (version < 26 and target_version >= 26) try db.exec(migration_26);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2123,4 +2133,44 @@ test "migration 25 re-observes every present location of a file held at more tha
     try std.testing.expectEqual(@as(i64, 8), try scalar(db, "SELECT count(*) FROM locations WHERE file_id IN (1, 2, 3, 4);"));
     try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM files WHERE quick_hash IS NOT NULL;"));
     try checkForeignKeys(db);
+}
+
+test "a version-25 library resumes an undo that was interrupted between files" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "half-undone.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 25);
+    try db.exec(
+        \\INSERT INTO mutation_operations(id, plan_id, group_id, action_index, kind, source_path, expected_size, expected_modified_ns, state) VALUES
+        \\    (1, 1, 1, 0, 0, '/m/1a.flac', 1, 1, 2),
+        \\    (2, 1, 1, 1, 0, '/m/1b.flac', 1, 1, 3),
+        \\    (3, 1, 1, 2, 0, '/m/1c.flac', 1, 1, 2),
+        \\    (4, 2, 2, 0, 0, '/m/2a.flac', 1, 1, 2),
+        \\    (5, 2, 2, 1, 0, '/m/2b.flac', 1, 1, 2),
+        \\    (6, 3, 3, 0, 0, '/m/3a.flac', 1, 1, 2),
+        \\    (7, 3, 3, 1, 0, '/m/3b.flac', 1, 1, 3),
+        \\    (8, 3, 3, 2, 0, '/m/3c.flac', 1, 1, 5),
+        \\    (9, 4, 4, 0, 0, '/m/4a.flac', 1, 1, 2),
+        \\    (10, 4, 4, 1, 0, '/m/4b.flac', 1, 1, 3),
+        \\    (11, 4, 4, 2, 0, '/m/4c.flac', 1, 1, 1),
+        \\    (12, 5, 5, 0, 0, '/m/5a.flac', 1, 1, 3);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    const State = repository.MutationState;
+    for ([_]struct { State, i64 }{
+        .{ .planned, 0 }, .{ .staged, 1 },               .{ .committed, 2 }, .{ .rolled_back, 3 },
+        .{ .failed, 4 },  .{ .needs_reconciliation, 5 }, .{ .undoing, 6 },
+    }) |pair| try std.testing.expectEqual(pair[1], @as(i64, @intFromEnum(pair[0])));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 6;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 6 AND id IN (1, 3);"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM mutation_operations WHERE state = 2 AND id IN (4, 5, 6, 9);"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 12;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 8;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 11;"));
 }

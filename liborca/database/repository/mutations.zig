@@ -18,6 +18,7 @@ pub const MutationState = enum {
     rolled_back,
     failed,
     needs_reconciliation,
+    undoing,
 };
 
 /// A journal record keeps its paths — a filesystem operation's subject
@@ -280,17 +281,63 @@ pub const MutationJournalRepository = struct {
     ) ![]u64 {
         var statement = try self.db.prepare(
             \\SELECT DISTINCT group_id FROM mutation_operations
-            \\WHERE state IN (?1, ?2, ?3) ORDER BY group_id;
+            \\WHERE state IN (?1, ?2, ?3, ?4) ORDER BY group_id;
         );
         defer statement.deinit();
         try statement.bindInt64(1, @intFromEnum(MutationState.planned));
         try statement.bindInt64(2, @intFromEnum(MutationState.staged));
         try statement.bindInt64(3, @intFromEnum(MutationState.failed));
+        try statement.bindInt64(4, @intFromEnum(MutationState.undoing));
         var ids: std.ArrayList(u64) = .empty;
         errdefer ids.deinit(allocator);
         while (try statement.step() == .row)
             try ids.append(allocator, @intCast(statement.columnInt64(0)));
         return ids.toOwnedSlice(allocator);
+    }
+
+    /// Records the intent to undo a whole group before any of its files is
+    /// restored: every operation becomes `undoing` in one transaction, or none
+    /// does and the group is refused because one of them is not committed.
+    pub fn beginUndo(self: *MutationJournalRepository, group_id: u64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var count = try self.db.prepare("SELECT count(*) FROM mutation_operations WHERE group_id=?1;");
+        defer count.deinit();
+        try count.bindInt64(1, @intCast(group_id));
+        if (try count.step() != .row) return error.SqlFailed;
+        const operations: u64 = @intCast(count.columnInt64(0));
+        if (operations == 0) return error.MutationGroupNotFound;
+        if (try self.undoCommittedLocked(group_id) != operations) return error.MutationGroupNotCommitted;
+        try self.db.exec("COMMIT;");
+    }
+
+    /// Marks every committed operation of a group `undoing` in one transaction,
+    /// so an interrupted unwind of the group is found again and finished rather
+    /// than left half applied. Returns how many it marked.
+    pub fn undoCommitted(self: *MutationJournalRepository, group_id: u64) !u64 {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
+        return self.undoCommittedLocked(group_id);
+    }
+
+    fn undoCommittedLocked(self: *MutationJournalRepository, group_id: u64) !u64 {
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations
+            \\SET state=?1, updated_at=unixepoch()
+            \\WHERE group_id=?2 AND state=?3;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intFromEnum(MutationState.undoing));
+        try statement.bindInt64(2, @intCast(group_id));
+        try statement.bindInt64(3, @intFromEnum(MutationState.committed));
+        if (try statement.step() != .done) return error.SqlFailed;
+        return self.db.changes();
     }
 
     /// A group and plan id no journaled operation uses yet. Stage and backup
@@ -384,7 +431,83 @@ fn validMutationTransition(from: MutationState, to: MutationState) bool {
         .planned => to == .staged or to == .failed,
         .staged => to == .committed or to == .rolled_back or to == .failed,
         .failed => to == .rolled_back,
-        .committed => to == .rolled_back,
+        .committed => to == .undoing,
+        .undoing => to == .rolled_back,
         .rolled_back, .needs_reconciliation => false,
     };
+}
+
+const JournalFixture = struct {
+    db: sqlite.Database,
+    lane: WriteLane,
+    journal: MutationJournalRepository,
+
+    fn init(self: *JournalFixture) !void {
+        self.db = try sqlite.Database.open(":memory:");
+        errdefer self.db.close();
+        try @import("../migrations.zig").apply(self.db);
+        self.lane = .{ .io = std.testing.io };
+        self.journal = .{ .db = self.db, .write_lane = &self.lane };
+    }
+
+    fn deinit(self: *JournalFixture) void {
+        self.db.close();
+    }
+
+    fn prepare(self: *JournalFixture, group_id: u64, action_index: u32) !i64 {
+        return self.journal.prepare(.{
+            .plan_id = group_id,
+            .group_id = group_id,
+            .action_index = action_index,
+            .kind = .write_tags,
+            .source_path = "/music/a.flac",
+            .expected_size = 1,
+            .expected_modified_ns = 1,
+            .expected_quick_hash = @splat(1),
+        });
+    }
+
+    fn committed(self: *JournalFixture, group_id: u64, action_index: u32) !i64 {
+        const id = try self.prepare(group_id, action_index);
+        try self.journal.transition(id, .planned, .staged, null);
+        try self.journal.commit(id, 2, 2, @splat(2));
+        return id;
+    }
+};
+
+test "a committed operation reaches rolled_back only through undoing" {
+    var fixture: JournalFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const id = try fixture.committed(3, 0);
+
+    try std.testing.expectError(error.InvalidMutationTransition, fixture.journal.transition(id, .committed, .rolled_back, null));
+    try std.testing.expectError(error.InvalidMutationTransition, fixture.journal.transition(id, .undoing, .committed, null));
+    try fixture.journal.transition(id, .committed, .undoing, null);
+    try std.testing.expectError(error.InvalidMutationTransition, fixture.journal.transition(id, .undoing, .committed, null));
+    try fixture.journal.transition(id, .undoing, .rolled_back, null);
+    try std.testing.expectEqual(MutationState.rolled_back, try fixture.journal.state(id));
+}
+
+test "a group's undo intent is recorded for every operation or none" {
+    var fixture: JournalFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const kept = try fixture.committed(4, 0);
+    const failed = try fixture.prepare(4, 1);
+    try fixture.journal.transition(failed, .planned, .failed, null);
+    const first = try fixture.committed(5, 0);
+    const second = try fixture.committed(5, 1);
+
+    try std.testing.expectError(error.MutationGroupNotCommitted, fixture.journal.beginUndo(4));
+    try std.testing.expectEqual(MutationState.committed, try fixture.journal.state(kept));
+    try std.testing.expectEqual(MutationState.failed, try fixture.journal.state(failed));
+    try std.testing.expectError(error.MutationGroupNotFound, fixture.journal.beginUndo(6));
+
+    try fixture.journal.beginUndo(5);
+    try std.testing.expectEqual(MutationState.undoing, try fixture.journal.state(first));
+    try std.testing.expectEqual(MutationState.undoing, try fixture.journal.state(second));
+    const groups = try fixture.journal.nonterminalGroupIds(std.testing.allocator);
+    defer std.testing.allocator.free(groups);
+    try std.testing.expectEqualSlices(u64, &.{ 4, 5 }, groups);
 }

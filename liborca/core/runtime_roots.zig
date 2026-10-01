@@ -354,8 +354,15 @@ pub fn startTagWrite(
         const pending = candidate.* orelse continue;
         if (pending.plan.id == plan_id and pending.library.eql(library)) break candidate;
     } else return error.UnknownTagWritePlan;
-    if ((try runtime.libraryDatabase(self, library)).backup_directory == null) return error.NoBackupDirectory;
+    const library_database = try runtime.libraryDatabase(self, library);
+    if (library_database.backup_directory == null) return error.NoBackupDirectory;
+    const io = self.control_threaded.io();
     const pending = slot.*.?;
+    pending.journal_lock = try metadata.JournalLock.acquireForMutation(io, library_database.journal_lock_path);
+    errdefer {
+        pending.journal_lock.?.release(io);
+        pending.journal_lock = null;
+    }
     try pending.plan.approve(.{ .plan_id = plan_id, .digest = digest });
     const job_handle = try runtime_jobs.startJobWorker(self, library, .{ .mutation = pending });
     slot.* = null;
@@ -366,7 +373,7 @@ pub fn discardTagWrite(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64)
     for (&self.pending_tag_writes) |*candidate| {
         const pending = candidate.* orelse continue;
         if (pending.plan.id != plan_id or !pending.library.eql(library)) continue;
-        pending.destroy();
+        pending.destroy(self.control_threaded.io());
         candidate.* = null;
         return;
     }
@@ -379,13 +386,23 @@ pub fn undoTagWrite(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, grou
         const pending = worker.tagWrite() orelse continue;
         if (!worker.retired and pending.plan.id == group_id) return error.TagWriteInProgress;
     }
-    var executor: metadata.executor.Executor = .{
-        .allocator = self.allocator,
-        .io = io,
-        .journal = &library_database.mutation_journal,
-        .backup_directory = library_database.backup_directory,
+    var lock = try metadata.JournalLock.acquireForMutation(io, library_database.journal_lock_path);
+    const already_undone = undo: {
+        defer lock.release(io);
+        try library_database.recoverPendingMutations(io, &lock);
+        var executor: metadata.executor.Executor = .{
+            .allocator = self.allocator,
+            .io = io,
+            .journal = &library_database.mutation_journal,
+            .journal_lock = &lock,
+            .backup_directory = library_database.backup_directory,
+        };
+        executor.undoGroup(group_id) catch |err| switch (err) {
+            error.MutationGroupAlreadyUndone => break :undo true,
+            else => return err,
+        };
+        break :undo false;
     };
-    try executor.undoGroup(group_id);
     const operations = try library_database.mutation_journal.groupOperationIds(self.allocator, group_id);
     defer self.allocator.free(operations);
     for (operations) |operation_id| {
@@ -395,14 +412,19 @@ pub fn undoTagWrite(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, grou
         defer self.allocator.free(location.uri);
         try job_worker.reobserve(self.allocator, io, library_database, location);
     }
+    if (already_undone) return error.MutationGroupAlreadyUndone;
 }
 
 pub fn pruneTagWriteBackups(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, older_than_s: u64) !PruneSummary {
     const library_database = try runtime.libraryDatabase(self, library);
+    var lock = try metadata.JournalLock.acquireForMutation(io, library_database.journal_lock_path);
+    defer lock.release(io);
+    try library_database.recoverPendingMutations(io, &lock);
     var executor: metadata.executor.Executor = .{
         .allocator = self.allocator,
         .io = io,
         .journal = &library_database.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library_database.backup_directory,
     };
     return executor.pruneBackups(older_than_s);

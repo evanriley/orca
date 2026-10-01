@@ -37,6 +37,13 @@
 - **Library schema version 25.** Every present location of a File held at
   more than one path is read again by the next scan, so copies that diverged
   before the fix below become Files of their own.
+- **Library schema version 26, and a journal lock.** Tag writes, undo,
+  pruning and startup recovery hold an exclusive lock on
+  `<database>.orca-journal.lock` and recover abandoned work before their own;
+  a second holder gets `MutationInProgress` (`ORCA_STATUS_BUSY`). Mutation
+  operations gain an `undoing` state, and groups left half undone are
+  resumed. Close every Orca process before upgrading: an older binary takes
+  no lock. Never delete the lock file.
 - **A recording ID inherited from a provider match is not sent to AcoustID.**
   A provider-sourced recording ID is submittable only when the same File holds
   the accepted, individually reviewed MusicBrainz proposal for it.
@@ -124,6 +131,17 @@
   a File of its own, carrying Orca's values and locks; analysis, listens and
   proposals stay with the original. Hard links stay one File. A tag write to
   one copy marks the written values on the File that holds them.
+- **Opening a Library no longer rolls back another process's tag write.**
+  Startup recovery treated every unfinished operation as abandoned, so any
+  command opening the Library while `orca-gtk` or another `orca-cli` was
+  writing undid that write and failed it. Recovery now runs only under the
+  journal lock, and an open that cannot take it leaves the work alone.
+- **An undo interrupted between files is finished instead of stuck.** Undo
+  restored files one by one with no record of the intent, so a crash left
+  the group half undone, beyond recovery and refused by `undo-tags`. The
+  intent is now recorded for the whole group first, the next open or
+  `undo-tags` finishes it, and `undo-tags` of a group already undone says so
+  and succeeds.
 
 ## 0.5.0 - 2026-09-30
 

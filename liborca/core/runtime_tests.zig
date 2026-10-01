@@ -6,6 +6,7 @@ const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const library_pass = @import("../library/root.zig");
+const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const job = @import("job.zig");
 const object = @import("object.zig");
@@ -1790,6 +1791,224 @@ test "pruned tag-write backups free their space and leave the write impossible t
     const after_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(after_mp3);
     try std.testing.expectEqualSlices(u8, written_mp3, after_mp3);
+}
+
+test "a tag write refuses to start while another process holds the journal lock and its plan stays pending" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Locked Album" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    const library_database = try libraryDatabase(&runtime, library);
+    const original_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original_mp3);
+
+    var foreign = (try metadata.JournalLock.tryAcquire(std.testing.io, library_database.journal_lock_path.?)).?;
+    try std.testing.expectError(error.MutationInProgress, runtime.startTagWrite(library, preview.plan_id, preview.digest));
+    const untouched_mp3 = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(untouched_mp3);
+    try std.testing.expectEqualSlices(u8, original_mp3, untouched_mp3);
+    try std.testing.expectEqual(@as(u64, 1), try library_database.mutation_journal.nextGroupId());
+
+    foreign.release(std.testing.io);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+}
+
+test "undoing a tag write that was already undone reports it and re-observes the files" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Undone Album" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    const library_database = try libraryDatabase(&runtime, library);
+    {
+        var lock = try metadata.JournalLock.acquireForMutation(std.testing.io, library_database.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor: metadata.executor.Executor = .{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .journal = &library_database.mutation_journal,
+            .journal_lock = &lock,
+            .backup_directory = library_database.backup_directory,
+        };
+        try executor.undoGroup(preview.plan_id);
+    }
+    const written = (try library_database.observed_tags.get(std.testing.allocator, preview.files[0].file_id)).?;
+    defer written.deinit();
+    try std.testing.expectEqualStrings("Undone Album", written.values.album.?);
+
+    try std.testing.expectError(error.MutationGroupAlreadyUndone, runtime.undoTagWrite(library, std.testing.io, preview.plan_id));
+    const stored = (try library_database.observed_tags.get(std.testing.allocator, preview.files[0].file_id)).?;
+    defer stored.deinit();
+    try std.testing.expect(stored.values.album == null or !std.mem.eql(u8, stored.values.album.?, "Undone Album"));
+}
+
+/// Another process's work under its own journal lock: a write of `a.mp3` that
+/// commits as group 900, then a write of `c.m4a` that it abandons after the
+/// rename, as group 901. Returns the abandoned operation.
+fn foreignWrites(
+    library_database: *database.LibraryDatabase,
+    temporary: *std.testing.TmpDir,
+    lock: *const metadata.JournalLock,
+) !i64 {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const a_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/a.mp3", .{temporary.sub_path});
+    defer allocator.free(a_path);
+    const actions = [_]metadata.mutation.Action{.{ .write_tags = .{
+        .path = a_path,
+        .expected = try metadata.file_mutation.identity(io, a_path),
+        .changes = &.{.{ .field = .title, .before = null, .after = "Foreign" }},
+    } }};
+    var plan = try metadata.mutation.Plan.init(allocator, 900, &actions);
+    defer plan.deinit();
+    try plan.approve(plan.approval());
+    var executor: metadata.executor.Executor = .{
+        .allocator = allocator,
+        .io = io,
+        .journal = &library_database.mutation_journal,
+        .journal_lock = lock,
+        .backup_directory = library_database.backup_directory,
+    };
+    try executor.executePlan(&plan, 900);
+
+    const c_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/c.m4a", .{temporary.sub_path});
+    defer allocator.free(c_path);
+    const stage = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/.c.m4a.orca-stage-901-0", .{temporary.sub_path});
+    defer allocator.free(stage);
+    const plan_backups = try std.fmt.allocPrint(allocator, "{s}/901", .{library_database.backup_directory.?});
+    defer allocator.free(plan_backups);
+    const backup = try std.fmt.allocPrint(allocator, "{s}/0-c.m4a", .{plan_backups});
+    defer allocator.free(backup);
+    const original = try metadata.file_mutation.identity(io, c_path);
+    const journal = &library_database.mutation_journal;
+    const operation = try journal.prepare(.{
+        .plan_id = 901,
+        .group_id = 901,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = c_path,
+        .stage_path = stage,
+        .backup_path = backup,
+        .expected_size = original.size_bytes,
+        .expected_modified_ns = original.modified_ns,
+        .expected_quick_hash = original.quick_hash,
+    });
+    const bytes = try temporary.dir.readFileAlloc(io, "c.m4a", allocator, .limited(1 << 22));
+    defer allocator.free(bytes);
+    const replacement = try std.mem.concat(allocator, u8, &.{ bytes, "abandoned" });
+    defer allocator.free(replacement);
+    try temporary.dir.writeFile(io, .{ .sub_path = ".c.m4a.orca-stage-901-0", .data = replacement });
+    const staged = try metadata.file_mutation.identity(io, stage);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.transition(operation, .planned, .staged, null);
+    try metadata.file_mutation.createDirectoryDurably(io, library_database.backup_directory.?);
+    try metadata.file_mutation.createDirectoryDurably(io, plan_backups);
+    try metadata.file_mutation.commitReplacement(io, c_path, stage, backup, original);
+    return operation;
+}
+
+const MutationAfterAbandon = enum { write, undo, prune };
+
+/// Open the Library while another process holds the journal lock, let that
+/// process abandon a write and exit, then run `mutation`: it must first
+/// finish the abandoned write.
+fn expectAbandonedWriteRecoveredFirst(mutation: MutationAfterAbandon) !void {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer allocator.free(database_path);
+    const lock_path = lock_path: {
+        var created = try database.LibraryDatabase.open(allocator, io, database_path);
+        defer created.close();
+        break :lock_path try allocator.dupe(u8, created.journal_lock_path.?);
+    };
+    defer allocator.free(lock_path);
+    var foreign = (try metadata.JournalLock.tryAcquire(io, lock_path)).?;
+    var foreign_held = true;
+    defer if (foreign_held) foreign.release(io);
+    var runtime = OrcaRuntime.init(allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expect(library_database.recovery_deferred.load(.acquire));
+    const a_original = try temporary.dir.readFileAlloc(io, "a.mp3", allocator, .limited(1 << 22));
+    defer allocator.free(a_original);
+    const c_original = try temporary.dir.readFileAlloc(io, "c.m4a", allocator, .limited(1 << 22));
+    defer allocator.free(c_original);
+    const abandoned = try foreignWrites(library_database, &temporary, &foreign);
+    foreign.release(io);
+    foreign_held = false;
+    try std.testing.expectEqual(database.repository.MutationState.staged, try library_database.mutation_journal.state(abandoned));
+
+    switch (mutation) {
+        .write => {
+            const ids = try allTrackIds(&runtime, library);
+            defer allocator.free(ids);
+            (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "After Recovery" }})).deinit();
+            const edited = try allTrackIds(&runtime, library);
+            defer allocator.free(edited);
+            const preview = try runtime.planTagWrite(library, io, edited);
+            defer preview.deinit();
+            try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+            try std.testing.expect(std.mem.endsWith(u8, preview.files[0].path, "b.flac"));
+            try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+            const written = try library_database.mutation_journal.groupOperationIds(allocator, preview.plan_id);
+            defer allocator.free(written);
+            for (written) |id| try std.testing.expectEqual(database.repository.MutationState.committed, try library_database.mutation_journal.state(id));
+        },
+        .undo => {
+            try runtime.undoTagWrite(library, io, 900);
+            const restored = try temporary.dir.readFileAlloc(io, "a.mp3", allocator, .limited(1 << 22));
+            defer allocator.free(restored);
+            try std.testing.expectEqualSlices(u8, a_original, restored);
+        },
+        .prune => try std.testing.expectEqual(@as(u64, 1), (try runtime.pruneTagWriteBackups(library, io, 0)).backups),
+    }
+    try std.testing.expectEqual(database.repository.MutationState.rolled_back, try library_database.mutation_journal.state(abandoned));
+    const c_after = try temporary.dir.readFileAlloc(io, "c.m4a", allocator, .limited(1 << 22));
+    defer allocator.free(c_after);
+    try std.testing.expectEqualSlices(u8, c_original, c_after);
+    try std.testing.expect(!library_database.recovery_deferred.load(.acquire));
+}
+
+test "a tag write first recovers a write another process abandoned after this one opened the Library" {
+    try expectAbandonedWriteRecoveredFirst(.write);
+}
+
+test "an undo first recovers a write another process abandoned after this one opened the Library" {
+    try expectAbandonedWriteRecoveredFirst(.undo);
+}
+
+test "pruning first recovers a write another process abandoned after this one opened the Library" {
+    try expectAbandonedWriteRecoveredFirst(.prune);
 }
 
 test "a Library with no database file refuses to start a tag write" {

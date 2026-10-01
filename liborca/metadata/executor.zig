@@ -2,6 +2,7 @@ const std = @import("std");
 const storage = @import("../storage/root.zig");
 const database = @import("../database/repository.zig");
 const file_mutation = @import("file_mutation.zig");
+const JournalLock = @import("journal_lock.zig").JournalLock;
 const mutation = @import("mutation.zig");
 
 /// Boundaries at which an execution can lose power. Production callers leave
@@ -17,6 +18,9 @@ pub const FaultPoint = enum {
     before_journal_commit,
     rollback_after_restore_copy,
     rollback_after_restore,
+    undo_after_intent,
+    undo_after_operation,
+    recovery_after_operation,
 };
 
 pub const Fault = struct {
@@ -54,13 +58,17 @@ pub const Executor = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     journal: *database.MutationJournalRepository,
+    /// Held for as long as this executor exists, so no other holder can recover
+    /// or change the journal rows it is working on.
+    journal_lock: *const JournalLock,
     /// Where tag writes keep each original, as
     /// `<backup_directory>/<plan>/<action>-<name>`. Null for a Library that has
     /// no database file, which cannot write tags.
     backup_directory: ?[]const u8 = null,
     /// Test-only interruption request; see `FaultPoint`.
     fault: ?Fault = null,
-    /// Set once an injected fault has fired, so no compensation runs.
+    /// Set once an injected fault has fired, or once a journal row this
+    /// executor owns was changed by someone else, so no compensation runs.
     crashed: bool = false,
 
     /// Execute every action as one logical group. A tag write builds a hidden
@@ -185,19 +193,19 @@ pub const Executor = struct {
                         write.changes,
                     ),
                 }) catch |err| {
-                    self.journal.transition(operation, .planned, .failed, @errorName(err)) catch {};
+                    self.transition(operation, .planned, .failed, @errorName(err)) catch {};
                     return err;
                 };
                 try self.interrupt(.after_stage, action_index);
                 const staged_identity = try file_mutation.identity(self.io, stage_path);
-                try self.journal.recordResultIdentity(
+                try self.recordResultIdentity(
                     operation,
                     .planned,
                     staged_identity.size_bytes,
                     staged_identity.modified_ns,
                     staged_identity.quick_hash,
                 );
-                try self.journal.transition(operation, .planned, .staged, null);
+                try self.transition(operation, .planned, .staged, null);
                 try self.interrupt(.after_stage_journaled, action_index);
                 const commit_interrupt = self.commitInterrupt(action_index);
                 if (commit_interrupt != null) self.crashed = true;
@@ -210,7 +218,7 @@ pub const Executor = struct {
                 ) catch |err| {
                     if (self.crashed) return err;
                     std.Io.Dir.cwd().deleteFile(self.io, stage_path) catch {};
-                    self.journal.transition(operation, .staged, .failed, @errorName(err)) catch {};
+                    self.transition(operation, .staged, .failed, @errorName(err)) catch {};
                     return err;
                 };
                 completed.appendAssumeCapacity(.{
@@ -219,7 +227,7 @@ pub const Executor = struct {
                 });
                 try self.interrupt(.before_journal_commit, action_index);
                 const committed = try file_mutation.identity(self.io, write.path);
-                try self.journal.commit(
+                try self.commit(
                     operation,
                     committed.size_bytes,
                     committed.modified_ns,
@@ -233,21 +241,21 @@ pub const Executor = struct {
                     !try self.groupProducedIdentity(completed.items, move.source_path, current))
                     return error.FileIdentityChanged;
                 if (try pathExists(self.io, move.destination_path)) return error.DestinationExists;
-                try self.journal.recordResultIdentity(
+                try self.recordResultIdentity(
                     operation,
                     .planned,
                     current.size_bytes,
                     current.modified_ns,
                     current.quick_hash,
                 );
-                try self.journal.transition(operation, .planned, .staged, null);
+                try self.transition(operation, .planned, .staged, null);
                 try self.interrupt(.after_stage_journaled, action_index);
                 file_mutation.commitMove(
                     self.io,
                     move.source_path,
                     move.destination_path,
                 ) catch |err| {
-                    self.journal.transition(operation, .staged, .failed, @errorName(err)) catch {};
+                    self.transition(operation, .staged, .failed, @errorName(err)) catch {};
                     return err;
                 };
                 completed.appendAssumeCapacity(.{
@@ -256,7 +264,7 @@ pub const Executor = struct {
                 });
                 try self.interrupt(.after_move_rename, action_index);
                 const committed = try file_mutation.identity(self.io, move.destination_path);
-                try self.journal.commit(
+                try self.commit(
                     operation,
                     committed.size_bytes,
                     committed.modified_ns,
@@ -318,6 +326,50 @@ pub const Executor = struct {
         return null;
     }
 
+    fn stopIfStale(self: *Executor, err: anyerror) void {
+        if (err == error.StaleMutationOperation) self.crashed = true;
+    }
+
+    fn transition(
+        self: *Executor,
+        operation_id: i64,
+        expected: database.MutationState,
+        next: database.MutationState,
+        message: ?[]const u8,
+    ) !void {
+        self.journal.transition(operation_id, expected, next, message) catch |err| {
+            self.stopIfStale(err);
+            return err;
+        };
+    }
+
+    fn recordResultIdentity(
+        self: *Executor,
+        operation_id: i64,
+        expected: database.MutationState,
+        size: u64,
+        modified_ns: i64,
+        digest: storage.quick_hash.Digest,
+    ) !void {
+        self.journal.recordResultIdentity(operation_id, expected, size, modified_ns, digest) catch |err| {
+            self.stopIfStale(err);
+            return err;
+        };
+    }
+
+    fn commit(
+        self: *Executor,
+        operation_id: i64,
+        size: u64,
+        modified_ns: i64,
+        digest: storage.quick_hash.Digest,
+    ) !void {
+        self.journal.commit(operation_id, size, modified_ns, digest) catch |err| {
+            self.stopIfStale(err);
+            return err;
+        };
+    }
+
     fn groupProducedIdentity(
         self: *Executor,
         actions: []const CompletedAction,
@@ -363,10 +415,11 @@ pub const Executor = struct {
         try self.rollbackOperation(operation_id, null);
     }
 
-    /// Undo a logical group only after every current after-state and every
-    /// backup has been validated. Operations then reverse in action order so
-    /// write-then-move plans restore the path before restoring the original
-    /// tagged bytes.
+    /// Undo a logical group in reverse action order, so write-then-move plans
+    /// restore the path before restoring the original tagged bytes. A group
+    /// whose every operation is committed is validated whole before any file
+    /// changes, then its intent to undo is journaled for every operation at
+    /// once. A group whose undo was interrupted finishes as recovery would.
     pub fn undoGroup(self: *Executor, group_id: u64) !void {
         if (group_id == 0) return error.InvalidMutationGroup;
         const ids = try self.journal.groupOperationIds(self.allocator, group_id);
@@ -382,9 +435,14 @@ pub const Executor = struct {
             try self.journal.get(self.allocator, id),
         );
 
+        switch (undoStart(operations.items)) {
+            .fresh => {},
+            .interrupted => return self.finishInterruptedUndo(group_id),
+            .already_undone => return error.MutationGroupAlreadyUndone,
+            .needs_reconciliation => return error.MutationNeedsReconciliation,
+            .not_committed => return error.MutationGroupNotCommitted,
+        }
         for (operations.items) |operation| {
-            if (operation.state != .committed)
-                return error.MutationGroupNotCommitted;
             if (operation.kind == .write_tags and operation.backup_path == null)
                 return error.TagWriteBackupPruned;
         }
@@ -420,7 +478,26 @@ pub const Executor = struct {
                 return error.MutationNeedsReconciliation;
             }
         }
-        for (ids) |id| try self.rollbackOperation(id, null);
+        try self.journal.beginUndo(group_id);
+        try self.interrupt(.undo_after_intent, 0);
+        var reconciled = false;
+        for (operations.items) |operation| {
+            self.rollbackOperation(operation.id, self.rollbackInterrupt(operation.action_index)) catch |err| switch (err) {
+                error.MutationNeedsReconciliation => reconciled = true,
+                else => return err,
+            };
+            try self.interrupt(.undo_after_operation, operation.action_index);
+        }
+        if (reconciled) return error.MutationNeedsReconciliation;
+    }
+
+    fn finishInterruptedUndo(self: *Executor, group_id: u64) !void {
+        try self.recoverGroup(group_id);
+        const ids = try self.journal.groupOperationIds(self.allocator, group_id);
+        defer self.allocator.free(ids);
+        for (ids) |id| {
+            if (try self.journal.state(id) == .needs_reconciliation) return error.MutationNeedsReconciliation;
+        }
     }
 
     /// Delete the backups of tag-write groups whose every operation committed
@@ -442,14 +519,42 @@ pub const Executor = struct {
         }
     }
 
+    /// Drive a group whose execution or undo was interrupted to a terminal
+    /// state, in reverse action order. Its committed operations become
+    /// `undoing` in one transaction first, so a crash part-way through leaves
+    /// the group discoverable rather than half unwound.
+    pub fn recoverGroup(self: *Executor, group_id: u64) !void {
+        _ = try self.journal.undoCommitted(group_id);
+        const ids = try self.journal.groupOperationIds(self.allocator, group_id);
+        defer self.allocator.free(ids);
+        for (ids) |id| {
+            var operation = try self.journal.get(self.allocator, id);
+            defer operation.deinit();
+            self.recoverLoaded(operation) catch |err| switch (err) {
+                error.MutationNeedsReconciliation => {},
+                else => return err,
+            };
+            try self.interrupt(.recovery_after_operation, operation.action_index);
+        }
+    }
+
     /// Resolve a nonterminal journal entry after interruption. Recovery always
     /// prefers the original bytes and never assumes a staged replacement won,
     /// and never reports `rolled_back` unless the original file is provably
-    /// back in place.
+    /// back in place. A committed operation is refused: only an undo of its
+    /// whole group may unwind it.
     pub fn recoverOperation(self: *Executor, operation_id: i64) !void {
         var operation = try self.journal.get(self.allocator, operation_id);
         defer operation.deinit();
-        if (operation.state == .rolled_back or operation.state == .needs_reconciliation) return;
+        return self.recoverLoaded(operation);
+    }
+
+    fn recoverLoaded(self: *Executor, operation: database.MutationOperation) !void {
+        switch (operation.state) {
+            .rolled_back, .needs_reconciliation => return,
+            .committed => return error.MutationOperationNotRecoverable,
+            .planned, .staged, .failed, .undoing => {},
+        }
         // A record that does not name the paths its own recovery needs can
         // never converge on its own, but it must not keep the Library shut
         // forever either: reconciliation is the terminal state for it.
@@ -597,28 +702,28 @@ pub const Executor = struct {
     ) !void {
         switch (state) {
             .planned => {
-                try self.journal.transition(operation_id, .planned, .failed, "recovered");
-                try self.journal.transition(operation_id, .failed, .rolled_back, "recovered");
+                try self.transition(operation_id, .planned, .failed, "recovered");
+                try self.transition(operation_id, .failed, .rolled_back, "recovered");
             },
-            .staged => try self.journal.transition(
+            .staged => try self.transition(
                 operation_id,
                 .staged,
                 .rolled_back,
                 "recovered",
             ),
-            .failed => try self.journal.transition(
+            .failed => try self.transition(
                 operation_id,
                 .failed,
                 .rolled_back,
                 "recovered",
             ),
-            .committed => try self.journal.transition(
+            .undoing => try self.transition(
                 operation_id,
-                .committed,
+                .undoing,
                 .rolled_back,
                 "recovered",
             ),
-            .rolled_back, .needs_reconciliation => unreachable,
+            .committed, .rolled_back, .needs_reconciliation => unreachable,
         }
     }
 
@@ -628,9 +733,13 @@ pub const Executor = struct {
         state: database.MutationState,
         message: []const u8,
     ) !void {
-        try self.journal.transition(operation_id, state, .needs_reconciliation, message);
+        try self.transition(operation_id, state, .needs_reconciliation, message);
     }
 
+    /// Restore one operation's before-state. A committed operation becomes
+    /// `undoing` first; a staged one is a write the same execution is
+    /// compensating. The backup goes before the journal says `rolled_back`,
+    /// so a crash between the two leaves an operation recovery still finishes.
     fn rollbackOperation(
         self: *Executor,
         operation_id: i64,
@@ -638,17 +747,23 @@ pub const Executor = struct {
     ) !void {
         var operation = try self.journal.get(self.allocator, operation_id);
         defer operation.deinit();
-        if (operation.state != .committed and operation.state != .staged)
-            return error.MutationOperationNotRecoverable;
+        const state: database.MutationState = switch (operation.state) {
+            .committed => undoing: {
+                try self.transition(operation_id, .committed, .undoing, null);
+                break :undoing .undoing;
+            },
+            .staged, .undoing => operation.state,
+            .planned, .failed, .rolled_back, .needs_reconciliation => return error.MutationOperationNotRecoverable,
+        };
         if (operation.kind == .move) {
             const destination = operation.destination_path orelse
                 return error.MissingMutationDestination;
             if (try pathExists(self.io, operation.source_path)) {
-                try self.reconcile(operation_id, operation.state, "move source already exists");
+                try self.reconcile(operation_id, state, "move source already exists");
                 return error.MutationNeedsReconciliation;
             }
             try file_mutation.commitMove(self.io, destination, operation.source_path);
-            try self.journal.transition(operation_id, operation.state, .rolled_back, null);
+            try self.transition(operation_id, state, .rolled_back, null);
             return;
         }
         const backup_path = operation.backup_path orelse return error.TagWriteBackupPruned;
@@ -670,8 +785,8 @@ pub const Executor = struct {
             try resultIdentity(operation),
             rollback_interrupt,
         );
-        try self.journal.transition(operation_id, operation.state, .rolled_back, null);
         try self.discardBackup(backup_path);
+        try self.transition(operation_id, state, .rolled_back, null);
     }
 
     fn discardBackup(self: *Executor, backup_path: []const u8) !void {
@@ -690,6 +805,33 @@ pub const Executor = struct {
         try deleteDirectoryIfEmpty(self.io, backup_directory);
     }
 };
+
+const UndoStart = enum {
+    fresh,
+    interrupted,
+    already_undone,
+    needs_reconciliation,
+    not_committed,
+};
+
+fn undoStart(operations: []const database.MutationOperation) UndoStart {
+    var committed: usize = 0;
+    var undoing: usize = 0;
+    var rolled_back: usize = 0;
+    var reconciled: usize = 0;
+    for (operations) |operation| switch (operation.state) {
+        .committed => committed += 1,
+        .undoing => undoing += 1,
+        .rolled_back => rolled_back += 1,
+        .needs_reconciliation => reconciled += 1,
+        .planned, .staged, .failed => return .not_committed,
+    };
+    if (committed == operations.len) return .fresh;
+    if (undoing > 0) return .interrupted;
+    if (reconciled > 0) return .needs_reconciliation;
+    if (rolled_back == operations.len) return .already_undone;
+    return .not_committed;
+}
 
 /// The identity a completed operation left behind, as the journal recorded it.
 ///
@@ -855,10 +997,13 @@ test "approved plan commits through journal and undo detects external edits" {
     var plan = try mutation.Plan.init(std.testing.allocator, 44, &actions);
     var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
     defer library.close();
+    var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+    defer lock.release(std.testing.io);
     var executor: Executor = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library.backup_directory,
     };
     try std.testing.expectError(error.MutationPlanNotApproved, executor.executePlan(&plan, 8));
@@ -971,10 +1116,13 @@ test "recovery restores original after replacement before journal commit" {
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try file_mutation.commitReplacement(std.testing.io, source, stage, backup, expected);
 
+    var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+    defer lock.release(std.testing.io);
     var executor: Executor = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library.backup_directory,
     };
     try executor.recoverOperation(operation);
@@ -1115,10 +1263,13 @@ test "approved move supports undo and rejects an externally edited destination" 
     });
     var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
     defer library.close();
+    var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+    defer lock.release(std.testing.io);
     var executor: Executor = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library.backup_directory,
     };
 
@@ -1224,10 +1375,13 @@ test "move recovery restores a rename interrupted before journal commit" {
     );
     try library.mutation_journal.transition(operation, .planned, .staged, null);
     try std.Io.Dir.cwd().renamePreserve(source, std.Io.Dir.cwd(), destination, std.testing.io);
+    var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+    defer lock.release(std.testing.io);
     var executor: Executor = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library.backup_directory,
     };
     try executor.recoverOperation(operation);
@@ -1307,10 +1461,13 @@ test "failed move rolls back an earlier tag write in the same group" {
     try plan.approve(plan.approval());
     var library = try LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
     defer library.close();
+    var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+    defer lock.release(std.testing.io);
     var executor: Executor = .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = &lock,
         .backup_directory = library.backup_directory,
     };
     try std.testing.expectError(error.DestinationExists, executor.executePlan(&plan, 103));
@@ -1323,8 +1480,10 @@ const WriteFixture = struct {
     music: std.testing.TmpDir,
     data: std.testing.TmpDir,
     source: []u8,
+    second: []u8,
     library: @import("../database/library.zig").LibraryDatabase,
     original: mutation.FileIdentity,
+    second_original: mutation.FileIdentity,
 
     fn init(database_name: ?[:0]const u8) !WriteFixture {
         const id3v1 = @import("id3v1.zig");
@@ -1334,47 +1493,64 @@ const WriteFixture = struct {
         errdefer music.cleanup();
         var data = std.testing.tmpDir(.{});
         errdefer data.cleanup();
-        try music.dir.writeFile(std.testing.io, .{
-            .sub_path = "source.mp3",
-            .data = "\xff\xfb\x90\x64generated payload" ++ try id3v1.encode(.{
-                .title = "Before write",
-                .artist = "Generated",
-                .album = "Generated",
-                .year = "2026",
-                .comment = "Generated",
-                .track_number = 1,
-                .genre = 13,
-            }),
-        });
+        for ([_][]const u8{ "source.mp3", "second.mp3" }, 1..) |name, track| {
+            try music.dir.writeFile(std.testing.io, .{
+                .sub_path = name,
+                .data = "\xff\xfb\x90\x64generated payload" ++ try id3v1.encode(.{
+                    .title = "Before write",
+                    .artist = "Generated",
+                    .album = "Generated",
+                    .year = "2026",
+                    .comment = "Generated",
+                    .track_number = @as(u8, @intCast(track)),
+                    .genre = 13,
+                }),
+            });
+        }
         const source = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/source.mp3", .{music.sub_path});
         errdefer allocator.free(source);
+        const second = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/second.mp3", .{music.sub_path});
+        errdefer allocator.free(second);
         const database_path = if (database_name) |name|
             try allocator.dupeSentinel(u8, name, 0)
         else
             try std.fmt.allocPrintSentinel(allocator, ".zig-cache/tmp/{s}/library.db", .{data.sub_path}, 0);
         defer allocator.free(database_path);
-        const original = try file_mutation.identity(std.testing.io, source);
         return .{
             .music = music,
             .data = data,
             .source = source,
+            .second = second,
+            .original = try file_mutation.identity(std.testing.io, source),
+            .second_original = try file_mutation.identity(std.testing.io, second),
             .library = try LibraryDatabase.open(allocator, std.testing.io, database_path),
-            .original = original,
         };
     }
 
     fn deinit(self: *WriteFixture) void {
         self.library.close();
         std.testing.allocator.free(self.source);
+        std.testing.allocator.free(self.second);
         self.data.cleanup();
         self.music.cleanup();
     }
 
-    fn newExecutor(self: *WriteFixture) Executor {
+    fn acquireLock(self: *WriteFixture) !JournalLock {
+        return JournalLock.acquireForMutation(std.testing.io, self.library.journal_lock_path);
+    }
+
+    /// The lock as another process would hold it: through its own open file
+    /// description.
+    fn holdForeignLock(self: *WriteFixture) !JournalLock {
+        return (try JournalLock.tryAcquire(std.testing.io, self.library.journal_lock_path.?)).?;
+    }
+
+    fn executorWith(self: *WriteFixture, lock: *const JournalLock) Executor {
         return .{
             .allocator = std.testing.allocator,
             .io = std.testing.io,
             .journal = &self.library.mutation_journal,
+            .journal_lock = lock,
             .backup_directory = self.library.backup_directory,
         };
     }
@@ -1385,11 +1561,47 @@ const WriteFixture = struct {
             .expected = self.original,
             .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
         } }};
-        var plan = try mutation.Plan.init(std.testing.allocator, plan_id, &actions);
+        return self.execute(plan_id, &actions);
+    }
+
+    fn writeBoth(self: *WriteFixture, plan_id: u64) !void {
+        const actions = [_]mutation.Action{
+            .{ .write_tags = .{
+                .path = self.source,
+                .expected = self.original,
+                .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+            } },
+            .{ .write_tags = .{
+                .path = self.second,
+                .expected = self.second_original,
+                .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+            } },
+        };
+        return self.execute(plan_id, &actions);
+    }
+
+    fn execute(self: *WriteFixture, plan_id: u64, actions: []const mutation.Action) !void {
+        var plan = try mutation.Plan.init(std.testing.allocator, plan_id, actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = self.newExecutor();
+        var lock = try self.acquireLock();
+        defer lock.release(std.testing.io);
+        var executor = self.executorWith(&lock);
         try executor.executePlan(&plan, plan_id);
+    }
+
+    fn undo(self: *WriteFixture, group_id: u64) !void {
+        var lock = try self.acquireLock();
+        defer lock.release(std.testing.io);
+        var executor = self.executorWith(&lock);
+        try executor.undoGroup(group_id);
+    }
+
+    fn prune(self: *WriteFixture, older_than_s: u64) !PruneSummary {
+        var lock = try self.acquireLock();
+        defer lock.release(std.testing.io);
+        var executor = self.executorWith(&lock);
+        return executor.pruneBackups(older_than_s);
     }
 
     fn backupPath(self: *WriteFixture, plan_id: u64) ![]u8 {
@@ -1400,14 +1612,18 @@ const WriteFixture = struct {
         return file_mutation.identity(std.testing.io, self.source);
     }
 
+    fn currentSecond(self: *WriteFixture) !mutation.FileIdentity {
+        return file_mutation.identity(std.testing.io, self.second);
+    }
+
     fn expectMusicFolderUntouched(self: *WriteFixture) !void {
         var iterator = self.music.dir.iterate();
         var count: usize = 0;
         while (try iterator.next(std.testing.io)) |entry| {
             count += 1;
-            try std.testing.expectEqualStrings("source.mp3", entry.name);
+            try std.testing.expect(std.mem.eql(u8, entry.name, "source.mp3") or std.mem.eql(u8, entry.name, "second.mp3"));
         }
-        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expectEqual(@as(usize, 2), count);
     }
 };
 
@@ -1431,8 +1647,7 @@ test "undo restores the original identity and removes the emptied backup directo
     var fixture = try WriteFixture.init(null);
     defer fixture.deinit();
     try fixture.write(7);
-    var executor = fixture.newExecutor();
-    try executor.undoGroup(7);
+    try fixture.undo(7);
 
     try std.testing.expect(fixture.original.eql(try fixture.current()));
     try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
@@ -1445,15 +1660,14 @@ test "undo refuses a pruned write and changes nothing" {
     defer fixture.deinit();
     try fixture.write(7);
     const written = try fixture.current();
-    var executor = fixture.newExecutor();
 
-    const pruned = try executor.pruneBackups(0);
+    const pruned = try fixture.prune(0);
     try std.testing.expectEqual(@as(u64, 1), pruned.backups);
     try std.testing.expectEqual(fixture.original.size_bytes, pruned.bytes);
     try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
-    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(0)).backups);
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.prune(0)).backups);
 
-    try std.testing.expectError(error.TagWriteBackupPruned, executor.undoGroup(7));
+    try std.testing.expectError(error.TagWriteBackupPruned, fixture.undo(7));
     try std.testing.expect(written.eql(try fixture.current()));
     try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
 }
@@ -1466,15 +1680,14 @@ test "undo reconciles a write whose backup is missing, changes nothing, and is n
     const backup = try fixture.backupPath(7);
     defer std.testing.allocator.free(backup);
     try std.Io.Dir.cwd().deleteFile(std.testing.io, backup);
-    var executor = fixture.newExecutor();
 
-    try std.testing.expectError(error.MutationNeedsReconciliation, executor.undoGroup(7));
+    try std.testing.expectError(error.MutationNeedsReconciliation, fixture.undo(7));
     try std.testing.expect(written.eql(try fixture.current()));
     try std.testing.expectEqual(
         database.MutationState.needs_reconciliation,
         try fixture.library.mutation_journal.state(1),
     );
-    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(0)).backups);
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.prune(0)).backups);
     var operation = try fixture.library.mutation_journal.get(std.testing.allocator, 1);
     defer operation.deinit();
     try std.testing.expect(operation.backup_path != null);
@@ -1484,9 +1697,8 @@ test "pruning keeps the backups of writes younger than the cutoff" {
     var fixture = try WriteFixture.init(null);
     defer fixture.deinit();
     try fixture.write(7);
-    var executor = fixture.newExecutor();
 
-    try std.testing.expectEqual(@as(u64, 0), (try executor.pruneBackups(3600)).backups);
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.prune(3600)).backups);
     const backup = try fixture.backupPath(7);
     defer std.testing.allocator.free(backup);
     try std.testing.expect(try pathExists(std.testing.io, backup));
@@ -1496,6 +1708,7 @@ test "a Library with no database file refuses a tag write before touching the fi
     var fixture = try WriteFixture.init("file:orca-executor-no-backups?mode=memory&cache=shared");
     defer fixture.deinit();
     try std.testing.expect(fixture.library.backup_directory == null);
+    try std.testing.expect(fixture.library.journal_lock_path == null);
 
     try std.testing.expectError(error.NoBackupDirectory, fixture.write(7));
     try std.testing.expect(fixture.original.eql(try fixture.current()));
@@ -1552,9 +1765,8 @@ test "undo restores a write whose backup sits beside the music and deletes that 
     defer fixture.deinit();
     const backup = try commitLegacyWrite(&fixture, 5);
     defer std.testing.allocator.free(backup);
-    var executor = fixture.newExecutor();
 
-    try executor.undoGroup(5);
+    try fixture.undo(5);
     try std.testing.expect(fixture.original.eql(try fixture.current()));
     try std.testing.expect(!try pathExists(std.testing.io, backup));
     try fixture.expectMusicFolderUntouched();
@@ -1565,11 +1777,161 @@ test "pruning deletes a backup beside the music from before the backup directory
     defer fixture.deinit();
     const backup = try commitLegacyWrite(&fixture, 5);
     defer std.testing.allocator.free(backup);
-    var executor = fixture.newExecutor();
 
-    const pruned = try executor.pruneBackups(0);
+    const pruned = try fixture.prune(0);
     try std.testing.expectEqual(@as(u64, 1), pruned.backups);
     try std.testing.expectEqual(fixture.original.size_bytes, pruned.bytes);
     try fixture.expectMusicFolderUntouched();
-    try std.testing.expectError(error.TagWriteBackupPruned, executor.undoGroup(5));
+    try std.testing.expectError(error.TagWriteBackupPruned, fixture.undo(5));
+}
+
+test "a tag write refuses to start while another process holds the mutation lock and journals nothing" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    var foreign = try fixture.holdForeignLock();
+
+    try std.testing.expectError(error.MutationInProgress, fixture.write(7));
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expectEqual(@as(u64, 1), try fixture.library.mutation_journal.nextGroupId());
+
+    foreign.release(std.testing.io);
+    try fixture.write(7);
+    try expectTitle(fixture.source, "After write");
+}
+
+test "undoing a group refuses while another process holds the mutation lock and changes nothing" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    const written = try fixture.current();
+    var foreign = try fixture.holdForeignLock();
+
+    try std.testing.expectError(error.MutationInProgress, fixture.undo(7));
+    try std.testing.expect(written.eql(try fixture.current()));
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
+
+    foreign.release(std.testing.io);
+    try fixture.undo(7);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+}
+
+test "pruning backups refuses while another process holds the mutation lock" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.write(7);
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    var foreign = try fixture.holdForeignLock();
+    defer foreign.release(std.testing.io);
+
+    try std.testing.expectError(error.MutationInProgress, fixture.prune(0));
+    try std.testing.expect(fixture.original.eql(try file_mutation.identity(std.testing.io, backup)));
+}
+
+test "an undo that fails on one file keeps its intent and finishes on the next attempt" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.writeBoth(7);
+    try fixture.music.dir.createDir(std.testing.io, ".source.mp3.orca-restore-7-0", .default_dir);
+
+    if (fixture.undo(7)) |_| return error.UndoIgnoredItsObstacle else |_| {}
+    try std.testing.expectEqual(database.MutationState.undoing, try fixture.library.mutation_journal.state(1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(2));
+    try expectTitle(fixture.source, "After write");
+    try std.testing.expect(fixture.second_original.eql(try fixture.currentSecond()));
+
+    try fixture.music.dir.deleteDir(std.testing.io, ".source.mp3.orca-restore-7-0");
+    try fixture.undo(7);
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try std.testing.expect(fixture.second_original.eql(try fixture.currentSecond()));
+    try fixture.expectMusicFolderUntouched();
+    try std.testing.expect(!try pathExists(std.testing.io, fixture.library.backup_directory.?));
+}
+
+test "undoing a group that was already undone reports it rather than refusing it as not committed" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.writeBoth(7);
+    try fixture.undo(7);
+
+    try std.testing.expectError(error.MutationGroupAlreadyUndone, fixture.undo(7));
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+}
+
+test "undoing a group with a reconciled operation reports reconciliation, not an uncommitted group" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.writeBoth(7);
+    const changed = try std.Io.Dir.cwd().openFile(std.testing.io, fixture.second, .{ .mode = .read_write });
+    const stat = try changed.stat(std.testing.io);
+    try changed.writePositionalAll(std.testing.io, "external", stat.size);
+    changed.close(std.testing.io);
+
+    try std.testing.expectError(error.MutationNeedsReconciliation, fixture.undo(7));
+    try std.testing.expectError(error.MutationNeedsReconciliation, fixture.undo(7));
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
+    try std.testing.expectEqual(database.MutationState.needs_reconciliation, try fixture.library.mutation_journal.state(2));
+    try expectTitle(fixture.source, "After write");
+}
+
+test "backups of a group being undone are never pruned" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.writeBoth(7);
+    {
+        var lock = try fixture.acquireLock();
+        defer lock.release(std.testing.io);
+        var executor = fixture.executorWith(&lock);
+        executor.fault = .{ .point = .undo_after_operation, .action_index = 1 };
+        try std.testing.expectError(error.SimulatedPowerLoss, executor.undoGroup(7));
+    }
+    try std.testing.expectEqual(database.MutationState.undoing, try fixture.library.mutation_journal.state(1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(2));
+
+    try std.testing.expectEqual(@as(u64, 0), (try fixture.prune(0)).backups);
+    const backup = try fixture.backupPath(7);
+    defer std.testing.allocator.free(backup);
+    try std.testing.expect(fixture.original.eql(try file_mutation.identity(std.testing.io, backup)));
+
+    try fixture.undo(7);
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+}
+
+test "an executor stops without compensating when its journal row was changed by someone else" {
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.library.database.exec(
+        \\CREATE TEMP TRIGGER recovered_elsewhere AFTER UPDATE OF state ON mutation_operations
+        \\WHEN NEW.state = 2 AND NEW.action_index = 0
+        \\BEGIN
+        \\    UPDATE mutation_operations SET state = 3, error = 'recovered'
+        \\    WHERE group_id = NEW.group_id AND action_index = 1;
+        \\END;
+    );
+    const actions = [_]mutation.Action{
+        .{ .write_tags = .{
+            .path = fixture.source,
+            .expected = fixture.original,
+            .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        } },
+        .{ .write_tags = .{
+            .path = fixture.second,
+            .expected = fixture.second_original,
+            .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+        } },
+    };
+    var plan = try mutation.Plan.init(std.testing.allocator, 7, &actions);
+    defer plan.deinit();
+    try plan.approve(plan.approval());
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+
+    try std.testing.expectError(error.StaleMutationOperation, executor.executePlan(&plan, 7));
+    try std.testing.expect(executor.crashed);
+    try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
+    try expectTitle(fixture.source, "After write");
+    try std.testing.expect(fixture.second_original.eql(try fixture.currentSecond()));
 }

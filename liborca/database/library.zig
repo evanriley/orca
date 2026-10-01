@@ -1,6 +1,7 @@
 const std = @import("std");
 const metadata = @import("../metadata/model.zig");
 const migrations = @import("migrations.zig");
+const JournalLock = @import("../metadata/journal_lock.zig").JournalLock;
 const mutation_recovery = @import("../metadata/recovery.zig");
 const platform = @import("../platform.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
@@ -42,6 +43,12 @@ pub const LibraryDatabase = struct {
     allocator: std.mem.Allocator,
     path: [:0]u8,
     backup_directory: ?[]u8,
+    /// Where the `JournalLock` lives: `<database>.orca-journal.lock`. Null
+    /// for a Library with no database file, which no other process can open.
+    journal_lock_path: ?[]u8,
+    /// Set when another holder had the journal lock at open, so recovery was
+    /// left to the next holder; `recoverPendingMutations` clears it.
+    recovery_deferred: std.atomic.Value(bool),
     database: sqlite.Database,
     write_lane: *repository.WriteLane,
     tracks: repository.TrackRepository,
@@ -77,6 +84,11 @@ pub const LibraryDatabase = struct {
     /// to become a `file_id` must reach a terminal state first. If it cannot,
     /// the Library is not opened at all, matching the existing posture of
     /// refusing to open an unknown newer schema rather than guessing.
+    ///
+    /// Recovery and migration run only while this open holds the journal lock.
+    /// Without it another holder is mid-mutation, and its rows are not
+    /// abandoned: recovery is deferred to a later open, and a Library that
+    /// still needs a migration returns `error.MutationInProgress`.
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !LibraryDatabase {
         const owned_path = try allocator.dupeSentinel(u8, path, 0);
         errdefer allocator.free(owned_path);
@@ -91,17 +103,38 @@ pub const LibraryDatabase = struct {
         else
             null;
         errdefer if (backup_directory) |directory| allocator.free(directory);
+        const journal_lock_path: ?[]u8 = if (database.filename()) |file|
+            try std.fmt.allocPrint(allocator, "{s}.orca-journal.lock", .{file})
+        else
+            null;
+        errdefer if (journal_lock_path) |lock_path| allocator.free(lock_path);
         try migrations.applyThrough(database, migrations.journal_ready_version);
         var journal: repository.MutationJournalRepository = .{
             .db = database,
             .write_lane = write_lane,
         };
-        _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory);
-        try migrations.apply(database);
+        var recovery_deferred = false;
+        if (journal_lock_path) |lock_path| {
+            if (try JournalLock.tryAcquire(io, lock_path)) |acquired| {
+                var lock = acquired;
+                defer lock.release(io);
+                _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory, &lock, null);
+                try migrations.apply(database);
+                _ = try mutation_recovery.recoverPending(allocator, io, &journal, backup_directory, &lock, null);
+            } else {
+                std.log.info("{s}: another process holds the mutation journal; recovery waits for the next open", .{path});
+                recovery_deferred = true;
+                if (try migrations.userVersion(database) < migrations.current_version) return error.MutationInProgress;
+            }
+        } else {
+            try migrations.apply(database);
+        }
         return .{
             .allocator = allocator,
             .path = owned_path,
             .backup_directory = backup_directory,
+            .journal_lock_path = journal_lock_path,
+            .recovery_deferred = .init(recovery_deferred),
             .database = database,
             .write_lane = write_lane,
             .tracks = .{ .db = database, .write_lane = write_lane },
@@ -129,10 +162,25 @@ pub const LibraryDatabase = struct {
         };
     }
 
+    /// Finishes whatever an interrupted holder of the journal lock left
+    /// behind. Every write, undo and prune runs this first, under `lock`.
+    pub fn recoverPendingMutations(self: *LibraryDatabase, io: std.Io, lock: *const JournalLock) !void {
+        _ = try mutation_recovery.recoverPending(
+            self.allocator,
+            io,
+            &self.mutation_journal,
+            self.backup_directory,
+            lock,
+            null,
+        );
+        self.recovery_deferred.store(false, .release);
+    }
+
     pub fn close(self: *LibraryDatabase) void {
         self.database.close();
         self.allocator.destroy(self.write_lane);
         if (self.backup_directory) |directory| self.allocator.free(directory);
+        if (self.journal_lock_path) |lock_path| self.allocator.free(lock_path);
         self.allocator.free(self.path);
         self.* = undefined;
     }

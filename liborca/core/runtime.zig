@@ -356,8 +356,8 @@ pub const OrcaRuntime = struct {
     /// The one Library whose listens go to ListenBrainz, so a runtime never
     /// has two gateways to one service.
     scrobbling_library: ?LibraryHandle = null,
-    /// The control lane's own `std.Io`, for clock reads and worker wakeups
-    /// only.
+    /// The control lane's own `std.Io`, for clock reads, worker wakeups and
+    /// taking and releasing a tag write's journal lock only.
     control_threaded: std.Io.Threaded = .init_single_threaded,
     last_listen_sample_ms: ?i64 = null,
     /// Replaced by tests that must not reach a network or wait in real time.
@@ -1416,7 +1416,11 @@ pub const OrcaRuntime = struct {
     /// The job is not cancellable once started: a journaled group finishes or
     /// rolls back as a whole. The files are re-observed and reprojected when
     /// it ends. A Library with no database file has nowhere to keep the
-    /// originals and returns `error.NoBackupDirectory`.
+    /// originals and returns `error.NoBackupDirectory`. While another process,
+    /// or another write, undo or prune in this one, holds the Library's
+    /// journal lock it returns `error.MutationInProgress` and the plan stays
+    /// pending. The job first finishes any mutation an interrupted holder
+    /// left, and fails without writing if that recovery fails.
     pub fn startTagWrite(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -1436,7 +1440,11 @@ pub const OrcaRuntime = struct {
     /// the edit. A file changed again since the write, or whose backup is
     /// missing or damaged, is left alone and recorded for reconciliation
     /// rather than overwritten. A write whose backups were pruned returns
-    /// `error.TagWriteBackupPruned` and changes nothing.
+    /// `error.TagWriteBackupPruned` and changes nothing. An undo that was
+    /// interrupted finishes; one that already finished re-observes the files
+    /// and returns `error.MutationGroupAlreadyUndone`. Returns
+    /// `error.MutationInProgress` while the journal lock is held elsewhere.
+    /// Finishes any mutation an interrupted holder left before undoing.
     pub fn undoTagWrite(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, group_id: u64) !void {
         return runtime_roots.undoTagWrite(self, library, io, group_id);
     }
@@ -1444,7 +1452,9 @@ pub const OrcaRuntime = struct {
     /// Deletes the originals kept for tag writes whose every file committed
     /// at least `older_than_s` seconds ago; zero prunes every committed write.
     /// A pruned write can no longer be undone. Writes awaiting reconciliation
-    /// keep their backups.
+    /// or being undone keep their backups. Returns `error.MutationInProgress`
+    /// while the journal lock is held elsewhere. Finishes any mutation an
+    /// interrupted holder left before pruning.
     pub fn pruneTagWriteBackups(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, older_than_s: u64) !PruneSummary {
         return runtime_roots.pruneTagWriteBackups(self, library, io, older_than_s);
     }

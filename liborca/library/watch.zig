@@ -50,7 +50,8 @@ pub const Ignore = struct {
         return suffix.len == 0 or
             std.mem.eql(u8, suffix, "-wal") or
             std.mem.eql(u8, suffix, "-shm") or
-            std.mem.eql(u8, suffix, "-journal");
+            std.mem.eql(u8, suffix, "-journal") or
+            std.mem.eql(u8, suffix, ".orca-journal.lock");
     }
 };
 
@@ -125,6 +126,7 @@ test "the database's own files, Orca's temporaries and the backup directory are 
         "library.db-wal",
         "library.db-shm",
         "library.db-journal",
+        "library.db.orca-journal.lock",
         "library.db.orca-backups",
         ".orca-volume-id",
         ".one.flac.orca-stage-3-0",

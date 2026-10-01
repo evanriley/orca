@@ -773,7 +773,10 @@ fn undoTagWrite(context: Context) !void {
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const group = try std.fmt.parseInt(u64, context.arguments[1], 10);
-    try runtime.undoTagWrite(library, context.io, group);
+    runtime.undoTagWrite(library, context.io, group) catch |err| switch (err) {
+        error.MutationGroupAlreadyUndone => return context.stdout.print("group {d} was already undone\n", .{group}),
+        else => return err,
+    };
     try context.stdout.print("undid group {d}\n", .{group});
 }
 

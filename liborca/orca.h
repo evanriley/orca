@@ -63,7 +63,8 @@ typedef enum orca_status {
     ORCA_STATUS_INVALID_STATE = 5,
     /* No such Track, root, or file behind a Track. */
     ORCA_STATUS_NOT_FOUND = 6,
-    /* A bounded queue is full. Backpressure, not failure. */
+    /* A bounded queue is full, a job holds the Library, or another process
+     * holds its mutation journal. Backpressure, not failure. */
     ORCA_STATUS_BUSY = 7,
     /* No codec can read those bytes, or no backend can open that device. */
     ORCA_STATUS_UNSUPPORTED = 8,

@@ -1,6 +1,7 @@
 const std = @import("std");
 const database = @import("../database/repository.zig");
 const executor_module = @import("executor.zig");
+const JournalLock = @import("journal_lock.zig").JournalLock;
 
 pub const Summary = struct {
     groups: usize = 0,
@@ -25,6 +26,8 @@ pub fn recoverPending(
     io: std.Io,
     journal: *database.MutationJournalRepository,
     backup_directory: ?[]const u8,
+    journal_lock: *const JournalLock,
+    fault: ?executor_module.Fault,
 ) !Summary {
     const group_ids = try journal.nonterminalGroupIds(allocator);
     defer allocator.free(group_ids);
@@ -35,18 +38,11 @@ pub fn recoverPending(
         .allocator = allocator,
         .io = io,
         .journal = journal,
+        .journal_lock = journal_lock,
         .backup_directory = backup_directory,
+        .fault = fault,
     };
-    for (group_ids) |group_id| {
-        const operation_ids = try journal.groupOperationIds(allocator, group_id);
-        defer allocator.free(operation_ids);
-        for (operation_ids) |operation_id| {
-            executor.recoverOperation(operation_id) catch |err| switch (err) {
-                error.MutationNeedsReconciliation => {},
-                else => return err,
-            };
-        }
-    }
+    for (group_ids) |group_id| try executor.recoverGroup(group_id);
 
     for (group_ids) |group_id| {
         const operation_ids = try journal.groupOperationIds(allocator, group_id);
@@ -57,7 +53,7 @@ pub fn recoverPending(
                 .rolled_back => summary.rolled_back += 1,
                 .needs_reconciliation => summary.needs_reconciliation += 1,
                 .committed => {},
-                .planned, .staged, .failed => return error.MutationRecoveryIncomplete,
+                .planned, .staged, .failed, .undoing => return error.MutationRecoveryIncomplete,
             }
         }
     }
@@ -67,7 +63,9 @@ pub fn recoverPending(
 const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
 const file_mutation = @import("file_mutation.zig");
 const id3v1 = @import("id3v1.zig");
+const migrations = @import("../database/migrations.zig");
 const mutation = @import("mutation.zig");
+const sqlite = @import("../database/sqlite.zig");
 
 const test_plan_id = 1000;
 const test_group_id = 1000;
@@ -83,8 +81,13 @@ const Harness = struct {
     restore: []u8,
     backup_directory: []u8,
     backup: []u8,
+    second: []u8,
+    second_stage: []u8,
+    second_restore: []u8,
+    second_backup: []u8,
     database_path: [:0]u8,
     original: mutation.FileIdentity,
+    second_original: mutation.FileIdentity,
 
     fn init() !Harness {
         var temporary = std.testing.tmpDir(.{});
@@ -117,18 +120,34 @@ const Harness = struct {
             0,
         );
         errdefer allocator.free(database_path);
-        try temporary.dir.writeFile(std.testing.io, .{
-            .sub_path = "source.mp3",
-            .data = "\xff\xfb\x90\x64generated audio payload" ++ (try id3v1.encode(.{
-                .title = "Original",
-                .artist = "Generated",
-                .album = "Generated",
-                .year = "2026",
-                .comment = "Generated",
-                .track_number = 1,
-                .genre = 13,
-            })),
-        });
+        for ([_][]const u8{ "source.mp3", "second.mp3" }, 1..) |name, track| {
+            try temporary.dir.writeFile(std.testing.io, .{
+                .sub_path = name,
+                .data = "\xff\xfb\x90\x64generated audio payload" ++ (try id3v1.encode(.{
+                    .title = "Original",
+                    .artist = "Generated",
+                    .album = "Generated",
+                    .year = "2026",
+                    .comment = "Generated",
+                    .track_number = @as(u8, @intCast(track)),
+                    .genre = 13,
+                })),
+            });
+        }
+        const second = try std.fmt.allocPrint(allocator, "{s}/second.mp3", .{prefix});
+        errdefer allocator.free(second);
+        const second_stage = try std.fmt.allocPrint(
+            allocator,
+            "{s}/.second.mp3.orca-stage-{d}-1",
+            .{ prefix, test_plan_id },
+        );
+        errdefer allocator.free(second_stage);
+        const second_restore = try std.fmt.allocPrint(
+            allocator,
+            "{s}/.second.mp3.orca-restore-{d}-1",
+            .{ prefix, test_plan_id },
+        );
+        errdefer allocator.free(second_restore);
         const backup_directory = backup_directory: {
             var library = try LibraryDatabase.open(allocator, std.testing.io, database_path);
             defer library.close();
@@ -141,6 +160,12 @@ const Harness = struct {
             .{ backup_directory, test_plan_id },
         );
         errdefer allocator.free(backup);
+        const second_backup = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{d}/1-second.mp3",
+            .{ backup_directory, test_plan_id },
+        );
+        errdefer allocator.free(second_backup);
         return .{
             .temporary = temporary,
             .prefix = prefix,
@@ -149,8 +174,13 @@ const Harness = struct {
             .restore = restore,
             .backup_directory = backup_directory,
             .backup = backup,
+            .second = second,
+            .second_stage = second_stage,
+            .second_restore = second_restore,
+            .second_backup = second_backup,
             .database_path = database_path,
             .original = try file_mutation.identity(std.testing.io, source),
+            .second_original = try file_mutation.identity(std.testing.io, second),
         };
     }
 
@@ -162,6 +192,10 @@ const Harness = struct {
         allocator.free(self.restore);
         allocator.free(self.backup_directory);
         allocator.free(self.backup);
+        allocator.free(self.second);
+        allocator.free(self.second_stage);
+        allocator.free(self.second_restore);
+        allocator.free(self.second_backup);
         allocator.free(self.database_path);
         self.temporary.cleanup();
     }
@@ -181,12 +215,82 @@ const Harness = struct {
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = executorFor(&library, .{ .point = point });
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = point });
         try std.testing.expectError(
             error.SimulatedPowerLoss,
             executor.executePlan(&plan, test_group_id),
         );
         try std.testing.expect(executor.crashed);
+    }
+
+    /// The journal lock as another process holds it: through an open file
+    /// description of its own.
+    fn holdForeignLock(self: *Harness) !JournalLock {
+        const path = try std.fmt.allocPrint(std.testing.allocator, "{s}.orca-journal.lock", .{self.database_path});
+        defer std.testing.allocator.free(path);
+        return (try JournalLock.tryAcquire(std.testing.io, path)).?;
+    }
+
+    fn releaseForeignLock(lock: *JournalLock) void {
+        lock.release(std.testing.io);
+    }
+
+    fn groupActions(self: *Harness) [2]mutation.Action {
+        return .{
+            .{ .write_tags = .{
+                .path = self.source,
+                .expected = self.original,
+                .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+            } },
+            .{ .write_tags = .{
+                .path = self.second,
+                .expected = self.second_original,
+                .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+            } },
+        };
+    }
+
+    fn writeGroup(self: *Harness) !void {
+        const actions = self.groupActions();
+        return self.writePlan(&actions);
+    }
+
+    fn writePlan(self: *Harness, actions: []const mutation.Action) !void {
+        var library = try self.open();
+        defer library.close();
+        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, null);
+        try executor.executePlan(&plan, test_group_id);
+    }
+
+    /// Undo the group and lose power at `fault`. The lock goes with the
+    /// process, as it does when a real one dies.
+    fn crashUndo(self: *Harness, fault: executor_module.Fault) !void {
+        var library = try self.open();
+        defer library.close();
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, fault);
+        try std.testing.expectError(error.SimulatedPowerLoss, executor.undoGroup(test_group_id));
+        try std.testing.expect(executor.crashed);
+    }
+
+    fn expectBothOriginal(self: *Harness) !void {
+        try self.expectOriginal();
+        try std.testing.expect(self.second_original.eql(try file_mutation.identity(std.testing.io, self.second)));
+    }
+
+    fn expectNoGroupResidue(self: *Harness) !void {
+        try self.expectNoResidue();
+        try std.testing.expect(!try exists(self.second_stage));
+        try std.testing.expect(!try exists(self.second_restore));
+        try std.testing.expect(!try exists(self.second_backup));
     }
 
     fn writeFile(self: *Harness, sub_path: []const u8, data: []const u8) !void {
@@ -211,11 +315,16 @@ const Harness = struct {
     }
 };
 
-fn executorFor(library: *LibraryDatabase, fault: ?executor_module.Fault) executor_module.Executor {
+fn executorFor(
+    library: *LibraryDatabase,
+    lock: *const JournalLock,
+    fault: ?executor_module.Fault,
+) executor_module.Executor {
     return .{
         .allocator = std.testing.allocator,
         .io = std.testing.io,
         .journal = &library.mutation_journal,
+        .journal_lock = lock,
         .backup_directory = library.backup_directory,
         .fault = fault,
     };
@@ -294,7 +403,9 @@ test "recovery restores a move interrupted after the rename and before the commi
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = executorFor(&library, .{ .point = .after_move_rename });
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = .after_move_rename });
         try std.testing.expectError(
             error.SimulatedPowerLoss,
             executor.executePlan(&plan, test_group_id),
@@ -342,7 +453,9 @@ fn expectConvergesFromRollbackCrash(point: executor_module.FaultPoint) !void {
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = executorFor(&library, .{ .point = point });
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = point });
         try std.testing.expectError(
             error.DestinationExists,
             executor.executePlan(&plan, test_group_id),
@@ -495,7 +608,9 @@ test "recovery waits for a folder that is gone, as an unmounted drive is, and re
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = executorFor(&library, .{ .point = .after_source_rename });
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = .after_source_rename });
         try std.testing.expectError(error.SimulatedPowerLoss, executor.executePlan(&plan, test_group_id));
     }
     try harness.temporary.dir.rename("drive", harness.temporary.dir, "unmounted", std.testing.io);
@@ -617,7 +732,9 @@ test "recovery unwinds a whole group when its last action crashed mid-rename" {
         var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
         defer plan.deinit();
         try plan.approve(plan.approval());
-        var executor = executorFor(&library, .{ .point = .after_move_rename, .action_index = 1 });
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = .after_move_rename, .action_index = 1 });
         try std.testing.expectError(
             error.SimulatedPowerLoss,
             executor.executePlan(&plan, test_group_id),
@@ -639,4 +756,283 @@ test "recovery unwinds a whole group when its last action crashed mid-rename" {
     try std.testing.expect(!try exists(destination));
     try harness.expectOriginal();
     try harness.expectNoResidue();
+}
+fn stateIn(library: *LibraryDatabase, operation_id: i64) !database.MutationState {
+    return library.mutation_journal.state(operation_id);
+}
+
+test "opening a Library leaves another process's in-flight write alone" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var writer = try harness.open();
+    defer writer.close();
+    var lock = try harness.holdForeignLock();
+    const journal = &writer.mutation_journal;
+    const operation = try journal.prepare(.{
+        .plan_id = test_plan_id,
+        .group_id = test_group_id,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = harness.source,
+        .stage_path = harness.stage,
+        .backup_path = harness.backup,
+        .expected_size = harness.original.size_bytes,
+        .expected_modified_ns = harness.original.modified_ns,
+        .expected_quick_hash = harness.original.quick_hash,
+    });
+    try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, harness.stage, harness.original, &.{
+        .{ .field = .title, .before = "Original", .after = "Replaced" },
+    });
+    const staged = try file_mutation.identity(std.testing.io, harness.stage);
+    try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    try journal.transition(operation, .planned, .staged, null);
+
+    {
+        var other = try harness.open();
+        defer other.close();
+        try std.testing.expectEqual(database.MutationState.staged, try stateIn(&other, operation));
+        try std.testing.expect(try exists(harness.stage));
+        try std.testing.expect(other.recovery_deferred.load(.acquire));
+    }
+
+    try file_mutation.createDirectoryDurably(std.testing.io, harness.backup_directory);
+    try file_mutation.createDirectoryDurably(std.testing.io, std.Io.Dir.path.dirname(harness.backup).?);
+    try file_mutation.commitReplacement(std.testing.io, harness.source, harness.stage, harness.backup, harness.original);
+    try journal.commit(operation, staged.size_bytes, staged.modified_ns, staged.quick_hash);
+    Harness.releaseForeignLock(&lock);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expect(!reopened.recovery_deferred.load(.acquire));
+    try std.testing.expectEqual(database.MutationState.committed, try stateIn(&reopened, operation));
+    try expectTitle(harness.source, "Replaced");
+}
+
+test "a Library that still needs a migration refuses to open while another process is mutating it" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    {
+        const db = try sqlite.Database.open(harness.database_path);
+        defer db.close();
+        try db.exec("PRAGMA user_version=25;");
+    }
+    var lock = try harness.holdForeignLock();
+
+    try std.testing.expectError(error.MutationInProgress, harness.open());
+    {
+        const db = try sqlite.Database.open(harness.database_path);
+        defer db.close();
+        try std.testing.expectEqual(@as(i64, 25), try migrations.userVersion(db));
+    }
+
+    Harness.releaseForeignLock(&lock);
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
+}
+
+test "the mutation lock is released when a write crashes, so the next open recovers it" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    {
+        var library = try harness.open();
+        defer library.close();
+        var lock = try harness.holdForeignLock();
+        const actions = [_]mutation.Action{.{ .write_tags = .{
+            .path = harness.source,
+            .expected = harness.original,
+            .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+        } }};
+        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var executor = executorFor(&library, &lock, .{ .point = .after_source_rename });
+        try std.testing.expectError(error.SimulatedPowerLoss, executor.executePlan(&plan, test_group_id));
+        {
+            var while_held = try harness.open();
+            defer while_held.close();
+            try std.testing.expect(while_held.recovery_deferred.load(.acquire));
+            try std.testing.expectEqual(database.MutationState.staged, try stateIn(&while_held, 1));
+        }
+        lock.file.close(std.testing.io);
+    }
+    try expectTitle(harness.source, "Replaced");
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expect(!reopened.recovery_deferred.load(.acquire));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try harness.expectOriginal();
+    try harness.expectNoResidue();
+}
+
+test "an undo records its intent for the whole group before restoring any file" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.writeGroup();
+    try harness.crashUndo(.{ .point = .undo_after_intent });
+
+    {
+        var lock = try harness.holdForeignLock();
+        defer Harness.releaseForeignLock(&lock);
+        var deferred = try harness.open();
+        defer deferred.close();
+        try std.testing.expect(deferred.recovery_deferred.load(.acquire));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&deferred, 1));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&deferred, 2));
+        try expectTitle(harness.source, "Replaced");
+        try expectTitle(harness.second, "Replaced");
+    }
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try harness.expectBothOriginal();
+    try harness.expectNoGroupResidue();
+}
+
+/// Crash a two-file undo at `fault`, reopen as a restart would, and require
+/// both originals back with no residue.
+fn expectUndoConvergesFromCrash(fault: executor_module.Fault) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.writeGroup();
+    try harness.crashUndo(fault);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try harness.expectBothOriginal();
+    try harness.expectNoGroupResidue();
+}
+
+test "recovery finishes an undo interrupted between two files" {
+    try expectUndoConvergesFromCrash(.{ .point = .undo_after_operation, .action_index = 1 });
+}
+
+test "recovery finishes an undo interrupted after a file was restored but before the journal said so" {
+    try expectUndoConvergesFromCrash(.{ .point = .rollback_after_restore, .action_index = 1 });
+    try expectUndoConvergesFromCrash(.{ .point = .rollback_after_restore, .action_index = 0 });
+}
+
+test "recovery finishes an undo interrupted during a restore copy" {
+    try expectUndoConvergesFromCrash(.{ .point = .rollback_after_restore_copy, .action_index = 1 });
+    try expectUndoConvergesFromCrash(.{ .point = .rollback_after_restore_copy, .action_index = 0 });
+}
+
+test "an undo resumed by recovery reconciles a file that changed meanwhile, and keeps every file" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.writeGroup();
+    try harness.crashUndo(.{ .point = .undo_after_intent });
+    const changed = try std.Io.Dir.cwd().openFile(std.testing.io, harness.source, .{ .mode = .read_write });
+    const stat = try changed.stat(std.testing.io);
+    try changed.writePositionalAll(std.testing.io, "external", stat.size);
+    changed.close(std.testing.io);
+    const edited = try file_mutation.identity(std.testing.io, harness.source);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.needs_reconciliation, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try std.testing.expect(edited.eql(try file_mutation.identity(std.testing.io, harness.source)));
+    try std.testing.expect(harness.original.eql(try file_mutation.identity(std.testing.io, harness.backup)));
+    try std.testing.expect(harness.second_original.eql(try file_mutation.identity(std.testing.io, harness.second)));
+}
+
+test "recovery marks the committed actions of an interrupted write as undoing before unwinding them" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    {
+        var library = try harness.open();
+        defer library.close();
+        const actions = harness.groupActions();
+        var plan = try mutation.Plan.init(std.testing.allocator, test_plan_id, &actions);
+        defer plan.deinit();
+        try plan.approve(plan.approval());
+        var lock = try JournalLock.acquireForMutation(std.testing.io, library.journal_lock_path);
+        defer lock.release(std.testing.io);
+        var executor = executorFor(&library, &lock, .{ .point = .after_stage_journaled, .action_index = 1 });
+        try std.testing.expectError(error.SimulatedPowerLoss, executor.executePlan(&plan, test_group_id));
+    }
+
+    var lock = try harness.holdForeignLock();
+    {
+        var library = try harness.open();
+        defer library.close();
+        try std.testing.expectEqual(database.MutationState.committed, try stateIn(&library, 1));
+        try std.testing.expectEqual(database.MutationState.staged, try stateIn(&library, 2));
+        try std.testing.expectError(error.SimulatedPowerLoss, recoverPending(
+            std.testing.allocator,
+            std.testing.io,
+            &library.mutation_journal,
+            library.backup_directory,
+            &lock,
+            .{ .point = .recovery_after_operation, .action_index = 1 },
+        ));
+        try std.testing.expectEqual(database.MutationState.undoing, try stateIn(&library, 1));
+        try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&library, 2));
+        try expectTitle(harness.source, "Replaced");
+    }
+    Harness.releaseForeignLock(&lock);
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try harness.expectBothOriginal();
+    try harness.expectNoGroupResidue();
+}
+
+test "a crashed undo of a moved and re-tagged file restores the path before the bytes" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const destination = try harness.childPath("moved.mp3");
+    defer std.testing.allocator.free(destination);
+    const actions = [_]mutation.Action{
+        .{ .write_tags = .{
+            .path = harness.source,
+            .expected = harness.original,
+            .changes = &.{.{ .field = .title, .before = "Original", .after = "Replaced" }},
+        } },
+        .{ .move = .{
+            .source_path = harness.source,
+            .destination_path = destination,
+            .expected = harness.original,
+        } },
+    };
+    try harness.writePlan(&actions);
+    try expectTitle(destination, "Replaced");
+    try harness.crashUndo(.{ .point = .undo_after_intent });
+    try std.testing.expect(!try exists(harness.source));
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try std.testing.expect(!try exists(destination));
+    try harness.expectOriginal();
+    try harness.expectNoResidue();
+}
+
+test "an undo converted by migration 26 finishes in the same open" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    try harness.writeGroup();
+    try harness.crashUndo(.{ .point = .undo_after_operation, .action_index = 1 });
+    {
+        const db = try sqlite.Database.open(harness.database_path);
+        defer db.close();
+        try db.exec("UPDATE mutation_operations SET state = 2 WHERE state = 6; PRAGMA user_version=25;");
+    }
+
+    var reopened = try harness.open();
+    defer reopened.close();
+    try std.testing.expectEqual(@as(i64, migrations.current_version), try migrations.userVersion(reopened.database));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 1));
+    try std.testing.expectEqual(database.MutationState.rolled_back, try stateIn(&reopened, 2));
+    try harness.expectBothOriginal();
+    try harness.expectNoGroupResidue();
 }

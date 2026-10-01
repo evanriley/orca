@@ -435,7 +435,7 @@ pub fn freeAllJobWorkers(self: *OrcaRuntime) void {
 }
 
 fn destroyJobWorker(self: *OrcaRuntime, worker: *JobWorker) void {
-    if (worker.tagWrite()) |pending| pending.destroy();
+    if (worker.tagWrite()) |pending| pending.destroy(self.control_threaded.io());
     if (worker.pendingReconcile()) |pending| pending.destroy();
     self.allocator.destroy(worker);
 }
@@ -444,7 +444,7 @@ pub fn discardPendingTagWrites(self: *OrcaRuntime, library: ?LibraryHandle) void
     for (&self.pending_tag_writes) |*slot| {
         const pending = slot.* orelse continue;
         if (library) |only| if (!pending.library.eql(only)) continue;
-        pending.destroy();
+        pending.destroy(self.control_threaded.io());
         slot.* = null;
     }
 }

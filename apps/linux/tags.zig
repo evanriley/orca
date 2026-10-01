@@ -398,10 +398,15 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
 pub fn undoLastWrite(self: *App) void {
     const library = self.library orelse return;
     if (self.tag_write_group == 0) return;
-    self.runtime.undoTagWrite(library, self.io, self.tag_write_group) catch |err| return self.toast(switch (err) {
-        error.TagWriteBackupPruned => "The backups for that write were pruned, so it can't be undone",
-        else => "Could not undo that write",
-    });
+    self.runtime.undoTagWrite(library, self.io, self.tag_write_group) catch |err| switch (err) {
+        error.MutationGroupAlreadyUndone => {},
+        else => return self.toast(switch (err) {
+            error.TagWriteBackupPruned => "The backups for that write were pruned, so it can't be undone",
+            error.MutationInProgress => "Another Orca is writing tags",
+            error.MutationNeedsReconciliation => "Some files changed after the write, so Orca left them as they are",
+            else => "Could not undo that write",
+        }),
+    };
     self.tag_write_group = 0;
     jobs.reloadLibraryViews(self);
     self.requestTick();

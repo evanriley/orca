@@ -203,8 +203,11 @@ pub const PendingTagWrite = struct {
     plan: metadata.mutation.Plan,
     /// Index-aligned with `plan.actions`, allocated in `arena`.
     locations: []database.repository.PresentLocation,
+    /// Taken by `startTagWrite` and released once the plan has executed.
+    journal_lock: ?metadata.JournalLock = null,
 
-    pub fn destroy(self: *PendingTagWrite) void {
+    pub fn destroy(self: *PendingTagWrite, io: std.Io) void {
+        if (self.journal_lock) |*lock| lock.release(io);
         const allocator = self.arena.child_allocator;
         self.plan.deinit();
         self.arena.deinit();
@@ -1153,13 +1156,22 @@ pub const JobWorker = struct {
         const stats = &self.stats.scan;
         const io = self.threaded.io();
         _ = stats.files_seen.fetchAdd(pending.plan.actions.len, .acq_rel);
-        var executor: metadata.executor.Executor = .{
-            .allocator = self.allocator,
-            .io = io,
-            .journal = &self.database.mutation_journal,
-            .backup_directory = self.database.backup_directory,
+        const written = written: {
+            defer {
+                pending.journal_lock.?.release(io);
+                pending.journal_lock = null;
+            }
+            const lock = &pending.journal_lock.?;
+            self.database.recoverPendingMutations(io, lock) catch break :written false;
+            var executor: metadata.executor.Executor = .{
+                .allocator = self.allocator,
+                .io = io,
+                .journal = &self.database.mutation_journal,
+                .journal_lock = lock,
+                .backup_directory = self.database.backup_directory,
+            };
+            break :written if (executor.executePlan(&pending.plan, pending.plan.id)) true else |_| false;
         };
-        const written = if (executor.executePlan(&pending.plan, pending.plan.id)) true else |_| false;
         if (written) {
             _ = stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
         } else {

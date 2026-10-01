@@ -241,11 +241,13 @@ the convergence `library/projection.zig` asserts on a fixture and
 
 `LibraryDatabase.open` applies migrations only as far as
 `migrations.journal_ready_version` (the version at which `mutation_operations`
-exists), runs mutation-journal recovery, and only then applies the remaining
-migrations. A nonterminal staged file mutation must reach a terminal state
-before any migration rewrites the tables it refers to, and a Library whose
-journal cannot be converged is not opened at all — the same posture as an
-unknown newer schema version.
+exists), runs mutation-journal recovery, applies the remaining migrations, and
+recovers again, for the rows a migration made nonterminal. A nonterminal
+staged file mutation must reach a terminal state before any migration rewrites
+the tables it refers to, and a Library whose journal cannot be converged is not
+opened at all — the same posture as an unknown newer schema version. Recovery
+and the migrations after it run only under the journal lock; see
+[Concurrency](#concurrency).
 
 `mutation_operations` keeps its paths: the subject of a filesystem operation
 genuinely is a path. It also carries `file_id` and the full journaled
@@ -292,6 +294,15 @@ describing the changed bytes, the untouched copy's Track disappeared, later
 scans skipped it, and the duplicate pass still reported the two as exact
 copies. Re-observing applies the divergence rule, so the file keeps the copy
 whose bytes it records and every other copy splits off into a file of its own.
+
+Migration 26 sets a journal operation to `undoing` (6) when it is `committed`
+(2) in a group that also holds a `rolled_back` (3) operation and no `planned`,
+`staged`, `failed` or `needs_reconciliation` one (0, 1, 4, 5). Before it, an
+undo rolled operations back one at a time, so a crash between two files left
+the group half undone in states recovery never selected, and a retried undo
+refused it as not committed. The recovery pass that follows the migrations in
+`LibraryDatabase.open` finishes those undos. `MutationState` values are stored
+by number, so new states are appended and never reordered.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
@@ -488,6 +499,11 @@ accepted proposals name. See
   across a bounded 256-row transaction while UI threads read.
 - Read snapshots use independent read-only connections.
 - Connections use SQLite's full-mutex mode and a five-second busy timeout.
+- One process at a time owns the mutation journal: the holder of an exclusive
+  `flock` on `<database>.orca-journal.lock`, taken without waiting by open's
+  recovery and by each tag write, undo and prune, which recover first. An open
+  that cannot take it defers recovery to the next holder, and refuses with
+  `error.MutationInProgress` when a migration is due. See [metadata.md](metadata.md#the-journal-lock).
 - Prepared batch statements are reused within one transaction.
 
 Automated coverage verifies that a migrated library files every Track exactly

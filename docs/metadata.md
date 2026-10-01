@@ -204,16 +204,55 @@ journal writes raise SQLite durability for their own transaction, so a group is
 always discoverable after a crash. Moves reject collisions and use the same
 operation journal.
 
+### The journal lock
+
+One holder at a time owns a Library's mutation journal: the holder of an
+exclusive advisory lock (`flock`) on `<database>.orca-journal.lock`
+(`metadata.JournalLock`). The operating system releases it when its process
+exits in any way, and a process that is paused, however long, keeps it, which
+a lease in the database could not promise. It is taken without waiting, and
+held only for the duration of one of these:
+
+- `LibraryDatabase.open`, for recovery and the migrations between its two
+  recovery passes.
+- A tag write, from `Runtime.startTagWrite` until the plan has executed; the
+  files are re-observed after it is released.
+- `Runtime.undoTagWrite`, until the group is undone; the files are re-observed
+  after it is released.
+- `Runtime.pruneTagWriteBackups`.
+
+A write, undo or prune that finds the lock held returns
+`error.MutationInProgress` and changes nothing; a refused write's plan stays
+pending. Once it holds the lock, it first runs recovery
+(`LibraryDatabase.recoverPendingMutations`), because a holder that exited
+since the Library was opened may have left work unfinished; a write does this
+on its job's thread. If that recovery fails, the operation fails with its error
+and journals nothing of its own. An open that finds the lock held leaves the
+journal alone, because its rows belong to a writer that is still alive: it sets
+`LibraryDatabase.recovery_deferred`, which the next recovery clears, and
+returns `error.MutationInProgress` instead if the Library still needs a
+migration. Each acquisition opens the file anew, so two acquisitions in one
+process exclude each other as two processes do. A Library with no database
+file has no lock file: tag writes, undo and pruning return
+`error.NoBackupDirectory`, and its open runs no recovery, since nothing it
+journals can outlive its process.
+
+**Never delete the lock file.** A process that opened it before the deletion
+still holds its lock, and the next process creates a new file and locks that,
+so both would own the journal.
+
 ### Tag-write files
 
-A tag write to `Album/01.flac` in plan 7, action 0, uses three files. Only the
-backup outlives the write, and it lives outside the music folders:
+A tag write to `Album/01.flac` in plan 7, action 0, uses three files and the
+Library's journal lock. Only the backup outlives the write, and it lives outside
+the music folders:
 
 | File | Path | Exists |
 | --- | --- | --- |
 | Stage | `Album/.01.flac.orca-stage-7-0` | until the write commits |
 | Backup | `<database>.orca-backups/7/0-01.flac` | until undone or pruned |
 | Restore | `Album/.01.flac.orca-restore-7-0` | during an undo |
+| Journal lock | `<database>.orca-journal.lock` | always; never delete it |
 
 `<database>` is the absolute path of the Library's database file, so the
 journaled backup path does not depend on the working directory. A Library with
@@ -238,29 +277,51 @@ untouched.
 
 ### Undo
 
-Logical groups undo in reverse action order. Before any file changes,
-`undoGroup` checks every operation of the group:
+Logical groups undo in reverse action order. `undoGroup` starts from the
+states of the group's operations:
+
+- Every operation `committed`: a fresh undo, below.
+- Some operation `undoing`, none `planned`, `staged` or `failed`: an undo that
+  was interrupted. It finishes the way recovery does, operation by operation
+  as the [Recovery](#recovery) table decides.
+- Every operation `rolled_back`: `error.MutationGroupAlreadyUndone`.
+- Otherwise, with an operation `needs_reconciliation`:
+  `error.MutationNeedsReconciliation`; with none,
+  `error.MutationGroupNotCommitted`.
+
+Before a fresh undo changes any file, it checks every operation of the group:
 
 - A write whose backup was pruned returns `error.TagWriteBackupPruned`.
 - A file that changed since the write, or a backup that is missing or no longer
   has the original's identity, records `needs_reconciliation` and returns
   `error.MutationNeedsReconciliation`.
 
+It then journals its intent: every operation of the group becomes `undoing` in
+one durable transaction, or none does. A crash or an error from here on leaves
+the group nonterminal, so the next undo or the next open finishes it; an
+operation never returns to `committed`.
+
 Each file is then restored: its backup is copied to the restore file with the
 original's modification time, fsynced and verified, the file is revalidated
 against the write's result, and the restore file is renamed onto it. The
-operation becomes `rolled_back`, then the backup is deleted, and the plan
-directory and the backup directory are removed once empty. An undo needs free
-space for one file on the music disk; if the copy fails, the file is untouched
-and the operation stays `committed`.
+backup is deleted, the plan directory and the backup directory are removed
+once empty, and the operation becomes `rolled_back`. An undo needs free space
+for one file on the music disk; if the copy fails, the file is untouched and
+the operation stays `undoing`.
 
 ### Recovery
 
 `LibraryDatabase.open` runs journal recovery before the Library is returned to
 the caller — after the journal table exists and before any later migration
-rewrites what a nonterminal operation refers to — and refuses to open at all if
-recovery cannot reach a terminal state. Recovery of a tag write is decided by
-identity alone:
+rewrites what a nonterminal operation refers to — and again after the
+migrations, and refuses to open at all if recovery cannot reach a terminal
+state. Both passes run only under the [journal lock](#the-journal-lock).
+
+Recovery drives every group with a `planned`, `staged`, `failed` or `undoing`
+operation to terminal states. It first marks the group's `committed`
+operations `undoing`, in one transaction, so a crash during recovery leaves
+the group discoverable, then unwinds it in reverse action order. A tag write
+being written or being undone is decided by identity alone:
 
 | Found | Action | Result |
 | --- | --- | --- |
@@ -270,6 +331,14 @@ identity alone:
 | File is the result, backup missing or damaged | keep every file | `needs_reconciliation` |
 | File's folder missing, as on an unmounted drive | keep every file | refuses to open; retried at the next open |
 | File missing or matching neither | keep every file | `needs_reconciliation` |
+
+An `undoing` operation reaches those rows from each point an undo can stop at:
+
+| Undo stopped | Found | Result |
+| --- | --- | --- |
+| Before its restore, or during the restore copy | file is the result | restored, `rolled_back` |
+| After the restore rename, or after deleting the backup | file is the original | `rolled_back` |
+| After the file changed externally | file matches neither | `needs_reconciliation`, every file kept |
 
 Journal records from before the backup directory existed name a stage and a
 backup beside the music (`Album/01.flac.orca-stage-7-0`,
@@ -283,7 +352,8 @@ directory, never a music folder.
 
 `Runtime.pruneTagWriteBackups(library, io, older_than_s)` deletes the backups
 of every group whose operations are all `committed` and were last updated at
-least `older_than_s` seconds ago; zero prunes every committed group. It returns
+least `older_than_s` seconds ago; zero prunes every committed group. A group
+being undone is not all `committed` and keeps its backups. It returns
 a `PruneSummary` with the number of backups pruned and their bytes. Each backup
 file is deleted before its journal path is cleared, so a prune that is
 interrupted finishes on the next run. A pruned write cannot be undone. Groups
@@ -322,13 +392,17 @@ files it left out and why, and the plan's ID and digest:
 
 The runtime holds at most eight plans awaiting approval.
 `Runtime.startTagWrite` approves one by its ID and digest and executes it as a
-`mutation` Job; a digest that does not match leaves the plan unwritten.
+`mutation` Job; a digest that does not match, or a journal lock held
+elsewhere (`error.MutationInProgress`), leaves the plan unwritten and
+pending.
 `Runtime.discardTagWrite` drops one. The Job cannot be cancelled once started,
 because a journaled group commits or rolls back as a whole. When it ends, every
 file in the plan is re-observed and reprojected, so the library reads what the
 files now say. The plan ID is the journal group, and
 `Runtime.undoTagWrite(group)` restores those files' previous bytes and
-re-observes them. Orca's values survive both directions: after a write the
+re-observes them; for a group already undone, such as one whose interrupted
+undo recovery finished, it re-observes them and returns
+`error.MutationGroupAlreadyUndone`. Orca's values survive both directions: after a write the
 library still holds the locked edit, and after an undo it still shows it.
 A plan writes one present location of each file. A file held at several
 paths is byte-identical copies, so writing one copy splits it off into a file
@@ -356,7 +430,7 @@ From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,
 each change labelled `edit` or `match`, a `conflict` line per conflict, and
 the digest; `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
 writes it if the digest still matches, `orca-cli undo-tags DATABASE GROUP`
-undoes it, and `orca-cli prune-backups DATABASE` deletes the backups that make
+undoes it or prints `group GROUP was already undone`, and `orca-cli prune-backups DATABASE` deletes the backups that make
 undo possible; see [Pruning backups](#pruning-backups).
 In `orca-gtk`, Write Tags to Files… on a track or album menu, and Save and
 Write to Files… in Edit Tags, show the plan and write it once confirmed.

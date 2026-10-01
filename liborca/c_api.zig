@@ -1699,7 +1699,7 @@ fn mapError(err: anyerror) Status {
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot => .not_found,
-        error.PlaybackQueueFull, error.LibraryJobRunning, error.LibraryScanRunning => .busy,
+        error.PlaybackQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,
