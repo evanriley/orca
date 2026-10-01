@@ -368,7 +368,7 @@ pub const Scanner = struct {
             if (entry.tags) |tags| try self.observed_tags.upsertBatchLocked(&.{.{
                 .file_id = file_id,
                 .values = tags.values,
-            }});
+            }}) else try self.observed_tags.clearLocked(file_id);
             if (self.projection != null) try self.projected.append(self.allocator, file_id);
         }
         try self.database_handle.exec("COMMIT;");
@@ -1064,4 +1064,85 @@ test "an ID3 tag in front of a FLAC stream does not hide the tags behind it" {
     // The same values the untagged fixture yields, read from behind the tag.
     try std.testing.expectEqualStrings("Reference Tone", stored.?.values.title.?);
     try std.testing.expectEqualStrings("Orca Test", stored.?.values.artist.?);
+}
+
+test "a rescan of a file whose tags were removed forgets the old tags" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var tagged: [256]u8 = @splat(0);
+    @memcpy(tagged[0..3], "ID3");
+    @memcpy(tagged[128..131], "TAG");
+    @memcpy(tagged[131..140], "Old title");
+    @memcpy(tagged[161..171], "Old artist");
+    @memcpy(tagged[191..200], "Old album");
+    tagged[255] = 17;
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "song.mp3", .data = &tagged });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-removed-tags?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var target: projection.Projection = .{
+        .allocator = std.testing.allocator,
+        .library = &library,
+    };
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .projection = &target,
+    };
+    defer scanner.deinit();
+
+    _ = try scanner.scan(root_path);
+    const song_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/song.mp3", .{root_path});
+    defer std.testing.allocator.free(song_path);
+    const file_id = (try library.files.resolveByUri(
+        database.LibraryDatabase.null_volume,
+        song_path,
+    )).?;
+    const before = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
+    defer before.deinit();
+    try std.testing.expectEqualStrings("Old title", before.values.title.?);
+    try std.testing.expectEqual(@as(usize, 1), before.values.genres.len);
+
+    var untagged: [300]u8 = @splat(0);
+    @memcpy(untagged[0..3], "ID3");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "song.mp3", .data = &untagged });
+    const rescan = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(file_id, (try library.files.resolveByUri(
+        database.LibraryDatabase.null_volume,
+        song_path,
+    )).?);
+
+    const after = try library.observed_tags.get(std.testing.allocator, file_id);
+    defer if (after) |owned| owned.deinit();
+    try std.testing.expect(after == null);
+    var genres = try library.database.prepare(
+        "SELECT count(*) FROM observed_file_genres WHERE file_id=?1;",
+    );
+    defer genres.deinit();
+    try genres.bindInt64(1, file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try genres.step());
+    try std.testing.expectEqual(@as(i64, 0), genres.columnInt64(0));
+
+    var page = try library.tracks.page(std.testing.allocator, .{ .limit = 4, .offset = 0 });
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.items.len);
+    try std.testing.expectEqualStrings("song", page.items[0].title);
+    try std.testing.expectEqualStrings("", page.items[0].artist);
+    try std.testing.expectEqualStrings("", page.items[0].album);
 }

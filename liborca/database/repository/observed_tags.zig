@@ -167,6 +167,21 @@ pub const ObservedTagsRepository = struct {
         }
     }
 
+    pub fn clearLocked(self: *ObservedTagsRepository, file_id: i64) !void {
+        var delete_genres = try self.db.prepare(
+            "DELETE FROM observed_file_genres WHERE file_id=?1;",
+        );
+        defer delete_genres.deinit();
+        try delete_genres.bindInt64(1, file_id);
+        if (try delete_genres.step() != .done) return error.SqlFailed;
+        var delete_tags = try self.db.prepare(
+            "DELETE FROM observed_file_tags WHERE file_id=?1;",
+        );
+        defer delete_tags.deinit();
+        try delete_tags.bindInt64(1, file_id);
+        if (try delete_tags.step() != .done) return error.SqlFailed;
+    }
+
     pub fn get(
         self: *const ObservedTagsRepository,
         allocator: std.mem.Allocator,

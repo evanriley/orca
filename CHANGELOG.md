@@ -70,6 +70,10 @@
   are ignored until `orca-cli analyze-library` measures the files again, and
   until then playback applies no measured correction to them. Channels are
   summed at weight 1.0; surround weighting waits for a channel layout.
+- **A file whose tags were removed loses them in the library on the next
+  scan.** A rescan of changed bytes that found no tags, or could not read
+  them, kept the tags observed from the old bytes. They are now cleared, as a
+  fresh import of the same file would have none.
 
 ## 0.5.0 - 2026-09-30
 
