@@ -735,18 +735,57 @@ pub const JobWorker = struct {
             .release => |id| id,
             .library, .track => return,
         };
-        if (request.accept_minimum_confidence) |minimum| {
-            if (self.cancelled()) return stats.cancelled.store(true, .release);
-            const accepted = self.database.identification_proposals.acceptConfidentInRelease(self.allocator, minimum, release_id) catch {
-                self.failed.store(true, .release);
-                return;
-            };
-            stats.accepted.store(accepted, .release);
-        }
+        var written: std.ArrayList(i64) = .empty;
+        defer written.deinit(self.allocator);
+        if (request.lookups and !self.applyMatches(request, release_id, &written)) return self.reproject(written.items);
         if (request.cover_art) {
-            if (self.cancelled()) return stats.cancelled.store(true, .release);
-            self.runCoverArt(setup, services, release_id);
+            if (self.cancelled()) {
+                stats.cancelled.store(true, .release);
+            } else {
+                self.runCoverArt(setup, services, release_id);
+            }
         }
+        self.reproject(written.items);
+    }
+
+    /// Match Album after its lookups: accepts the confident matches when
+    /// asked, then applies the Release's consensus. False when the job has
+    /// to stop here.
+    fn applyMatches(self: *JobWorker, request: MatchingRequest, release_id: i64, written: *std.ArrayList(i64)) bool {
+        const stats = &self.stats.matching;
+        const proposals = &self.database.identification_proposals;
+        if (request.accept_minimum_confidence) |minimum| {
+            if (self.cancelled()) {
+                stats.cancelled.store(true, .release);
+                return false;
+            }
+            const acceptance = proposals.acceptConfidentInRelease(self.allocator, minimum, release_id) catch {
+                self.failed.store(true, .release);
+                return false;
+            };
+            defer acceptance.deinit();
+            stats.accepted.store(acceptance.accepted, .release);
+            written.appendSlice(self.allocator, acceptance.file_ids) catch {
+                self.failed.store(true, .release);
+                return false;
+            };
+        }
+        _ = proposals.applyReleaseConsensus(self.allocator, release_id, written) catch {
+            self.failed.store(true, .release);
+            return false;
+        };
+        return true;
+    }
+
+    /// Reprojects the files a Match Album gave values, after its cover fetch,
+    /// so the fetch stored the cover under the Release id it started with.
+    fn reproject(self: *JobWorker, file_ids: []const i64) void {
+        if (file_ids.len == 0) return;
+        var pass: library_pass.Projection = .{
+            .allocator = self.allocator,
+            .library = self.database,
+        };
+        _ = pass.run(.{ .files = file_ids }) catch self.failed.store(true, .release);
     }
 
     const Services = struct {

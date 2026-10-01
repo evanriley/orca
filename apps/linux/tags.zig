@@ -153,9 +153,10 @@ fn save(editor: *Editor) bool {
     return true;
 }
 
-/// Album and artist pages show what they were opened with; after an edit
-/// that may have moved tracks between them, they go back to their lists.
-fn popPages(self: *App) void {
+/// Album and artist pages show what they were opened with; after an edit or
+/// an accepted match that may have moved tracks between them, they go back to
+/// their lists.
+pub fn popPages(self: *App) void {
     if (self.albums_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
     if (self.artists_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
 }
@@ -261,7 +262,14 @@ const PendingWrite = struct {
 
 fn fieldLabel(field: liborca.MetadataField) []const u8 {
     for (fields) |spec| if (spec.field == field) return std.mem.span(spec.label);
-    return @tagName(field);
+    return switch (field) {
+        .compilation => "Compilation",
+        .musicbrainz_release_id => "MusicBrainz Release",
+        .musicbrainz_release_group_id => "MusicBrainz Release Group",
+        .musicbrainz_release_track_id => "MusicBrainz Release Track",
+        .musicbrainz_album_artist_id => "MusicBrainz Album Artist",
+        .title, .artist, .album, .album_artist, .date, .track_number, .disc_number, .musicbrainz_recording_id => @tagName(field),
+    };
 }
 
 fn sourceLabel(provenance: liborca.Provenance) []const u8 {

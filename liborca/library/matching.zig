@@ -1,6 +1,7 @@
 const std = @import("std");
 const analysis = @import("../analysis/root.zig");
 const database = @import("../database/root.zig");
+const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const providers = @import("../providers/root.zig");
 const scanner = @import("scanner.zig");
@@ -8,6 +9,7 @@ const scanner = @import("scanner.zig");
 pub const CancellationToken = scanner.CancellationToken;
 
 const acoustid = providers.acoustid;
+const ReleaseLookup = providers.musicbrainz.ReleaseLookup;
 
 const initial_backoff_ms: u64 = 60_000;
 const maximum_attempts = 3;
@@ -68,6 +70,17 @@ const SearchOutcome = union(enum) {
     busy,
 };
 
+const ReleaseStep = enum { done, cancelled, unavailable, busy };
+
+const ReleaseOutcome = union(enum) {
+    found: *const ReleaseLookup,
+    /// Refused, not found, or not a release: proposals stay as found.
+    unusable,
+    cancelled,
+    unavailable,
+    busy,
+};
+
 const LookupOutcome = union(enum) {
     answered,
     /// How many queries AcoustID refused.
@@ -91,9 +104,12 @@ pub const LibraryMatching = struct {
     batch_size: usize = 64,
     limit: ?u32 = null,
     scope: database.MatchScope = .library,
+    last_release: ?ReleaseLookup = null,
+    unusable_releases: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn run(self: *LibraryMatching) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
+        defer self.forgetReleases();
         const acoustid_service = self.acoustid;
         var result: Result = .{ .acoustid = if (acoustid_service != null) .searched else self.acoustid_use };
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
@@ -119,6 +135,18 @@ pub const LibraryMatching = struct {
                 if (!try self.matchGroup(group, &result)) break :walk;
             }
         }
+        const stopped = result.cancelled or result.unavailable or result.busy != .none;
+        if (!stopped) switch (self.scope) {
+            .release => |release_id| if (self.isCancelled()) {
+                _ = self.stop(&result, .cancelled);
+            } else switch (try self.alignRelease(release_id)) {
+                .done => {},
+                .cancelled => _ = self.stop(&result, .cancelled),
+                .unavailable => _ = self.stop(&result, .unavailable),
+                .busy => _ = self.stop(&result, .musicbrainz_busy),
+            },
+            .library, .track => {},
+        };
         result.requests_answered = self.musicbrainz.requests_answered;
         result.cache_hits = self.musicbrainz.cache_hits;
         if (acoustid_service) |service| {
@@ -180,15 +208,20 @@ pub const LibraryMatching = struct {
                 .busy => return self.stop(result, .musicbrainz_busy),
             };
             if (!answered.isEmpty()) {
-                const stored = try providers.workflow.record(
+                const evidence = try providers.workflow.collect(
                     self.allocator,
-                    self.proposals,
-                    candidate.file_id,
                     query,
-                    answered,
                     if (musicbrainz) |list| list.items else &.{},
                     if (lookup) |list| list.items else &.{},
                 );
+                defer evidence.deinit();
+                switch (try self.enrich(evidence.items, candidate.tagged_track_number)) {
+                    .done => {},
+                    .cancelled => return self.stop(result, .cancelled),
+                    .unavailable => return self.stop(result, .unavailable),
+                    .busy => return self.stop(result, .musicbrainz_busy),
+                }
+                const stored = try self.proposals.recordSearch(self.allocator, candidate.file_id, answered, evidence.items);
                 result.proposals_stored += stored;
                 if (stored == 0) result.unmatched += 1 else result.matched += 1;
             }
@@ -196,6 +229,124 @@ pub const LibraryMatching = struct {
             self.publish(result);
         }
         return true;
+    }
+
+    /// Fills in what the release of the most confident MusicBrainz
+    /// proposal says, on every proposal naming that release.
+    fn enrich(self: *LibraryMatching, items: []database.ProposalEvidence, tagged_track_number: ?u32) !ReleaseStep {
+        var best: ?*const database.ProposalEvidence = null;
+        for (items) |*item| {
+            if (!item.found_by.musicbrainz) continue;
+            const release_mbid = item.payload.release_mbid orelse continue;
+            if (!metadata.isMusicBrainzId(release_mbid)) continue;
+            if (best == null or item.payload.combinedConfidence() > best.?.payload.combinedConfidence()) best = item;
+        }
+        const chosen = best orelse return .done;
+        const release = switch (try self.lookUpRelease(chosen.payload.release_mbid.?)) {
+            .found => |lookup| lookup,
+            .unusable => return .done,
+            .cancelled => return .cancelled,
+            .unavailable => return .unavailable,
+            .busy => return .busy,
+        };
+        for (items) |*item| {
+            const named = item.payload.release_mbid orelse continue;
+            if (!std.mem.eql(u8, named, release.id())) continue;
+            const enrichment = try release.enrichment(item.recording_mbid, tagged_track_number) orelse continue;
+            item.payload.enrich(release.id(), enrichment);
+        }
+        return .done;
+    }
+
+    /// Match Album's second phase. Each file votes once for every release
+    /// its stored proposals list; the winner is looked up, and every proposal
+    /// listing it is pointed at it with what it says.
+    fn alignRelease(self: *LibraryMatching, release_id: i64) !ReleaseStep {
+        const list = try self.proposals.releaseProposals(self.allocator, release_id);
+        defer list.deinit();
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const payloads = try scratch.alloc(?database.ProposalPayload, list.items.len);
+        var tally: database.repository.MbidTally = .{};
+        defer tally.deinit(self.allocator);
+        var file_votes: std.ArrayList([36]u8) = .empty;
+        var voting_file: ?i64 = null;
+        for (list.items, payloads) |item, *slot| {
+            slot.* = null;
+            if (voting_file != item.file_id) {
+                for (file_votes.items) |mbid| try tally.add(self.allocator, mbid);
+                file_votes.clearRetainingCapacity();
+                voting_file = item.file_id;
+            }
+            const parsed = database.ProposalPayload.parse(scratch, item.payload) catch |err| switch (err) {
+                error.InvalidProposalPayload => continue,
+                error.OutOfMemory => return err,
+            };
+            slot.* = parsed.value;
+            if (parsed.value.release_mbid) |mbid| try addVote(scratch, &file_votes, mbid);
+            for (parsed.value.release_mbids orelse &.{}) |mbid| try addVote(scratch, &file_votes, mbid);
+        }
+        for (file_votes.items) |mbid| try tally.add(self.allocator, mbid);
+        const winner = tally.winner(list.tag) orelse return .done;
+        const release = switch (try self.lookUpRelease(&winner)) {
+            .found => |lookup| lookup,
+            .unusable => return .done,
+            .cancelled => return .cancelled,
+            .unavailable => return .unavailable,
+            .busy => return .busy,
+        };
+        for (list.items, payloads) |item, slot| {
+            var payload = slot orelse continue;
+            if (!payload.listsRelease(&winner)) continue;
+            const enrichment = try release.enrichment(item.recording_mbid, item.tagged_track_number) orelse continue;
+            payload.enrich(release.id(), enrichment);
+            const encoded = try payload.encode(scratch);
+            if (std.mem.eql(u8, encoded, item.payload)) continue;
+            try self.proposals.updatePayload(item.id, encoded);
+        }
+        return .done;
+    }
+
+    /// A release, from this run's memory when it asked already. Transient
+    /// failures are waited out and retried as searches are.
+    fn lookUpRelease(self: *LibraryMatching, release_mbid: []const u8) !ReleaseOutcome {
+        if (self.last_release) |*last| {
+            if (std.mem.eql(u8, last.id(), release_mbid)) return .{ .found = last };
+        }
+        if (self.unusable_releases.contains(release_mbid)) return .unusable;
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            const lookup = self.musicbrainz.lookUpRelease(self.allocator, release_mbid) catch |err| switch (err) {
+                error.ProviderRejectedRequest, error.InvalidProviderResponse, error.InvalidMusicBrainzId => {
+                    const key = try self.allocator.dupe(u8, release_mbid);
+                    errdefer self.allocator.free(key);
+                    try self.unusable_releases.put(self.allocator, key, {});
+                    return .unusable;
+                },
+                error.Canceled => return .cancelled,
+                error.NetworkUnavailable, error.Offline => return .unavailable,
+                error.ProviderBusy => return .busy,
+                error.RateLimited, error.ProviderUnavailable, error.Timeout => {
+                    if (attempt + 1 >= maximum_attempts) return .unavailable;
+                    if (!self.backOff(self.musicbrainz.gateway, attempt)) return .cancelled;
+                    continue;
+                },
+                else => return err,
+            };
+            if (self.last_release) |previous| previous.deinit();
+            self.last_release = lookup;
+            return .{ .found = &self.last_release.? };
+        }
+    }
+
+    fn forgetReleases(self: *LibraryMatching) void {
+        if (self.last_release) |lookup| lookup.deinit();
+        self.last_release = null;
+        var keys = self.unusable_releases.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        self.unusable_releases.deinit(self.allocator);
+        self.unusable_releases = .empty;
     }
 
     fn stop(_: *LibraryMatching, result: *Result, reason: enum { cancelled, unavailable, musicbrainz_busy, acoustid_busy }) bool {
@@ -318,6 +469,12 @@ pub const LibraryMatching = struct {
         return false;
     }
 };
+
+fn addVote(allocator: std.mem.Allocator, votes: *std.ArrayList([36]u8), mbid: []const u8) !void {
+    if (!metadata.isMusicBrainzId(mbid)) return;
+    for (votes.items) |vote| if (std.mem.eql(u8, &vote, mbid)) return;
+    try votes.append(allocator, mbid[0..36].*);
+}
 
 fn queryFor(candidate: database.MatchCandidate) providers.Query {
     return .{

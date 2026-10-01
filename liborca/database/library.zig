@@ -2090,7 +2090,7 @@ test "an accepted match gives feedback and listens a recording id, a file's tag 
         try putProposal(&library, file, match_mbid, 0.9, match_payload),
     );
 
-    try std.testing.expectEqual(@as(u32, 1), acceptance.values_written);
+    try std.testing.expectEqual(@as(u32, 3), acceptance.values_written);
     try std.testing.expectEqual(file, acceptance.file_id);
     try std.testing.expect(try library.feedback.canSync(track));
     try std.testing.expectEqual(@as(u64, 1), try library.feedback.pendingSyncCount());
@@ -2168,8 +2168,9 @@ test "confident proposals are accepted in bulk where a file's best one shows a h
 
     try std.testing.expectEqual(@as(u64, 3), try library.identification_proposals.confidentCount(std.testing.allocator, 0.9));
     const accepted = try library.identification_proposals.acceptConfident(std.testing.allocator, 0.9);
+    defer accepted.deinit();
 
-    try std.testing.expectEqual(@as(u64, 3), accepted);
+    try std.testing.expectEqual(@as(u64, 3), accepted.accepted);
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, alone));
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, contested));
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, runner_up));
@@ -2186,6 +2187,12 @@ test "confident proposals are accepted in bulk where a file's best one shows a h
     }
 }
 
+fn acceptedCount(proposals: *repository.IdentificationProposalRepository, minimum_confidence: f32) !u64 {
+    const acceptance = try proposals.acceptConfident(std.testing.allocator, minimum_confidence);
+    defer acceptance.deinit();
+    return acceptance.accepted;
+}
+
 const fingerprinted_payload = "{\"title\":\"Song\",\"acoustid_score\":0.95}";
 
 test "a match the file's fingerprint backs is accepted in bulk over a more confident text-only rival" {
@@ -2196,7 +2203,7 @@ test "a match the file's fingerprint backs is accepted in bulk over a more confi
     const fingerprinted = try putProposalFrom(&library, file, "acoustid", match_mbid, 0.85, fingerprinted_payload);
 
     try std.testing.expectEqual(@as(u64, 1), try library.identification_proposals.confidentCount(std.testing.allocator, 0.8));
-    try std.testing.expectEqual(@as(u64, 1), try library.identification_proposals.acceptConfident(std.testing.allocator, 0.8));
+    try std.testing.expectEqual(@as(u64, 1), try acceptedCount(&library.identification_proposals, 0.8));
 
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, fingerprinted));
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, live_version));
@@ -2220,7 +2227,7 @@ test "duplicate recordings the fingerprint backs equally resolve to the song's t
     const unnumbered_rival = try putProposalFrom(&library, unnumbered, "musicbrainz+acoustid", rival_mbid, 0.93, on_track);
     const unnumbered_match = try putProposalFrom(&library, unnumbered, "musicbrainz+acoustid", match_mbid, 0.935, elsewhere);
 
-    try std.testing.expectEqual(@as(u64, 2), try library.identification_proposals.acceptConfident(std.testing.allocator, 0.9));
+    try std.testing.expectEqual(@as(u64, 2), try acceptedCount(&library.identification_proposals, 0.9));
 
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, numbered_rival));
     try std.testing.expectEqual(repository.ProposalState.dismissed, try proposalState(&library, numbered_match));
@@ -2438,7 +2445,7 @@ test "a recording ID AcoustID proposed or a text-only match accepted in bulk is 
     try setRecordingId(&library, edited, match_mbid, .user, false);
     const bulk = try addFeedbackTrack(&library, "Bulk", try addRecording(&library), null);
     const bulk_proposal = try putProposal(&library, try playFileOf(&library, bulk), match_mbid, 0.95, match_payload);
-    try std.testing.expectEqual(@as(u64, 1), try proposals.acceptConfident(std.testing.allocator, 0.9));
+    try std.testing.expectEqual(@as(u64, 1), try acceptedCount(proposals, 0.9));
     try std.testing.expectEqual(repository.ProposalState.accepted, try proposalState(&library, bulk_proposal));
     const submissions = &library.acoustid_submissions;
 

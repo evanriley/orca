@@ -181,7 +181,12 @@ defer page.deinit();
   `MatchAcceptance`, `libraryDismissMatch` dismisses one, and
   `libraryAcceptConfidentMatches(library, minimum)` accepts each file's best
   pending proposal at least that confident, chosen as
-  [metadata.md](metadata.md#musicbrainz-recording-ids) describes.
+  [metadata.md](metadata.md#musicbrainz-recording-ids) describes, and
+  returns a `ConfidentMatchAcceptance`. `libraryApplyMatchedRelease(library,
+  release_id)` stores a Release's album values once its Tracks agree on one
+  MusicBrainz release and returns how many it stored. Accepts reproject, so
+  Track and Release ids can change; see
+  [metadata.md](metadata.md#accepting-a-match).
   `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
   the same rules as `setListenBrainzServer`, from the next job.
   `setAcoustIdClientKey(key)` sets the AcoustID application key; the key

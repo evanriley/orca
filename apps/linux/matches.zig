@@ -13,6 +13,7 @@ const jobs = @import("jobs.zig");
 const details = @import("details.zig");
 const window = @import("window.zig");
 const secret = @import("secret.zig");
+const tags = @import("tags.zig");
 
 const App = app.App;
 
@@ -58,6 +59,12 @@ fn sourceName(provider: []const u8) []const u8 {
     return provider;
 }
 
+pub fn writeRelease(writer: *std.Io.Writer, proposal: liborca.MatchProposal) std.Io.Writer.Error!void {
+    const album = proposal.release_title orelse proposal.album;
+    if (album.len != 0) try writer.print(separator ++ "{s}", .{album});
+    if (proposal.release_date) |date| try writer.print(separator ++ "{s}", .{date});
+}
+
 pub fn writeSource(writer: *std.Io.Writer, proposal: liborca.MatchProposal) std.Io.Writer.Error!void {
     try writer.writeAll(sourceName(proposal.provider));
     if (proposal.acoustid_score) |score| try writer.print(separator ++ "fingerprint {d}%", .{percent(score)});
@@ -98,13 +105,22 @@ fn changed(self: *App) void {
     self.requestTick();
 }
 
+/// An accept can regroup albums under new Release ids, so every page that
+/// shows one is rebuilt.
+pub fn accepted(self: *App) void {
+    jobs.reloadLibraryViews(self);
+    tags.popPages(self);
+    details.invalidate(self);
+    self.requestTick();
+}
+
 pub fn accept(self: *App, track_id: i64, proposal_id: i64) void {
     const library = self.library orelse return;
     self.matches_open_track = track_id;
     const acceptance = self.runtime.libraryAcceptMatch(library, proposal_id) catch |err|
         return refused(self, err, "Could not save that match");
-    self.toast(if (acceptance.values_written == 0) "Kept your recording ID" else "Recording ID saved");
-    changed(self);
+    self.toast(if (acceptance.values_written == 0) "Kept your values" else "Match saved");
+    accepted(self);
 }
 
 pub fn dismiss(self: *App, track_id: i64, proposal_id: i64) void {
@@ -214,14 +230,14 @@ fn acceptConfidentResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyo
     const self = state(data);
     if (!std.mem.eql(u8, std.mem.span(response), "accept")) return;
     const library = self.library orelse return;
-    const accepted = self.runtime.libraryAcceptConfidentMatches(library, thresholdFraction(self)) catch
+    const acceptance = self.runtime.libraryAcceptConfidentMatches(library, thresholdFraction(self)) catch
         return self.toast("Could not accept the matches");
     var buffer: [64]u8 = undefined;
-    self.toast(if (accepted == 1)
+    self.toast(if (acceptance.accepted == 1)
         "Accepted 1 match"
     else
-        strings.format(&buffer, "Accepted {f} matches", .{strings.grouped(accepted)}));
-    changed(self);
+        strings.format(&buffer, "Accepted {f} matches", .{strings.grouped(acceptance.accepted)}));
+    accepted(self);
 }
 
 pub fn showAcoustIdKey(self: *App, presence: secret.Presence) void {
@@ -303,7 +319,7 @@ fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     writeHeading(&writer, proposal) catch {};
-    if (proposal.album.len != 0) writer.print(separator ++ "{s}", .{proposal.album}) catch {};
+    writeRelease(&writer, proposal) catch {};
     if (proposal.track_number) |number| writer.print(separator ++ "#{d}", .{number}) catch {};
     const text = finish(&buffer, &writer);
     const heading = newLabel(text, null);

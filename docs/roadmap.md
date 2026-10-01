@@ -144,6 +144,17 @@ MusicBrainz metadata from accepted matches.
   --accept-min-score=SCORE --cover-art`, `cover-art` and `artwork`, and in
   `orca-gtk` through Match Album and Fetch Cover Art on an album's menu. See
   [providers.md](providers.md#cover-art-archive).
+- Applying matches: an accepted match stores its title and artist on every
+  file of the Track, and once every Track of a Release names one MusicBrainz
+  release, its album, album artist, date, disc and track numbers and
+  release, release-group, release-track and album-artist IDs, as unlocked
+  provider values that tag writes store where the files have none. Matching
+  looks up the best release of each search, and Match Album points the
+  album's matches at the release most of them list. Reachable through
+  `orca-cli accept-match`, `accept-matches`, `apply-release`, `matches`,
+  `track` and `match --release=ID`, and in `orca-gtk` through the Matches
+  page and the details panel. See
+  [metadata.md](metadata.md#release-consensus).
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
   files whose recording ID came from an edit or from a match accepted one at
   a time that AcoustID did not propose, once per file and ID, with the user
@@ -199,17 +210,7 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Apply MusicBrainz metadata from accepted matches.** An accepted match
-   records only the recording ID; its title, artist, track number and the
-   rest should become Orca metadata too, under the same lock and provenance
-   rules. Matching is to parse and carry the release, release-group,
-   release-track and album-artist MusicBrainz IDs and the matched text as
-   unlocked provider values, which tag writes then store where the files
-   have none. Release-level IDs are stored and written only when every file
-   of the Release agrees on the release, a consensus generalising the tally
-   in `release_artwork.zig`. Artist IDs follow once `ObservedTags` holds
-   multiple values.
-2. **Verify and re-identify.** Matching skips every file whose tags carry a
+1. **Verify and re-identify.** Matching skips every file whose tags carry a
    recording ID, so a confidently wrong tag is never questioned: an album
    whose tags are shifted against its audio looks fully identified. A verify
    pass fingerprints identified files and proposes the recording AcoustID
@@ -219,30 +220,30 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    earlier searches. Both are reachable from `orca-cli` and the song and
    album menus, and verification results are kept per file until its bytes
    change.
-3. **Actionable Health.** Each issue offers the action that resolves it
+2. **Actionable Health.** Each issue offers the action that resolves it
    through the existing approved paths: review a verify proposal and preview
    the tag write, match or edit missing tags, compare duplicates, analyse,
    fetch cover art, reveal the file. A dismissed issue stays hidden until its
    file changes.
-4. **Idle maintenance.** A low-priority Job that runs while the player is
+3. **Idle maintenance.** A low-priority Job that runs while the player is
    idle and no other Job is active: one bounded unit at a time, such as
    verifying one album every few minutes, within the provider rate limits and
    leases. Off until enabled. liborca owns scheduling and the idle test, so
    `orca-cli watch` can run it headless; findings land in Health.
-5. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
+4. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
    feedback takes recordings only), and a Loved page in `orca-gtk` listing
    loved albums and songs.
-6. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+5. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
    tag writes, library edits and undo, queue insertion, moves and removal,
    artwork, DSP and the signal path, track details, matching, AcoustID
    submission, love and hate, ratings, playlists, and scrobbling.
-7. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+6. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-8. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+7. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-9. **An optional fixed output rate with a band-limited resampler**, for
+8. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.

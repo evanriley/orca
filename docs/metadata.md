@@ -64,8 +64,8 @@ recording ID from an accepted match or an edit may be sent to AcoustID with
 the file's fingerprint, and a tag Orca did not write never is; see
 [providers.md](providers.md#acoustid-submission).
 
-The projection does not read the field, so accepting a match reprojects
-nothing. A tag write stores it under the write rule in
+The projection does not read the recording ID. A tag write stores it under
+the write rule in
 [Writing tags back](#writing-tags-back): FLAC as `MUSICBRAINZ_TRACKID`, MP3
 and ADTS as a `UFID` frame owned by `http://musicbrainz.org`, as Picard does.
 
@@ -82,16 +82,58 @@ transaction:
 2. Parses its payload and checks its recording ID. Either failing is
    `error.InvalidProposalPayload`, and nothing is written.
 3. Stores the recording ID as an unlocked `provider` value for the file,
-   unless the file holds a locked value, which is kept. `values_written`
-   reports which.
+   and the title and artist, the release track's when the proposal was
+   looked up on its release, else the recording's, on every file of the
+   Track (`tracks.fileIds`), as edits do.
 4. Marks the proposal accepted and dismisses the file's other pending
    proposals.
+5. Applies the consensus of the Release the Track belongs to, below.
 
-Only the recording ID is stored. The candidate's title, artist and album are
-there for a person to review and change nothing. No media file is written.
+Every value goes through the same upsert: a locked value is kept, a value
+equal to the stored one keeps its `written_at` and is not counted, an empty
+value is never stored, a MusicBrainz ID must be a lowercase UUID, and a value
+is cut to 4096 bytes on a character boundary. `values_written` counts every
+value stored on any file, the Release's other files included. No media file
+is written.
+
+`Runtime.libraryAcceptMatch` and `libraryAcceptConfidentMatches` then
+reproject the files given values before they return, as edits do, so a Track
+can move to a Release with a new id. A frontend holding a Release id
+reloads it after an accept.
+
+#### Release consensus
+
+`IdentificationProposalRepository.applyReleaseConsensus(release_id)` stores
+a MusicBrainz release's album-level values once the whole Orca Release
+agrees on it. It holds when every Track of the Release has a play file that
+names the same release R, either by an accepted proposal looked up on R or
+by an observed `MUSICBRAINZ_ALBUMID` of R; a file whose location is missing
+counts. A Release of more than 512 Tracks never reaches consensus. When it
+holds, every file of every Track accepted on R gets R's album, album artist,
+date, disc and track numbers (positions on R), and the release,
+release-group, release-track and album-artist IDs, the last only when the
+release credits one artist; a release credited to Various Artists
+(`89ad4ac3-39f7-470e-963a-56509c546377`) adds `compilation=1`. A Track that
+names R only by its tag gets nothing new. Running it again stores nothing.
+
+An accept applies it in its own transaction; bulk acceptance applies it once
+per Release it touched before each commit; Match Album applies it at its
+end. `Runtime.libraryApplyMatchedRelease` and `orca-cli apply-release` apply
+it to a Release that came to agree without an accept, such as after an edit
+moved a stray file out of it.
+
+The projection resolves a Release's MusicBrainz release ID from the Orca
+value and the tag under `prefer_file`, so an accepted release ID keys the
+Release. When a reprojection leaves a Release without Tracks, its fetched
+cover moves to the Release that took most of them, unless that one has a
+cover of its own.
+
+#### Bulk acceptance
+
 `acceptConfident` accepts at most one pending proposal per file, in commits
 of at most 512, and passes over a proposal whose payload or recording ID it
-cannot read. Of the file's proposals that reach the given confidence, those
+cannot read. It returns the number accepted, the values stored, and the
+files accepted or given a value. Of the file's proposals that reach the given confidence, those
 found by AcoustID with a fingerprint score of at least 0.9 are backed by the
 file's own audio. When any is, the first of them in this order is accepted:
 

@@ -176,9 +176,10 @@ zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept loca
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
 zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal
 zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FINGERPRINT=
-zig build run -- accept-match DATABASE PROPOSAL_ID   # records the recording ID in the library only
+zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
+zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
 zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to

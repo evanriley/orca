@@ -133,6 +133,7 @@ pub const MatchStats = runtime.MatchStats;
 pub const MatchProposal = runtime.MatchProposal;
 pub const MatchProposalPage = runtime.MatchProposalPage;
 pub const MatchAcceptance = runtime.MatchAcceptance;
+pub const ConfidentMatchAcceptance = runtime.ConfidentMatchAcceptance;
 pub const MatchReviewItem = runtime.MatchReviewItem;
 pub const MatchReviewPage = runtime.MatchReviewPage;
 pub const AcoustIdUse = runtime.AcoustIdUse;

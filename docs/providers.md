@@ -241,9 +241,10 @@ built from the same fields as a listen. It is off by default.
 A file without a MusicBrainz recording ID cannot have its loves, hates or
 listens tied to a recording on ListenBrainz. `Runtime.startLibraryMatching`
 asks MusicBrainz, and AcoustID by fingerprint, about those files and stores
-what they find as proposals. Nothing takes effect until a person accepts one;
-what acceptance writes is in
-[metadata.md](metadata.md#musicbrainz-recording-ids).
+what they find as proposals. Nothing takes effect until a person accepts one.
+Acceptance stores the recording ID, title and artist, and the album's values
+once every Track of its Release agrees on one MusicBrainz release, as Orca
+metadata; see [metadata.md](metadata.md#accepting-a-match).
 
 - **What is searched.** Every Track whose playing file has no recording ID in
   effect, in Track id order, by each service that has not yet answered for
@@ -284,8 +285,9 @@ what acceptance writes is in
   Tracks, under the same rule. With it, `accept_minimum_confidence` then
   accepts the Release's matches as `libraryAcceptConfidentMatches` would, and
   `cover_art` then fetches the Release's cover as in
-  [Cover Art Archive](#cover-art-archive). `orca-gtk`'s Match Album runs all
-  three with the review threshold from Preferences.
+  [Cover Art Archive](#cover-art-archive), under the Release id it started
+  with; the files given values are then reprojected once. `orca-gtk`'s Match
+  Album runs all three with the review threshold from Preferences.
 - **One job at a time.** A second `startLibraryMatching` while one runs returns
   `error.MatchingAlreadyRunning`, and one while an AcoustID submission runs
   returns `error.AcoustIdBusy`, so each service sees one client and one
@@ -314,11 +316,39 @@ explicit user action, never run by a job.
   Lucene syntax characters in the values are escaped with a backslash. A
   Track without a title or an artist is counted and not searched.
 - **What is kept.** The recording ID, title, full artist credit, the release
-  whose title is closest to the album with its ID and track number, the
-  length, and MusicBrainz's own score from 0 to 100.
+  whose title is closest to the album with its ID and track number, the IDs
+  of up to 25 releases the recording is listed on, the length, and
+  MusicBrainz's own score from 0 to 100.
 - **Cache.** Answers, empty ones included, are cached in `provider_cache` for
   30 days of wall time, keyed by the request URL. When a request fails and an
   expired answer is cached, that answer is used.
+
+### MusicBrainz release lookup
+
+- **The request.** `GET /ws/2/release/{id}?fmt=json&inc=recordings+artist-credits+release-groups`,
+  through the same gateway, cache, counters and refusal rules as the search.
+  The ID is checked to be a lowercase UUID first.
+- **When.** Before a file's search is recorded, the release of its most
+  confident MusicBrainz proposal is looked up, once per run, and every
+  proposal naming that release is filled in. A failure that would stop a
+  search stops the job the same way, before that file is recorded, so it is
+  searched again next time from the cache. A refused or missing release
+  (`404`), an answer that is not a release, or a release without the
+  recording leaves the proposals as found.
+- **What is kept.** The track holding the recording: at the file's tagged
+  track number when the recording appears more than once, else the first.
+  Its title, artist credit, ID and position and its medium's position, which
+  become the track and disc numbers (a vinyl number such as `A1` is not
+  used), and the release's title, artist credit, date and release-group ID,
+  with the album-artist ID only when the credit names one artist. A proposal
+  found again on another release loses these values. Proposals found only by
+  AcoustID carry no release.
+- **Match Album.** After its search pass, which may search nothing, each
+  file of the Release votes once for every release its stored proposals that
+  are not dismissed list. The release with most votes wins, a tie going to
+  the Release's tagged release ID, then to the lowest. It is looked up once,
+  and every proposal listing it is pointed at it and filled in
+  (`updatePayload`). A rerun after a failure completes from the cache.
 
 ### AcoustID lookup
 
@@ -407,6 +437,7 @@ orca-cli matches DATABASE TRACK_ID
 orca-cli accept-match DATABASE PROPOSAL_ID
 orca-cli dismiss-match DATABASE PROPOSAL_ID
 orca-cli accept-matches DATABASE --min-score=0.9
+orca-cli apply-release DATABASE RELEASE_ID
 orca-cli fingerprint DATABASE TRACK_ID
 ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 ```

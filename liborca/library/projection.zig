@@ -50,6 +50,68 @@ pub const Result = struct {
     artists_pruned: u64 = 0,
 };
 
+const MovedTrack = struct { from_release_id: i64, file_id: i64 };
+
+/// A Release left without Tracks hands its fetched cover to the Release that
+/// took most of them, when that one has none, so a cover fetched before a
+/// regrouping survives it. `release_artwork` cascades on the Release row.
+fn carryArtwork(db: database.sqlite.Database, allocator: std.mem.Allocator, moved: []const MovedTrack) !void {
+    if (moved.len == 0) return;
+    var has_artwork = try db.prepare("SELECT 1 FROM release_artwork WHERE release_id = ?1;");
+    defer has_artwork.deinit();
+    var in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
+    defer in_use.deinit();
+    var now_on = try db.prepare(
+        \\SELECT DISTINCT release_id FROM tracks WHERE release_id IS NOT NULL
+        \\  AND (preferred_file_id = ?1 OR recording_id = (SELECT recording_id FROM files WHERE id = ?1));
+    );
+    defer now_on.deinit();
+    var hand_over = try db.prepare("UPDATE release_artwork SET release_id = ?2 WHERE release_id = ?1;");
+    defer hand_over.deinit();
+
+    var seen: std.ArrayList(i64) = .empty;
+    for (moved) |track| {
+        const from = track.from_release_id;
+        if (std.mem.indexOfScalar(i64, seen.items, from) != null) continue;
+        try seen.append(allocator, from);
+        if (!try exists(&has_artwork, from) or try exists(&in_use, from)) continue;
+
+        const Count = struct { release_id: i64, tracks: u32 };
+        var counts: std.ArrayList(Count) = .empty;
+        for (moved) |other| {
+            if (other.from_release_id != from) continue;
+            try now_on.bindInt64(1, other.file_id);
+            while (try now_on.step() == .row) {
+                const release_id = now_on.columnInt64(0);
+                for (counts.items) |*count| {
+                    if (count.release_id == release_id) {
+                        count.tracks += 1;
+                        break;
+                    }
+                } else try counts.append(allocator, .{ .release_id = release_id, .tracks = 1 });
+            }
+            try now_on.reset();
+        }
+        var heir: ?Count = null;
+        for (counts.items) |count| {
+            if (heir == null or count.tracks > heir.?.tracks or
+                (count.tracks == heir.?.tracks and count.release_id < heir.?.release_id)) heir = count;
+        }
+        const target = heir orelse continue;
+        if (try exists(&has_artwork, target.release_id)) continue;
+        try hand_over.bindInt64(1, from);
+        try hand_over.bindInt64(2, target.release_id);
+        if (try hand_over.step() != .done) return error.SqlFailed;
+        try hand_over.reset();
+    }
+}
+
+fn exists(statement: *database.sqlite.Statement, id: i64) !bool {
+    try statement.bindInt64(1, id);
+    defer statement.reset() catch {};
+    return try statement.step() == .row;
+}
+
 /// A Track position this run wrote, which pruning must leave alone.
 const WrittenPosition = struct { release_id: i64, disc: i64, number: i64 };
 
@@ -110,6 +172,7 @@ const ExtraOverrides = struct {
     disc_number: ?metadata.Value = null,
     date: ?metadata.Value = null,
     compilation: ?metadata.Value = null,
+    musicbrainz_release_id: ?metadata.Value = null,
 };
 
 fn resolvedText(observed: ?[]const u8, orca: ?metadata.Value, policy: metadata.ResolutionPolicy) ?[]const u8 {
@@ -202,6 +265,7 @@ pub const Projection = struct {
 
         var releases: std.ArrayList(i64) = .empty;
         var artists: std.ArrayList(i64) = .empty;
+        var moved: std.ArrayList(MovedTrack) = .empty;
         for (entries) |entry| {
             try candidates.bindInt64(1, entry.file_id);
             var stale: std.ArrayList(i64) = .empty;
@@ -214,6 +278,7 @@ pub const Projection = struct {
                 if (containsPosition(written, position)) continue;
                 try stale.append(allocator, candidates.columnInt64(0));
                 try releases.append(allocator, position.release_id);
+                try moved.append(allocator, .{ .from_release_id = position.release_id, .file_id = entry.file_id });
                 if (!candidates.columnIsNull(4)) try artists.append(allocator, candidates.columnInt64(4));
             }
             try candidates.reset();
@@ -224,6 +289,7 @@ pub const Projection = struct {
                 result.tracks_pruned += 1;
             }
         }
+        try carryArtwork(db, allocator, moved.items);
         const pruned = try database.repository.pruneOrphanedReleasesAndArtists(
             db,
             allocator,
@@ -243,6 +309,8 @@ pub const Projection = struct {
         entry.disc_number = resolvedNumber(entry.disc_number, extra.disc_number, self.policy);
         if (resolvedText(boolText(entry.compilation), extra.compilation, self.policy)) |text|
             entry.compilation = std.mem.eql(u8, text, "1");
+        const tagged_release = if (entry.musicbrainz_release_id) |tag| (if (tag.len == 0) null else tag) else null;
+        entry.musicbrainz_release_id = resolvedText(tagged_release, extra.musicbrainz_release_id, self.policy);
     }
 
     /// The folders the scope touches, deduplicated and ordered.
@@ -396,8 +464,8 @@ pub const Projection = struct {
                     .disc_number => extra.disc_number = value,
                     .date => extra.date = value,
                     .compilation => extra.compilation = value,
+                    .musicbrainz_release_id => extra.musicbrainz_release_id = value,
                     .musicbrainz_recording_id,
-                    .musicbrainz_release_id,
                     .musicbrainz_release_group_id,
                     .musicbrainz_release_track_id,
                     .musicbrainz_album_artist_id,

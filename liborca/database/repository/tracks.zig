@@ -317,11 +317,23 @@ pub const TrackRepository = struct {
     }
 
     pub fn recordingMbid(self: *const TrackRepository, allocator: std.mem.Allocator, track_id: i64) !?RecordingMbid {
+        return self.musicBrainzId(allocator, track_id, .musicbrainz_recording_id);
+    }
+
+    /// One MusicBrainz ID of the file a Track plays, resolved under
+    /// `prefer_file` from Orca's value and the file's tag of the same name.
+    pub fn musicBrainzId(
+        self: *const TrackRepository,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+        comptime field: metadata.Field,
+    ) !?RecordingMbid {
+        const field_number = std.fmt.comptimePrint("{d}", .{@intFromEnum(field)});
         var statement = try self.db.prepare(
-            "SELECT orca.value, orca.provenance, orca.locked, observed.musicbrainz_recording_id\n" ++
+            "SELECT orca.value, orca.provenance, orca.locked, observed." ++ @tagName(field) ++ "\n" ++
                 "FROM (SELECT " ++ track_play_file ++ " AS file_id FROM tracks WHERE tracks.id = ?1) AS track\n" ++
                 "LEFT JOIN orca_metadata_values AS orca\n" ++
-                "    ON orca.file_id = track.file_id AND orca.field = " ++ recording_mbid_field ++ "\n" ++
+                "    ON orca.file_id = track.file_id AND orca.field = " ++ field_number ++ "\n" ++
                 "LEFT JOIN observed_file_tags AS observed ON observed.file_id = track.file_id;",
         );
         defer statement.deinit();
@@ -344,13 +356,7 @@ pub const TrackRepository = struct {
     /// The files a Track resolves to: its preferred file and every other
     /// encoding of its recording. Bounded by `max_page`.
     pub fn fileIds(self: *const TrackRepository, allocator: std.mem.Allocator, track_id: i64) ![]i64 {
-        var statement = try self.db.prepare(
-            \\SELECT preferred_file_id FROM tracks WHERE id=?1 AND preferred_file_id IS NOT NULL
-            \\UNION
-            \\SELECT f.id FROM files f JOIN tracks t ON f.recording_id = t.recording_id
-            \\WHERE t.id=?1
-            \\LIMIT ?2;
-        );
+        var statement = try self.db.prepare(track_file_ids_sql);
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
         try statement.bindInt64(2, max_page);
@@ -363,13 +369,7 @@ pub const TrackRepository = struct {
     /// The Tracks a file backs: as their preferred file, or through their
     /// Recording. The reverse of `fileIds`.
     pub fn idsForFile(self: *const TrackRepository, allocator: std.mem.Allocator, file_id: i64) ![]i64 {
-        var statement = try self.db.prepare(
-            \\SELECT id FROM tracks WHERE preferred_file_id=?1
-            \\UNION
-            \\SELECT t.id FROM tracks t JOIN files f ON f.recording_id = t.recording_id
-            \\WHERE f.id=?1
-            \\LIMIT ?2;
-        );
+        var statement = try self.db.prepare(file_track_ids_sql);
         defer statement.deinit();
         try statement.bindInt64(1, file_id);
         try statement.bindInt64(2, max_page);
@@ -706,6 +706,24 @@ pub fn readTrackSummary(allocator: std.mem.Allocator, statement: sqlite.Statemen
 
 /// The file a Track plays: its preferred file, else the first file of its
 /// Recording, matching `TrackRepository.playableLocation`.
+/// The files Track ?1 resolves to, at most ?2: its preferred file and every
+/// other encoding of its recording.
+pub const track_file_ids_sql =
+    \\SELECT preferred_file_id FROM tracks WHERE id=?1 AND preferred_file_id IS NOT NULL
+    \\UNION
+    \\SELECT f.id FROM files f JOIN tracks t ON f.recording_id = t.recording_id
+    \\WHERE t.id=?1
+    \\LIMIT ?2;
+;
+
+pub const file_track_ids_sql =
+    \\SELECT id FROM tracks WHERE preferred_file_id=?1
+    \\UNION
+    \\SELECT t.id FROM tracks t JOIN files f ON f.recording_id = t.recording_id
+    \\WHERE f.id=?1
+    \\LIMIT ?2;
+;
+
 pub const track_play_file =
     \\COALESCE(
     \\    tracks.preferred_file_id,

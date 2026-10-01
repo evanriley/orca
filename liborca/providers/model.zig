@@ -17,6 +17,8 @@ pub const Candidate = struct {
     artist: []u8,
     album: []u8,
     release_mbid: ?[]u8 = null,
+    /// Every release the provider listed the recording on, owned.
+    release_mbids: [][]u8 = &.{},
     duration_ms: ?u64 = null,
     track_number: ?u32 = null,
     mb_score: ?u8 = null,
@@ -55,6 +57,8 @@ pub const Candidate = struct {
         self.allocator.free(self.artist);
         self.allocator.free(self.album);
         if (self.release_mbid) |value| self.allocator.free(value);
+        for (self.release_mbids) |value| self.allocator.free(value);
+        self.allocator.free(self.release_mbids);
     }
 };
 

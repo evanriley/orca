@@ -237,9 +237,13 @@ The window is an `AdwNavigationSplitView`:
   awaiting review (`libraryMatchReviewPage`), with their count in the
   sidebar. Each row shows the song's own title, artist, album and length and
   its best proposal's score; expanding it lists every proposal with its
+  album and release date, the looked-up release's when there is one, its
   source (MusicBrainz, AcoustID or MusicBrainz + AcoustID) and AcoustID's
   fingerprint score when there is one, Accept, Dismiss and a MusicBrainz
-  button that opens the recording's page in the browser. An AcoustID
+  button that opens the recording's page in the browser. Accept toasts
+  "Match saved", or "Kept your values" when every value was locked or
+  already held. An accept can regroup albums, so the library pages reload
+  and album and artist pages go back to their lists, as after an edit. An AcoustID
   proposal without a title reads Unknown title. A proposal more than 10 s
   longer or shorter than the song shows its length in the warning colour.
   Find Matches starts the matching job, which shares the status card and,
@@ -291,7 +295,8 @@ says it won't sync to ListenBrainz.
 
 The details panel's **MusicBrainz** section shows the recording ID in effect
 and where it came from (From tags, Matched or Set by you), with a MusicBrainz
-button. A song without one shows its top three proposals with Accept and
+button, and the release, release-group, release-track and album-artist IDs
+when known, each with its source as a tooltip. A song without one shows its top three proposals with Accept and
 Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
 that song; with no proposals it offers Find Match, which searches for that
 song alone. A change made in one place repaints the others, by recording and

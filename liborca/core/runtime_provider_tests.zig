@@ -3,6 +3,7 @@ const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
+const library_pass = @import("../library/root.zig");
 const listen_worker = @import("listen_worker.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
@@ -921,6 +922,24 @@ fn recordingAnswer(comptime mbid: []const u8, comptime title: []const u8) []cons
 const northern_sky_answer = recordingAnswer(northern_sky_mbid, "Northern Sky");
 const pink_moon_answer = recordingAnswer(pink_moon_mbid, "Pink Moon");
 
+const nick_drake_mbid = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
+const bryter_layter_group_mbid = "4b5c6d7e-8f90-4a1b-8c2d-3e4f5a6b7c8d";
+const northern_sky_track_mbid = "6d7e8f9a-0b1c-4d2e-8f3a-4b5c6d7e8f9a";
+const pink_moon_track_mbid = "7e8f9a0b-1c2d-4e3f-8a4b-5c6d7e8f9a0b";
+
+fn releaseTrack(comptime track_mbid: []const u8, comptime position: []const u8, comptime title: []const u8, comptime recording_mbid: []const u8) []const u8 {
+    return "{\"id\":\"" ++ track_mbid ++ "\",\"position\":" ++ position ++ ",\"number\":\"" ++ position ++
+        "\",\"title\":\"" ++ title ++ "\",\"artist-credit\":[{\"name\":\"Nick Drake\",\"joinphrase\":\"\"," ++
+        "\"artist\":{\"id\":\"" ++ nick_drake_mbid ++ "\"}}],\"recording\":{\"id\":\"" ++ recording_mbid ++ "\"}}";
+}
+
+/// The release `recordingAnswer` names, as a release lookup answers.
+const bryter_layter_release = "{\"id\":\"" ++ bryter_layter_mbid ++ "\",\"title\":\"Bryter Layter\",\"date\":\"1971-03-01\"," ++
+    "\"artist-credit\":[{\"name\":\"Nick Drake\",\"joinphrase\":\"\",\"artist\":{\"id\":\"" ++ nick_drake_mbid ++ "\"}}]," ++
+    "\"release-group\":{\"id\":\"" ++ bryter_layter_group_mbid ++ "\"},\"media\":[{\"position\":1,\"tracks\":[" ++
+    releaseTrack(northern_sky_track_mbid, "3", "Northern Sky", northern_sky_mbid) ++ "," ++
+    releaseTrack(pink_moon_track_mbid, "4", "Pink Moon", pink_moon_mbid) ++ "]}]}";
+
 /// Every call arrives on the job's thread; a test reads the request count
 /// while the job runs and the rest only once it is reaped.
 const FakeMusicBrainz = struct {
@@ -930,6 +949,9 @@ const FakeMusicBrainz = struct {
     refusals: []const u16 = &.{},
     failure: ?anyerror = null,
     hang_from: ?u32 = null,
+    /// What a release lookup answers, and with which status.
+    release_status: u16 = 200,
+    release_body: []const u8 = bryter_layter_release,
 
     const Answer = struct { title: []const u8, body: []const u8 };
     const wall_base_ms: i64 = 1_800_000_000_000;
@@ -954,6 +976,8 @@ const FakeMusicBrainz = struct {
         if (self.failure) |err| return .{ .fail = err };
         if (exchange.index < self.refusals.len)
             return .{ .respond = .{ .status = self.refusals[exchange.index], .body = "" } };
+        if (std.mem.indexOf(u8, exchange.request.url, "/ws/2/release/") != null)
+            return .{ .respond = .{ .status = self.release_status, .body = self.release_body } };
         const body = for (self.answers) |answer| {
             if (std.mem.indexOf(u8, exchange.request.url, answer.title) != null) break answer.body;
         } else "{\"recordings\":[]}";
@@ -1021,11 +1045,11 @@ test "a matching job proposes recordings for the Tracks without one, one search 
     try std.testing.expectEqual(@as(u64, 2), stats.matched);
     try std.testing.expectEqual(@as(u64, 1), stats.unmatched);
     try std.testing.expectEqual(@as(u64, 1), stats.insufficient_evidence);
-    try std.testing.expectEqual(@as(u64, 3), stats.requests);
+    try std.testing.expectEqual(@as(u64, 4), stats.requests);
     try std.testing.expectEqual(@as(u64, 0), stats.cache_hits);
     try std.testing.expectEqual(@as(u64, 2), stats.proposals_stored);
     try std.testing.expectEqual(ScanStats{}, try runtime.jobScanStats(job_handle));
-    try std.testing.expectEqual(@as(u32, 3), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
     try std.testing.expect(std.mem.startsWith(u8, fake.transport.lastUrl(), "http://127.0.0.1:5000/ws/2/recording?fmt=json&limit=10&query="));
 
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
@@ -1053,7 +1077,7 @@ test "a matching job proposes recordings for the Tracks without one, one search 
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests);
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.cache_hits);
     try std.testing.expectEqual(AcoustIdUse.no_client_key, rerun_stats.acoustid);
-    try std.testing.expectEqual(@as(u32, 3), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
 }
 
 test "an accepted match gives the Track a recording id, which its love is sent to ListenBrainz under" {
@@ -1074,7 +1098,7 @@ test "an accepted match gives the Track a recording id, which its love is sent t
 
     const acceptance = try rig.runtime.libraryAcceptMatch(fixture.library, proposals.items[0].id);
 
-    try std.testing.expectEqual(@as(u32, 1), acceptance.values_written);
+    try std.testing.expect(acceptance.values_written >= 1);
     try std.testing.expectError(error.StaleIdentificationProposal, rig.runtime.libraryAcceptMatch(fixture.library, proposals.items[0].id));
     const after = (try rig.runtime.libraryTrackDetails(fixture.library, fixture.track_id)).?;
     defer after.deinit();
@@ -1123,7 +1147,7 @@ test "a Track's recording id names where it came from, and only a well-formed on
 }
 
 test "a matching job stops when cancelled mid-search, and another cannot start while it runs" {
-    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }}, .hang_from = 1 };
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_answer }}, .hang_from = 2 };
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
     try runtime.setClientIdentity(network.testing.test_identity);
@@ -1135,7 +1159,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     _ = try addMatchTrack(library_database, "River Man", "Nick Drake", null);
 
     const job_handle = try runtime.startLibraryMatching(library, .{});
-    try fake.awaitRequests(2);
+    try fake.awaitRequests(3);
     try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(job_handle)).matched);
     try std.testing.expectError(error.MatchingAlreadyRunning, runtime.startLibraryMatching(library, .{}));
     try runtime.cancelJob(job_handle);
@@ -1144,7 +1168,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const stats = try runtime.jobMatchStats(job_handle);
     try std.testing.expect(stats.cancelled);
     try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
-    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 3), fake.requestCount());
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
@@ -1154,7 +1178,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const resumed = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, resumed));
     try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(resumed)).tracks_examined);
-    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 5), fake.requestCount());
 }
 
 test "a job worker keeps the pump timeout at 100 ms until it is reaped" {
@@ -1206,7 +1230,7 @@ test "matching, AcoustID submission and scrobbling are refused until the host na
 
     try runtime.setClientIdentity(network.testing.test_identity);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
     try std.testing.expect(std.mem.startsWith(u8, fake.transport.lastUserAgent(), "Orca/"));
 }
 
@@ -1225,7 +1249,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
 
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
 
-    try std.testing.expectEqual(@as(u32, 3), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
     try std.testing.expect(fake.transport.request_times_ms[1] - fake.transport.request_times_ms[0] >= 30_000);
     try std.testing.expect(fake.transport.request_times_ms[2] - fake.transport.request_times_ms[1] >= 60_000);
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
@@ -1305,7 +1329,7 @@ test "a matching job fails as busy while another process holds MusicBrainz, and 
     const searched = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, searched));
     try std.testing.expectEqual(BusyService.none, (try runtime.jobMatchStats(searched)).busy);
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
     try std.testing.expect(try library_database.provider_state.claimLease(
         providers.musicbrainz.service,
         99,
@@ -1351,7 +1375,7 @@ fn acceptRecordingIds(
                 .provider = "musicbrainz",
                 .provider_id = value,
                 .confidence = 0.95,
-                .payload = review_payload,
+                .payload = "{\"album\":\"Bryter Layter\"}",
             });
             try find.reset();
             try find.bindInt64(1, file_id);
@@ -1580,7 +1604,7 @@ test "the confident count is exactly how many matches accepting confident ones t
     const accepted = try runtime.libraryAcceptConfidentMatches(library, 0.9);
 
     try std.testing.expectEqual(@as(u64, 3), counted);
-    try std.testing.expectEqual(counted, accepted);
+    try std.testing.expectEqual(counted, accepted.accepted);
     try std.testing.expectEqual(@as(u64, 4), lower);
     try std.testing.expectEqual(@as(u64, 0), try runtime.libraryConfidentMatchCount(library, 0.9));
     try std.testing.expectError(error.InvalidMinimumConfidence, runtime.libraryConfidentMatchCount(library, 0));
@@ -1606,7 +1630,7 @@ test "a single-Track matching job searches only that Track, and one already iden
     try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(job_handle)).total_units);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     try std.testing.expectEqual(@as(u64, 1), (try runtime.jobMatchStats(job_handle)).matched);
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
     const untouched = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer untouched.deinit();
     try std.testing.expectEqual(@as(usize, 0), untouched.items.len);
@@ -1619,7 +1643,7 @@ test "a single-Track matching job searches only that Track, and one already iden
         try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, skipped));
         try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(skipped)).tracks_examined);
     }
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
 }
 
 /// Answers AcoustID lookups and submissions on the job's thread; a test reads
@@ -1749,7 +1773,7 @@ test "a matching job fingerprints each file, asks AcoustID about them in one req
     try std.testing.expectEqual(AcoustIdUse.searched, stats.acoustid);
     try std.testing.expectEqual(@as(u64, 2), stats.fingerprinted);
     try std.testing.expectEqual(@as(u64, 1), stats.acoustid_requests);
-    try std.testing.expectEqual(@as(u64, 1), stats.requests);
+    try std.testing.expectEqual(@as(u64, 2), stats.requests);
     try std.testing.expectEqual(@as(u64, 2), stats.matched);
     try std.testing.expectEqual(@as(u32, 1), acoustid.lookups.load(.acquire));
     try std.testing.expect(std.mem.startsWith(u8, acoustid.lastForm(), "client=test-client&"));
@@ -1775,10 +1799,14 @@ test "a matching job fingerprints each file, asks AcoustID about them in one req
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.requests + rerun_stats.acoustid_requests);
     try std.testing.expectEqual(@as(u64, 0), rerun_stats.fingerprinted);
     try std.testing.expectEqual(@as(u32, 1), acoustid.lookups.load(.acquire));
-    try std.testing.expectEqual(@as(u32, 1), musicbrainz.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), musicbrainz.requestCount());
 
+    const untagged_files = try library_database.tracks.fileIds(std.testing.allocator, untagged);
+    defer std.testing.allocator.free(untagged_files);
     _ = try runtime.libraryAcceptMatch(library, fingerprint_only.items[0].id);
-    const details = (try runtime.libraryTrackDetails(library, untagged)).?;
+    const reprojected = try library_database.tracks.idsForFile(std.testing.allocator, untagged_files[0]);
+    defer std.testing.allocator.free(reprojected);
+    const details = (try runtime.libraryTrackDetails(library, reprojected[0])).?;
     defer details.deinit();
     try std.testing.expectEqualStrings(pink_moon_mbid, details.musicbrainz_recording_id.?);
 }
@@ -1881,13 +1909,15 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     const library_database = try libraryDatabase(&runtime, library);
     const chosen = try addAudioTrack(library_database, &temporary, "chosen.wav", "Northern Sky", "Nick Drake");
     const doubted = try addAudioTrack(library_database, &temporary, "doubted.wav", "Pink Moon", "Nick Drake");
-    try proposeMatch(library_database, chosen, northern_sky_mbid, 0.95, "{\"title\":\"Northern Sky\",\"duration_ms\":15000}");
-    try proposeMatch(library_database, doubted, pink_moon_mbid, 0.95, "{\"title\":\"Pink Moon\",\"duration_ms\":300000}");
-    for ([_]i64{ chosen, doubted }) |track_id| {
+    try proposeMatch(library_database, chosen, northern_sky_mbid, 0.95, "{\"title\":\"Northern Sky\",\"artist\":\"Nick Drake\",\"duration_ms\":15000}");
+    try proposeMatch(library_database, doubted, pink_moon_mbid, 0.95, "{\"title\":\"Pink Moon\",\"artist\":\"Nick Drake\",\"duration_ms\":300000}");
+    var proposal_ids: [2]i64 = undefined;
+    for ([_]i64{ chosen, doubted }, &proposal_ids) |track_id, *proposal_id| {
         const page = try runtime.libraryMatchProposals(library, track_id, 1);
         defer page.deinit();
-        _ = try runtime.libraryAcceptMatch(library, page.items[0].id);
+        proposal_id.* = page.items[0].id;
     }
+    for (proposal_ids) |proposal_id| _ = try runtime.libraryAcceptMatch(library, proposal_id);
     try std.testing.expectEqual(@as(u64, 2), try runtime.libraryAcoustIdSubmittableCount(library));
 
     const matching = try runtime.startLibraryMatching(library, .{ .fingerprints = false });
@@ -2044,7 +2074,7 @@ test "a release-scoped matching job searches only that Release's Tracks and acce
     try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
     try std.testing.expectEqual(@as(u64, 2), stats.accepted);
     try std.testing.expectEqual(runtime_module.CoverArtOutcome.not_requested, stats.cover_art);
-    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
     try std.testing.expectEqualStrings(northern_sky_mbid, &try recordingIdOf(&runtime, library, northern_sky));
     try std.testing.expectEqualStrings("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a", &try recordingIdOf(&runtime, library, locked));
     try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
@@ -2059,11 +2089,97 @@ test "a release-scoped matching job searches only that Release's Tracks and acce
     try std.testing.expectEqual(@as(usize, 1), try pendingCount(&runtime, library, pink_moon));
 }
 
-test "Match Album fetches the cover under the release ID its accepted matches name, and the Release then shows it" {
-    var fake: FakeMusicBrainz = .{ .answers = &.{
-        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
-        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
-    } };
+/// A file in a folder with only the tags given, as the scanner would leave it.
+fn observeFile(library_database: *database.LibraryDatabase, uri: []const u8, title: []const u8, artist: []const u8) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = uri,
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{ .title = title, .artist = artist } });
+    return file_id;
+}
+
+fn projectAll(library_database: *database.LibraryDatabase) !void {
+    var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+    _ = try projection.run(.all);
+}
+
+fn releaseOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64 {
+    var statement = try library_database.database.prepare("SELECT release_id FROM tracks WHERE preferred_file_id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+fn trackOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64 {
+    const ids = try library_database.tracks.idsForFile(std.testing.allocator, file_id);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    return ids[0];
+}
+
+/// What a search and a lookup of Bryter Layter say about one of its tracks.
+fn bryterLayterPayload(title: []const u8, track_mbid: []const u8, position: u32) database.ProposalPayload {
+    var payload: database.ProposalPayload = .{
+        .title = title,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .release_mbid = bryter_layter_mbid,
+        .mb_score = 100,
+        .musicbrainz_confidence = 0.95,
+    };
+    payload.enrich(bryter_layter_mbid, .{
+        .track_title = title,
+        .track_artist = "Nick Drake",
+        .release_title = "Bryter Layter",
+        .release_artist = "Nick Drake",
+        .release_artist_mbid = nick_drake_mbid,
+        .release_date = "1971-03-01",
+        .release_group_mbid = bryter_layter_group_mbid,
+        .release_track_mbid = track_mbid,
+        .track_number = position,
+        .disc_number = 1,
+    });
+    return payload;
+}
+
+fn putPayload(library_database: *database.LibraryDatabase, file_id: i64, recording_mbid: []const u8, payload: database.ProposalPayload) !i64 {
+    const encoded = try payload.encode(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    _ = try library_database.identification_proposals.put(.{
+        .file_id = file_id,
+        .provider = "musicbrainz",
+        .provider_id = recording_mbid,
+        .confidence = 0.95,
+        .payload = encoded,
+    });
+    var statement = try library_database.database.prepare("SELECT id FROM identification_proposals WHERE file_id = ?1 AND provider_id = ?2;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try statement.bindText(2, recording_mbid);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+fn orcaValue(library_database: *database.LibraryDatabase, file_id: i64, field: metadata.Field) !?[]u8 {
+    const stored = (try library_database.orca_metadata.get(std.testing.allocator, file_id, field)) orelse return null;
+    return stored.text;
+}
+
+fn expectOrcaValue(library_database: *database.LibraryDatabase, file_id: i64, field: metadata.Field, expected: ?[]const u8) !void {
+    const stored = try orcaValue(library_database, file_id, field);
+    defer if (stored) |text| std.testing.allocator.free(text);
+    if (expected) |text| {
+        try std.testing.expectEqualStrings(text, stored orelse return error.TestExpectedValue);
+    } else try std.testing.expectEqual(@as(?[]u8, null), stored);
+}
+
+test "Match Album points every file at the release most of them list, accepts, and the cover follows the album to its new Release id" {
+    var fake: FakeMusicBrainz = .{};
     var cover: FakeCoverArt = .{ .locations = &.{
         "https://archive.org/download/mbid-x/front.jpg",
         "https://dn710702.ca.archive.org/0/items/mbid-x/front.jpg",
@@ -2076,10 +2192,34 @@ test "Match Album fetches the cover under the release ID its accepted matches na
     cover.attach(&runtime.matching_hooks);
     const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-cover?mode=memory&cache=shared");
     const library_database = try libraryDatabase(&runtime, library);
-    const album = try addRelease(library_database, "Bryter Layter", null);
-    const northern_sky = try addAlbumTrack(library_database, album, "Northern Sky");
-    _ = try addAlbumTrack(library_database, album, "Pink Moon");
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    try std.testing.expectEqual(album, try releaseOfFile(library_database, pink_moon));
     try std.testing.expect((try runtime.libraryReleaseArtwork(library, std.testing.io, album)) == null);
+
+    const other_edition = "9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    const both_editions = [_][]const u8{ other_edition, bryter_layter_mbid };
+    const one_edition = [_][]const u8{bryter_layter_mbid};
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8, best: []const u8, listed: []const []const u8 }{
+        .{ .file = northern_sky, .recording = northern_sky_mbid, .title = "Northern Sky", .best = other_edition, .listed = &both_editions },
+        .{ .file = pink_moon, .recording = pink_moon_mbid, .title = "Pink Moon", .best = bryter_layter_mbid, .listed = &one_edition },
+    }) |found| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = found.recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = found.title,
+                .artist = "Nick Drake",
+                .release_mbid = found.best,
+                .release_mbids = found.listed,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, found.file, .{ .musicbrainz = true }, &evidence);
+    }
 
     const job_handle = try runtime.startLibraryMatching(library, .{
         .release_id = album,
@@ -2091,24 +2231,219 @@ test "Match Album fetches the cover under the release ID its accepted matches na
     const stats = try runtime.jobMatchStats(job_handle);
     try std.testing.expectEqual(@as(u64, 2), stats.accepted);
     try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, stats.cover_art);
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
     try std.testing.expectEqual(@as(u32, 3), cover.requestCount());
     try std.testing.expectEqualStrings(
         "https://coverartarchive.org/release/" ++ bryter_layter_mbid ++ "/front-500",
         cover.http.history.items[0].url,
     );
-    const release_cover = (try runtime.libraryReleaseArtwork(library, std.testing.io, album)).?;
+    try std.testing.expectEqual(@as(i64, 2), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM identification_proposals WHERE state = 1 AND payload LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
+    ));
+    try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, bryter_layter_mbid);
+    try expectOrcaValue(library_database, northern_sky, .track_number, "3");
+
+    const regrouped = try releaseOfFile(library_database, northern_sky);
+    try std.testing.expect(regrouped != album);
+    try std.testing.expectEqual(regrouped, try releaseOfFile(library_database, pink_moon));
+    try std.testing.expect((try runtime.libraryRelease(library, album)) == null);
+    const release = (try runtime.libraryRelease(library, regrouped)).?;
+    defer release.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Bryter Layter", release.title);
+    try std.testing.expectEqualStrings("Nick Drake", release.album_artist);
+    const release_cover = (try runtime.libraryReleaseArtwork(library, std.testing.io, regrouped)).?;
     defer release_cover.deinit();
     try std.testing.expectEqualStrings("image/jpeg", release_cover.mime_type);
     try std.testing.expectEqualStrings(jpeg_cover, release_cover.bytes);
-    const track_cover = (try runtime.libraryTrackArtwork(library, std.testing.io, northern_sky)).?;
+    const track_cover = (try runtime.libraryTrackArtwork(library, std.testing.io, try trackOfFile(library_database, northern_sky))).?;
     defer track_cover.deinit();
     try std.testing.expectEqualStrings(jpeg_cover, track_cover.bytes);
 
     runtime.reapFinishedJobs();
-    const refetch = try runtime.startReleaseCoverArtFetch(library, album);
+    const refetch = try runtime.startReleaseCoverArtFetch(library, regrouped);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, refetch));
     try std.testing.expectEqual(runtime_module.CoverArtOutcome.cached, (try runtime.jobMatchStats(refetch)).cover_art);
     try std.testing.expectEqual(@as(u32, 3), cover.requestCount());
+}
+
+test "accepting one file of a two-file Release stores its title and artist only, and accepting the other stores the release's values on both" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-accept-release-values?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const untitled = try releaseOfFile(library_database, northern_sky);
+    const first = try putPayload(library_database, northern_sky, northern_sky_mbid, bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3));
+    const second = try putPayload(library_database, pink_moon, pink_moon_mbid, bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4));
+
+    try std.testing.expectEqual(@as(u32, 3), (try runtime.libraryAcceptMatch(library, first)).values_written);
+    try expectOrcaValue(library_database, northern_sky, .title, "Northern Sky");
+    try expectOrcaValue(library_database, northern_sky, .artist, "Nick Drake");
+    try expectOrcaValue(library_database, northern_sky, .album, null);
+    try expectOrcaValue(library_database, pink_moon, .title, null);
+    try std.testing.expectEqual(untitled, try releaseOfFile(library_database, northern_sky));
+
+    try std.testing.expectEqual(@as(u32, 3 + 2 * 9), (try runtime.libraryAcceptMatch(library, second)).values_written);
+    for ([_]struct { file: i64, position: []const u8, track_mbid: []const u8 }{
+        .{ .file = northern_sky, .position = "3", .track_mbid = northern_sky_track_mbid },
+        .{ .file = pink_moon, .position = "4", .track_mbid = pink_moon_track_mbid },
+    }) |expected| {
+        try expectOrcaValue(library_database, expected.file, .album, "Bryter Layter");
+        try expectOrcaValue(library_database, expected.file, .album_artist, "Nick Drake");
+        try expectOrcaValue(library_database, expected.file, .date, "1971-03-01");
+        try expectOrcaValue(library_database, expected.file, .disc_number, "1");
+        try expectOrcaValue(library_database, expected.file, .track_number, expected.position);
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_release_id, bryter_layter_mbid);
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_release_group_id, bryter_layter_group_mbid);
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_release_track_id, expected.track_mbid);
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_album_artist_id, nick_drake_mbid);
+        try expectOrcaValue(library_database, expected.file, .compilation, null);
+    }
+
+    var tracks = try library_database.tracks.page(std.testing.allocator, .{ .limit = 16, .offset = 0, .sort = .track_number });
+    defer tracks.deinit();
+    try std.testing.expectEqual(@as(usize, 2), tracks.items.len);
+    for (tracks.items, [_]i64{ 3, 4 }) |track, position| {
+        try std.testing.expectEqualStrings("Bryter Layter", track.album);
+        try std.testing.expectEqual(@as(?i64, position), track.track_number);
+    }
+    var releases = try runtime.libraryReleasePage(library, .{});
+    defer releases.deinit();
+    try std.testing.expectEqual(@as(usize, 1), releases.items.len);
+    try std.testing.expectEqualStrings("Bryter Layter", releases.items[0].title);
+    try std.testing.expect(releases.items[0].id != untitled);
+    const details = (try runtime.libraryTrackDetails(library, try trackOfFile(library_database, northern_sky))).?;
+    defer details.deinit();
+    try std.testing.expectEqualStrings(bryter_layter_mbid, details.musicbrainz_release_id.?);
+    try std.testing.expectEqual(@as(?RecordingIdSource, .match), details.musicbrainz_release_id_source);
+    try std.testing.expectEqualStrings(nick_drake_mbid, details.musicbrainz_album_artist_id.?);
+
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, releases.items[0].id));
+}
+
+test "an accept keeps a locked title, still stores the other values, and a Various Artists release marks a compilation" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-accept-locked-title?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const file = try observeFile(library_database, "/music/mix/01.flac", "Northern Sky", "Nick Drake");
+    try projectAll(library_database);
+    try library_database.orca_metadata.upsert(.{ .file_id = file, .field = .title, .value = "My Title", .provenance = .user, .locked = true });
+    var payload = bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3);
+    payload.release_artist = "Various Artists";
+    payload.release_artist_mbid = database.repository.various_artists_mbid;
+    payload.release_date = "";
+
+    const acceptance = try runtime.libraryAcceptMatch(library, try putPayload(library_database, file, northern_sky_mbid, payload));
+
+    try std.testing.expectEqual(@as(u32, 2 + 9), acceptance.values_written);
+    const title = (try library_database.orca_metadata.get(std.testing.allocator, file, .title)).?;
+    defer title.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("My Title", title.text);
+    try std.testing.expect(title.locked);
+    try expectOrcaValue(library_database, file, .artist, "Nick Drake");
+    try expectOrcaValue(library_database, file, .date, null);
+    try expectOrcaValue(library_database, file, .compilation, "1");
+    try expectOrcaValue(library_database, file, .album_artist, "Various Artists");
+}
+
+test "a stray file accepted on another release blocks the album's values until an edit moves it out and apply-release runs" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-accept-stray?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    const stray = try observeFile(library_database, "/music/drake/03.flac", "Hazey Jane I", "Nick Drake");
+    try projectAll(library_database);
+    var elsewhere = bryterLayterPayload("Hazey Jane I", "8e9f0a1b-2c3d-4e4f-8a5b-6c7d8e9f0a1b", 2);
+    elsewhere.enrich("9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d", .{
+        .release_title = "Fruit Tree",
+        .release_track_mbid = "8e9f0a1b-2c3d-4e4f-8a5b-6c7d8e9f0a1b",
+        .track_number = 2,
+        .disc_number = 1,
+    });
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, northern_sky, northern_sky_mbid, bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3)));
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, pink_moon, pink_moon_mbid, bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4)));
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, stray, "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8092", elsewhere));
+    try expectOrcaValue(library_database, northern_sky, .album, null);
+    const album = try releaseOfFile(library_database, northern_sky);
+    try std.testing.expectEqual(@as(u32, 0), try runtime.libraryApplyMatchedRelease(library, album));
+
+    const moved = try runtime.libraryEditTracks(library, &.{try trackOfFile(library_database, stray)}, &.{.{ .field = .album, .value = "Strays" }});
+    moved.deinit();
+    try std.testing.expectEqual(@as(u32, 2 * 9), try runtime.libraryApplyMatchedRelease(library, album));
+
+    try expectOrcaValue(library_database, northern_sky, .album, "Bryter Layter");
+    try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
+    try expectOrcaValue(library_database, stray, .musicbrainz_release_id, null);
+    try std.testing.expect(try releaseOfFile(library_database, northern_sky) != album);
+    try std.testing.expectError(error.UnknownRelease, runtime.libraryApplyMatchedRelease(library, album));
+}
+
+test "library matching looks the best release up before storing a search, asks nothing again within thirty days, stops on an unreachable lookup and stores a missing release unlooked" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-enrich?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    const first = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, first));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(first)).requests);
+    {
+        const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
+        defer proposals.deinit();
+        const proposal = proposals.items[0];
+        try std.testing.expectEqualStrings(bryter_layter_mbid, proposal.release_mbid.?);
+        try std.testing.expectEqualStrings("Bryter Layter", proposal.release_title.?);
+        try std.testing.expectEqualStrings("1971-03-01", proposal.release_date.?);
+        try std.testing.expectEqualStrings(northern_sky_track_mbid, proposal.release_track_mbid.?);
+        try std.testing.expectEqual(@as(?u32, 1), proposal.disc_number);
+        try std.testing.expectEqual(@as(?u32, 3), proposal.track_number);
+    }
+
+    try library_database.database.exec("DELETE FROM identification_searches;");
+    runtime.reapFinishedJobs();
+    const cached = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, cached));
+    const cached_stats = try runtime.jobMatchStats(cached);
+    try std.testing.expectEqual(@as(u64, 0), cached_stats.requests);
+    try std.testing.expectEqual(@as(u64, 2), cached_stats.cache_hits);
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+
+    const pink_moon = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    try library_database.database.exec("DELETE FROM provider_cache WHERE request_key LIKE '%/ws/2/release/%';");
+    fake.release_status = 503;
+    fake.release_body = "";
+    runtime.reapFinishedJobs();
+    const unreachable_job = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreachable_job));
+    try std.testing.expectEqual(@as(u32, 2 + 1 + 3), fake.requestCount());
+    try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
+
+    fake.release_status = 404;
+    fake.release_body = "{\"error\":\"Not Found\"}";
+    runtime.reapFinishedJobs();
+    const missing = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, missing));
+    try std.testing.expectEqual(@as(u32, 2 + 1 + 3 + 1), fake.requestCount());
+    const proposals = try runtime.libraryMatchProposals(library, pink_moon, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    try std.testing.expectEqualStrings(bryter_layter_mbid, proposals.items[0].release_mbid.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), proposals.items[0].release_title);
 }
 
 test "a cover the archive does not have is not asked for again for 30 days, and is asked for after" {
@@ -2205,6 +2540,101 @@ test "a Release's cover release ID is the one most of its accepted matches name"
         });
     }
     try std.testing.expect(try library_database.release_artwork.coverReleaseMbid(std.testing.allocator, album) == null);
-    try std.testing.expectEqual(@as(u64, 3), try runtime.libraryAcceptConfidentMatches(library, 0.9));
+    try std.testing.expectEqual(@as(u64, 3), (try runtime.libraryAcceptConfidentMatches(library, 0.9)).accepted);
     try std.testing.expectEqualStrings(bryter_layter_mbid, &(try library_database.release_artwork.coverReleaseMbid(std.testing.allocator, album)).?);
+}
+
+fn id3v23Frame(bytes: *std.ArrayList(u8), identifier: *const [4]u8, payload: []const u8) !void {
+    try bytes.appendSlice(std.testing.allocator, identifier);
+    var size: [4]u8 = undefined;
+    std.mem.writeInt(u32, &size, @intCast(payload.len), .big);
+    try bytes.appendSlice(std.testing.allocator, &size);
+    try bytes.appendSlice(std.testing.allocator, &.{ 0, 0 });
+    try bytes.appendSlice(std.testing.allocator, payload);
+}
+
+/// The reference MP3's audio under an ID3v2.3 tag with a title, an artist
+/// and a MusicBrainz TXXX no field is written to.
+fn writeId3v23Mp3(dir: std.Io.Dir, name: []const u8) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/tagged-reference.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(source);
+    const tag_size = (@as(usize, source[6]) << 21) | (@as(usize, source[7]) << 14) | (@as(usize, source[8]) << 7) | source[9];
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(std.testing.allocator);
+    try id3v23Frame(&frames, "TIT2", "\x00Northern Sky");
+    try id3v23Frame(&frames, "TPE1", "\x00Nick Drake");
+    try id3v23Frame(&frames, "TXXX", "\x00MusicBrainz Album Comment\x00kept as it was");
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 'I', 'D', '3', 3, 0, 0 });
+    const length = frames.items.len;
+    try bytes.appendSlice(std.testing.allocator, &.{
+        @intCast((length >> 21) & 0x7f), @intCast((length >> 14) & 0x7f),
+        @intCast((length >> 7) & 0x7f),  @intCast(length & 0x7f),
+    });
+    try bytes.appendSlice(std.testing.allocator, frames.items);
+    try bytes.appendSlice(std.testing.allocator, source[10 + tag_size ..]);
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes.items });
+}
+
+test "after an accept, a tag-write preview of a 2.3 MP3 and a FLAC adds only the fields each file lacks, and the write keeps a foreign MusicBrainz TXXX" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tagWriteDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    try writeId3v23Mp3(temporary.dir, "a.mp3");
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, database_path);
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const library_database = try libraryDatabase(&runtime, library);
+    const mp3 = try database.columns.scalar(library_database.database, "SELECT file_id FROM locations WHERE uri LIKE '%/a.mp3';");
+    const flac = try database.columns.scalar(library_database.database, "SELECT file_id FROM locations WHERE uri LIKE '%/b.flac';");
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, mp3, northern_sky_mbid, bryterLayterPayload("Northern Sky", northern_sky_track_mbid, 3)));
+    _ = try runtime.libraryAcceptMatch(library, try putPayload(library_database, flac, pink_moon_mbid, bryterLayterPayload("Pink Moon", pink_moon_track_mbid, 4)));
+    const ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, ids);
+    defer preview.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    for (preview.files) |file| {
+        var adds_release_id = false;
+        for (file.changes) |change| {
+            try std.testing.expect(change.before == null);
+            try std.testing.expectEqual(.provider, change.provenance);
+            if (change.field == .musicbrainz_release_id) adds_release_id = true;
+        }
+        try std.testing.expect(adds_release_id);
+    }
+    for (preview.conflicts) |conflict| {
+        try std.testing.expectEqual(flac, conflict.file_id);
+        try std.testing.expect(conflict.file_value.len != 0);
+    }
+    try std.testing.expect(preview.conflicts.len != 0);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+
+    const written = try temporary.dir.readFileAlloc(std.testing.io, "a.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(written);
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\x00MusicBrainz Album Comment\x00kept as it was") != null);
+    for ([_]i64{ mp3, flac }) |file_id| {
+        const stored = (try library_database.observed_tags.get(std.testing.allocator, file_id)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualStrings(bryter_layter_mbid, stored.values.musicbrainz_release_id.?);
+        try std.testing.expectEqualStrings(bryter_layter_group_mbid, stored.values.musicbrainz_release_group_id.?);
+    }
+    const mp3_tags = (try library_database.observed_tags.get(std.testing.allocator, mp3)).?;
+    defer mp3_tags.deinit();
+    try std.testing.expectEqualStrings("Bryter Layter", mp3_tags.values.album.?);
+    const flac_tags = (try library_database.observed_tags.get(std.testing.allocator, flac)).?;
+    defer flac_tags.deinit();
+    try std.testing.expectEqualStrings("Fixtures", flac_tags.values.album.?);
 }

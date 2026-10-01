@@ -294,6 +294,12 @@ pub const MatchReviewItem = database.MatchReviewItem;
 pub const MatchReviewPage = database.MatchReviewPage;
 pub const MatchAcceptance = database.ProposalAcceptance;
 
+pub const ConfidentMatchAcceptance = struct {
+    accepted: u64,
+    /// Every value stored, on any file, the Releases' other files included.
+    values_written: u64,
+};
+
 /// One lock-free read of everything a transport UI shows.
 pub const PlayerStatus = struct {
     transport: audio.player.TransportState,
@@ -924,8 +930,16 @@ pub const OrcaRuntime = struct {
         return runtime_listens.libraryConfidentMatchCount(self, library, minimum_confidence);
     }
 
-    pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !u64 {
+    pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !ConfidentMatchAcceptance {
         return runtime_listens.libraryAcceptConfidentMatches(self, library, minimum_confidence);
+    }
+
+    /// Stores what the MusicBrainz release a Release's accepted matches
+    /// agree on says, when every Track names it, and reprojects. For a
+    /// Release that came to agree without an accept: after an edit moved a
+    /// stray file out, or a rescan. Returns how many values were stored.
+    pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !u32 {
+        return runtime_listens.libraryApplyMatchedRelease(self, library, release_id);
     }
 
     pub fn libraryTrackFeedback(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !Feedback {

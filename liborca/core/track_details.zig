@@ -81,6 +81,14 @@ pub const TrackDetails = struct {
     rating: ?u8,
     musicbrainz_recording_id: ?[]u8,
     musicbrainz_recording_id_source: ?RecordingIdSource,
+    musicbrainz_release_id: ?[]u8,
+    musicbrainz_release_id_source: ?RecordingIdSource,
+    musicbrainz_release_group_id: ?[]u8,
+    musicbrainz_release_group_id_source: ?RecordingIdSource,
+    musicbrainz_release_track_id: ?[]u8,
+    musicbrainz_release_track_id_source: ?RecordingIdSource,
+    musicbrainz_album_artist_id: ?[]u8,
+    musicbrainz_album_artist_id_source: ?RecordingIdSource,
 
     pub fn deinit(self: TrackDetails) void {
         self.allocator.free(self.title);
@@ -90,7 +98,13 @@ pub const TrackDetails = struct {
         if (self.date) |value| self.allocator.free(value);
         self.allocator.free(self.codec);
         if (self.path) |value| self.allocator.free(value);
-        if (self.musicbrainz_recording_id) |value| self.allocator.free(value);
+        inline for (.{
+            self.musicbrainz_recording_id,
+            self.musicbrainz_release_id,
+            self.musicbrainz_release_group_id,
+            self.musicbrainz_release_track_id,
+            self.musicbrainz_album_artist_id,
+        }) |id| if (id) |value| self.allocator.free(value);
     }
 };
 
@@ -112,6 +126,14 @@ pub fn load(
     const feedback_syncable = try library.feedback.canSync(track_id);
     const recording_mbid = try library.tracks.recordingMbid(allocator, track_id);
     errdefer if (recording_mbid) |value| value.deinit(allocator);
+    const release_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_id);
+    errdefer if (release_mbid) |value| value.deinit(allocator);
+    const release_group_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_group_id);
+    errdefer if (release_group_mbid) |value| value.deinit(allocator);
+    const release_track_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_track_id);
+    errdefer if (release_track_mbid) |value| value.deinit(allocator);
+    const album_artist_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_album_artist_id);
+    errdefer if (album_artist_mbid) |value| value.deinit(allocator);
     const codec_identifier = if (facts) |file| file.codec else try allocator.alloc(u8, 0);
 
     return .{
@@ -144,6 +166,14 @@ pub fn load(
         .rating = summary.rating,
         .musicbrainz_recording_id = if (recording_mbid) |value| value.text else null,
         .musicbrainz_recording_id_source = if (recording_mbid) |value| RecordingIdSource.of(value.provenance) else null,
+        .musicbrainz_release_id = if (release_mbid) |value| value.text else null,
+        .musicbrainz_release_id_source = if (release_mbid) |value| RecordingIdSource.of(value.provenance) else null,
+        .musicbrainz_release_group_id = if (release_group_mbid) |value| value.text else null,
+        .musicbrainz_release_group_id_source = if (release_group_mbid) |value| RecordingIdSource.of(value.provenance) else null,
+        .musicbrainz_release_track_id = if (release_track_mbid) |value| value.text else null,
+        .musicbrainz_release_track_id_source = if (release_track_mbid) |value| RecordingIdSource.of(value.provenance) else null,
+        .musicbrainz_album_artist_id = if (album_artist_mbid) |value| value.text else null,
+        .musicbrainz_album_artist_id_source = if (album_artist_mbid) |value| RecordingIdSource.of(value.provenance) else null,
     };
 }
 

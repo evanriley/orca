@@ -169,6 +169,7 @@ const commands = [_]Command{
     .{ .name = "accept-match", .usage = "accept-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = acceptMatch },
     .{ .name = "dismiss-match", .usage = "dismiss-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = dismissMatch, .shares_usage_line = true },
     .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
+    .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = applyMatchedRelease, .shares_usage_line = true },
     .{ .name = "artists", .usage = "artists DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
     .{ .name = "releases", .usage = "releases DATABASE [--artist ID] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
     .{ .name = "tracks", .usage = "tracks DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
@@ -231,7 +232,10 @@ const help_details =
     \\  --clear=FIELD      drop Orca's value so the file's tag applies again
     \\                     (title|artist|album|album_artist|track_number|
     \\                      disc_number|date|compilation|
-    \\                      musicbrainz_recording_id)
+    \\                      musicbrainz_recording_id|musicbrainz_release_id|
+    \\                      musicbrainz_release_group_id|
+    \\                      musicbrainz_release_track_id|
+    \\                      musicbrainz_album_artist_id)
     \\
     \\write-tags writes Orca's values for the Tracks into their files: an edit
     \\wherever it differs from the file's tag, a match only where the file has
@@ -338,9 +342,20 @@ const help_details =
     \\servers (https, or http to localhost only). matches lists a Track's
     \\matches, most confident first: id, confidence (0 to 1), MusicBrainz's
     \\score, source (musicbrainz, acoustid or both), AcoustID's score, recording
-    \\ID, title, artist, album, track, length and release ID. accept-match
-    \\records one match's recording ID for the Track's file, in the Library only,
-    \\and dismisses the file's other matches; dismiss-match drops one.
+    \\ID, title, artist, album, track, length and release ID, then what that
+    \\release says once it has been looked up: its title, artist and date, the
+    \\disc, the track's title and artist, and the release-track ID. A field
+    \\not known is `-`. accept-match records one match in the Library only:
+    \\its recording ID for the Track's file, its title and artist for every
+    \\file of the Track, and dismisses the file's other matches; dismiss-match
+    \\drops one. When every Track of the Release then names one MusicBrainz
+    \\release, by an accepted match looked up on it or by the file's tag, the
+    \\files of the Tracks accepted on it also get its album, album artist,
+    \\date, disc and track numbers and release, release-group, release-track
+    \\and album-artist IDs. A value you set with edit is kept. Both print how
+    \\many values they stored. apply-release stores those release values for
+    \\a Release that came to agree without an accept, as after an edit moved
+    \\a stray file out of it. Releases can get new ids as albums regroup.
     \\accept-matches accepts each file's best match at least as confident as
     \\--min-score. A match AcoustID found with a fingerprint score of at least
     \\0.9 comes first; among those, the higher percent, then the Track's own
@@ -349,7 +364,9 @@ const help_details =
     \\most confident match is accepted only when no other match of the file
     \\has as high a percent.
     \\
-    \\match --release=ID searches only that Release's Tracks. With
+    \\match --release=ID searches only that Release's Tracks, then looks up
+    \\the MusicBrainz release most of their matches list and points every
+    \\match listing it at it. With
     \\--accept-min-score=SCORE it then accepts the Release's matches as
     \\accept-matches would, and with --cover-art it then fetches the Release's
     \\cover as cover-art does. It prints accepted= and cover_art=.
@@ -903,10 +920,16 @@ fn acceptMatch(context: Context) !void {
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const proposal_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const acceptance = try runtime.libraryAcceptMatch(library, proposal_id);
-    try context.stdout.print("accepted match {d}: {s}\n", .{
-        proposal_id,
-        if (acceptance.values_written == 0) "the file's locked recording id was kept" else "recording id stored",
-    });
+    try context.stdout.print("accepted match {d}: values_written={d}\n", .{ proposal_id, acceptance.values_written });
+}
+
+fn applyMatchedRelease(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const values_written = try runtime.libraryApplyMatchedRelease(library, release_id);
+    try context.stdout.print("values_written={d}\n", .{values_written});
 }
 
 fn dismissMatch(context: Context) !void {
@@ -925,8 +948,8 @@ fn acceptConfidentMatches(context: Context) !void {
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    const accepted = try runtime.libraryAcceptConfidentMatches(library, minimum);
-    try context.stdout.print("accepted {d} matches\n", .{accepted});
+    const acceptance = try runtime.libraryAcceptConfidentMatches(library, minimum);
+    try context.stdout.print("accepted {d} matches: values_written={d}\n", .{ acceptance.accepted, acceptance.values_written });
 }
 
 /// A volume change scheduled mid-run. Exists so the independence of user
@@ -1504,15 +1527,27 @@ fn showTrack(context: Context) !void {
     if (details.rating) |rating| {
         try printDetail(stdout, "rating", "{d}", .{rating});
     } else try printDetail(stdout, "rating", "{s}", .{"none"});
-    if (details.musicbrainz_recording_id) |recording_id| {
-        try printDetail(stdout, "recording id", "{s} ({s})", .{ recording_id, @tagName(details.musicbrainz_recording_id_source.?) });
-    } else try printDetail(stdout, "recording id", "{s}", .{"-"});
+    try printMusicBrainzId(stdout, "recording id", details.musicbrainz_recording_id, details.musicbrainz_recording_id_source);
+    try printMusicBrainzId(stdout, "release id", details.musicbrainz_release_id, details.musicbrainz_release_id_source);
+    try printMusicBrainzId(stdout, "release group", details.musicbrainz_release_group_id, details.musicbrainz_release_group_id_source);
+    try printMusicBrainzId(stdout, "release track", details.musicbrainz_release_track_id, details.musicbrainz_release_track_id_source);
+    try printMusicBrainzId(stdout, "album artist id", details.musicbrainz_album_artist_id, details.musicbrainz_album_artist_id_source);
     try printDetail(stdout, "plays", "{d}", .{details.play_count});
     try writeDetailKey(stdout, "last played");
     if (details.last_played_at) |seconds| {
         try writeIsoUtc(stdout, seconds);
     } else try stdout.writeAll("never");
     try stdout.writeAll("\n");
+}
+
+fn printMusicBrainzId(
+    stdout: *std.Io.Writer,
+    comptime key: []const u8,
+    id: ?[]const u8,
+    source: ?liborca.RecordingIdSource,
+) !void {
+    const present = id orelse return printDetail(stdout, key, "{s}", .{"-"});
+    try printDetail(stdout, key, "{s} ({s})", .{ present, @tagName(source.?) });
 }
 
 fn writeIsoUtc(stdout: *std.Io.Writer, unix_seconds: i64) !void {
@@ -2195,12 +2230,23 @@ fn listMatches(context: Context) !void {
         if (proposal.track_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
         try stdout.writeAll("\t");
         try writeDuration(stdout, if (proposal.duration_ms) |milliseconds| std.math.cast(i64, milliseconds) else null);
-        try stdout.print("\t{s}\n", .{proposal.release_mbid orelse "-"});
+        try stdout.print("\t{s}\t{s}\t{s}\t{s}\t", .{
+            proposal.release_mbid orelse "-",
+            proposal.release_title orelse "-",
+            proposal.release_artist orelse "-",
+            proposal.release_date orelse "-",
+        });
+        if (proposal.disc_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
+        try stdout.print("\t{s}\t{s}\t{s}\n", .{
+            proposal.track_title orelse "-",
+            proposal.track_artist orelse "-",
+            proposal.release_track_mbid orelse "-",
+        });
     }
 }
 
 fn writeDetailKey(stdout: *std.Io.Writer, comptime key: []const u8) !void {
-    try stdout.print("{s: <14}", .{key ++ ":"});
+    try stdout.print("{s: <17}", .{key ++ ":"});
 }
 
 fn printDetail(

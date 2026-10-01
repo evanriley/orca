@@ -65,6 +65,10 @@ pub const Panel = struct {
     musicbrainz_group: *gtk.Widget,
     recording_row: *gtk.Widget,
     recording_link: *gtk.Widget,
+    release_id_row: *gtk.Widget,
+    release_group_id_row: *gtk.Widget,
+    release_track_id_row: *gtk.Widget,
+    album_artist_id_row: *gtk.Widget,
     proposal_rows: [proposal_slots]*gtk.Widget,
     proposal_ids: [proposal_slots]i64 = @splat(0),
     review_row: *gtk.Widget,
@@ -285,7 +289,17 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     any_tag = setRow(panel.compilation_row, compilation) or any_tag;
     gtk.gtk_widget_set_visible(panel.tags_group, boolean(any_tag));
 
+    setIdRow(panel.release_id_row, details.musicbrainz_release_id, details.musicbrainz_release_id_source);
+    setIdRow(panel.release_group_id_row, details.musicbrainz_release_group_id, details.musicbrainz_release_group_id_source);
+    setIdRow(panel.release_track_id_row, details.musicbrainz_release_track_id, details.musicbrainz_release_track_id_source);
+    setIdRow(panel.album_artist_id_row, details.musicbrainz_album_artist_id, details.musicbrainz_album_artist_id_source);
     populateRecording(panel, details);
+}
+
+fn setIdRow(row: *gtk.Widget, id: ?[]const u8, source: ?liborca.RecordingIdSource) void {
+    var buffer: [64]u8 = undefined;
+    if (!setRow(row, if (id) |text| strings.terminated(&buffer, text) else null)) return;
+    gtk.gtk_widget_set_tooltip_text(row, sourceText(source));
 }
 
 fn sourceText(source: ?liborca.RecordingIdSource) [*:0]const u8 {
@@ -345,7 +359,9 @@ fn showProposal(row: *gtk.Widget, proposal: liborca.MatchProposal) void {
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), title.ptr);
     var subtitle_buffer: [512]u8 = undefined;
     writer = std.Io.Writer.fixed(subtitle_buffer[0 .. subtitle_buffer.len - 1]);
-    if (proposal.album.len != 0) writer.print("{s}" ++ separator, .{proposal.album}) catch {};
+    const album = proposal.release_title orelse proposal.album;
+    if (album.len != 0) writer.print("{s}" ++ separator, .{album}) catch {};
+    if (proposal.release_date) |date| writer.print("{s}" ++ separator, .{date}) catch {};
     if (proposal.duration_ms) |milliseconds| {
         var length_buffer: [32]u8 = undefined;
         writer.print("{s}" ++ separator, .{strings.formatMs(&length_buffer, milliseconds)}) catch {};
@@ -525,6 +541,14 @@ fn newRow(title: [*:0]const u8) *gtk.Widget {
     return row;
 }
 
+fn newIdRow(title: [*:0]const u8) *gtk.Widget {
+    const row = newRow(title);
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, row), 1);
+    gtk.gtk_widget_add_css_class(row, "recording-id");
+    gtk.gtk_widget_set_visible(row, gtk.false_);
+    return row;
+}
+
 fn newGroup(title: ?[*:0]const u8, rows: []const *gtk.Widget) *gtk.Widget {
     const group = adw.adw_preferences_group_new();
     if (title) |text| adw.adw_preferences_group_set_title(gtk.cast(adw.PreferencesGroup, group), text);
@@ -659,6 +683,10 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, recording_row), 1);
     const recording_link = matches.linkButton("");
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, recording_row), recording_link);
+    const release_id_row = newIdRow("Release");
+    const release_group_id_row = newIdRow("Release group");
+    const release_track_id_row = newIdRow("Release track");
+    const album_artist_id_row = newIdRow("Album artist");
     var proposal_parts: [proposal_slots]@TypeOf(newProposalRow(0)) = undefined;
     for (&proposal_parts, 0..) |*parts, index| parts.* = newProposalRow(index);
     const review_row = buttonRow("Review all", "go-next-symbolic");
@@ -678,7 +706,18 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const file_group = newGroup("File", &.{ size_row, path_row });
     const loudness_group = newGroup("Loudness", &.{loudness_row});
     const tags_group = newGroup("Tags", &.{ album_artist_row, date_row, track_row, disc_row, compilation_row });
-    const musicbrainz_group = newGroup("MusicBrainz", &.{ recording_row, proposal_parts[0].row, proposal_parts[1].row, proposal_parts[2].row, review_row, find_row });
+    const musicbrainz_group = newGroup("MusicBrainz", &.{
+        recording_row,
+        release_id_row,
+        release_group_id_row,
+        release_track_id_row,
+        album_artist_id_row,
+        proposal_parts[0].row,
+        proposal_parts[1].row,
+        proposal_parts[2].row,
+        review_row,
+        find_row,
+    });
     const history_group = newGroup("History", &.{ feedback_row, rating_row, plays_row, last_played_row });
     const now_group = newGroup("Now Playing", &.{now_row});
     gtk.gtk_widget_set_visible(now_group, gtk.false_);
@@ -734,6 +773,10 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .musicbrainz_group = musicbrainz_group,
         .recording_row = recording_row,
         .recording_link = recording_link,
+        .release_id_row = release_id_row,
+        .release_group_id_row = release_group_id_row,
+        .release_track_id_row = release_track_id_row,
+        .album_artist_id_row = album_artist_id_row,
         .proposal_rows = .{ proposal_parts[0].row, proposal_parts[1].row, proposal_parts[2].row },
         .review_row = review_row,
         .find_row = find_row,

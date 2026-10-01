@@ -1,5 +1,7 @@
 const std = @import("std");
 const listen_worker = @import("listen_worker.zig");
+const database = @import("../database/root.zig");
+const library_pass = @import("../library/root.zig");
 const providers = @import("../providers/root.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
@@ -12,6 +14,7 @@ const Feedback = runtime.Feedback;
 const FeedbackChange = runtime.FeedbackChange;
 const LibraryHandle = runtime.LibraryHandle;
 const LibraryObject = runtime.LibraryObject;
+const ConfidentMatchAcceptance = runtime.ConfidentMatchAcceptance;
 const MatchAcceptance = runtime.MatchAcceptance;
 const MatchProposalPage = runtime.MatchProposalPage;
 const MatchReviewPage = runtime.MatchReviewPage;
@@ -205,9 +208,35 @@ pub fn libraryMatchProposals(
 }
 
 pub fn libraryAcceptMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !MatchAcceptance {
-    const acceptance = try (try runtime.libraryDatabase(self, library)).identification_proposals.acceptProposal(self.allocator, proposal_id);
-    if (acceptance.values_written != 0) recordingIdsChanged(self, library);
+    const library_database = try runtime.libraryDatabase(self, library);
+    var written: std.ArrayList(i64) = .empty;
+    defer written.deinit(self.allocator);
+    const acceptance = try library_database.identification_proposals.acceptProposalInto(self.allocator, proposal_id, &written);
+    if (acceptance.values_written == 0) return acceptance;
+    try reproject(self, library_database, written.items);
+    recordingIdsChanged(self, library);
     return acceptance;
+}
+
+pub fn libraryApplyMatchedRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !u32 {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const release = try library_database.releases.byId(self.allocator, release_id) orelse return error.UnknownRelease;
+    release.deinit(self.allocator);
+    var written: std.ArrayList(i64) = .empty;
+    defer written.deinit(self.allocator);
+    const values_written = try library_database.identification_proposals.applyReleaseConsensus(self.allocator, release_id, &written);
+    if (values_written == 0) return 0;
+    try reproject(self, library_database, written.items);
+    recordingIdsChanged(self, library);
+    return values_written;
+}
+
+fn reproject(self: *OrcaRuntime, library_database: *database.LibraryDatabase, file_ids: []const i64) !void {
+    var pass: library_pass.Projection = .{
+        .allocator = self.allocator,
+        .library = library_database,
+    };
+    _ = try pass.run(.{ .files = file_ids });
 }
 
 pub fn libraryDismissMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !void {
@@ -239,10 +268,13 @@ pub fn libraryConfidentMatchCount(self: *OrcaRuntime, library: LibraryHandle, mi
     return (try runtime.libraryDatabase(self, library)).identification_proposals.confidentCount(self.allocator, minimum_confidence);
 }
 
-pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !u64 {
-    const accepted = try (try runtime.libraryDatabase(self, library)).identification_proposals.acceptConfident(self.allocator, minimum_confidence);
-    if (accepted != 0) recordingIdsChanged(self, library);
-    return accepted;
+pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle, minimum_confidence: f32) !ConfidentMatchAcceptance {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const acceptance = try library_database.identification_proposals.acceptConfident(self.allocator, minimum_confidence);
+    defer acceptance.deinit();
+    if (acceptance.values_written != 0) try reproject(self, library_database, acceptance.file_ids);
+    if (acceptance.accepted != 0) recordingIdsChanged(self, library);
+    return .{ .accepted = acceptance.accepted, .values_written = acceptance.values_written };
 }
 
 pub fn recordingIdsChanged(self: *OrcaRuntime, library: LibraryHandle) void {

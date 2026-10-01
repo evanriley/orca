@@ -313,8 +313,7 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn albumFinished(self: *App, release_id: i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
     art.refreshRelease(self, release_id);
-    matches.reload(self);
-    details.invalidate(self);
+    matches.accepted(self);
     if (state_value == .cancelled) return self.toast("Stopped");
     const result = stats orelse return self.toast("Could not match the album");
     if (state_value != .succeeded) return self.toast(switch (result.cover_art) {

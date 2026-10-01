@@ -14,6 +14,35 @@
   as Picard's `TXXX` frames, replacing only a `TXXX` under a description the
   reader takes the ID from and keeping every other frame byte for byte, in
   ID3v2.3 and 2.4.
+- **Accepted matches store MusicBrainz's metadata.** An accept stores the
+  title and artist on every file of the Track, and once every Track of a
+  Release names one MusicBrainz release, by an accepted match or its tag,
+  the album, album artist, date, disc and track numbers and the release,
+  release-group, release-track and album-artist IDs (`compilation=1` for
+  Various Artists), as unlocked provider values that keep a user's locked
+  edit and that tag writes store only where a file has no tag. Accepted
+  files are reprojected, so an album can regroup under a new Release id;
+  its fetched cover follows it. Matching looks up the release of each
+  search's best proposal (`MusicBrainz.lookUpRelease`, cached 30 days)
+  before recording it, and Match Album points the album's matches at the
+  release most of its files list. `Runtime.libraryApplyMatchedRelease` and
+  `orca-cli apply-release` apply a Release that came to agree without an
+  accept. `MatchProposal` and `orca-cli matches` carry the release's title,
+  artist, date, disc and track IDs; `TrackDetails` and `orca-cli track` the
+  release, release-group, release-track and album-artist IDs with their
+  source; `orca-gtk` shows the album and date on the Matches page and the
+  IDs in the details panel.
+
+### Changed
+
+- **Breaking (Zig API): bulk acceptance reports values.**
+  `Runtime.libraryAcceptConfidentMatches` returns
+  `ConfidentMatchAcceptance` (`accepted`, `values_written`) instead of a
+  count, and `IdentificationProposalRepository.acceptConfident` returns an
+  owned `ConfidentAcceptance` with the files it accepted or wrote. An
+  accept's `values_written` now counts every value stored, so it is no
+  longer only 0 or 1. Matching makes about one more MusicBrainz request per
+  album.
 
 ### Fixed
 

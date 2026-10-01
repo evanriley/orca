@@ -33,12 +33,40 @@ pub const MusicBrainz = struct {
         if (isBlank(query.title) or isBlank(query.artist)) return error.InsufficientIdentificationEvidence;
         const request_url = try self.searchUrl(allocator, query);
         defer allocator.free(request_url);
+        return self.request(model.CandidateList, allocator, request_url, SearchParser{ .album = query.album });
+    }
+
+    pub fn lookUpRelease(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        release_mbid: []const u8,
+    ) !ReleaseLookup {
+        if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
+        const request_url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/ws/2/release/{s}?fmt=json&inc=recordings+artist-credits+release-groups",
+            .{ std.mem.trimEnd(u8, self.server, "/"), release_mbid },
+        );
+        defer allocator.free(request_url);
+        return self.request(ReleaseLookup, allocator, request_url, ReleaseParser{});
+    }
+
+    /// One cached GET: a fresh cached answer without a request, else the
+    /// service, else an expired answer when the service cannot be reached.
+    /// An answer is cached only once `parser` accepts it.
+    fn request(
+        self: *MusicBrainz,
+        comptime T: type,
+        allocator: std.mem.Allocator,
+        request_url: []const u8,
+        parser: anytype,
+    ) !T {
         const now_s = @divFloor(self.wall_clock.nowMs(), 1000);
         if (try self.cache.get(allocator, service, request_url, now_s, false)) |cached| {
             defer cached.deinit();
             self.cache_hits += 1;
             if (cached.status != 200) return error.ProviderRejectedRequest;
-            return parseCandidates(allocator, cached.body, query.album);
+            return parser.parse(allocator, cached.body);
         }
         const response = self.gateway.execute(
             allocator,
@@ -48,7 +76,7 @@ pub const MusicBrainz = struct {
             &.{.{ .name = "accept", .value = "application/json" }},
         ) catch |err| switch (err) {
             error.RateLimited, error.NetworkUnavailable, error.Timeout, error.Offline => {
-                if (try self.stale(allocator, request_url, now_s, query.album)) |list| return list;
+                if (try self.stale(T, allocator, request_url, now_s, parser)) |value| return value;
                 return err;
             },
             else => return err,
@@ -56,7 +84,7 @@ pub const MusicBrainz = struct {
         defer response.deinit();
         self.requests_answered += 1;
         if (response.status == 408 or response.status >= 500) {
-            if (try self.stale(allocator, request_url, now_s, query.album)) |list| return list;
+            if (try self.stale(T, allocator, request_url, now_s, parser)) |value| return value;
             return error.ProviderUnavailable;
         }
         if (response.status != 200) {
@@ -64,23 +92,24 @@ pub const MusicBrainz = struct {
                 try self.cache.put(service, request_url, response.status, response.body, now_s + self.refusal_ttl_seconds);
             return error.ProviderRejectedRequest;
         }
-        const candidates = try parseCandidates(allocator, response.body, query.album);
-        errdefer candidates.deinit();
+        const value = try parser.parse(allocator, response.body);
+        errdefer value.deinit();
         try self.cache.put(service, request_url, response.status, response.body, now_s + self.cache_ttl_seconds);
-        return candidates;
+        return value;
     }
 
     fn stale(
         self: *MusicBrainz,
+        comptime T: type,
         allocator: std.mem.Allocator,
         request_url: []const u8,
         now_s: i64,
-        album: ?[]const u8,
-    ) !?model.CandidateList {
+        parser: anytype,
+    ) !?T {
         const entry = try self.cache.get(allocator, service, request_url, now_s, true) orelse return null;
         defer entry.deinit();
         if (entry.status != 200) return null;
-        return try parseCandidates(allocator, entry.body, album);
+        return try parser.parse(allocator, entry.body);
     }
 
     fn searchUrl(self: MusicBrainz, allocator: std.mem.Allocator, query: model.Query) ![]u8 {
@@ -113,6 +142,139 @@ pub const MusicBrainz = struct {
         return self.search(allocator, query);
     }
 };
+
+const SearchParser = struct {
+    album: ?[]const u8,
+
+    fn parse(self: SearchParser, allocator: std.mem.Allocator, body: []const u8) !model.CandidateList {
+        return parseCandidates(allocator, body, self.album);
+    }
+};
+
+const ReleaseParser = struct {
+    fn parse(_: ReleaseParser, allocator: std.mem.Allocator, body: []const u8) !ReleaseLookup {
+        const parsed = std.json.parseFromSlice(ReleaseBody, allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidProviderResponse,
+        };
+        if (!metadata.isMusicBrainzId(parsed.value.id)) {
+            parsed.deinit();
+            return error.InvalidProviderResponse;
+        }
+        return .{ .parsed = parsed };
+    }
+};
+
+pub const max_release_mbids = 25;
+
+const CreditedArtist = struct {
+    id: []const u8 = "",
+};
+
+const ReleaseCredit = struct {
+    name: []const u8 = "",
+    joinphrase: []const u8 = "",
+    artist: ?CreditedArtist = null,
+};
+
+const ReleaseRecording = struct {
+    id: []const u8 = "",
+};
+
+const ReleaseTrack = struct {
+    id: []const u8 = "",
+    position: ?u32 = null,
+    title: []const u8 = "",
+    @"artist-credit": []const ReleaseCredit = &.{},
+    recording: ?ReleaseRecording = null,
+};
+
+const ReleaseMedium = struct {
+    position: ?u32 = null,
+    tracks: []const ReleaseTrack = &.{},
+};
+
+const ReleaseGroup = struct {
+    id: []const u8 = "",
+};
+
+const ReleaseBody = struct {
+    id: []const u8 = "",
+    title: []const u8 = "",
+    date: ?[]const u8 = null,
+    @"artist-credit": []const ReleaseCredit = &.{},
+    @"release-group": ?ReleaseGroup = null,
+    media: []const ReleaseMedium = &.{},
+};
+
+/// A looked-up release. Strings it hands out live as long as it does.
+pub const ReleaseLookup = struct {
+    parsed: std.json.Parsed(ReleaseBody),
+
+    pub fn deinit(self: ReleaseLookup) void {
+        self.parsed.deinit();
+    }
+
+    pub fn id(self: *const ReleaseLookup) []const u8 {
+        return self.parsed.value.id;
+    }
+
+    /// What the release says about the track holding `recording_mbid`: the
+    /// one at `tagged_track_number` when the recording appears more than
+    /// once, else the first. Null when the release does not hold it.
+    pub fn enrichment(
+        self: *const ReleaseLookup,
+        recording_mbid: []const u8,
+        tagged_track_number: ?u32,
+    ) !?database.ReleaseEnrichment {
+        const release = self.parsed.value;
+        var first: ?Placed = null;
+        var at_tagged: ?Placed = null;
+        for (release.media) |*medium| {
+            for (medium.tracks) |*track| {
+                const recording = track.recording orelse continue;
+                if (!std.mem.eql(u8, recording.id, recording_mbid)) continue;
+                if (!metadata.isMusicBrainzId(track.id)) continue;
+                const placed: Placed = .{ .medium = medium, .track = track };
+                if (first == null) first = placed;
+                if (at_tagged == null and tagged_track_number != null and track.position == tagged_track_number) at_tagged = placed;
+            }
+        }
+        const chosen = at_tagged orelse first orelse return null;
+        const arena = self.parsed.arena.allocator();
+        const release_credit = release.@"artist-credit";
+        return .{
+            .track_title = nonEmpty(chosen.track.title),
+            .track_artist = nonEmpty(try creditedArtist(arena, chosen.track.@"artist-credit")),
+            .release_title = nonEmpty(release.title),
+            .release_artist = nonEmpty(try creditedArtist(arena, release_credit)),
+            .release_artist_mbid = if (release_credit.len == 1) soleArtistId(release_credit[0]) else null,
+            .release_date = nonEmpty(release.date orelse ""),
+            .release_group_mbid = if (release.@"release-group") |group| validId(group.id) else null,
+            .release_track_mbid = chosen.track.id,
+            .track_number = chosen.track.position,
+            .disc_number = chosen.medium.position,
+        };
+    }
+
+    const Placed = struct { medium: *const ReleaseMedium, track: *const ReleaseTrack };
+};
+
+fn soleArtistId(credit: ReleaseCredit) ?[]const u8 {
+    const artist = credit.artist orelse return null;
+    return validId(artist.id);
+}
+
+fn validId(text: []const u8) ?[]const u8 {
+    return if (metadata.isMusicBrainzId(text)) text else null;
+}
+
+fn nonEmpty(text: []const u8) ?[]const u8 {
+    return if (std.mem.trim(u8, text, " \t").len == 0) null else text;
+}
 
 fn isBlank(text: ?[]const u8) bool {
     const value = text orelse return true;
@@ -198,12 +360,13 @@ fn parseCandidates(
             candidate.track_number = trackNumber(chosen);
             if (metadata.isMusicBrainzId(chosen.id)) candidate.release_mbid = try allocator.dupe(u8, chosen.id);
         }
+        candidate.release_mbids = try releaseIds(allocator, recording.releases);
         try candidates.append(allocator, candidate);
     }
     return .{ .allocator = allocator, .items = try candidates.toOwnedSlice(allocator) };
 }
 
-fn creditedArtist(allocator: std.mem.Allocator, credits: []const ArtistCredit) ![]u8 {
+fn creditedArtist(allocator: std.mem.Allocator, credits: anytype) ![]u8 {
     var joined: std.ArrayList(u8) = .empty;
     errdefer joined.deinit(allocator);
     for (credits) |credit| {
@@ -211,6 +374,25 @@ fn creditedArtist(allocator: std.mem.Allocator, credits: []const ArtistCredit) !
         try joined.appendSlice(allocator, credit.joinphrase);
     }
     return joined.toOwnedSlice(allocator);
+}
+
+fn releaseIds(allocator: std.mem.Allocator, releases: []const Release) ![][]u8 {
+    var ids: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (ids.items) |value| allocator.free(value);
+        ids.deinit(allocator);
+    }
+    for (releases) |release| {
+        if (ids.items.len == max_release_mbids) break;
+        if (!metadata.isMusicBrainzId(release.id)) continue;
+        const seen = for (ids.items) |value| {
+            if (std.mem.eql(u8, value, release.id)) break true;
+        } else false;
+        if (seen) continue;
+        try ids.ensureUnusedCapacity(allocator, 1);
+        ids.appendAssumeCapacity(try allocator.dupe(u8, release.id));
+    }
+    return ids.toOwnedSlice(allocator);
 }
 
 fn bestRelease(allocator: std.mem.Allocator, releases: []const Release, album: ?[]const u8) !?usize {
@@ -437,4 +619,118 @@ test "a query MusicBrainz refused is refused without a request for seven days, a
     defer answered.deinit();
     try testing.expectEqual(@as(u32, 3), rig.net.transport.requestCount());
     try testing.expectEqual(@as(usize, 0), answered.items.len);
+}
+
+const release_fixture_path = "fixtures/providers/musicbrainz-release-lookup.json";
+const hot_space_mbid = "047a4aae-27f8-4f2d-92fb-214fd8dc865a";
+const duet_mbid = "a6d3063b-c34f-46c7-b61c-dda4d94195a9";
+
+fn readReleaseFixture() ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(testing.io, release_fixture_path, testing.allocator, .limited(1 << 20));
+}
+
+fn parseRelease(body: []const u8) !ReleaseLookup {
+    return (ReleaseParser{}).parse(testing.allocator, body);
+}
+
+test "a release lookup yields the recording's track by position, with its own credit, and the release's title, artist, date and IDs" {
+    const body = try readReleaseFixture();
+    defer testing.allocator.free(body);
+    const release = try parseRelease(body);
+    defer release.deinit();
+
+    try testing.expectEqualStrings(hot_space_mbid, release.id());
+    const duet = (try release.enrichment(duet_mbid, null)).?;
+    try testing.expectEqualStrings("Under Pressure", duet.track_title.?);
+    try testing.expectEqualStrings("Queen & David Bowie", duet.track_artist.?);
+    try testing.expectEqualStrings("Hot Space", duet.release_title.?);
+    try testing.expectEqualStrings("Queen", duet.release_artist.?);
+    try testing.expectEqualStrings("0383dadf-2a4e-4d10-a46a-e9e041da8eb3", duet.release_artist_mbid.?);
+    try testing.expectEqualStrings("2014", duet.release_date.?);
+    try testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", duet.release_group_mbid.?);
+    try testing.expectEqualStrings("6a31811e-e7ac-44d9-8345-7a6918130bf7", duet.release_track_mbid);
+    try testing.expectEqual(@as(?u32, 7), duet.track_number);
+    try testing.expectEqual(@as(?u32, 2), duet.disc_number);
+    try testing.expectEqual(@as(?database.ReleaseEnrichment, null), try release.enrichment("af59c0c3-f3da-4bc2-ae24-dd2aa93021a4", null));
+}
+
+const twice_release =
+    \\{"id":"047a4aae-27f8-4f2d-92fb-214fd8dc865a","title":"Twice","artist-credit":[
+    \\  {"name":"James Blake","joinphrase":" & ","artist":{"id":"0383dadf-2a4e-4d10-a46a-e9e041da8eb3"}},
+    \\  {"name":"Rosalía","joinphrase":"","artist":{"id":"5441c29d-3602-4898-b1a1-b77fa23b8e50"}}],
+    \\ "media":[{"position":1,"tracks":[
+    \\  {"id":"7938be9a-8cd9-40d0-b17f-9555cf5168c2","position":1,"number":"A1","title":"Song","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}},
+    \\  {"id":"23600855-11bc-4dca-89bd-b71cf2232d25","position":5,"number":"B2","title":"Song (reprise)","recording":{"id":"a6d3063b-c34f-46c7-b61c-dda4d94195a9"}}]}]}
+;
+
+test "a recording on a release twice takes the track at the file's tagged number, else the first, by position not vinyl number" {
+    const release = try parseRelease(twice_release);
+    defer release.deinit();
+
+    const tagged = (try release.enrichment(duet_mbid, 5)).?;
+    try testing.expectEqualStrings("23600855-11bc-4dca-89bd-b71cf2232d25", tagged.release_track_mbid);
+    try testing.expectEqual(@as(?u32, 5), tagged.track_number);
+    const untagged = (try release.enrichment(duet_mbid, null)).?;
+    try testing.expectEqualStrings("7938be9a-8cd9-40d0-b17f-9555cf5168c2", untagged.release_track_mbid);
+    try testing.expectEqual(@as(?u32, 1), untagged.track_number);
+    const elsewhere = (try release.enrichment(duet_mbid, 9)).?;
+    try testing.expectEqual(@as(?u32, 1), elsewhere.track_number);
+}
+
+test "a release credited to two artists names them both and gives no album-artist ID, and blanks stay unset" {
+    const release = try parseRelease(twice_release);
+    defer release.deinit();
+    const track = (try release.enrichment(duet_mbid, null)).?;
+    try testing.expectEqualStrings("James Blake & Rosalía", track.release_artist.?);
+    try testing.expectEqual(@as(?[]const u8, null), track.release_artist_mbid);
+    try testing.expectEqual(@as(?[]const u8, null), track.track_artist);
+    try testing.expectEqual(@as(?[]const u8, null), track.release_date);
+    try testing.expectEqual(@as(?[]const u8, null), track.release_group_mbid);
+}
+
+test "an answer that is not a release is refused as invalid" {
+    try testing.expectError(error.InvalidProviderResponse, parseRelease("<html>"));
+    try testing.expectError(error.InvalidProviderResponse, parseRelease("{\"recordings\":[]}"));
+}
+
+test "a release lookup asks for its recordings, credits and release group, is cached for thirty days, and a missing release is cached as refused" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-release?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.net.gateway.config.minimum_interval_ms = 0;
+    rig.adapter.server = "http://127.0.0.1:5000/";
+    const body = try readReleaseFixture();
+    defer testing.allocator.free(body);
+    rig.respond(200, body);
+
+    try testing.expectError(error.InvalidMusicBrainzId, rig.adapter.lookUpRelease(testing.allocator, "Hot Space"));
+    const first = try rig.adapter.lookUpRelease(testing.allocator, hot_space_mbid);
+    defer first.deinit();
+    try testing.expectEqualStrings(
+        "http://127.0.0.1:5000/ws/2/release/" ++ hot_space_mbid ++ "?fmt=json&inc=recordings+artist-credits+release-groups",
+        rig.net.transport.lastUrl(),
+    );
+    rig.net.clock.advance((rig.adapter.cache_ttl_seconds - 1) * 1000);
+    const again = try rig.adapter.lookUpRelease(testing.allocator, hot_space_mbid);
+    defer again.deinit();
+    try testing.expectEqual(@as(u32, 1), rig.net.transport.requestCount());
+    try testing.expectEqual(@as(u64, 1), rig.adapter.cache_hits);
+
+    const missing = "aaaaaaaa-0000-4000-8000-000000000000";
+    rig.respond(404, "{\"error\":\"Not Found\"}");
+    try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
+    try testing.expectError(error.ProviderRejectedRequest, rig.adapter.lookUpRelease(testing.allocator, missing));
+    try testing.expectEqual(@as(u32, 2), rig.net.transport.requestCount());
+    rig.respond(503, "");
+    try testing.expectError(error.ProviderUnavailable, rig.adapter.lookUpRelease(testing.allocator, "bbbbbbbb-0000-4000-8000-000000000000"));
+}
+
+test "a search keeps every release it lists for a recording, each once" {
+    const body = try readFixture();
+    defer testing.allocator.free(body);
+    const list = try parseCandidates(testing.allocator, body, null);
+    defer list.deinit();
+    const live = findCandidate(list, "e3a15a94-41d6-45c0-bbc1-aae6137bcb7a").?;
+    try testing.expectEqual(@as(usize, 3), live.release_mbids.len);
+    try testing.expectEqualStrings("786a6852-4b41-44c9-a585-c65f9caa54a1", live.release_mbids[1]);
 }

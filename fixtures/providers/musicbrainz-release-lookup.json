@@ -1,0 +1,1012 @@
+{
+  "id": "047a4aae-27f8-4f2d-92fb-214fd8dc865a",
+  "packaging": "None",
+  "status": "Official",
+  "date": "2014",
+  "packaging-id": "119eba76-b343-3e02-a292-f0f00644bb9b",
+  "quality": "normal",
+  "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+  "country": "GB",
+  "cover-art-archive": {
+    "back": false,
+    "artwork": true,
+    "front": true,
+    "count": 1,
+    "darkened": false
+  },
+  "text-representation": {
+    "language": "eng",
+    "script": "Latn"
+  },
+  "release-group": {
+    "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+    "title": "Hot Space",
+    "disambiguation": "",
+    "artist-credit": [
+      {
+        "name": "Queen",
+        "artist": {
+          "disambiguation": "UK rock group",
+          "country": "GB",
+          "type": "Group",
+          "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+          "sort-name": "Queen",
+          "name": "Queen",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+        },
+        "joinphrase": ""
+      }
+    ],
+    "primary-type": "Album",
+    "first-release-date": "1982-05-21",
+    "secondary-types": [],
+    "secondary-type-ids": [],
+    "id": "3918b90b-340e-3779-9d7e-ba1593653498"
+  },
+  "disambiguation": "deluxe edition",
+  "title": "Hot Space",
+  "barcode": "00602547025630",
+  "release-events": [
+    {
+      "date": "2014",
+      "area": {
+        "type": null,
+        "disambiguation": "",
+        "sort-name": "United Kingdom",
+        "iso-3166-1-codes": [
+          "GB"
+        ],
+        "name": "United Kingdom",
+        "type-id": null,
+        "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed"
+      }
+    }
+  ],
+  "asin": null,
+  "media": [
+    {
+      "track-offset": 0,
+      "tracks": [
+        {
+          "position": 1,
+          "length": 252479,
+          "id": "7938be9a-8cd9-40d0-b17f-9555cf5168c2",
+          "title": "Staying Power",
+          "number": "1",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "sort-name": "Queen",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type": "Group"
+              },
+              "name": "Queen"
+            }
+          ],
+          "recording": {
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "1982-05-21",
+            "disambiguation": "",
+            "title": "Staying Power",
+            "id": "82795f50-6f55-42ad-b86d-60cf500073d2",
+            "video": false,
+            "length": 253000
+          }
+        },
+        {
+          "recording": {
+            "disambiguation": "",
+            "title": "Dancer",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "sort-name": "Queen",
+                  "country": "GB",
+                  "disambiguation": "UK rock group",
+                  "type": "Group"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "1982-05-21",
+            "length": 228080,
+            "id": "9b3ddcc0-de53-4754-9d6c-bfc7fcdb1a67",
+            "video": false
+          },
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "sort-name": "Queen",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "type": "Group"
+              },
+              "name": "Queen"
+            }
+          ],
+          "number": "2",
+          "title": "Dancer",
+          "id": "23600855-11bc-4dca-89bd-b71cf2232d25",
+          "length": 230118,
+          "position": 2
+        },
+        {
+          "recording": {
+            "first-release-date": "1982-05-21",
+            "artist-credit": [
+              {
+                "artist": {
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group"
+                },
+                "name": "Queen",
+                "joinphrase": ""
+              }
+            ],
+            "disambiguation": "",
+            "title": "Back Chat",
+            "id": "b0194c5f-c161-4fa3-a680-b59da57539b4",
+            "video": false,
+            "length": 275133
+          },
+          "number": "3",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "type": "Group",
+                "disambiguation": "UK rock group",
+                "country": "GB"
+              },
+              "name": "Queen"
+            }
+          ],
+          "id": "f2a110da-a64f-4788-963e-bbb2d15d8747",
+          "title": "Back Chat",
+          "position": 3,
+          "length": 275866
+        },
+        {
+          "position": 4,
+          "length": 271605,
+          "id": "365cb83c-92ac-4010-ad54-31a80fe2cdd1",
+          "title": "Body Language",
+          "number": "4",
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "type": "Group"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "recording": {
+            "artist-credit": [
+              {
+                "artist": {
+                  "sort-name": "Queen",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type": "Group",
+                  "disambiguation": "UK rock group",
+                  "country": "GB"
+                },
+                "name": "Queen",
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "1982-04-19",
+            "title": "Body Language ↑⬱",
+            "disambiguation": "",
+            "length": 272000,
+            "video": false,
+            "id": "0e54f5ff-299b-4b65-ac5f-00c158b48c26"
+          }
+        },
+        {
+          "recording": {
+            "disambiguation": "",
+            "title": "Action This Day",
+            "first-release-date": "1982-05-21",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "length": 215066,
+            "id": "0cbde616-b9d5-4f3a-afbe-1f29497724c8",
+            "video": false
+          },
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "type": "Group"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "number": "5",
+          "title": "Action This Day",
+          "id": "d8e51723-6e5a-42f4-b682-a23304bb2376",
+          "length": 218132,
+          "position": 5
+        },
+        {
+          "id": "d1eebe58-b4cb-4fc5-974c-c9bbaa97afb2",
+          "title": "Put Out the Fire",
+          "position": 6,
+          "length": 200068,
+          "recording": {
+            "first-release-date": "1982-05-21",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "type": "Group",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "title": "Put Out the Fire",
+            "disambiguation": "",
+            "length": 199680,
+            "video": false,
+            "id": "4543243d-3cc0-45c2-aa65-8350cda9f07c"
+          },
+          "number": "6",
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "type": "Group",
+                "disambiguation": "UK rock group",
+                "country": "GB"
+              },
+              "joinphrase": ""
+            }
+          ]
+        },
+        {
+          "number": "7",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "type": "Group",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "sort-name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              },
+              "name": "Queen"
+            }
+          ],
+          "recording": {
+            "length": 211360,
+            "id": "097dd4c9-c472-43cc-b399-1a869d8f9fe9",
+            "video": false,
+            "disambiguation": "",
+            "title": "Life Is Real (Song for Lennon)",
+            "artist-credit": [
+              {
+                "joinphrase": "",
+                "name": "Queen",
+                "artist": {
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+                }
+              }
+            ],
+            "first-release-date": "1982-05-21"
+          },
+          "position": 7,
+          "length": 211360,
+          "id": "f5d180c6-b900-474a-8a6b-15986021d06b",
+          "title": "Life Is Real (Song for Lennon)"
+        },
+        {
+          "recording": {
+            "length": 232000,
+            "video": false,
+            "id": "44e3f0e9-d4bf-48fe-a1d7-dc6038bd99fc",
+            "title": "Calling All Girls",
+            "disambiguation": "",
+            "first-release-date": "1982-05-21",
+            "artist-credit": [
+              {
+                "artist": {
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group"
+                },
+                "name": "Queen",
+                "joinphrase": ""
+              }
+            ]
+          },
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "sort-name": "Queen",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type": "Group"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "number": "8",
+          "title": "Calling All Girls",
+          "id": "5a57bfb1-e15a-46b2-8ffc-cc7eb6376b96",
+          "length": 232160,
+          "position": 8
+        },
+        {
+          "number": "9",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "sort-name": "Queen",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type": "Group"
+              },
+              "name": "Queen"
+            }
+          ],
+          "recording": {
+            "first-release-date": "1980",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "disambiguation": "",
+            "title": "Las palabras de amor (The Words of Love)",
+            "length": 271000,
+            "id": "450e2a51-7bef-4048-9e72-0b938a8ecb68",
+            "video": false
+          },
+          "position": 9,
+          "length": 272413,
+          "id": "1d92d204-b7d0-4769-b842-bb789bb72802",
+          "title": "Las palabras de amor (The Words of Love)"
+        },
+        {
+          "length": 209533,
+          "position": 10,
+          "title": "Cool Cat",
+          "id": "8b4a0142-8eae-442d-9d6a-14f78af57d91",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "type": "Group",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "sort-name": "Queen",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+              },
+              "name": "Queen"
+            }
+          ],
+          "number": "10",
+          "recording": {
+            "id": "e86921bb-70d2-409b-b3a3-fb169842ee74",
+            "video": false,
+            "length": 209666,
+            "first-release-date": "1982-05-21",
+            "artist-credit": [
+              {
+                "joinphrase": "",
+                "name": "Queen",
+                "artist": {
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                }
+              }
+            ],
+            "disambiguation": "",
+            "title": "Cool Cat"
+          }
+        },
+        {
+          "recording": {
+            "length": 243000,
+            "id": "32c7e292-14f1-4080-bddf-ef852e0a4c59",
+            "video": false,
+            "first-release-date": "1981-10",
+            "artist-credit": [
+              {
+                "joinphrase": " & ",
+                "name": "Queen",
+                "artist": {
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group"
+                }
+              },
+              {
+                "joinphrase": "",
+                "artist": {
+                  "type": "Person",
+                  "country": "GB",
+                  "disambiguation": "English singer‐songwriter",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "name": "David Bowie",
+                  "sort-name": "Bowie, David",
+                  "id": "5441c29d-3602-4898-b1a1-b77fa23b8e50"
+                },
+                "name": "David Bowie"
+              }
+            ],
+            "disambiguation": "",
+            "title": "Under Pressure"
+          },
+          "number": "11",
+          "artist-credit": [
+            {
+              "artist": {
+                "type": "Group",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "sort-name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              },
+              "name": "Queen",
+              "joinphrase": " & "
+            },
+            {
+              "joinphrase": "",
+              "artist": {
+                "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                "name": "David Bowie",
+                "sort-name": "Bowie, David",
+                "id": "5441c29d-3602-4898-b1a1-b77fa23b8e50",
+                "type": "Person",
+                "country": "GB",
+                "disambiguation": "English singer‐songwriter"
+              },
+              "name": "David Bowie"
+            }
+          ],
+          "id": "27b09cd9-b95d-4521-b604-f883e4d5f70f",
+          "title": "Under Pressure",
+          "position": 11,
+          "length": 246264
+        }
+      ],
+      "format-id": "907a28d9-b3b2-3ef6-89a8-7b18d91d4794",
+      "track-count": 11,
+      "position": 1,
+      "format": "Digital Media",
+      "id": "862be379-c382-35ac-82be-78dd85f685f5",
+      "title": ""
+    },
+    {
+      "id": "9fd81338-bf30-30ff-96ad-0fb11129c38c",
+      "title": "",
+      "position": 2,
+      "track-count": 8,
+      "format": "Digital Media",
+      "format-id": "907a28d9-b3b2-3ef6-89a8-7b18d91d4794",
+      "track-offset": 0,
+      "tracks": [
+        {
+          "recording": {
+            "length": 238560,
+            "video": false,
+            "id": "471f6a77-bef2-48ae-8502-f2b8fd2747a0",
+            "artist-credit": [
+              {
+                "joinphrase": "",
+                "artist": {
+                  "type": "Group",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                },
+                "name": "Queen"
+              }
+            ],
+            "first-release-date": "2011-01-01",
+            "title": "Staying Power (live at Milton Keynes Bowl, June 1982)",
+            "disambiguation": "2011 remaster"
+          },
+          "number": "1",
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "type": "Group",
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "sort-name": "Queen",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "id": "8ec9590d-c311-4175-aca6-38feb5c90fca",
+          "title": "Staying Power (live at Milton Keynes Bowl, June 1982)",
+          "position": 1,
+          "length": 237732
+        },
+        {
+          "id": "d04a3fb8-e13b-43e6-a24b-8c0e796a76f4",
+          "title": "Soul Brother",
+          "position": 2,
+          "length": 217229,
+          "recording": {
+            "length": 217000,
+            "video": false,
+            "id": "ccba00f3-2d67-47c3-bd4f-78118dcdf05d",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type": "Group",
+                  "disambiguation": "UK rock group",
+                  "country": "GB"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "2000",
+            "title": "Soul Brother",
+            "disambiguation": "2011 remaster"
+          },
+          "number": "2",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type": "Group",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "sort-name": "Queen"
+              },
+              "name": "Queen"
+            }
+          ]
+        },
+        {
+          "length": 254172,
+          "position": 3,
+          "title": "Back Chat (single remix)",
+          "id": "66620a0b-c350-428a-b38c-b325afe2ad53",
+          "artist-credit": [
+            {
+              "artist": {
+                "type": "Group",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "sort-name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              },
+              "name": "Queen",
+              "joinphrase": ""
+            }
+          ],
+          "number": "3",
+          "recording": {
+            "title": "Back Chat (single remix)",
+            "disambiguation": "2011 remaster",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "2011-01-01",
+            "video": false,
+            "id": "a271d054-5f06-41e4-a6b1-240c831a6cca",
+            "length": 254000
+          }
+        },
+        {
+          "id": "0932b5b2-75d9-49a8-a6e1-1f6c884887a2",
+          "title": "Action This Day (live in Tokyo, November 1982)",
+          "position": 4,
+          "length": 385594,
+          "recording": {
+            "first-release-date": "2011-01-01",
+            "artist-credit": [
+              {
+                "joinphrase": "",
+                "artist": {
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group"
+                },
+                "name": "Queen"
+              }
+            ],
+            "title": "Action This Day (live in Tokyo, November 1982)",
+            "disambiguation": "2011 remaster",
+            "video": false,
+            "id": "ee01491c-c044-484a-8d8e-d4906557f463",
+            "length": 385600
+          },
+          "number": "4",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "name": "Queen",
+              "artist": {
+                "type": "Group",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "sort-name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              }
+            }
+          ]
+        },
+        {
+          "length": 282946,
+          "position": 5,
+          "title": "Calling All Girls (live in Tokyo, November 1982)",
+          "id": "eef8e474-991e-4671-8cea-184f3549936e",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "artist": {
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "type": "Group",
+                "disambiguation": "UK rock group",
+                "country": "GB"
+              },
+              "name": "Queen"
+            }
+          ],
+          "number": "5",
+          "recording": {
+            "disambiguation": "",
+            "title": "Calling All Girls (live in Tokyo, November 1982)",
+            "first-release-date": "2011-01-01",
+            "artist-credit": [
+              {
+                "name": "Queen",
+                "artist": {
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "sort-name": "Queen",
+                  "country": "GB",
+                  "disambiguation": "UK rock group",
+                  "type": "Group"
+                },
+                "joinphrase": ""
+              }
+            ],
+            "length": 285000,
+            "id": "472649a9-3119-4d5d-84dd-7db7dc3b8631",
+            "video": false
+          }
+        },
+        {
+          "recording": {
+            "length": 273320,
+            "video": true,
+            "id": "9093a898-9026-4bf8-91b5-270e98701a1b",
+            "artist-credit": [
+              {
+                "artist": {
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                  "sort-name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "name": "Queen",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "type": "Group"
+                },
+                "name": "Queen",
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "2014",
+            "title": "Las palabras de amor (Top of the Pops, 1982)",
+            "disambiguation": ""
+          },
+          "artist-credit": [
+            {
+              "name": "Queen",
+              "artist": {
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "type": "Group",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "sort-name": "Queen"
+              },
+              "joinphrase": ""
+            }
+          ],
+          "number": "6",
+          "title": "Las palabras de amor (Top of the Pops, 1982)",
+          "id": "82c84448-0740-4ec0-9293-3664d79284a7",
+          "length": 273320,
+          "position": 6
+        },
+        {
+          "artist-credit": [
+            {
+              "joinphrase": " & ",
+              "artist": {
+                "type": "Group",
+                "country": "GB",
+                "disambiguation": "UK rock group",
+                "name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "sort-name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              },
+              "name": "Queen"
+            },
+            {
+              "artist": {
+                "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                "name": "David Bowie",
+                "sort-name": "Bowie, David",
+                "id": "5441c29d-3602-4898-b1a1-b77fa23b8e50",
+                "type": "Person",
+                "country": "GB",
+                "disambiguation": "English singer‐songwriter"
+              },
+              "name": "David Bowie",
+              "joinphrase": ""
+            }
+          ],
+          "number": "7",
+          "recording": {
+            "id": "a6d3063b-c34f-46c7-b61c-dda4d94195a9",
+            "video": true,
+            "length": 266920,
+            "disambiguation": "",
+            "title": "Under Pressure",
+            "first-release-date": "2014",
+            "artist-credit": [
+              {
+                "joinphrase": " & ",
+                "name": "Queen",
+                "artist": {
+                  "type": "Group",
+                  "country": "GB",
+                  "disambiguation": "UK rock group",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "sort-name": "Queen",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                }
+              },
+              {
+                "joinphrase": "",
+                "name": "David Bowie",
+                "artist": {
+                  "id": "5441c29d-3602-4898-b1a1-b77fa23b8e50",
+                  "name": "David Bowie",
+                  "type-id": "b6e035f4-3ce9-331c-97df-83397230b0df",
+                  "sort-name": "Bowie, David",
+                  "country": "GB",
+                  "disambiguation": "English singer‐songwriter",
+                  "type": "Person"
+                }
+              }
+            ]
+          },
+          "length": 266920,
+          "position": 7,
+          "title": "Under Pressure",
+          "id": "6a31811e-e7ac-44d9-8345-7a6918130bf7"
+        },
+        {
+          "id": "a6c98662-27ab-4f81-a580-9af368110cfc",
+          "title": "Action This Day (live at Milton Keynes Bowl, 1982)",
+          "position": 8,
+          "length": 292200,
+          "recording": {
+            "length": 292200,
+            "video": true,
+            "id": "0008fa2c-8d79-4ac6-a5c6-78cf9152bc3b",
+            "title": "Action This Day (live at Milton Keynes Bowl, 1982)",
+            "disambiguation": "",
+            "artist-credit": [
+              {
+                "artist": {
+                  "type": "Group",
+                  "disambiguation": "UK rock group",
+                  "country": "GB",
+                  "sort-name": "Queen",
+                  "name": "Queen",
+                  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                  "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+                },
+                "name": "Queen",
+                "joinphrase": ""
+              }
+            ],
+            "first-release-date": "2014"
+          },
+          "number": "8",
+          "artist-credit": [
+            {
+              "joinphrase": "",
+              "name": "Queen",
+              "artist": {
+                "type": "Group",
+                "disambiguation": "UK rock group",
+                "country": "GB",
+                "sort-name": "Queen",
+                "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+                "name": "Queen",
+                "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "artist-credit": [
+    {
+      "joinphrase": "",
+      "artist": {
+        "sort-name": "Queen",
+        "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+        "name": "Queen",
+        "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+        "type": "Group",
+        "disambiguation": "UK rock group",
+        "country": "GB"
+      },
+      "name": "Queen"
+    }
+  ]
+}
