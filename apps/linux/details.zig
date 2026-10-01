@@ -16,6 +16,7 @@ const signal_path = @import("signal_path.zig");
 const track_model = @import("track_model.zig");
 const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
+const ratings = @import("ratings.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -70,6 +71,7 @@ pub const Panel = struct {
     find_row: *gtk.Widget,
     history_group: *gtk.Widget,
     feedback_row: *gtk.Widget,
+    rating_stars: *gtk.Widget,
     plays_row: *gtk.Widget,
     last_played_row: *gtk.Widget,
     now_group: *gtk.Widget,
@@ -266,6 +268,7 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     _ = setRow(panel.loudness_row, loudnessText(&buffer, details.loudness));
 
     _ = setRow(panel.feedback_row, feedbackText(&buffer, details));
+    ratings.show(panel.rating_stars, details.rating);
 
     var plays_buffer: [24]u8 = undefined;
     _ = setRow(panel.plays_row, strings.printZ(&plays_buffer, "{d}", .{details.play_count}) catch null);
@@ -572,6 +575,11 @@ fn findMatchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startTrackMatching(panel.self, panel.shown orelse return);
 }
 
+fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    ratings.changeTrack(panel.self, panel.shown orelse return, ratings.chosen(button));
+}
+
 fn iconButton(icon: [*:0]const u8, tooltip: [*:0]const u8, slot: usize) *gtk.Widget {
     const button = gtk.gtk_button_new_from_icon_name(icon);
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
@@ -656,6 +664,11 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const review_row = buttonRow("Review all", "go-next-symbolic");
     const find_row = buttonRow("Find Match", "system-search-symbolic");
     const feedback_row = newRow("Feedback");
+    const rating_row = adw.adw_action_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, rating_row), "Rating");
+    gtk.gtk_widget_add_css_class(rating_row, "property");
+    const rating_stars = ratings.newStars(gtk.callback(starClicked), panel);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, rating_row), rating_stars);
     const plays_row = newRow("Plays");
     const last_played_row = newRow("Last played");
     const now_row = newRow("Signal path");
@@ -666,7 +679,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const loudness_group = newGroup("Loudness", &.{loudness_row});
     const tags_group = newGroup("Tags", &.{ album_artist_row, date_row, track_row, disc_row, compilation_row });
     const musicbrainz_group = newGroup("MusicBrainz", &.{ recording_row, proposal_parts[0].row, proposal_parts[1].row, proposal_parts[2].row, review_row, find_row });
-    const history_group = newGroup("History", &.{ feedback_row, plays_row, last_played_row });
+    const history_group = newGroup("History", &.{ feedback_row, rating_row, plays_row, last_played_row });
     const now_group = newGroup("Now Playing", &.{now_row});
     gtk.gtk_widget_set_visible(now_group, gtk.false_);
 
@@ -726,6 +739,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .find_row = find_row,
         .history_group = history_group,
         .feedback_row = feedback_row,
+        .rating_stars = rating_stars,
         .plays_row = plays_row,
         .last_played_row = last_played_row,
         .now_group = now_group,

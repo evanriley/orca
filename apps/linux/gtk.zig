@@ -112,6 +112,8 @@ pub const GestureSingle = opaque {};
 pub const Gesture = opaque {};
 pub const GdkClipboard = opaque {};
 pub const UriLauncher = opaque {};
+pub const FileFilter = opaque {};
+pub const Entry = opaque {};
 
 pub const GKeyFile = opaque {};
 pub extern fn g_key_file_new() *GKeyFile;
@@ -324,6 +326,7 @@ pub extern fn g_list_store_splice(
     n_additions: c_uint,
 ) void;
 pub extern fn g_list_store_remove_all(store: *ListStore) void;
+pub extern fn g_list_store_append(store: *ListStore, item: *anyopaque) void;
 
 pub extern fn g_simple_action_new(name: [*:0]const u8, parameter_type: ?*const GVariantType) ?*GSimpleAction;
 pub extern fn g_action_map_add_action(action_map: *GActionMap, action: *GAction) void;
@@ -336,6 +339,7 @@ pub extern fn g_menu_new() *GMenu;
 pub extern fn g_menu_model_get_n_items(model: *GMenuModel) c_int;
 pub extern fn g_menu_append(menu: *GMenu, label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) void;
 pub extern fn g_menu_append_section(menu: *GMenu, label: ?[*:0]const u8, section: *GMenuModel) void;
+pub extern fn g_menu_append_submenu(menu: *GMenu, label: ?[*:0]const u8, submenu: *GMenuModel) void;
 
 // A cover arrives from liborca as caller-owned encoded bytes, and has to
 // become something a widget can draw without ever touching the filesystem.
@@ -838,6 +842,35 @@ pub extern fn gtk_file_dialog_select_folder_finish(
     result: *GAsyncResult,
     err: *?*GError,
 ) ?*GFile;
+
+pub extern fn gtk_file_dialog_set_initial_name(dialog: *FileDialog, name: ?[*:0]const u8) void;
+pub extern fn gtk_file_dialog_set_filters(dialog: *FileDialog, filters: ?*ListModel) void;
+pub extern fn gtk_file_dialog_set_default_filter(dialog: *FileDialog, filter: ?*FileFilter) void;
+pub extern fn gtk_file_dialog_open(
+    dialog: *FileDialog,
+    parent: ?*Window,
+    cancellable: ?*GCancellable,
+    ready: ?AsyncReadyCallback,
+    user_data: ?*anyopaque,
+) void;
+pub extern fn gtk_file_dialog_open_finish(dialog: *FileDialog, result: *GAsyncResult, err: *?*GError) ?*GFile;
+pub extern fn gtk_file_dialog_save(
+    dialog: *FileDialog,
+    parent: ?*Window,
+    cancellable: ?*GCancellable,
+    ready: ?AsyncReadyCallback,
+    user_data: ?*anyopaque,
+) void;
+pub extern fn gtk_file_dialog_save_finish(dialog: *FileDialog, result: *GAsyncResult, err: *?*GError) ?*GFile;
+
+pub extern fn gtk_file_filter_get_type() GType;
+pub extern fn gtk_file_filter_new() *FileFilter;
+pub extern fn gtk_file_filter_set_name(filter: *FileFilter, name: ?[*:0]const u8) void;
+pub extern fn gtk_file_filter_add_suffix(filter: *FileFilter, suffix: [*:0]const u8) void;
+
+pub extern fn gtk_entry_new() *Widget;
+pub extern fn gtk_entry_set_activates_default(entry: *Entry, setting: gboolean) void;
+pub extern fn gtk_entry_set_placeholder_text(entry: *Entry, text: ?[*:0]const u8) void;
 
 comptime {
     std.debug.assert(@sizeOf(GObject) == 24);

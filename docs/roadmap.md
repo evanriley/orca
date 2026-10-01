@@ -20,8 +20,8 @@ versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is playlists and
-ratings.
+`orca-gtk` sleeps on instead of polling. The next milestone is applying
+MusicBrainz metadata from accepted matches.
 
 ## Works today
 
@@ -107,6 +107,14 @@ ratings.
   it.
 - Now Playing, off until enabled: the playing track is announced to
   ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
+- Star ratings, kept in the Library per recording: `orca-cli rate`, a sort
+  by rating, and stars on every song row, in the details panel and in song
+  menus in `orca-gtk`.
+- Playlists of up to 10,000 songs, kept per recording so edits do not break
+  them, with M3U and M3U8 import and export. Reachable through the
+  `orca-cli playlist*` commands and `play-tracks --playlist`, and in
+  `orca-gtk` through the sidebar's Playlists section, playlist pages and Add
+  to Playlist on song and album menus. See [playlists.md](playlists.md).
 
 ### Identification
 
@@ -156,7 +164,7 @@ ratings.
 
 - `orca-cli`: scan, browse, search, library edits, tag write-back, undo and
   backup pruning, analysis, duplicates, artwork, queue playback, `feedback`,
-  `scrobble`, MusicBrainz and AcoustID matching, fingerprints and AcoustID
+  ratings, playlists with M3U import and export, `scrobble`, MusicBrainz and AcoustID matching, fingerprints and AcoustID
   submission.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
@@ -164,7 +172,8 @@ ratings.
   album menus), Preferences, a Health page, a player bar with cover art and an
   output menu, job progress, a welcome page, toasts, a shortcuts dialog, MPRIS,
   ListenBrainz submission with play counts in the details panel, love and
-  dislike, MusicBrainz and AcoustID match review, and AcoustID submission.
+  dislike, star ratings, playlists with M3U import and export, MusicBrainz
+  and AcoustID match review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
   with `liborca.so.0` exporting exactly its functions and `orca.pc` for
   pkg-config.
@@ -189,9 +198,7 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Playlists and ratings.** `tracks.rating` exists; playlists have no
-   schema yet. Play history, love and hate, and Now Playing are done.
-2. **Apply MusicBrainz metadata from accepted matches.** An accepted match
+1. **Apply MusicBrainz metadata from accepted matches.** An accepted match
    records only the recording ID; its title, artist, track number and the
    rest should become Orca metadata too, under the same lock and provenance
    rules. Matching is to parse and carry the release, release-group,
@@ -201,17 +208,17 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    of the Release agrees on the release, a consensus generalising the tally
    in `release_artwork.zig`. Artist IDs follow once `ObservedTags` holds
    multiple values.
-3. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+2. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
    tag writes, library edits and undo, queue insertion, moves and removal,
    artwork, DSP and the signal path, track details, matching, AcoustID
-   submission, love and hate, and scrobbling.
-4. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+   submission, love and hate, ratings, playlists, and scrobbling.
+3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-5. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+4. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-6. **An optional fixed output rate with a band-limited resampler**, for
+5. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -256,8 +263,15 @@ Small defects that are not yet scheduled:
 - The scanner skips symbolic links to files without counting them.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a
   root writes `.orca-volume-id` at the mount point.
-- Removing a root leaves its recordings, and their love and hate, in the
-  Library.
+- Removing a root leaves its recordings, and their love and hate, ratings
+  and playlist entries, in the Library; rescanning the folder creates new
+  recordings, so those entries show as unavailable.
+- Opening and closing a Library's database, `-wal` or `-shm` file from
+  another part of the same process, as a GTK file dialog browsing the
+  database's folder may do, drops SQLite's POSIX locks on it. A second Orca
+  process can then check-point and delete the WAL under the first. Seen once
+  while testing playlist import; not reproduced in isolation.
+- Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
 - `orca-gtk` ignores a Library that fails to open, including one with a newer
   schema, and shows the welcome page.
 - A file whose fingerprint fails, and a Track without a title or artist that

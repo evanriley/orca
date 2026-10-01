@@ -34,6 +34,7 @@ const tags = @import("tags.zig");
 const art = @import("art.zig");
 const secret = @import("secret.zig");
 const watching = @import("watching.zig");
+const playlists = @import("playlists.zig");
 
 const stylesheet = @embedFile("style.css");
 
@@ -228,6 +229,42 @@ fn activateContextFetchCoverArt(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaqu
     menu.fetchCoverArt(@ptrCast(@alignCast(data.?)));
 }
 
+fn activateContextRate(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    menu.rate(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activateContextAddToPlaylist(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    menu.addToPlaylist(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activateContextAddToNewPlaylist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.addToNewPlaylist(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextPlaylistRemove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.removeFromPlaylist(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextPlaylistUp(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.movePlaylistEntry(@ptrCast(@alignCast(data.?)), .up);
+}
+
+fn activateContextPlaylistDown(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.movePlaylistEntry(@ptrCast(@alignCast(data.?)), .down);
+}
+
+fn activatePlaylistRename(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    playlists.askRename(@ptrCast(@alignCast(data.?)));
+}
+
+fn activatePlaylistExport(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    playlists.chooseExport(@ptrCast(@alignCast(data.?)));
+}
+
+fn activatePlaylistDelete(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    playlists.confirmDelete(@ptrCast(@alignCast(data.?)));
+}
+
 fn activatePreferences(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     preferences.present(@ptrCast(@alignCast(data.?)));
 }
@@ -323,6 +360,19 @@ fn addAction(
     const full = strings.printZ(&detailed, "app.{s}", .{std.mem.span(name)}) catch return;
     const accelerators: [2]?[*:0]const u8 = .{ key, null };
     gtk.gtk_application_set_accels_for_action(application, full.ptr, &accelerators);
+}
+
+/// An action that takes a 64-bit integer, as in `app.name(int64 7)`.
+fn addIntegerAction(
+    application: *gtk.Application,
+    name: [*:0]const u8,
+    handler: *const fn (?*anyopaque, ?*gtk.GVariant, ?*anyopaque) callconv(.c) void,
+    self: *App,
+) void {
+    const action = gtk.g_simple_action_new(name, gtk.variantType("x")).?;
+    _ = gtk.signalConnect(action, "activate", gtk.callback(handler), self);
+    gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, application), gtk.cast(gtk.GAction, action));
+    gtk.g_object_unref(action);
 }
 
 /// The library lives in the platform data directory unless `ORCA_LIBRARY` names
@@ -464,6 +514,15 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
     addAction(application, "ctx-match-album", activateContextMatchAlbum, null, &self);
     addAction(application, "ctx-fetch-cover-art", activateContextFetchCoverArt, null, &self);
+    addIntegerAction(application, "ctx-rate", activateContextRate, &self);
+    addIntegerAction(application, "ctx-add-to-playlist", activateContextAddToPlaylist, &self);
+    addAction(application, "ctx-add-to-new-playlist", activateContextAddToNewPlaylist, null, &self);
+    addAction(application, "ctx-playlist-remove", activateContextPlaylistRemove, null, &self);
+    addAction(application, "ctx-playlist-up", activateContextPlaylistUp, null, &self);
+    addAction(application, "ctx-playlist-down", activateContextPlaylistDown, null, &self);
+    addAction(application, "playlist-rename", activatePlaylistRename, null, &self);
+    addAction(application, "playlist-export", activatePlaylistExport, null, &self);
+    addAction(application, "playlist-delete", activatePlaylistDelete, null, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);

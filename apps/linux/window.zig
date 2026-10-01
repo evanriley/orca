@@ -20,6 +20,8 @@ const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
+const ratings = @import("ratings.zig");
+const playlists = @import("playlists.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -91,8 +93,16 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
 }
 
 fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const label = gtk.gtk_label_new(null);
     const column = columnOf(data);
+    if (column == .rating) {
+        const stars = ratings.newRowStars(gtk.callback(starClicked), null);
+        gtk.gtk_widget_set_halign(stars, gtk.ALIGN_START);
+        gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), stars);
+        gtk.g_object_set_data(stars, "orca-list-item", item);
+        menu.onSecondaryClick(stars, cellMenu, null);
+        return;
+    }
+    const label = gtk.gtk_label_new(null);
     gtk.gtk_label_set_xalign(
         gtk.cast(gtk.Label, label),
         if (column == .duration or column == .number) 1.0 else 0.0,
@@ -123,6 +133,15 @@ fn heartClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
     const row: *TrackObject = @ptrCast(@alignCast(object));
     feedback.toggle(self, .{ .track_id = row.id(), .recording_id = row.recordingId(), .feedback = row.feedback() });
+}
+
+fn starClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    const self = cells_app orelse return;
+    const stars = ratings.starsOf(button) orelse return;
+    const item = gtk.g_object_get_data(stars, "orca-list-item") orelse return;
+    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
+    const row: *TrackObject = @ptrCast(@alignCast(object));
+    ratings.change(self, &.{.{ .track_id = row.id(), .recording_id = row.recordingId(), .feedback = row.feedback() }}, ratings.chosen(button));
 }
 
 /// A right-click on a selected row acts on the whole selection, as it does in
@@ -167,23 +186,28 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     const row: *TrackObject = @ptrCast(@alignCast(object));
     const child = gtk.gtk_list_item_get_child(list_item) orelse return;
     const column = columnOf(data);
-    const label = gtk.cast(gtk.Label, if (column == .title)
-        gtk.gtk_widget_get_first_child(child) orelse return
-    else
-        child);
-    if (column == .title) {
-        const heart = gtk.gtk_widget_get_next_sibling(gtk.cast(gtk.Widget, label)) orelse return;
-        feedback.showRowButton(heart, row.feedback());
+    if (column == .rating) {
+        ratings.show(child, row.rating());
+    } else {
+        const label = gtk.cast(gtk.Label, if (column == .title)
+            gtk.gtk_widget_get_first_child(child) orelse return
+        else
+            child);
+        if (column == .title) {
+            const heart = gtk.gtk_widget_get_next_sibling(gtk.cast(gtk.Widget, label)) orelse return;
+            feedback.showRowButton(heart, row.feedback());
+        }
+        var buffer: [32]u8 = undefined;
+        const text: [:0]const u8 = switch (column) {
+            .number => row.numberText(&buffer),
+            .title => row.title(),
+            .artist => row.artist(),
+            .album => row.album(),
+            .duration => row.durationText(&buffer),
+            .rating => unreachable,
+        };
+        gtk.gtk_label_set_text(label, text.ptr);
     }
-    var buffer: [32]u8 = undefined;
-    const text: [:0]const u8 = switch (columnOf(data)) {
-        .number => row.numberText(&buffer),
-        .title => row.title(),
-        .artist => row.artist(),
-        .album => row.album(),
-        .duration => row.durationText(&buffer),
-    };
-    gtk.gtk_label_set_text(label, text.ptr);
     // A Track whose file is missing is shown, not hidden — the library still
     // knows about it — but it is visibly not playable.
     if (row.hasFile())
@@ -345,7 +369,8 @@ fn windowKeyPressed(
 
 const mouse_back_button: c_uint = 8;
 
-/// In sidebar order: `AdwSidebar` numbers items across sections.
+/// In sidebar order: `AdwSidebar` numbers items across sections. A playlist
+/// has no fixed place there; `sidebarIndex` finds it.
 pub const Page = enum(c_uint) {
     albums,
     artists,
@@ -354,6 +379,7 @@ pub const Page = enum(c_uint) {
     matches,
     now_playing,
     queue,
+    playlist,
 
     fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -364,6 +390,7 @@ pub const Page = enum(c_uint) {
             .matches => "matches",
             .now_playing => "now-playing",
             .queue => "queue",
+            .playlist => "playlist",
         };
     }
 
@@ -376,6 +403,7 @@ pub const Page = enum(c_uint) {
             .matches => "Matches",
             .now_playing => "Now Playing",
             .queue => "Queue",
+            .playlist => "Playlist",
         };
     }
 };
@@ -419,15 +447,51 @@ fn backPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque
     back(state(data));
 }
 
+/// The sidebar's "New Playlist" and "Import Playlist…" follow the fixed
+/// pages, and the playlists follow them.
+const new_playlist_index: c_uint = @intFromEnum(Page.playlist);
+const import_playlist_index: c_uint = new_playlist_index + 1;
+pub const first_playlist_index: c_uint = new_playlist_index + 2;
+
+fn sidebarIndex(self: *App, page: Page) c_uint {
+    if (page != .playlist) return @intFromEnum(page);
+    const position = playlists.sidebarPosition(self) orelse return gtk.INVALID_LIST_POSITION;
+    return first_playlist_index + position;
+}
+
+/// Puts the sidebar's highlight back on the page that is showing.
+pub fn syncSidebarSelection(self: *App) void {
+    const sidebar = self.sidebar orelse return;
+    const wanted = sidebarIndex(self, self.current_page);
+    if (adw.adw_sidebar_get_selected(sidebar) != wanted) adw.adw_sidebar_set_selected(sidebar, wanted);
+}
+
+/// The open playlist went away: leave its page and forget it was visited.
+pub fn closePlaylistPage(self: *App) void {
+    var kept: usize = 0;
+    for (self.page_history[0..self.page_history_len]) |page| {
+        if (page == .playlist) continue;
+        self.page_history[kept] = page;
+        kept += 1;
+    }
+    self.page_history_len = kept;
+    if (self.current_page != .playlist) return syncSidebarSelection(self);
+    const previous: Page = if (self.page_history_len != 0) blk: {
+        self.page_history_len -= 1;
+        break :blk self.page_history[self.page_history_len];
+    } else .albums;
+    switchTo(self, previous, false);
+}
+
 fn switchTo(self: *App, page: Page, remember_previous: bool) void {
     if (remember_previous and page != self.current_page) remember(self, self.current_page);
     self.current_page = page;
     if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
-    if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
-    if (self.sidebar) |sidebar| {
-        if (adw.adw_sidebar_get_selected(sidebar) != @intFromEnum(page))
-            adw.adw_sidebar_set_selected(sidebar, @intFromEnum(page));
-    }
+    if (self.content_page) |content| adw.adw_navigation_page_set_title(
+        content,
+        if (page == .playlist) playlists.openName(self) else page.title(),
+    );
+    syncSidebarSelection(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -451,15 +515,27 @@ pub fn showArtist(self: *App, artist_id: i64) void {
 }
 
 fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
-    if (index > @intFromEnum(Page.queue)) return;
+    const self = state(data);
+    if (index == new_playlist_index) {
+        syncSidebarSelection(self);
+        return playlists.askNew(self, &.{});
+    }
+    if (index == import_playlist_index) {
+        syncSidebarSelection(self);
+        return playlists.chooseImport(self);
+    }
+    if (index >= first_playlist_index) {
+        const id = playlists.idAt(self, index - first_playlist_index) orelse return;
+        return playlists.open(self, id);
+    }
     const page: Page = @enumFromInt(index);
-    if (page == .albums) if (state(data).albums_navigation) |navigation| {
+    if (page == .albums) if (self.albums_navigation) |navigation| {
         _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
     };
-    if (page == .artists) if (state(data).artists_navigation) |navigation| {
+    if (page == .artists) if (self.artists_navigation) |navigation| {
         _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
     };
-    showPage(state(data), @enumFromInt(index));
+    showPage(self, page);
 }
 
 fn sidebarItem(section: *adw.SidebarSection, title: [*:0]const u8, icon: [*:0]const u8) *adw.SidebarItem {
@@ -522,6 +598,11 @@ fn buildSidebar(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(count, "dim-label");
     adw.adw_sidebar_item_set_suffix(queue_item, count);
     adw.adw_sidebar_append(self.sidebar.?, playback);
+    const playlist_section = adw.adw_sidebar_section_new();
+    adw.adw_sidebar_section_set_title(playlist_section, "Playlists");
+    self.playlists.section = playlist_section;
+    playlists.fillSidebar(self);
+    adw.adw_sidebar_append(self.sidebar.?, playlist_section);
     _ = gtk.signalConnect(sidebar, "activated", gtk.callback(sidebarActivated), self);
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
@@ -575,6 +656,7 @@ fn buildTrackList(self: *App) *gtk.Widget {
     const columns: [Column.all.len]*gtk.ColumnViewColumn = .{
         makeColumn("#", .number, 64, false),
         makeColumn("Title", .title, 320, true),
+        makeColumn("Rating", .rating, 112, false),
         makeColumn("Artist", .artist, 220, true),
         makeColumn("Album", .album, 220, true),
         makeColumn("Length", .duration, 80, false),
@@ -739,6 +821,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, playlists.build(self), Page.playlist.name());
 
     const content = adw.adw_navigation_page_new(pages, Page.albums.title());
     self.content_page = content;

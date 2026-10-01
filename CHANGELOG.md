@@ -25,6 +25,12 @@
   `libraryExportPlaylist` writes absolute or relative paths atomically.
   `orca-cli playlist-import` and `playlist-export` run them, and the parser
   has a fuzz target.
+- **Playlists and ratings in `orca-gtk`.** Five stars on every song row, in
+  the details panel and in song menus, and a Rating column on the Tracks
+  page. A Playlists section in the sidebar with New Playlist and Import
+  Playlist…, a page per playlist with Play, Shuffle, Move Up, Move Down,
+  Remove, Rename, Export… and Delete, and Add to Playlist on song and album
+  menus.
 
 ### Changed
 

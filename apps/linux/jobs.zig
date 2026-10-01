@@ -19,6 +19,7 @@ const health = @import("health.zig");
 const matches = @import("matches.zig");
 const details = @import("details.zig");
 const tags = @import("tags.zig");
+const playlists = @import("playlists.zig");
 const art = @import("art.zig");
 
 const App = app.App;
@@ -66,6 +67,7 @@ pub fn reloadLibraryViews(self: *App) void {
     artists.reload(self);
     health.reload(self);
     matches.reload(self);
+    playlists.reloadPage(self, true);
 }
 
 pub fn build(self: *App) *gtk.Widget {

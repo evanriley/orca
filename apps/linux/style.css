@@ -350,6 +350,44 @@ row:selected button.row-heart {
   opacity: 1;
 }
 
+.rating-stars button.star {
+  min-width: 18px;
+  min-height: 24px;
+  padding: 0 1px;
+}
+
+.rating-stars button.star.filled {
+  color: var(--accent-color);
+}
+
+.row-stars {
+  opacity: 0.35;
+}
+
+.row-stars.rated,
+.row-stars:hover,
+.row-stars:focus-within,
+row:hover .row-stars,
+row:selected .row-stars,
+.playlist-row:hover .row-stars,
+.queue-row:hover .row-stars {
+  opacity: 1;
+}
+
+.playlist-actions {
+  padding: 12px 18px 6px 18px;
+}
+
+.playlist-list {
+  padding: 6px;
+  background-color: transparent;
+}
+
+.playlist-row {
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+
 row.recording-id label.subtitle {
   font-family: monospace;
 }

@@ -11,6 +11,8 @@ const art = @import("art.zig");
 const mpris = @import("mpris.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
+const track_model = @import("track_model.zig");
 
 const App = app.App;
 
@@ -19,6 +21,7 @@ const up_next_rows = 5;
 
 var up_next_targets: [up_next_rows]feedback.Target = undefined;
 var up_next_hearts: [up_next_rows]*gtk.Widget = undefined;
+var up_next_stars: [up_next_rows]*gtk.Widget = undefined;
 var up_next_shown: usize = 0;
 
 pub fn build(self: *App) *gtk.Widget {
@@ -106,12 +109,25 @@ fn upNextHeartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void 
     feedback.toggle(self, up_next_targets[marked - 1]);
 }
 
-pub fn repaintFeedback(changed: *const feedback.Recordings, value: liborca.Feedback) void {
-    for (up_next_targets[0..up_next_shown], up_next_hearts[0..up_next_shown]) |*target, heart| {
+fn upNextStarClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const stars = ratings.starsOf(button) orelse return;
+    const marked = @intFromPtr(gtk.g_object_get_data(stars, "orca-position"));
+    if (marked == 0 or marked > up_next_shown) return;
+    ratings.change(self, &.{up_next_targets[marked - 1]}, ratings.chosen(button));
+}
+
+pub fn repaint(changed: *const feedback.Recordings, change: track_model.Change) void {
+    for (up_next_targets[0..up_next_shown], up_next_hearts[0..up_next_shown], up_next_stars[0..up_next_shown]) |*target, heart, stars| {
         const recording = target.recording_id orelse continue;
         if (!changed.contains(recording)) continue;
-        target.feedback = value;
-        feedback.showRowButton(heart, value);
+        switch (change) {
+            .feedback => |value| {
+                target.feedback = value;
+                feedback.showRowButton(heart, value);
+            },
+            .rating => |value| ratings.show(stars, value),
+        }
     }
 }
 
@@ -198,15 +214,20 @@ pub fn refreshUpNext(self: *App) void {
                 const heart = feedback.newRowButton(gtk.callback(upNextHeartClicked), self);
                 feedback.showRowButton(heart, item.feedback);
                 gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(shown + 1));
+                const stars = ratings.newRowStars(gtk.callback(upNextStarClicked), self);
+                ratings.show(stars, item.rating);
+                gtk.g_object_set_data(stars, "orca-position", @ptrFromInt(shown + 1));
                 const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
                 gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
                 const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
                 gtk.gtk_box_append(gtk.cast(gtk.Box, row), label);
                 gtk.gtk_box_append(gtk.cast(gtk.Box, row), heart);
+                gtk.gtk_box_append(gtk.cast(gtk.Box, row), stars);
                 gtk.gtk_box_append(gtk.cast(gtk.Box, row), spacer);
                 gtk.gtk_list_box_append(list, row);
                 up_next_targets[shown] = .{ .track_id = item.id, .recording_id = item.recording_id, .feedback = item.feedback };
                 up_next_hearts[shown] = heart;
+                up_next_stars[shown] = stars;
                 shown += 1;
             }
         } else |_| {}

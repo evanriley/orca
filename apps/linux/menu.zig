@@ -14,11 +14,14 @@ const app = @import("app.zig");
 const transport = @import("transport.zig");
 const mpris = @import("mpris.zig");
 const feedback = @import("feedback.zig");
+const strings = @import("strings.zig");
 const jobs = @import("jobs.zig");
+const ratings = @import("ratings.zig");
+const playlists = @import("playlists.zig");
 
 const App = app.App;
 
-pub const Kind = enum { tracks, album, artist, queue };
+pub const Kind = enum { tracks, album, artist, queue, playlist };
 
 const FeedbackCounts = struct {
     none: u32 = 0,
@@ -33,6 +36,9 @@ pub const Context = struct {
     release_id: ?i64 = null,
     artist_id: ?i64 = null,
     queue_position: ?u32 = null,
+    playlist_id: ?i64 = null,
+    playlist_position: ?u32 = null,
+    playlist_length: u32 = 0,
 
     pub fn reset(self: *Context, kind: Kind) void {
         self.kind = kind;
@@ -41,6 +47,9 @@ pub const Context = struct {
         self.release_id = null;
         self.artist_id = null;
         self.queue_position = null;
+        self.playlist_id = null;
+        self.playlist_position = null;
+        self.playlist_length = 0;
     }
 
     pub fn addTrack(
@@ -61,7 +70,44 @@ pub const Context = struct {
     }
 };
 
-fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
+fn ratingMenu() *gtk.GMenu {
+    const stars = gtk.g_menu_new();
+    gtk.g_menu_append(stars, "1 Star", "app.ctx-rate(int64 1)");
+    gtk.g_menu_append(stars, "2 Stars", "app.ctx-rate(int64 2)");
+    gtk.g_menu_append(stars, "3 Stars", "app.ctx-rate(int64 3)");
+    gtk.g_menu_append(stars, "4 Stars", "app.ctx-rate(int64 4)");
+    gtk.g_menu_append(stars, "5 Stars", "app.ctx-rate(int64 5)");
+    const clear = gtk.g_menu_new();
+    gtk.g_menu_append(clear, "Clear Rating", "app.ctx-rate(int64 0)");
+    const rating = gtk.g_menu_new();
+    gtk.g_menu_append_section(rating, null, gtk.cast(gtk.GMenuModel, stars));
+    gtk.g_menu_append_section(rating, null, gtk.cast(gtk.GMenuModel, clear));
+    gtk.g_object_unref(stars);
+    gtk.g_object_unref(clear);
+    return rating;
+}
+
+fn playlistMenu(self: *App) *gtk.GMenu {
+    const create = gtk.g_menu_new();
+    gtk.g_menu_append(create, "New Playlist…", "app.ctx-add-to-new-playlist");
+    const existing = gtk.g_menu_new();
+    for (playlists.names(self), playlists.ids(self)) |name, id| {
+        var label_buffer: [512]u8 = undefined;
+        var action_buffer: [64]u8 = undefined;
+        const action = strings.printZ(&action_buffer, "app.ctx-add-to-playlist(int64 {d})", .{id}) catch continue;
+        gtk.g_menu_append(existing, playlists.menuLabel(&label_buffer, name).ptr, action.ptr);
+    }
+    const choices = gtk.g_menu_new();
+    gtk.g_menu_append_section(choices, null, gtk.cast(gtk.GMenuModel, create));
+    if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, existing)) != 0)
+        gtk.g_menu_append_section(choices, null, gtk.cast(gtk.GMenuModel, existing));
+    gtk.g_object_unref(create);
+    gtk.g_object_unref(existing);
+    return choices;
+}
+
+fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
+    const songs = context.tracks.items.len != 0;
     const playback = gtk.g_menu_new();
     switch (context.kind) {
         .tracks, .album, .artist => {
@@ -73,6 +119,11 @@ fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
             gtk.g_menu_append(playback, "Play", "app.ctx-play");
             gtk.g_menu_append(playback, "Remove from Queue", "app.ctx-remove");
         },
+        .playlist => if (songs) {
+            gtk.g_menu_append(playback, "Play", "app.ctx-play");
+            gtk.g_menu_append(playback, "Play Next", "app.ctx-play-next");
+            gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
+        },
     }
     const navigation = gtk.g_menu_new();
     if (context.kind != .album and context.release_id != null)
@@ -80,7 +131,16 @@ fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
     if (context.artist_id != null)
         gtk.g_menu_append(navigation, "Show Artist", "app.ctx-show-artist");
     const menu = gtk.g_menu_new();
-    gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
+    if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, playback)) != 0)
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
+    if (context.kind == .playlist) if (context.playlist_position) |position| {
+        const arranging = gtk.g_menu_new();
+        gtk.g_menu_append(arranging, "Remove from Playlist", "app.ctx-playlist-remove");
+        if (position > 0) gtk.g_menu_append(arranging, "Move Up", "app.ctx-playlist-up");
+        if (position + 1 < context.playlist_length) gtk.g_menu_append(arranging, "Move Down", "app.ctx-playlist-down");
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, arranging));
+        gtk.g_object_unref(arranging);
+    };
     const opinion = gtk.g_menu_new();
     defer gtk.g_object_unref(opinion);
     if (counts.none != 0) {
@@ -89,12 +149,29 @@ fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
     }
     if (counts.loved != 0) gtk.g_menu_append(opinion, "Remove Love", "app.ctx-remove-love");
     if (counts.hated != 0) gtk.g_menu_append(opinion, "Remove Dislike", "app.ctx-remove-dislike");
+    const rates_songs = switch (context.kind) {
+        .tracks, .queue, .playlist => true,
+        .album, .artist => false,
+    };
+    if (songs and rates_songs) {
+        const rating = ratingMenu();
+        gtk.g_menu_append_submenu(opinion, "Rating", gtk.cast(gtk.GMenuModel, rating));
+        gtk.g_object_unref(rating);
+    }
     if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, opinion)) != 0)
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, opinion));
-    if (context.kind != .artist) {
+    if (songs and context.kind != .artist) {
+        const collecting = gtk.g_menu_new();
+        const choices = playlistMenu(self);
+        gtk.g_menu_append_submenu(collecting, "Add to Playlist", gtk.cast(gtk.GMenuModel, choices));
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, collecting));
+        gtk.g_object_unref(choices);
+        gtk.g_object_unref(collecting);
+    }
+    if (context.kind != .artist and (songs or context.kind != .playlist)) {
         const editing = gtk.g_menu_new();
         gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
-        if (context.kind == .tracks or context.kind == .album)
+        if (context.kind == .tracks or context.kind == .album or context.kind == .playlist)
             gtk.g_menu_append(editing, "Write Tags to Files…", "app.ctx-write-tags");
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
         gtk.g_object_unref(editing);
@@ -139,7 +216,7 @@ fn closed(popover: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
 
 /// Pops up the menu for `self.context` at `x`, `y` in `widget`.
 pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
-    const menu = model(&self.context, countFeedback(&self.context));
+    const menu = model(self, &self.context, countFeedback(&self.context));
     defer gtk.g_object_unref(menu);
     const popover = gtk.gtk_popover_menu_new_from_model(gtk.cast(gtk.GMenuModel, menu));
     gtk.gtk_widget_set_parent(popover, widget);
@@ -206,6 +283,34 @@ pub fn removeDislike(self: *App) void {
     feedback.change(self, self.context.songs.items, .hated, .none);
 }
 
+pub fn rate(self: *App, stars: i64) void {
+    ratings.change(self, self.context.songs.items, ratings.menuRating(stars));
+}
+
+pub fn addToPlaylist(self: *App, playlist_id: i64) void {
+    playlists.addTracks(self, playlist_id, self.context.tracks.items);
+}
+
+pub fn addToNewPlaylist(self: *App) void {
+    if (self.context.tracks.items.len == 0) return;
+    playlists.askNew(self, self.context.tracks.items);
+}
+
+pub fn removeFromPlaylist(self: *App) void {
+    const playlist_id = self.context.playlist_id orelse return;
+    playlists.removeAt(self, playlist_id, self.context.playlist_position orelse return);
+}
+
+pub fn movePlaylistEntry(self: *App, direction: enum { up, down }) void {
+    const playlist_id = self.context.playlist_id orelse return;
+    const position = self.context.playlist_position orelse return;
+    const to = switch (direction) {
+        .up => if (position == 0) return else position - 1,
+        .down => if (position + 1 >= self.context.playlist_length) return else position + 1,
+    };
+    playlists.move(self, playlist_id, position, to);
+}
+
 pub fn matchAlbum(self: *App) void {
     jobs.startAlbumMatching(self, self.context.release_id orelse return);
 }
@@ -223,6 +328,8 @@ pub fn play(self: *App) void {
             self.mpris.notify();
             self.requestTick();
         },
+        .playlist => if (self.context.playlist_id == self.playlists.open_id)
+            playlists.playFrom(self, self.context.playlist_position orelse return),
         else => transport.playIds(self, self.context.tracks.items, 0),
     }
 }

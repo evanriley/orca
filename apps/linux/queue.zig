@@ -12,6 +12,7 @@ const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -46,11 +47,14 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     }
     const heart = feedback.newRowButton(gtk.callback(heartClicked), self);
     gtk.g_object_set_data(heart, "orca-list-item", item);
+    const stars = ratings.newRowStars(gtk.callback(starClicked), self);
+    gtk.g_object_set_data(stars, "orca-list-item", item);
     const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
     const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), heart);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), stars);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), spacer);
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
@@ -89,6 +93,15 @@ fn heartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
     const track: *TrackObject = @ptrCast(@alignCast(object));
     feedback.toggle(self, .{ .track_id = track.id(), .recording_id = track.recordingId(), .feedback = track.feedback() });
+}
+
+fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const stars = ratings.starsOf(button) orelse return;
+    const item = gtk.g_object_get_data(stars, "orca-list-item") orelse return;
+    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
+    const track: *TrackObject = @ptrCast(@alignCast(object));
+    ratings.change(self, &.{.{ .track_id = track.id(), .recording_id = track.recordingId(), .feedback = track.feedback() }}, ratings.chosen(button));
 }
 
 fn removeClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -135,6 +148,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     const artist = gtk.gtk_widget_get_next_sibling(title_row) orelse return;
     const title = gtk.gtk_widget_get_first_child(title_row) orelse return;
     const heart = gtk.gtk_widget_get_next_sibling(title) orelse return;
+    const stars = gtk.gtk_widget_get_next_sibling(heart) orelse return;
     const number = gtk.gtk_widget_get_first_child(marker) orelse return;
 
     const position = gtk.gtk_list_item_get_position(list_item);
@@ -151,6 +165,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
         gtk.gtk_widget_remove_css_class(row, "now-playing");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, title), track.title().ptr);
     feedback.showRowButton(heart, track.feedback());
+    ratings.show(stars, track.rating());
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, artist), track.artist().ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, duration), track.durationText(&buffer).ptr);
     art.show(self, cover, if (track.releaseId()) |release| art.Key.release(release, .thumb) else art.Key.track(track.id(), .thumb));
@@ -252,9 +267,9 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
     }
 }
 
-pub fn repaintFeedback(self: *App, changed: *const feedback.Recordings, value: liborca.Feedback) void {
+pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
     const store = self.queue_store orelse return;
-    _ = feedback.replaceRows(store, changed, value);
+    _ = feedback.replaceRows(store, changed, change);
 }
 
 /// Forces the next tick to rebuild the page, for when it becomes visible.

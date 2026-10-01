@@ -160,6 +160,7 @@ pub extern fn adw_header_bar_set_title_widget(bar: *HeaderBar, title_widget: ?*g
 
 pub extern fn adw_window_title_new(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget;
 pub extern fn adw_window_title_set_subtitle(title: *WindowTitle, subtitle: [*:0]const u8) void;
+pub extern fn adw_window_title_set_title(title: *WindowTitle, text: [*:0]const u8) void;
 
 pub extern fn adw_toast_new(title: [*:0]const u8) *Toast;
 pub extern fn adw_toast_set_timeout(toast: *Toast, seconds: c_uint) void;
@@ -186,6 +187,7 @@ pub extern fn adw_sidebar_set_mode(sidebar: *Sidebar, mode: c_int) void;
 pub extern fn adw_sidebar_section_new() *SidebarSection;
 pub extern fn adw_sidebar_section_set_title(section: *SidebarSection, title: ?[*:0]const u8) void;
 pub extern fn adw_sidebar_section_append(section: *SidebarSection, item: *SidebarItem) void;
+pub extern fn adw_sidebar_section_remove_all(section: *SidebarSection) void;
 pub extern fn adw_sidebar_item_new(title: [*:0]const u8) *SidebarItem;
 pub extern fn adw_sidebar_item_set_icon_name(item: *SidebarItem, icon_name: ?[*:0]const u8) void;
 pub extern fn adw_sidebar_item_set_suffix(item: *SidebarItem, suffix: ?*gtk.Widget) void;

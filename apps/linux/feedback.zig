@@ -13,6 +13,7 @@ const albums = @import("albums.zig");
 const details = @import("details.zig");
 const queue = @import("queue.zig");
 const nowplaying = @import("nowplaying.zig");
+const playlists = @import("playlists.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -155,17 +156,23 @@ fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void
         self.shown_feedback = value;
     };
     showPlaying(self);
-    repaintRows(self, changed, value);
-    albums.repaintFeedback(self, changed, value);
-    queue.repaintFeedback(self, changed, value);
-    nowplaying.repaintFeedback(changed, value);
+    repaintLists(self, changed, .{ .feedback = value });
+}
+
+/// Shows `change` on every listed song whose recording is in `changed`.
+pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
+    repaintRows(self, changed, change_value);
+    albums.repaint(self, changed, change_value);
+    queue.repaint(self, changed, change_value);
+    nowplaying.repaint(changed, change_value);
+    playlists.repaint(self, changed, change_value);
     details.invalidate(self);
 }
 
 /// Replaces, in place, each row of `store` whose recording changed, with a copy
 /// that carries the new value: a list view rebinds the widget of an item it is
 /// given anew, and nothing else about the list moves.
-pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, value: liborca.Feedback) bool {
+pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, change_value: track_model.Change) bool {
     const model = gtk.cast(gtk.ListModel, store);
     const count = gtk.g_list_model_get_n_items(model);
     var replaced = false;
@@ -175,9 +182,11 @@ pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, value: lib
         defer gtk.g_object_unref(item);
         const row: *TrackObject = @ptrCast(@alignCast(item));
         const recording = row.recordingId() orelse continue;
-        if (!changed.contains(recording) or row.feedback() == value) continue;
+        if (!changed.contains(recording)) continue;
+        var probe = row.fields().*;
+        if (!change_value.apply(&probe)) continue;
         const copy = track_model.clone(row) orelse continue;
-        copy.fields().feedback = value;
+        _ = change_value.apply(copy.fields());
         var replacement: [1]?*anyopaque = .{copy};
         gtk.g_list_store_splice(store, index, 1, &replacement, 1);
         gtk.g_object_unref(copy);
@@ -186,14 +195,14 @@ pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, value: lib
     return replaced;
 }
 
-fn repaintRows(self: *App, changed: *const Recordings, value: liborca.Feedback) void {
+fn repaintRows(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
     const store = self.tracks orelse return;
     const selection = self.selection orelse return;
     const live = gtk.gtk_selection_model_get_selection(selection);
     defer gtk.gtk_bitset_unref(live);
     const selected = gtk.gtk_bitset_copy(live);
     defer gtk.gtk_bitset_unref(selected);
-    if (!replaceRows(store, changed, value)) return;
+    if (!replaceRows(store, changed, change_value)) return;
     const everything = gtk.gtk_bitset_new_range(0, gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)));
     defer gtk.gtk_bitset_unref(everything);
     _ = gtk.gtk_selection_model_set_selection(selection, selected, everything);

@@ -31,6 +31,8 @@ pub const Fields = struct {
     disc_number: ?i64 = null,
     has_file: bool = false,
     feedback: liborca.Feedback = .none,
+    rating: ?u8 = null,
+    in_library: bool = true,
     recording_id: ?i64 = null,
     release_id: ?i64 = null,
     artist_id: ?i64 = null,
@@ -71,6 +73,15 @@ pub const TrackObject = extern struct {
 
     pub fn feedback(self: *TrackObject) liborca.Feedback {
         return self.fields().feedback;
+    }
+
+    pub fn rating(self: *TrackObject) ?u8 {
+        return self.fields().rating;
+    }
+
+    /// False for a playlist entry whose recording has no Track left.
+    pub fn inLibrary(self: *TrackObject) bool {
+        return self.fields().in_library;
     }
 
     pub fn recordingId(self: *TrackObject) ?i64 {
@@ -171,6 +182,7 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     values.disc_number = summary.disc_number;
     values.has_file = summary.has_playable_file;
     values.feedback = summary.feedback;
+    values.rating = summary.rating;
     values.recording_id = summary.recording_id;
     values.release_id = summary.release_id;
     values.artist_id = summary.artist_id;
@@ -180,6 +192,37 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     values.album = dupe(summary.album);
     return self;
 }
+
+/// A playlist entry whose recording has no Track: listed, never played.
+pub fn unavailable(recording_id: i64) ?*TrackObject {
+    const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
+    const self: *TrackObject = @ptrCast(object);
+    self.fields().in_library = false;
+    self.fields().recording_id = recording_id;
+    self.fields().title = dupe("Not in your library");
+    return self;
+}
+
+/// What changed about a recording, applied to every row that shows it.
+pub const Change = union(enum) {
+    feedback: liborca.Feedback,
+    rating: ?u8,
+
+    /// Sets the value on `fields`; false when it already had it.
+    pub fn apply(self: Change, fields: *Fields) bool {
+        switch (self) {
+            .feedback => |value| {
+                if (fields.feedback == value) return false;
+                fields.feedback = value;
+            },
+            .rating => |value| {
+                if (std.meta.eql(fields.rating, value)) return false;
+                fields.rating = value;
+            },
+        }
+        return true;
+    }
+};
 
 /// A second object with the same fields. A list view reuses the widget of an
 /// item it already shows, so swapping in a copy is how a row is made to bind
@@ -206,18 +249,20 @@ pub const Column = enum(usize) {
     // — is not an available value.
     number = 1,
     title,
+    rating,
     artist,
     album,
     duration,
 
     /// Declaration order, which is also the order the headers appear in and the
     /// order `App.sort_columns` records them in.
-    pub const all = [_]Column{ .number, .title, .artist, .album, .duration };
+    pub const all = [_]Column{ .number, .title, .rating, .artist, .album, .duration };
 
     pub fn sortKey(self: Column) liborca.TrackSort {
         return switch (self) {
             .number => .track_number,
             .title => .title,
+            .rating => .rating,
             .artist => .artist,
             .album => .album,
             .duration => .duration,

@@ -18,6 +18,7 @@ const track_model = @import("track_model.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
 const details = @import("details.zig");
+const playlists = @import("playlists.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
@@ -232,6 +233,7 @@ pub const App = struct {
     art: art.Cache = .{},
     /// What the open right-click menu acts on.
     context: menu.Context = .{},
+    playlists: playlists.State = .{},
 
     health_list: ?*gtk.ListBox = null,
     health_note: ?*gtk.Label = null,
@@ -575,6 +577,7 @@ pub const App = struct {
         self.device_names.deinit(self.allocator);
         self.art.deinit(self.allocator);
         self.context.deinit(self.allocator);
+        self.playlists.deinit(self.allocator);
         self.artist_list_filter.clear(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);

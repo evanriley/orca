@@ -13,6 +13,7 @@ const transport = @import("transport.zig");
 const details = @import("details.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
+const ratings = @import("ratings.zig");
 const artists = @import("artists.zig");
 
 const App = app.App;
@@ -315,15 +316,24 @@ fn markRows(page: *AlbumPage, track_id: ?i64) void {
     }
 }
 
-pub fn repaintFeedback(self: *App, changed: *const feedback.Recordings, value: liborca.Feedback) void {
+pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
     for (self.open_album_pages[0..self.open_album_page_count]) |page| {
         for (page.songs, page.rows) |*song, maybe_row| {
             const recording = song.recording_id orelse continue;
             if (!changed.contains(recording)) continue;
-            song.feedback = value;
-            const row = maybe_row orelse continue;
-            const heart = gtk.g_object_get_data(row, "orca-heart") orelse continue;
-            feedback.showRowButton(gtk.cast(gtk.Widget, heart), value);
+            switch (change) {
+                .feedback => |value| {
+                    song.feedback = value;
+                    const row = maybe_row orelse continue;
+                    const heart = gtk.g_object_get_data(row, "orca-heart") orelse continue;
+                    feedback.showRowButton(gtk.cast(gtk.Widget, heart), value);
+                },
+                .rating => |value| {
+                    const row = maybe_row orelse continue;
+                    const stars = gtk.g_object_get_data(row, "orca-stars") orelse continue;
+                    ratings.show(gtk.cast(gtk.Widget, stars), value);
+                },
+            }
         }
     }
 }
@@ -398,6 +408,14 @@ fn heartClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     feedback.toggle(page.self, page.songs[marked - 1]);
 }
 
+fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    const stars = ratings.starsOf(button) orelse return;
+    const marked = @intFromPtr(gtk.g_object_get_data(stars, "orca-position"));
+    if (marked == 0 or marked > page.songs.len) return;
+    ratings.change(page.self, &.{page.songs[marked - 1]}, ratings.chosen(button));
+}
+
 fn trackRow(page: *AlbumPage, summary: liborca.TrackSummary, album_artist: []const u8, position: usize) ?*gtk.Widget {
     const row = gtk.gtk_list_box_row_new();
     gtk.gtk_widget_add_css_class(row, "album-track-row");
@@ -430,11 +448,16 @@ fn trackRow(page: *AlbumPage, summary: liborca.TrackSummary, album_artist: []con
     feedback.showRowButton(heart, summary.feedback);
     gtk.g_object_set_data(heart, "orca-position", @ptrFromInt(position + 1));
     gtk.g_object_set_data(row, "orca-heart", heart);
+    const stars = ratings.newRowStars(gtk.callback(starClicked), page);
+    ratings.show(stars, summary.rating);
+    gtk.g_object_set_data(stars, "orca-position", @ptrFromInt(position + 1));
+    gtk.g_object_set_data(row, "orca-stars", stars);
     const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
     const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), heart);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), stars);
     gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), spacer);
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
     if (summary.artist.len != 0 and !std.mem.eql(u8, summary.artist, album_artist)) {
