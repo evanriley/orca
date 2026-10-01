@@ -74,6 +74,7 @@ pub const LibraryDatabase = struct {
     ratings: repository.RatingRepository,
     playlists: repository.PlaylistRepository,
     identification_proposals: repository.IdentificationProposalRepository,
+    recording_verifications: repository.RecordingVerificationRepository,
     acoustid_submissions: repository.AcoustIdSubmissionRepository,
 
     /// Open a Library, recovering any interrupted file mutation before the
@@ -162,6 +163,7 @@ pub const LibraryDatabase = struct {
             .ratings = .{ .db = database, .write_lane = write_lane },
             .playlists = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
+            .recording_verifications = .{ .db = database, .write_lane = write_lane },
             .acoustid_submissions = .{ .db = database, .write_lane = write_lane },
         };
     }
@@ -2289,17 +2291,17 @@ test "matching selects a Track until each provider in scope has answered for its
     const matched = try addFeedbackTrack(&library, "Matched", try addRecording(&library), null);
     _ = try proposals.acceptProposal(std.testing.allocator, try putProposal(&library, try playFileOf(&library, matched), match_mbid, 0.9, match_payload));
 
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, false, null));
-    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, true, null));
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, true, 2));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, false, null));
-    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, false, null));
-    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, true, null));
-    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, false, 0, 2);
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 3), try proposals.unidentifiedCount(.library, .unidentified, true, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, true, 2));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = two_files }, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = musicbrainz_answered }, .unidentified, true, null));
+    const only = try proposals.unidentifiedPage(std.testing.allocator, .{ .track = two_files }, .unidentified, false, 0, 2);
     defer only.deinit();
     try std.testing.expectEqual(@as(usize, 1), only.items.len);
     try std.testing.expectEqual(two_files, only.items[0].track_id);
-    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, true, 0, 2);
+    const first = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, true, 0, 2);
     defer first.deinit();
     try std.testing.expectEqual(@as(usize, 2), first.items.len);
     try std.testing.expectEqual(untagged, first.items[0].track_id);
@@ -2308,7 +2310,7 @@ test "matching selects a Track until each provider in scope has answered for its
     try std.testing.expectEqual(@as(?[]u8, null), first.items[0].path);
     try std.testing.expectEqual(two_files, first.items[1].track_id);
     try std.testing.expectEqual(try playFileOf(&library, two_files), first.items[1].file_id);
-    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, true, first.items[1].track_id, 2);
+    const rest = try proposals.unidentifiedPage(std.testing.allocator, .library, .unidentified, true, first.items[1].track_id, 2);
     defer rest.deinit();
     try std.testing.expectEqual(@as(usize, 1), rest.items.len);
     try std.testing.expectEqual(musicbrainz_answered, rest.items[0].track_id);
@@ -2318,7 +2320,29 @@ test "matching selects a Track until each provider in scope has answered for its
         .title = "Untagged",
         .musicbrainz_recording_id = rival_mbid,
     } });
-    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, true, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .unidentified, true, null));
+}
+
+test "re-identify selects every Track in scope with a play file, with the recording id in effect, whatever was answered" {
+    var library = try openFeedbackLibrary("reidentify");
+    defer library.close();
+    const proposals = &library.identification_proposals;
+    const tagged = try addFeedbackTrack(&library, "Tagged", try addRecording(&library), feedback_mbid);
+    const both_answered = try addFeedbackTrack(&library, "Both Answered", try addRecording(&library), null);
+    _ = try proposals.recordSearch(std.testing.allocator, try playFileOf(&library, both_answered), .{ .musicbrainz = true, .acoustid = true }, &.{});
+
+    try std.testing.expectEqual(@as(u64, 0), try proposals.unidentifiedCount(.{ .track = tagged }, .unidentified, true, null));
+    try std.testing.expectEqual(@as(u64, 2), try proposals.unidentifiedCount(.library, .every, true, null));
+    try std.testing.expectEqual(@as(u64, 1), try proposals.unidentifiedCount(.{ .track = tagged }, .every, false, null));
+    const page = try proposals.unidentifiedPage(std.testing.allocator, .library, .every, false, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(tagged, page.items[0].track_id);
+    try std.testing.expectEqualStrings(feedback_mbid, page.items[0].recording_mbid.?);
+    try std.testing.expect(page.items[0].needs_musicbrainz and !page.items[0].needs_acoustid);
+    try std.testing.expectEqual(both_answered, page.items[1].track_id);
+    try std.testing.expectEqual(@as(?[]u8, null), page.items[1].recording_mbid);
+    try std.testing.expect(page.items[1].needs_musicbrainz);
 }
 
 fn proposalScalar(library: *LibraryDatabase, comptime column: []const u8, proposal_id: i64) !i64 {
@@ -2499,6 +2523,8 @@ test "a recording id and the matching selection are looked up by key, never by s
         try queryPlan(&library, repository.review_page_sql),
         try queryPlan(&library, repository.review_count_sql),
         try queryPlan(&library, repository.unidentified_release_page_sql),
+        try queryPlan(&library, repository.reidentify_page_sql),
+        try queryPlan(&library, repository.reidentify_release_page_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -2509,6 +2535,26 @@ test "a recording id and the matching selection are looked up by key, never by s
     }
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN tracks") == null);
     try std.testing.expect(std.mem.indexOf(u8, plans[8], "SCAN tracks") == null);
+}
+
+test "verification selects its files by Release, Track and key, never by scanning metadata, files or verifications" {
+    var library = try openFeedbackLibrary("verify-plans");
+    defer library.close();
+    const plans = [_][]u8{
+        try queryPlan(&library, repository.verifiable_release_page_sql),
+        try queryPlan(&library, repository.verifiable_loose_page_sql),
+        try queryPlan(&library, repository.verifiable_track_page_sql),
+        try queryPlan(&library, repository.verifiable_releases_sql),
+        try queryPlan(&library, repository.verifiable_count_sql),
+    };
+    defer for (plans) |plan| std.testing.allocator.free(plan);
+    for (plans) |plan| {
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN orca_metadata_values") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN observed_file_tags") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN recording_verifications") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+    }
+    for (plans[0..4]) |plan| try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN tracks") == null);
 }
 
 test "a change is offered only once it has stood for two seconds, and the count includes it before" {

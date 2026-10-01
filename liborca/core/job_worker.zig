@@ -158,6 +158,7 @@ pub const MatchingSetup = struct {
     identity: OwnedIdentity,
     hooks: MatchingHooks,
     scope: database.MatchScope,
+    mode: library_pass.matching.Mode = .search,
     /// Null when the job looks nothing up on AcoustID.
     acoustid: ?AcoustIdSetup,
     cover_art_server: []const u8,
@@ -417,6 +418,17 @@ pub const MatchStats = struct {
     insufficient_evidence: u64 = 0,
     refused: u64 = 0,
     proposals_stored: u64 = 0,
+    /// Tracks a re-identify found again as the recording they are
+    /// identified as.
+    confirmed: u64 = 0,
+    /// A verification's files with an outcome stored, and those outcomes.
+    verified: u64 = 0,
+    agreed: u64 = 0,
+    disagreed: u64 = 0,
+    unconfirmed: u64 = 0,
+    /// Files a verification passed over for having no quick hash.
+    skipped: u64 = 0,
+    correction_groups: u64 = 0,
     requests: u64 = 0,
     cache_hits: u64 = 0,
     fingerprinted: u64 = 0,
@@ -440,6 +452,13 @@ const LiveMatchStats = struct {
     insufficient_evidence: std.atomic.Value(u64) = .init(0),
     refused: std.atomic.Value(u64) = .init(0),
     proposals_stored: std.atomic.Value(u64) = .init(0),
+    confirmed: std.atomic.Value(u64) = .init(0),
+    verified: std.atomic.Value(u64) = .init(0),
+    agreed: std.atomic.Value(u64) = .init(0),
+    disagreed: std.atomic.Value(u64) = .init(0),
+    unconfirmed: std.atomic.Value(u64) = .init(0),
+    skipped: std.atomic.Value(u64) = .init(0),
+    correction_groups: std.atomic.Value(u64) = .init(0),
     requests: std.atomic.Value(u64) = .init(0),
     cache_hits: std.atomic.Value(u64) = .init(0),
     fingerprinted: std.atomic.Value(u64) = .init(0),
@@ -465,6 +484,13 @@ const LiveMatchStats = struct {
             .insufficient_evidence = self.insufficient_evidence.load(.acquire),
             .refused = self.refused.load(.acquire),
             .proposals_stored = self.proposals_stored.load(.acquire),
+            .confirmed = self.confirmed.load(.acquire),
+            .verified = self.verified.load(.acquire) + progress.verified.load(.acquire),
+            .agreed = self.agreed.load(.acquire),
+            .disagreed = self.disagreed.load(.acquire),
+            .unconfirmed = self.unconfirmed.load(.acquire),
+            .skipped = self.skipped.load(.acquire),
+            .correction_groups = self.correction_groups.load(.acquire),
             .requests = self.requests.load(.acquire),
             .cache_hits = self.cache_hits.load(.acquire),
             .fingerprinted = self.fingerprinted.load(.acquire) + progress.fingerprinted.load(.acquire),
@@ -731,6 +757,7 @@ pub const JobWorker = struct {
             .shared_state = providers.shared_state.store(&self.database.provider_state),
         };
         if (request.lookups and !self.runLookups(request, services)) return;
+        if (setup.mode == .verify) return;
         const release_id = switch (setup.scope) {
             .release => |id| id,
             .library, .track => return,
@@ -885,6 +912,7 @@ pub const JobWorker = struct {
         var pass: library_pass.LibraryMatching = .{
             .allocator = self.allocator,
             .proposals = &self.database.identification_proposals,
+            .verifications = &self.database.recording_verifications,
             .musicbrainz = &musicbrainz,
             .acoustid = if (acoustid) |*service| service else null,
             .acoustid_use = stats.acoustid.load(.acquire),
@@ -900,6 +928,7 @@ pub const JobWorker = struct {
             .batch_size = request.batch_size,
             .limit = request.limit,
             .scope = setup.scope,
+            .mode = setup.mode,
         };
         const result = pass.run() catch {
             self.failed.store(true, .release);
@@ -908,12 +937,20 @@ pub const JobWorker = struct {
         stats.progress.tracks_seen.store(0, .release);
         stats.progress.matched.store(0, .release);
         stats.progress.fingerprinted.store(0, .release);
+        stats.progress.verified.store(0, .release);
         _ = stats.tracks_examined.fetchAdd(result.tracks_seen, .acq_rel);
         _ = stats.matched.fetchAdd(result.matched, .acq_rel);
         _ = stats.unmatched.fetchAdd(result.unmatched, .acq_rel);
         _ = stats.insufficient_evidence.fetchAdd(result.insufficient, .acq_rel);
         _ = stats.refused.fetchAdd(result.refused, .acq_rel);
         _ = stats.proposals_stored.fetchAdd(result.proposals_stored, .acq_rel);
+        _ = stats.confirmed.fetchAdd(result.confirmed, .acq_rel);
+        _ = stats.verified.fetchAdd(result.verified, .acq_rel);
+        _ = stats.agreed.fetchAdd(result.agreed, .acq_rel);
+        _ = stats.disagreed.fetchAdd(result.disagreed, .acq_rel);
+        _ = stats.unconfirmed.fetchAdd(result.unconfirmed, .acq_rel);
+        _ = stats.skipped.fetchAdd(result.skipped, .acq_rel);
+        _ = stats.correction_groups.fetchAdd(result.correction_groups, .acq_rel);
         _ = stats.requests.fetchAdd(result.requests_answered, .acq_rel);
         _ = stats.cache_hits.fetchAdd(result.cache_hits, .acq_rel);
         _ = stats.fingerprinted.fetchAdd(result.fingerprinted, .acq_rel);
@@ -925,8 +962,9 @@ pub const JobWorker = struct {
         stats.acoustid.store(result.acoustid, .release);
         stats.busy.store(result.busy, .release);
         if (result.cancelled) stats.cancelled.store(true, .release);
-        if (result.unavailable or result.busy != .none) self.failed.store(true, .release);
-        return !result.cancelled and !result.unavailable and result.busy == .none;
+        const without_acoustid = setup.mode == .verify and result.acoustid != .searched;
+        if (result.unavailable or result.busy != .none or without_acoustid) self.failed.store(true, .release);
+        return !result.cancelled and !result.unavailable and result.busy == .none and !without_acoustid;
     }
 
     fn runSubmission(self: *JobWorker, setup: SubmissionSetup) void {

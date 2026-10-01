@@ -12,6 +12,7 @@ const track_play_file = @import("tracks.zig").track_play_file;
 const track_file_ids_sql = @import("tracks.zig").track_file_ids_sql;
 const file_track_ids_sql = @import("tracks.zig").file_track_ids_sql;
 const WriteLane = @import("write_lane.zig").WriteLane;
+const recording_verifications = @import("recording_verifications.zig");
 
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
@@ -54,6 +55,7 @@ pub const ProposalPayload = struct {
     musicbrainz_confidence: ?f32 = null,
     acoustid_confidence: ?f32 = null,
     release_mbids: ?[]const []const u8 = null,
+    release_facts: ?[]const ReleaseFact = null,
     /// What the release `release_mbid` names says, filled in by a release
     /// lookup. `track_number` and `disc_number` are then positions on it.
     track_title: ?[]const u8 = null,
@@ -147,6 +149,13 @@ pub const ProposalPayload = struct {
         }
         return 1 - doubt;
     }
+};
+
+pub const ReleaseFact = struct {
+    mbid: []const u8,
+    status: ?[]const u8 = null,
+    date: ?[]const u8 = null,
+    track_count: ?u32 = null,
 };
 
 pub const ReleaseEnrichment = struct {
@@ -337,6 +346,7 @@ pub fn mergeProposalPayload(
         merged.track_number = found.track_number;
         merged.release_mbid = found.release_mbid;
         merged.release_mbids = found.release_mbids;
+        merged.release_facts = found.release_facts;
         merged.duration_ms = found.duration_ms;
         merged.mb_score = found.mb_score;
         if (found.isEnriched()) {
@@ -381,6 +391,9 @@ pub const MatchProposal = struct {
     release_group_mbid: ?[]const u8,
     release_track_mbid: ?[]const u8,
     disc_number: ?u32,
+    /// The file's recording ID in effect that accepting would replace; null
+    /// when the proposal is not a correction.
+    corrects: ?[]const u8,
 };
 
 pub const MatchProposalPage = struct {
@@ -394,7 +407,7 @@ pub const MatchProposalPage = struct {
     }
 };
 
-const AcceptanceReview = enum { reviewed, bulk };
+const AcceptanceReview = enum { reviewed, bulk, group };
 
 pub const ProposalAcceptance = struct {
     file_id: i64,
@@ -428,9 +441,62 @@ pub const ReleaseProposalList = struct {
     arena: *std.heap.ArenaAllocator,
     /// The Release's tagged MusicBrainz release ID, or empty.
     tag: []const u8,
+    track_count: u32 = 0,
     items: []ReleaseProposal,
 
     pub fn deinit(self: ReleaseProposalList) void {
+        const child = self.arena.child_allocator;
+        self.arena.deinit();
+        child.destroy(self.arena);
+    }
+};
+
+/// One file of a verification unit: its verification and the proposals it
+/// makes, of which `grouped` indexes the one joining the unit's album group.
+pub const VerifiedFile = struct {
+    verification: recording_verifications.Verification,
+    evidence: []const ProposalEvidence = &.{},
+    grouped: ?usize = null,
+};
+
+pub const VerificationRecord = struct {
+    /// Proposals stored pending.
+    pending: u32 = 0,
+    /// The album group formed, when one of its proposals is pending.
+    group: ?i64 = null,
+};
+
+/// A pending proposal of an album group beside its file's Track as it is.
+pub const CorrectionGroupMember = struct {
+    proposal_id: i64,
+    /// The lowest-numbered Track that plays the file, or null when none does.
+    track_id: ?i64,
+    file_id: i64,
+    title: []const u8,
+    track_number: ?i64,
+    disc_number: ?i64,
+    proposed_title: []const u8,
+    proposed_track_number: ?u32,
+    proposed_disc_number: ?u32,
+    recording_mbid: []const u8,
+    corrects: ?[]const u8,
+};
+
+/// Corrections that are accepted or dismissed together, all or none.
+pub const CorrectionGroup = struct {
+    group_id: i64,
+    /// The Release of the first member's Track.
+    release_id: ?i64,
+    album: []const u8,
+    album_artist: []const u8,
+    proposals: []CorrectionGroupMember,
+};
+
+pub const CorrectionGroupPage = struct {
+    arena: *std.heap.ArenaAllocator,
+    items: []CorrectionGroup,
+
+    pub fn deinit(self: CorrectionGroupPage) void {
         const child = self.arena.child_allocator;
         self.arena.deinit();
         child.destroy(self.arena);
@@ -441,19 +507,30 @@ pub const various_artists_mbid = "89ad4ac3-39f7-470e-963a-56509c546377";
 
 pub const max_value_bytes = 4096;
 
-/// Stores unlocked `provider` values. A value equal to the stored one is
-/// left as it is, so it keeps its `written_at` and is not counted.
+/// How `ProviderValueWriter` stores a value.
+const ValueWrite = enum {
+    /// Unlocked, never over a locked value.
+    match,
+    /// Locked, over an unlocked or locked `provider` value; the recording ID
+    /// over any value.
+    correction,
+};
+
+/// Stores `provider` values. A value equal to the stored one is left as it
+/// is, so it keeps its `written_at` and is not counted.
 const ProviderValueWriter = struct {
     db: sqlite.Database,
     statement: sqlite.Statement,
     allocator: std.mem.Allocator,
     written: ?*std.ArrayList(i64),
+    write: ValueWrite,
     values_written: u32 = 0,
 
-    fn init(db: sqlite.Database, allocator: std.mem.Allocator, written: ?*std.ArrayList(i64)) !ProviderValueWriter {
+    fn init(db: sqlite.Database, allocator: std.mem.Allocator, written: ?*std.ArrayList(i64), write: ValueWrite) !ProviderValueWriter {
         return .{
             .db = db,
-            .statement = try db.prepare(
+            .statement = try db.prepare(switch (write) {
+                .match =>
                 \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
                 \\VALUES (?1, ?2, ?3, ?4, 0, unixepoch())
                 \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
@@ -463,9 +540,23 @@ const ProviderValueWriter = struct {
                 \\WHERE orca_metadata_values.locked=0
                 \\  AND (orca_metadata_values.value IS NOT excluded.value
                 \\       OR orca_metadata_values.provenance IS NOT excluded.provenance);
-            ),
+                ,
+                .correction =>
+                \\INSERT INTO orca_metadata_values(file_id, field, value, provenance, locked, updated_at)
+                \\VALUES (?1, ?2, ?3, ?4, 1, unixepoch())
+                \\ON CONFLICT(file_id, field) DO UPDATE SET value=excluded.value,
+                \\    provenance=excluded.provenance, locked=1, updated_at=excluded.updated_at,
+                \\    written_at=CASE WHEN orca_metadata_values.value=excluded.value
+                \\        THEN orca_metadata_values.written_at END
+                \\WHERE (?5 OR orca_metadata_values.locked=0 OR orca_metadata_values.provenance=excluded.provenance)
+                \\  AND (orca_metadata_values.value IS NOT excluded.value
+                \\       OR orca_metadata_values.provenance IS NOT excluded.provenance
+                \\       OR orca_metadata_values.locked=0);
+                ,
+            }),
             .allocator = allocator,
             .written = written,
+            .write = write,
         };
     }
 
@@ -480,6 +571,7 @@ const ProviderValueWriter = struct {
         try self.statement.bindInt64(2, @intFromEnum(field));
         try self.statement.bindText(3, clean);
         try self.statement.bindInt64(4, @intFromEnum(metadata.Provenance.provider));
+        if (self.write == .correction) try self.statement.bindInt64(5, @intFromBool(field == .musicbrainz_recording_id));
         if (try self.statement.step() != .done) return error.SqlFailed;
         const changed = self.db.changes() != 0;
         try self.statement.reset();
@@ -516,6 +608,13 @@ fn cleanValue(value: []const u8) ?[]const u8 {
     return value[0..end];
 }
 
+/// The recording ID in effect when a proposal for `recording_mbid` would
+/// replace it, which makes the proposal a correction.
+fn correctedId(in_effect: ?[]const u8, recording_mbid: []const u8) ?[]const u8 {
+    const current = in_effect orelse return null;
+    return if (std.ascii.eqlIgnoreCase(current, recording_mbid)) null else current;
+}
+
 fn appendUnique(list: *std.ArrayList(i64), allocator: std.mem.Allocator, id: i64) !void {
     if (std.mem.indexOfScalar(i64, list.items, id) == null) try list.append(allocator, id);
 }
@@ -533,13 +632,26 @@ pub const MatchCandidate = struct {
     needs_acoustid: bool,
     /// The track number the file's own tag states.
     tagged_track_number: ?u32 = null,
+    /// The file's recording id in effect; selected only by `.every`.
+    recording_mbid: ?[]u8 = null,
 
     fn deinit(self: MatchCandidate, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
         allocator.free(self.artist);
         allocator.free(self.album);
         if (self.path) |value| allocator.free(value);
+        if (self.recording_mbid) |value| allocator.free(value);
     }
+};
+
+/// Which Tracks in scope a matching pass searches.
+pub const MatchSelection = enum {
+    /// Those with no recording id in effect that some provider in scope has
+    /// not answered for.
+    unidentified,
+    /// Every one with a play file, whatever it is identified as or was
+    /// answered with.
+    every,
 };
 
 pub const MatchCandidatePage = struct {
@@ -573,12 +685,18 @@ pub const MatchScope = union(enum) {
         };
     }
 
-    fn pageSql(self: MatchScope) [:0]const u8 {
-        return if (self == .release) unidentified_release_page_sql else unidentified_page_sql;
+    fn pageSql(self: MatchScope, selection: MatchSelection) [:0]const u8 {
+        return switch (selection) {
+            .unidentified => if (self == .release) unidentified_release_page_sql else unidentified_page_sql,
+            .every => if (self == .release) reidentify_release_page_sql else reidentify_page_sql,
+        };
     }
 
-    fn countSql(self: MatchScope) [:0]const u8 {
-        return if (self == .release) unidentified_release_count_sql else unidentified_count_sql;
+    fn countSql(self: MatchScope, selection: MatchSelection) [:0]const u8 {
+        return switch (selection) {
+            .unidentified => if (self == .release) unidentified_release_count_sql else unidentified_count_sql,
+            .every => if (self == .release) reidentify_release_count_sql else reidentify_count_sql,
+        };
     }
 
     fn bindRelease(self: MatchScope, statement: sqlite.Statement) !void {
@@ -709,10 +827,12 @@ pub const IdentificationProposalRepository = struct {
 
     /// Stores the recording ID on the proposal's file and the title and
     /// artist on every file of its Track, and adds the Track's Release to
-    /// `touched`. A reviewed accept then applies the Release's consensus; a
-    /// bulk one leaves that to its caller, once per Release. Nothing is
-    /// written before the proposal has been read and its payload parsed, so
-    /// a refusal leaves the open transaction as it found it.
+    /// `touched`. A correction stores them locked, and a group's member also
+    /// its track and disc numbers and release-track ID. A reviewed accept
+    /// then applies the Release's consensus; a bulk or group one leaves that
+    /// to its caller, once per Release. Nothing is written before the
+    /// proposal has been read and its payload parsed, so a refusal leaves the
+    /// open transaction as it found it.
     fn acceptLocked(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -725,10 +845,12 @@ pub const IdentificationProposalRepository = struct {
         defer arena.deinit();
         const scratch = arena.allocator();
         const acceptable = try self.readAcceptable(scratch, proposal_id);
+        if (acceptable.album_group != null and review != .group) return error.ProposalInGroup;
         const file_id = acceptable.file_id;
         const payload = acceptable.payload;
 
-        var writer = try ProviderValueWriter.init(self.db, allocator, written);
+        const correction = review == .group or acceptable.corrects != null;
+        var writer = try ProviderValueWriter.init(self.db, allocator, written, if (correction) .correction else .match);
         defer writer.deinit();
         try writer.text(file_id, .musicbrainz_recording_id, acceptable.recording_mbid);
         const track_ids = try self.idsFor(scratch, file_track_ids_sql, file_id);
@@ -736,6 +858,10 @@ pub const IdentificationProposalRepository = struct {
         for (track_files) |track_file| {
             try writer.text(track_file, .title, payload.track_title orelse payload.title);
             try writer.text(track_file, .artist, payload.track_artist orelse payload.artist);
+            if (review != .group) continue;
+            try writer.number(track_file, .track_number, payload.track_number);
+            try writer.number(track_file, .disc_number, payload.disc_number);
+            try writer.text(track_file, .musicbrainz_release_track_id, payload.release_track_mbid);
         }
         const first_touched = touched.items.len;
         try self.appendReleasesOf(allocator, track_ids, touched);
@@ -770,10 +896,10 @@ pub const IdentificationProposalRepository = struct {
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         proposal_id: i64,
-    ) !struct { file_id: i64, recording_mbid: []u8, payload: ProposalPayload } {
-        var select = try self.db.prepare(
-            "SELECT file_id, provider_id, payload, state FROM identification_proposals WHERE id=?1;",
-        );
+    ) !struct { file_id: i64, recording_mbid: []u8, payload: ProposalPayload, album_group: ?i64, corrects: ?[]const u8 } {
+        var select = try self.db.prepare(comptime "SELECT file_id, provider_id, payload, state, album_group,\n" ++
+            "       " ++ effectiveRecordingMbid("identification_proposals.file_id") ++ "\n" ++
+            "FROM identification_proposals WHERE id=?1;");
         defer select.deinit();
         try select.bindInt64(1, proposal_id);
         if (try select.step() != .row) return error.UnknownIdentificationProposal;
@@ -781,7 +907,14 @@ pub const IdentificationProposalRepository = struct {
         const recording_mbid = try allocator.dupe(u8, select.columnText(1));
         if (!metadata.isMusicBrainzId(recording_mbid)) return error.InvalidProposalPayload;
         const payload = try ProposalPayload.parse(allocator, select.columnBlob(2));
-        return .{ .file_id = select.columnInt64(0), .recording_mbid = recording_mbid, .payload = payload.value };
+        const in_effect = try duplicateNullableColumn(allocator, select, 5);
+        return .{
+            .file_id = select.columnInt64(0),
+            .recording_mbid = recording_mbid,
+            .payload = payload.value,
+            .album_group = optionalInt64(select, 4),
+            .corrects = correctedId(in_effect, recording_mbid),
+        };
     }
 
     fn idsFor(self: *const IdentificationProposalRepository, allocator: std.mem.Allocator, sql: [:0]const u8, id: i64) ![]i64 {
@@ -881,7 +1014,7 @@ pub const IdentificationProposalRepository = struct {
             if (everywhere) break candidate;
         } else return 0;
 
-        var writer = try ProviderValueWriter.init(self.db, allocator, written);
+        var writer = try ProviderValueWriter.init(self.db, allocator, written, .match);
         defer writer.deinit();
         for (release_tracks.items) |release_track| {
             const accepted = try self.acceptedEnriched(scratch, release_track.play_file);
@@ -967,6 +1100,7 @@ pub const IdentificationProposalRepository = struct {
             try statement.bindInt64(2, max_page + 1);
             if (try statement.step() != .row) return error.SqlFailed;
             if (statement.columnInt64(0) > max_page) return list;
+            list.track_count = @intCast(statement.columnInt64(0));
         }
         var statement = try self.db.prepare(
             "SELECT proposal.id, proposal.file_id, proposal.provider_id, proposal.payload,\n" ++
@@ -994,11 +1128,13 @@ pub const IdentificationProposalRepository = struct {
         return list;
     }
 
+    /// A proposal in an album group is dismissed only with its group.
     pub fn dismiss(self: *IdentificationProposalRepository, proposal_id: i64) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
         var update = try self.db.prepare(
-            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch() WHERE id=?1 AND state=?3;",
+            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch()\n" ++
+                "WHERE id=?1 AND state=?3 AND album_group IS NULL;",
         );
         defer update.deinit();
         try update.bindInt64(1, proposal_id);
@@ -1006,10 +1142,143 @@ pub const IdentificationProposalRepository = struct {
         try update.bindInt64(3, @intFromEnum(ProposalState.pending));
         if (try update.step() != .done) return error.SqlFailed;
         if (self.db.changes() == 1) return;
-        var exists = try self.db.prepare("SELECT 1 FROM identification_proposals WHERE id=?1;");
+        var exists = try self.db.prepare("SELECT state, album_group FROM identification_proposals WHERE id=?1;");
         defer exists.deinit();
         try exists.bindInt64(1, proposal_id);
-        return if (try exists.step() == .row) error.StaleIdentificationProposal else error.UnknownIdentificationProposal;
+        if (try exists.step() != .row) return error.UnknownIdentificationProposal;
+        if (exists.columnInt64(0) == @intFromEnum(ProposalState.pending) and !exists.columnIsNull(1)) return error.ProposalInGroup;
+        return error.StaleIdentificationProposal;
+    }
+
+    /// Album groups with a pending proposal, by group id, each with its
+    /// pending proposals by Track position.
+    pub fn correctionGroups(
+        self: *const IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !CorrectionGroupPage {
+        if (limit == 0 or limit > max_page) return error.PageOutOfRange;
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = .init(allocator);
+        const page: CorrectionGroupPage = .{ .arena = arena, .items = &.{} };
+        errdefer page.deinit();
+        const owned = arena.allocator();
+
+        var groups = try self.db.prepare(correction_groups_sql);
+        defer groups.deinit();
+        try groups.bindInt64(1, limit);
+        try groups.bindInt64(2, offset);
+        try groups.bindInt64(3, @intFromEnum(ProposalState.pending));
+        var members = try self.db.prepare(correction_members_sql);
+        defer members.deinit();
+        var items: std.ArrayList(CorrectionGroup) = .empty;
+        while (try groups.step() == .row) {
+            const group_id = groups.columnInt64(0);
+            try members.bindInt64(1, group_id);
+            try members.bindInt64(2, @intFromEnum(ProposalState.pending));
+            try members.bindInt64(3, max_page);
+            var group: CorrectionGroup = .{ .group_id = group_id, .release_id = null, .album = "", .album_artist = "", .proposals = &.{} };
+            var proposals: std.ArrayList(CorrectionGroupMember) = .empty;
+            while (try members.step() == .row) {
+                const payload = ProposalPayload.parse(owned, members.columnBlob(3)) catch |err| switch (err) {
+                    error.InvalidProposalPayload => null,
+                    error.OutOfMemory => return err,
+                };
+                const said: ProposalPayload = if (payload) |parsed| parsed.value else .{};
+                const recording_mbid = try owned.dupe(u8, members.columnText(2));
+                if (proposals.items.len == 0) {
+                    group.release_id = optionalInt64(members, 9);
+                    group.album = try owned.dupe(u8, members.columnText(10));
+                    group.album_artist = try owned.dupe(u8, members.columnText(11));
+                }
+                try proposals.append(owned, .{
+                    .proposal_id = members.columnInt64(0),
+                    .file_id = members.columnInt64(1),
+                    .recording_mbid = recording_mbid,
+                    .corrects = correctedId(try duplicateNullableColumn(owned, members, 4), recording_mbid),
+                    .track_id = optionalInt64(members, 5),
+                    .title = try owned.dupe(u8, members.columnText(6)),
+                    .track_number = optionalInt64(members, 7),
+                    .disc_number = optionalInt64(members, 8),
+                    .proposed_title = said.track_title orelse said.title,
+                    .proposed_track_number = said.track_number,
+                    .proposed_disc_number = said.disc_number,
+                });
+            }
+            try members.reset();
+            group.proposals = proposals.items;
+            try items.append(owned, group);
+        }
+        return .{ .arena = arena, .items = items.items };
+    }
+
+    /// Accepts every pending proposal of the group as a correction, in one
+    /// transaction, and applies the consensus of each Release they touch.
+    pub fn acceptCorrectionGroup(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        group_id: i64,
+    ) !ConfidentAcceptance {
+        var files: std.ArrayList(i64) = .empty;
+        errdefer files.deinit(allocator);
+        var touched: std.ArrayList(i64) = .empty;
+        defer touched.deinit(allocator);
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var members: [max_page]i64 = undefined;
+        const accepted = try self.groupMembersLocked(group_id, &members);
+        var values_written: u64 = 0;
+        for (accepted) |proposal_id| {
+            const acceptance = try self.acceptLocked(allocator, proposal_id, .group, &files, &touched);
+            values_written += acceptance.values_written;
+        }
+        for (touched.items) |release_id| values_written += try self.applyReleaseConsensusLocked(allocator, release_id, &files);
+        try self.db.exec("COMMIT;");
+        return .{
+            .allocator = allocator,
+            .accepted = accepted.len,
+            .values_written = values_written,
+            .file_ids = try files.toOwnedSlice(allocator),
+        };
+    }
+
+    pub fn dismissCorrectionGroup(self: *IdentificationProposalRepository, group_id: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        var update = try self.db.prepare(
+            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch() WHERE album_group=?1 AND state=?3;",
+        );
+        defer update.deinit();
+        try update.bindInt64(1, group_id);
+        try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+        try update.bindInt64(3, @intFromEnum(ProposalState.pending));
+        if (try update.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 0) return;
+        return if (try self.groupExists(group_id)) error.StaleCorrectionGroup else error.UnknownCorrectionGroup;
+    }
+
+    fn groupMembersLocked(self: *const IdentificationProposalRepository, group_id: i64, buffer: *[max_page]i64) ![]i64 {
+        var statement = try self.db.prepare(
+            "SELECT id FROM identification_proposals WHERE album_group=?1 AND state=?2 ORDER BY id LIMIT ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, group_id);
+        try statement.bindInt64(2, @intFromEnum(ProposalState.pending));
+        try statement.bindInt64(3, buffer.len);
+        var count: usize = 0;
+        while (try statement.step() == .row) : (count += 1) buffer[count] = statement.columnInt64(0);
+        if (count != 0) return buffer[0..count];
+        return if (try self.groupExists(group_id)) error.StaleCorrectionGroup else error.UnknownCorrectionGroup;
+    }
+
+    fn groupExists(self: *const IdentificationProposalRepository, group_id: i64) !bool {
+        var statement = try self.db.prepare("SELECT 1 FROM identification_proposals WHERE album_group=?1 LIMIT 1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, group_id);
+        return try statement.step() == .row;
     }
 
     pub fn acceptConfident(
@@ -1056,7 +1325,7 @@ pub const IdentificationProposalRepository = struct {
             touched.clearRetainingCapacity();
             for (selection.chosen) |proposal_id| {
                 const acceptance = self.acceptLocked(allocator, proposal_id, .bulk, &files, &touched) catch |err| switch (err) {
-                    error.InvalidProposalPayload, error.StaleIdentificationProposal => continue,
+                    error.InvalidProposalPayload, error.StaleIdentificationProposal, error.ProposalInGroup => continue,
                     else => return err,
                 };
                 accepted += 1;
@@ -1179,12 +1448,12 @@ pub const IdentificationProposalRepository = struct {
         limit: u32,
     ) !MatchProposalPage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        var statement = try self.db.prepare(
-            "SELECT id, provider, provider_id, confidence, payload FROM identification_proposals\n" ++
-                "WHERE file_id = (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1)\n" ++
-                "  AND state = ?3\n" ++
-                "ORDER BY confidence DESC, id LIMIT ?2;",
-        );
+        var statement = try self.db.prepare(comptime "SELECT id, provider, provider_id, confidence, payload,\n" ++
+            "       " ++ effectiveRecordingMbid("identification_proposals.file_id") ++ "\n" ++
+            "FROM identification_proposals\n" ++
+            "WHERE file_id = (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1)\n" ++
+            "  AND state = ?3\n" ++
+            "ORDER BY confidence DESC, id LIMIT ?2;");
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
         try statement.bindInt64(2, limit);
@@ -1200,8 +1469,8 @@ pub const IdentificationProposalRepository = struct {
         return .{ .arena = arena, .items = items.items };
     }
 
-    /// Tracks whose play file has a pending proposal, by artist, album and
-    /// position, each with its best proposal.
+    /// Tracks whose play file has a pending proposal outside an album group,
+    /// by artist, album and position, each with its best such proposal.
     pub fn reviewPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
@@ -1265,7 +1534,7 @@ pub const IdentificationProposalRepository = struct {
         errdefer self.db.exec("ROLLBACK;") catch {};
         var pending_count: u32 = 0;
         for (evidence) |*item| {
-            if (try self.mergeLocked(allocator, file_id, item) == .pending) pending_count += 1;
+            if (try self.mergeLocked(allocator, file_id, item, null) == .pending) pending_count += 1;
         }
         inline for (.{ IdentificationProvider.musicbrainz, IdentificationProvider.acoustid }) |provider| {
             if (@field(answered, @tagName(provider))) try self.markSearchedLocked(file_id, provider);
@@ -1274,11 +1543,15 @@ pub const IdentificationProposalRepository = struct {
         return pending_count;
     }
 
+    /// Inserts or updates the file's proposal for the evidence's recording,
+    /// in `album_group` or in none. A proposal joining a group takes the
+    /// release values the group was formed on.
     fn mergeLocked(
         self: *IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         file_id: i64,
         evidence: *const ProposalEvidence,
+        album_group: ?i64,
     ) !ProposalState {
         var select = try self.db.prepare(
             \\SELECT id, provider, confidence, payload, state FROM identification_proposals
@@ -1292,8 +1565,8 @@ pub const IdentificationProposalRepository = struct {
             defer allocator.free(payload);
             var insert = try self.db.prepare(
                 \\INSERT INTO identification_proposals(
-                \\    file_id, provider, provider_id, confidence, payload, state, updated_at)
-                \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch());
+                \\    file_id, provider, provider_id, confidence, payload, state, updated_at, album_group)
+                \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch(), ?7);
             );
             defer insert.deinit();
             try insert.bindInt64(1, file_id);
@@ -1302,6 +1575,7 @@ pub const IdentificationProposalRepository = struct {
             try insert.bindDouble(4, evidence.payload.combinedConfidence());
             try insert.bindBlob(5, payload);
             try insert.bindInt64(6, @intFromEnum(ProposalState.pending));
+            try insert.bindOptionalInt64(7, album_group);
             if (try insert.step() != .done) return error.SqlFailed;
             return .pending;
         }
@@ -1315,26 +1589,87 @@ pub const IdentificationProposalRepository = struct {
             error.OutOfMemory => return err,
         };
         defer if (parsed) |value| value.deinit();
-        const merged = mergeProposalPayload(
+        var merged = mergeProposalPayload(
             if (parsed) |value| value.value else .{},
             existing_providers,
             existing_confidence,
             evidence.*,
         );
+        if (album_group != null) {
+            merged.release_mbid = evidence.payload.release_mbid;
+            merged.track_number = evidence.payload.track_number;
+            merged.copyEnrichment(evidence.payload);
+        }
         const payload = try merged.encode(allocator);
         defer allocator.free(payload);
         const providers = existing_providers.with(evidence.found_by);
         var update = try self.db.prepare(
             \\UPDATE identification_proposals
-            \\SET provider=?2, confidence=?3, payload=?4, updated_at=unixepoch() WHERE id=?1;
+            \\SET provider=?2, confidence=?3, payload=?4, updated_at=unixepoch(), album_group=?5 WHERE id=?1;
         );
         defer update.deinit();
         try update.bindInt64(1, proposal_id);
         try update.bindText(2, providers.text());
         try update.bindDouble(3, merged.combinedConfidence());
         try update.bindBlob(4, payload);
+        try update.bindOptionalInt64(5, album_group);
         if (try update.step() != .done) return error.SqlFailed;
         return state;
+    }
+
+    /// Stores one verification unit in one transaction: each file's
+    /// verification and the proposals it makes. The proposals a file had in
+    /// an album group leave it; those marked `grouped` form one new group.
+    pub fn recordVerifications(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        files: []const VerifiedFile,
+    ) !VerificationRecord {
+        var grouping = false;
+        for (files) |file| {
+            for (file.evidence) |item| {
+                if (!metadata.isMusicBrainzId(item.recording_mbid) or item.found_by.isEmpty())
+                    return error.InvalidIdentificationProposal;
+            }
+            if (file.grouped) |index| {
+                if (index >= file.evidence.len) return error.InvalidIdentificationProposal;
+                grouping = true;
+            }
+        }
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const group: ?i64 = if (grouping) try self.nextAlbumGroupLocked() else null;
+        var ungroup = try self.db.prepare(
+            "UPDATE identification_proposals SET album_group = NULL WHERE file_id = ?1 AND album_group IS NOT NULL;",
+        );
+        defer ungroup.deinit();
+        var record: VerificationRecord = .{};
+        for (files) |file| {
+            const file_id = file.verification.file_id;
+            try recording_verifications.putLocked(self.db, file.verification);
+            try ungroup.bindInt64(1, file_id);
+            if (try ungroup.step() != .done) return error.SqlFailed;
+            try ungroup.reset();
+            for (file.evidence, 0..) |*item, index| {
+                const in_group = file.grouped == index;
+                if (try self.mergeLocked(allocator, file_id, item, if (in_group) group else null) != .pending) continue;
+                record.pending += 1;
+                if (in_group) record.group = group;
+            }
+        }
+        try self.db.exec("COMMIT;");
+        return record;
+    }
+
+    fn nextAlbumGroupLocked(self: *const IdentificationProposalRepository) !i64 {
+        var statement = try self.db.prepare(
+            "SELECT max(album_group) FROM identification_proposals WHERE album_group IS NOT NULL;",
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return (optionalInt64(statement, 0) orelse 0) + 1;
     }
 
     fn markSearchedLocked(self: *IdentificationProposalRepository, file_id: i64, provider: IdentificationProvider) !void {
@@ -1349,19 +1684,19 @@ pub const IdentificationProposalRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
-    /// Tracks a matching job still has to search: those some provider in
-    /// scope has not answered for. MusicBrainz is always in scope; AcoustID
-    /// only when `acoustid` is set.
+    /// Tracks a matching job has to search, as `selection` picks them.
+    /// MusicBrainz is always in scope; AcoustID only when `acoustid` is set.
     pub fn unidentifiedPage(
         self: *const IdentificationProposalRepository,
         allocator: std.mem.Allocator,
         scope: MatchScope,
+        selection: MatchSelection,
         acoustid: bool,
         cursor: i64,
         limit: u32,
     ) !MatchCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        var statement = try self.db.prepare(scope.pageSql());
+        var statement = try self.db.prepare(scope.pageSql(selection));
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(cursor));
         try statement.bindInt64(2, limit);
@@ -1382,6 +1717,11 @@ pub const IdentificationProposalRepository = struct {
             errdefer allocator.free(album);
             const path = try duplicateNullableColumn(allocator, statement, 6);
             errdefer if (path) |value| allocator.free(value);
+            const recording_mbid = switch (selection) {
+                .unidentified => null,
+                .every => try duplicateNullableColumn(allocator, statement, 10),
+            };
+            errdefer if (recording_mbid) |value| allocator.free(value);
             try items.append(allocator, .{
                 .track_id = statement.columnInt64(0),
                 .file_id = statement.columnInt64(1),
@@ -1393,6 +1733,7 @@ pub const IdentificationProposalRepository = struct {
                 .needs_musicbrainz = statement.columnInt64(7) != 0,
                 .needs_acoustid = statement.columnInt64(8) != 0,
                 .tagged_track_number = if (optionalInt64(statement, 9)) |number| std.math.cast(u32, number) else null,
+                .recording_mbid = recording_mbid,
             });
         }
         return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
@@ -1401,10 +1742,11 @@ pub const IdentificationProposalRepository = struct {
     pub fn unidentifiedCount(
         self: *const IdentificationProposalRepository,
         scope: MatchScope,
+        selection: MatchSelection,
         acoustid: bool,
         limit: ?u32,
     ) !u64 {
-        var statement = try self.db.prepare(scope.countSql());
+        var statement = try self.db.prepare(scope.countSql(selection));
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(0));
         try statement.bindInt64(2, if (limit) |bound| bound else -1);
@@ -1416,18 +1758,20 @@ pub const IdentificationProposalRepository = struct {
     }
 };
 
-/// Reads `id, provider, provider_id, confidence, payload` starting at `first`.
-/// A payload that does not parse leaves the provider's fields empty.
+/// Reads `id, provider, provider_id, confidence, payload` and the file's
+/// recording ID in effect starting at `first`. A payload that does not parse
+/// leaves the provider's fields empty.
 fn readMatchProposal(owned: std.mem.Allocator, statement: sqlite.Statement, first: c_int) !MatchProposal {
     const payload = ProposalPayload.parse(owned, statement.columnBlob(first + 4)) catch |err| switch (err) {
         error.InvalidProposalPayload => null,
         error.OutOfMemory => return err,
     };
     const said: ProposalPayload = if (payload) |parsed| parsed.value else .{};
+    const recording_mbid = try owned.dupe(u8, statement.columnText(first + 2));
     return .{
         .id = statement.columnInt64(first),
         .provider = try owned.dupe(u8, statement.columnText(first + 1)),
-        .recording_mbid = try owned.dupe(u8, statement.columnText(first + 2)),
+        .recording_mbid = recording_mbid,
         .confidence = @floatCast(statement.columnDouble(first + 3)),
         .title = said.title,
         .artist = said.artist,
@@ -1445,14 +1789,18 @@ fn readMatchProposal(owned: std.mem.Allocator, statement: sqlite.Statement, firs
         .release_group_mbid = said.release_group_mbid,
         .release_track_mbid = said.release_track_mbid,
         .disc_number = said.disc_number,
+        .corrects = correctedId(try duplicateNullableColumn(owned, statement, first + 5), recording_mbid),
     };
 }
 
-/// Files after id ?2 with a pending proposal (state ?4) at least ?1, by id,
-/// and with `in_release` only the play files of Release ?5's Tracks.
+/// Files after id ?2 with no recording ID in effect and a pending proposal
+/// (state ?4) at least ?1, by id, and with `in_release` only the play files
+/// of Release ?5's Tracks. A file with a recording ID in effect would take
+/// only a correction, which is never accepted in bulk.
 fn confidentFilesSql(comptime in_release: bool) [:0]const u8 {
     return "SELECT DISTINCT file_id FROM identification_proposals\n" ++
         "WHERE state = ?4 AND confidence >= ?1 AND file_id > ?2\n" ++
+        "  AND " ++ effectiveRecordingMbid("identification_proposals.file_id") ++ " IS NULL\n" ++
         (if (in_release)
             "  AND file_id IN (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id = ?5)\n"
         else
@@ -1463,20 +1811,43 @@ fn confidentFilesSql(comptime in_release: bool) [:0]const u8 {
 const confident_files_sql = confidentFilesSql(false);
 const confident_release_files_sql = confidentFilesSql(true);
 
-/// The best pending proposal (state ?3) for the Track in scope as `tracks`, in
-/// the order `pendingForTrack` lists them.
+/// The best pending proposal (state ?3) outside an album group for the Track
+/// in scope as `tracks`, in the order `pendingForTrack` lists them.
 const best_pending_proposal =
     "(SELECT id FROM identification_proposals\n" ++
-    "    WHERE file_id = " ++ track_play_file ++ " AND state = ?3\n" ++
+    "    WHERE file_id = " ++ track_play_file ++ " AND state = ?3 AND album_group IS NULL\n" ++
     "    ORDER BY confidence DESC, id LIMIT 1)";
 
 pub const review_page_sql =
     "SELECT tracks.id, tracks.title, tracks.artist, tracks.album, tracks.duration_ms,\n" ++
     "       (SELECT count(*) FROM identification_proposals AS pending\n" ++
-    "        WHERE pending.file_id = best.file_id AND pending.state = ?3),\n" ++
-    "       best.id, best.provider, best.provider_id, best.confidence, best.payload\n" ++
+    "        WHERE pending.file_id = best.file_id AND pending.state = ?3 AND pending.album_group IS NULL),\n" ++
+    "       best.id, best.provider, best.provider_id, best.confidence, best.payload,\n" ++
+    "       " ++ effectiveRecordingMbid("best.file_id") ++ "\n" ++
     "FROM tracks JOIN identification_proposals AS best ON best.id = " ++ best_pending_proposal ++ "\n" ++
     "ORDER BY " ++ orderTerms(.artist, .ascending) ++ "\nLIMIT ?1 OFFSET ?2;";
+
+/// Album groups with a pending proposal (state ?3), by id.
+const correction_groups_sql =
+    "SELECT DISTINCT album_group FROM identification_proposals\n" ++
+    "WHERE album_group IS NOT NULL AND state = ?3\n" ++
+    "ORDER BY album_group LIMIT ?1 OFFSET ?2;";
+
+/// The pending proposals (state ?2) of album group ?1, each beside the
+/// lowest-numbered Track that plays its file.
+const correction_members_sql =
+    "SELECT proposal.id, proposal.file_id, proposal.provider_id, proposal.payload,\n" ++
+    "       " ++ effectiveRecordingMbid("proposal.file_id") ++ ",\n" ++
+    "       track.id, track.title, track.track_number, track.disc_number, track.release_id,\n" ++
+    "       coalesce(releases.title, track.album), coalesce(releases.album_artist, track.album_artist)\n" ++
+    "FROM identification_proposals AS proposal\n" ++
+    "LEFT JOIN tracks AS track ON track.id = (SELECT min(id) FROM (\n" ++
+    "    SELECT tracks.id FROM tracks WHERE tracks.preferred_file_id = proposal.file_id\n" ++
+    "    UNION ALL SELECT tracks.id FROM tracks JOIN files ON files.recording_id = tracks.recording_id\n" ++
+    "    WHERE files.id = proposal.file_id))\n" ++
+    "LEFT JOIN releases ON releases.id = track.release_id\n" ++
+    "WHERE proposal.album_group = ?1 AND proposal.state = ?2\n" ++
+    "ORDER BY track.disc_number, track.track_number, proposal.id LIMIT ?3;";
 
 pub const review_count_sql =
     "SELECT count(*) FROM tracks WHERE " ++ best_pending_proposal ++ " IS NOT NULL;";
@@ -1492,38 +1863,53 @@ const needs_musicbrainz = "NOT " ++ searched(.musicbrainz);
 const needs_acoustid = "(?3 AND NOT " ++ searched(.acoustid) ++ ")";
 
 /// Tracks with ids in (?1, ?4], and with `in_release` of Release ?5 only,
-/// whose play file has no recording id and has not been answered for by
-/// MusicBrainz, or by AcoustID when ?3 is set. The matching job's page and
-/// its count share it so they agree.
-fn unidentifiedTracks(comptime in_release: bool) []const u8 {
+/// that have a play file. With `.unidentified`, only those whose play file
+/// has no recording id and has not been answered for by MusicBrainz, or by
+/// AcoustID when ?3 is set. The matching job's page and its count share it so
+/// they agree.
+fn unidentifiedTracks(comptime in_release: bool, comptime selection: MatchSelection) []const u8 {
     return "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
         "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
         "    FROM tracks WHERE " ++ (if (in_release) "tracks.release_id = ?5 AND " else "") ++
         "tracks.id > ?1 AND tracks.id <= ?4) AS track\n" ++
-        "WHERE track.file_id IS NOT NULL\n" ++
-        "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
-        "  AND (" ++ needs_musicbrainz ++ " OR " ++ needs_acoustid ++ ")";
+        "WHERE track.file_id IS NOT NULL" ++ switch (selection) {
+        .unidentified => "\n" ++
+            "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
+            "  AND (" ++ needs_musicbrainz ++ " OR " ++ needs_acoustid ++ ")",
+        .every => "",
+    };
 }
 
-fn unidentifiedPageSql(comptime in_release: bool) [:0]const u8 {
+fn unidentifiedPageSql(comptime in_release: bool, comptime selection: MatchSelection) [:0]const u8 {
     return "SELECT track.id, track.file_id, track.title, track.artist, track.album, track.duration_ms,\n" ++
         "       (SELECT locations.uri FROM locations\n" ++
         "        WHERE locations.file_id = track.file_id AND locations.state = 'present'\n" ++
         "        ORDER BY locations.id LIMIT 1),\n" ++
-        "       " ++ needs_musicbrainz ++ ", " ++ needs_acoustid ++ ",\n" ++
-        "       (SELECT track_number FROM observed_file_tags WHERE observed_file_tags.file_id = track.file_id)\n" ++
-        "FROM " ++ unidentifiedTracks(in_release) ++ "\nORDER BY track.id LIMIT ?2;";
+        switch (selection) {
+            .unidentified => "       " ++ needs_musicbrainz ++ ", " ++ needs_acoustid ++ ",\n",
+            .every => "       1, ?3,\n",
+        } ++
+        "       (SELECT track_number FROM observed_file_tags WHERE observed_file_tags.file_id = track.file_id)" ++
+        switch (selection) {
+            .unidentified => "\n",
+            .every => ",\n       " ++ effectiveRecordingMbid("track.file_id") ++ "\n",
+        } ++
+        "FROM " ++ unidentifiedTracks(in_release, selection) ++ "\nORDER BY track.id LIMIT ?2;";
 }
 
-fn unidentifiedCountSql(comptime in_release: bool) [:0]const u8 {
-    return "SELECT count(*) FROM (SELECT 1 FROM " ++ unidentifiedTracks(in_release) ++ " LIMIT ?2);";
+fn unidentifiedCountSql(comptime in_release: bool, comptime selection: MatchSelection) [:0]const u8 {
+    return "SELECT count(*) FROM (SELECT 1 FROM " ++ unidentifiedTracks(in_release, selection) ++ " LIMIT ?2);";
 }
 
-pub const unidentified_tracks = unidentifiedTracks(false);
-pub const unidentified_page_sql = unidentifiedPageSql(false);
-pub const unidentified_count_sql = unidentifiedCountSql(false);
-pub const unidentified_release_page_sql = unidentifiedPageSql(true);
-pub const unidentified_release_count_sql = unidentifiedCountSql(true);
+pub const unidentified_tracks = unidentifiedTracks(false, .unidentified);
+pub const unidentified_page_sql = unidentifiedPageSql(false, .unidentified);
+pub const unidentified_count_sql = unidentifiedCountSql(false, .unidentified);
+pub const unidentified_release_page_sql = unidentifiedPageSql(true, .unidentified);
+pub const unidentified_release_count_sql = unidentifiedCountSql(true, .unidentified);
+pub const reidentify_page_sql = unidentifiedPageSql(false, .every);
+pub const reidentify_count_sql = unidentifiedCountSql(false, .every);
+pub const reidentify_release_page_sql = unidentifiedPageSql(true, .every);
+pub const reidentify_release_count_sql = unidentifiedCountSql(true, .every);
 
 const testing = std.testing;
 const mbid_a = "aaaaaaaa-0000-4000-8000-000000000000";
@@ -1710,6 +2096,48 @@ test "a proposal found again on the same release keeps its release values, and n
         .payload = .{ .acoustid_score = 0.95, .acoustid_confidence = 0.9 },
     });
     try testing.expectEqualStrings("Album", fingerprint_only.release_title.?);
+}
+
+test "a proposal keeps the releases and release facts MusicBrainz last listed for it" {
+    const old_facts = [_]ReleaseFact{.{ .mbid = release_a, .status = "Official", .date = "1991", .track_count = 12 }};
+    const new_facts = [_]ReleaseFact{.{ .mbid = release_b, .status = "Bootleg" }};
+    const existing: ProposalPayload = .{
+        .title = "Song",
+        .release_mbids = &.{release_a},
+        .release_facts = &old_facts,
+        .musicbrainz_confidence = 0.9,
+    };
+    const replaced = mergeProposalPayload(existing, .{ .musicbrainz = true }, 0.9, .{
+        .recording_mbid = mbid_a,
+        .found_by = .{ .musicbrainz = true },
+        .payload = .{ .title = "Song", .release_mbids = &.{release_b}, .release_facts = &new_facts, .musicbrainz_confidence = 0.9 },
+    });
+    try testing.expectEqualStrings(release_b, replaced.release_mbids.?[0]);
+    try testing.expectEqualStrings(release_b, replaced.release_facts.?[0].mbid);
+    try testing.expectEqualStrings("Bootleg", replaced.release_facts.?[0].status.?);
+
+    const kept = mergeProposalPayload(existing, .{ .musicbrainz = true }, 0.9, .{
+        .recording_mbid = mbid_a,
+        .found_by = .{ .acoustid = true },
+        .payload = .{ .acoustid_score = 0.95, .acoustid_confidence = 0.9 },
+    });
+    try testing.expectEqualStrings(release_a, kept.release_mbids.?[0]);
+    try testing.expectEqual(@as(?u32, 12), kept.release_facts.?[0].track_count);
+}
+
+test "a payload stored before release facts existed still parses, and facts survive encoding" {
+    const old = try ProposalPayload.parse(testing.allocator, "{\"title\":\"Song\",\"release_mbids\":[\"" ++ release_a ++ "\"]}");
+    defer old.deinit();
+    try testing.expectEqual(@as(?[]const ReleaseFact, null), old.value.release_facts);
+
+    const facts = [_]ReleaseFact{.{ .mbid = release_a, .status = "Official", .date = "1991", .track_count = 12 }};
+    const encoded = try (ProposalPayload{ .release_facts = &facts }).encode(testing.allocator);
+    defer testing.allocator.free(encoded);
+    const decoded = try ProposalPayload.parse(testing.allocator, encoded);
+    defer decoded.deinit();
+    try testing.expectEqualStrings("Official", decoded.value.release_facts.?[0].status.?);
+    try testing.expectEqualStrings("1991", decoded.value.release_facts.?[0].date.?);
+    try testing.expectEqual(@as(?u32, 12), decoded.value.release_facts.?[0].track_count);
 }
 
 test "a value is never stored blank and is cut at its cap on a character boundary" {

@@ -32,7 +32,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
         error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL and ORCA_COVERARTARCHIVE_URL must be https, or http to localhost",
-        error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release",
+        error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release; --reidentify needs --track or --release and takes no --accept-min-score; --track and --release do not go together",
         error.UnknownRelease => "no release with that id",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
         error.CoverArtUnavailable => "the Cover Art Archive could not be reached; try again later",
@@ -48,6 +48,11 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidAcoustIdClientKey => "AcoustID does not accept the application key; rebuild with -Dacoustid-key=KEY",
         error.SubmissionStopped => "submission stopped early: AcoustID could not be reached or kept refusing requests; run submit-acoustid again to continue",
         error.NoPresentFile => "the track's file is not where the library last saw it; rescan its folder",
+        error.AcoustIdRequired => "verify needs AcoustID: set an AcoustID application key (rebuild with -Dacoustid-key=KEY) and keep fingerprints on",
+        error.VerificationStopped => "verification stopped early: AcoustID or MusicBrainz could not be reached or kept refusing requests; run verify again to continue",
+        error.ProposalInGroup => "that match belongs to an album correction; list it with corrections, then accept or dismiss the whole group with accept-correction or dismiss-correction",
+        error.UnknownCorrectionGroup => "no correction group with that id",
+        error.StaleCorrectionGroup => "that correction group was already accepted or dismissed",
         error.UnknownIdentificationProposal => "no match with that id",
         error.StaleIdentificationProposal => "that match was already accepted or dismissed",
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
@@ -157,13 +162,25 @@ const commands = [_]Command{
     .{
         .name = "match",
         .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++
-            "  [--cancel-after=MS] [--release=ID [--accept-min-score=SCORE] [--cover-art]]",
+            "  [--cancel-after=MS] [--release=ID [--accept-min-score=SCORE] [--cover-art]]\n" ++ usage_indent ++
+            "  [--track=ID] [--reidentify (with --track or --release)]",
         .min_arguments = 1,
         .max_arguments = null,
         .run = matchLibrary,
     },
     .{ .name = "matches", .usage = "matches DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = listMatches },
     .{ .name = "cover-art", .usage = "cover-art DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = fetchCoverArt, .shares_usage_line = true },
+    .{
+        .name = "verify",
+        .usage = "verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N]\n" ++ usage_indent ++
+            "  [--cancel-after=MS]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = verifyLibrary,
+    },
+    .{ .name = "corrections", .usage = "corrections DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = 5, .run = listCorrections },
+    .{ .name = "accept-correction", .usage = "accept-correction DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = acceptCorrection },
+    .{ .name = "dismiss-correction", .usage = "dismiss-correction DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = dismissCorrection, .shares_usage_line = true },
     .{ .name = "fingerprint", .usage = "fingerprint DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = printFingerprint },
     .{ .name = "submit-acoustid", .usage = "submit-acoustid DATABASE [--dry-run]", .min_arguments = 1, .max_arguments = null, .run = submitAcoustId },
     .{ .name = "accept-match", .usage = "accept-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = acceptMatch },
@@ -238,8 +255,9 @@ const help_details =
     \\                      musicbrainz_album_artist_id)
     \\
     \\write-tags writes Orca's values for the Tracks into their files: an edit
-    \\wherever it differs from the file's tag, a match only where the file has
-    \\no tag for its field. Each change is labelled edit or match. A match the
+    \\or an accepted correction wherever it differs from the file's tag, a
+    \\match only where the file has no tag for its field. Each change is
+    \\labelled edit or match. A match the
     \\file's tag disagrees with is printed as a conflict and not written; edit
     \\the field to lock your choice, then write again. Without
     \\--approve it prints the plan and its digest and writes nothing; run it
@@ -265,8 +283,8 @@ const help_details =
     \\  --offset N         rows to skip
     \\
     \\track prints what the Library recorded about one Track and its file: tags,
-    \\format, size, path, stored loudness, whether the file carries a cover, and
-    \\the rating. It opens no file.
+    \\format, size, path, stored loudness, whether the file carries a cover,
+    \\the rating, and the file's last verification. It opens no file.
     \\
     \\play-tracks plays a comma-separated list of Track ids, or with
     \\--playlist=ID the playlist's entries that have a Track, as a playback
@@ -344,11 +362,15 @@ const help_details =
     \\score, source (musicbrainz, acoustid or both), AcoustID's score, recording
     \\ID, title, artist, album, track, length and release ID, then what that
     \\release says once it has been looked up: its title, artist and date, the
-    \\disc, the track's title and artist, and the release-track ID. A field
-    \\not known is `-`. accept-match records one match in the Library only:
+    \\disc, the track's title and artist, the release-track ID, and the
+    \\recording ID the match would replace. A field not known is `-`.
+    \\accept-match records one match in the Library only:
     \\its recording ID for the Track's file, its title and artist for every
     \\file of the Track, and dismisses the file's other matches; dismiss-match
-    \\drops one. When every Track of the Release then names one MusicBrainz
+    \\drops one. A match that would replace the file's recording ID is a
+    \\correction: accepting it stores those values locked, so they outrank
+    \\the file's tags, keeping a title or artist you set with edit; bulk
+    \\acceptance never takes one. When every Track of the Release then names one MusicBrainz
     \\release, by an accepted match looked up on it or by the file's tag, the
     \\files of the Tracks accepted on it also get its album, album artist,
     \\date, disc and track numbers and release, release-group, release-track
@@ -370,6 +392,30 @@ const help_details =
     \\--accept-min-score=SCORE it then accepts the Release's matches as
     \\accept-matches would, and with --cover-art it then fetches the Release's
     \\cover as cover-art does. It prints accepted= and cover_art=.
+    \\
+    \\verify checks the recording ID of every identified Track's file against
+    \\what AcoustID hears in its fingerprint, a Release at a time, and needs
+    \\AcoustID. A file agrees when AcoustID lists its ID at a score of at least
+    \\0.5; it disagrees when AcoustID does not and lists another recording at
+    \\0.9 or more, which is then proposed as a correction; otherwise it is
+    \\unconfirmed. A recording ID you set with edit is checked and never
+    \\corrected. A file is verified again once its bytes or its recording ID
+    \\change; one that disagrees only beside such a file of its Release, or
+    \\with --track=ID. When the Release has a
+    \\MusicBrainz release ID, the corrections of its files whose recording is
+    \\on that release form one album correction, with their positions on it.
+    \\--track=ID or --release=ID verifies only that Track or Release, and
+    \\--limit=N at most N Tracks. It prints verified=, agreed=, disagreed=,
+    \\unconfirmed=, skipped= (files never hashed, which it cannot check),
+    \\correction_groups= and proposals=. track prints a Track's outcome.
+    \\
+    \\corrections lists the album corrections: group id, album and album
+    \\artist, then one line per Track: its id, its title and disc-track
+    \\position as it is and as the correction makes it, the recording ID and
+    \\the one it replaces. accept-correction accepts a whole group as
+    \\corrections, with each file's track and disc numbers and release-track
+    \\ID, and dismiss-correction drops it; a match in a group is never
+    \\accepted or dismissed alone. edit --clear=FIELD undoes a correction.
     \\
     \\cover-art fetches a Release's front cover from the Cover Art Archive into
     \\the Library, unless one of its files carries a cover, under the release ID
@@ -613,8 +659,10 @@ const JobOption = enum {
     max_delay,
     once,
     release,
+    track,
     accept_min_score,
     cover_art,
+    reidentify,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -631,8 +679,10 @@ const JobOption = enum {
             .max_delay => "--max-delay=",
             .once => "--once",
             .release => "--release=",
+            .track => "--track=",
             .accept_min_score => "--accept-min-score=",
             .cover_art => "--cover-art",
+            .reidentify => "--reidentify",
         };
     }
 };
@@ -651,8 +701,10 @@ const JobOptions = struct {
     max_delay_ms: ?u32 = null,
     once: bool = false,
     release_id: ?i64 = null,
+    track_id: ?i64 = null,
     accept_min_score: ?f32 = null,
     cover_art: bool = false,
+    reidentify: bool = false,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
@@ -681,8 +733,10 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .max_delay => options.max_delay_ms = try std.fmt.parseInt(u32, value, 10),
                     .once => options.once = true,
                     .release => options.release_id = try std.fmt.parseInt(i64, value, 10),
+                    .track => options.track_id = try std.fmt.parseInt(i64, value, 10),
                     .accept_min_score => options.accept_min_score = try std.fmt.parseFloat(f32, value),
                     .cover_art => options.cover_art = true,
+                    .reidentify => options.reidentify = true,
                 }
                 continue :next_argument;
             }
@@ -1532,12 +1586,35 @@ fn showTrack(context: Context) !void {
     try printMusicBrainzId(stdout, "release group", details.musicbrainz_release_group_id, details.musicbrainz_release_group_id_source);
     try printMusicBrainzId(stdout, "release track", details.musicbrainz_release_track_id, details.musicbrainz_release_track_id_source);
     try printMusicBrainzId(stdout, "album artist id", details.musicbrainz_album_artist_id, details.musicbrainz_album_artist_id_source);
+    try printVerification(stdout, try runtime.libraryTrackVerification(library, allocator, track_id));
     try printDetail(stdout, "plays", "{d}", .{details.play_count});
     try writeDetailKey(stdout, "last played");
     if (details.last_played_at) |seconds| {
         try writeIsoUtc(stdout, seconds);
     } else try stdout.writeAll("never");
     try stdout.writeAll("\n");
+}
+
+fn printVerification(stdout: *std.Io.Writer, stored: ?liborca.TrackVerification) !void {
+    const verification = stored orelse return printDetail(stdout, "verification", "{s}", .{"not verified"});
+    defer verification.deinit();
+    try printDetail(stdout, "verification", "{s}{s}", .{
+        switch (verification.outcome) {
+            .agrees => "agrees",
+            .disagrees => "disagrees",
+            .unconfirmed => "unconfirmed",
+            .no_fingerprint => "no fingerprint",
+        },
+        if (verification.stale) " (stale)" else "",
+    });
+    if (verification.outcome != .disagrees) return;
+    try writeDetailKey(stdout, "heard");
+    for (verification.heard, 0..) |recording, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.print("{s} ({d:.2})", .{ recording.mbid, recording.score });
+    }
+    try stdout.writeAll("\n");
+    if (verification.dismissed) try printDetail(stdout, "proposal", "{s}", .{"dismissed"});
 }
 
 fn printMusicBrainzId(
@@ -1990,10 +2067,14 @@ fn matchLibrary(context: Context) !void {
         .no_fingerprints,
         .cancel_after,
         .release,
+        .track,
         .accept_min_score,
         .cover_art,
+        .reidentify,
     });
     var request: liborca.MatchRequest = .{
+        .mode = if (options.reidentify) .reidentify else .search,
+        .track_id = options.track_id,
         .release_id = options.release_id,
         .accept_minimum_confidence = options.accept_min_score,
         .cover_art = options.cover_art,
@@ -2017,7 +2098,7 @@ fn matchLibrary(context: Context) !void {
     const release_steps = request.accept_minimum_confidence != null or request.cover_art;
     awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms) catch |err| {
         const stats = try runtime.jobMatchStats(job_handle);
-        try printMatchStats(stdout, stats);
+        try printMatchStats(stdout, request.mode, stats);
         if (release_steps) try printReleaseSteps(stdout, stats);
         try stdout.flush();
         if (err != error.JobFailed) return err;
@@ -2029,7 +2110,7 @@ fn matchLibrary(context: Context) !void {
         };
     };
     const stats = try runtime.jobMatchStats(job_handle);
-    try printMatchStats(stdout, stats);
+    try printMatchStats(stdout, request.mode, stats);
     if (release_steps) try printReleaseSteps(stdout, stats);
     if (stats.cover_art == .no_release_id) try stdout.writeAll(no_release_id_hint);
 }
@@ -2103,11 +2184,20 @@ fn fetchCoverArt(context: Context) !void {
     }
 }
 
-fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
+fn printMatchStats(stdout: *std.Io.Writer, mode: liborca.MatchMode, stats: liborca.MatchStats) !void {
     try stdout.print(
-        "examined={d} matched={d} unmatched={d} no_title_or_artist={d} refused={d} matches={d}\n",
+        "examined={d} matched={d} unmatched={d} no_title_or_artist={d} refused={d} matches={d}",
         .{ stats.tracks_examined, stats.matched, stats.unmatched, stats.insufficient_evidence, stats.refused, stats.proposals_stored },
     );
+    switch (mode) {
+        .search, .verify => {},
+        .reidentify => try stdout.print(" confirmed={d}", .{stats.confirmed}),
+    }
+    try stdout.writeAll("\n");
+    try printServiceStats(stdout, stats);
+}
+
+fn printServiceStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
     try stdout.print("requests={d} cached={d}\n", .{ stats.requests, stats.cache_hits });
     try stdout.print(
         "acoustid={s} fingerprinted={d} fingerprints_cached={d} fingerprint_failures={d} acoustid_requests={d} acoustid_cached={d} acoustid_refused={d}\n",
@@ -2121,6 +2211,102 @@ fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
             stats.acoustid_refused,
         },
     );
+}
+
+/// `orca-cli verify DATABASE`: checks each identified file's recording ID
+/// against AcoustID through the job the GTK app's verification starts.
+fn verifyLibrary(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .limit, .cancel_after, .release, .track });
+    var request: liborca.MatchRequest = .{
+        .mode = .verify,
+        .track_id = options.track_id,
+        .release_id = options.release_id,
+    };
+    if (options.batch_size) |batch_size| request.batch_size = batch_size;
+    if (options.limit) |limit| request.limit = limit;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    if (context.environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
+        if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
+    }
+    try configureAcoustId(allocator, &runtime, context.environ);
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startLibraryMatching(library, request);
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} tracks to verify\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    const failed = if (awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms)) false else |err| switch (err) {
+        error.JobFailed => true,
+        else => return err,
+    };
+    const stats = try runtime.jobMatchStats(job_handle);
+    try stdout.print(
+        "verified={d} agreed={d} disagreed={d} unconfirmed={d} skipped={d} correction_groups={d} proposals={d}\n",
+        .{ stats.verified, stats.agreed, stats.disagreed, stats.unconfirmed, stats.skipped, stats.correction_groups, stats.proposals_stored },
+    );
+    try printServiceStats(stdout, stats);
+    if (!failed) return;
+    try stdout.flush();
+    return switch (stats.acoustid) {
+        .no_client_key, .off => error.AcoustIdRequired,
+        .invalid_client_key => error.InvalidAcoustIdClientKey,
+        .searched => switch (stats.busy) {
+            .none => error.VerificationStopped,
+            .musicbrainz => error.MusicBrainzInUse,
+            .acoustid => error.AcoustIdInUse,
+        },
+    };
+}
+
+/// One line per album group: its id, album and album artist; then one line
+/// per correction: Track id, the Track as it is, and as the correction makes
+/// it, with its recording ID and the one it replaces.
+fn listCorrections(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseBrowseOptions(context.arguments[1..]);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const page = try runtime.libraryCorrectionGroups(library, context.allocator, options.limit, options.offset);
+    defer page.deinit();
+    for (page.items) |group| {
+        try stdout.print("{d}\t{s}\t{s}\n", .{ group.group_id, group.album, group.album_artist });
+        for (group.proposals) |member| {
+            try stdout.writeAll("\t");
+            if (member.track_id) |track_id| try stdout.print("{d}", .{track_id}) else try stdout.writeAll("-");
+            try stdout.print("\tcurrent \"{s}\" (", .{member.title});
+            try writePosition(stdout, member.disc_number, member.track_number);
+            try stdout.print(") -> proposed \"{s}\" (", .{member.proposed_title});
+            try writePosition(stdout, member.proposed_disc_number, member.proposed_track_number);
+            try stdout.print(")\t{s}\t{s}\n", .{ member.recording_mbid, member.corrects orelse "-" });
+        }
+    }
+}
+
+fn writePosition(stdout: *std.Io.Writer, disc: anytype, track: anytype) !void {
+    if (disc) |number| try stdout.print("{d}-", .{number});
+    if (track) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
+}
+
+fn acceptCorrection(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const acceptance = try runtime.libraryAcceptCorrectionGroup(library, group_id);
+    try context.stdout.print("accepted correction group {d}: accepted={d} values_written={d}\n", .{ group_id, acceptance.accepted, acceptance.values_written });
+}
+
+fn dismissCorrection(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    try runtime.libraryDismissCorrectionGroup(library, group_id);
+    try context.stdout.print("dismissed correction group {d}\n", .{group_id});
 }
 
 fn printFingerprint(context: Context) !void {
@@ -2237,10 +2423,11 @@ fn listMatches(context: Context) !void {
             proposal.release_date orelse "-",
         });
         if (proposal.disc_number) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("-");
-        try stdout.print("\t{s}\t{s}\t{s}\n", .{
+        try stdout.print("\t{s}\t{s}\t{s}\t{s}\n", .{
             proposal.track_title orelse "-",
             proposal.track_artist orelse "-",
             proposal.release_track_mbid orelse "-",
+            proposal.corrects orelse "-",
         });
     }
 }

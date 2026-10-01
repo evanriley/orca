@@ -21,8 +21,8 @@ versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is applying
-MusicBrainz metadata from accepted matches.
+`orca-gtk` sleeps on instead of polling. The next milestone is actionable
+Health.
 
 ## Works today
 
@@ -155,6 +155,26 @@ MusicBrainz metadata from accepted matches.
   `track` and `match --release=ID`, and in `orca-gtk` through the Matches
   page and the details panel. See
   [metadata.md](metadata.md#release-consensus).
+- Verification: a matching job in `verify` mode checks each identified
+  file's recording ID against what AcoustID hears in its fingerprint, one
+  Release at a time, and keeps the outcome per file until its bytes or its
+  recording ID change. A file that disagrees is proposed what AcoustID
+  hears; when the Release's tagged release lists those recordings, its
+  files' corrections form one album correction with their positions, which
+  is accepted or dismissed whole. An accepted correction is stored locked,
+  so it outranks the file's tag and a tag write stores it. Reachable through
+  `orca-cli verify`, `corrections`, `accept-correction`,
+  `dismiss-correction` and `track`, and in `orca-gtk` through Verify and
+  Verify Album on song and album menus, the Matches page's Corrections and
+  the details panel. See [providers.md](providers.md#verification) and
+  [metadata.md](metadata.md#corrections).
+- Re-identify: a matching job in `reidentify` mode searches one Track or
+  Release again, ignoring the recording ID in effect and earlier searches.
+  Reachable through `orca-cli match --track=ID|--release=ID --reidentify`
+  and Re-identify on song and album menus in `orca-gtk`.
+- Match Album's release vote breaks a tie the files' tags leave open for an
+  official release, then the one with as many tracks as the album, then the
+  earliest date.
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
   files whose recording ID came from an edit or from a match accepted one at
   a time that AcoustID did not propose, once per file and ID, with the user
@@ -210,43 +230,31 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Verify and re-identify.** Matching skips every file whose tags carry a
-   recording ID, so a confidently wrong tag is never questioned: an album
-   whose tags are shifted against its audio looks fully identified. A verify
-   pass fingerprints identified files and proposes the recording AcoustID
-   hears when it disagrees with the tag; an album whose fingerprints are a
-   permutation of its own tagged IDs becomes one album-level proposal.
-   Re-identify matches a track or album again, ignoring the tagged ID and
-   earlier searches. Both are reachable from `orca-cli` and the song and
-   album menus, and verification results are kept per file until its bytes
-   change. Match Album's release vote breaks a tie the files' tags leave
-   open by the lowest MBID, which picks an arbitrary edition, such as a
-   reissue over the original; a tie is to go to an official release, then
-   the one whose track count equals the album's, then the earliest date.
-2. **Actionable Health.** Each issue offers the action that resolves it
+1. **Actionable Health.** Each issue offers the action that resolves it
    through the existing approved paths: review a verify proposal and preview
    the tag write, match or edit missing tags, compare duplicates, analyse,
    fetch cover art, reveal the file. A dismissed issue stays hidden until its
    file changes.
-3. **Idle maintenance.** A low-priority Job that runs while the player is
+2. **Idle maintenance.** A low-priority Job that runs while the player is
    idle and no other Job is active: one bounded unit at a time, such as
    verifying one album every few minutes, within the provider rate limits and
    leases. Off until enabled. liborca owns scheduling and the idle test, so
    `orca-cli watch` can run it headless; findings land in Health.
-4. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
+3. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
    feedback takes recordings only), and a Loved page in `orca-gtk` listing
    loved albums and songs.
-5. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+4. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
    tag writes, library edits and undo, queue insertion, moves and removal,
    artwork, DSP and the signal path, track details, matching, AcoustID
-   submission, love and hate, ratings, playlists, and scrobbling.
-6. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+   submission, verification and corrections, love and hate, ratings,
+   playlists, and scrobbling.
+5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-7. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+6. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-8. **An optional fixed output rate with a band-limited resampler**, for
+7. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -348,6 +356,12 @@ Small defects that are not yet scheduled:
   finished blocks draining for ever.
 - A Zone attached, detached or moved while its Player's engine thread is
   starting can return before that engine adopts the change.
+- Re-identifying a Release turns its pending album correction into
+  single-file corrections, which can then be accepted one at a time and
+  leave the album's positions half-moved until the rest are accepted.
+- In a Release of more than 512 Tracks, verified a page at a time, a file
+  that still disagrees is checked again only while the Release has a stale
+  file left when its page is reached, though the job's total counted it.
 - `zig build pipewire-live-smoke` opens the first device on the user's
   PipeWire server rather than a silent sink.
 - `scripts/headless-audio.sh` fails on the development desktop with

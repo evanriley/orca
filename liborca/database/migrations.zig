@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 27;
+pub const current_version = 28;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1026,6 +1026,20 @@ const migration_27 =
     \\CREATE INDEX locations_by_uri ON locations(uri);
 ;
 
+const migration_28 =
+    \\CREATE TABLE recording_verifications (
+    \\    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    \\    quick_hash BLOB,
+    \\    recording_mbid TEXT NOT NULL,
+    \\    outcome INTEGER NOT NULL,
+    \\    heard TEXT,
+    \\    verified_at INTEGER NOT NULL
+    \\);
+    \\ALTER TABLE identification_proposals ADD COLUMN album_group INTEGER;
+    \\CREATE INDEX identification_proposals_album_group
+    \\    ON identification_proposals(album_group, state) WHERE album_group IS NOT NULL;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1179,6 +1193,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 25 and target_version >= 25) try db.exec(migration_25);
     if (version < 26 and target_version >= 26) try db.exec(migration_26);
     if (version < 27 and target_version >= 27) try db.exec(migration_27);
+    if (version < 28 and target_version >= 28) try db.exec(migration_28);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2266,4 +2281,35 @@ test "the migrated ratings and playlist tables reject invalid rows and follow th
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM playlist_entries;"));
     try db.exec("DELETE FROM playlists WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM playlist_entries;"));
+}
+
+test "upgrading from version 27 adds an empty verification table that follows its file, and leaves every proposal out of an album group" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v27.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 27);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES (1, 1, 10, x'01'), (2, 1, 10, NULL);
+        \\INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload, state, updated_at)
+        \\VALUES (1, 'acoustid', 'a', 0.9, x'7b7d', 0, 100);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM recording_verifications;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM identification_proposals WHERE album_group IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'identification_proposals_album_group';"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO recording_verifications(file_id, recording_mbid, outcome, verified_at) VALUES (9, 'a', 0, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO recording_verifications(file_id, outcome, verified_at) VALUES (1, 0, 0);"));
+    try db.exec(
+        \\INSERT INTO recording_verifications(file_id, quick_hash, recording_mbid, outcome, heard, verified_at)
+        \\VALUES (1, x'01', 'a', 0, '[]', 0), (2, NULL, 'b', 3, NULL, 0);
+        \\DELETE FROM files WHERE id = 1;
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM recording_verifications;"));
+    try checkForeignKeys(db);
 }

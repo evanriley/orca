@@ -32,10 +32,49 @@ pub const BusyService = enum(u8) {
     acoustid,
 };
 
+pub const Mode = enum {
+    /// Tracks with no recording id that a provider in scope has not
+    /// answered for.
+    search,
+    /// Every Track in scope again, whatever it is identified as. The
+    /// recording it is identified as is confirmed, never proposed.
+    reidentify,
+    /// Each file's recording id in effect checked against what AcoustID
+    /// hears in its fingerprint; MusicBrainz is not searched.
+    verify,
+
+    /// Null for `.verify`, which selects files by their verification.
+    pub fn selection(self: Mode) ?database.MatchSelection {
+        return switch (self) {
+            .search => .unidentified,
+            .reidentify => .every,
+            .verify => null,
+        };
+    }
+};
+
+/// The score at which AcoustID hearing the recording id in effect confirms it.
+pub const verify_agree_minimum: f32 = 0.5;
+/// The score at which AcoustID hearing another recording disputes it.
+pub const verify_disagree_minimum: f32 = 0.9;
+
+/// What AcoustID hearing `heard` says about `recording_mbid`.
+pub fn classify(recording_mbid: []const u8, heard: []const database.HeardRecording) database.VerificationOutcome {
+    var disputed = false;
+    for (heard) |recording| {
+        if (std.ascii.eqlIgnoreCase(recording.mbid, recording_mbid)) {
+            if (recording.score >= verify_agree_minimum) return .agrees;
+        } else if (recording.score >= verify_disagree_minimum) disputed = true;
+    }
+    return if (disputed) .disagrees else .unconfirmed;
+}
+
 pub const Result = struct {
     tracks_seen: u64 = 0,
     matched: u64 = 0,
     unmatched: u64 = 0,
+    /// Tracks found again as the recording they are identified as.
+    confirmed: u64 = 0,
     insufficient: u64 = 0,
     refused: u64 = 0,
     proposals_stored: u64 = 0,
@@ -48,6 +87,14 @@ pub const Result = struct {
     acoustid_cache_hits: u64 = 0,
     /// Fingerprints AcoustID refused or left unanswered.
     acoustid_refused: u64 = 0,
+    /// Files a verification stored an outcome for.
+    verified: u64 = 0,
+    agreed: u64 = 0,
+    disagreed: u64 = 0,
+    unconfirmed: u64 = 0,
+    /// Files a verification passed over for having no quick hash.
+    skipped: u64 = 0,
+    correction_groups: u64 = 0,
     acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
     unavailable: bool = false,
@@ -59,6 +106,7 @@ pub const Progress = struct {
     tracks_seen: std.atomic.Value(u64) = .init(0),
     matched: std.atomic.Value(u64) = .init(0),
     fingerprinted: std.atomic.Value(u64) = .init(0),
+    verified: std.atomic.Value(u64) = .init(0),
 };
 
 const SearchOutcome = union(enum) {
@@ -81,6 +129,20 @@ const ReleaseOutcome = union(enum) {
     busy,
 };
 
+const Fingerprinted = union(enum) {
+    taken: analysis.chromaprint.Fingerprint,
+    /// No present location, or no file there.
+    missing,
+    failed,
+};
+
+/// What a verification learned about one file of its unit.
+const FileCheck = struct {
+    lookup: ?providers.CandidateList = null,
+    heard: []const database.HeardRecording = &.{},
+    outcome: ?database.VerificationOutcome = null,
+};
+
 const LookupOutcome = union(enum) {
     answered,
     /// How many queries AcoustID refused.
@@ -94,6 +156,8 @@ const LookupOutcome = union(enum) {
 pub const LibraryMatching = struct {
     allocator: std.mem.Allocator,
     proposals: *database.IdentificationProposalRepository,
+    /// Needed by `.verify`.
+    verifications: ?*const database.RecordingVerificationRepository = null,
     musicbrainz: *providers.musicbrainz.MusicBrainz,
     /// Null leaves AcoustID out; `acoustid_use` says why.
     acoustid: ?*acoustid.AcoustId = null,
@@ -104,6 +168,7 @@ pub const LibraryMatching = struct {
     batch_size: usize = 64,
     limit: ?u32 = null,
     scope: database.MatchScope = .library,
+    mode: Mode = .search,
     last_release: ?ReleaseLookup = null,
     unusable_releases: std.StringHashMapUnmanaged(void) = .empty,
 
@@ -113,9 +178,20 @@ pub const LibraryMatching = struct {
         const acoustid_service = self.acoustid;
         var result: Result = .{ .acoustid = if (acoustid_service != null) .searched else self.acoustid_use };
         const page_limit: u32 = @intCast(@min(self.batch_size, @as(usize, database.repository.max_page)));
+        const selection = self.mode.selection() orelse {
+            try self.verify(&result, page_limit);
+            return self.finish(result, acoustid_service);
+        };
         var cursor: i64 = 0;
         walk: while (true) {
-            var page = try self.proposals.unidentifiedPage(self.allocator, self.scope, self.acoustid != null, cursor, page_limit);
+            var page = try self.proposals.unidentifiedPage(
+                self.allocator,
+                self.scope,
+                selection,
+                self.acoustid != null,
+                cursor,
+                page_limit,
+            );
             defer page.deinit();
             if (page.items.len == 0) break;
             var start: usize = 0;
@@ -147,6 +223,11 @@ pub const LibraryMatching = struct {
             },
             .library, .track => {},
         };
+        return self.finish(result, acoustid_service);
+    }
+
+    fn finish(self: *const LibraryMatching, finished: Result, acoustid_service: ?*acoustid.AcoustId) Result {
+        var result = finished;
         result.requests_answered = self.musicbrainz.requests_answered;
         result.cache_hits = self.musicbrainz.cache_hits;
         if (acoustid_service) |service| {
@@ -154,6 +235,208 @@ pub const LibraryMatching = struct {
             result.acoustid_cache_hits = service.cache_hits;
         }
         return result;
+    }
+
+    /// Verifies the scope one unit at a time: a Release's files together, so
+    /// the corrections it disputes can form one album group, and Tracks with
+    /// no Release a page at a time. Stops without AcoustID, which
+    /// `result.acoustid` then says.
+    fn verify(self: *LibraryMatching, result: *Result, page_limit: u32) !void {
+        if (self.acoustid == null) return;
+        const verifications = self.verifications orelse return error.VerificationUnavailable;
+        if (self.fingerprinter == null) return error.VerificationUnavailable;
+        switch (self.scope) {
+            .track => |track_id| {
+                var page = try verifications.unitPage(self.allocator, .{ .track = track_id }, 0, 1);
+                defer page.deinit();
+                _ = try self.verifyUnit(page.items, null, result);
+            },
+            .release => |release_id| _ = try self.verifyRelease(verifications, release_id, result),
+            .library => {
+                var cursor: i64 = 0;
+                var buffer: [64]i64 = undefined;
+                while (true) {
+                    const releases = try verifications.releasesToVerify(cursor, &buffer);
+                    if (releases.len == 0) break;
+                    for (releases) |release_id| {
+                        cursor = release_id;
+                        if (!try self.verifyRelease(verifications, release_id, result)) return;
+                    }
+                }
+                var track_cursor: i64 = 0;
+                while (true) {
+                    var page = try verifications.unitPage(self.allocator, .loose, track_cursor, page_limit);
+                    defer page.deinit();
+                    if (page.items.len == 0) return;
+                    track_cursor = page.items[page.items.len - 1].track_id;
+                    if (!try self.verifyUnit(page.items, null, result)) return;
+                }
+            },
+        }
+    }
+
+    /// False when the pass has to stop.
+    fn verifyRelease(
+        self: *LibraryMatching,
+        verifications: *const database.RecordingVerificationRepository,
+        release_id: i64,
+        result: *Result,
+    ) !bool {
+        var tag_buffer: [36]u8 = undefined;
+        const tag = if (try verifications.isLargeRelease(release_id)) null else try verifications.releaseTag(release_id, &tag_buffer);
+        var cursor: i64 = 0;
+        while (true) {
+            var page = try verifications.unitPage(self.allocator, .{ .release = release_id }, cursor, database.repository.max_page);
+            defer page.deinit();
+            if (page.items.len == 0) return true;
+            cursor = page.items[page.items.len - 1].track_id;
+            if (!try self.verifyUnit(page.items, tag, result)) return false;
+        }
+    }
+
+    /// Verifies one unit's files and commits what it found in one
+    /// transaction, or nothing when it stops. With the unit's tagged release
+    /// ID, the files whose strongest recording heard is on that release
+    /// propose it as one album group. False when the pass has to stop.
+    fn verifyUnit(
+        self: *LibraryMatching,
+        unit: []const database.VerifiableFile,
+        unit_release: ?[]const u8,
+        result: *Result,
+    ) !bool {
+        var files = unit;
+        var release_mbid = unit_release;
+        if (self.limit) |limit| {
+            if (result.tracks_seen >= limit) return false;
+            const remaining: usize = @intCast(limit - result.tracks_seen);
+            if (files.len > remaining) {
+                files = files[0..remaining];
+                release_mbid = null;
+            }
+        }
+        if (files.len == 0) return true;
+        if (self.isCancelled()) return self.stop(result, .cancelled);
+
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const checks = try scratch.alloc(FileCheck, files.len);
+        @memset(checks, .{});
+        defer for (checks) |check| if (check.lookup) |list| list.deinit();
+
+        var to_look_up: std.ArrayList(usize) = .empty;
+        var skipped: u64 = 0;
+        for (files, checks, 0..) |file, *check, index| {
+            if (file.quick_hash == null) {
+                skipped += 1;
+                continue;
+            }
+            if (file.heard_before) |before| if (classify(file.recording_mbid, before) == .agrees) {
+                check.* = .{ .heard = before, .outcome = .agrees };
+                continue;
+            };
+            try to_look_up.append(scratch, index);
+        }
+        var start: usize = 0;
+        while (start < to_look_up.items.len) {
+            const end = @min(start + acoustid.max_lookup_queries, to_look_up.items.len);
+            if (!try self.verifyBatch(files, checks, to_look_up.items[start..end], scratch, result)) return false;
+            start = end;
+        }
+
+        var release: ?*const ReleaseLookup = null;
+        if (release_mbid) |mbid| if (disputesProposable(files, checks)) {
+            release = switch (try self.lookUpRelease(mbid)) {
+                .found => |lookup| lookup,
+                .unusable => null,
+                .cancelled => return self.stop(result, .cancelled),
+                .unavailable => return self.stop(result, .unavailable),
+                .busy => return self.stop(result, .musicbrainz_busy),
+            };
+        };
+
+        var records: std.ArrayList(database.VerifiedFile) = .empty;
+        var tally: Result = .{};
+        for (files, checks) |file, check| {
+            const outcome = check.outcome orelse continue;
+            var record: database.VerifiedFile = .{ .verification = .{
+                .file_id = file.file_id,
+                .quick_hash = file.quick_hash,
+                .recording_mbid = file.recording_mbid,
+                .outcome = outcome,
+                .heard = check.heard,
+            } };
+            switch (outcome) {
+                .agrees => tally.agreed += 1,
+                .disagrees => tally.disagreed += 1,
+                .unconfirmed => tally.unconfirmed += 1,
+                .no_fingerprint => {},
+            }
+            if (outcome == .disagrees and !file.user_locked) {
+                const evidence = try correctionEvidence(scratch, file, check.lookup.?.items);
+                record.evidence = evidence;
+                if (release) |lookup| record.grouped = try joinGroup(lookup, evidence, check.heard[0]);
+            }
+            try records.append(scratch, record);
+        }
+        if (self.isCancelled()) return self.stop(result, .cancelled);
+        const recorded = try self.proposals.recordVerifications(self.allocator, records.items);
+        result.verified += records.items.len;
+        result.agreed += tally.agreed;
+        result.disagreed += tally.disagreed;
+        result.unconfirmed += tally.unconfirmed;
+        result.skipped += skipped;
+        result.proposals_stored += recorded.pending;
+        if (recorded.group != null) result.correction_groups += 1;
+        result.tracks_seen += files.len;
+        self.publish(result);
+        return true;
+    }
+
+    /// Fingerprints up to `max_lookup_queries` files of a unit and looks them
+    /// up on AcoustID together. False when the pass has to stop.
+    fn verifyBatch(
+        self: *LibraryMatching,
+        files: []const database.VerifiableFile,
+        checks: []FileCheck,
+        batch: []const usize,
+        scratch: std.mem.Allocator,
+        result: *Result,
+    ) !bool {
+        var group: [acoustid.max_lookup_queries]database.VerifiableFile = undefined;
+        var fingerprints: [acoustid.max_lookup_queries]?analysis.chromaprint.Fingerprint = @splat(null);
+        defer for (fingerprints[0..batch.len]) |fingerprint| if (fingerprint) |value| value.deinit();
+        var lookups: [acoustid.max_lookup_queries]?providers.CandidateList = @splat(null);
+        for (batch, 0..) |index, slot| {
+            if (self.isCancelled()) return self.stop(result, .cancelled);
+            group[slot] = files[index];
+            switch (self.fingerprintOf(files[index].file_id, files[index].path, result) catch |err| switch (err) {
+                error.Cancelled => return self.stop(result, .cancelled),
+                else => return err,
+            }) {
+                .taken => |fingerprint| fingerprints[slot] = fingerprint,
+                .missing => {},
+                .failed => checks[index].outcome = .no_fingerprint,
+            }
+        }
+        switch (try self.lookUp(group[0..batch.len], &fingerprints, &lookups)) {
+            .answered => {},
+            .refused => |queries| result.acoustid_refused += queries,
+            .cancelled => return self.stop(result, .cancelled),
+            .unavailable => return self.stop(result, .unavailable),
+            .busy => return self.stop(result, .acoustid_busy),
+            .invalid_client_key => {
+                result.acoustid = .invalid_client_key;
+                return false;
+            },
+        }
+        for (batch, lookups[0..batch.len]) |index, lookup| checks[index].lookup = lookup;
+        for (batch) |index| {
+            const list = checks[index].lookup orelse continue;
+            checks[index].heard = try heardFrom(scratch, list.items, files[index].recording_mbid);
+            checks[index].outcome = classify(files[index].recording_mbid, checks[index].heard);
+        }
+        return true;
     }
 
     /// False when the pass has to stop: cancelled or a service unreachable.
@@ -215,15 +498,22 @@ pub const LibraryMatching = struct {
                     if (lookup) |list| list.items else &.{},
                 );
                 defer evidence.deinit();
-                switch (try self.enrich(evidence.items, candidate.tagged_track_number)) {
+                const kept = withoutRecording(evidence.items, candidate.recording_mbid);
+                const confirmed = kept.len < evidence.items.len;
+                if (confirmed) result.confirmed += 1;
+                switch (try self.enrich(kept, candidate.tagged_track_number)) {
                     .done => {},
                     .cancelled => return self.stop(result, .cancelled),
                     .unavailable => return self.stop(result, .unavailable),
                     .busy => return self.stop(result, .musicbrainz_busy),
                 }
-                const stored = try self.proposals.recordSearch(self.allocator, candidate.file_id, answered, evidence.items);
+                const stored = try self.proposals.recordSearch(self.allocator, candidate.file_id, answered, kept);
                 result.proposals_stored += stored;
-                if (stored == 0) result.unmatched += 1 else result.matched += 1;
+                if (stored != 0) {
+                    result.matched += 1;
+                } else if (!confirmed) {
+                    result.unmatched += 1;
+                }
             }
             result.tracks_seen += 1;
             self.publish(result);
@@ -271,6 +561,7 @@ pub const LibraryMatching = struct {
         var tally: database.repository.MbidTally = .{};
         defer tally.deinit(self.allocator);
         var file_votes: std.ArrayList([36]u8) = .empty;
+        var facts: std.ArrayList(database.ReleaseFact) = .empty;
         var voting_file: ?i64 = null;
         for (list.items, payloads) |item, *slot| {
             slot.* = null;
@@ -286,9 +577,13 @@ pub const LibraryMatching = struct {
             slot.* = parsed.value;
             if (parsed.value.release_mbid) |mbid| try addVote(scratch, &file_votes, mbid);
             for (parsed.value.release_mbids orelse &.{}) |mbid| try addVote(scratch, &file_votes, mbid);
+            for (parsed.value.release_facts orelse &.{}) |fact| try addFact(scratch, &facts, fact);
         }
         for (file_votes.items) |mbid| try tally.add(self.allocator, mbid);
-        const winner = tally.winner(list.tag) orelse return .done;
+        const winner = tally.rankedWinner(list.tag, .{
+            .facts = facts.items,
+            .album_track_count = list.track_count,
+        }) orelse return .done;
         const release = switch (try self.lookUpRelease(&winner)) {
             .found => |lookup| lookup,
             .unusable => return .done,
@@ -360,27 +655,39 @@ pub const LibraryMatching = struct {
     }
 
     fn takeFingerprint(self: *LibraryMatching, candidate: database.MatchCandidate, result: *Result) !?analysis.chromaprint.Fingerprint {
-        const fingerprinter = self.fingerprinter orelse return null;
-        const path = candidate.path orelse {
-            result.fingerprint_failures += 1;
-            return null;
+        return switch (try self.fingerprintOf(candidate.file_id, candidate.path, result)) {
+            .taken => |fingerprint| fingerprint,
+            .missing, .failed => null,
         };
-        const outcome = fingerprinter.fingerprintFile(candidate.file_id, path) catch |err| switch (err) {
+    }
+
+    fn fingerprintOf(self: *LibraryMatching, file_id: i64, path: ?[]const u8, result: *Result) !Fingerprinted {
+        const fingerprinter = self.fingerprinter orelse return .failed;
+        const present = path orelse {
+            result.fingerprint_failures += 1;
+            return .missing;
+        };
+        const outcome = fingerprinter.fingerprintFile(file_id, present) catch |err| switch (err) {
             error.Cancelled, error.OutOfMemory => return err,
+            error.FileNotFound => {
+                result.fingerprint_failures += 1;
+                return .missing;
+            },
             else => {
                 result.fingerprint_failures += 1;
-                return null;
+                return .failed;
             },
         };
         result.fingerprinted += 1;
         if (outcome.cache_hit) result.fingerprint_cache_hits += 1;
         if (self.progress) |progress| progress.fingerprinted.store(result.fingerprinted, .release);
-        return outcome.fingerprint;
+        return .{ .taken = outcome.fingerprint };
     }
 
+    /// `group` holds Match or Verifiable files: each its `album`.
     fn lookUp(
         self: *LibraryMatching,
-        group: []const database.MatchCandidate,
+        group: anytype,
         fingerprints: *const [acoustid.max_lookup_queries]?analysis.chromaprint.Fingerprint,
         lookups: *[acoustid.max_lookup_queries]?providers.CandidateList,
     ) !LookupOutcome {
@@ -461,6 +768,7 @@ pub const LibraryMatching = struct {
         const progress = self.progress orelse return;
         progress.tracks_seen.store(result.tracks_seen, .release);
         progress.matched.store(result.matched, .release);
+        progress.verified.store(result.verified, .release);
     }
 
     fn isCancelled(self: *const LibraryMatching) bool {
@@ -476,6 +784,103 @@ fn addVote(allocator: std.mem.Allocator, votes: *std.ArrayList([36]u8), mbid: []
     try votes.append(allocator, mbid[0..36].*);
 }
 
+fn addFact(allocator: std.mem.Allocator, facts: *std.ArrayList(database.ReleaseFact), fact: database.ReleaseFact) !void {
+    for (facts.items) |known| if (std.mem.eql(u8, known.mbid, fact.mbid)) return;
+    try facts.append(allocator, fact);
+}
+
+fn withoutRecording(items: []database.ProposalEvidence, recording_mbid: ?[]const u8) []database.ProposalEvidence {
+    const confirmed = recording_mbid orelse return items;
+    var kept: usize = 0;
+    for (items) |item| {
+        if (std.ascii.eqlIgnoreCase(item.recording_mbid, confirmed)) continue;
+        items[kept] = item;
+        kept += 1;
+    }
+    return items[0..kept];
+}
+
+/// Whether a file of the unit disputes its recording id and may be proposed
+/// a correction.
+fn disputesProposable(files: []const database.VerifiableFile, checks: []const FileCheck) bool {
+    for (files, checks) |file, check| {
+        if (check.outcome == .disagrees and !file.user_locked) return true;
+    }
+    return false;
+}
+
+/// The recordings AcoustID heard, strongest first. Strings borrow from
+/// `candidates`.
+fn heardFrom(
+    allocator: std.mem.Allocator,
+    candidates: []const providers.Candidate,
+    recording_mbid: []const u8,
+) ![]const database.HeardRecording {
+    const heard = try allocator.alloc(database.HeardRecording, candidates.len);
+    var count: usize = 0;
+    for (candidates) |candidate| {
+        heard[count] = .{ .mbid = candidate.provider_id, .score = candidate.fingerprint_similarity orelse continue };
+        count += 1;
+    }
+    std.mem.sort(database.HeardRecording, heard[0..count], {}, strongerFirst);
+    keepStored(heard[0..count], recording_mbid);
+    return heard[0..count];
+}
+
+fn keepStored(heard: []database.HeardRecording, recording_mbid: []const u8) void {
+    const last = database.repository.max_heard - 1;
+    if (heard.len <= database.repository.max_heard) return;
+    for (heard[database.repository.max_heard..], database.repository.max_heard..) |recording, index| {
+        if (!std.ascii.eqlIgnoreCase(recording.mbid, recording_mbid)) continue;
+        std.mem.copyBackwards(database.HeardRecording, heard[last + 1 .. index + 1], heard[last..index]);
+        heard[last] = recording;
+        return;
+    }
+}
+
+fn strongerFirst(_: void, a: database.HeardRecording, b: database.HeardRecording) bool {
+    if (a.score != b.score) return a.score > b.score;
+    return std.mem.order(u8, a.mbid, b.mbid) == .lt;
+}
+
+/// A correction is scored on what the file's Track says besides its title:
+/// the title may belong to the recording the file is wrongly identified as.
+fn correctionQuery(file: database.VerifiableFile) providers.Query {
+    return .{
+        .artist = if (file.artist.len == 0) null else file.artist,
+        .album = if (file.album.len == 0) null else file.album,
+        .duration_ms = if (file.duration_ms) |milliseconds| std.math.cast(u64, milliseconds) else null,
+    };
+}
+
+/// Proposals for the recordings AcoustID heard at least
+/// `verify_disagree_minimum`. Payloads borrow from `candidates`.
+fn correctionEvidence(
+    allocator: std.mem.Allocator,
+    file: database.VerifiableFile,
+    candidates: []const providers.Candidate,
+) ![]database.ProposalEvidence {
+    var strong: std.ArrayList(providers.Candidate) = .empty;
+    for (candidates) |candidate| {
+        const score = candidate.fingerprint_similarity orelse continue;
+        if (score < verify_disagree_minimum or std.ascii.eqlIgnoreCase(candidate.provider_id, file.recording_mbid)) continue;
+        try strong.append(allocator, candidate);
+    }
+    const evidence = try providers.workflow.collect(allocator, correctionQuery(file), &.{}, strong.items);
+    return evidence.items;
+}
+
+/// Points the proposal for `strongest` at the unit's release when the
+/// release holds it, and returns its index.
+fn joinGroup(release: *const ReleaseLookup, evidence: []database.ProposalEvidence, strongest: database.HeardRecording) !?usize {
+    const index = for (evidence, 0..) |item, position| {
+        if (std.mem.eql(u8, item.recording_mbid, strongest.mbid)) break position;
+    } else return null;
+    const enrichment = try release.enrichment(strongest.mbid, null) orelse return null;
+    evidence[index].payload.enrich(release.id(), enrichment);
+    return index;
+}
+
 fn queryFor(candidate: database.MatchCandidate) providers.Query {
     return .{
         .title = if (candidate.title.len == 0) null else candidate.title,
@@ -483,4 +888,74 @@ fn queryFor(candidate: database.MatchCandidate) providers.Query {
         .album = if (candidate.album.len == 0) null else candidate.album,
         .duration_ms = if (candidate.duration_ms) |milliseconds| std.math.cast(u64, milliseconds) else null,
     };
+}
+
+const testing = std.testing;
+const in_effect_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
+const heard_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
+
+test "a file agrees when AcoustID hears its recording at 0.5, and disagrees only when another reaches 0.9" {
+    try testing.expectEqual(database.VerificationOutcome.agrees, classify(in_effect_mbid, &.{
+        .{ .mbid = heard_mbid, .score = 0.97 },
+        .{ .mbid = in_effect_mbid, .score = verify_agree_minimum },
+    }));
+    try testing.expectEqual(database.VerificationOutcome.agrees, classify("0B3C4D5E-6F70-4812-9A3B-4C5D6E7F8091", &.{
+        .{ .mbid = in_effect_mbid, .score = 0.6 },
+    }));
+    try testing.expectEqual(database.VerificationOutcome.disagrees, classify(in_effect_mbid, &.{
+        .{ .mbid = heard_mbid, .score = verify_disagree_minimum },
+        .{ .mbid = in_effect_mbid, .score = 0.4 },
+    }));
+    try testing.expectEqual(database.VerificationOutcome.unconfirmed, classify(in_effect_mbid, &.{
+        .{ .mbid = heard_mbid, .score = 0.89 },
+    }));
+    try testing.expectEqual(database.VerificationOutcome.unconfirmed, classify(in_effect_mbid, &.{}));
+}
+
+test "a correction's confidence ignores the file's title, which may be the wrong recording's" {
+    var candidate = try providers.Candidate.init(testing.allocator, "acoustid", heard_mbid, "Pink Moon", "Nick Drake", "Pink Moon");
+    defer candidate.deinit();
+    candidate.duration_ms = 125_000;
+    candidate.fingerprint_similarity = 0.95;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var confidences: [2]f32 = undefined;
+    for ([_][]const u8{ "Northern Sky", "Pink Moon" }, &confidences) |title, *confidence| {
+        const file: database.VerifiableFile = .{
+            .track_id = 1,
+            .file_id = 1,
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Pink Moon",
+            .duration_ms = 125_000,
+            .path = null,
+            .quick_hash = null,
+            .recording_mbid = in_effect_mbid,
+            .user_locked = false,
+            .heard_before = null,
+        };
+        const evidence = try correctionEvidence(arena.allocator(), file, &.{candidate});
+        try testing.expectEqual(@as(usize, 1), evidence.len);
+        confidence.* = evidence[0].payload.combinedConfidence();
+    }
+    try testing.expectEqual(confidences[0], confidences[1]);
+}
+
+test "the recording in effect stays among the stored heard recordings when nine others outrank it" {
+    var heard: [database.repository.max_heard + 3]database.HeardRecording = undefined;
+    const others = [_][]const u8{
+        "a0000000-0000-4000-8000-000000000000", "a1000000-0000-4000-8000-000000000000",
+        "a2000000-0000-4000-8000-000000000000", "a3000000-0000-4000-8000-000000000000",
+        "a4000000-0000-4000-8000-000000000000", "a5000000-0000-4000-8000-000000000000",
+        "a6000000-0000-4000-8000-000000000000", "a7000000-0000-4000-8000-000000000000",
+        "a8000000-0000-4000-8000-000000000000", "a9000000-0000-4000-8000-000000000000",
+    };
+    const tagged = "ffffffff-0000-4000-8000-000000000000";
+    for (others, heard[0..others.len]) |mbid, *slot| slot.* = .{ .mbid = mbid, .score = 0.99 };
+    heard[others.len] = .{ .mbid = tagged, .score = 0.98 };
+    keepStored(&heard, tagged);
+    try std.testing.expectEqualStrings(tagged, heard[database.repository.max_heard - 1].mbid);
+    try std.testing.expectEqualStrings(others[database.repository.max_heard - 1], heard[database.repository.max_heard].mbid);
+    try std.testing.expectEqualStrings(others[others.len - 1], heard[others.len].mbid);
+    try std.testing.expectEqual(database.VerificationOutcome.agrees, classify(tagged, heard[0..database.repository.max_heard]));
 }

@@ -41,6 +41,7 @@ pub fn collect(
                 .track_number = candidate.track_number,
                 .release_mbid = candidate.release_mbid,
                 .release_mbids = if (candidate.release_mbids.len == 0) null else candidate.release_mbids,
+                .release_facts = if (candidate.release_facts.len == 0) null else candidate.release_facts,
                 .duration_ms = candidate.duration_ms,
                 .mb_score = candidate.mb_score,
                 .musicbrainz_confidence = try scoring.score(allocator, query, candidate),
@@ -210,7 +211,7 @@ test "a fingerprint match with no title still becomes a proposal for an untagged
     try testing.expect(evidence.items[0].payload.combinedConfidence() >= minimum_confidence);
 }
 
-test "accepting a proposal keeps a user's locked recording id and still settles the proposal" {
+test "accepting a proposal over a user's locked recording id replaces it as a locked correction and settles the proposal" {
     var opened = try openLibraryWithFile("file:orca-workflow-locked?mode=memory&cache=shared");
     defer opened.library.close();
     const library = &opened.library;
@@ -239,17 +240,17 @@ test "accepting a proposal keeps a user's locked recording id and still settles 
 
     const acceptance = try library.identification_proposals.acceptProposal(testing.allocator, pending[0].id);
 
-    try testing.expectEqual(@as(u32, 2), acceptance.values_written);
-    const kept = (try library.orca_metadata.get(testing.allocator, opened.file_id, .musicbrainz_recording_id)).?;
-    defer kept.deinit(testing.allocator);
-    try testing.expectEqualStrings(locked_mbid, kept.text);
-    try testing.expectEqual(metadata.Provenance.user, kept.provenance);
-    try testing.expect(kept.locked);
+    try testing.expectEqual(@as(u32, 3), acceptance.values_written);
+    const replaced = (try library.orca_metadata.get(testing.allocator, opened.file_id, .musicbrainz_recording_id)).?;
+    defer replaced.deinit(testing.allocator);
+    try testing.expectEqualStrings(exact_mbid, replaced.text);
+    try testing.expectEqual(metadata.Provenance.provider, replaced.provenance);
+    try testing.expect(replaced.locked);
     const title = (try library.orca_metadata.get(testing.allocator, opened.file_id, .title)).?;
     defer title.deinit(testing.allocator);
     try testing.expectEqualStrings("Provider title", title.text);
     try testing.expectEqual(metadata.Provenance.provider, title.provenance);
-    try testing.expect(!title.locked);
+    try testing.expect(title.locked);
     const remaining = try library.identification_proposals.pending(testing.allocator, opened.file_id, 10);
     defer testing.allocator.free(remaining);
     try testing.expectEqual(@as(usize, 0), remaining.len);

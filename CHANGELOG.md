@@ -32,9 +32,54 @@
   release, release-group, release-track and album-artist IDs with their
   source; `orca-gtk` shows the album and date on the Matches page and the
   IDs in the details panel.
+- **Re-identify.** `MatchRequest.mode` (`MatchMode`: `search`, `reidentify`)
+  searches one Track or one Release again with `.reidentify`, ignoring the
+  recording ID in effect and earlier searches. A candidate for the recording
+  ID already in effect is counted in `MatchStats.confirmed` instead of being
+  proposed, dismissed proposals stay dismissed, and a Release's proposals are
+  aligned as Match Album aligns them. It is refused for the whole library and
+  with `accept_minimum_confidence`. `orca-cli match` gains `--track=ID` and
+  `--reidentify`, and prints `confirmed=` in that mode.
+- **Verification.** `MatchRequest.mode = .verify` checks each identified
+  file's recording ID against what AcoustID hears in its fingerprint, one
+  Release at a time: `agrees` at a score of 0.5, `disagrees` when another
+  recording reaches 0.9, else `unconfirmed`, or `no_fingerprint`. Outcomes
+  are stored per file in `recording_verifications` and checked again once
+  the file's bytes or recording ID change. A file that disagrees is proposed
+  the recordings heard, unless its ID is the user's own edit. It needs
+  AcoustID (`error.AcoustIdRequired`). `MatchStats` gains `verified`,
+  `agreed`, `disagreed`, `unconfirmed`, `skipped` and `correction_groups`,
+  and `Runtime.libraryTrackVerification` returns a Track's outcome.
+  `orca-cli verify` runs it and `track` prints the outcome.
+- **Corrections.** A proposal for a file whose recording ID in effect it
+  would replace is a correction, `MatchProposal.corrects` naming that ID.
+  When a verified Release has a MusicBrainz release ID, the corrections of
+  its files whose recording is on it form one album group with their
+  positions, listed by `Runtime.libraryCorrectionGroups` and accepted or
+  dismissed only whole by `libraryAcceptCorrectionGroup` and
+  `libraryDismissCorrectionGroup`. `orca-cli` has `corrections`,
+  `accept-correction` and `dismiss-correction`, and `matches` prints the
+  replaced ID last.
 
 ### Changed
 
+- **Library schema version 28.** Adds `recording_verifications` and
+  `identification_proposals.album_group` with its index.
+- **Breaking: an accepted correction is locked.** Accepting a correction
+  stores the recording ID, over any value, and the title and artist, over
+  anything but a user's edit, as locked provider values that outrank the
+  file's tags and that tag writes write over them. Bulk acceptance and Match
+  Album never take a correction, and `libraryAcceptMatch` and
+  `libraryDismissMatch` refuse a proposal in an album group with
+  `error.ProposalInGroup`. The review page leaves grouped proposals out.
+
+- **Match Album prefers the original edition in a tie.** When releases have
+  as many votes and none is the Release's tagged release ID, the vote now
+  goes to an `Official` release, then to one with as many tracks as the
+  Release has Tracks, then to the earliest date, before the lowest ID. A
+  search keeps each listed release's status, date and track count in the
+  proposal payload (`ProposalPayload.release_facts`, `ReleaseFact`), and
+  `MbidTally.rankedWinner` ranks with them.
 - **Breaking (Zig API): bulk acceptance reports values.**
   `Runtime.libraryAcceptConfidentMatches` returns
   `ConfidentMatchAcceptance` (`accepted`, `values_written`) instead of a

@@ -253,11 +253,19 @@ pub const BackfillRequest = job_worker.BackfillRequest;
 pub const AnalysisRequest = job_worker.AnalysisRequest;
 pub const DuplicateScanRequest = job_worker.DuplicateScanRequest;
 
+pub const MatchMode = library_pass.matching.Mode;
+
 pub const MatchRequest = struct {
     batch_size: usize = 64,
     limit: ?u32 = null,
-    /// Search only this Track, under the same rule as the whole library: one
-    /// already identified, or already answered for, is not searched.
+    /// `.reidentify` needs `track_id` or `release_id`, and takes no
+    /// `accept_minimum_confidence`. `.verify` needs AcoustID, refused with
+    /// `error.AcoustIdRequired`, and takes neither
+    /// `accept_minimum_confidence` nor `cover_art`.
+    mode: MatchMode = .search,
+    /// Search only this Track. With `.search`, under the same rule as the
+    /// whole library: one already identified, or already answered for, is not
+    /// searched.
     track_id: ?i64 = null,
     /// Search only this Release's Tracks, under the same rule. Not with
     /// `track_id`.
@@ -299,6 +307,14 @@ pub const ConfidentMatchAcceptance = struct {
     /// Every value stored, on any file, the Releases' other files included.
     values_written: u64,
 };
+
+pub const CorrectionGroup = database.CorrectionGroup;
+pub const CorrectionGroupMember = database.CorrectionGroupMember;
+pub const CorrectionGroupPage = database.CorrectionGroupPage;
+pub const CorrectionGroupAcceptance = ConfidentMatchAcceptance;
+pub const TrackVerification = database.TrackVerification;
+pub const VerificationOutcome = database.VerificationOutcome;
+pub const HeardRecording = database.HeardRecording;
 
 /// One lock-free read of everything a transport UI shows.
 pub const PlayerStatus = struct {
@@ -901,6 +917,39 @@ pub const OrcaRuntime = struct {
 
     pub fn libraryDismissMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_id: i64) !void {
         return runtime_listens.libraryDismissMatch(self, library, proposal_id);
+    }
+
+    /// Album groups a verification proposed: corrections of one Release's
+    /// files, accepted or dismissed only together.
+    pub fn libraryCorrectionGroups(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !CorrectionGroupPage {
+        return runtime_listens.libraryCorrectionGroups(self, library, allocator, limit, offset);
+    }
+
+    /// Accepts every pending correction of the group, in one transaction, and
+    /// reprojects the files given values.
+    pub fn libraryAcceptCorrectionGroup(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !CorrectionGroupAcceptance {
+        return runtime_listens.libraryAcceptCorrectionGroup(self, library, group_id);
+    }
+
+    pub fn libraryDismissCorrectionGroup(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !void {
+        return runtime_listens.libraryDismissCorrectionGroup(self, library, group_id);
+    }
+
+    /// The Track's file's last verification, or null when it was never
+    /// verified.
+    pub fn libraryTrackVerification(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        track_id: i64,
+    ) !?TrackVerification {
+        return runtime_listens.libraryTrackVerification(self, library, allocator, track_id);
     }
 
     /// Tracks with a pending proposal, by artist, album and position, each

@@ -174,9 +174,14 @@ zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept loca
 # ORCA_ACOUSTID_URL (https, or http to localhost); AcoustID application key from
 # -Dacoustid-key=KEY at build time (default AqlfLksN1K)
 zig build run -- match DATABASE [--batch=N] [--limit=N] [--no-fingerprints] [--cancel-after=MS]   # each service once per file, 1 request/s
-zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal
+zig build run -- match DATABASE (--track=ID | --release=ID) --reidentify   # again, ignoring IDs and earlier searches; confirmed= counts IDs found again
+zig build run -- matches DATABASE TRACK_ID   # source and AcoustID score per proposal; the replaced ID last
+zig build run -- verify DATABASE [--track=ID | --release=ID] [--batch=N] [--limit=N] [--cancel-after=MS]   # recording IDs against AcoustID; proposes corrections
+zig build run -- corrections DATABASE [--limit N] [--offset N]   # album groups of corrections
+zig build run -- accept-correction DATABASE GROUP   # the whole group, locked, in the library only
+zig build run -- dismiss-correction DATABASE GROUP
 zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FINGERPRINT=
-zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only
+zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, artist (and album values) in the library only; a correction locked
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
 zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release

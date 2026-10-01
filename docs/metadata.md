@@ -49,7 +49,7 @@ and hate are sent to ListenBrainz under. Orca can hold one of its own in
 `orca_metadata_values` (`metadata.Field.musicbrainz_recording_id`), beside the
 one the file's tag carries. The ID in effect is:
 
-1. a locked Orca value, which is a user's own edit;
+1. a locked Orca value: a user's own edit, or an accepted correction;
 2. else the file's tag, when it is not empty;
 3. else an unlocked Orca value, which is an accepted match.
 
@@ -81,13 +81,15 @@ transaction:
    `error.StaleIdentificationProposal`.
 2. Parses its payload and checks its recording ID. Either failing is
    `error.InvalidProposalPayload`, and nothing is written.
-3. Stores the recording ID as an unlocked `provider` value for the file,
+3. Refuses a proposal in an album group with `error.ProposalInGroup`.
+4. Stores the recording ID as an unlocked `provider` value for the file,
    and the title and artist, the release track's when the proposal was
    looked up on its release, else the recording's, on every file of the
-   Track (`tracks.fileIds`), as edits do.
-4. Marks the proposal accepted and dismisses the file's other pending
+   Track (`tracks.fileIds`), as edits do. A correction stores them locked;
+   see [Corrections](#corrections).
+5. Marks the proposal accepted and dismisses the file's other pending
    proposals.
-5. Applies the consensus of the Release the Track belongs to, below.
+6. Applies the consensus of the Release the Track belongs to, below.
 
 Every value goes through the same upsert: a locked value is kept, a value
 equal to the stored one keeps its `written_at` and is not counted, an empty
@@ -128,11 +130,41 @@ Release. When a reprojection leaves a Release without Tracks, its fetched
 cover moves to the Release that took most of them, unless that one has a
 cover of its own.
 
+#### Corrections
+
+A pending proposal is a correction when its file has a recording ID in
+effect and the proposal names another. It is computed, never stored:
+`MatchProposal.corrects` is the ID it would replace. A
+[verification](providers.md#verification) proposes corrections, and so can a
+re-identify. Accepting one stores its values as locked `provider` values, so
+they outrank the file's tags, a tag write writes them over the tags, and
+`TrackDetails` still names their source `match`:
+
+- the recording ID on the file, over any value, a user's own locked edit
+  included, since accepting it is the user's explicit choice;
+- the title and artist on every file of the Track, over an unlocked value or
+  a locked `provider` value, so a title or artist the user set is kept;
+- for a proposal in an album group, also the track and disc numbers and the
+  release-track ID, under the same rule.
+
+No album, release or release-group ID is written. The same equality,
+empty-value, ID and length rules as an accept apply. Bulk acceptance never
+takes a correction. A group is accepted only whole,
+`IdentificationProposalRepository.acceptCorrectionGroup` accepting every
+pending member in one transaction and applying the consensus of each Release
+it touched, because the projection re-seats a file whose track number
+another holds, so half a swap of positions would scramble the album.
+`dismissCorrectionGroup` dismisses every pending member. An unknown group is
+`error.UnknownCorrectionGroup`, one with no pending member
+`error.StaleCorrectionGroup`. A correction is undone by clearing the fields
+it set, as Clear in Edit Tags and `orca-cli edit --clear=FIELD` do.
+
 #### Bulk acceptance
 
 `acceptConfident` accepts at most one pending proposal per file, in commits
 of at most 512, and passes over a proposal whose payload or recording ID it
-cannot read. It returns the number accepted, the values stored, and the
+cannot read or that is in an album group. A file with a recording ID in
+effect is left out, since its proposals are corrections. It returns the number accepted, the values stored, and the
 files accepted or given a value. Of the file's proposals that reach the given confidence, those
 found by AcoustID with a fingerprint score of at least 0.9 are backed by the
 file's own audio. When any is, the first of them in this order is accepted:
@@ -413,8 +445,8 @@ tags and seals a `MutationPlan` of the values to write. It writes nothing. A
 value is written only when it is the one in effect, so a file's own tag is
 never replaced by an automatic value:
 
-- A locked value, which is a user's edit, is written when it differs from the
-  file's tag.
+- A locked value, which is a user's edit or an accepted correction, is
+  written when it differs from the file's tag.
 - An unlocked value, such as an accepted match, is written only when the file
   has no tag for its field.
 - An unlocked value that differs from the file's tag is a conflict. It is

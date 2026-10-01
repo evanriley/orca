@@ -434,7 +434,8 @@ when an edit reprojects a Track, so no rating could have survived there.
 on `files.id`: the providers that found the candidate (`musicbrainz`,
 `acoustid` or `musicbrainz+acoustid`), its MusicBrainz recording id, Orca's
 confidence from 0 to 1, and a JSON payload of what the providers said,
-including each provider's confidence alone and AcoustID's score. `state` is 0
+including each provider's confidence alone, AcoustID's score and the status,
+date and track count of each release a search listed. `state` is 0
 pending, 1 accepted, 2 dismissed. A file has one proposal per recording:
 `IdentificationProposalRepository.recordSearch` finds an existing one by file
 and recording id, whatever its provider, merges the new evidence into it and
@@ -467,6 +468,32 @@ the id in effect, is not the file's tag unless Orca wrote it there, and has
 no row here for that id. A `provider` value also needs its accepted proposal
 on the same file. Editing the id makes the file eligible again under the new
 one.
+
+`identification_proposals.album_group` (version 28) is null, or the integer
+an [album correction](metadata.md#corrections) shares among its proposals,
+one past the highest group in use when a verification forms it. A
+verification unit first takes its files' proposals out of any group, so a
+group holds the proposals of one unit. The partial index
+`identification_proposals_album_group ON (album_group, state) WHERE
+album_group IS NOT NULL` lists and finds groups. The review page and its
+count leave grouped proposals out.
+
+`recording_verifications` (version 28) holds each file's latest
+[verification](providers.md#verification), keyed on `files.id` and going
+with its file: the `quick_hash` the file had, the `recording_mbid` in effect,
+the `outcome` (0 agrees, 1 disagrees, 2 unconfirmed, 3 no fingerprint), the
+recordings heard as JSON (`[{"mbid","score"}]`, strongest first, at most
+eight; null for no fingerprint), and `verified_at` in Unix seconds. Staleness
+is computed, never stored: a row is stale when `quick_hash IS NOT
+files.quick_hash` or `recording_mbid IS NOT` the recording ID in effect.
+`repository.verifiable_*_sql` select the play files with a recording ID in
+effect whose row is missing or stale, per Release, per Track or for Tracks
+with no Release, through `tracks_release` and primary keys, and add a file
+whose row `disagrees` when its Release has such a file or for one Track.
+Each is built from the one `verifiable` definition, so the job's count and
+its walk agree. A
+correction AcoustID found is never submitted back to it: its accepted
+proposal was not found by MusicBrainz alone.
 
 `orca_metadata_values.written_at` (version 21) is when a tag write last put
 the value into its file, or null. Changing the value clears it; undoing the

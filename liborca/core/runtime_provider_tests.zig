@@ -912,11 +912,15 @@ test "Now Playing is never sent unless the option and scrobbling are both on" {
 const northern_sky_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
 const pink_moon_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
 
-fn recordingAnswer(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
-    return "{\"recordings\":[{\"id\":\"" ++ mbid ++ "\",\"score\":100,\"title\":\"" ++ title ++
+fn recordingEntry(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
+    return "{\"id\":\"" ++ mbid ++ "\",\"score\":100,\"title\":\"" ++ title ++
         "\",\"length\":180000,\"artist-credit\":[{\"name\":\"Nick Drake\"}],\"releases\":[{" ++
         "\"id\":\"2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b\",\"title\":\"Bryter Layter\"," ++
-        "\"media\":[{\"track-offset\":2,\"track\":[{\"number\":\"3\"}]}]}]}]}";
+        "\"media\":[{\"track-offset\":2,\"track\":[{\"number\":\"3\"}]}]}]}";
+}
+
+fn recordingAnswer(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
+    return "{\"recordings\":[" ++ recordingEntry(mbid, title) ++ "]}";
 }
 
 const northern_sky_answer = recordingAnswer(northern_sky_mbid, "Northern Sky");
@@ -1172,7 +1176,7 @@ test "a matching job stops when cancelled mid-search, and another cannot start w
     const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
-    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
+    try std.testing.expectEqual(@as(u64, 2), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
 
     fake.hang_from = null;
     const resumed = try runtime.startLibraryMatching(library, .{});
@@ -1261,7 +1265,7 @@ test "a refused search is waited out and retried, and an unreachable MusicBrainz
     const unreachable_job = try runtime.startLibraryMatching(library, .{});
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unreachable_job)).tracks_examined);
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
 
     fake.failure = null;
     const retried = try runtime.startLibraryMatching(library, .{});
@@ -1473,7 +1477,7 @@ test "a matched recording id that disagrees with the file's tag is a conflict, a
         defer std.testing.allocator.free(file_ids);
         for (file_ids) |file_id| try library_database.orca_metadata.remove(file_id, .musicbrainz_recording_id);
     }
-    try acceptRecordingIds(library_database, ids, northern_sky_mbid);
+    try setRecordingIds(library_database, ids, northern_sky_mbid, .provider);
     const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Locked Title" }});
     defer edited.deinit();
 
@@ -1646,10 +1650,158 @@ test "a single-Track matching job searches only that Track, and one already iden
     try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
 }
 
+const northern_sky_remaster_mbid = "3a4b5c6d-7e8f-4a9b-8c0d-1e2f3a4b5c6d";
+const northern_sky_two_answer = "{\"recordings\":[" ++ recordingEntry(northern_sky_mbid, "Northern Sky") ++ "," ++
+    recordingEntry(northern_sky_remaster_mbid, "Northern Sky") ++ "]}";
+
+fn proposalState(library_database: *database.LibraryDatabase, comptime recording_mbid: []const u8) !i64 {
+    return database.columns.scalar(
+        library_database.database,
+        "SELECT state FROM identification_proposals WHERE provider_id = '" ++ recording_mbid ++ "';",
+    );
+}
+
+test "re-identify searches a Track its tag already identifies, confirms that recording without proposing it, and proposes another" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{.{ .title = "Northern%20Sky", .body = northern_sky_two_answer }} };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-reidentify-track?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", northern_sky_mbid);
+    const files = try library_database.tracks.fileIds(std.testing.allocator, northern_sky);
+    defer std.testing.allocator.free(files);
+    _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, files[0], .{ .musicbrainz = true }, &.{});
+    try library_database.database.exec("UPDATE identification_searches SET searched_at = 0;");
+
+    const search = try runtime.startLibraryMatching(library, .{ .track_id = northern_sky });
+    try std.testing.expectEqual(@as(?u64, 0), (try runtime.jobSnapshotSynced(search)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, search));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(search)).tracks_examined);
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+    runtime.reapFinishedJobs();
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .track_id = northern_sky, .mode = .reidentify });
+
+    try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), stats.confirmed);
+    try std.testing.expectEqual(@as(u64, 1), stats.matched);
+    try std.testing.expectEqual(@as(u64, 0), stats.unmatched);
+    try std.testing.expectEqual(@as(u64, 1), stats.proposals_stored);
+    try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
+    const proposals = try runtime.libraryMatchProposals(library, northern_sky, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    try std.testing.expectEqualStrings(northern_sky_remaster_mbid, proposals.items[0].recording_mbid);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM identification_proposals WHERE provider_id = '" ++ northern_sky_mbid ++ "';",
+    ));
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM identification_searches WHERE provider = 'musicbrainz' AND searched_at > 0;",
+    ));
+
+    try runtime.libraryDismissMatch(library, proposals.items[0].id);
+    runtime.reapFinishedJobs();
+    const again = try runtime.startLibraryMatching(library, .{ .track_id = northern_sky, .mode = .reidentify });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, again));
+    const again_stats = try runtime.jobMatchStats(again);
+    try std.testing.expectEqual(@as(u64, 1), again_stats.confirmed);
+    try std.testing.expectEqual(@as(u64, 0), again_stats.matched);
+    try std.testing.expectEqual(@as(u64, 0), again_stats.unmatched);
+    try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, northern_sky));
+    try std.testing.expectEqual(@as(i64, @intFromEnum(database.ProposalState.dismissed)), try proposalState(library_database, northern_sky_remaster_mbid));
+}
+
+test "re-identify is refused for the whole library and with bulk acceptance, and nothing is sent" {
+    var fake: FakeMusicBrainz = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-reidentify-refused?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", null);
+    _ = try addAlbumTrack(library_database, album, "Northern Sky");
+
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{ .mode = .reidentify }));
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{
+        .mode = .reidentify,
+        .release_id = album,
+        .accept_minimum_confidence = 0.9,
+    }));
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+}
+
+test "re-identifying a Release searches its identified files and points their proposals at the release most of them list" {
+    var fake: FakeMusicBrainz = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-reidentify-release?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    for ([_]i64{ northern_sky, pink_moon }) |file_id| {
+        try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+            .title = if (file_id == northern_sky) "Northern Sky" else "Pink Moon",
+            .artist = "Nick Drake",
+            .musicbrainz_recording_id = feedback_mbid,
+        } });
+    }
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+
+    const other_edition = "9c8b7a6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+    const both_editions = [_][]const u8{ other_edition, bryter_layter_mbid };
+    const one_edition = [_][]const u8{bryter_layter_mbid};
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8, best: []const u8, listed: []const []const u8 }{
+        .{ .file = northern_sky, .recording = northern_sky_mbid, .title = "Northern Sky", .best = other_edition, .listed = &both_editions },
+        .{ .file = pink_moon, .recording = pink_moon_mbid, .title = "Pink Moon", .best = bryter_layter_mbid, .listed = &one_edition },
+    }) |found| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = found.recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = found.title,
+                .artist = "Nick Drake",
+                .release_mbid = found.best,
+                .release_mbids = found.listed,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, found.file, .{ .musicbrainz = true }, &evidence);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .mode = .reidentify });
+
+    try std.testing.expectEqual(@as(?u64, 2), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 2), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 0), stats.accepted);
+    try std.testing.expectEqual(@as(u32, 3), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
+    try std.testing.expectEqual(@as(i64, 2), try database.columns.scalar(
+        library_database.database,
+        "SELECT count(*) FROM identification_proposals WHERE state = 0 AND payload LIKE '%\"release_mbid\":\"" ++ bryter_layter_mbid ++ "\"%';",
+    ));
+}
+
 /// Answers AcoustID lookups and submissions on the job's thread; a test reads
 /// what it recorded once the job is reaped.
 const FakeAcoustId = struct {
     http: network.testing.ScriptedTransport = .{},
+    /// Lookups from this one on hang until the job is cancelled.
+    hang_lookups_from: ?u32 = null,
+    lookup_status: u16 = 200,
     lookup_body: []const u8 = "{\"status\":\"ok\",\"fingerprints\":[]}",
     submit_status: u16 = 200,
     submit_body: []const u8 = "{\"status\":\"ok\",\"submissions\":[]}",
@@ -1668,8 +1820,9 @@ const FakeAcoustId = struct {
     fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
         const self: *FakeAcoustId = @ptrCast(@alignCast(context));
         if (std.mem.endsWith(u8, exchange.request.url, "/v2/lookup")) {
-            _ = self.lookups.fetchAdd(1, .acq_rel);
-            return .{ .respond = .{ .body = self.lookup_body } };
+            const index = self.lookups.fetchAdd(1, .acq_rel);
+            if (self.hang_lookups_from) |first| if (index >= first) return .hang;
+            return .{ .respond = .{ .status = self.lookup_status, .body = self.lookup_body } };
         }
         _ = self.submissions.fetchAdd(1, .acq_rel);
         return .{ .respond = .{ .status = self.submit_status, .body = self.submit_body } };
@@ -2028,7 +2181,7 @@ fn recordingIdOf(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64) !
     return (details.musicbrainz_recording_id orelse return error.NoRecordingId)[0..36].*;
 }
 
-test "a release-scoped matching job searches only that Release's Tracks and accepts only its confident matches, keeping a locked recording ID" {
+test "a release-scoped matching job searches only that Release's Tracks and accepts only its confident matches, never a correction of a locked recording ID" {
     var fake: FakeMusicBrainz = .{ .answers = &.{
         .{ .title = "Northern%20Sky", .body = northern_sky_answer },
         .{ .title = "Pink%20Moon", .body = pink_moon_answer },
@@ -2072,11 +2225,12 @@ test "a release-scoped matching job searches only that Release's Tracks and acce
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
     const stats = try runtime.jobMatchStats(job_handle);
     try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
-    try std.testing.expectEqual(@as(u64, 2), stats.accepted);
+    try std.testing.expectEqual(@as(u64, 1), stats.accepted);
     try std.testing.expectEqual(runtime_module.CoverArtOutcome.not_requested, stats.cover_art);
     try std.testing.expectEqual(@as(u32, 2), fake.requestCount());
     try std.testing.expectEqualStrings(northern_sky_mbid, &try recordingIdOf(&runtime, library, northern_sky));
     try std.testing.expectEqualStrings("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a", &try recordingIdOf(&runtime, library, locked));
+    try std.testing.expectEqual(@as(usize, 1), try pendingCount(&runtime, library, locked));
     try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
 
     runtime.reapFinishedJobs();
@@ -2268,6 +2422,57 @@ test "Match Album points every file at the release most of them list, accepts, a
     try std.testing.expectEqual(@as(u32, 3), cover.requestCount());
 }
 
+test "Match Album breaks a tie between editions for the Official one with the album's track count" {
+    var fake: FakeMusicBrainz = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-edition?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+
+    const bootleg = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const reissue = "1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9";
+    const editions = [_][]const u8{ bootleg, reissue, bryter_layter_mbid };
+    const facts = [_]database.ReleaseFact{
+        .{ .mbid = bootleg, .status = "Bootleg", .date = "1970", .track_count = 2 },
+        .{ .mbid = reissue, .status = "Official", .date = "2000", .track_count = 14 },
+        .{ .mbid = bryter_layter_mbid, .status = "Official", .date = "1971-03-01", .track_count = 2 },
+    };
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8 }{
+        .{ .file = northern_sky, .recording = northern_sky_mbid, .title = "Northern Sky" },
+        .{ .file = pink_moon, .recording = pink_moon_mbid, .title = "Pink Moon" },
+    }) |found| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = found.recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = found.title,
+                .artist = "Nick Drake",
+                .release_mbid = bootleg,
+                .release_mbids = &editions,
+                .release_facts = &facts,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, found.file, .{ .musicbrainz = true }, &evidence);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).accepted);
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, fake.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
+    try expectOrcaValue(library_database, northern_sky, .musicbrainz_release_id, bryter_layter_mbid);
+    try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
+}
+
 test "accepting one file of a two-file Release stores its title and artist only, and accepting the other stores the release's values on both" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -2431,7 +2636,7 @@ test "library matching looks the best release up before storing a search, asks n
     try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, unreachable_job));
     try std.testing.expectEqual(@as(u32, 2 + 1 + 3), fake.requestCount());
     try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
-    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, false, null));
+    try std.testing.expectEqual(@as(u64, 1), try library_database.identification_proposals.unidentifiedCount(.library, .unidentified, false, null));
 
     fake.release_status = 404;
     fake.release_body = "{\"error\":\"Not Found\"}";
@@ -2637,4 +2842,606 @@ test "after an accept, a tag-write preview of a 2.3 MP3 and a FLAC adds only the
     const flac_tags = (try library_database.observed_tags.get(std.testing.allocator, flac)).?;
     defer flac_tags.deinit();
     try std.testing.expectEqualStrings("Fixtures", flac_tags.values.album.?);
+}
+
+fn heardRecording(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
+    return "{\"id\":\"" ++ mbid ++ "\",\"title\":\"" ++ title ++
+        "\",\"duration\":15,\"artists\":[{\"id\":\"a1\",\"name\":\"Nick Drake\"}]}";
+}
+
+fn heardResult(comptime score: []const u8, comptime recordings: []const u8) []const u8 {
+    return "{\"id\":\"t" ++ score ++ "\",\"score\":" ++ score ++ ",\"recordings\":[" ++ recordings ++ "]}";
+}
+
+fn heardBy(comptime index: []const u8, comptime results: []const u8) []const u8 {
+    return "{\"index\":" ++ index ++ ",\"results\":[" ++ results ++ "]}";
+}
+
+fn acoustIdAnswer(comptime entries: []const u8) []const u8 {
+    return "{\"status\":\"ok\",\"fingerprints\":[" ++ entries ++ "]}";
+}
+
+const northern_sky_heard = heardRecording(northern_sky_mbid, "Northern Sky");
+const pink_moon_heard = heardRecording(pink_moon_mbid, "Pink Moon");
+const hazey_jane_heard = heardRecording(feedback_mbid, "Hazey Jane I");
+
+/// A runtime whose MusicBrainz and AcoustID are fakes, with an AcoustID key,
+/// and a Library whose Tracks play files in a temporary directory.
+const VerifyRig = struct {
+    musicbrainz: FakeMusicBrainz = .{},
+    acoustid: FakeAcoustId = .{},
+    temporary: std.testing.TmpDir,
+    runtime: OrcaRuntime,
+    library: LibraryHandle = undefined,
+    library_database: *database.LibraryDatabase = undefined,
+
+    const Verified = struct { total_units: ?u64, stats: runtime_module.MatchStats };
+
+    fn init(self: *VerifyRig, uri: [:0]const u8) !void {
+        self.* = .{ .temporary = std.testing.tmpDir(.{}), .runtime = OrcaRuntime.init(std.testing.allocator) };
+        errdefer self.deinit();
+        try self.runtime.setClientIdentity(network.testing.test_identity);
+        self.runtime.matching_hooks = self.musicbrainz.hooks();
+        self.runtime.matching_hooks.acoustid_transport = self.acoustid.transport();
+        try self.runtime.setAcoustIdClientKey("test-client");
+        self.library = try self.runtime.openLibrary(std.testing.io, uri);
+        self.library_database = try libraryDatabase(&self.runtime, self.library);
+    }
+
+    fn deinit(self: *VerifyRig) void {
+        self.runtime.deinit();
+        self.temporary.cleanup();
+    }
+
+    /// A Track playing a fifteen-second tone whose tag names `recording_mbid`.
+    fn addTone(self: *VerifyRig, name: []const u8, frequency: f32, title: []const u8, recording_mbid: ?[]const u8, release_id: ?i64) !i64 {
+        try writeToneWave(self.temporary.dir, name, frequency);
+        return self.addFile(name, title, recording_mbid, release_id);
+    }
+
+    fn addFile(self: *VerifyRig, name: []const u8, title: []const u8, recording_mbid: ?[]const u8, release_id: ?i64) !i64 {
+        const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, name });
+        defer std.testing.allocator.free(path);
+        const binding = try self.library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:verify" });
+        try self.library_database.observed_tags.upsert(.{ .file_id = binding.file_id, .values = .{
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .musicbrainz_recording_id = recording_mbid,
+        } });
+        try self.library_database.tracks.upsertTracks(&.{.{
+            .release_id = release_id,
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .duration_ms = 15_000,
+            .preferred_file_id = binding.file_id,
+        }});
+        return trackOfFile(self.library_database, binding.file_id);
+    }
+
+    fn verify(self: *VerifyRig, request: runtime_module.MatchRequest) !Verified {
+        self.runtime.reapFinishedJobs();
+        var verify_request = request;
+        verify_request.mode = .verify;
+        const job_handle = try self.runtime.startLibraryMatching(self.library, verify_request);
+        const total_units = (try self.runtime.jobSnapshotSynced(job_handle)).total_units;
+        try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&self.runtime, job_handle));
+        return .{ .total_units = total_units, .stats = try self.runtime.jobMatchStats(job_handle) };
+    }
+
+    fn outcomeOf(self: *VerifyRig, track_id: i64) !?database.VerificationOutcome {
+        const stored = (try self.runtime.libraryTrackVerification(self.library, std.testing.allocator, track_id)) orelse return null;
+        defer stored.deinit();
+        return stored.outcome;
+    }
+
+    fn fileOf(self: *VerifyRig, track_id: i64) !i64 {
+        const files = try self.library_database.tracks.fileIds(std.testing.allocator, track_id);
+        defer std.testing.allocator.free(files);
+        return files[0];
+    }
+};
+
+fn writeDamagedFlac(dir: std.Io.Dir, name: []const u8) !void {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/tagged-reference.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(bytes);
+    const packed_bits = std.mem.readInt(u64, bytes[18..26], .big);
+    std.mem.writeInt(u64, bytes[18..26], packed_bits + 1_000_000, .big);
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+test "verification stores what AcoustID hears of each file's recording ID and proposes a correction only for a file another recording outscores" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-outcomes?mode=memory&cache=shared");
+    defer rig.deinit();
+    const agrees = try rig.addTone("agrees.wav", 300, "Northern Sky", northern_sky_mbid, null);
+    const disagrees = try rig.addTone("disagrees.wav", 420, "Northern Sky", northern_sky_mbid, null);
+    const weak = try rig.addTone("weak.wav", 540, "Northern Sky", northern_sky_mbid, null);
+    const empty = try rig.addTone("empty.wav", 660, "Northern Sky", northern_sky_mbid, null);
+    try writeDamagedFlac(rig.temporary.dir, "damaged.flac");
+    const damaged = try rig.addFile("damaged.flac", "Northern Sky", northern_sky_mbid, null);
+    const refused = try rig.addTone("refused.wav", 780, "Northern Sky", northern_sky_mbid, null);
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.97", northern_sky_heard ++ "," ++ pink_moon_heard)) ++ "," ++
+            heardBy("1", heardResult("0.4", northern_sky_heard) ++ "," ++ heardResult("0.95", pink_moon_heard)) ++ "," ++
+            heardBy("2", heardResult("0.8", hazey_jane_heard)) ++ "," ++
+            heardBy("3", ""),
+    );
+
+    const verified = try rig.verify(.{});
+
+    try std.testing.expectEqual(@as(?u64, 6), verified.total_units);
+    const stats = verified.stats;
+    try std.testing.expectEqual(@as(u64, 6), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 5), stats.verified);
+    try std.testing.expectEqual(@as(u64, 1), stats.agreed);
+    try std.testing.expectEqual(@as(u64, 1), stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 2), stats.unconfirmed);
+    try std.testing.expectEqual(@as(u64, 0), stats.skipped);
+    try std.testing.expectEqual(@as(u64, 0), stats.correction_groups);
+    try std.testing.expectEqual(@as(u64, 1), stats.proposals_stored);
+    try std.testing.expectEqual(@as(u64, 5), stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 1), stats.fingerprint_failures);
+    try std.testing.expectEqual(@as(u64, 1), stats.acoustid_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.acoustid_refused);
+    try std.testing.expectEqual(@as(u64, 0), stats.requests);
+    try std.testing.expectEqual(@as(u32, 0), rig.musicbrainz.requestCount());
+
+    try std.testing.expectEqual(database.VerificationOutcome.agrees, (try rig.outcomeOf(agrees)).?);
+    try std.testing.expectEqual(database.VerificationOutcome.disagrees, (try rig.outcomeOf(disagrees)).?);
+    try std.testing.expectEqual(database.VerificationOutcome.unconfirmed, (try rig.outcomeOf(weak)).?);
+    try std.testing.expectEqual(database.VerificationOutcome.unconfirmed, (try rig.outcomeOf(empty)).?);
+    try std.testing.expectEqual(database.VerificationOutcome.no_fingerprint, (try rig.outcomeOf(damaged)).?);
+    try std.testing.expectEqual(@as(?database.VerificationOutcome, null), try rig.outcomeOf(refused));
+    try std.testing.expectEqual(@as(i64, 5), try database.columns.scalar(rig.library_database.database, "SELECT count(*) FROM recording_verifications;"));
+
+    const disputed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, disagrees)).?;
+    defer disputed.deinit();
+    try std.testing.expectEqualStrings(northern_sky_mbid, disputed.recording_mbid);
+    try std.testing.expectEqual(@as(usize, 2), disputed.heard.len);
+    try std.testing.expectEqualStrings(pink_moon_mbid, disputed.heard[0].mbid);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.95), disputed.heard[0].score, 0.001);
+    try std.testing.expect(!disputed.stale and !disputed.dismissed);
+
+    for ([_]i64{ agrees, weak, empty, damaged, refused }) |track_id|
+        try std.testing.expectEqual(@as(usize, 0), try pendingCount(&rig.runtime, rig.library, track_id));
+    const proposals = try rig.runtime.libraryMatchProposals(rig.library, disagrees, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    try std.testing.expectEqualStrings(pink_moon_mbid, proposals.items[0].recording_mbid);
+    try std.testing.expectEqualStrings("acoustid", proposals.items[0].provider);
+    try std.testing.expectEqualStrings(northern_sky_mbid, proposals.items[0].corrects.?);
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryMatchReviewCount(rig.library));
+
+    try rig.runtime.libraryDismissMatch(rig.library, proposals.items[0].id);
+    const dismissed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, disagrees)).?;
+    defer dismissed.deinit();
+    try std.testing.expect(dismissed.dismissed);
+}
+
+test "a verified file is looked up again only when its bytes or its recording ID change, and one that disagrees only beside such a file or alone" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-stale?mode=memory&cache=shared");
+    defer rig.deinit();
+    const album = try addRelease(rig.library_database, "Bryter Layter", null);
+    const agreeing = try rig.addTone("agreeing.wav", 300, "Northern Sky", northern_sky_mbid, album);
+    const disputed = try rig.addTone("disputed.wav", 420, "Pink Moon", pink_moon_mbid, album);
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.97", northern_sky_heard) ++ "," ++ heardResult("0.6", hazey_jane_heard)) ++ "," ++
+            heardBy("1", heardResult("0.3", pink_moon_heard) ++ "," ++ heardResult("0.95", hazey_jane_heard)),
+    );
+
+    const first = try rig.verify(.{ .release_id = album });
+    try std.testing.expectEqual(@as(?u64, 2), first.total_units);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.agreed);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.disagreed);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+
+    for ([_]runtime_module.MatchRequest{ .{}, .{ .release_id = album } }) |request| {
+        const again = try rig.verify(request);
+        try std.testing.expectEqual(@as(?u64, 0), again.total_units);
+        try std.testing.expectEqual(@as(u64, 0), again.stats.tracks_examined);
+        try std.testing.expectEqual(@as(u64, 0), again.stats.fingerprinted);
+        try std.testing.expectEqual(@as(u64, 0), again.stats.acoustid_requests + again.stats.acoustid_cache_hits);
+    }
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+    const alone = try rig.verify(.{ .track_id = disputed });
+    try std.testing.expectEqual(@as(?u64, 1), alone.total_units);
+    try std.testing.expectEqual(@as(u64, 1), alone.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), alone.stats.acoustid_cache_hits);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+
+    const agreeing_file = try rig.fileOf(agreeing);
+    const disputed_file = try rig.fileOf(disputed);
+    const edited = try rig.runtime.libraryEditTracks(rig.library, &.{agreeing}, &.{.{ .field = .musicbrainz_recording_id, .value = feedback_mbid }});
+    edited.deinit();
+    const reidentified = try trackOfFile(rig.library_database, agreeing_file);
+    const changed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, reidentified)).?;
+    defer changed.deinit();
+    try std.testing.expect(changed.stale);
+    const after_edit = try rig.verify(.{});
+    try std.testing.expectEqual(@as(?u64, 2), after_edit.total_units);
+    try std.testing.expectEqual(@as(u64, 2), after_edit.stats.verified);
+    try std.testing.expectEqual(@as(u64, 1), after_edit.stats.agreed);
+    try std.testing.expectEqual(@as(u64, 1), after_edit.stats.fingerprinted);
+    try std.testing.expectEqual(database.VerificationOutcome.agrees, (try rig.outcomeOf(reidentified)).?);
+
+    var rehash = try rig.library_database.database.prepare("UPDATE files SET quick_hash = x'00' WHERE id = ?1;");
+    defer rehash.deinit();
+    try rehash.bindInt64(1, agreeing_file);
+    try std.testing.expectEqual(database.sqlite.Step.done, try rehash.step());
+    const rehashed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, reidentified)).?;
+    defer rehashed.deinit();
+    try std.testing.expect(rehashed.stale);
+    const after_change = try rig.verify(.{});
+    try std.testing.expectEqual(@as(?u64, 2), after_change.total_units);
+    try std.testing.expectEqual(@as(u64, 2), after_change.stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 2), after_change.stats.acoustid_cache_hits);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(database.VerificationOutcome.agrees, (try rig.outcomeOf(reidentified)).?);
+    const fresh = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, reidentified)).?;
+    defer fresh.deinit();
+    try std.testing.expect(!fresh.stale);
+    try std.testing.expectEqual(database.VerificationOutcome.disagrees, (try rig.outcomeOf(try trackOfFile(rig.library_database, disputed_file))).?);
+}
+
+test "an album correction forms again with every file it disputes once one file of its Release is stale" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-reform?mode=memory&cache=shared");
+    defer rig.deinit();
+    const album = try addRelease(rig.library_database, "Bryter Layter", bryter_layter_mbid);
+    const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", pink_moon_mbid, album);
+    _ = try rig.addTone("pink.wav", 420, "Northern Sky", northern_sky_mbid, album);
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.97", northern_sky_heard)) ++ "," ++ heardBy("1", heardResult("0.96", pink_moon_heard)),
+    );
+
+    const first = try rig.verify(.{ .release_id = album });
+    try std.testing.expectEqual(@as(u64, 2), first.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.correction_groups);
+    const formed = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer formed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), formed.items.len);
+    const unchanged = try rig.verify(.{ .release_id = album });
+    try std.testing.expectEqual(@as(?u64, 0), unchanged.total_units);
+
+    var rehash = try rig.library_database.database.prepare("UPDATE files SET quick_hash = x'00' WHERE id = ?1;");
+    defer rehash.deinit();
+    try rehash.bindInt64(1, try rig.fileOf(sounds_northern));
+    try std.testing.expectEqual(database.sqlite.Step.done, try rehash.step());
+    const reformed = try rig.verify(.{ .release_id = album });
+
+    try std.testing.expectEqual(@as(?u64, 2), reformed.total_units);
+    try std.testing.expectEqual(@as(u64, 2), reformed.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), reformed.stats.correction_groups);
+    try std.testing.expectEqual(@as(u64, 2), reformed.stats.acoustid_cache_hits);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), rig.musicbrainz.requestCount());
+    const groups = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer groups.deinit();
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    try std.testing.expect(groups.items[0].group_id != formed.items[0].group_id);
+    try std.testing.expectEqual(@as(usize, 2), groups.items[0].proposals.len);
+}
+
+test "cancelling a verification while a unit's lookup is in flight commits nothing for that unit and keeps the unit before it" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-cancel?mode=memory&cache=shared");
+    defer rig.deinit();
+    const first_album = try addRelease(rig.library_database, "Five Leaves Left", null);
+    const second_album = try addRelease(rig.library_database, "Bryter Layter", null);
+    const committed = try rig.addTone("committed.wav", 300, "River Man", northern_sky_mbid, first_album);
+    const interrupted = [_]i64{
+        try rig.addTone("northern.wav", 420, "Northern Sky", northern_sky_mbid, second_album),
+        try rig.addTone("pink.wav", 540, "Pink Moon", northern_sky_mbid, second_album),
+    };
+    rig.acoustid.lookup_body = acoustIdAnswer(heardBy("0", heardResult("0.95", pink_moon_heard)) ++ "," ++
+        heardBy("1", heardResult("0.95", pink_moon_heard)));
+    rig.acoustid.hang_lookups_from = 1;
+
+    const job_handle = try rig.runtime.startLibraryMatching(rig.library, .{ .mode = .verify });
+    try std.testing.expectEqual(@as(?u64, 3), (try rig.runtime.jobSnapshotSynced(job_handle)).total_units);
+    var deadline: runtime_tests.TestDeadline = .init(5_000);
+    while (rig.acoustid.lookups.load(.acquire) < 2) {
+        if (!deadline.tick()) return error.LookupNeverSent;
+    }
+    try rig.runtime.cancelJob(job_handle);
+
+    try std.testing.expectEqual(job.State.cancelled, try runtime_tests.awaitJob(&rig.runtime, job_handle));
+    const stats = try rig.runtime.jobMatchStats(job_handle);
+    try std.testing.expect(stats.cancelled);
+    try std.testing.expectEqual(@as(u64, 1), stats.verified);
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(database.VerificationOutcome.disagrees, (try rig.outcomeOf(committed)).?);
+    try std.testing.expectEqual(@as(usize, 1), try pendingCount(&rig.runtime, rig.library, committed));
+    for (interrupted) |track_id| {
+        try std.testing.expectEqual(@as(?database.VerificationOutcome, null), try rig.outcomeOf(track_id));
+        try std.testing.expectEqual(@as(usize, 0), try pendingCount(&rig.runtime, rig.library, track_id));
+    }
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(rig.library_database.database, "SELECT count(*) FROM recording_verifications;"));
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(rig.library_database.database, "SELECT count(*) FROM identification_proposals;"));
+}
+
+/// Ten seconds of the Chromaprint reference audio under an ID3v2.3 title, so
+/// two files of it differ in bytes and not in sound.
+fn writeTitledMp3(dir: std.Io.Dir, name: []const u8, title: []const u8) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/audio/chromaprint-test.mp3", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(source);
+    const tag_size = (@as(usize, source[6]) << 21) | (@as(usize, source[7]) << 14) | (@as(usize, source[8]) << 7) | source[9];
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(std.testing.allocator);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(std.testing.allocator);
+    try text.append(std.testing.allocator, 0);
+    try text.appendSlice(std.testing.allocator, title);
+    try id3v23Frame(&frames, "TIT2", text.items);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    try bytes.appendSlice(std.testing.allocator, &.{ 'I', 'D', '3', 3, 0, 0 });
+    const length = frames.items.len;
+    try bytes.appendSlice(std.testing.allocator, &.{
+        @intCast((length >> 21) & 0x7f), @intCast((length >> 14) & 0x7f),
+        @intCast((length >> 7) & 0x7f),  @intCast(length & 0x7f),
+    });
+    try bytes.appendSlice(std.testing.allocator, frames.items);
+    try bytes.appendSlice(std.testing.allocator, source[10 + tag_size ..]);
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes.items });
+}
+
+fn tagAlbumFile(library_database: *database.LibraryDatabase, file_id: i64, title: []const u8, position: u32, recording_mbid: []const u8) !void {
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = title,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .album_artist = "Nick Drake",
+        .track_number = position,
+        .disc_number = 1,
+        .musicbrainz_recording_id = recording_mbid,
+        .musicbrainz_release_id = bryter_layter_mbid,
+    } });
+}
+
+test "a Release whose files carry each other's tags is proposed one album correction, taken only whole, which swaps its Tracks and is written as changes" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-swap?mode=memory&cache=shared");
+    defer rig.deinit();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    try writeTitledMp3(rig.temporary.dir, "a.mp3", "First");
+    try writeTitledMp3(rig.temporary.dir, "b.mp3", "Second");
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const binding = try rig.runtime.libraryAddRoot(rig.library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, try rig.runtime.startLibraryScan(rig.library, .{ .root_id = binding.root_id })));
+    const library_database = rig.library_database;
+    const sounds_northern = try database.columns.scalar(library_database.database, "SELECT file_id FROM locations WHERE uri LIKE '%/a.mp3';");
+    const sounds_pink = try database.columns.scalar(library_database.database, "SELECT file_id FROM locations WHERE uri LIKE '%/b.mp3';");
+    try tagAlbumFile(library_database, sounds_northern, "Pink Moon", 4, pink_moon_mbid);
+    try tagAlbumFile(library_database, sounds_pink, "Northern Sky", 3, northern_sky_mbid);
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, sounds_northern);
+    try std.testing.expectEqual(album, try releaseOfFile(library_database, sounds_pink));
+    const northern_first = try trackOfFile(library_database, sounds_northern) < try trackOfFile(library_database, sounds_pink);
+    const heard_northern = comptime heardResult("0.97", northern_sky_heard);
+    const heard_pink = comptime heardResult("0.96", pink_moon_heard);
+    rig.acoustid.lookup_body = if (northern_first)
+        acoustIdAnswer(heardBy("0", heard_northern) ++ "," ++ heardBy("1", heard_pink))
+    else
+        acoustIdAnswer(heardBy("0", heard_pink) ++ "," ++ heardBy("1", heard_northern));
+
+    const verified = try rig.verify(.{ .release_id = album });
+
+    try std.testing.expectEqual(@as(?u64, 2), verified.total_units);
+    try std.testing.expectEqual(@as(u64, 2), verified.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), verified.stats.correction_groups);
+    try std.testing.expectEqual(@as(u64, 2), verified.stats.proposals_stored);
+    try std.testing.expectEqual(@as(u32, 1), rig.musicbrainz.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, rig.musicbrainz.transport.lastUrl(), "/ws/2/release/" ++ bryter_layter_mbid) != null);
+    try std.testing.expectEqual(@as(u64, 0), try rig.runtime.libraryMatchReviewCount(rig.library));
+
+    const groups = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer groups.deinit();
+    try std.testing.expectEqual(@as(usize, 1), groups.items.len);
+    const group = groups.items[0];
+    try std.testing.expectEqualStrings("Bryter Layter", group.album);
+    try std.testing.expectEqual(@as(?i64, album), group.release_id);
+    try std.testing.expectEqual(@as(usize, 2), group.proposals.len);
+    const moved = for (group.proposals) |member| {
+        if (member.file_id == sounds_northern) break member;
+    } else return error.TestExpectedMember;
+    try std.testing.expectEqualStrings("Pink Moon", moved.title);
+    try std.testing.expectEqual(@as(?i64, 4), moved.track_number);
+    try std.testing.expectEqualStrings("Northern Sky", moved.proposed_title);
+    try std.testing.expectEqual(@as(?u32, 3), moved.proposed_track_number);
+    try std.testing.expectEqual(@as(?u32, 1), moved.proposed_disc_number);
+    try std.testing.expectEqualStrings(northern_sky_mbid, moved.recording_mbid);
+    try std.testing.expectEqualStrings(pink_moon_mbid, moved.corrects.?);
+    try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryAcceptMatch(rig.library, moved.proposal_id));
+    try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryDismissMatch(rig.library, moved.proposal_id));
+    try std.testing.expectError(error.UnknownCorrectionGroup, rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id + 100));
+
+    const acceptance = try rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id);
+
+    try std.testing.expectEqual(@as(u64, 2), acceptance.accepted);
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8, position: []const u8, track_mbid: []const u8 }{
+        .{ .file = sounds_northern, .recording = northern_sky_mbid, .title = "Northern Sky", .position = "3", .track_mbid = northern_sky_track_mbid },
+        .{ .file = sounds_pink, .recording = pink_moon_mbid, .title = "Pink Moon", .position = "4", .track_mbid = pink_moon_track_mbid },
+    }) |expected| {
+        inline for (.{ .musicbrainz_recording_id, .title, .artist, .track_number, .disc_number, .musicbrainz_release_track_id }) |field| {
+            const stored = (try library_database.orca_metadata.get(std.testing.allocator, expected.file, field)).?;
+            defer stored.deinit(std.testing.allocator);
+            try std.testing.expect(stored.locked);
+            try std.testing.expectEqual(metadata.Provenance.provider, stored.provenance);
+        }
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_recording_id, expected.recording);
+        try expectOrcaValue(library_database, expected.file, .title, expected.title);
+        try expectOrcaValue(library_database, expected.file, .track_number, expected.position);
+        try expectOrcaValue(library_database, expected.file, .disc_number, "1");
+        try expectOrcaValue(library_database, expected.file, .musicbrainz_release_track_id, expected.track_mbid);
+        const details = (try rig.runtime.libraryTrackDetails(rig.library, try trackOfFile(library_database, expected.file))).?;
+        defer details.deinit();
+        try std.testing.expectEqualStrings(expected.title, details.title);
+        try std.testing.expectEqual(try std.fmt.parseInt(i64, expected.position, 10), details.track_number.?);
+        try std.testing.expectEqualStrings(expected.recording, details.musicbrainz_recording_id.?);
+        try std.testing.expectEqual(RecordingIdSource.match, details.musicbrainz_recording_id_source.?);
+    }
+    var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+    try std.testing.expectEqual(@as(u64, 0), (try projection.run(.all)).displaced_positions);
+    const remaining = try rig.runtime.libraryCorrectionGroups(rig.library, std.testing.allocator, 10, 0);
+    defer remaining.deinit();
+    try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
+    try std.testing.expectError(error.StaleCorrectionGroup, rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id));
+    try std.testing.expectError(error.StaleCorrectionGroup, rig.runtime.libraryDismissCorrectionGroup(rig.library, group.group_id));
+
+    const ids = [_]i64{ try trackOfFile(library_database, sounds_northern), try trackOfFile(library_database, sounds_pink) };
+    const preview = try rig.runtime.planTagWrite(rig.library, std.testing.io, &ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 0), preview.conflicts.len);
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    for (preview.files) |file| {
+        const recording_change = for (file.changes) |change| {
+            if (change.field == .musicbrainz_recording_id) break change;
+        } else return error.TestExpectedChange;
+        try std.testing.expectEqual(.provider, recording_change.provenance);
+        try std.testing.expectEqualStrings(if (file.file_id == sounds_northern) pink_moon_mbid else northern_sky_mbid, recording_change.before.?);
+        try std.testing.expectEqualStrings(if (file.file_id == sounds_northern) northern_sky_mbid else pink_moon_mbid, recording_change.after.?);
+    }
+
+    const reverified = try rig.verify(.{ .release_id = try releaseOfFile(library_database, sounds_northern) });
+    try std.testing.expectEqual(@as(u64, 2), reverified.stats.agreed);
+    try std.testing.expectEqual(@as(u64, 0), reverified.stats.fingerprinted);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+}
+
+test "a disputed file with no tagged release is proposed a correction of its recording ID, title and artist alone, which keeps the user's own title, and a recording ID the user set is never corrected" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-verify-single?mode=memory&cache=shared");
+    defer rig.deinit();
+    const disputed_file = try rig.fileOf(try rig.addTone("disputed.wav", 300, "Wrong Title", northern_sky_mbid, null));
+    const chosen_file = try rig.fileOf(try rig.addTone("chosen.wav", 420, "Northern Sky", null, null));
+    const titled = try rig.runtime.libraryEditTracks(rig.library, &.{try trackOfFile(rig.library_database, disputed_file)}, &.{.{ .field = .title, .value = "My Title" }});
+    titled.deinit();
+    const identified = try rig.runtime.libraryEditTracks(rig.library, &.{try trackOfFile(rig.library_database, chosen_file)}, &.{.{ .field = .musicbrainz_recording_id, .value = northern_sky_mbid }});
+    identified.deinit();
+    rig.acoustid.lookup_body = acoustIdAnswer(
+        heardBy("0", heardResult("0.95", pink_moon_heard)) ++ "," ++ heardBy("1", heardResult("0.95", pink_moon_heard)),
+    );
+
+    const verified = try rig.verify(.{});
+
+    try std.testing.expectEqual(@as(u64, 2), verified.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 0), verified.stats.correction_groups);
+    try std.testing.expectEqual(@as(u64, 1), verified.stats.proposals_stored);
+    try std.testing.expectEqual(@as(u32, 0), rig.musicbrainz.requestCount());
+    const disputed_track = try trackOfFile(rig.library_database, disputed_file);
+    const chosen_track = try trackOfFile(rig.library_database, chosen_file);
+    try std.testing.expectEqual(database.VerificationOutcome.disagrees, (try rig.outcomeOf(chosen_track)).?);
+    try std.testing.expectEqual(@as(usize, 0), try pendingCount(&rig.runtime, rig.library, chosen_track));
+    const proposals = try rig.runtime.libraryMatchProposals(rig.library, disputed_track, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
+    try std.testing.expectEqual(@as(?u32, null), proposals.items[0].track_number);
+
+    _ = try rig.runtime.libraryAcceptMatch(rig.library, proposals.items[0].id);
+
+    try expectOrcaValue(rig.library_database, disputed_file, .musicbrainz_recording_id, pink_moon_mbid);
+    try expectOrcaValue(rig.library_database, disputed_file, .artist, "Nick Drake");
+    try expectOrcaValue(rig.library_database, disputed_file, .title, "My Title");
+    const title = (try rig.library_database.orca_metadata.get(std.testing.allocator, disputed_file, .title)).?;
+    defer title.deinit(std.testing.allocator);
+    try std.testing.expectEqual(metadata.Provenance.user, title.provenance);
+    const recording = (try rig.library_database.orca_metadata.get(std.testing.allocator, disputed_file, .musicbrainz_recording_id)).?;
+    defer recording.deinit(std.testing.allocator);
+    try std.testing.expect(recording.locked);
+    inline for (.{ .track_number, .disc_number, .musicbrainz_release_track_id, .musicbrainz_release_id, .album }) |field|
+        try expectOrcaValue(rig.library_database, disputed_file, field, null);
+    try expectOrcaValue(rig.library_database, chosen_file, .musicbrainz_recording_id, northern_sky_mbid);
+    const submittable = try rig.runtime.libraryAcoustIdSubmittablePage(rig.library, 0, 10);
+    defer submittable.deinit();
+    try std.testing.expectEqual(@as(usize, 1), submittable.items.len);
+    try std.testing.expectEqual(chosen_file, submittable.items[0].file_id);
+}
+
+test "bulk acceptance never takes a correction, even fully confident and fingerprint-backed" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-bulk-no-corrections?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const tagged = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", northern_sky_mbid);
+    const untagged = try addMatchTrack(library_database, "Pink Moon", "Nick Drake", null);
+    for ([_]struct { track: i64, recording: []const u8 }{
+        .{ .track = tagged, .recording = pink_moon_mbid },
+        .{ .track = untagged, .recording = pink_moon_mbid },
+    }) |proposal| {
+        const files = try library_database.tracks.fileIds(std.testing.allocator, proposal.track);
+        defer std.testing.allocator.free(files);
+        const payload = try (database.ProposalPayload{
+            .title = "Pink Moon",
+            .artist = "Nick Drake",
+            .acoustid_score = 1,
+            .acoustid_confidence = 1,
+            .musicbrainz_confidence = 1,
+        }).encode(std.testing.allocator);
+        defer std.testing.allocator.free(payload);
+        _ = try library_database.identification_proposals.put(.{
+            .file_id = files[0],
+            .provider = "musicbrainz+acoustid",
+            .provider_id = proposal.recording,
+            .confidence = 1,
+            .payload = payload,
+        });
+    }
+
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryConfidentMatchCount(library, 0.5));
+    const acceptance = try runtime.libraryAcceptConfidentMatches(library, 0.5);
+
+    try std.testing.expectEqual(@as(u64, 1), acceptance.accepted);
+    try std.testing.expectEqual(@as(usize, 1), try pendingCount(&runtime, library, tagged));
+    try std.testing.expectEqualStrings(northern_sky_mbid, &try recordingIdOf(&runtime, library, tagged));
+    const proposals = try runtime.libraryMatchProposals(library, tagged, 10);
+    defer proposals.deinit();
+    try std.testing.expectEqualStrings(northern_sky_mbid, proposals.items[0].corrects.?);
+}
+
+test "verification is refused without AcoustID or with bulk acceptance or a cover fetch, and stops when AcoustID refuses the key" {
+    var fake: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{ .lookup_status = 400, .lookup_body = "{\"status\":\"error\",\"error\":{\"code\":4,\"message\":\"invalid API key\"}}" };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeToneWave(temporary.dir, "tone.wav", 440);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-verify-refused?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track = try addAudioTrack(library_database, &temporary, "tone.wav", "Northern Sky", "Nick Drake");
+    try library_database.observed_tags.upsert(.{ .file_id = try trackFile(library_database, track), .values = .{
+        .title = "Northern Sky",
+        .musicbrainz_recording_id = northern_sky_mbid,
+    } });
+    const album = try addRelease(library_database, "Bryter Layter", null);
+
+    try std.testing.expectError(error.AcoustIdRequired, runtime.startLibraryMatching(library, .{ .mode = .verify }));
+    try runtime.setAcoustIdClientKey("test-client");
+    try std.testing.expectError(error.AcoustIdRequired, runtime.startLibraryMatching(library, .{ .mode = .verify, .fingerprints = false }));
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{ .mode = .verify, .release_id = album, .accept_minimum_confidence = 0.9 }));
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{ .mode = .verify, .release_id = album, .cover_art = true }));
+    try std.testing.expectEqual(@as(u32, 0), acoustid.lookups.load(.acquire));
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .mode = .verify, .track_id = track });
+
+    try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(AcoustIdUse.invalid_client_key, (try runtime.jobMatchStats(job_handle)).acoustid);
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM recording_verifications;"));
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+}
+
+fn trackFile(library_database: *database.LibraryDatabase, track_id: i64) !i64 {
+    const files = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+    defer std.testing.allocator.free(files);
+    return files[0];
 }

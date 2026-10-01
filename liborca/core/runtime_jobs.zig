@@ -86,6 +86,15 @@ pub fn startLibraryMatching(
     if (request.track_id != null and request.release_id != null) return error.InvalidMatchRequest;
     if (request.release_id == null and (request.accept_minimum_confidence != null or request.cover_art))
         return error.InvalidMatchRequest;
+    switch (request.mode) {
+        .search => {},
+        .reidentify => if ((request.track_id == null and request.release_id == null) or
+            request.accept_minimum_confidence != null) return error.InvalidMatchRequest,
+        .verify => {
+            if (request.accept_minimum_confidence != null or request.cover_art) return error.InvalidMatchRequest;
+            if (!acoustIdInScope(self, request.fingerprints)) return error.AcoustIdRequired;
+        },
+    }
     if (request.accept_minimum_confidence) |minimum| {
         if (!std.math.isFinite(minimum) or minimum <= 0 or minimum > 1) return error.InvalidMinimumConfidence;
     }
@@ -107,6 +116,7 @@ pub fn startLibraryMatching(
             .identity = identity,
             .hooks = self.matching_hooks,
             .scope = scope,
+            .mode = request.mode,
             .acoustid = if (request.fingerprints) acoustIdSetup(self) else null,
             .cover_art_server = self.coverartarchive_server,
         },
@@ -247,11 +257,17 @@ pub fn spawnJobWorker(
         ),
         .duplicate_scan => try library_database.files.count(),
         .mutation => |pending| pending.plan.actions.len,
-        .metadata_lookup => |matching| if (!matching.lookups) 0 else try library_database.identification_proposals.unidentifiedCount(
-            matching.setup.scope,
-            matching.setup.acoustid != null and acoustIdInScope(self, true),
-            matching.limit,
-        ),
+        .metadata_lookup => |matching| if (!matching.lookups)
+            0
+        else if (matching.setup.mode.selection()) |selection|
+            try library_database.identification_proposals.unidentifiedCount(
+                matching.setup.scope,
+                selection,
+                matching.setup.acoustid != null and acoustIdInScope(self, true),
+                matching.limit,
+            )
+        else
+            try library_database.recording_verifications.verifiableCount(matching.setup.scope, matching.limit),
         .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
         .scan, .reconcile, .projection => null,
     };

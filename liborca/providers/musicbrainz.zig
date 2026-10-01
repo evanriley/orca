@@ -307,6 +307,9 @@ const Medium = struct {
 const Release = struct {
     id: []const u8 = "",
     title: []const u8 = "",
+    status: ?[]const u8 = null,
+    date: ?[]const u8 = null,
+    @"track-count": ?u32 = null,
     media: []const Medium = &.{},
 };
 
@@ -361,6 +364,7 @@ fn parseCandidates(
             if (metadata.isMusicBrainzId(chosen.id)) candidate.release_mbid = try allocator.dupe(u8, chosen.id);
         }
         candidate.release_mbids = try releaseIds(allocator, recording.releases);
+        candidate.release_facts = try releaseFacts(allocator, recording.releases);
         try candidates.append(allocator, candidate);
     }
     return .{ .allocator = allocator, .items = try candidates.toOwnedSlice(allocator) };
@@ -393,6 +397,34 @@ fn releaseIds(allocator: std.mem.Allocator, releases: []const Release) ![][]u8 {
         ids.appendAssumeCapacity(try allocator.dupe(u8, release.id));
     }
     return ids.toOwnedSlice(allocator);
+}
+
+fn releaseFacts(allocator: std.mem.Allocator, releases: []const Release) ![]database.ReleaseFact {
+    var facts: std.ArrayList(database.ReleaseFact) = .empty;
+    errdefer {
+        for (facts.items) |fact| model.freeReleaseFact(allocator, fact);
+        facts.deinit(allocator);
+    }
+    for (releases) |release| {
+        if (facts.items.len == max_release_mbids) break;
+        if (!metadata.isMusicBrainzId(release.id)) continue;
+        const seen = for (facts.items) |fact| {
+            if (std.mem.eql(u8, fact.mbid, release.id)) break true;
+        } else false;
+        if (seen) continue;
+        try facts.ensureUnusedCapacity(allocator, 1);
+        const mbid = try allocator.dupe(u8, release.id);
+        errdefer allocator.free(mbid);
+        const status = try dupeOptional(allocator, release.status);
+        errdefer if (status) |value| allocator.free(value);
+        const date = try dupeOptional(allocator, release.date);
+        facts.appendAssumeCapacity(.{ .mbid = mbid, .status = status, .date = date, .track_count = release.@"track-count" });
+    }
+    return facts.toOwnedSlice(allocator);
+}
+
+fn dupeOptional(allocator: std.mem.Allocator, value: ?[]const u8) !?[]u8 {
+    return if (value) |text| try allocator.dupe(u8, text) else null;
 }
 
 fn bestRelease(allocator: std.mem.Allocator, releases: []const Release, album: ?[]const u8) !?usize {
@@ -733,4 +765,20 @@ test "a search keeps every release it lists for a recording, each once" {
     const live = findCandidate(list, "e3a15a94-41d6-45c0-bbc1-aae6137bcb7a").?;
     try testing.expectEqual(@as(usize, 3), live.release_mbids.len);
     try testing.expectEqualStrings("786a6852-4b41-44c9-a585-c65f9caa54a1", live.release_mbids[1]);
+}
+
+test "a search keeps each listed release's status, date and track count" {
+    const body = try readFixture();
+    defer testing.allocator.free(body);
+    const list = try parseCandidates(testing.allocator, body, null);
+    defer list.deinit();
+    const fact = found: for (list.items) |candidate| {
+        for (candidate.release_facts) |listed| {
+            if (std.mem.eql(u8, listed.mbid, "047a4aae-27f8-4f2d-92fb-214fd8dc865a")) break :found listed;
+        }
+    } else null;
+    try testing.expectEqualStrings("Official", fact.?.status.?);
+    try testing.expectEqualStrings("2014", fact.?.date.?);
+    try testing.expectEqual(@as(?u32, 19), fact.?.track_count);
+    for (list.items) |candidate| try testing.expectEqual(candidate.release_mbids.len, candidate.release_facts.len);
 }

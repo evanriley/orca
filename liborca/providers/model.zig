@@ -1,4 +1,5 @@
 const std = @import("std");
+const database = @import("../database/root.zig");
 
 pub const Query = struct {
     title: ?[]const u8 = null,
@@ -19,6 +20,8 @@ pub const Candidate = struct {
     release_mbid: ?[]u8 = null,
     /// Every release the provider listed the recording on, owned.
     release_mbids: [][]u8 = &.{},
+    /// What the provider said about each of `release_mbids`, owned.
+    release_facts: []database.ReleaseFact = &.{},
     duration_ms: ?u64 = null,
     track_number: ?u32 = null,
     mb_score: ?u8 = null,
@@ -59,8 +62,16 @@ pub const Candidate = struct {
         if (self.release_mbid) |value| self.allocator.free(value);
         for (self.release_mbids) |value| self.allocator.free(value);
         self.allocator.free(self.release_mbids);
+        for (self.release_facts) |fact| freeReleaseFact(self.allocator, fact);
+        self.allocator.free(self.release_facts);
     }
 };
+
+pub fn freeReleaseFact(allocator: std.mem.Allocator, fact: database.ReleaseFact) void {
+    allocator.free(fact.mbid);
+    if (fact.status) |value| allocator.free(value);
+    if (fact.date) |value| allocator.free(value);
+}
 
 pub const CandidateList = struct {
     allocator: std.mem.Allocator,

@@ -139,7 +139,7 @@ pub const ReleaseArtworkRepository = struct {
 };
 
 /// Votes for release IDs. The most votes win; a tie goes to the one equal to
-/// `tag`, then to the lowest.
+/// `tag`, then by `ReleaseRanking`, then to the lowest.
 pub const MbidTally = struct {
     entries: std.ArrayList(Entry) = .empty,
 
@@ -160,27 +160,75 @@ pub const MbidTally = struct {
     }
 
     pub fn winner(self: *const MbidTally, tag: []const u8) ?[36]u8 {
+        return self.rankedWinner(tag, .{});
+    }
+
+    pub fn rankedWinner(self: *const MbidTally, tag: []const u8, ranking: ReleaseRanking) ?[36]u8 {
         var best: ?Entry = null;
         for (self.entries.items) |entry| {
             const current = best orelse {
                 best = entry;
                 continue;
             };
-            if (entry.votes != current.votes) {
-                if (entry.votes > current.votes) best = entry;
-                continue;
-            }
-            const entry_is_tag = std.mem.eql(u8, &entry.mbid, tag);
-            const current_is_tag = std.mem.eql(u8, &current.mbid, tag);
-            if (entry_is_tag != current_is_tag) {
-                if (entry_is_tag) best = entry;
-                continue;
-            }
-            if (std.mem.order(u8, &entry.mbid, &current.mbid) == .lt) best = entry;
+            if (outranks(entry, current, tag, ranking)) best = entry;
         }
         return if (best) |chosen| chosen.mbid else null;
     }
+
+    fn outranks(entry: Entry, current: Entry, tag: []const u8, ranking: ReleaseRanking) bool {
+        if (entry.votes != current.votes) return entry.votes > current.votes;
+        const entry_is_tag = std.mem.eql(u8, &entry.mbid, tag);
+        const current_is_tag = std.mem.eql(u8, &current.mbid, tag);
+        if (entry_is_tag != current_is_tag) return entry_is_tag;
+        const entry_fact = ranking.factFor(&entry.mbid);
+        const current_fact = ranking.factFor(&current.mbid);
+        const entry_official = isOfficial(entry_fact);
+        if (entry_official != isOfficial(current_fact)) return entry_official;
+        const entry_complete = ranking.hasAlbumTrackCount(entry_fact);
+        if (entry_complete != ranking.hasAlbumTrackCount(current_fact)) return entry_complete;
+        switch (dateOrder(entry_fact, current_fact)) {
+            .lt => return true,
+            .gt => return false,
+            .eq => {},
+        }
+        return std.mem.order(u8, &entry.mbid, &current.mbid) == .lt;
+    }
 };
+
+pub const ReleaseRanking = struct {
+    facts: []const identification.ReleaseFact = &.{},
+    album_track_count: ?u32 = null,
+
+    fn factFor(self: ReleaseRanking, mbid: []const u8) ?identification.ReleaseFact {
+        for (self.facts) |fact| if (std.mem.eql(u8, fact.mbid, mbid)) return fact;
+        return null;
+    }
+
+    fn hasAlbumTrackCount(self: ReleaseRanking, fact: ?identification.ReleaseFact) bool {
+        const album = self.album_track_count orelse return false;
+        const release = (fact orelse return false).track_count orelse return false;
+        return release == album;
+    }
+};
+
+fn isOfficial(fact: ?identification.ReleaseFact) bool {
+    const status = (fact orelse return false).status orelse return false;
+    return std.mem.eql(u8, status, "Official");
+}
+
+fn dateOrder(a: ?identification.ReleaseFact, b: ?identification.ReleaseFact) std.math.Order {
+    const a_date = knownDate(a);
+    const b_date = knownDate(b);
+    if (a_date == null and b_date == null) return .eq;
+    if (a_date == null) return .gt;
+    if (b_date == null) return .lt;
+    return std.mem.order(u8, a_date.?, b_date.?);
+}
+
+fn knownDate(fact: ?identification.ReleaseFact) ?[]const u8 {
+    const date = (fact orelse return null).date orelse return null;
+    return if (date.len == 0) null else date;
+}
 
 const testing = std.testing;
 const mbid_a = "aaaaaaaa-0000-4000-8000-000000000000";
@@ -200,4 +248,68 @@ test "the release ID most accepted matches name wins, and a tie goes to the tag,
     try testing.expectEqualStrings(mbid_a, &(try tallyOf(3, 3, "")).?);
     try testing.expectEqualStrings(mbid_b, &(try tallyOf(3, 3, mbid_b)).?);
     try testing.expectEqual(@as(?[36]u8, null), try tallyOf(0, 0, mbid_b));
+}
+
+const mbid_c = "cccccccc-0000-4000-8000-000000000000";
+
+fn rankedWinnerOf(tag: []const u8, facts: []const identification.ReleaseFact, album_track_count: ?u32) !?[36]u8 {
+    var tally: MbidTally = .{};
+    defer tally.deinit(testing.allocator);
+    for ([_][]const u8{ mbid_c, mbid_b, mbid_a }) |mbid| try tally.add(testing.allocator, mbid[0..36].*);
+    return tally.rankedWinner(tag, .{ .facts = facts, .album_track_count = album_track_count });
+}
+
+test "a tie in votes goes to the Official release with the album's track count, then the earliest" {
+    const facts = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "2011", .track_count = 14 },
+        .{ .mbid = mbid_b, .status = "Bootleg", .date = "1990", .track_count = 12 },
+        .{ .mbid = mbid_c, .status = "Official", .date = "1991", .track_count = 12 },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &facts, 12)).?);
+}
+
+test "among Official releases a tie goes to the one with the album's track count" {
+    const facts = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1990", .track_count = 14 },
+        .{ .mbid = mbid_b, .status = "Official", .date = "1991" },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2020", .track_count = 12 },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &facts, 12)).?);
+    try testing.expectEqualStrings(mbid_a, &(try rankedWinnerOf("", &facts, null)).?);
+}
+
+test "a tie in status and track count goes to the earliest date, and a missing date sorts last" {
+    const facts = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "" },
+        .{ .mbid = mbid_b, .status = "Official", .date = "2004-06-02" },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2004" },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &facts, 12)).?);
+    const undated = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official" },
+        .{ .mbid = mbid_c, .status = "Official", .date = "2020" },
+    };
+    try testing.expectEqualStrings(mbid_c, &(try rankedWinnerOf("", &undated, null)).?);
+}
+
+test "a release with no facts ranks below one with them, and with none the lowest wins" {
+    const facts = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_b, .status = "Promotion", .date = "2030" },
+    };
+    try testing.expectEqualStrings(mbid_b, &(try rankedWinnerOf("", &facts, null)).?);
+    try testing.expectEqualStrings(mbid_a, &(try rankedWinnerOf("", &.{}, 12)).?);
+    try testing.expectEqualStrings(mbid_a, &(try rankedWinnerOf("", &.{.{ .mbid = mbid_c, .status = "official" }}, null)).?);
+}
+
+test "the tag and more votes still outrank every release fact" {
+    const facts = [_]identification.ReleaseFact{
+        .{ .mbid = mbid_a, .status = "Official", .date = "1991", .track_count = 12 },
+    };
+    try testing.expectEqualStrings(mbid_b, &(try rankedWinnerOf(mbid_b, &facts, 12)).?);
+    var tally: MbidTally = .{};
+    defer tally.deinit(testing.allocator);
+    try tally.add(testing.allocator, mbid_a.*);
+    try tally.add(testing.allocator, mbid_b.*);
+    try tally.add(testing.allocator, mbid_b.*);
+    try testing.expectEqualStrings(mbid_b, &tally.rankedWinner("", .{ .facts = &facts, .album_track_count = 12 }).?);
 }

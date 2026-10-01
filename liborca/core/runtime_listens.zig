@@ -15,6 +15,9 @@ const FeedbackChange = runtime.FeedbackChange;
 const LibraryHandle = runtime.LibraryHandle;
 const LibraryObject = runtime.LibraryObject;
 const ConfidentMatchAcceptance = runtime.ConfidentMatchAcceptance;
+const CorrectionGroupAcceptance = runtime.CorrectionGroupAcceptance;
+const CorrectionGroupPage = runtime.CorrectionGroupPage;
+const TrackVerification = runtime.TrackVerification;
 const MatchAcceptance = runtime.MatchAcceptance;
 const MatchProposalPage = runtime.MatchProposalPage;
 const MatchReviewPage = runtime.MatchReviewPage;
@@ -243,6 +246,40 @@ pub fn libraryDismissMatch(self: *OrcaRuntime, library: LibraryHandle, proposal_
     try (try runtime.libraryDatabase(self, library)).identification_proposals.dismiss(proposal_id);
 }
 
+pub fn libraryCorrectionGroups(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    limit: u32,
+    offset: u32,
+) !CorrectionGroupPage {
+    return (try runtime.libraryDatabase(self, library)).identification_proposals.correctionGroups(allocator, limit, offset);
+}
+
+pub fn libraryAcceptCorrectionGroup(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !CorrectionGroupAcceptance {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const acceptance = try library_database.identification_proposals.acceptCorrectionGroup(self.allocator, group_id);
+    defer acceptance.deinit();
+    if (acceptance.values_written != 0) {
+        try reproject(self, library_database, acceptance.file_ids);
+        recordingIdsChanged(self, library);
+    }
+    return .{ .accepted = acceptance.accepted, .values_written = acceptance.values_written };
+}
+
+pub fn libraryDismissCorrectionGroup(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !void {
+    try (try runtime.libraryDatabase(self, library)).identification_proposals.dismissCorrectionGroup(group_id);
+}
+
+pub fn libraryTrackVerification(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    track_id: i64,
+) !?TrackVerification {
+    return (try runtime.libraryDatabase(self, library)).recording_verifications.forTrack(allocator, track_id);
+}
+
 pub fn libraryMatchReviewPage(
     self: *OrcaRuntime,
     library: LibraryHandle,
@@ -259,6 +296,7 @@ pub fn libraryMatchReviewCount(self: *OrcaRuntime, library: LibraryHandle) !u64 
 pub fn libraryUnidentifiedCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
     return (try runtime.libraryDatabase(self, library)).identification_proposals.unidentifiedCount(
         .library,
+        .unidentified,
         runtime_jobs.acoustIdInScope(self, true),
         null,
     );

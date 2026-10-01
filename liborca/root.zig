@@ -129,6 +129,7 @@ pub const BoundedText = runtime.BoundedText;
 
 // MusicBrainz matching: proposals found by a job, reviewed by a person.
 pub const MatchRequest = runtime.MatchRequest;
+pub const MatchMode = runtime.MatchMode;
 pub const MatchStats = runtime.MatchStats;
 pub const MatchProposal = runtime.MatchProposal;
 pub const MatchProposalPage = runtime.MatchProposalPage;
@@ -136,6 +137,13 @@ pub const MatchAcceptance = runtime.MatchAcceptance;
 pub const ConfidentMatchAcceptance = runtime.ConfidentMatchAcceptance;
 pub const MatchReviewItem = runtime.MatchReviewItem;
 pub const MatchReviewPage = runtime.MatchReviewPage;
+pub const CorrectionGroup = runtime.CorrectionGroup;
+pub const CorrectionGroupMember = runtime.CorrectionGroupMember;
+pub const CorrectionGroupPage = runtime.CorrectionGroupPage;
+pub const CorrectionGroupAcceptance = runtime.CorrectionGroupAcceptance;
+pub const TrackVerification = runtime.TrackVerification;
+pub const VerificationOutcome = runtime.VerificationOutcome;
+pub const HeardRecording = runtime.HeardRecording;
 pub const AcoustIdUse = runtime.AcoustIdUse;
 pub const BusyService = runtime.BusyService;
 pub const CoverArtOutcome = runtime.CoverArtOutcome;

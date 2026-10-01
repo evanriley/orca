@@ -288,6 +288,19 @@ metadata; see [metadata.md](metadata.md#accepting-a-match).
   [Cover Art Archive](#cover-art-archive), under the Release id it started
   with; the files given values are then reprojected once. `orca-gtk`'s Match
   Album runs all three with the review threshold from Preferences.
+- **Re-identify.** `MatchRequest.mode = .reidentify` searches one Track
+  (`track_id`) or one Release's Tracks (`release_id`) again: every one with a
+  playing file, whatever recording ID is in effect and whatever services
+  answered before. Without either it returns `error.InvalidMatchRequest`, as
+  it does with `accept_minimum_confidence`, so no correction is accepted in
+  bulk. A candidate for the recording ID already in effect is not proposed
+  and counts as `confirmed` in `jobMatchStats`, once per Track; any other
+  candidate is stored as a proposal as in a search. The answers are recorded
+  in `identification_searches` as in a search, and a dismissed proposal stays
+  dismissed. With `release_id`, the proposals are pointed at one release as
+  [Match Album](#musicbrainz-release-lookup) does. The MusicBrainz query is
+  built from the Track's current tags and does not use its recording ID, so
+  for a mistagged file the fingerprint lookup on AcoustID carries the signal.
 - **One job at a time.** A second `startLibraryMatching` while one runs returns
   `error.MatchingAlreadyRunning`, and one while an AcoustID submission runs
   returns `error.AcoustIdBusy`, so each service sees one client and one
@@ -301,8 +314,10 @@ cache or failed, the AcoustID requests, cache hits and refused queries, and
 `no_client_key` or `invalid_client_key`.
 
 `libraryMatchProposals` lists a Track's pending proposals, most confident
-first, with their source and AcoustID score. `libraryAcceptMatch` accepts one
-and `libraryDismissMatch` dismisses one.
+first, with their source, AcoustID score and, for a correction, the
+recording ID it replaces. `libraryAcceptMatch` accepts one and
+`libraryDismissMatch` dismisses one; both return `error.ProposalInGroup` for
+a proposal in an album group.
 `libraryAcceptConfidentMatches(minimum)` accepts each file's best pending
 proposal with a confidence of at least `minimum`, chosen as
 [metadata.md](metadata.md#musicbrainz-recording-ids) describes; it is an
@@ -317,8 +332,9 @@ explicit user action, never run by a job.
   Track without a title or an artist is counted and not searched.
 - **What is kept.** The recording ID, title, full artist credit, the release
   whose title is closest to the album with its ID and track number, the IDs
-  of up to 25 releases the recording is listed on, the length, and
-  MusicBrainz's own score from 0 to 100.
+  of up to 25 releases the recording is listed on with each one's status,
+  date and track count, the length, and MusicBrainz's own score from 0 to
+  100.
 - **Cache.** Answers, empty ones included, are cached in `provider_cache` for
   30 days of wall time, keyed by the request URL. When a request fails and an
   expired answer is cached, that answer is used.
@@ -346,8 +362,13 @@ explicit user action, never run by a job.
 - **Match Album.** After its search pass, which may search nothing, each
   file of the Release votes once for every release its stored proposals that
   are not dismissed list. The release with most votes wins, a tie going to
-  the Release's tagged release ID, then to the lowest. It is looked up once,
-  and every proposal listing it is pointed at it and filled in
+  the Release's tagged release ID, then to an `Official` release, then to
+  one with as many tracks as the Release has Tracks, then to the earliest
+  date (a release without one last), then to the lowest ID. Status, track
+  count and date are what the search said about each release, first seen
+  per release; a release a stored payload says none of them about ranks as
+  unofficial, of another length and undated. It is looked up once, and
+  every proposal listing it is pointed at it and filled in
   (`updatePayload`). A rerun after a failure completes from the cache.
 
 ### AcoustID lookup
@@ -378,6 +399,76 @@ explicit user action, never run by a job.
   `client-key` overrides it. Without a key AcoustID is skipped and reported
   as `no_client_key`; a key AcoustID refuses (error code 4) stops AcoustID for
   the rest of the job and is reported as `invalid_client_key`.
+
+### Verification
+
+A recording ID in effect can be wrong: a file tagged as another track of its
+album, a tag copied from the wrong edition. `MatchRequest.mode = .verify`
+checks each file that has one against what AcoustID hears in its
+fingerprint, and proposes a correction where AcoustID hears another
+recording. MusicBrainz is asked only for the Release a correction names.
+
+- **AcoustID is required.** Without an application key, or with
+  `fingerprints = false`, `startLibraryMatching` returns
+  `error.AcoustIdRequired` and no job starts. `accept_minimum_confidence` and
+  `cover_art` return `error.InvalidMatchRequest`. A key AcoustID refuses
+  mid-run stops the job `failed` with `acoustid = invalid_client_key`, and a
+  credential store holding no key stops it with `no_client_key`.
+- **Outcomes.** A file `agrees` when AcoustID lists its recording ID in
+  effect at a score of at least 0.5 (`verify_agree_minimum`). It `disagrees`
+  when AcoustID does not and lists another recording at 0.9 or more
+  (`verify_disagree_minimum`); it is `unconfirmed` otherwise, an empty answer
+  included. A file that does not decode, or changes while it is
+  fingerprinted, is `no_fingerprint`. Each outcome is stored in
+  `recording_verifications` with the file's quick hash, the recording ID in
+  effect and up to eight recordings AcoustID heard, strongest first.
+- **What is not stored.** A file with no present location or no file there,
+  and a fingerprint AcoustID refused or left unanswered (counted in
+  `acoustid_refused`), get no outcome and are tried again on the next run. A
+  file with no quick hash is counted in `skipped` and never verified.
+- **What is verified.** A file whose stored outcome is missing or stale. An
+  outcome is stale once the file's quick hash or its recording ID in effect
+  changes. A file whose fresh outcome is `disagrees` is verified again only
+  beside a stale or unverified file of its Release, so the Release's album
+  group can form again with every file it disputes, or when `track_id` asks
+  for it alone; otherwise a rerun asks nothing about it. When only the
+  recording ID changed and the new one is among the recordings heard at 0.5
+  or more, the file agrees again without a lookup. `total_units` counts by
+  the same rule.
+- **Units.** The library is verified one Release at a time, in Release id
+  order, then Tracks with no Release a page at a time; `release_id` and
+  `track_id` limit it to one. A unit's files are fingerprinted, looked up 20
+  at a time, and committed in one transaction with their proposals; a
+  cancelled unit commits nothing. `limit` bounds the Tracks examined.
+- **Corrections.** A file that disagrees is proposed each recording heard at
+  0.9 or more, scored as a search candidate against the Track's artist,
+  album and length but not its title, which may be the wrong recording's. A
+  file whose recording ID is the user's own locked edit is verified and
+  never proposed a correction. Accepting one is described in
+  [metadata.md](metadata.md#corrections).
+- **Album corrections.** When the Release has a MusicBrainz release ID and
+  at most 512 Tracks, it is looked up once as in
+  [MusicBrainz release lookup](#musicbrainz-release-lookup). Each disputing
+  file whose strongest recording heard is on that release has that proposal
+  filled in from it, positions included, and those proposals form one album
+  group (`identification_proposals.album_group`), accepted or dismissed
+  only whole with `libraryAcceptCorrectionGroup` and
+  `libraryDismissCorrectionGroup`. The other disputing files get corrections
+  of their own, with AcoustID's title and artist and no position. A lookup
+  that fails stops the job as a search's would; a release MusicBrainz does
+  not have leaves every correction ungrouped.
+- **Cost.** About one AcoustID request per Release with a file to verify,
+  and one MusicBrainz request per Release with a correction, each at most
+  one a second. Answers come from the 90-day AcoustID and 30-day MusicBrainz
+  caches when they can, so a file that disagrees, verified again beside a
+  stale one, costs no request.
+
+`jobMatchStats` reports `verified`, `agreed`, `disagreed`, `unconfirmed`,
+`skipped`, `correction_groups` and `proposals_stored` besides the fingerprint
+and request counts. `libraryTrackVerification` returns a Track's stored
+outcome, whether it is stale, and whether the strongest recording heard has
+a dismissed proposal. `libraryCorrectionGroups` lists the album groups with a
+pending proposal; `libraryMatchReviewPage` leaves their proposals out.
 
 ## AcoustID submission
 

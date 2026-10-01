@@ -1382,6 +1382,7 @@ test "a diverged copy carries the file's Orca values and locks but none of its a
         "INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload) VALUES (?1, 'musicbrainz', '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 0.9, '{}');",
         "INSERT INTO identification_searches(file_id, provider, searched_at) VALUES (?1, 'musicbrainz', 1800000000);",
         "INSERT INTO acoustid_submissions(file_id, recording_mbid, submission_id, submitted_at) VALUES (?1, '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 7, 1800000000);",
+        "INSERT INTO recording_verifications(file_id, quick_hash, recording_mbid, outcome, heard, verified_at) VALUES (?1, X'01', '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 0, '[]', 1800000000);",
     }) |sql| {
         var statement = try copies.library.database.prepare(sql);
         defer statement.deinit();
@@ -1414,6 +1415,7 @@ test "a diverged copy carries the file's Orca values and locks but none of its a
         "identification_proposals",
         "identification_searches",
         "acoustid_submissions",
+        "recording_verifications",
     }) |table| {
         try std.testing.expectEqual(@as(i64, 1), try copies.rowsOf(table, shared));
         try std.testing.expectEqual(@as(i64, 0), try copies.rowsOf(table, diverged));
