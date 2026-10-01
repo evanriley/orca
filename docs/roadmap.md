@@ -275,6 +275,29 @@ Small defects that are not yet scheduled:
   renders in software. To examine: build the default from the consumer's
   `pkgs` when its `zig` is 0.16, and document `inputs.nixpkgs.follows` and
   nixGL for `nix run` outside NixOS.
+- Files in different folders at the same release position share one Track,
+  and the folder projected last decides which File it prefers; the other
+  File is on no Track. An undo can switch the Track between them.
+- `playerNext` and `playerPrevious` move the queue before opening the
+  target, so a target that fails to open leaves now-playing on it while the
+  previous entry keeps playing.
+- `orca-cli analyze PATH` records the location's identity without reading
+  its tags, so the next scan skips the path and its tags are never observed.
+- A change confined to the middle of a file, with its size and first and
+  last 64 KiB unchanged, keeps its quick hash, so analysis and the identity
+  cascade still treat it as the old bytes.
+- `playerSignalPath` describes the current DSP settings while audio
+  processed under earlier settings is still queued, so it can report
+  bit-perfect output for up to a pipe's worth of processed audio.
+- Canonical PCM carries a channel count but no layout: Vorbis and FLAC
+  order multichannel audio differently, the PipeWire stream gets no channel
+  positions, and loudness weights every channel 1.0.
+- A Zone whose stream stays active but stops calling back after decoding
+  finished blocks draining for ever.
+- A Zone attached, detached or moved while its Player's engine thread is
+  starting can return before that engine adopts the change.
+- `zig build pipewire-live-smoke` opens the first device on the user's
+  PipeWire server rather than a silent sink.
 
 ## Deferred formats
 
