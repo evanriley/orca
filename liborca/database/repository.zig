@@ -14,6 +14,7 @@ const orca_metadata = @import("repository/orca_metadata.zig");
 const provider_cache = @import("repository/provider_cache.zig");
 const provider_state = @import("repository/provider_state.zig");
 const recordings = @import("repository/recordings.zig");
+const release_artwork = @import("repository/release_artwork.zig");
 const releases = @import("repository/releases.zig");
 const roots = @import("repository/roots.zig");
 const scan_runs = @import("repository/scan_runs.zig");
@@ -113,6 +114,10 @@ pub const ArtistQuery = artists.ArtistQuery;
 pub const ReleaseQuery = releases.ReleaseQuery;
 pub const ReleaseSort = releases.ReleaseSort;
 pub const ReleaseRepository = releases.ReleaseRepository;
+pub const ReleaseArtworkRepository = release_artwork.ReleaseArtworkRepository;
+pub const StoredReleaseArtwork = release_artwork.StoredReleaseArtwork;
+pub const FetchedImage = release_artwork.FetchedImage;
+pub const MbidTally = release_artwork.MbidTally;
 pub const RecordingRepository = recordings.RecordingRepository;
 pub const RootRemoval = roots.RootRemoval;
 pub const OrphanPruneCounts = roots.OrphanPruneCounts;
@@ -151,6 +156,7 @@ pub const review_count_sql = identification.review_count_sql;
 pub const unidentified_tracks = identification.unidentified_tracks;
 pub const unidentified_page_sql = identification.unidentified_page_sql;
 pub const unidentified_count_sql = identification.unidentified_count_sql;
+pub const unidentified_release_page_sql = identification.unidentified_release_page_sql;
 
 test {
     _ = @import("repository/acoustid_submissions.zig");
@@ -169,6 +175,7 @@ test {
     _ = @import("repository/provider_cache.zig");
     _ = @import("repository/provider_state.zig");
     _ = @import("repository/recordings.zig");
+    _ = @import("repository/release_artwork.zig");
     _ = @import("repository/releases.zig");
     _ = @import("repository/roots.zig");
     _ = @import("repository/scan_runs.zig");

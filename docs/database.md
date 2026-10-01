@@ -391,6 +391,19 @@ proposal accepted by `acceptConfident`, 0 for one accepted on its own and for
 every proposal accepted before version 19. AcoustID submission leaves out an
 ID whose accepted proposal was found by AcoustID or accepted in bulk.
 
+## Release artwork
+
+`release_artwork` (version 20) holds a Release's front cover fetched from the
+Cover Art Archive, one row per Release: `release_id` is its primary key and
+references `releases(id)` with `ON DELETE CASCADE`, so a Release pruned or
+reprojected under a new id loses its row. `musicbrainz_release_id` is the
+release ID it was fetched for, `image` and `mime` the cover, and
+`fetched_at` Unix seconds. A null `image` records that the archive had no
+cover, which stands for 30 days. `ReleaseArtworkRepository.coverReleaseMbid`
+chooses the release ID: the Release's tagged one, else the one most of its
+accepted proposals name. See
+[providers.md](providers.md#cover-art-archive).
+
 ## Concurrency
 
 - The primary connection uses WAL and `synchronous=NORMAL`.

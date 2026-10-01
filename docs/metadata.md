@@ -130,6 +130,10 @@ observation and a fetch cannot disagree about which bytes are the image.
   demand costs one open and one read, and it is right by construction — a track
   whose stored observation predates the current reader still yields its cover,
   because the row is not consulted.
+  The one image the Library does store is a cover fetched from the Cover Art
+  Archive for a Release none of whose files has one (`release_artwork`), since
+  it exists nowhere on disk; an embedded cover always wins over it. See
+  [providers.md](providers.md#cover-art-archive).
 - **liborca keeps no image cache.** `Runtime.libraryRequestArtwork` queues a
   request on the Library's artwork loader (`core/artwork.zig`), which reads
   covers on its own thread with at most `artwork.capacity` requests

@@ -226,6 +226,23 @@ pub fn forget(self: *App, stack_widget: *gtk.Widget) void {
     }
 }
 
+/// Drops a Release's cached covers and asks again for each one a widget
+/// shows, so a cover fetched since replaces the placeholder.
+pub fn refreshRelease(self: *App, release_id: i64) void {
+    const cache = &self.art;
+    inline for (comptime std.enums.values(Size)) |size| {
+        const key = Key.release(release_id, size);
+        if (cache.entries.fetchRemove(key)) |removed| {
+            if (removed.value.texture) |texture| gtk.g_object_unref(texture);
+        }
+        if (cache.pending.fetchRemove(key)) |pending| {
+            _ = cache.requests.remove(pending.value);
+            if (self.library) |library| self.runtime.libraryCancelArtwork(library, pending.value);
+        }
+        if (isWanted(cache, key)) want(self, key);
+    }
+}
+
 /// The cached cover's tint, if its large decode has finished.
 pub fn tintOf(self: *App, key: Key) ?Tint {
     const entry = self.art.entries.get(key) orelse return null;

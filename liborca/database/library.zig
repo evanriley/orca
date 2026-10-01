@@ -47,6 +47,7 @@ pub const LibraryDatabase = struct {
     tracks: repository.TrackRepository,
     artists: repository.ArtistRepository,
     releases: repository.ReleaseRepository,
+    release_artwork: repository.ReleaseArtworkRepository,
     recordings: repository.RecordingRepository,
     volumes: repository.VolumeRepository,
     library_roots: repository.LibraryRootRepository,
@@ -106,6 +107,7 @@ pub const LibraryDatabase = struct {
             .tracks = .{ .db = database, .write_lane = write_lane },
             .artists = .{ .db = database, .write_lane = write_lane },
             .releases = .{ .db = database, .write_lane = write_lane },
+            .release_artwork = .{ .db = database, .write_lane = write_lane },
             .recordings = .{ .db = database, .write_lane = write_lane },
             .volumes = .{ .db = database, .write_lane = write_lane },
             .library_roots = .{ .db = database, .write_lane = write_lane },
@@ -2153,6 +2155,7 @@ test "a recording id and the matching selection are looked up by key, never by s
         try queryPlan(&library, repository.acoustid_submittable_page_sql),
         try queryPlan(&library, repository.review_page_sql),
         try queryPlan(&library, repository.review_count_sql),
+        try queryPlan(&library, repository.unidentified_release_page_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -2162,6 +2165,7 @@ test "a recording id and the matching selection are looked up by key, never by s
         try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
     }
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN tracks") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[8], "SCAN tracks") == null);
 }
 
 test "a change is offered only once it has stood for two seconds, and the count includes it before" {

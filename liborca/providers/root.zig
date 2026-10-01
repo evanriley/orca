@@ -1,4 +1,5 @@
 pub const acoustid = @import("acoustid.zig");
+pub const coverartarchive = @import("coverartarchive.zig");
 pub const credentials = @import("credentials.zig");
 pub const listenbrainz = @import("listenbrainz.zig");
 pub const listens = @import("listens.zig");
@@ -17,6 +18,7 @@ pub const Query = model.Query;
 
 test {
     _ = @import("acoustid.zig");
+    _ = @import("coverartarchive.zig");
     _ = @import("credentials.zig");
     _ = @import("listenbrainz.zig");
     _ = @import("listens.zig");

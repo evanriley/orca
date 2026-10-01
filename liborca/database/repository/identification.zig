@@ -238,19 +238,36 @@ pub const MatchCandidatePage = struct {
 pub const MatchScope = union(enum) {
     library,
     track: i64,
+    /// The Tracks of one Release.
+    release: i64,
 
     fn lowerBound(self: MatchScope, cursor: i64) i64 {
         return switch (self) {
-            .library => cursor,
+            .library, .release => cursor,
             .track => |track_id| @max(cursor, track_id - 1),
         };
     }
 
     fn upperBound(self: MatchScope) i64 {
         return switch (self) {
-            .library => std.math.maxInt(i64),
+            .library, .release => std.math.maxInt(i64),
             .track => |track_id| track_id,
         };
+    }
+
+    fn pageSql(self: MatchScope) [:0]const u8 {
+        return if (self == .release) unidentified_release_page_sql else unidentified_page_sql;
+    }
+
+    fn countSql(self: MatchScope) [:0]const u8 {
+        return if (self == .release) unidentified_release_count_sql else unidentified_count_sql;
+    }
+
+    fn bindRelease(self: MatchScope, statement: sqlite.Statement) !void {
+        switch (self) {
+            .release => |release_id| try statement.bindInt64(5, release_id),
+            .library, .track => {},
+        }
     }
 };
 
@@ -451,13 +468,32 @@ pub const IdentificationProposalRepository = struct {
         allocator: std.mem.Allocator,
         minimum_confidence: f32,
     ) !u64 {
+        return self.acceptConfidentWhere(allocator, minimum_confidence, null);
+    }
+
+    /// `acceptConfident` for the files of one Release's Tracks only.
+    pub fn acceptConfidentInRelease(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        minimum_confidence: f32,
+        release_id: i64,
+    ) !u64 {
+        return self.acceptConfidentWhere(allocator, minimum_confidence, release_id);
+    }
+
+    fn acceptConfidentWhere(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        minimum_confidence: f32,
+        release_id: ?i64,
+    ) !u64 {
         if (!std.math.isFinite(minimum_confidence) or minimum_confidence <= 0 or minimum_confidence > 1)
             return error.InvalidMinimumConfidence;
         var accepted: u64 = 0;
         var cursor: i64 = 0;
         var batch: [max_page]i64 = undefined;
         while (true) {
-            const selected = try self.confidentBatch(minimum_confidence, cursor, &batch);
+            const selected = try self.confidentBatch(minimum_confidence, cursor, release_id, &batch);
             if (selected.len == 0) return accepted;
             cursor = selected[selected.len - 1];
             self.write_lane.acquire();
@@ -479,10 +515,12 @@ pub const IdentificationProposalRepository = struct {
         self: *IdentificationProposalRepository,
         minimum_confidence: f32,
         cursor: i64,
+        release_id: ?i64,
         batch: *[max_page]i64,
     ) ![]i64 {
-        var statement = try self.db.prepare(confident_batch_sql);
+        var statement = try self.db.prepare(if (release_id == null) confident_batch_sql else confident_release_batch_sql);
         defer statement.deinit();
+        if (release_id) |id| try statement.bindInt64(5, id);
         try statement.bindDouble(1, minimum_confidence);
         try statement.bindInt64(2, cursor);
         try statement.bindInt64(3, batch.len);
@@ -505,7 +543,7 @@ pub const IdentificationProposalRepository = struct {
         var cursor: i64 = 0;
         var batch: [max_page]i64 = undefined;
         while (true) {
-            const selected = try self.confidentBatch(minimum_confidence, cursor, &batch);
+            const selected = try self.confidentBatch(minimum_confidence, cursor, null, &batch);
             if (selected.len == 0) return acceptable;
             cursor = selected[selected.len - 1];
             for (selected) |proposal_id| {
@@ -708,12 +746,13 @@ pub const IdentificationProposalRepository = struct {
         limit: u32,
     ) !MatchCandidatePage {
         if (limit == 0 or limit > max_page) return error.PageOutOfRange;
-        var statement = try self.db.prepare(unidentified_page_sql);
+        var statement = try self.db.prepare(scope.pageSql());
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(cursor));
         try statement.bindInt64(2, limit);
         try statement.bindInt64(3, @intFromBool(acoustid));
         try statement.bindInt64(4, scope.upperBound());
+        try scope.bindRelease(statement);
         var items: std.ArrayList(MatchCandidate) = .empty;
         errdefer {
             for (items.items) |item| item.deinit(allocator);
@@ -749,12 +788,13 @@ pub const IdentificationProposalRepository = struct {
         acoustid: bool,
         limit: ?u32,
     ) !u64 {
-        var statement = try self.db.prepare(unidentified_count_sql);
+        var statement = try self.db.prepare(scope.countSql());
         defer statement.deinit();
         try statement.bindInt64(1, scope.lowerBound(0));
         try statement.bindInt64(2, if (limit) |bound| bound else -1);
         try statement.bindInt64(3, @intFromBool(acoustid));
         try statement.bindInt64(4, scope.upperBound());
+        try scope.bindRelease(statement);
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -784,15 +824,25 @@ fn readMatchProposal(owned: std.mem.Allocator, statement: sqlite.Statement, firs
     };
 }
 
-const confident_batch_sql =
-    \\SELECT candidate.id FROM identification_proposals AS candidate
-    \\WHERE candidate.state = ?4 AND candidate.confidence >= ?1 AND candidate.id > ?2
-    \\  AND NOT EXISTS (
-    \\    SELECT 1 FROM identification_proposals AS rival
-    \\    WHERE rival.file_id = candidate.file_id AND rival.state = ?4
-    \\      AND rival.confidence >= ?1 AND rival.id <> candidate.id)
-    \\ORDER BY candidate.id LIMIT ?3;
-;
+/// Pending proposals (state ?4) after id ?2 with confidence at least ?1 that
+/// are their file's only one that confident, and with `in_release` only
+/// those for the play files of Release ?5's Tracks.
+fn confidentBatchSql(comptime in_release: bool) [:0]const u8 {
+    return "SELECT candidate.id FROM identification_proposals AS candidate\n" ++
+        "WHERE candidate.state = ?4 AND candidate.confidence >= ?1 AND candidate.id > ?2\n" ++
+        (if (in_release)
+            "  AND candidate.file_id IN (SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.release_id = ?5)\n"
+        else
+            "") ++
+        "  AND NOT EXISTS (\n" ++
+        "    SELECT 1 FROM identification_proposals AS rival\n" ++
+        "    WHERE rival.file_id = candidate.file_id AND rival.state = ?4\n" ++
+        "      AND rival.confidence >= ?1 AND rival.id <> candidate.id)\n" ++
+        "ORDER BY candidate.id LIMIT ?3;";
+}
+
+const confident_batch_sql = confidentBatchSql(false);
+const confident_release_batch_sql = confidentBatchSql(true);
 
 /// The best pending proposal (state ?3) for the Track in scope as `tracks`, in
 /// the order `pendingForTrack` lists them.
@@ -822,24 +872,35 @@ const needs_musicbrainz = "NOT " ++ searched(.musicbrainz);
 /// ?3 is whether AcoustID is in scope.
 const needs_acoustid = "(?3 AND NOT " ++ searched(.acoustid) ++ ")";
 
-/// Tracks with ids in (?1, ?4] whose play file has no recording id and has not
-/// been answered for by MusicBrainz, or by AcoustID when ?3 is set. The
-/// matching job's page and its count share it so they agree.
-pub const unidentified_tracks =
-    "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
-    "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
-    "    FROM tracks WHERE tracks.id > ?1 AND tracks.id <= ?4) AS track\n" ++
-    "WHERE track.file_id IS NOT NULL\n" ++
-    "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
-    "  AND (" ++ needs_musicbrainz ++ " OR " ++ needs_acoustid ++ ")";
+/// Tracks with ids in (?1, ?4], and with `in_release` of Release ?5 only,
+/// whose play file has no recording id and has not been answered for by
+/// MusicBrainz, or by AcoustID when ?3 is set. The matching job's page and
+/// its count share it so they agree.
+fn unidentifiedTracks(comptime in_release: bool) []const u8 {
+    return "(SELECT tracks.id, " ++ track_play_file ++ " AS file_id,\n" ++
+        "        tracks.title, tracks.artist, tracks.album, tracks.duration_ms\n" ++
+        "    FROM tracks WHERE " ++ (if (in_release) "tracks.release_id = ?5 AND " else "") ++
+        "tracks.id > ?1 AND tracks.id <= ?4) AS track\n" ++
+        "WHERE track.file_id IS NOT NULL\n" ++
+        "  AND " ++ effectiveRecordingMbid("track.file_id") ++ " IS NULL\n" ++
+        "  AND (" ++ needs_musicbrainz ++ " OR " ++ needs_acoustid ++ ")";
+}
 
-pub const unidentified_page_sql =
-    "SELECT track.id, track.file_id, track.title, track.artist, track.album, track.duration_ms,\n" ++
-    "       (SELECT locations.uri FROM locations\n" ++
-    "        WHERE locations.file_id = track.file_id AND locations.state = 'present'\n" ++
-    "        ORDER BY locations.id LIMIT 1),\n" ++
-    "       " ++ needs_musicbrainz ++ ", " ++ needs_acoustid ++ "\n" ++
-    "FROM " ++ unidentified_tracks ++ "\nORDER BY track.id LIMIT ?2;";
+fn unidentifiedPageSql(comptime in_release: bool) [:0]const u8 {
+    return "SELECT track.id, track.file_id, track.title, track.artist, track.album, track.duration_ms,\n" ++
+        "       (SELECT locations.uri FROM locations\n" ++
+        "        WHERE locations.file_id = track.file_id AND locations.state = 'present'\n" ++
+        "        ORDER BY locations.id LIMIT 1),\n" ++
+        "       " ++ needs_musicbrainz ++ ", " ++ needs_acoustid ++ "\n" ++
+        "FROM " ++ unidentifiedTracks(in_release) ++ "\nORDER BY track.id LIMIT ?2;";
+}
 
-pub const unidentified_count_sql =
-    "SELECT count(*) FROM (SELECT 1 FROM " ++ unidentified_tracks ++ " LIMIT ?2);";
+fn unidentifiedCountSql(comptime in_release: bool) [:0]const u8 {
+    return "SELECT count(*) FROM (SELECT 1 FROM " ++ unidentifiedTracks(in_release) ++ " LIMIT ?2);";
+}
+
+pub const unidentified_tracks = unidentifiedTracks(false);
+pub const unidentified_page_sql = unidentifiedPageSql(false);
+pub const unidentified_count_sql = unidentifiedCountSql(false);
+pub const unidentified_release_page_sql = unidentifiedPageSql(true);
+pub const unidentified_release_count_sql = unidentifiedCountSql(true);

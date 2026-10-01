@@ -30,7 +30,12 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL and ORCA_ACOUSTID_URL must be https, or http to localhost",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL and ORCA_COVERARTARCHIVE_URL must be https, or http to localhost",
+        error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release",
+        error.UnknownRelease => "no release with that id",
+        error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
+        error.CoverArtUnavailable => "the Cover Art Archive could not be reached; try again later",
+        error.CoverArtArchiveInUse => "the Cover Art Archive is in use by another Orca process; try again once it finishes",
         error.MatchingStopped => "matching stopped early: MusicBrainz or AcoustID could not be reached or kept refusing requests; run match again to continue",
         error.AcoustIdBusy => "another job is using AcoustID; wait for it to finish",
         error.MusicBrainzInUse => "MusicBrainz is in use by another Orca process; run match again once it finishes",
@@ -122,12 +127,14 @@ const commands = [_]Command{
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
     .{
         .name = "match",
-        .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++ "  [--cancel-after=MS]",
+        .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++
+            "  [--cancel-after=MS] [--release=ID [--accept-min-score=SCORE] [--cover-art]]",
         .min_arguments = 1,
         .max_arguments = null,
         .run = matchLibrary,
     },
     .{ .name = "matches", .usage = "matches DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = listMatches },
+    .{ .name = "cover-art", .usage = "cover-art DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = fetchCoverArt, .shares_usage_line = true },
     .{ .name = "fingerprint", .usage = "fingerprint DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = printFingerprint },
     .{ .name = "submit-acoustid", .usage = "submit-acoustid DATABASE [--dry-run]", .min_arguments = 1, .max_arguments = null, .run = submitAcoustId },
     .{ .name = "accept-match", .usage = "accept-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = acceptMatch },
@@ -276,6 +283,20 @@ const help_details =
     \\and dismisses the file's other matches; dismiss-match drops one.
     \\accept-matches accepts, for every file with exactly one match at least as
     \\confident as --min-score, that match.
+    \\
+    \\match --release=ID searches only that Release's Tracks. With
+    \\--accept-min-score=SCORE it then accepts the Release's matches as
+    \\accept-matches would, and with --cover-art it then fetches the Release's
+    \\cover as cover-art does. It prints accepted= and cover_art=.
+    \\
+    \\cover-art fetches a Release's front cover from the Cover Art Archive into
+    \\the Library, unless one of its files carries a cover, under the release ID
+    \\its tags give or most of its accepted matches name. It prints where the
+    \\cover comes from (embedded, fetched, cached, cached-miss, not-found or
+    \\no-release-id) and its size; artwork --release=ID then reads it. A
+    \\release the archive has no cover for is not asked again for 30 days.
+    \\Media files are never written. ORCA_COVERARTARCHIVE_URL selects another
+    \\server (https, or http to localhost only).
     \\
     \\fingerprint prints a Track's AcoustID fingerprint and length, in fpcalc's
     \\format, decoding the first two minutes of its file unless the Library
@@ -506,6 +527,9 @@ const JobOption = enum {
     quiet,
     max_delay,
     once,
+    release,
+    accept_min_score,
+    cover_art,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -520,6 +544,9 @@ const JobOption = enum {
             .quiet => "--quiet=",
             .max_delay => "--max-delay=",
             .once => "--once",
+            .release => "--release=",
+            .accept_min_score => "--accept-min-score=",
+            .cover_art => "--cover-art",
         };
     }
 };
@@ -536,6 +563,9 @@ const JobOptions = struct {
     quiet_ms: ?u32 = null,
     max_delay_ms: ?u32 = null,
     once: bool = false,
+    release_id: ?i64 = null,
+    accept_min_score: ?f32 = null,
+    cover_art: bool = false,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
@@ -562,6 +592,9 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .quiet => options.quiet_ms = try std.fmt.parseInt(u32, value, 10),
                     .max_delay => options.max_delay_ms = try std.fmt.parseInt(u32, value, 10),
                     .once => options.once = true,
+                    .release => options.release_id = try std.fmt.parseInt(i64, value, 10),
+                    .accept_min_score => options.accept_min_score = try std.fmt.parseFloat(f32, value),
+                    .cover_art => options.cover_art = true,
                 }
                 continue :next_argument;
             }
@@ -1628,8 +1661,20 @@ fn matchLibrary(context: Context) !void {
     const stdout = context.stdout;
     const database_path_argument = context.arguments[0];
     const option_arguments = context.arguments[1..];
-    const options = try parseJobOptions(option_arguments, &.{ .batch, .limit, .no_fingerprints, .cancel_after });
-    var request: liborca.MatchRequest = .{};
+    const options = try parseJobOptions(option_arguments, &.{
+        .batch,
+        .limit,
+        .no_fingerprints,
+        .cancel_after,
+        .release,
+        .accept_min_score,
+        .cover_art,
+    });
+    var request: liborca.MatchRequest = .{
+        .release_id = options.release_id,
+        .accept_minimum_confidence = options.accept_min_score,
+        .cover_art = options.cover_art,
+    };
     if (options.batch_size) |batch_size| request.batch_size = batch_size;
     if (options.limit) |limit| request.limit = limit;
     if (options.no_fingerprints) request.fingerprints = false;
@@ -1640,23 +1685,99 @@ fn matchLibrary(context: Context) !void {
         if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
     }
     try configureAcoustId(allocator, &runtime, environ);
+    try configureCoverArtArchive(allocator, &runtime, environ);
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const job_handle = try runtime.startLibraryMatching(library, request);
     const planned = try runtime.jobSnapshotSynced(job_handle);
     try stdout.print("{d} tracks to match\n", .{planned.total_units orelse 0});
     try stdout.flush();
+    const release_steps = request.accept_minimum_confidence != null or request.cover_art;
     awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms) catch |err| {
         const stats = try runtime.jobMatchStats(job_handle);
         try printMatchStats(stdout, stats);
+        if (release_steps) try printReleaseSteps(stdout, stats);
         try stdout.flush();
         if (err != error.JobFailed) return err;
+        if (coverArtError(stats.cover_art)) |cover_error| return cover_error;
         return switch (stats.busy) {
             .none => error.MatchingStopped,
             .musicbrainz => error.MusicBrainzInUse,
             .acoustid => error.AcoustIdInUse,
         };
     };
-    try printMatchStats(stdout, try runtime.jobMatchStats(job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try printMatchStats(stdout, stats);
+    if (release_steps) try printReleaseSteps(stdout, stats);
+    if (stats.cover_art == .no_release_id) try stdout.writeAll(no_release_id_hint);
+}
+
+const no_release_id_hint = "no release ID: review matches, then run cover-art\n";
+
+fn configureCoverArtArchive(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
+    if (environ.get("ORCA_COVERARTARCHIVE_URL")) |url| {
+        if (url.len > 0) try runtime.setCoverArtArchiveServer(try allocator.dupe(u8, url));
+    }
+}
+
+fn printReleaseSteps(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
+    try stdout.print("accepted={d} cover_art={s}\n", .{ stats.accepted, coverArtSource(stats.cover_art) });
+}
+
+fn coverArtSource(outcome: liborca.CoverArtOutcome) []const u8 {
+    return switch (outcome) {
+        .not_requested => "not-requested",
+        .embedded => "embedded",
+        .fetched => "fetched",
+        .cached => "cached",
+        .cached_miss => "cached-miss",
+        .not_found => "not-found",
+        .no_release_id => "no-release-id",
+        .refused => "refused",
+        .unavailable => "unavailable",
+        .busy => "busy",
+        .cancelled => "cancelled",
+    };
+}
+
+fn coverArtError(outcome: liborca.CoverArtOutcome) ?anyerror {
+    return switch (outcome) {
+        .refused => error.CoverArtRefused,
+        .unavailable => error.CoverArtUnavailable,
+        .busy => error.CoverArtArchiveInUse,
+        .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id, .cancelled => null,
+    };
+}
+
+/// `orca-cli cover-art DATABASE RELEASE_ID`: the Release's cover from the
+/// Cover Art Archive, through the job the GTK app's Fetch Cover Art starts.
+fn fetchCoverArt(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    try configureCoverArtArchive(allocator, &runtime, context.environ);
+    const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startReleaseCoverArtFetch(library, release_id);
+    const failed = if (awaitJob(&runtime, stdout, job_handle, null)) false else |err| switch (err) {
+        error.JobFailed => true,
+        else => return err,
+    };
+    const outcome = (try runtime.jobMatchStats(job_handle)).cover_art;
+    const image = try runtime.libraryReleaseArtwork(library, io, release_id);
+    defer if (image) |present| present.deinit();
+    const bytes: usize = switch (outcome) {
+        .embedded, .fetched, .cached => if (image) |present| present.bytes.len else 0,
+        else => 0,
+    };
+    try stdout.print("cover-art: source={s} bytes={d}\n", .{ coverArtSource(outcome), bytes });
+    if (outcome == .no_release_id) try stdout.writeAll(no_release_id_hint);
+    if (failed) {
+        try stdout.flush();
+        return coverArtError(outcome) orelse error.JobFailed;
+    }
 }
 
 fn printMatchStats(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {

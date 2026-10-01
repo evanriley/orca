@@ -170,7 +170,19 @@ fn readEmbedded(allocator: std.mem.Allocator, io: std.Io, uri: []const u8) !?met
     return metadata.artwork.read(allocator, local.readable());
 }
 
+/// The cover embedded in a Track's file, else the one fetched for its
+/// Release.
 pub fn trackArtwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    library_database: *database.LibraryDatabase,
+    track_id: i64,
+) !?metadata.EmbeddedImage {
+    if (try trackEmbeddedArtwork(allocator, io, library_database, track_id)) |image| return image;
+    return library_database.release_artwork.imageForTrack(allocator, track_id);
+}
+
+fn trackEmbeddedArtwork(
     allocator: std.mem.Allocator,
     io: std.Io,
     library_database: *database.LibraryDatabase,
@@ -195,7 +207,20 @@ pub fn trackArtwork(
 /// The alternatives were rejected for failing one of those: a majority vote
 /// would have to read every file in the Release, and "the largest image" would
 /// too, and both change their answer when one track is re-tagged.
+///
+/// A Release none of whose files carries a readable cover shows the one
+/// fetched for it from the Cover Art Archive, if any.
 pub fn releaseArtwork(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    library_database: *database.LibraryDatabase,
+    release_id: i64,
+) !?metadata.EmbeddedImage {
+    if (try releaseEmbeddedArtwork(allocator, io, library_database, release_id)) |image| return image;
+    return library_database.release_artwork.imageForRelease(allocator, release_id);
+}
+
+pub fn releaseEmbeddedArtwork(
     allocator: std.mem.Allocator,
     io: std.Io,
     library_database: *database.LibraryDatabase,
@@ -206,7 +231,7 @@ pub fn releaseArtwork(
     for (candidates[0..count]) |track_id| {
         // A candidate whose cover will not read is skipped rather than fatal:
         // the next track's cover is the same album's.
-        const image = trackArtwork(allocator, io, library_database, track_id) catch continue;
+        const image = trackEmbeddedArtwork(allocator, io, library_database, track_id) catch continue;
         if (image) |present| return present;
     }
     return null;

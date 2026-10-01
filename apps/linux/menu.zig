@@ -14,6 +14,7 @@ const app = @import("app.zig");
 const transport = @import("transport.zig");
 const mpris = @import("mpris.zig");
 const feedback = @import("feedback.zig");
+const jobs = @import("jobs.zig");
 
 const App = app.App;
 
@@ -95,6 +96,13 @@ fn model(context: *const Context, counts: FeedbackCounts) *gtk.GMenu {
         gtk.g_menu_append(editing, "Edit Tags…", "app.ctx-edit-tags");
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
         gtk.g_object_unref(editing);
+    }
+    if (context.kind == .album and context.release_id != null) {
+        const identification = gtk.g_menu_new();
+        gtk.g_menu_append(identification, "Match Album", "app.ctx-match-album");
+        gtk.g_menu_append(identification, "Fetch Cover Art", "app.ctx-fetch-cover-art");
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, identification));
+        gtk.g_object_unref(identification);
     }
     gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, navigation));
     gtk.g_object_unref(playback);
@@ -194,6 +202,14 @@ pub fn removeLove(self: *App) void {
 
 pub fn removeDislike(self: *App) void {
     feedback.change(self, self.context.songs.items, .hated, .none);
+}
+
+pub fn matchAlbum(self: *App) void {
+    jobs.startAlbumMatching(self, self.context.release_id orelse return);
+}
+
+pub fn fetchCoverArt(self: *App) void {
+    jobs.startCoverArtFetch(self, self.context.release_id orelse return);
 }
 
 pub fn play(self: *App) void {

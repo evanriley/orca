@@ -166,6 +166,11 @@ zig build run -- fingerprint DATABASE TRACK_ID   # fpcalc-style DURATION= and FI
 zig build run -- accept-match DATABASE PROPOSAL_ID   # records the recording ID in the library only
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # files with exactly one match that confident
+zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album
+
+# Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
+# localhost); stores the cover in the library, never in a file
+zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|fetched|cached|cached-miss|not-found|no-release-id and bytes
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key
 # from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing
@@ -189,6 +194,9 @@ ORCA_MUSICBRAINZ_URL=http://127.0.0.1:PORT zig build run-linux
 
 # Point AcoustID lookups and submissions at a local mock instead of acoustid.org
 ORCA_ACOUSTID_URL=http://127.0.0.1:PORT zig build run-linux
+
+# Point cover fetches at a local mock instead of coverartarchive.org
+ORCA_COVERARTARCHIVE_URL=http://127.0.0.1:PORT zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does

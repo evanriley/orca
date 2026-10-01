@@ -1,6 +1,7 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
+const cover_art = @import("cover_art.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const library_pass = @import("../library/root.zig");
@@ -19,6 +20,7 @@ const CredentialStore = providers.credentials.Store;
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
 pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
+pub const CoverArtOutcome = cover_art.Outcome;
 
 pub const ScanRequest = struct {
     /// Which registered root to walk. Null walks every enabled root.
@@ -134,6 +136,8 @@ pub const MatchingHooks = struct {
     transport: ?network.client.Transport = null,
     /// AcoustID's transport; `transport` when null.
     acoustid_transport: ?network.client.Transport = null,
+    /// The Cover Art Archive's transport; `transport` when null.
+    cover_art_transport: ?network.client.Transport = null,
     clock: ?network.client.Clock = null,
     wall_clock: ?network.client.Clock = null,
     random: ?std.Random = null,
@@ -153,6 +157,7 @@ pub const MatchingSetup = struct {
     scope: database.MatchScope,
     /// Null when the job looks nothing up on AcoustID.
     acoustid: ?AcoustIdSetup,
+    cover_art_server: []const u8,
 };
 
 pub const SubmissionSetup = struct {
@@ -234,6 +239,13 @@ pub const MatchingRequest = struct {
     batch_size: usize,
     limit: ?u32,
     setup: MatchingSetup,
+    /// False when the job only accepts matches or fetches a cover.
+    lookups: bool = true,
+    /// With a Release scope: then accept each of its files' one match at
+    /// least this confident.
+    accept_minimum_confidence: ?f32 = null,
+    /// With a Release scope: then fetch its front cover.
+    cover_art: bool = false,
 };
 
 pub const Request = union(enum) {
@@ -410,6 +422,9 @@ pub const MatchStats = struct {
     acoustid: AcoustIdUse = .off,
     cancelled: bool = false,
     busy: BusyService = .none,
+    /// Matches the job accepted after its lookups.
+    accepted: u64 = 0,
+    cover_art: CoverArtOutcome = .not_requested,
 };
 
 const LiveMatchStats = struct {
@@ -430,6 +445,8 @@ const LiveMatchStats = struct {
     acoustid: std.atomic.Value(AcoustIdUse) = .init(.off),
     cancelled: std.atomic.Value(bool) = .init(false),
     busy: std.atomic.Value(BusyService) = .init(.none),
+    accepted: std.atomic.Value(u64) = .init(0),
+    cover_art: std.atomic.Value(CoverArtOutcome) = .init(.not_requested),
     /// A running matching pass's counters.
     progress: library_pass.matching.Progress = .{},
 
@@ -453,6 +470,8 @@ const LiveMatchStats = struct {
             .acoustid = self.acoustid.load(.acquire),
             .cancelled = self.cancelled.load(.acquire),
             .busy = self.busy.load(.acquire),
+            .accepted = self.accepted.load(.acquire),
+            .cover_art = self.cover_art.load(.acquire),
         };
     }
 };
@@ -696,13 +715,89 @@ pub const JobWorker = struct {
         var standard: network.StandardTransport = .init(self.allocator, setup.io);
         defer standard.deinit();
         var system_clock: network.SystemClock = .{ .io = setup.io };
-        const clock = setup.hooks.clock orelse system_clock.clock();
-        const wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock();
         const random_source: std.Random.IoSource = .{ .io = setup.io };
-        const random = setup.hooks.random orelse random_source.interface();
-        const shared_state = providers.shared_state.store(&self.database.provider_state);
-        var gateway: network.Gateway = .{
+        const services: Services = .{
             .transport = setup.hooks.transport orelse standard.transport(),
+            .clock = setup.hooks.clock orelse system_clock.clock(),
+            .wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock(),
+            .random = setup.hooks.random orelse random_source.interface(),
+            .shared_state = providers.shared_state.store(&self.database.provider_state),
+        };
+        if (request.lookups and !self.runLookups(request, services)) return;
+        const release_id = switch (setup.scope) {
+            .release => |id| id,
+            .library, .track => return,
+        };
+        if (request.accept_minimum_confidence) |minimum| {
+            if (self.cancelled()) return stats.cancelled.store(true, .release);
+            const accepted = self.database.identification_proposals.acceptConfidentInRelease(self.allocator, minimum, release_id) catch {
+                self.failed.store(true, .release);
+                return;
+            };
+            stats.accepted.store(accepted, .release);
+        }
+        if (request.cover_art) {
+            if (self.cancelled()) return stats.cancelled.store(true, .release);
+            self.runCoverArt(setup, services, release_id);
+        }
+    }
+
+    const Services = struct {
+        transport: network.client.Transport,
+        clock: network.client.Clock,
+        wall_clock: network.client.Clock,
+        random: std.Random,
+        shared_state: network.client.StateStore,
+    };
+
+    fn runCoverArt(self: *JobWorker, setup: MatchingSetup, services: Services, release_id: i64) void {
+        const stats = &self.stats.matching;
+        var gateway: network.Gateway = .{
+            .transport = setup.hooks.cover_art_transport orelse services.transport,
+            .clock = services.clock,
+            .wall_clock = services.wall_clock,
+            .random = services.random,
+            .config = .{
+                .identity = setup.identity.view(),
+                .max_response_bytes = providers.coverartarchive.max_image_bytes,
+            },
+            .cancel = &self.registration.cancel,
+            .sharing = .{ .store = services.shared_state, .service = providers.coverartarchive.service },
+        };
+        defer gateway.releaseLease();
+        var archive: providers.coverartarchive.CoverArtArchive = .{
+            .gateway = &gateway,
+            .server = setup.cover_art_server,
+        };
+        var fetch: cover_art.Fetch = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .library = self.database,
+            .archive = &archive,
+            .wall_clock = services.wall_clock,
+        };
+        const outcome = fetch.run(release_id) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        stats.cover_art.store(outcome, .release);
+        switch (outcome) {
+            .cancelled => stats.cancelled.store(true, .release),
+            .refused, .unavailable, .busy => self.failed.store(true, .release),
+            .not_requested, .embedded, .fetched, .cached, .cached_miss, .not_found, .no_release_id => {},
+        }
+    }
+
+    /// False when the job has to stop here: failed or cancelled.
+    fn runLookups(self: *JobWorker, request: MatchingRequest, services: Services) bool {
+        const stats = &self.stats.matching;
+        const setup = request.setup;
+        const clock = services.clock;
+        const wall_clock = services.wall_clock;
+        const random = services.random;
+        const shared_state = services.shared_state;
+        var gateway: network.Gateway = .{
+            .transport = services.transport,
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
@@ -718,7 +813,7 @@ pub const JobWorker = struct {
             .server = setup.server,
         };
         var acoustid_gateway: network.Gateway = .{
-            .transport = setup.hooks.acoustid_transport orelse setup.hooks.transport orelse standard.transport(),
+            .transport = setup.hooks.acoustid_transport orelse services.transport,
             .clock = clock,
             .wall_clock = wall_clock,
             .random = random,
@@ -729,7 +824,7 @@ pub const JobWorker = struct {
         defer acoustid_gateway.releaseLease();
         const client_key = if (setup.acoustid) |acoustid| resolveClientKey(self.allocator, acoustid) catch {
             self.failed.store(true, .release);
-            return;
+            return false;
         } else null;
         defer if (client_key) |key| providers.credentials.wipeAndFree(self.allocator, key);
         var acoustid: ?providers.acoustid.AcoustId = if (client_key) |key| .{
@@ -762,7 +857,7 @@ pub const JobWorker = struct {
         };
         const result = pass.run() catch {
             self.failed.store(true, .release);
-            return;
+            return false;
         };
         stats.progress.tracks_seen.store(0, .release);
         stats.progress.matched.store(0, .release);
@@ -785,6 +880,7 @@ pub const JobWorker = struct {
         stats.busy.store(result.busy, .release);
         if (result.cancelled) stats.cancelled.store(true, .release);
         if (result.unavailable or result.busy != .none) self.failed.store(true, .release);
+        return !result.cancelled and !result.unavailable and result.busy == .none;
     }
 
     fn runSubmission(self: *JobWorker, setup: SubmissionSetup) void {

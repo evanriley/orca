@@ -95,6 +95,7 @@ pub const Reply = union(enum) {
         status: u16 = 200,
         body: []const u8 = "{}",
         rate_limit: client.RateLimit = .{},
+        location: ?[]const u8 = null,
     };
 };
 
@@ -203,11 +204,16 @@ pub const ScriptedTransport = struct {
         _ = self.requests.fetchAdd(1, .acq_rel);
 
         return switch (reply) {
-            .respond => |answer| .{
-                .allocator = allocator,
-                .status = answer.status,
-                .body = try allocator.dupe(u8, answer.body),
-                .rate_limit = answer.rate_limit,
+            .respond => |answer| respond: {
+                const body = try allocator.dupe(u8, answer.body);
+                errdefer allocator.free(body);
+                break :respond .{
+                    .allocator = allocator,
+                    .status = answer.status,
+                    .body = body,
+                    .rate_limit = answer.rate_limit,
+                    .location = if (answer.location) |location| try allocator.dupe(u8, location) else null,
+                };
             },
             .fail => |err| err,
             .hang => hang(request),

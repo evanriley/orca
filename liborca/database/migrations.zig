@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 19;
+pub const current_version = 20;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -927,6 +927,19 @@ const migration_19 =
     \\ALTER TABLE identification_proposals ADD COLUMN accepted_in_bulk INTEGER NOT NULL DEFAULT 0;
 ;
 
+/// Front covers fetched from the Cover Art Archive, one per Release. A null
+/// `image` records that the archive had none, as of `fetched_at` in Unix
+/// seconds.
+const migration_20 =
+    \\CREATE TABLE release_artwork (
+    \\    release_id INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
+    \\    musicbrainz_release_id TEXT NOT NULL,
+    \\    image BLOB,
+    \\    mime TEXT,
+    \\    fetched_at INTEGER NOT NULL
+    \\);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1070,6 +1083,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 17 and target_version >= 17) try db.exec(migration_17);
     if (version < 18 and target_version >= 18) try db.exec(migration_18);
     if (version < 19 and target_version >= 19) try db.exec(migration_19);
+    if (version < 20 and target_version >= 20) try db.exec(migration_20);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1861,4 +1875,27 @@ test "an untitled album keeps the folder path its key was built from" {
     try std.testing.expect(
         std.mem.indexOf(u8, stored, "/mnt/Media/Music/Loose  Tracks") != null,
     );
+}
+
+test "a version-19 library gains release artwork, whose row goes when its release does" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "artwork.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 19);
+    try db.exec("INSERT INTO releases(id, title, release_key) VALUES (1, 'Ginger', 'ginger');");
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try db.exec(
+        \\INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at)
+        \\VALUES (1, '2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b', NULL, NULL, 1800000000);
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM release_artwork;"));
+    try db.exec("DELETE FROM releases WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM release_artwork;"));
+    try checkForeignKeys(db);
 }

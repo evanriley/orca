@@ -6,6 +6,7 @@ const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const library_pass = @import("../library/root.zig");
+const network = @import("../network/root.zig");
 const job = @import("job.zig");
 const object = @import("object.zig");
 const storage = @import("../storage/root.zig");
@@ -1385,6 +1386,42 @@ test "a Release takes its cover from its first track in listening order" {
         std.testing.io,
         fixtures.release_id + 1,
     )) == null);
+}
+
+test "a cover embedded in a Release's file beats one fetched for it, and none is fetched for such a Release" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var archive: network.testing.ScriptedTransport = .{};
+    defer archive.deinit();
+    var clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 };
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = .{ .transport = archive.transport(), .clock = clock.clock(), .wall_clock = clock.wallClock() };
+    const fixtures = try openArtworkLibrary(
+        &runtime,
+        "file:orca-artwork-fetched?mode=memory&cache=shared",
+        &.{ "fixtures/audio/tagged-reference.flac", "fixtures/audio/covered-reference.flac" },
+    );
+    const library_database = try libraryDatabase(&runtime, fixtures.library);
+    const fetched = "\xff\xd8\xff\xe0fetched";
+    try library_database.release_artwork.put(fixtures.release_id, "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b", .{
+        .bytes = fetched,
+        .mime_type = "image/jpeg",
+    }, 1_800_000_000);
+
+    const release_cover = (try runtime.libraryReleaseArtwork(fixtures.library, std.testing.io, fixtures.release_id)).?;
+    defer release_cover.deinit();
+    try std.testing.expectEqualStrings("image/png", release_cover.mime_type);
+    const embedded = (try runtime.libraryTrackArtwork(fixtures.library, std.testing.io, fixtures.ids[1])).?;
+    defer embedded.deinit();
+    try std.testing.expectEqualStrings("image/png", embedded.mime_type);
+    const fallback = (try runtime.libraryTrackArtwork(fixtures.library, std.testing.io, fixtures.ids[0])).?;
+    defer fallback.deinit();
+    try std.testing.expectEqualStrings(fetched, fallback.bytes);
+
+    const fetch = try runtime.startReleaseCoverArtFetch(fixtures.library, fixtures.release_id);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, fetch));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.embedded, (try runtime.jobMatchStats(fetch)).cover_art);
+    try std.testing.expectEqual(@as(u32, 0), archive.requestCount());
 }
 
 test "a library edit regroups a track without touching its file, and clearing it reverts" {

@@ -1795,3 +1795,279 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expectEqual(@as(u64, 0), (try runtime.jobSubmissionStats(again)).files_examined);
     try std.testing.expectEqual(@as(u32, 2), acoustid.submissions.load(.acquire));
 }
+
+const bryter_layter_mbid = "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b";
+const jpeg_cover = "\xff\xd8\xff\xe0\x00\x10JFIF cover";
+
+/// The Cover Art Archive, answering every request alike on the job's thread.
+const FakeCoverArt = struct {
+    http: network.testing.ScriptedTransport = .{},
+    status: u16 = 200,
+    body: []const u8 = jpeg_cover,
+    /// Redirects answered, in order, before the image.
+    locations: []const []const u8 = &.{},
+
+    fn attach(self: *FakeCoverArt, hooks: *MatchingHooks) void {
+        self.http.keep_history = true;
+        self.http.responder = .{ .context = self, .respond_fn = respond };
+        hooks.cover_art_transport = self.http.transport();
+    }
+
+    fn deinit(self: *FakeCoverArt) void {
+        self.http.deinit();
+    }
+
+    fn requestCount(self: *const FakeCoverArt) u32 {
+        return self.http.requestCount();
+    }
+
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *FakeCoverArt = @ptrCast(@alignCast(context));
+        if (exchange.index < self.locations.len)
+            return .{ .respond = .{ .status = 307, .body = "", .location = self.locations[exchange.index] } };
+        return .{ .respond = .{ .status = self.status, .body = self.body } };
+    }
+};
+
+fn addRelease(library_database: *database.LibraryDatabase, title: []const u8, mbid: ?[]const u8) !i64 {
+    return library_database.releases.upsert(.{ .release_key = title, .title = title, .musicbrainz_release_id = mbid });
+}
+
+fn addAlbumTrack(library_database: *database.LibraryDatabase, release_id: i64, title: []const u8) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{ .title = title } });
+    try library_database.tracks.upsertTracks(&.{.{
+        .release_id = release_id,
+        .title = title,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 180_000,
+        .preferred_file_id = file_id,
+    }});
+    const ids = try library_database.tracks.idsForFile(std.testing.allocator, file_id);
+    defer std.testing.allocator.free(ids);
+    return ids[0];
+}
+
+fn pendingCount(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64) !usize {
+    const proposals = try runtime.libraryMatchProposals(library, track_id, 10);
+    defer proposals.deinit();
+    return proposals.items.len;
+}
+
+fn recordingIdOf(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64) ![36]u8 {
+    const details = (try runtime.libraryTrackDetails(library, track_id)).?;
+    defer details.deinit();
+    return (details.musicbrainz_recording_id orelse return error.NoRecordingId)[0..36].*;
+}
+
+test "a release-scoped matching job searches only that Release's Tracks and accepts only its confident matches, keeping a locked recording ID" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-matching-release?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", null);
+    const other = try addRelease(library_database, "Pink Moon", null);
+    const northern_sky = try addAlbumTrack(library_database, album, "Northern Sky");
+    const locked = try addAlbumTrack(library_database, album, "Hazey Jane I");
+    const pink_moon = try addAlbumTrack(library_database, other, "Pink Moon");
+    const locked_files = try library_database.tracks.fileIds(std.testing.allocator, locked);
+    defer std.testing.allocator.free(locked_files);
+    try library_database.orca_metadata.upsert(.{
+        .file_id = locked_files[0],
+        .field = .musicbrainz_recording_id,
+        .value = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a",
+        .provenance = .user,
+        .locked = true,
+    });
+    const payload = try (database.ProposalPayload{ .release_mbid = bryter_layter_mbid, .musicbrainz_confidence = 0.95 }).encode(std.testing.allocator);
+    defer std.testing.allocator.free(payload);
+    _ = try library_database.identification_proposals.put(.{
+        .file_id = locked_files[0],
+        .provider = "musicbrainz",
+        .provider_id = pink_moon_mbid,
+        .confidence = 0.95,
+        .payload = payload,
+    });
+
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{ .cover_art = true }));
+    try std.testing.expectError(error.InvalidMatchRequest, runtime.startLibraryMatching(library, .{ .track_id = northern_sky, .release_id = album }));
+    try std.testing.expectError(error.UnknownRelease, runtime.startLibraryMatching(library, .{ .release_id = other + 100 }));
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+
+    try std.testing.expectEqual(@as(?u64, 1), (try runtime.jobSnapshotSynced(job_handle)).total_units);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 2), stats.accepted);
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.not_requested, stats.cover_art);
+    try std.testing.expectEqual(@as(u32, 1), fake.requestCount());
+    try std.testing.expectEqualStrings(northern_sky_mbid, &try recordingIdOf(&runtime, library, northern_sky));
+    try std.testing.expectEqualStrings("8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a", &try recordingIdOf(&runtime, library, locked));
+    try std.testing.expectEqual(@as(usize, 0), try pendingCount(&runtime, library, pink_moon));
+
+    runtime.reapFinishedJobs();
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, try runtime.startLibraryMatching(library, .{})));
+    try std.testing.expectEqual(@as(usize, 1), try pendingCount(&runtime, library, pink_moon));
+    runtime.reapFinishedJobs();
+    const again = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, again));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(again)).accepted);
+    try std.testing.expectEqual(@as(usize, 1), try pendingCount(&runtime, library, pink_moon));
+}
+
+test "Match Album fetches the cover under the release ID its accepted matches name, and the Release then shows it" {
+    var fake: FakeMusicBrainz = .{ .answers = &.{
+        .{ .title = "Northern%20Sky", .body = northern_sky_answer },
+        .{ .title = "Pink%20Moon", .body = pink_moon_answer },
+    } };
+    var cover: FakeCoverArt = .{ .locations = &.{
+        "https://archive.org/download/mbid-x/front.jpg",
+        "https://dn710702.ca.archive.org/0/items/mbid-x/front.jpg",
+    } };
+    defer cover.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    cover.attach(&runtime.matching_hooks);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-cover?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", null);
+    const northern_sky = try addAlbumTrack(library_database, album, "Northern Sky");
+    _ = try addAlbumTrack(library_database, album, "Pink Moon");
+    try std.testing.expect((try runtime.libraryReleaseArtwork(library, std.testing.io, album)) == null);
+
+    const job_handle = try runtime.startLibraryMatching(library, .{
+        .release_id = album,
+        .accept_minimum_confidence = 0.9,
+        .cover_art = true,
+    });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    const stats = try runtime.jobMatchStats(job_handle);
+    try std.testing.expectEqual(@as(u64, 2), stats.accepted);
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, stats.cover_art);
+    try std.testing.expectEqual(@as(u32, 3), cover.requestCount());
+    try std.testing.expectEqualStrings(
+        "https://coverartarchive.org/release/" ++ bryter_layter_mbid ++ "/front-500",
+        cover.http.history.items[0].url,
+    );
+    const release_cover = (try runtime.libraryReleaseArtwork(library, std.testing.io, album)).?;
+    defer release_cover.deinit();
+    try std.testing.expectEqualStrings("image/jpeg", release_cover.mime_type);
+    try std.testing.expectEqualStrings(jpeg_cover, release_cover.bytes);
+    const track_cover = (try runtime.libraryTrackArtwork(library, std.testing.io, northern_sky)).?;
+    defer track_cover.deinit();
+    try std.testing.expectEqualStrings(jpeg_cover, track_cover.bytes);
+
+    runtime.reapFinishedJobs();
+    const refetch = try runtime.startReleaseCoverArtFetch(library, album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, refetch));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.cached, (try runtime.jobMatchStats(refetch)).cover_art);
+    try std.testing.expectEqual(@as(u32, 3), cover.requestCount());
+}
+
+test "a cover the archive does not have is not asked for again for 30 days, and is asked for after" {
+    var fake: FakeMusicBrainz = .{};
+    var cover: FakeCoverArt = .{ .status = 404, .body = "" };
+    defer cover.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    cover.attach(&runtime.matching_hooks);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-cover-negative?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", bryter_layter_mbid);
+    _ = try addAlbumTrack(library_database, album, "Northern Sky");
+
+    for ([_]runtime_module.CoverArtOutcome{ .not_found, .cached_miss }) |expected| {
+        runtime.reapFinishedJobs();
+        const fetch = try runtime.startReleaseCoverArtFetch(library, album);
+        try std.testing.expectEqual(@as(?u64, 0), (try runtime.jobSnapshotSynced(fetch)).total_units);
+        try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, fetch));
+        try std.testing.expectEqual(expected, (try runtime.jobMatchStats(fetch)).cover_art);
+        try std.testing.expectEqual(@as(u32, 1), cover.requestCount());
+    }
+    try std.testing.expect(!(try library_database.release_artwork.get(album)).?.has_image);
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+
+    fake.clock.advance(30 * std.time.ms_per_day - 1000);
+    runtime.reapFinishedJobs();
+    const early = try runtime.startReleaseCoverArtFetch(library, album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, early));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.cached_miss, (try runtime.jobMatchStats(early)).cover_art);
+
+    fake.clock.advance(1000);
+    cover.status = 200;
+    cover.body = jpeg_cover;
+    runtime.reapFinishedJobs();
+    const later = try runtime.startReleaseCoverArtFetch(library, album);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, later));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.fetched, (try runtime.jobMatchStats(later)).cover_art);
+    try std.testing.expectEqual(@as(u32, 2), cover.requestCount());
+}
+
+test "a cover fetch without a release ID asks nothing, and a second redirect to plain http stores nothing and fails" {
+    var fake: FakeMusicBrainz = .{};
+    var cover: FakeCoverArt = .{ .locations = &.{
+        "https://archive.org/download/mbid-x/front.jpg",
+        "http://dn710702.ca.archive.org/0/items/mbid-x/front.jpg",
+    } };
+    defer cover.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    cover.attach(&runtime.matching_hooks);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-cover-refused?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const untagged = try addRelease(library_database, "Five Leaves Left", null);
+    const tagged = try addRelease(library_database, "Bryter Layter", bryter_layter_mbid);
+
+    const unnamed = try runtime.startReleaseCoverArtFetch(library, untagged);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, unnamed));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.no_release_id, (try runtime.jobMatchStats(unnamed)).cover_art);
+    try std.testing.expectEqual(@as(u32, 0), cover.requestCount());
+
+    runtime.reapFinishedJobs();
+    const redirected = try runtime.startReleaseCoverArtFetch(library, tagged);
+    try std.testing.expectEqual(job.State.failed, try runtime_tests.awaitJob(&runtime, redirected));
+    try std.testing.expectEqual(runtime_module.CoverArtOutcome.refused, (try runtime.jobMatchStats(redirected)).cover_art);
+    try std.testing.expectEqual(@as(u32, 2), cover.requestCount());
+    try std.testing.expect((try library_database.release_artwork.get(tagged)) == null);
+}
+
+test "a Release's cover release ID is the one most of its accepted matches name" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-cover-vote?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const album = try addRelease(library_database, "Bryter Layter", null);
+    const named = [_][]const u8{ "bbbbbbbb-0000-4000-8000-000000000000", bryter_layter_mbid, bryter_layter_mbid };
+    for (named, 0..) |release_mbid, index| {
+        var title_buffer: [16]u8 = undefined;
+        const track_id = try addAlbumTrack(library_database, album, try std.fmt.bufPrint(&title_buffer, "Song {d}", .{index}));
+        const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+        defer std.testing.allocator.free(file_ids);
+        const payload = try (database.ProposalPayload{ .release_mbid = release_mbid }).encode(std.testing.allocator);
+        defer std.testing.allocator.free(payload);
+        _ = try library_database.identification_proposals.put(.{
+            .file_id = file_ids[0],
+            .provider = "musicbrainz",
+            .provider_id = northern_sky_mbid,
+            .confidence = 0.95,
+            .payload = payload,
+        });
+    }
+    try std.testing.expect(try library_database.release_artwork.coverReleaseMbid(std.testing.allocator, album) == null);
+    try std.testing.expectEqual(@as(u64, 3), try runtime.libraryAcceptConfidentMatches(library, 0.9));
+    try std.testing.expectEqualStrings(bryter_layter_mbid, &(try library_database.release_artwork.coverReleaseMbid(std.testing.allocator, album)).?);
+}

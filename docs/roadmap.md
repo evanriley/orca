@@ -121,6 +121,13 @@ analysis.
   (Preferences > Library > Match by audio fingerprint turns it off), with
   each proposal's source and AcoustID score on the Matches page and in the
   details panel.
+- Match Album and cover art: a matching job scoped to one Release searches
+  its Tracks, accepts its confident matches, and fetches its front cover from
+  the Cover Art Archive when none of its files carries one, keeping the cover
+  in the Library. Reachable through `orca-cli match --release=ID
+  --accept-min-score=SCORE --cover-art`, `cover-art` and `artwork`, and in
+  `orca-gtk` through Match Album and Fetch Cover Art on an album's menu. See
+  [providers.md](providers.md#cover-art-archive).
 - AcoustID submission: `orca-cli submit-acoustid` sends the fingerprints of
   files whose recording ID came from an edit or from a match accepted one at
   a time that AcoustID did not propose, once per file and ID, with the user
@@ -192,7 +199,11 @@ In priority order. Each step leaves `orca-gtk` usable every day.
 4. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-5. **An optional fixed output rate with a band-limited resampler**, for
+5. **Apply MusicBrainz metadata from accepted matches.** An accepted match
+   records only the recording ID; its title, artist, track number and the
+   rest should become Orca metadata too, under the same lock and provenance
+   rules.
+6. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -287,6 +298,9 @@ are sniffed or not recognized until then:
 - A macOS filesystem watcher (FSEvents) behind the same `library/watch.zig`
   contract; until then `libraryWatch` returns `error.WatchingUnsupported`
   there.
+- A preference to also write fetched cover art into files: embedded through
+  the tag writer's approved `MutationPlan`, or as `cover.jpg` in the album
+  folder.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.

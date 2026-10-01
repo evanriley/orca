@@ -220,6 +220,14 @@ fn activateContextShowArtist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) 
     window.showArtist(self, self.context.artist_id orelse return);
 }
 
+fn activateContextMatchAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.matchAlbum(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextFetchCoverArt(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.fetchCoverArt(@ptrCast(@alignCast(data.?)));
+}
+
 fn activatePreferences(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     preferences.present(@ptrCast(@alignCast(data.?)));
 }
@@ -399,6 +407,8 @@ pub fn main(init: std.process.Init) !u8 {
         runtime.setMusicBrainzServer(server) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_ACOUSTID_URL")) |server|
         runtime.setAcoustIdServer(server) catch {};
+    if (resolveServer(allocator, init.environ_map, "ORCA_COVERARTARCHIVE_URL")) |server|
+        runtime.setCoverArtArchiveServer(server) catch {};
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
@@ -446,6 +456,8 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-remove-dislike", activateContextRemoveDislike, null, &self);
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
+    addAction(application, "ctx-match-album", activateContextMatchAlbum, null, &self);
+    addAction(application, "ctx-fetch-cover-art", activateContextFetchCoverArt, null, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);

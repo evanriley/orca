@@ -1,5 +1,6 @@
 const std = @import("std");
 const analysis_service = @import("../analysis/service.zig");
+const database = @import("../database/root.zig");
 const job = @import("job.zig");
 const work = @import("work.zig");
 const job_worker = @import("job_worker.zig");
@@ -82,8 +83,21 @@ pub fn startLibraryMatching(
 ) !JobHandle {
     try runtime.requireRunning(self);
     const identity = self.client_identity orelse return error.ClientIdentityRequired;
+    if (request.track_id != null and request.release_id != null) return error.InvalidMatchRequest;
+    if (request.release_id == null and (request.accept_minimum_confidence != null or request.cover_art))
+        return error.InvalidMatchRequest;
+    if (request.accept_minimum_confidence) |minimum| {
+        if (!std.math.isFinite(minimum) or minimum <= 0 or minimum > 1) return error.InvalidMinimumConfidence;
+    }
+    if (request.release_id) |release_id| try requireRelease(self, library, release_id);
     if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
     if (runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
+    const scope: database.MatchScope = if (request.track_id) |track_id|
+        .{ .track = track_id }
+    else if (request.release_id) |release_id|
+        .{ .release = release_id }
+    else
+        .library;
     return startJobWorker(self, library, .{ .metadata_lookup = .{
         .batch_size = request.batch_size,
         .limit = request.limit,
@@ -92,10 +106,41 @@ pub fn startLibraryMatching(
             .server = self.musicbrainz_server,
             .identity = identity,
             .hooks = self.matching_hooks,
-            .scope = if (request.track_id) |track_id| .{ .track = track_id } else .library,
+            .scope = scope,
             .acoustid = if (request.fingerprints) acoustIdSetup(self) else null,
+            .cover_art_server = self.coverartarchive_server,
         },
+        .accept_minimum_confidence = request.accept_minimum_confidence,
+        .cover_art = request.cover_art,
     } });
+}
+
+pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
+    try runtime.requireRunning(self);
+    const identity = self.client_identity orelse return error.ClientIdentityRequired;
+    try requireRelease(self, library, release_id);
+    if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
+    return startJobWorker(self, library, .{ .metadata_lookup = .{
+        .batch_size = 1,
+        .limit = null,
+        .setup = .{
+            .io = try runtime_listens.networkIo(self),
+            .server = self.musicbrainz_server,
+            .identity = identity,
+            .hooks = self.matching_hooks,
+            .scope = .{ .release = release_id },
+            .acoustid = null,
+            .cover_art_server = self.coverartarchive_server,
+        },
+        .lookups = false,
+        .cover_art = true,
+    } });
+}
+
+fn requireRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
+    const release = try (try runtime.libraryDatabase(self, library)).releases.byId(self.allocator, release_id) orelse
+        return error.UnknownRelease;
+    release.deinit(self.allocator);
 }
 
 pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
@@ -202,7 +247,7 @@ pub fn spawnJobWorker(
         ),
         .duplicate_scan => try library_database.files.count(),
         .mutation => |pending| pending.plan.actions.len,
-        .metadata_lookup => |matching| try library_database.identification_proposals.unidentifiedCount(
+        .metadata_lookup => |matching| if (!matching.lookups) 0 else try library_database.identification_proposals.unidentifiedCount(
             matching.setup.scope,
             matching.setup.acoustid != null and acoustIdInScope(self, true),
             matching.limit,
@@ -332,6 +377,7 @@ pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) 
         .succeeded;
     self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
     self.jobs.finish(worker.job, state) catch {};
+    if (worker.matchStats().accepted != 0) runtime_listens.recordingIdsChanged(self, worker.library);
     runtime_watch.jobFinalized(self, worker, state);
     if (!publish) return;
     self.events.publish(.{

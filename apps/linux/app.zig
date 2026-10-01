@@ -126,6 +126,8 @@ pub const App = struct {
     tag_write_group: u64 = 0,
     /// The one Track a `.matching` task searches, when it searches one.
     match_task_track: ?i64 = null,
+    /// The Release a `.matching` task matches or fetches the cover of.
+    match_task_release: ?i64 = null,
     /// The Track whose own search last found nothing, so its details say so.
     unmatched_track: ?i64 = null,
     /// Tracks the running matching job had matched when the badge was last

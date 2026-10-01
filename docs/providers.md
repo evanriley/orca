@@ -1,8 +1,8 @@
 # Providers and listening history
 
 Orca talks to online services only through `network.Gateway`, and the rules
-below hold for every provider. ListenBrainz, MusicBrainz and AcoustID are
-connected.
+below hold for every provider. ListenBrainz, MusicBrainz, AcoustID and the
+Cover Art Archive are connected.
 Other services follow the same rules; a request that breaks one is a defect,
 not a tuning choice.
 
@@ -82,8 +82,9 @@ not a tuning choice.
   `ORCA_LISTENBRAINZ_TOKEN` and `ORCA_ACOUSTID_USER_KEY`.
 - **Servers.** ListenBrainz-compatible servers are reachable with
   `Runtime.setListenBrainzServer`, a MusicBrainz mirror with
-  `Runtime.setMusicBrainzServer` and another AcoustID server with
-  `Runtime.setAcoustIdServer`. `http` is accepted only for `127.0.0.1`,
+  `Runtime.setMusicBrainzServer`, another AcoustID server with
+  `Runtime.setAcoustIdServer` and another Cover Art Archive with
+  `Runtime.setCoverArtArchiveServer`. `http` is accepted only for `127.0.0.1`,
   `[::1]` and `localhost`, so a token or a library's contents never cross a
   network in clear text.
 
@@ -275,6 +276,12 @@ what acceptance writes is in
   a refusal of a single fingerprint is cached. A refused key (AcoustID error codes
   4 and 6) is not cached, and a cached refusal never stands in for an answer
   while the service is down.
+- **One Release.** `MatchRequest.release_id` limits a run to one Release's
+  Tracks, under the same rule. With it, `accept_minimum_confidence` then
+  accepts the Release's matches as `libraryAcceptConfidentMatches` would, and
+  `cover_art` then fetches the Release's cover as in
+  [Cover Art Archive](#cover-art-archive). `orca-gtk`'s Match Album runs all
+  three with the review threshold from Preferences.
 - **One job at a time.** A second `startLibraryMatching` while one runs returns
   `error.MatchingAlreadyRunning`, and one while an AcoustID submission runs
   returns `error.AcoustIdBusy`, so each service sees one client and one
@@ -398,3 +405,49 @@ ORCA_ACOUSTID_USER_KEY=KEY orca-cli submit-acoustid DATABASE [--dry-run]
 
 `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` point `match` and
 `submit-acoustid` at other servers.
+
+## Cover Art Archive
+
+`Runtime.startReleaseCoverArtFetch(library, release_id)`, and a matching job
+with `MatchRequest.cover_art`, fetch a Release's front cover from the Cover
+Art Archive into the Library. Nothing is fetched for a Release one of whose
+files carries a readable cover, and media files are never written. The
+cover is stored in `release_artwork` ([database.md](database.md#release-artwork)),
+and `libraryReleaseArtwork`, `libraryTrackArtwork` and the artwork loader
+return it when no file of the Release has one: an embedded cover always
+wins.
+
+- **Release ID.** The Release's tagged MusicBrainz release ID; without one,
+  the release ID most of its accepted matches name, a tie going to the
+  lowest. Without either nothing is fetched, and the outcome is
+  `no_release_id`: review the matches, then fetch again. The ID is checked
+  to be a lowercase UUID before a URL is built from it.
+- **The request.** `GET /release/{mbid}/front-500` through the gateway as the
+  service `coverartarchive`: one request a second, the shared backoff and
+  block, the client identity and the service lease, as above.
+- **Redirects.** The archive answers with a redirect to `archive.org`, which
+  redirects again to the node holding the file. `Gateway.fetch` follows at
+  most two redirects, each to `https` on `archive.org` or a host ending in
+  `.archive.org`, sending only the user agent. A redirect anywhere else, to
+  plain `http` included, is refused and nothing is stored; a third redirect
+  is not followed. Against a server set with `setCoverArtArchiveServer` on a
+  loopback host, a redirect back to that same server is also followed, so a
+  local mock can redirect to itself.
+- **The image.** At most 4 MiB, and only a JPEG or PNG by its bytes;
+  anything else is refused and nothing is stored.
+- **No cover.** A `404` is stored as a row without an image, and the release
+  ID is not asked about again for 30 days of wall time; a fetched cover is
+  not asked for again while its release ID stays the same.
+
+`jobMatchStats(job).cover_art` reports the `CoverArtOutcome`: `embedded`,
+`fetched`, `cached`, `cached_miss`, `not_found`, `no_release_id`, or, failing
+the job, `refused`, `unavailable` or `busy`.
+
+```sh
+orca-cli match DATABASE --release=ID [--accept-min-score=SCORE] [--cover-art]
+orca-cli cover-art DATABASE RELEASE_ID
+orca-cli artwork DATABASE --release=ID --out=PATH
+```
+
+`ORCA_COVERARTARCHIVE_URL` points `match`, `cover-art` and `orca-gtk` at
+another server.

@@ -2,7 +2,25 @@
 
 ## Unreleased
 
+Ships Library schema version 20.
+
 ### Added
+
+- **Match Album and Cover Art Archive covers.** `MatchRequest.release_id`
+  limits matching to one Release; with it, `accept_minimum_confidence`
+  accepts that Release's confident matches and `cover_art` fetches its front
+  cover. `Runtime.startReleaseCoverArtFetch` fetches the cover alone, and
+  `jobMatchStats` reports `accepted` and the `CoverArtOutcome`. A cover is
+  fetched only for a Release none of whose files carries one, under its
+  tagged release ID or the one most of its accepted matches name, through
+  `Gateway.fetch`, which follows at most two `https` redirects within
+  `archive.org`. It is stored in the new `release_artwork` table, a missing
+  cover for 30 days, and the artwork reads return it when no file has a
+  cover. `Runtime.setCoverArtArchiveServer` and `ORCA_COVERARTARCHIVE_URL`
+  select another server. `orca-cli match --release=ID
+  [--accept-min-score=SCORE] [--cover-art]` and `orca-cli cover-art DATABASE
+  RELEASE_ID` run them, and `orca-gtk` offers Match Album and Fetch Cover Art
+  on an album's menu.
 
 - **The flake installs Orca on NixOS and Home Manager.** `nix/package.nix`
   holds the package, `packages.orca` (also `default`) builds it, and

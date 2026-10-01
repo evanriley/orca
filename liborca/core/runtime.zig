@@ -233,10 +233,21 @@ pub const MatchRequest = struct {
     /// Search only this Track, under the same rule as the whole library: one
     /// already identified, or already answered for, is not searched.
     track_id: ?i64 = null,
+    /// Search only this Release's Tracks, under the same rule. Not with
+    /// `track_id`.
+    release_id: ?i64 = null,
     /// Also fingerprint each Track's file and look it up on AcoustID, when an
     /// AcoustID application key is set.
     fingerprints: bool = true,
+    /// With `release_id`: after the lookups, accept the Release's matches
+    /// `libraryAcceptConfidentMatches` would accept at this confidence.
+    accept_minimum_confidence: ?f32 = null,
+    /// With `release_id`: then fetch its front cover, as
+    /// `startReleaseCoverArtFetch` does.
+    cover_art: bool = false,
 };
+
+pub const CoverArtOutcome = job_worker.CoverArtOutcome;
 
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
@@ -320,6 +331,7 @@ pub const OrcaRuntime = struct {
     listen_settings: u32 = 0,
     acoustid_server: []const u8 = providers.acoustid.default_server,
     acoustid_client_key: ?[]const u8 = null,
+    coverartarchive_server: []const u8 = providers.coverartarchive.default_server,
     /// One per runtime, created with the first listen worker and deinitialized
     /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
     /// handlers and `deinit` restores what it found, so a second instance torn
@@ -642,12 +654,13 @@ pub const OrcaRuntime = struct {
         return (try libraryDatabase(self, library)).releases.byId(self.allocator, release_id);
     }
 
-    /// The cover image embedded in a Track's file, or null when it has none.
+    /// The cover image embedded in a Track's file, else the one fetched for
+    /// its Release, or null when there is neither.
     ///
     /// Caller-owned bytes plus the media type those bytes actually are; free
-    /// with `EmbeddedImage.deinit`. Read from the file on every call, and
-    /// deliberately not cached and deliberately not stored: see
-    /// `docs/metadata.md` for the measurements behind both decisions.
+    /// with `EmbeddedImage.deinit`. An embedded cover is read from the file on
+    /// every call, and deliberately not cached and deliberately not stored:
+    /// see `docs/metadata.md` for the measurements behind both decisions.
     ///
     /// A Track with no file, a file that has since gone, and a file with no
     /// cover are all the same answer — null. None of them is a failure a host
@@ -666,8 +679,8 @@ pub const OrcaRuntime = struct {
 
     pub const max_release_artwork_candidates = artwork.max_release_candidates;
 
-    /// The cover image for a Release, or null when none of its files has one,
-    /// read on the caller's thread. See `artwork.releaseArtwork` for which
+    /// The cover image for a Release, or the one fetched for it when none of
+    /// its files has one, read on the caller's thread. See `artwork.releaseArtwork` for which
     /// file's cover that is.
     pub fn libraryReleaseArtwork(
         self: *OrcaRuntime,
@@ -788,6 +801,13 @@ pub const OrcaRuntime = struct {
     /// runtime.
     pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: []const u8) !void {
         return runtime_listens.setAcoustIdServer(self, base_url);
+    }
+
+    /// Points cover fetches at another Cover Art Archive, under the same rule
+    /// as `setListenBrainzServer`. A loopback server may redirect to itself.
+    /// `base_url` must outlive the runtime.
+    pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: []const u8) !void {
+        return runtime_listens.setCoverArtArchiveServer(self, base_url);
     }
 
     /// Sends this Library's listens and feedback to ListenBrainz, or stops
@@ -1506,6 +1526,15 @@ pub const OrcaRuntime = struct {
         request: MatchRequest,
     ) !JobHandle {
         return runtime_jobs.startLibraryMatching(self, library, request);
+    }
+
+    /// Fetches a Release's front cover from the Cover Art Archive into the
+    /// Library, unless one of its files carries a cover, under the release ID
+    /// its tags give or most of its accepted matches name. `jobMatchStats`
+    /// reports the `CoverArtOutcome`. Refused with
+    /// `error.MatchingAlreadyRunning` beside a matching job.
+    pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
+        return runtime_jobs.startReleaseCoverArtFetch(self, library, release_id);
     }
 
     /// Fingerprints every file whose recording ID came from an accepted match

@@ -183,11 +183,79 @@ pub const Response = struct {
     status: u16,
     body: []u8,
     rate_limit: RateLimit = .{},
+    /// A redirect's `Location` header, as the server sent it.
+    location: ?[]u8 = null,
 
     pub fn deinit(self: Response) void {
         self.allocator.free(self.body);
+        if (self.location) |location| self.allocator.free(location);
     }
 };
+
+/// Where `Gateway.fetch` may be redirected: to `https` on `host` or on a
+/// host ending in `.` and `host`, or, from a request to a loopback server, to
+/// that same server, so a local mock can redirect to itself.
+pub const RedirectAllowance = struct {
+    host: []const u8,
+};
+
+/// The Cover Art Archive redirects to `archive.org`, which redirects again
+/// to the storage node holding the file.
+pub const max_redirects = 2;
+
+fn isRedirect(status: u16) bool {
+    return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
+}
+
+const loopback_hosts = [_][]const u8{ "127.0.0.1", "[::1]", "localhost" };
+
+/// The absolute URL a redirect from `request_url` to `location` leads to,
+/// when `allowance` permits it.
+pub fn redirectTarget(
+    allocator: std.mem.Allocator,
+    request_url: []const u8,
+    location: []const u8,
+    allowance: RedirectAllowance,
+) ![]u8 {
+    const origin = std.Uri.parse(request_url) catch return error.RedirectRefused;
+    var origin_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const origin_host = (origin.getHost(&origin_host_buffer) catch return error.RedirectRefused).bytes;
+    const target_url = if (std.mem.startsWith(u8, location, "/") and !std.mem.startsWith(u8, location, "//"))
+        try absoluteOnOrigin(allocator, origin, origin_host, location)
+    else
+        try allocator.dupe(u8, location);
+    errdefer allocator.free(target_url);
+    const target = std.Uri.parse(target_url) catch return error.RedirectRefused;
+    if (target.user != null or target.password != null) return error.RedirectRefused;
+    var target_host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const target_host = (target.getHost(&target_host_buffer) catch return error.RedirectRefused).bytes;
+    if (std.ascii.eqlIgnoreCase(target.scheme, "https") and isWithinHost(target_host, allowance.host))
+        return target_url;
+    if (isLoopback(origin_host) and std.ascii.eqlIgnoreCase(target.scheme, origin.scheme) and
+        std.ascii.eqlIgnoreCase(target_host, origin_host) and target.port == origin.port)
+        return target_url;
+    return error.RedirectRefused;
+}
+
+fn absoluteOnOrigin(allocator: std.mem.Allocator, origin: std.Uri, host: []const u8, path: []const u8) ![]u8 {
+    if (origin.port) |port|
+        return std.fmt.allocPrint(allocator, "{s}://{s}:{d}{s}", .{ origin.scheme, host, port, path });
+    return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ origin.scheme, host, path });
+}
+
+fn isWithinHost(host: []const u8, allowed: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, allowed)) return true;
+    if (host.len <= allowed.len + 1) return false;
+    const suffix_start = host.len - allowed.len;
+    return host[suffix_start - 1] == '.' and std.ascii.eqlIgnoreCase(host[suffix_start..], allowed);
+}
+
+fn isLoopback(host: []const u8) bool {
+    for (loopback_hosts) |loopback| {
+        if (std.ascii.eqlIgnoreCase(host, loopback)) return true;
+    }
+    return false;
+}
 
 pub const Transport = struct {
     context: *anyopaque,
@@ -379,6 +447,61 @@ pub const Gateway = struct {
             backoff = @min(backoff *| 2, 60_000);
         }
         unreachable;
+    }
+
+    /// A GET under the same rules as `execute` that follows at most
+    /// `max_redirects` redirects, each one `allowance` permits from the URL
+    /// before it, sending only the user agent to their targets. A redirect it
+    /// does not permit fails with `error.RedirectRefused`; one past the limit
+    /// is returned as it came.
+    pub fn fetch(
+        self: *Gateway,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        headers: []const Header,
+        allowance: RedirectAllowance,
+    ) !Response {
+        var response = try self.execute(allocator, .get, url, null, headers);
+        var current_url = try allocator.dupe(u8, url);
+        defer allocator.free(current_url);
+        var hops: u8 = 0;
+        while (isRedirect(response.status) and hops < max_redirects) : (hops += 1) {
+            const redirect = response;
+            defer redirect.deinit();
+            const location = redirect.location orelse return error.RedirectRefused;
+            const target = try redirectTarget(allocator, current_url, location, allowance);
+            allocator.free(current_url);
+            current_url = target;
+            response = try self.follow(allocator, target);
+        }
+        return response;
+    }
+
+    fn follow(self: *Gateway, allocator: std.mem.Allocator, target: []const u8) !Response {
+        try self.checkCanceled();
+        const user_agent = try self.config.identity.userAgent(allocator);
+        defer allocator.free(user_agent);
+        const followed = self.transport.perform(allocator, .{
+            .method = .get,
+            .url = target,
+            .user_agent = user_agent,
+            .max_response_bytes = self.config.max_response_bytes,
+            .timeout_ms = self.config.request_timeout_ms,
+            .cancel = self.cancel,
+        }) catch |err| switch (err) {
+            error.OutOfMemory, error.ResponseTooLarge, error.Canceled, error.Timeout => return err,
+            error.ConcurrencyUnavailable => return error.InvalidNetworkConfiguration,
+            else => return error.NetworkUnavailable,
+        };
+        const refused = self.recordResponse(followed) catch |err| {
+            followed.deinit();
+            return err;
+        };
+        if (refused) {
+            followed.deinit();
+            return error.RateLimited;
+        }
+        return followed;
     }
 
     pub fn blockedUntilMs(self: *Gateway) ?i64 {
@@ -647,8 +770,14 @@ pub const StandardTransport = struct {
             connection.closing = true;
         };
         var rate_limit: RateLimit = .{};
+        var location: ?[]u8 = null;
+        errdefer if (location) |value| allocator.free(value);
         var header_iterator = response.head.iterateHeaders();
-        while (header_iterator.next()) |header| rate_limit.observe(header.name, header.value);
+        while (header_iterator.next()) |header| {
+            rate_limit.observe(header.name, header.value);
+            if (location == null and std.ascii.eqlIgnoreCase(header.name, "location"))
+                location = try allocator.dupe(u8, header.value);
+        }
 
         const decompress_buffer: []u8 = switch (response.head.content_encoding) {
             .identity => &.{},
@@ -672,6 +801,7 @@ pub const StandardTransport = struct {
             .status = @intFromEnum(response.head.status),
             .body = try allocator.dupe(u8, buffered),
             .rate_limit = rate_limit,
+            .location = location,
         };
     }
 };
@@ -1164,4 +1294,113 @@ test "setting the cancel flag makes a hung request return promptly" {
     ));
     const elapsed = std.Io.Clock.awake.now(io).toMilliseconds() - started;
     try std.testing.expect(elapsed < 500);
+}
+
+const archive_allowance: RedirectAllowance = .{ .host = "archive.org" };
+
+fn redirectTo(location: []const u8) net_testing.Reply {
+    return .{ .respond = .{ .status = 307, .body = "", .location = location } };
+}
+
+test "fetch follows two redirects within archive.org and sends their targets no headers but the user agent" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    net.transport.keep_history = true;
+    try net.transport.script(redirectTo("https://archive.org/download/mbid-x/front.jpg"));
+    try net.transport.script(redirectTo("https://dn710702.ca.archive.org/0/items/mbid-x/front.jpg"));
+    try net.transport.script(.{ .respond = .{ .body = "image" } });
+    const response = try net.gateway.fetch(
+        std.testing.allocator,
+        "https://coverartarchive.org/release/x/front-500",
+        &.{.{ .name = "Authorization", .value = "Token secret" }},
+        archive_allowance,
+    );
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("image", response.body);
+    try std.testing.expectEqual(@as(u32, 3), net.transport.requestCount());
+    try std.testing.expectEqualStrings("https://archive.org/download/mbid-x/front.jpg", net.transport.history.items[1].url);
+    try std.testing.expectEqualStrings("https://dn710702.ca.archive.org/0/items/mbid-x/front.jpg", net.transport.history.items[2].url);
+    try std.testing.expectEqualStrings("", net.transport.lastAuthorization());
+}
+
+test "a second redirect to plain http or off the archive is refused and its target never requested" {
+    for ([_][]const u8{ "http://dn1.ca.archive.org/front.jpg", "https://example.org/front.jpg" }) |location| {
+        var net: TestGateway = undefined;
+        net.init(.{});
+        defer net.deinit();
+        try net.transport.script(redirectTo("https://archive.org/download/a"));
+        try net.transport.script(redirectTo(location));
+        try std.testing.expectError(error.RedirectRefused, net.gateway.fetch(
+            std.testing.allocator,
+            "https://coverartarchive.org/release/x/front-500",
+            &.{},
+            archive_allowance,
+        ));
+        try std.testing.expectEqual(@as(u32, 2), net.transport.requestCount());
+    }
+}
+
+test "a redirect to plain http, to another host or to a host merely ending in archive.org is refused unrequested" {
+    for ([_][]const u8{
+        "http://archive.org/download/front.jpg",
+        "https://example.org/front.jpg",
+        "https://notarchive.org/front.jpg",
+        "https://archive.org.example.org/front.jpg",
+        "https://user:secret@archive.org/front.jpg",
+        "/download/front.jpg",
+        "//example.org/front.jpg",
+        "not a url",
+    }) |location| {
+        var net: TestGateway = undefined;
+        net.init(.{});
+        defer net.deinit();
+        try net.transport.script(redirectTo(location));
+        try std.testing.expectError(error.RedirectRefused, net.gateway.fetch(
+            std.testing.allocator,
+            "https://coverartarchive.org/release/x/front-500",
+            &.{},
+            archive_allowance,
+        ));
+        try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
+    }
+}
+
+test "a third redirect is returned as it came and not followed" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    try net.transport.script(redirectTo("https://archive.org/download/a"));
+    try net.transport.script(redirectTo("https://archive.org/download/b"));
+    try net.transport.script(redirectTo("https://archive.org/download/c"));
+    const response = try net.gateway.fetch(std.testing.allocator, "https://coverartarchive.org/release/x/front-500", &.{}, archive_allowance);
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 307), response.status);
+    try std.testing.expectEqual(@as(u32, 3), net.transport.requestCount());
+}
+
+test "a request to a loopback server may be redirected to that same server only" {
+    const allocator = std.testing.allocator;
+    const same_path = try redirectTarget(allocator, "http://127.0.0.1:8080/release/x/front-500", "/files/front.jpg", archive_allowance);
+    defer allocator.free(same_path);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/files/front.jpg", same_path);
+    const same_absolute = try redirectTarget(allocator, "http://localhost:8080/release/x", "http://localhost:8080/f.jpg", archive_allowance);
+    defer allocator.free(same_absolute);
+    try std.testing.expectEqualStrings("http://localhost:8080/f.jpg", same_absolute);
+    for ([_][]const u8{ "http://127.0.0.1:9090/f.jpg", "http://localhost:8080/f.jpg", "http://archive.org/f.jpg" }) |location|
+        try std.testing.expectError(error.RedirectRefused, redirectTarget(allocator, "http://127.0.0.1:8080/release/x", location, archive_allowance));
+    try std.testing.expectError(error.RedirectRefused, redirectTarget(allocator, "https://coverartarchive.org/release/x", "/files/front.jpg", archive_allowance));
+}
+
+test "execute returns a redirect to the caller without following it" {
+    var net: TestGateway = undefined;
+    net.init(.{});
+    defer net.deinit();
+    try net.transport.script(redirectTo("https://archive.org/download/a"));
+    const response = try net.gateway.execute(std.testing.allocator, .get, "https://example.test", null, &.{});
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 307), response.status);
+    try std.testing.expectEqualStrings("https://archive.org/download/a", response.location.?);
+    try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
 }

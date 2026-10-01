@@ -19,6 +19,7 @@ const health = @import("health.zig");
 const matches = @import("matches.zig");
 const details = @import("details.zig");
 const tags = @import("tags.zig");
+const art = @import("art.zig");
 
 const App = app.App;
 
@@ -162,14 +163,41 @@ fn startMatchingJob(self: *App, track_id: ?i64) void {
     const job = self.runtime.startLibraryMatching(library, .{
         .track_id = track_id,
         .fingerprints = self.match_fingerprints,
-    }) catch |err| return self.toast(switch (err) {
-        error.MatchingAlreadyRunning => "Already finding matches",
-        error.AcoustIdBusy => "Already submitting to AcoustID",
-        else => "Could not start finding matches",
-    });
+    }) catch |err| return self.toast(matchingRefusal(err));
     self.match_task_track = track_id;
     begin(self, .matching, job, "Finding matches");
     if (track_id != null) details.invalidate(self);
+}
+
+/// Searches for an album's Tracks, accepts their matches at the review
+/// threshold, and fetches the album's cover when it has none.
+pub fn startAlbumMatching(self: *App, release_id: i64) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const job = self.runtime.startLibraryMatching(library, .{
+        .release_id = release_id,
+        .fingerprints = self.match_fingerprints,
+        .accept_minimum_confidence = matches.thresholdFraction(self),
+        .cover_art = true,
+    }) catch |err| return self.toast(matchingRefusal(err));
+    self.match_task_release = release_id;
+    begin(self, .matching, job, "Matching album");
+}
+
+pub fn startCoverArtFetch(self: *App, release_id: i64) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const job = self.runtime.startReleaseCoverArtFetch(library, release_id) catch |err| return self.toast(matchingRefusal(err));
+    self.match_task_release = release_id;
+    begin(self, .matching, job, "Fetching cover art");
+}
+
+fn matchingRefusal(err: anyerror) [:0]const u8 {
+    return switch (err) {
+        error.MatchingAlreadyRunning => "Already finding matches",
+        error.AcoustIdBusy => "Already submitting to AcoustID",
+        else => "Could not start finding matches",
+    };
 }
 
 pub fn startSubmission(self: *App) void {
@@ -255,6 +283,8 @@ fn writeDetail(self: *App, task: app.Task, snapshot: liborca.JobSnapshot, stats:
 
 fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.MatchStats) void {
     const label = self.scan_detail orelse return;
+    if (self.match_task_release != null and snapshot.completed_units == (snapshot.total_units orelse 0))
+        return gtk.gtk_label_set_text(label, "Cover Art Archive");
     var buffer: [160]u8 = undefined;
     const text = strings.printZ(&buffer, "{f} of {f} songs · {f} matched", .{
         strings.grouped(snapshot.completed_units),
@@ -278,7 +308,44 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     tags.undoLastWrite(state(data));
 }
 
+fn albumFinished(self: *App, release_id: i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    art.refreshRelease(self, release_id);
+    matches.reload(self);
+    details.invalidate(self);
+    if (state_value == .cancelled) return self.toast("Stopped");
+    const result = stats orelse return self.toast("Could not match the album");
+    if (state_value != .succeeded) return self.toast(switch (result.cover_art) {
+        .refused => "The Cover Art Archive's answer was refused",
+        .unavailable => "The Cover Art Archive could not be reached; try again later",
+        .busy => "The Cover Art Archive is in use by another Orca process; try again once it finishes",
+        else => switch (result.busy) {
+            .musicbrainz => "MusicBrainz is in use by another Orca process; try again once it finishes",
+            .acoustid => "AcoustID is in use by another Orca process; try again once it finishes",
+            .none => "MusicBrainz or AcoustID could not be reached; try again later",
+        },
+    });
+    const cover: [:0]const u8 = switch (result.cover_art) {
+        .no_release_id => "No release ID — review matches, then Fetch Cover Art",
+        .fetched => "Found the album's cover",
+        .embedded => "The album's files already carry a cover",
+        .cached => "The album's cover was already fetched",
+        .cached_miss, .not_found => "The Cover Art Archive has no cover for this album",
+        .not_requested, .refused, .unavailable, .busy, .cancelled => "Done",
+    };
+    if (result.accepted == 0) return self.toast(cover);
+    var buffer: [160]u8 = undefined;
+    self.toast(strings.printZ(&buffer, "Accepted {f} {s} · {s}", .{
+        strings.grouped(result.accepted),
+        if (result.accepted == 1) "match" else "matches",
+        cover,
+    }) catch cover);
+}
+
 fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    if (self.match_task_release) |release_id| {
+        self.match_task_release = null;
+        return albumFinished(self, release_id, state_value, stats);
+    }
     const searched = self.match_task_track;
     self.match_task_track = null;
     const matched = if (stats) |value| value.matched else 0;
@@ -379,6 +446,7 @@ pub fn tick(self: *App) void {
         self.task = null;
         self.task_job = null;
         self.match_task_track = null;
+        self.match_task_release = null;
         self.shown_matched = 0;
         showScanning(self, false);
         return;

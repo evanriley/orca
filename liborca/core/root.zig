@@ -1,5 +1,6 @@
 pub const artwork = @import("artwork.zig");
 pub const control = @import("control.zig");
+pub const cover_art = @import("cover_art.zig");
 pub const handle = @import("handle.zig");
 pub const job = @import("job.zig");
 pub const job_worker = @import("job_worker.zig");
@@ -31,6 +32,7 @@ pub const WorkHandle = runtime.WorkHandle;
 test {
     _ = @import("artwork.zig");
     _ = @import("control.zig");
+    _ = @import("cover_art.zig");
     _ = @import("handle.zig");
     _ = @import("job.zig");
     _ = @import("job_worker.zig");

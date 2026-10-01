@@ -74,6 +74,12 @@ pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: []const u8) !void {
     self.acoustid_server = base_url;
 }
 
+pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: []const u8) !void {
+    try runtime.requireRunning(self);
+    try providers.url.validateServer(base_url);
+    self.coverartarchive_server = base_url;
+}
+
 fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
     var updated = config;
     updated.identity = self.client_identity;
@@ -239,7 +245,7 @@ pub fn libraryAcceptConfidentMatches(self: *OrcaRuntime, library: LibraryHandle,
     return accepted;
 }
 
-fn recordingIdsChanged(self: *OrcaRuntime, library: LibraryHandle) void {
+pub fn recordingIdsChanged(self: *OrcaRuntime, library: LibraryHandle) void {
     const object_value = self.libraries.get(library) catch return;
     object_value.stored_counts = null;
     const listens = object_value.listens orelse return;
