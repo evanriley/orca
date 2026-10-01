@@ -330,8 +330,13 @@ files now say. The plan ID is the journal group, and
 `Runtime.undoTagWrite(group)` restores those files' previous bytes and
 re-observes them. Orca's values survive both directions: after a write the
 library still holds the locked edit, and after an undo it still shows it.
+A plan writes one present location of each file. A file held at several
+paths is byte-identical copies, so writing one copy splits it off into a file
+of its own that carries Orca's values, and the copies left behind keep the
+shared file (see [database.md](database.md#identity)).
 When a write commits, each value it wrote is marked with
-`orca_metadata_values.written_at`; changing the value clears the mark. The
+`orca_metadata_values.written_at` on the file its path holds after the
+re-observation; changing the value clears the mark. The
 mark keeps a recording ID that Orca wrote into a file eligible for AcoustID
 submission, since the file's tag then holds Orca's choice.
 

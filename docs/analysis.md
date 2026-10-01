@@ -280,10 +280,13 @@ mean measuring the library a second time.
 
 - **`exact_duplicate`** — Orca holds this audio at more than one place, and a
   person can act on it without listening to anything. Two sources, and the
-  second one is not optional: a *byte-identical copy never becomes a second
-  `files` row*, because the scanner's identity cascade resolves it by quick
-  hash to the row that already exists. The Library models it as one file at two
-  present locations, so no amount of comparing rows could ever find it.
+  second one is not optional: a *byte-identical copy is not a second `files`
+  row*, because the scanner's identity cascade resolves it by quick hash to the
+  row that already exists. The Library models it as one file at two present
+  locations, so no amount of comparing rows could ever find it. A copy whose
+  bytes change leaves for a file of its own, so it is no longer reported as a
+  copy of the file it left (see
+  [database.md](database.md#identity)).
   1. one `files` row with a second `present` location, or
   2. two `files` rows whose `files.audio_hash` — BLAKE3 over the decoded
      samples — is byte-identical. Same audio, whatever the container, the

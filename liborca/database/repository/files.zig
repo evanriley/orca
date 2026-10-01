@@ -71,6 +71,15 @@ pub const FilePropertyUpdate = struct {
     audio_format: ?i64 = null,
 };
 
+/// Which file the bytes now at one path belong to.
+pub const FileResolution = union(enum) {
+    new,
+    same: i64,
+    /// A file still present at another path with other bytes than these: the
+    /// path leaves it for a file of its own, forked from it.
+    diverged: i64,
+};
+
 /// One incomplete file and where to read it.
 pub const IncompleteFile = struct {
     id: i64,
@@ -468,6 +477,80 @@ pub const FileRepository = struct {
         try statement.bindBlob(1, digest);
         if (try statement.step() != .row) return null;
         return statement.columnInt64(0);
+    }
+
+    /// The identity cascade for the bytes now at `uri`, whose quick hash is
+    /// `digest`.
+    ///
+    /// A file is one set of bytes. When the cascade finds a file whose recorded
+    /// quick hash differs from `digest` and that is still present at another
+    /// path, that path holds the bytes the file describes, so this path has
+    /// diverged from it and must not rewrite it. A missing location does not
+    /// count, because it is usually what a move left behind, and neither does
+    /// a hard link to this path on the same volume, which cannot hold other
+    /// bytes.
+    pub fn resolveForBytes(
+        self: *const FileRepository,
+        uri: []const u8,
+        identity: StorageIdentityKey,
+        digest: []const u8,
+    ) !FileResolution {
+        const existing = (try self.resolveByUri(identity.volume_id, uri)) orelse
+            (try self.resolveByIdentity(identity)) orelse
+            (try self.resolveByQuickHash(digest)) orelse return .new;
+        var statement = try self.db.prepare(
+            \\SELECT EXISTS (
+            \\    SELECT 1 FROM files JOIN locations ON locations.file_id = files.id
+            \\    WHERE files.id = ?1 AND files.quick_hash IS NOT NULL AND files.quick_hash <> ?2
+            \\      AND locations.state = 'present'
+            \\      AND NOT (locations.volume_id = ?3
+            \\          AND (locations.uri = ?4 OR locations.native_inode IS ?5))
+            \\);
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, existing);
+        try statement.bindBlob(2, digest);
+        try statement.bindInt64(3, identity.volume_id);
+        try statement.bindText(4, uri);
+        try statement.bindInt64(5, identity.native_inode);
+        if (try statement.step() != .row) return error.SqlFailed;
+        if (statement.columnInt64(0) != 0) return .{ .diverged = existing };
+        return .{ .same = existing };
+    }
+
+    /// A new file for the bytes at `uri`, which diverged from `shared`.
+    ///
+    /// It takes a copy of Orca's values for `shared`, unwritten, because the
+    /// user's edits and locks are about the song rather than the bytes, and
+    /// the journal rows that name `uri`. Everything measured from or recorded
+    /// against the shared bytes stays with `shared`. The caller re-points the
+    /// location at the new file in the same transaction.
+    pub fn forkLocked(
+        self: *FileRepository,
+        shared: i64,
+        uri: []const u8,
+        input: FileUpsert,
+    ) !i64 {
+        const fresh = try self.createLocked(input);
+        var values = try self.db.prepare(
+            \\INSERT INTO orca_metadata_values(
+            \\    file_id, field, value, provenance, locked, updated_at, written_at
+            \\) SELECT ?1, field, value, provenance, locked, updated_at, NULL
+            \\FROM orca_metadata_values WHERE file_id = ?2;
+        );
+        defer values.deinit();
+        try values.bindInt64(1, fresh);
+        try values.bindInt64(2, shared);
+        if (try values.step() != .done) return error.SqlFailed;
+        var journal = try self.db.prepare(
+            "UPDATE mutation_operations SET file_id = ?1 WHERE file_id = ?2 AND source_path = ?3;",
+        );
+        defer journal.deinit();
+        try journal.bindInt64(1, fresh);
+        try journal.bindInt64(2, shared);
+        try journal.bindText(3, uri);
+        if (try journal.step() != .done) return error.SqlFailed;
+        return fresh;
     }
 
     /// Sweep after a completed, uncancelled run: locations under this root that

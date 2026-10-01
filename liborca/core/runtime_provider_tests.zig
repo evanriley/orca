@@ -1333,6 +1333,35 @@ fn setRecordingIds(
     }
 }
 
+fn acceptRecordingIds(
+    library_database: *database.LibraryDatabase,
+    track_ids: []const i64,
+    value: []const u8,
+) !void {
+    var find = try library_database.database.prepare(
+        "SELECT id FROM identification_proposals WHERE file_id=?1 AND provider_id=?2;",
+    );
+    defer find.deinit();
+    for (track_ids) |track_id| {
+        const file_ids = try library_database.tracks.fileIds(std.testing.allocator, track_id);
+        defer std.testing.allocator.free(file_ids);
+        for (file_ids) |file_id| {
+            _ = try library_database.identification_proposals.put(.{
+                .file_id = file_id,
+                .provider = "musicbrainz",
+                .provider_id = value,
+                .confidence = 0.95,
+                .payload = review_payload,
+            });
+            try find.reset();
+            try find.bindInt64(1, file_id);
+            try find.bindText(2, value);
+            try std.testing.expectEqual(database.sqlite.Step.row, try find.step());
+            _ = try library_database.identification_proposals.acceptProposal(std.testing.allocator, find.columnInt64(0));
+        }
+    }
+}
+
 fn writePlan(runtime: *OrcaRuntime, library: LibraryHandle, ids: []const i64) !void {
     const plan = try runtime.planTagWrite(library, std.testing.io, ids);
     defer plan.deinit();
@@ -1358,7 +1387,7 @@ test "a matched recording id is written into files without one, and they stay su
     const ids = try runtime_tests.allTrackIds(&runtime, library);
     defer std.testing.allocator.free(ids);
     const library_database = try libraryDatabase(&runtime, library);
-    try setRecordingIds(library_database, ids, northern_sky_mbid, .provider);
+    try acceptRecordingIds(library_database, ids, northern_sky_mbid);
     const submittable = try runtime.libraryAcoustIdSubmittableCount(library);
     try std.testing.expectEqual(@as(u64, 3), submittable);
 
@@ -1420,7 +1449,7 @@ test "a matched recording id that disagrees with the file's tag is a conflict, a
         defer std.testing.allocator.free(file_ids);
         for (file_ids) |file_id| try library_database.orca_metadata.remove(file_id, .musicbrainz_recording_id);
     }
-    try setRecordingIds(library_database, ids, northern_sky_mbid, .provider);
+    try acceptRecordingIds(library_database, ids, northern_sky_mbid);
     const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Locked Title" }});
     defer edited.deinit();
 

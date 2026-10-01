@@ -203,9 +203,6 @@ pub const PendingTagWrite = struct {
     plan: metadata.mutation.Plan,
     /// Index-aligned with `plan.actions`, allocated in `arena`.
     locations: []database.repository.PresentLocation,
-    /// The file each action writes, index-aligned with `plan.actions`,
-    /// allocated in `arena`.
-    file_ids: []const i64,
 
     pub fn destroy(self: *PendingTagWrite) void {
         const allocator = self.arena.child_allocator;
@@ -1162,12 +1159,10 @@ pub const JobWorker = struct {
             .journal = &self.database.mutation_journal,
             .backup_directory = self.database.backup_directory,
         };
-        if (executor.executePlan(&pending.plan, pending.plan.id)) {
+        const written = if (executor.executePlan(&pending.plan, pending.plan.id)) true else |_| false;
+        if (written) {
             _ = stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
-            self.markWritten(pending) catch {
-                _ = stats.errors.fetchAdd(1, .acq_rel);
-            };
-        } else |_| {
+        } else {
             _ = stats.errors.fetchAdd(1, .acq_rel);
             self.failed.store(true, .release);
         }
@@ -1176,13 +1171,21 @@ pub const JobWorker = struct {
                 _ = stats.errors.fetchAdd(1, .acq_rel);
             };
         }
+        if (written) self.markWritten(pending) catch {
+            _ = stats.errors.fetchAdd(1, .acq_rel);
+        };
     }
 
+    /// Runs after `reobserve`: a written copy of a shared file has by then
+    /// become a file of its own, and the mark belongs on that file.
     fn markWritten(self: *JobWorker, pending: *const PendingTagWrite) !void {
-        for (pending.plan.actions, pending.file_ids) |action, file_id| switch (action) {
-            .write_tags => |write| for (write.changes) |change| {
-                const value = change.after orelse continue;
-                try self.database.orca_metadata.markWritten(file_id, change.field, value);
+        for (pending.plan.actions, pending.locations) |action, location| switch (action) {
+            .write_tags => |write| {
+                const file_id = try self.database.files.resolveByUri(location.volume_id, location.uri) orelse continue;
+                for (write.changes) |change| {
+                    const value = change.after orelse continue;
+                    try self.database.orca_metadata.markWritten(file_id, change.field, value);
+                }
             },
             .move => {},
         };

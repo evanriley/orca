@@ -166,9 +166,11 @@ fn bindAcoustIdSubmittable(statement: sqlite.Statement) !void {
 /// Files with ids above ?1 whose recording ID in effect is an Orca value of
 /// field ?3 with provenance ?4 or ?5, not the file's own tag unless Orca
 /// wrote it there, not yet sent.
-/// A provider value is left out when its accepted proposal (state ?6) came
-/// from AcoustID, or was accepted in bulk: without AcoustID a proposal has no
-/// fingerprint score, so a bulk acceptance of it rests on text alone.
+/// A provider value is sent only when the same file holds its accepted
+/// proposal (state ?6), found by MusicBrainz alone and accepted on its own.
+/// AcoustID already knows what it proposed; without AcoustID a proposal has no
+/// fingerprint score, so a bulk acceptance of it rests on text alone; and a
+/// file split off a shared one inherits the value without the proposal.
 pub const acoustid_submittable =
     "FROM orca_metadata_values AS chosen\n" ++
     "JOIN files ON files.id = chosen.file_id\n" ++
@@ -180,6 +182,9 @@ pub const acoustid_submittable =
     "      WHERE observed_file_tags.file_id = files.id AND observed_file_tags.musicbrainz_recording_id = chosen.value))\n" ++
     "  AND NOT EXISTS (SELECT 1 FROM acoustid_submissions WHERE acoustid_submissions.file_id = files.id\n" ++
     "      AND acoustid_submissions.recording_mbid = chosen.value)\n" ++
+    "  AND (chosen.provenance = ?5 OR EXISTS (SELECT 1 FROM identification_proposals AS reviewed\n" ++
+    "      WHERE reviewed.file_id = files.id AND reviewed.provider_id = chosen.value AND reviewed.state = ?6\n" ++
+    "        AND reviewed.provider NOT IN ('acoustid', 'musicbrainz+acoustid') AND reviewed.accepted_in_bulk = 0))\n" ++
     "  AND NOT (chosen.provenance = ?4 AND EXISTS (SELECT 1 FROM identification_proposals AS accepted\n" ++
     "      WHERE accepted.file_id = files.id AND accepted.provider_id = chosen.value AND accepted.state = ?6\n" ++
     "        AND (accepted.provider IN ('acoustid', 'musicbrainz+acoustid') OR accepted.accepted_in_bulk = 1)))";

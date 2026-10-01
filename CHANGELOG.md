@@ -34,6 +34,12 @@
 - **Library schema version 24.** `provider_state.next_request_ms` keeps the
   earliest time a service may be sent its next request, so a quota window or
   the one-request-per-second spacing outlives the job that learned it.
+- **Library schema version 25.** Every present location of a File held at
+  more than one path is read again by the next scan, so copies that diverged
+  before the fix below become Files of their own.
+- **A recording ID inherited from a provider match is not sent to AcoustID.**
+  A provider-sourced recording ID is submittable only when the same File holds
+  the accepted, individually reviewed MusicBrainz proposal for it.
 - **Library schema version 23.** `files.audio_hash` is cleared unless a
   current fingerprint was measured from the file's present bytes, so stale
   hashes in an existing library stop producing exact-duplicate findings;
@@ -111,6 +117,13 @@
   position, which the new Player could take for its own. Moving a Zone now
   closes its output and forgets that state; the new Player reopens it in its
   own format. Detaching a Zone and destroying a Player forget it too.
+- **A copy of a file that changes no longer rewrites its identical copies.**
+  Byte-identical copies share one File, and a changed copy overwrote it, so
+  the untouched copy's Track disappeared and later scans and the duplicate
+  pass still treated the two as one. A copy whose bytes diverge now becomes
+  a File of its own, carrying Orca's values and locks; analysis, listens and
+  proposals stay with the original. Hard links stay one File. A tag write to
+  one copy marks the written values on the File that holds them.
 
 ## 0.5.0 - 2026-09-30
 

@@ -263,7 +263,9 @@ pub const LibraryDatabase = struct {
     /// This is the identity cascade in its cheapest useful form: the same path
     /// on the same volume, then the same inode/size/mtime elsewhere on that
     /// volume, then the same quick hash anywhere. It is what lets
-    /// `orca-cli analyze` cache a result against a file rather than a path.
+    /// `orca-cli analyze` cache a result against a file rather than a path. A
+    /// path whose bytes diverged from a file still present elsewhere becomes a
+    /// file of its own, as a scan would make it.
     pub fn resolveOrCreateFile(
         self: *LibraryDatabase,
         io: std.Io,
@@ -278,24 +280,26 @@ pub const LibraryDatabase = struct {
         const size: i64 = @intCast(stat.size);
         const modified_ns: i64 = @intCast(stat.mtime.nanoseconds);
         const inode: i64 = @bitCast(@as(u64, stat.inode));
+        const upsert: repository.FileUpsert = .{ .size_bytes = size, .quick_hash = &digest };
 
-        const existing = (try self.files.resolveByUri(volume_id, path)) orelse
-            (try self.files.resolveByIdentity(.{
-                .volume_id = volume_id,
-                .native_inode = inode,
-                .size_bytes = size,
-                .modified_ns = modified_ns,
-            })) orelse
-            try self.files.resolveByQuickHash(&digest);
-        const file_id = existing orelse try self.files.create(.{
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.database.exec("BEGIN IMMEDIATE;");
+        errdefer self.database.exec("ROLLBACK;") catch {};
+        const file_id = switch (try self.files.resolveForBytes(path, .{
+            .volume_id = volume_id,
+            .native_inode = inode,
             .size_bytes = size,
-            .quick_hash = &digest,
-        });
-        if (existing != null) try self.files.update(file_id, .{
-            .size_bytes = size,
-            .quick_hash = &digest,
-        });
-        const location_id = try self.locations.upsert(.{
+            .modified_ns = modified_ns,
+        }, &digest)) {
+            .new => try self.files.createLocked(upsert),
+            .same => |id| same: {
+                try self.files.updateLocked(id, upsert);
+                break :same id;
+            },
+            .diverged => |shared| try self.files.forkLocked(shared, path, upsert),
+        };
+        const location_id = try self.locations.upsertLocked(.{
             .file_id = file_id,
             .volume_id = volume_id,
             .uri = path,
@@ -304,6 +308,7 @@ pub const LibraryDatabase = struct {
             .modified_ns = modified_ns,
             .state = .present,
         });
+        try self.database.exec("COMMIT;");
         return .{ .file_id = file_id, .location_id = location_id, .volume_id = volume_id };
     }
 
@@ -779,6 +784,187 @@ test "a renamed file keeps its identity and everything attached to it" {
     var page = try library.health_issues.page(std.testing.allocator, 10, 0);
     defer page.deinit();
     try std.testing.expectEqualStrings("/music/new/name.flac", page.items[0].path);
+}
+
+fn countForFile(library: *LibraryDatabase, sql: [:0]const u8, file_id: i64) !i64 {
+    var statement = try library.database.prepare(sql);
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    if (try statement.step() != .row) return error.SqlFailed;
+    return statement.columnInt64(0);
+}
+
+test "forking a file copies Orca's values with no written-at mark and nothing else" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-fork?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const volume_id = try library.volumes.ensure(.{ .stable_key = "test:fork" });
+    const shared_bytes: [32]u8 = @splat(1);
+    const forked_bytes: [32]u8 = @splat(2);
+    const measured_audio: [32]u8 = @splat(0xaa);
+    const shared = try library.files.create(.{
+        .audio_format = 1,
+        .size_bytes = 4096,
+        .quick_hash = &shared_bytes,
+        .audio_hash = &measured_audio,
+    });
+    for ([_][]const u8{ "/music/a/song.flac", "/music/b/song.flac" }) |uri| {
+        _ = try library.locations.upsert(.{ .file_id = shared, .volume_id = volume_id, .uri = uri });
+    }
+    try library.observed_tags.upsert(.{ .file_id = shared, .values = .{ .title = "Northern Sky" } });
+    try library.orca_metadata.upsert(.{
+        .file_id = shared,
+        .field = .title,
+        .value = "Curated title",
+        .provenance = .user,
+        .locked = true,
+    });
+    try library.orca_metadata.upsert(.{
+        .file_id = shared,
+        .field = .album,
+        .value = "Bryter Layter",
+        .provenance = .provider,
+    });
+    try library.orca_metadata.markWritten(shared, .album, "Bryter Layter");
+    try library.analysis_cache.put(.{
+        .file_id = shared,
+        .kind = 1,
+        .algorithm_id = "orca.audio-diagnostics",
+        .algorithm_version = 1,
+        .parameter_hash = @splat(0),
+        .source_identity = shared_bytes,
+    }, "loudness");
+    try library.health_issues.replaceFile(shared, &.{
+        .{ .kind = .clipping, .severity = .warning, .details = "3 clipped samples" },
+    });
+    var journal = try library.database.prepare(
+        \\INSERT INTO mutation_operations(
+        \\    plan_id, group_id, action_index, kind, file_id, source_path,
+        \\    expected_size, expected_modified_ns, state
+        \\) VALUES (1, 1, ?1, 0, ?2, ?3, 4096, 5, 2);
+    );
+    defer journal.deinit();
+    for ([_][]const u8{ "/music/a/song.flac", "/music/b/song.flac" }, 0..) |uri, index| {
+        try journal.reset();
+        try journal.bindInt64(1, @intCast(index));
+        try journal.bindInt64(2, shared);
+        try journal.bindText(3, uri);
+        try std.testing.expectEqual(sqlite.Step.done, try journal.step());
+    }
+
+    library.write_lane.acquire();
+    try library.database.exec("BEGIN IMMEDIATE;");
+    const fresh = try library.files.forkLocked(shared, "/music/a/song.flac", .{
+        .audio_format = 1,
+        .size_bytes = 2048,
+        .quick_hash = &forked_bytes,
+    });
+    try library.database.exec("COMMIT;");
+    library.write_lane.release();
+
+    try std.testing.expect(fresh != shared);
+    for ([_]i64{ shared, fresh }) |file_id| {
+        var values = try library.orca_metadata.values(std.testing.allocator, file_id);
+        defer values.deinit();
+        try std.testing.expectEqual(@as(usize, 2), values.items.len);
+        try std.testing.expectEqualStrings("Curated title", values.items[0].text);
+        try std.testing.expectEqual(metadata.Provenance.user, values.items[0].provenance);
+        try std.testing.expect(values.items[0].locked);
+        try std.testing.expectEqualStrings("Bryter Layter", values.items[1].text);
+        try std.testing.expectEqual(metadata.Provenance.provider, values.items[1].provenance);
+        try std.testing.expect(!values.items[1].locked);
+    }
+    const written_sql = "SELECT count(*) FROM orca_metadata_values WHERE file_id=?1 AND written_at IS NOT NULL;";
+    try std.testing.expectEqual(@as(i64, 1), try countForFile(&library, written_sql, shared));
+    try std.testing.expectEqual(@as(i64, 0), try countForFile(&library, written_sql, fresh));
+
+    try std.testing.expectEqual(@as(i64, 2048), try countForFile(&library, "SELECT size_bytes FROM files WHERE id=?1;", fresh));
+    try std.testing.expectEqual(@as(i64, 1), try countForFile(&library, "SELECT count(*) FROM files WHERE id=?1 AND audio_hash IS NULL;", fresh));
+    try expectAudioHash(&library, shared, &measured_audio);
+    try std.testing.expect((try library.observed_tags.get(std.testing.allocator, fresh)) == null);
+    inline for (.{
+        "SELECT count(*) FROM analysis_results WHERE file_id=?1;",
+        "SELECT count(*) FROM library_health_issues WHERE file_id=?1;",
+        "SELECT count(*) FROM locations WHERE file_id=?1;",
+    }) |sql| {
+        try std.testing.expectEqual(@as(i64, 0), try countForFile(&library, sql, fresh));
+        try std.testing.expect(try countForFile(&library, sql, shared) > 0);
+    }
+
+    var journaled = try library.database.prepare(
+        "SELECT source_path FROM mutation_operations WHERE file_id=?1;",
+    );
+    defer journaled.deinit();
+    for ([_]struct { file_id: i64, path: []const u8 }{
+        .{ .file_id = fresh, .path = "/music/a/song.flac" },
+        .{ .file_id = shared, .path = "/music/b/song.flac" },
+    }) |expected| {
+        try journaled.reset();
+        try journaled.bindInt64(1, expected.file_id);
+        try std.testing.expectEqual(sqlite.Step.row, try journaled.step());
+        try std.testing.expectEqualStrings(expected.path, journaled.columnText(0));
+        try std.testing.expectEqual(sqlite.Step.done, try journaled.step());
+    }
+}
+
+test "analyzing a path whose bytes diverged from a shared file splits it as a scan would" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const flac = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.flac",
+        std.testing.allocator,
+        .limited(1 << 22),
+    );
+    defer std.testing.allocator.free(flac);
+    const opus = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "fixtures/audio/tagged-reference.opus",
+        std.testing.allocator,
+        .limited(1 << 22),
+    );
+    defer std.testing.allocator.free(opus);
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "first.flac", .data = flac });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "second.flac", .data = flac });
+    const first = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/first.flac", .{temporary.sub_path});
+    defer std.testing.allocator.free(first);
+    const second = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/second.flac", .{temporary.sub_path});
+    defer std.testing.allocator.free(second);
+
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-analyze-diverged?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const options: VolumeOptions = .{ .stable_key = "test:analyze-diverged" };
+    const shared = (try library.resolveOrCreateFile(std.testing.io, first, options)).file_id;
+    try std.testing.expectEqual(shared, (try library.resolveOrCreateFile(std.testing.io, second, options)).file_id);
+    try library.orca_metadata.upsert(.{
+        .file_id = shared,
+        .field = .title,
+        .value = "Curated title",
+        .provenance = .user,
+        .locked = true,
+    });
+
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "first.flac", .data = opus });
+    const binding = try library.resolveOrCreateFile(std.testing.io, first, options);
+    try std.testing.expect(binding.file_id != shared);
+    try std.testing.expectEqual(@as(u64, 2), try library.files.count());
+    try std.testing.expectEqual(@as(?i64, binding.file_id), try library.files.resolveByUri(binding.volume_id, first));
+    try std.testing.expectEqual(@as(?i64, shared), try library.files.resolveByUri(binding.volume_id, second));
+    const carried = (try library.orca_metadata.get(std.testing.allocator, binding.file_id, .title)).?;
+    defer carried.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Curated title", carried.text);
+    try std.testing.expect(carried.locked);
+
+    try std.testing.expectEqual(binding.file_id, (try library.resolveOrCreateFile(std.testing.io, first, options)).file_id);
+    try std.testing.expectEqual(shared, (try library.resolveOrCreateFile(std.testing.io, second, options)).file_id);
+    try std.testing.expectEqual(@as(u64, 2), try library.files.count());
 }
 
 test "observed tags round trip every field a reader can produce" {

@@ -254,7 +254,6 @@ pub fn planTagWrite(
     var files: std.ArrayList(TagWriteFile) = .empty;
     var skipped: std.ArrayList(TagWriteSkip) = .empty;
     var conflicts: std.ArrayList(TagWriteConflict) = .empty;
-    var written_file_ids: std.ArrayList(i64) = .empty;
     for (file_ids.items) |file_id| {
         const location = try library_database.locations.presentOf(scratch, file_id) orelse {
             try skipped.append(owned, .{ .file_id = file_id, .path = "", .reason = .missing });
@@ -302,7 +301,6 @@ pub fn planTagWrite(
             .changes = changes.items,
         } });
         try locations.append(scratch, location);
-        try written_file_ids.append(scratch, file_id);
         try files.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .changes = shown.items });
     }
     preview.skipped = skipped.items;
@@ -327,7 +325,6 @@ pub fn planTagWrite(
         .library = library,
         .plan = try metadata.mutation.Plan.init(self.allocator, plan_id, actions.items),
         .locations = &.{},
-        .file_ids = &.{},
     };
     errdefer {
         pending.plan.deinit();
@@ -339,7 +336,6 @@ pub fn planTagWrite(
         held.uri = try pending.arena.allocator().dupe(u8, location.uri);
     }
     pending.locations = held_locations;
-    pending.file_ids = try pending.arena.allocator().dupe(i64, written_file_ids.items);
 
     preview.files = files.items;
     preview.plan_id = plan_id;

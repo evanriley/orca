@@ -12,7 +12,8 @@ or ordered runtime shutdown.
 is one place that encoding can currently be found, on one `volume`. No table
 outside `locations` and `mutation_operations` stores a path, so renaming, moving
 or re-tagging a file never detaches the metadata, locks, analysis results or
-health issues attached to it.
+health issues attached to it. The exception is re-tagging one of several
+byte-identical copies, which splits that copy off (below).
 
 A scan re-finds a file through a cascade, cheapest first:
 
@@ -27,6 +28,32 @@ A scan re-finds a file through a cascade, cheapest first:
    the bytes it was measured from: an update that records a different
    `quick_hash` clears it, and it stays NULL until the analysis pass decodes
    the new bytes.
+
+**A file is one set of bytes.** Byte-identical copies are one file at several
+locations: a new path holding bytes the Library already has joins that file
+through tier 3. When a changed path resolves to a file that is still present at
+another path and records a different `quick_hash`, the path has *diverged*:
+the other path still holds the bytes the file describes, so the path gets a
+file of its own instead of rewriting the shared one.
+`FileRepository.resolveForBytes` decides this and `forkLocked` makes the new
+file, in the scan batch's transaction, and `resolveOrCreateFile` applies the
+same rule. The split moves the location to the new file, copies Orca's values
+and locks to it with `written_at` cleared, and re-points journal rows that
+name the path. The new file takes the bytes' properties and observed tags from
+the read; analysis results, the audio hash, health issues, identification
+proposals and searches, AcoustID submissions and listens stay with the file the
+copy left. A scan reprojects both copies' folders. Only a `present` location
+counts as the other path, because a `missing` one is usually what a move left
+behind, and a location on the same volume with this path's inode does not
+count, because a hard link cannot hold other bytes. A file with no quick hash,
+or whose only present location is this path, is updated in place.
+
+Not handled yet:
+
+- A changed path whose new bytes equal another file's stays on its own file,
+  so two files can share a `quick_hash`.
+- Two copies changed in the same way end as two files with equal hashes.
+- A tag write writes one location of a file, not every copy of it.
 
 Volumes are identified by a `stable_key` the platform adapter resolves — a
 filesystem UUID, else an identifier persisted at the mount root, else
@@ -257,6 +284,15 @@ received them, so the next job's Gateway could send inside the window or less
 than a second after the previous job's last request. Existing rows keep their
 block and backoff and start with the column NULL.
 
+Migration 25 sets `modified_ns` to -1 on every present location of a file
+with more than one present location, so the next scan, reconcile or watch pass
+re-observes them, as after migration 22. Before it, a copy whose bytes changed
+rewrote the file it shared with an untouched copy: both paths named a file
+describing the changed bytes, the untouched copy's Track disappeared, later
+scans skipped it, and the duplicate pass still reported the two as exact
+copies. Re-observing applies the divergence rule, so the file keeps the copy
+whose bytes it records and every other copy splits off into a file of its own.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
@@ -394,13 +430,18 @@ accepted: `(file_id, recording_mbid)` is its primary key, with the
 `repository.acoustid_submittable` selects the files a submission sends: an
 Orca value for the recording id with `provider` or `user` provenance that is
 the id in effect, is not the file's tag unless Orca wrote it there, and has
-no row here for that id. Editing the id makes the file eligible again under
-the new one.
+no row here for that id. A `provider` value also needs its accepted proposal
+on the same file. Editing the id makes the file eligible again under the new
+one.
 
 `orca_metadata_values.written_at` (version 21) is when a tag write last put
 the value into its file, or null. Changing the value clears it; undoing the
-write does not. The submission query reads it to tell a tag Orca wrote from
-one the file already had.
+write does not. A tag write marks the file its path resolves to after the
+write is observed, which is a new file when the path was one copy of a shared
+file; the copy the write left keeps the value unmarked. The submission query
+reads it to tell a tag Orca wrote from one the file already had. A copy split
+off by a tag write has no `acoustid_submissions` row, so a recording id the
+user edited is sent again for it.
 
 ## Provider state
 
@@ -422,7 +463,9 @@ answer as refused until it expires and never use as an answer.
 Version 19 also adds `identification_proposals.accepted_in_bulk`: 1 for a
 proposal accepted by `acceptConfident`, 0 for one accepted on its own and for
 every proposal accepted before version 19. AcoustID submission leaves out an
-ID whose accepted proposal was found by AcoustID or accepted in bulk.
+ID whose accepted proposal was found by AcoustID or accepted in bulk, and an
+ID a file holds without its accepted proposal, as a copy split off a shared
+file does.
 
 ## Release artwork
 

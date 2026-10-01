@@ -365,8 +365,10 @@ be identified. It is started only by a person; no job starts it.
   `libraryAcceptConfidentMatches`: a match without AcoustID has no
   fingerprint score, so a bulk acceptance of it rests on text alone. A match
   accepted one at a time from MusicBrainz alone is sent, and so is an ID the
-  user edited, whatever proposed it. Matches accepted before library version
-  19 count as accepted one at a time.
+  user edited, whatever proposed it. An ID from a match is sent only for the
+  file the match was accepted on: a copy split off a shared file inherits the
+  ID without the match and does not send it. Matches accepted before library
+  version 19 count as accepted one at a time.
   `libraryAcoustIdSubmittableCount` and `libraryAcoustIdSubmittablePage` list
   them without fingerprinting anything.
 - **ID or metadata.** When the file's length differs from the recording's by

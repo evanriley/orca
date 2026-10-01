@@ -271,12 +271,13 @@ pub const LocationRepository = struct {
     /// The second path at which Orca holds this file's bytes, when there is
     /// one.
     ///
-    /// A byte-identical copy never becomes a second `files` row: the scanner's
+    /// A byte-identical copy is not a second `files` row: the scanner's
     /// identity cascade resolves it by quick hash to the row that already
     /// exists, so the Library models it as one file at two locations. That is
     /// still the same audio stored twice, and it is what a person asking about
     /// duplicates means, so the duplicate scan reads it here rather than
-    /// pretending the copy does not exist.
+    /// pretending the copy does not exist. A copy whose bytes change is split
+    /// off into a file of its own and is no longer a location of this one.
     ///
     /// Only `present` locations count. A file that *moved* leaves a `missing`
     /// row behind and a `present` one ahead, and reporting that pair as a

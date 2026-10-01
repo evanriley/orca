@@ -1837,6 +1837,67 @@ test "a file changed since its scan is left out of a tag write" {
     // Left pending on purpose: shutdown must free it.
 }
 
+test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    for ([_][]const u8{ "one", "two" }) |folder| try temporary.dir.createDir(std.testing.io, folder, .default_dir);
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "one/song.flac");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "two/song.flac");
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, database_path);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM files;"));
+
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    (try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }})).deinit();
+    const edited = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(edited);
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    const shared = preview.files[0].file_id;
+    const written_path = preview.files[0].path;
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+
+    const untouched_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{
+        root,
+        if (std.mem.endsWith(u8, written_path, "one/song.flac")) "two/song.flac" else "one/song.flac",
+    });
+    defer std.testing.allocator.free(untouched_path);
+    const written = (try library_database.files.resolveByUri(binding.volume_id, written_path)).?;
+    try std.testing.expect(written != shared);
+    try std.testing.expectEqual(@as(?i64, shared), try library_database.files.resolveByUri(binding.volume_id, untouched_path));
+    var marked = try library_database.database.prepare(
+        "SELECT count(*) FROM orca_metadata_values WHERE file_id=?1 AND value='Written Album' AND written_at IS NOT NULL;",
+    );
+    defer marked.deinit();
+    for ([_]struct { file_id: i64, count: i64 }{ .{ .file_id = written, .count = 1 }, .{ .file_id = shared, .count = 0 } }) |expected| {
+        try marked.reset();
+        try marked.bindInt64(1, expected.file_id);
+        try std.testing.expectEqual(database.sqlite.Step.row, try marked.step());
+        try std.testing.expectEqual(expected.count, marked.columnInt64(0));
+    }
+
+    const after = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(after);
+    const again = try runtime.planTagWrite(library, std.testing.io, after);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(usize, 1), again.files.len);
+    try std.testing.expectEqual(shared, again.files[0].file_id);
+    try std.testing.expectEqualStrings(untouched_path, again.files[0].path);
+    try runtime.discardTagWrite(library, again.plan_id);
+}
+
 fn collectArtwork(runtime: *OrcaRuntime, library: LibraryHandle, results: []?ArtworkResult, first_request: u64, wanted: usize) !usize {
     var deadline: TestDeadline = .init(10_000);
     var collected: usize = 0;

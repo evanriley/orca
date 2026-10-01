@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 24;
+pub const current_version = 25;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -983,6 +983,14 @@ const migration_24 =
     \\ALTER TABLE provider_state ADD COLUMN next_request_ms INTEGER;
 ;
 
+const migration_25 =
+    \\UPDATE locations SET modified_ns = -1
+    \\WHERE state = 'present' AND file_id IN (
+    \\    SELECT file_id FROM locations WHERE state = 'present'
+    \\    GROUP BY file_id HAVING count(*) > 1
+    \\);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1131,6 +1139,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 22 and target_version >= 22) try db.exec(migration_22);
     if (version < 23 and target_version >= 23) try db.exec(migration_23);
     if (version < 24 and target_version >= 24) try db.exec(migration_24);
+    if (version < 25 and target_version >= 25) try db.exec(migration_25);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2078,5 +2087,40 @@ test "a version-23 library keeps each service's block and backoff and gains no r
         @as(i64, 1),
         try scalar(db, "SELECT count(*) FROM provider_state WHERE service = 'acoustid' AND blocked_until_ms IS NULL AND backoff_ms = 0;"),
     );
+    try checkForeignKeys(db);
+}
+
+test "migration 25 re-observes every present location of a file held at more than one path and leaves single-location files alone" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "shared-copies.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 24);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES
+        \\    (1, 1, 10, X'01'), (2, 1, 10, X'02'), (3, 1, 10, X'03'), (4, 1, 10, X'04');
+        \\INSERT INTO locations(id, file_id, volume_id, uri, native_inode, size_bytes, modified_ns, state) VALUES
+        \\    (1, 1, 1, '/m/a/shared.flac', 11, 10, 500, 'present'),
+        \\    (2, 1, 1, '/m/b/shared.flac', 12, 10, 500, 'present'),
+        \\    (3, 2, 1, '/m/single.flac', 13, 10, 500, 'present'),
+        \\    (4, 3, 1, '/m/new/moved.flac', 14, 10, 500, 'present'),
+        \\    (5, 3, 1, '/m/old/moved.flac', 14, 10, 500, 'missing'),
+        \\    (6, 4, 1, '/m/a/three.flac', 15, 10, 500, 'present'),
+        \\    (7, 4, 1, '/m/b/three.flac', 16, 10, 500, 'present'),
+        \\    (8, 4, 1, '/m/c/three.flac', 17, 10, 500, 'missing');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(
+        @as(i64, 4),
+        try scalar(db, "SELECT count(*) FROM locations WHERE modified_ns = -1 AND id IN (1, 2, 6, 7);"),
+    );
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM locations WHERE modified_ns = 500;"));
+    try std.testing.expectEqual(@as(i64, 8), try scalar(db, "SELECT count(*) FROM locations WHERE file_id IN (1, 2, 3, 4);"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM files WHERE quick_hash IS NOT NULL;"));
     try checkForeignKeys(db);
 }

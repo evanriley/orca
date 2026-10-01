@@ -49,9 +49,11 @@ const PendingEntry = struct {
 /// Walks a root and records what the filesystem currently says.
 ///
 /// The scanner observes: it writes `files`, `locations` and
-/// `observed_file_tags` and nothing else. Turning observations into artists,
-/// releases and tracks is the projection's job, and Track metadata is never
-/// written from here.
+/// `observed_file_tags`. The one exception is a path whose bytes diverged from
+/// a file still present elsewhere: it becomes a file of its own, which takes a
+/// copy of the shared file's Orca values and the journal rows naming the path.
+/// Turning observations into artists, releases and tracks is the projection's
+/// job, and Track metadata is never written from here.
 pub const Scanner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -347,13 +349,15 @@ pub const Scanner = struct {
                 .duration_ms = optionalCount(entry.properties.duration_ms),
                 .quick_hash = &entry.quick_hash,
             };
-            const existing = (try self.files.resolveByUri(self.volume_id, entry.path)) orelse
-                (try self.files.resolveByIdentity(entry.identity)) orelse
-                try self.files.resolveByQuickHash(&entry.quick_hash);
-            const file_id = if (existing) |id| resolved: {
-                try self.files.updateLocked(id, upsert);
-                break :resolved id;
-            } else try self.files.createLocked(upsert);
+            const resolution = try self.files.resolveForBytes(entry.path, entry.identity, &entry.quick_hash);
+            const file_id = switch (resolution) {
+                .new => try self.files.createLocked(upsert),
+                .same => |id| same: {
+                    try self.files.updateLocked(id, upsert);
+                    break :same id;
+                },
+                .diverged => |shared| try self.files.forkLocked(shared, entry.path, upsert),
+            };
             _ = try self.locations.upsertLocked(.{
                 .file_id = file_id,
                 .volume_id = self.volume_id,
@@ -369,7 +373,11 @@ pub const Scanner = struct {
                 .file_id = file_id,
                 .values = tags.values,
             }}) else try self.observed_tags.clearLocked(file_id);
-            if (self.projection != null) try self.projected.append(self.allocator, file_id);
+            if (self.projection != null) {
+                try self.projected.append(self.allocator, file_id);
+                // After the fork: when both copies resolve to one Track, the folder projected last decides its file.
+                if (resolution == .diverged) try self.projected.append(self.allocator, resolution.diverged);
+            }
         }
         try self.database_handle.exec("COMMIT;");
         for (pending.items) |entry| entry.deinit(self.allocator);
@@ -896,6 +904,10 @@ fn column(statement: database.sqlite.Statement, index: c_int) ?i64 {
 }
 
 fn copyFixture(directory: std.Io.Dir, name: []const u8) !void {
+    try copyFixtureTo(directory, name, name);
+}
+
+fn copyFixtureTo(directory: std.Io.Dir, name: []const u8, sub_path: []const u8) !void {
     const source = try std.fmt.allocPrint(
         std.testing.allocator,
         "fixtures/audio/{s}",
@@ -909,7 +921,7 @@ fn copyFixture(directory: std.Io.Dir, name: []const u8) !void {
         .limited(4 * 1024 * 1024),
     );
     defer std.testing.allocator.free(bytes);
-    try directory.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+    try directory.writeFile(std.testing.io, .{ .sub_path = sub_path, .data = bytes });
 }
 
 test "rescanning an untouched library leaves every file present" {
@@ -1145,4 +1157,397 @@ test "a rescan of a file whose tags were removed forgets the old tags" {
     try std.testing.expectEqualStrings("song", page.items[0].title);
     try std.testing.expectEqualStrings("", page.items[0].artist);
     try std.testing.expectEqualStrings("", page.items[0].album);
+}
+
+/// Byte-identical copies of `tagged-reference.flac` at `a/song.flac` and
+/// `b/song.flac` under one root, scanned once into a single shared file.
+const SharedCopies = struct {
+    temporary: std.testing.TmpDir,
+    root_path: []u8,
+    first_path: []u8,
+    second_path: []u8,
+    library: database.LibraryDatabase,
+    binding: database.RootBinding,
+    target: projection.Projection,
+
+    fn init(self: *SharedCopies, name: [:0]const u8) !void {
+        self.temporary = std.testing.tmpDir(.{});
+        for ([_][]const u8{ "a", "b" }) |folder| try self.temporary.dir.createDir(std.testing.io, folder, .default_dir);
+        try copyFixtureTo(self.temporary.dir, "tagged-reference.flac", "a/song.flac");
+        try copyFixtureTo(self.temporary.dir, "tagged-reference.flac", "b/song.flac");
+        self.root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{self.temporary.sub_path});
+        self.first_path = try pathUnder(std.testing.allocator, self.root_path, "a/song.flac");
+        self.second_path = try pathUnder(std.testing.allocator, self.root_path, "b/song.flac");
+        self.library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, name);
+        self.binding = try self.library.ensureRoot(std.testing.io, self.root_path, .{ .stable_key = "test:shared-copies" });
+        self.target = .{ .allocator = std.testing.allocator, .library = &self.library };
+        const first = try self.scan();
+        try std.testing.expectEqual(@as(u64, 2), first.changed);
+        try std.testing.expectEqual(@as(u64, 1), try self.library.files.count());
+    }
+
+    fn deinit(self: *SharedCopies) void {
+        self.library.close();
+        std.testing.allocator.free(self.second_path);
+        std.testing.allocator.free(self.first_path);
+        std.testing.allocator.free(self.root_path);
+        self.temporary.cleanup();
+    }
+
+    /// A completed scan of the whole root, swept as a scan job sweeps it.
+    fn scan(self: *SharedCopies) !Result {
+        const run = try self.library.scan_runs.begin(self.binding.root_id);
+        var walker = self.scannerFor(run.generation);
+        defer walker.deinit();
+        const result = try walker.scan(self.root_path);
+        _ = try self.library.files.markMissingBelowGeneration(self.binding.root_id, run.generation);
+        return result;
+    }
+
+    fn scannerFor(self: *SharedCopies, generation: i64) Scanner {
+        return .{
+            .allocator = std.testing.allocator,
+            .io = std.testing.io,
+            .files = &self.library.files,
+            .locations = &self.library.locations,
+            .observed_tags = &self.library.observed_tags,
+            .write_lane = self.library.write_lane,
+            .database_handle = self.library.database,
+            .volume_id = self.binding.volume_id,
+            .root_id = self.binding.root_id,
+            .generation = generation,
+            .projection = &self.target,
+        };
+    }
+
+    fn fileAt(self: *SharedCopies, path: []const u8) !?i64 {
+        return self.library.files.resolveByUri(self.binding.volume_id, path);
+    }
+
+    fn sizeOf(self: *SharedCopies, file_id: i64) !i64 {
+        var statement = try self.library.database.prepare("SELECT size_bytes FROM files WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    fn rowsOf(self: *SharedCopies, comptime table: []const u8, file_id: i64) !i64 {
+        return self.scalarFor("SELECT count(*) FROM " ++ table ++ " WHERE file_id=?1;", file_id);
+    }
+
+    fn writtenValuesOf(self: *SharedCopies, file_id: i64) !i64 {
+        return self.scalarFor(
+            "SELECT count(*) FROM orca_metadata_values WHERE file_id=?1 AND written_at IS NOT NULL;",
+            file_id,
+        );
+    }
+
+    fn scalarFor(self: *SharedCopies, sql: [:0]const u8, file_id: i64) !i64 {
+        var statement = try self.library.database.prepare(sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    fn preferredFileOf(self: *SharedCopies, title: []const u8) !i64 {
+        var statement = try self.library.database.prepare(
+            "SELECT preferred_file_id FROM tracks WHERE title=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindText(1, title);
+        if (try statement.step() != .row) return error.SqlFailed;
+        return statement.columnInt64(0);
+    }
+
+    fn trackTitles(self: *SharedCopies) ![]u8 {
+        var statement = try self.library.database.prepare(
+            "SELECT group_concat(title, '|') FROM (SELECT title FROM tracks ORDER BY title);",
+        );
+        defer statement.deinit();
+        if (try statement.step() != .row) return error.SqlFailed;
+        return std.testing.allocator.dupe(u8, statement.columnText(0));
+    }
+};
+
+test "a copy that diverges from a shared file becomes its own file and the untouched copy keeps the original" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-diverged-copy?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 2), try copies.library.files.count());
+
+    const diverged = (try copies.fileAt(copies.first_path)).?;
+    try std.testing.expect(diverged != shared);
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
+    try std.testing.expectEqual(@as(i64, 10880), try copies.sizeOf(shared));
+    try std.testing.expectEqual(@as(i64, 2734), try copies.sizeOf(diverged));
+
+    const kept = (try copies.library.observed_tags.get(std.testing.allocator, shared)).?;
+    defer kept.deinit();
+    try std.testing.expectEqualStrings("Reference Tone", kept.values.title.?);
+    const read = (try copies.library.observed_tags.get(std.testing.allocator, diverged)).?;
+    defer read.deinit();
+    try std.testing.expectEqualStrings("Opus Reference", read.values.title.?);
+
+    const titles = try copies.trackTitles();
+    defer std.testing.allocator.free(titles);
+    try std.testing.expectEqualStrings("Opus Reference|Reference Tone", titles);
+}
+
+test "a diverged copy carries the file's Orca values and locks but none of its analysis, history or proposals" {
+    var copies: SharedCopies = undefined;
+    const Provenance = @import("../metadata/model.zig").Provenance;
+    try copies.init("file:orca-scanner-diverged-values?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    const recording_mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    try copies.library.orca_metadata.upsert(.{
+        .file_id = shared,
+        .field = .title,
+        .value = "Curated Title",
+        .provenance = .user,
+        .locked = true,
+    });
+    try copies.library.orca_metadata.upsert(.{
+        .file_id = shared,
+        .field = .musicbrainz_recording_id,
+        .value = recording_mbid,
+        .provenance = .provider,
+    });
+    try copies.library.orca_metadata.markWritten(shared, .musicbrainz_recording_id, recording_mbid);
+    for ([_][:0]const u8{
+        "INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES (?1, 2, 'orca.temporal-fingerprint', 2, X'00', X'01', X'00');",
+        "INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES (?1, 5, 1, 'clipped');",
+        "INSERT INTO listens(file_id, started_at, listened_ms, title, artist) VALUES (?1, 1800000000, 1000, 'Reference Tone', 'Orca Test');",
+        "INSERT INTO identification_proposals(file_id, provider, provider_id, confidence, payload) VALUES (?1, 'musicbrainz', '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 0.9, '{}');",
+        "INSERT INTO identification_searches(file_id, provider, searched_at) VALUES (?1, 'musicbrainz', 1800000000);",
+        "INSERT INTO acoustid_submissions(file_id, recording_mbid, submission_id, submitted_at) VALUES (?1, '8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a', 7, 1800000000);",
+    }) |sql| {
+        var statement = try copies.library.database.prepare(sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, shared);
+        try std.testing.expectEqual(database.sqlite.Step.done, try statement.step());
+    }
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    _ = try copies.scan();
+    const diverged = (try copies.fileAt(copies.first_path)).?;
+    try std.testing.expect(diverged != shared);
+
+    for ([_]i64{ shared, diverged }) |file_id| {
+        var values = try copies.library.orca_metadata.values(std.testing.allocator, file_id);
+        defer values.deinit();
+        try std.testing.expectEqual(@as(usize, 2), values.items.len);
+        try std.testing.expectEqualStrings("Curated Title", values.items[0].text);
+        try std.testing.expectEqual(Provenance.user, values.items[0].provenance);
+        try std.testing.expect(values.items[0].locked);
+        try std.testing.expectEqualStrings(recording_mbid, values.items[1].text);
+        try std.testing.expectEqual(Provenance.provider, values.items[1].provenance);
+        try std.testing.expect(!values.items[1].locked);
+    }
+    try std.testing.expectEqual(@as(i64, 1), try copies.writtenValuesOf(shared));
+    try std.testing.expectEqual(@as(i64, 0), try copies.writtenValuesOf(diverged));
+    inline for (.{
+        "analysis_results",
+        "library_health_issues",
+        "listens",
+        "identification_proposals",
+        "identification_searches",
+        "acoustid_submissions",
+    }) |table| {
+        try std.testing.expectEqual(@as(i64, 1), try copies.rowsOf(table, shared));
+        try std.testing.expectEqual(@as(i64, 0), try copies.rowsOf(table, diverged));
+    }
+}
+
+test "a split reprojects both the folder the copy left and the folder it is in" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-split-folders?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 2), rescan.projection.folders_visited);
+    const diverged = (try copies.fileAt(copies.first_path)).?;
+    try std.testing.expectEqual(shared, try copies.preferredFileOf("Reference Tone"));
+    try std.testing.expectEqual(diverged, try copies.preferredFileOf("Opus Reference"));
+}
+
+test "a rescan after a split reports both copies unchanged" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-split-rescan?mode=memory&cache=shared");
+    defer copies.deinit();
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    _ = try copies.scan();
+    const again = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 0), again.changed);
+    try std.testing.expectEqual(@as(u64, 2), again.unchanged);
+    try std.testing.expectEqual(@as(u64, 0), again.projection.folders_visited);
+    try std.testing.expectEqual(@as(u64, 2), try copies.library.files.count());
+    try std.testing.expectEqual(@as(u64, 2), try copies.library.locations.countPresent());
+}
+
+test "a copy that diverged is no longer a second present path of what it left" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-split-duplicate?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    const before = (try copies.library.locations.secondPresentPath(std.testing.allocator, shared)).?;
+    std.testing.allocator.free(before);
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    _ = try copies.scan();
+    const diverged = (try copies.fileAt(copies.first_path)).?;
+    try std.testing.expect((try copies.library.locations.secondPresentPath(std.testing.allocator, shared)) == null);
+    try std.testing.expect((try copies.library.locations.secondPresentPath(std.testing.allocator, diverged)) == null);
+}
+
+test "a moved copy of a shared file stays on that file" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-moved-copy?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+
+    try copies.temporary.dir.createDir(std.testing.io, "c", .default_dir);
+    try copies.temporary.dir.rename("b/song.flac", copies.temporary.dir, "c/song.flac", std.testing.io);
+    const moved_path = try pathUnder(std.testing.allocator, copies.root_path, "c/song.flac");
+    defer std.testing.allocator.free(moved_path);
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+    try std.testing.expectEqual(shared, (try copies.fileAt(moved_path)).?);
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
+    try std.testing.expectEqual(
+        database.LocationState.missing,
+        try copies.library.locations.stateOf((try copies.library.locations.find(copies.binding.volume_id, copies.second_path)).?),
+    );
+}
+
+test "a file with one location follows its bytes when they change" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try copyFixtureTo(temporary.dir, "tagged-reference.flac", "song.flac");
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    const song_path = try pathUnder(std.testing.allocator, root_path, "song.flac");
+    defer std.testing.allocator.free(song_path);
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-single-location?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+    defer scanner.deinit();
+    _ = try scanner.scan(root_path);
+    const file_id = (try library.files.resolveByUri(database.LibraryDatabase.null_volume, song_path)).?;
+
+    try copyFixtureTo(temporary.dir, "tagged-reference.opus", "song.flac");
+    const rescan = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try library.files.count());
+    try std.testing.expectEqual(file_id, (try library.files.resolveByUri(database.LibraryDatabase.null_volume, song_path)).?);
+    const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
+    defer observed.deinit();
+    try std.testing.expectEqualStrings("Opus Reference", observed.values.title.?);
+}
+
+test "a file whose other copy is gone follows its bytes when they change" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-copy-gone?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    try copies.temporary.dir.deleteFile(std.testing.io, "b/song.flac");
+    _ = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.locations.countPresent());
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
+    try std.testing.expectEqual(@as(i64, 2734), try copies.sizeOf(shared));
+}
+
+test "hard-linked paths of one file stay one file when it changes" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-hard-link?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    try copies.temporary.dir.deleteFile(std.testing.io, "b/song.flac");
+    try copies.temporary.dir.hardLink("a/song.flac", copies.temporary.dir, "b/song.flac", std.testing.io, .{});
+    _ = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 2), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
+    try std.testing.expectEqual(@as(i64, 2734), try copies.sizeOf(shared));
+}
+
+test "a split copy does not submit a recording id it inherited from a provider match" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-split-acoustid?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    const recording_mbid = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+    _ = try copies.library.identification_proposals.put(.{
+        .file_id = shared,
+        .provider = "musicbrainz",
+        .provider_id = recording_mbid,
+        .confidence = 0.95,
+        .payload = "{\"title\":\"Reference Tone\"}",
+    });
+    const proposal = try copies.scalarFor("SELECT id FROM identification_proposals WHERE file_id=?1;", shared);
+    _ = try copies.library.identification_proposals.acceptProposal(std.testing.allocator, proposal);
+    const submissions = &copies.library.acoustid_submissions;
+    try std.testing.expectEqual(@as(u64, 1), try submissions.submittableCount());
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    _ = try copies.scan();
+    const diverged = (try copies.fileAt(copies.first_path)).?;
+    const inherited = (try copies.library.orca_metadata.get(std.testing.allocator, diverged, .musicbrainz_recording_id)).?;
+    defer inherited.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(recording_mbid, inherited.text);
+
+    try std.testing.expectEqual(@as(u64, 1), try submissions.submittableCount());
+    const page = try submissions.submittablePage(std.testing.allocator, 0, 10);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.items.len);
+    try std.testing.expectEqual(shared, page.items[0].file_id);
+}
+
+test "a shared file with no quick hash is updated in place rather than split" {
+    var copies: SharedCopies = undefined;
+    try copies.init("file:orca-scanner-no-quick-hash?mode=memory&cache=shared");
+    defer copies.deinit();
+    const shared = (try copies.fileAt(copies.first_path)).?;
+    try copies.library.database.exec("UPDATE files SET quick_hash = NULL;");
+
+    try copyFixtureTo(copies.temporary.dir, "tagged-reference.opus", "a/song.flac");
+    const rescan = try copies.scan();
+    try std.testing.expectEqual(@as(u64, 1), rescan.changed);
+    try std.testing.expectEqual(@as(u64, 1), try copies.library.files.count());
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.first_path)).?);
+    try std.testing.expectEqual(shared, (try copies.fileAt(copies.second_path)).?);
 }
