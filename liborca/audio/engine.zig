@@ -328,10 +328,12 @@ pub const PlayerEngine = struct {
     }
 
     fn queueFinished(self: *const PlayerEngine) bool {
+        const gave_up = self.consecutive_open_failures >= max_consecutive_open_failures;
+        if (gave_up and self.player.sources == null) return true;
         if (!self.player.drained.load(.acquire)) return false;
         const queue = self.queue orelse return true;
         if (self.opener == null) return true;
-        if (self.consecutive_open_failures >= max_consecutive_open_failures) return true;
+        if (gave_up) return true;
         return queue.followingPosition() == null;
     }
 
@@ -437,6 +439,7 @@ pub const PlayerEngine = struct {
             const ref = queue.refAt(position) orelse return;
             var session = opener.open(ref) catch {
                 self.noteOpenFailure(queue, position);
+                if (queue.followingPosition()) |next| queue.seekTo(next);
                 return;
             };
             self.player.replaceSource(session);
@@ -1890,6 +1893,43 @@ test "an unreadable entry is stepped over rather than looping forever" {
     try std.testing.expectEqual(@as(u64, 1), harness.engine.open_failures);
     try std.testing.expectEqual(@as(u64, 2), harness.engine.entries_started);
     try std.testing.expectEqual(@as(u32, 2), harness.queue.decodePosition());
+}
+
+test "an entry that cannot be opened at start is stepped over to its successor" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 1024 },
+        .{ .track_id = 11, .frames = 1024 },
+        .{ .track_id = 12, .frames = 1024 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{10};
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+
+    harness.run(300, 128);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.open_failures);
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.entries_started);
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(11));
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+}
+
+test "a queue of unopenable entries on repeat stops retrying and goes idle" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 1024 },
+        .{ .track_id = 11, .frames = 1024 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{ 10, 11 };
+    try harness.enqueue(&.{ 10, 11 });
+    harness.queue.setRepeat(.all);
+    harness.player.play();
+
+    harness.run(64, 128);
+    try std.testing.expectEqual(@as(u64, max_consecutive_open_failures), harness.engine.open_failures);
+    try std.testing.expectEqual(@as(u64, 0), harness.engine.entries_started);
+    try std.testing.expect(harness.engine.isIdle());
 }
 
 const FailingDecoder = struct {

@@ -1167,6 +1167,51 @@ test "stop keeps the queue while clear empties it" {
     );
 }
 
+test "playing a stopped queue whose cursor file has gone steps over it to the next entry" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try copyFixtureInto(temporary.dir, "fixtures/audio/generated-reference.flac", "a.flac");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    const first_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/a.flac", .{temporary.sub_path});
+    defer std.testing.allocator.free(first_path);
+    const second_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/b.flac", .{temporary.sub_path});
+    defer std.testing.allocator.free(second_path);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-queue-missing-start?mode=memory&cache=shared",
+        &.{ first_path, second_path },
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playerPlayTracks(player, fixtures.library, std.testing.io, fixtures.ids[0..2], 0);
+    try runtime.stopPlayer(player);
+    try temporary.dir.deleteFile(std.testing.io, "a.flac");
+
+    try runtime.playPlayer(player);
+
+    var samples: [512]f32 = @splat(0);
+    var deadline: TestDeadline = .init(5_000);
+    while (deadline.tick()) {
+        if (backend.liveStream()) |stream| stream.pump(&samples, 256);
+        if ((try runtime.playerQueueStats(player)).entries_started == 0) continue;
+        if ((try runtime.playerSnapshot(player)).position_frames > 0) break;
+    }
+    const stats = try runtime.playerQueueStats(player);
+    try std.testing.expectEqual(@as(u64, 1), stats.open_failures);
+    try std.testing.expectEqual(@as(u64, 1), stats.entries_started);
+    try std.testing.expect((try runtime.playerSnapshot(player)).position_frames > 0);
+    try std.testing.expectEqual(@as(u32, 1), (try runtime.playerQueueSnapshot(player)).cursor);
+    try std.testing.expectEqual(fixtures.ids[1], (try runtime.playerNowPlaying(player)).?.track_id);
+}
+
 test "a track with no file behind it fails typed through the command lane" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

@@ -87,6 +87,11 @@
   its old audio.** A rescan of changed bytes kept `files.audio_hash`, the hash
   of the decoded audio, and the duplicate pass trusted it. A new quick hash
   now clears it until the analysis pass decodes the file again.
+- **Playing a stopped queue whose current file has gone plays the next
+  entry.** The engine retried the missing entry until its failure limit and
+  never reached the next one. It now steps over it, as it already did for an
+  entry reached by auto-advance, and an engine that gives up with nothing
+  loaded goes idle instead of waking every 2 ms.
 
 ## 0.5.0 - 2026-09-30
 
