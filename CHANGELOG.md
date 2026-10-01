@@ -48,6 +48,12 @@
   longer crashes.** The block header's length was narrowed to one byte, so a
   Debug or ReleaseSafe build panicked mid-write on nearly every real FLAC file
   and startup recovery rolled the write back.
+- **Writing tags to an MP3 or ADTS file whose values were only in its ID3v1
+  trailer no longer drops them from the library.** The new ID3v2 tag held only
+  the written fields, such as an accepted recording ID, and a re-scan reads
+  ID3v2 first, so the file lost its title, artist, album, year, track and
+  genre. The trailer's values are now written into the new tag too, unless a
+  change replaces them.
 
 ## 0.5.0 - 2026-09-30
 

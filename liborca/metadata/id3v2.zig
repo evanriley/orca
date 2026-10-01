@@ -655,7 +655,7 @@ pub fn rewrite(
     const current = try currentTags(scratch, loaded, trailer);
     for (changes) |change| {
         if (change.before) |expected| {
-            const value = try currentValue(scratch, current, change.field) orelse
+            const value = try currentValue(scratch, current.tags, change.field) orelse
                 return error.MetadataPreconditionChanged;
             if (!std.mem.eql(u8, expected, value)) return error.MetadataPreconditionChanged;
         }
@@ -666,9 +666,10 @@ pub fn rewrite(
 
     var body: std.ArrayList(u8) = .empty;
     if (loaded) |tag| try copyUnchangedFrames(scratch, &body, tag, changes);
+    if (current.origin == .trailer) try appendTrailerFrames(scratch, &body, major, current.tags, changes);
     for (changes) |change| {
         const value = change.after orelse continue;
-        try appendChangedFrames(scratch, &body, major, change.field, value, current);
+        try appendChangedFrames(scratch, &body, major, change.field, value, current.tags);
     }
     try body.appendNTimes(scratch, 0, write_padding);
     if (body.items.len >= 1 << 28) return error.Id3v2TagTooLarge;
@@ -691,19 +692,26 @@ pub fn rewrite(
     };
 }
 
-fn currentTags(allocator: std.mem.Allocator, loaded: ?LoadedTag, trailer: ?id3v1.Tag) !model.ObservedTags {
+const CurrentTags = struct {
+    tags: model.ObservedTags,
+    origin: enum { id3v2, trailer, none },
+};
+
+fn currentTags(allocator: std.mem.Allocator, loaded: ?LoadedTag, trailer: ?id3v1.Tag) !CurrentTags {
     if (loaded) |tag| {
         const tags = try parseFrames(allocator, tag.span, tag.major);
-        if (!tags.isEmpty()) return tags;
+        if (!tags.isEmpty()) return .{ .tags = tags, .origin = .id3v2 };
     }
-    const legacy = trailer orelse return .{};
-    return .{
+    const legacy = trailer orelse return .{ .tags = .{}, .origin = .none };
+    var tags: model.ObservedTags = .{
         .title = if (legacy.title.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.title) else null,
         .artist = if (legacy.artist.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.artist) else null,
         .album = if (legacy.album.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.album) else null,
         .date = if (legacy.year.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.year) else null,
-        .track_number = if (legacy.track_number) |number| number else null,
+        .track_number = if (legacy.track_number) |number| (if (number != 0) number else null) else null,
     };
+    if (id3v1.genreName(legacy.genre)) |name| tags.genres = try allocator.dupe([]const u8, &.{name});
+    return .{ .tags = tags, .origin = .trailer };
 }
 
 /// A field's current value, as text in the form a `Change.before` states it.
@@ -814,6 +822,31 @@ fn copyUnchangedFrames(
         if (try replaced(allocator, frame, tag.major, changes)) continue;
         try body.appendSlice(allocator, frame);
     }
+}
+
+fn appendTrailerFrames(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    tags: model.ObservedTags,
+    changes: []const mutation.Change,
+) !void {
+    for ([_]mutation.Field{ .title, .artist, .album, .date, .track_number }) |field| {
+        if (changesField(changes, field)) continue;
+        const value = try currentValue(allocator, tags, field) orelse continue;
+        if (field == .date and major < 4)
+            try appendTextFrame(allocator, body, major, "TYER", value)
+        else
+            try appendChangedFrames(allocator, body, major, field, value, tags);
+    }
+    for (tags.genres) |genre| try appendTextFrame(allocator, body, major, "TCON", genre);
+}
+
+fn changesField(changes: []const mutation.Change, field: mutation.Field) bool {
+    for (changes) |change| {
+        if (change.field == field) return true;
+    }
+    return false;
 }
 
 fn appendChangedFrames(
@@ -1397,4 +1430,114 @@ test "a recording id is added to a tag that had none, and an earlier MusicBrainz
     });
     try std.testing.expectEqualStrings(second_id, (try expectTags(allocator, second)).?.musicbrainz_recording_id.?);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, second, "http://musicbrainz.org"));
+}
+
+fn legacyTrailer(year: []const u8) ![128]u8 {
+    return id3v1.encode(.{
+        .title = "Song",
+        .artist = "Band",
+        .album = "Record",
+        .year = year,
+        .comment = "",
+        .track_number = 3,
+        .genre = 17,
+    });
+}
+
+fn expectTrailerValues(tags: model.ObservedTags, title: []const u8, year: []const u8) !void {
+    try std.testing.expectEqualStrings(title, tags.title.?);
+    try std.testing.expectEqualStrings("Band", tags.artist.?);
+    try std.testing.expectEqualStrings("Record", tags.album.?);
+    try std.testing.expectEqualStrings(year, tags.date.?);
+    try std.testing.expectEqual(@as(?u32, 3), tags.track_number);
+    try std.testing.expectEqual(@as(usize, 1), tags.genres.len);
+    try std.testing.expectEqualStrings("Rock", tags.genres[0]);
+}
+
+test "a recording id given to a trailer-only stream keeps every trailer value in the new ID3v2 tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{ "\xff\xfb\x90\x64audio", &trailer });
+    const recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_recording_id, .before = null, .after = recording_id },
+    });
+    try std.testing.expectEqual(@as(u8, 4), written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Song", "1999");
+    try std.testing.expectEqualStrings(recording_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+}
+
+test "a changed field overrides the trailer value while the other trailer values are kept" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try legacyTrailer("99");
+    const original = try std.mem.concat(allocator, u8, &.{ "\xff\xfb\x90\x64audio", &trailer });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .title, .before = "Song", .after = "Anthem" },
+    });
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Anthem", "99");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "TIT2"));
+    try std.testing.expectEqualStrings("Anthem", id3v1.parse(written[written.len - 128 ..][0..128]).?.title);
+
+    const cleared = try applyRewrite(allocator, original, &.{
+        .{ .field = .artist, .before = "Band", .after = null },
+    });
+    try std.testing.expect((try expectTags(allocator, cleared)).?.artist == null);
+    try std.testing.expect(std.mem.indexOf(u8, cleared, "TPE1") == null);
+}
+
+test "an ID3v2.3 tag holding only ReplayGain gains the trailer values in 2.3 form and keeps the ReplayGain frame byte for byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const replay_gain = try buildFrame(allocator, "TXXX", 3, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 3, 0, replay_gain),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_recording_id, .before = null, .after = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" },
+    });
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    try std.testing.expect(std.mem.indexOf(u8, written, replay_gain) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "TYER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "TDRC") == null);
+    try expectTrailerValues((try expectTags(allocator, written)).?, "Song", "1999");
+}
+
+test "an ID3v2 tag with values of its own gains nothing from the trailer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const title = try buildFrame(allocator, "TIT2", 4, "\x03Tagged");
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 4, 0, title),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .album, .before = null, .after = "New Album" },
+    });
+    var expected_body: std.ArrayList(u8) = .empty;
+    try expected_body.appendSlice(allocator, title);
+    try appendTextFrame(allocator, &expected_body, 4, "TALB", "New Album");
+    try expected_body.appendNTimes(allocator, 0, write_padding);
+    try std.testing.expectEqualSlices(u8, expected_body.items, written[10 .. 10 + expected_body.items.len]);
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings("Tagged", after.title.?);
+    try std.testing.expect(after.artist == null);
+    try std.testing.expectEqual(@as(usize, 0), after.genres.len);
 }
