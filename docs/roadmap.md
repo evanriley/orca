@@ -346,6 +346,11 @@ Small defects that are not yet scheduled:
   starting can return before that engine adopts the change.
 - `zig build pipewire-live-smoke` opens the first device on the user's
   PipeWire server rather than a silent sink.
+- `scripts/headless-audio.sh` fails on the development desktop with
+  "wireplumber did not connect to pipewire within 5 s", before running its
+  command; `scripts/headless-audio.sh true` fails the same way.
+  WirePlumber's log shows only skipped optional components. Not yet
+  examined; whether CI is affected is unknown.
 
 ## Deferred formats
 
