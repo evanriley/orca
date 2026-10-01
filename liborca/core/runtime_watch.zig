@@ -257,7 +257,7 @@ fn startWatch(
             .degraded_rescan_ms = options.degraded_rescan_ms,
             .watch_limit = self.watch_limit,
         },
-        ignoreFor(library_database),
+        watch.Ignore.forLibrary(library_database),
         roots.items,
     );
     errdefer watcher.destroy();
@@ -270,13 +270,6 @@ fn startWatch(
         .roots = watched,
     };
     return library_watch;
-}
-
-fn ignoreFor(library_database: *database.LibraryDatabase) watch.Ignore {
-    return .{
-        .database_name = if (library_database.database.filename()) |file| std.Io.Dir.path.basename(file) else null,
-        .backup_name = if (library_database.backup_directory) |directory| std.Io.Dir.path.basename(directory) else null,
-    };
 }
 
 fn stopWatch(self: *OrcaRuntime, object_value: *LibraryObject) void {

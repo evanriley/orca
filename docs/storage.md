@@ -89,10 +89,12 @@ the old tags:
 - names from journals that predate the backup directory: those containing
   `.orca-backup-` or `.orca-stage-`, or ending in `.recovery-displaced`.
 
-Backups live in `<database>.orca-backups`, beside the database, which the walk
-reaches only if the database itself sits inside a library root. Keep the
-database outside every root. [Tag-write files](metadata.md#tag-write-files)
-covers the layout and the disk space backups and undo need.
+It also skips the Library's own files, matched by name anywhere under the
+root as the watcher matches them: the database and its `-wal`, `-shm`,
+`-journal` and `.orca-journal.lock` files, the volume marker
+`.orca-volume-id`, and the backup directory `<database>.orca-backups`, which
+it does not walk into. [Tag-write files](metadata.md#tag-write-files) covers
+the backup layout and the disk space backups and undo need.
 
 Cancellation is checked before filesystem work and between entries. A cancelled
 or interrupted scan is resumable by restarting it: already committed unchanged

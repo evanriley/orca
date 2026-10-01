@@ -10,6 +10,11 @@
   locks, so another process check-pointed and deleted the WAL and later
   writes were lost without an error. liborca now switches SQLite's `unix`
   VFS to OFD locks, process-wide, before its first open.
+- **A scan of a root that holds the Library no longer examines the Library's
+  own files.** The database, its `-wal`, `-shm`, `-journal` and journal lock
+  files, its `.orca-backups` directory and the `.orca-volume-id` marker are
+  skipped, as the watcher already skipped them, and no longer count as
+  unsupported files.
 
 ## 0.7.0 - 2026-10-01
 

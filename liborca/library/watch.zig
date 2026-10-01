@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const control = @import("../core/control.zig");
+const LibraryDatabase = @import("../database/library.zig").LibraryDatabase;
 const mutation_executor = @import("../metadata/executor.zig");
 const volume_marker = @import("../platform/volume_linux.zig").marker_name;
 const work = @import("../core/work.zig");
@@ -39,6 +40,13 @@ pub const Ignore = struct {
     database_name: ?[]const u8 = null,
     /// The name of the directory tag writes keep their backups in.
     backup_name: ?[]const u8 = null,
+
+    pub fn forLibrary(library_database: *const LibraryDatabase) Ignore {
+        return .{
+            .database_name = if (library_database.database.filename()) |file| std.Io.Dir.path.basename(file) else null,
+            .backup_name = if (library_database.backup_directory) |directory| std.Io.Dir.path.basename(directory) else null,
+        };
+    }
 
     pub fn matches(self: Ignore, name: []const u8) bool {
         if (mutation_executor.isOrcaTemporaryName(name)) return true;

@@ -1026,6 +1026,7 @@ pub const JobWorker = struct {
             .batch_size = batch_size,
             .progress = &self.progress,
             .projection = pass,
+            .ignore = library_pass.watch.Ignore.forLibrary(self.database),
         };
     }
 

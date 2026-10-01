@@ -1,10 +1,10 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
 const database = @import("../database/root.zig");
-const mutation_executor = @import("../metadata/executor.zig");
 const storage = @import("../storage/root.zig");
 const projection = @import("projection.zig");
 const tag_reader = @import("tag_reader.zig");
+const watch = @import("watch.zig");
 
 pub const CancellationToken = struct {
     requested: std.atomic.Value(bool) = .init(false),
@@ -78,6 +78,7 @@ pub const Scanner = struct {
     /// Decoders used to read each changed file's declared audio properties.
     /// Injectable so a test can narrow the set; absent, the builtins are used.
     codecs: ?*const codec.CodecRegistry = null,
+    ignore: watch.Ignore = .{},
     /// Where observations become a browsable library.
     ///
     /// The scanner still writes only files, locations and observed tags; it
@@ -151,8 +152,11 @@ pub const Scanner = struct {
                 result.cancelled = true;
                 break;
             };
+            if (self.ignore.matches(entry.basename)) {
+                if (entry.kind == .directory) walker.leave(self.io);
+                continue;
+            }
             if (entry.kind != .file) continue;
-            if (mutation_executor.isOrcaTemporaryName(entry.basename)) continue;
             result.files_seen += 1;
             if (self.progress) |counter| counter.store(result.files_seen, .release);
 
@@ -577,6 +581,55 @@ test "a scan never ingests the temporaries and backups a tag write leaves beside
     const result = try scanner.scan(root_path);
     try std.testing.expectEqual(@as(u64, 2), result.files_seen);
     try std.testing.expectEqual(@as(u64, 2), try library.files.count());
+}
+
+test "a scan of a root holding the Library never examines its database, WAL files or backups" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "song.flac",
+        .data = "fLaCgenerated song",
+    });
+    try temporary.dir.createDirPath(std.testing.io, "library.db.orca-backups/1");
+    try temporary.dir.writeFile(std.testing.io, .{
+        .sub_path = "library.db.orca-backups/1/0-song.flac",
+        .data = "fLaCgenerated backup",
+    });
+    const root_path = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}",
+        .{temporary.sub_path},
+    );
+    defer std.testing.allocator.free(root_path);
+    const database_path = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "{s}/library.db",
+        .{root_path},
+        0,
+    );
+    defer std.testing.allocator.free(database_path);
+    var library = try database.LibraryDatabase.open(std.testing.allocator, std.testing.io, database_path);
+    defer library.close();
+    for ([_][]const u8{ "library.db", "library.db-wal", "library.db-shm" }) |name|
+        _ = try temporary.dir.statFile(std.testing.io, name, .{});
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+        .ignore = watch.Ignore.forLibrary(&library),
+    };
+    defer scanner.deinit();
+
+    const result = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 1), result.files_seen);
+    try std.testing.expectEqual(@as(u64, 1), result.changed);
+    try std.testing.expectEqual(@as(u64, 0), result.unsupported);
+    try std.testing.expectEqual(@as(u64, 0), result.errors);
+    try std.testing.expectEqual(@as(u64, 1), try library.files.count());
 }
 
 test "cancelled scans stop before filesystem work" {
