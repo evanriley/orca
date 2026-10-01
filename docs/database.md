@@ -249,6 +249,14 @@ of changed bytes kept the hash of the old audio, and the duplicate pass reported
 files as exact duplicates of audio they no longer held. The analysis pass
 measures the cleared files again.
 
+Migration 24 adds `provider_state.next_request_ms`, the earliest Unix
+millisecond a service may next be sent a request: the minimum interval after
+the last request, or the end of a quota window a response announced with
+`X-RateLimit-Remaining: 0`. Before it, both lived only in the Gateway that
+received them, so the next job's Gateway could send inside the window or less
+than a second after the previous job's last request. Existing rows keep their
+block and backoff and start with the column NULL.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the
@@ -397,7 +405,8 @@ one the file already had.
 ## Provider state
 
 `provider_state` (version 19) holds each service's rate-limit block
-(`blocked_until_ms`) and backoff (`backoff_ms`), keyed by service name, so
+(`blocked_until_ms`), backoff (`backoff_ms`) and next request time
+(`next_request_ms`, version 24), keyed by service name, so
 every process that opens the Library obeys one block. `provider_leases`
 (version 19) records which process may talk to each service: `owner` is a
 random id and `expires_at` is when the claim lapses. Both tables keep Unix

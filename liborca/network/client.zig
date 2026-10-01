@@ -317,6 +317,7 @@ pub const SharedState = struct {
     blocked_until_ms: ?i64 = null,
     /// The rate-limit backoff the next refusal doubles.
     backoff_ms: u64 = 0,
+    next_request_ms: ?i64 = null,
 };
 
 /// Where Gateways keep each service's rate-limit state and a lease on
@@ -523,12 +524,16 @@ pub const Gateway = struct {
         try self.saveSharedState();
     }
 
-    /// Adopts the block and backoff the store holds for the service. A block
-    /// is never shortened.
+    /// Adopts the block, backoff and next request time the store holds for
+    /// the service. A block or hold is never shortened.
     pub fn loadSharedState(self: *Gateway) !void {
         const sharing = self.sharing orelse return;
         const stored = try sharing.store.load(sharing.service) orelse return;
         self.rate_limit_backoff_ms = stored.backoff_ms;
+        if (stored.next_request_ms) |wall_next| {
+            const next = self.monotonicFromWall(wall_next);
+            self.hold_until_ms = if (self.hold_until_ms) |current| @max(current, next) else next;
+        }
         const wall_until = stored.blocked_until_ms orelse return;
         const until = self.monotonicFromWall(wall_until);
         self.blocked_until_ms = if (self.blocked_until_ms) |current| @max(current, until) else until;
@@ -558,7 +563,17 @@ pub const Gateway = struct {
         try sharing.store.save(sharing.service, .{
             .blocked_until_ms = if (self.blocked_until_ms) |until| self.wallFromMonotonic(until) else null,
             .backoff_ms = self.rate_limit_backoff_ms,
+            .next_request_ms = if (self.nextRequestMs()) |next| self.wallFromMonotonic(next) else null,
         });
+    }
+
+    fn nextRequestMs(self: *Gateway) ?i64 {
+        var next: ?i64 = null;
+        if (self.last_request_ms) |last|
+            next = last +| @as(i64, @intCast(self.config.minimum_interval_ms));
+        if (self.hold_until_ms) |hold|
+            next = if (next) |spacing| @max(spacing, hold) else hold;
+        return next;
     }
 
     fn monotonicFromWall(self: *Gateway, wall_ms: i64) i64 {
@@ -592,11 +607,9 @@ pub const Gateway = struct {
             try self.saveSharedState();
             return true;
         }
-        if (response.status >= 200 and response.status < 300 and self.rate_limit_backoff_ms != 0) {
-            self.rate_limit_backoff_ms = 0;
-            // The caller gets an accepted response even when the reset cannot be stored.
-            self.saveSharedState() catch {};
-        }
+        if (response.status >= 200 and response.status < 300) self.rate_limit_backoff_ms = 0;
+        // The caller gets the response even when the state cannot be stored.
+        self.saveSharedState() catch {};
         return false;
     }
 
@@ -1067,6 +1080,93 @@ test "an exhausted quota with a long reset is scheduled instead of slept" {
     try std.testing.expectEqual(@as(u32, 1), net.transport.requestCount());
     try std.testing.expectEqual(@as(u64, 0), net.clock.slept());
     try std.testing.expectEqual(@as(?i64, 7000), net.gateway.blockedUntilMs());
+}
+
+const MemoryStateStore = struct {
+    state: ?SharedState = null,
+
+    fn store(self: *MemoryStateStore) StateStore {
+        return .{ .context = self, .load_fn = load, .save_fn = save, .claim_fn = claim, .release_fn = release };
+    }
+
+    fn load(context: *anyopaque, _: []const u8) anyerror!?SharedState {
+        const self: *MemoryStateStore = @ptrCast(@alignCast(context));
+        return self.state;
+    }
+
+    fn save(context: *anyopaque, _: []const u8, state: SharedState) anyerror!void {
+        const self: *MemoryStateStore = @ptrCast(@alignCast(context));
+        self.state = state;
+    }
+
+    fn claim(_: *anyopaque, _: []const u8, _: i64, _: i64, _: i64) anyerror!bool {
+        return true;
+    }
+
+    fn release(_: *anyopaque, _: []const u8, _: i64) anyerror!void {}
+};
+
+const SuccessiveGateways = struct {
+    net: TestGateway,
+    store: MemoryStateStore,
+    second: Gateway,
+
+    const wall_offset_ms: i64 = 1_800_000_000_000;
+
+    fn init(self: *SuccessiveGateways) void {
+        self.net.init(.{ .now_ms = 5000, .wall_offset_ms = wall_offset_ms });
+        self.store = .{};
+        const sharing: Sharing = .{ .store = self.store.store(), .service = "musicbrainz" };
+        self.net.gateway.sharing = sharing;
+        self.second = net_testing.gateway(&self.net.transport, &self.net.clock, &self.net.prng, self.net.gateway.config);
+        self.second.sharing = sharing;
+    }
+
+    fn deinit(self: *SuccessiveGateways) void {
+        self.net.deinit();
+    }
+};
+
+test "a quota window a previous Gateway was told of blocks a fresh Gateway's first request" {
+    var gateways: SuccessiveGateways = undefined;
+    gateways.init();
+    defer gateways.deinit();
+    try gateways.net.transport.script(.{ .respond = .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 3600 } } });
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateways.net.gateway));
+    const reset_wall_ms = gateways.net.clock.wallNow() + 3_600_000;
+
+    try std.testing.expectError(error.RateLimited, fetchOnce(&gateways.second));
+    try std.testing.expectEqual(@as(u32, 1), gateways.net.transport.requestCount());
+    try std.testing.expectEqual(@as(u64, 0), gateways.net.clock.slept());
+    try std.testing.expectEqual(@as(?i64, reset_wall_ms), gateways.store.state.?.blocked_until_ms);
+    try std.testing.expectEqual(@as(?i64, reset_wall_ms), gateways.second.blockedUntilWallMs());
+}
+
+test "a fresh Gateway's first request waits the minimum interval after a previous Gateway's last" {
+    var gateways: SuccessiveGateways = undefined;
+    gateways.init();
+    defer gateways.deinit();
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateways.net.gateway));
+    gateways.net.clock.advance(300);
+
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateways.second));
+    try std.testing.expectEqual(@as(u32, 2), gateways.net.transport.requestCount());
+    const times = gateways.net.transport.request_times_ms;
+    try std.testing.expectEqual(@as(i64, 1000), times[1] - times[0]);
+}
+
+test "a short quota window a previous Gateway was told of is waited out by a fresh Gateway" {
+    var gateways: SuccessiveGateways = undefined;
+    gateways.init();
+    defer gateways.deinit();
+    try gateways.net.transport.script(.{ .respond = .{ .rate_limit = .{ .remaining = 0, .reset_in_s = 3 } } });
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateways.net.gateway));
+
+    try std.testing.expectEqual(@as(u16, 200), try fetchOnce(&gateways.second));
+    const times = gateways.net.transport.request_times_ms;
+    try std.testing.expectEqual(@as(i64, 3000), times[1] - times[0]);
+    try std.testing.expectEqual(@as(u64, 3000), gateways.net.clock.slept());
+    try std.testing.expectEqual(@as(?i64, null), gateways.second.blockedUntilMs());
 }
 
 test "a transport without concurrency is a configuration error and is not retried" {

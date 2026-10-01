@@ -22,12 +22,20 @@ pub fn store(repository: *database.ProviderStateRepository) StateStore {
 fn load(context: *anyopaque, service: []const u8) anyerror!?SharedState {
     const repository: *database.ProviderStateRepository = @ptrCast(@alignCast(context));
     const stored = try repository.get(service) orelse return null;
-    return .{ .blocked_until_ms = stored.blocked_until_ms, .backoff_ms = stored.backoff_ms };
+    return .{
+        .blocked_until_ms = stored.blocked_until_ms,
+        .backoff_ms = stored.backoff_ms,
+        .next_request_ms = stored.next_request_ms,
+    };
 }
 
 fn save(context: *anyopaque, service: []const u8, state: SharedState) anyerror!void {
     const repository: *database.ProviderStateRepository = @ptrCast(@alignCast(context));
-    try repository.put(service, .{ .blocked_until_ms = state.blocked_until_ms, .backoff_ms = state.backoff_ms });
+    try repository.put(service, .{
+        .blocked_until_ms = state.blocked_until_ms,
+        .backoff_ms = state.backoff_ms,
+        .next_request_ms = state.next_request_ms,
+    });
 }
 
 fn claim(context: *anyopaque, service: []const u8, owner: i64, now_ms: i64, expires_at_ms: i64) anyerror!bool {

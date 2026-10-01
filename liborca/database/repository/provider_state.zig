@@ -8,6 +8,7 @@ const WriteLane = @import("write_lane.zig").WriteLane;
 pub const ProviderState = struct {
     blocked_until_ms: ?i64 = null,
     backoff_ms: u64 = 0,
+    next_request_ms: ?i64 = null,
 };
 
 pub const ProviderStateRepository = struct {
@@ -16,7 +17,7 @@ pub const ProviderStateRepository = struct {
 
     pub fn get(self: *const ProviderStateRepository, service: []const u8) !?ProviderState {
         var statement = try self.db.prepare(
-            "SELECT blocked_until_ms, backoff_ms FROM provider_state WHERE service=?1;",
+            "SELECT blocked_until_ms, backoff_ms, next_request_ms FROM provider_state WHERE service=?1;",
         );
         defer statement.deinit();
         try statement.bindText(1, service);
@@ -24,6 +25,7 @@ pub const ProviderStateRepository = struct {
         return .{
             .blocked_until_ms = if (statement.columnIsNull(0)) null else statement.columnInt64(0),
             .backoff_ms = std.math.cast(u64, statement.columnInt64(1)) orelse return error.InvalidStoredBackoff,
+            .next_request_ms = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
         };
     }
 
@@ -32,14 +34,17 @@ pub const ProviderStateRepository = struct {
         self.write_lane.acquire();
         defer self.write_lane.release();
         var statement = try self.db.prepare(
-            \\INSERT INTO provider_state(service, blocked_until_ms, backoff_ms) VALUES (?1, ?2, ?3)
+            \\INSERT INTO provider_state(service, blocked_until_ms, backoff_ms, next_request_ms)
+            \\VALUES (?1, ?2, ?3, ?4)
             \\ON CONFLICT(service) DO UPDATE SET
-            \\    blocked_until_ms=excluded.blocked_until_ms, backoff_ms=excluded.backoff_ms;
+            \\    blocked_until_ms=excluded.blocked_until_ms, backoff_ms=excluded.backoff_ms,
+            \\    next_request_ms=excluded.next_request_ms;
         );
         defer statement.deinit();
         try statement.bindText(1, service);
         try statement.bindOptionalInt64(2, state.blocked_until_ms);
         try statement.bindInt64(3, backoff_ms);
+        try statement.bindOptionalInt64(4, state.next_request_ms);
         if (try statement.step() != .done) return error.SqlFailed;
     }
 

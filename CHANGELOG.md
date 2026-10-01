@@ -31,6 +31,9 @@
 - **Library schema version 22.** Files observed with a cover and no other
   tag value are re-read by the next scan, reconcile or watch pass, so a
   library scanned before the fix below gains their trailer and INFO values.
+- **Library schema version 24.** `provider_state.next_request_ms` keeps the
+  earliest time a service may be sent its next request, so a quota window or
+  the one-request-per-second spacing outlives the job that learned it.
 - **Library schema version 23.** `files.audio_hash` is cleared unless a
   current fingerprint was measured from the file's present bytes, so stale
   hashes in an existing library stop producing exact-duplicate findings;
@@ -92,6 +95,11 @@
   never reached the next one. It now steps over it, as it already did for an
   entry reached by auto-advance, and an engine that gives up with nothing
   loaded goes idle instead of waking every 2 ms.
+- **A provider's quota window and request spacing hold across jobs.** A
+  response announcing no remaining requests, and the time of the last
+  request, were kept only by the job's own Gateway, so the next matching or
+  submission job could send at once. Both are now stored with the service's
+  block and backoff and honoured by every later Gateway.
 
 ## 0.5.0 - 2026-09-30
 

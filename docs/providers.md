@@ -32,9 +32,13 @@ not a tuning choice.
   already past adds nothing to the backoff. `X-RateLimit-Reset-In` counts
   for at most 1 h.
 - **Blocks outlive the process.** Each service's block and backoff are kept
-  in the Library (`provider_state`) in wall-clock time. Every Gateway over
-  that Library reads them before a request, so a restarted or second process
-  obeys a block another one received. Libraries do not share blocks.
+  in the Library (`provider_state`) in wall-clock time, and so is the
+  earliest time of its next request: the minimum interval after the last
+  request, or the end of a quota window (`X-RateLimit-Remaining: 0`). Every
+  Gateway over that Library reads them before a request, so a restarted or
+  second process, or the next job's Gateway, obeys a block, a quota window
+  and the request spacing another one received. Libraries do not share
+  blocks.
 - **One process per service.** Before each request a Gateway claims the
   service's lease in the Library (`provider_leases`) for 120 s, and it
   releases the lease when its job ends. While another process holds the

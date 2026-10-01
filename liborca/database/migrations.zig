@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 23;
+pub const current_version = 24;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -979,6 +979,10 @@ const migration_23 =
     \\);
 ;
 
+const migration_24 =
+    \\ALTER TABLE provider_state ADD COLUMN next_request_ms INTEGER;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1126,6 +1130,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 21 and target_version >= 21) try db.exec(migration_21);
     if (version < 22 and target_version >= 22) try db.exec(migration_22);
     if (version < 23 and target_version >= 23) try db.exec(migration_23);
+    if (version < 24 and target_version >= 24) try db.exec(migration_24);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2044,5 +2049,34 @@ test "a version-22 library keeps an audio hash only where a current fingerprint 
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND audio_hash = X'AA';"));
     try std.testing.expectEqual(@as(i64, 6), try scalar(db, "SELECT count(*) FROM files WHERE quick_hash IS NOT NULL;"));
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-23 library keeps each service's block and backoff and gains no request time" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "next-request.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 23);
+    try db.exec(
+        \\INSERT INTO provider_state(service, blocked_until_ms, backoff_ms) VALUES
+        \\    ('musicbrainz', 1800000600000, 60000),
+        \\    ('acoustid', NULL, 0);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM provider_state WHERE next_request_ms IS NULL;"));
+    try std.testing.expectEqual(
+        @as(i64, 1800000600000),
+        try scalar(db, "SELECT blocked_until_ms FROM provider_state WHERE service = 'musicbrainz' AND backoff_ms = 60000;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try scalar(db, "SELECT count(*) FROM provider_state WHERE service = 'acoustid' AND blocked_until_ms IS NULL AND backoff_ms = 0;"),
+    );
     try checkForeignKeys(db);
 }
