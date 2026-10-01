@@ -20,8 +20,8 @@ versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is tag writers
-for the remaining formats and the C ABI's catch-up.
+`orca-gtk` sleeps on instead of polling. The next milestone is playlists and
+ratings.
 
 ## Works today
 
@@ -44,6 +44,9 @@ for the remaining formats and the C ABI's catch-up.
 - No scan or reconcile walks a root whose path now lies on another volume
   than the one recorded, so an unmounted drive's files are never marked
   missing.
+- Byte-identical copies share one File until one of them changes; a changed
+  copy becomes a File of its own, keeping Orca's values and locks, and hard
+  links stay one File.
 - Embedded cover art extraction.
 
 ### Formats
@@ -72,6 +75,10 @@ for the remaining formats and the C ABI's catch-up.
   float source and any gain that is not exactly 1 are not
   (`orca-cli play-tracks --eq --crossfeed`).
 - Output device selection.
+- Tag write-back for FLAC, MP3 and ADTS from an approved plan, with undo.
+  One process at a time owns a Library's mutation journal through a lock
+  file; an undo interrupted by a crash is finished by the next open, and
+  recovery never touches another process's write in progress.
 - Track details: format, file, loudness, tags and MusicBrainz recording ID
   with its source for one Track (`orca-cli track`), and a details panel in
   `orca-gtk`.
@@ -87,8 +94,8 @@ for the remaining formats and the C ABI's catch-up.
   held in the Secret Service (`orca-gtk` Preferences > Listening) or read from
   `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
   [providers.md](providers.md).
-- Provider blocks and backoffs for ListenBrainz, MusicBrainz and AcoustID are
-  stored in the Library, so they persist across restarts and bind every
+- Provider blocks, backoffs, quota windows and request spacing for
+  ListenBrainz, MusicBrainz and AcoustID are stored in the Library, so they persist across restarts and bind every
   process using it, and a per-service lease lets one process at a time talk
   to each service; another gets `ProviderBusy` without sending. See
   [providers.md](providers.md#rules-toward-providers).
@@ -182,27 +189,29 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
-   MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
-   tag are reported as not writable. The C ABI covers about a third of the
-   Zig API: it lacks tag writes, queue editing, artwork, DSP, track details,
-   matching and AcoustID submission.
-2. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+1. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
-   would match what MusicBrainz and AcoustID miss, 50 songs per request, but
-   needs the user's token and must share the listen worker's gateway.
-4. **Apply MusicBrainz metadata from accepted matches.** An accepted match
+2. **Apply MusicBrainz metadata from accepted matches.** An accepted match
    records only the recording ID; its title, artist, track number and the
    rest should become Orca metadata too, under the same lock and provenance
-   rules. Matching parses and carries the release, release-group,
+   rules. Matching is to parse and carry the release, release-group,
    release-track and album-artist MusicBrainz IDs and the matched text as
    unlocked provider values, which tag writes then store where the files
    have none. Release-level IDs are stored and written only when every file
    of the Release agrees on the release, a consensus generalising the tally
    in `release_artwork.zig`. Artist IDs follow once `ObservedTags` holds
    multiple values.
-5. **An optional fixed output rate with a band-limited resampler**, for
+3. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+   tag writes, library edits and undo, queue insertion, moves and removal,
+   artwork, DSP and the signal path, track details, matching, AcoustID
+   submission, love and hate, and scrobbling.
+4. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+   would match what MusicBrainz and AcoustID miss, 50 songs per request, but
+   needs the user's token and must share the listen worker's gateway.
+5. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+   written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
+   as not writable.
+6. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
