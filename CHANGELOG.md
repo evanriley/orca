@@ -78,6 +78,11 @@
   scan.** A rescan of changed bytes that found no tags, or could not read
   them, kept the tags observed from the old bytes. They are now cleared, as a
   fresh import of the same file would have none.
+- **`zig build test` can no longer play through the speakers.** The C ABI
+  smoke test fell back to the default output when the silent sink could not
+  be created, and the build hid that failure. The build now creates the sink
+  with the `orca-cli` it builds and hands the test its device id; on Linux the
+  test fails rather than open the default output.
 - **A file whose audio changed is no longer reported as an exact duplicate of
   its old audio.** A rescan of changed bytes kept `files.audio_hash`, the hash
   of the decoded audio, and the duplicate pass trusted it. A new quick hash

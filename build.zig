@@ -181,12 +181,13 @@ pub fn build(b: *std.Build) void {
     c_abi_module.linkLibrary(liborca);
     const run_c_abi_smoke = b.addRunArtifact(c_abi_smoke);
     if (target.result.os.tag == .linux) {
-        // The smoke test plays audio. Without a silent sink it falls back to
-        // the default output, which is somebody's speakers.
-        const silent_sink = b.addSystemCommand(&.{ "sh", "-c", "\"$0\" >/dev/null 2>&1 || true" });
+        // The smoke test plays audio and refuses to run on Linux without a
+        // silent sink, since the default output is somebody's speakers.
+        const silent_sink = b.addSystemCommand(&.{ "sh", "-c", "ORCA_CLI=\"$1\" exec \"$0\"" });
         silent_sink.addFileArg(b.path("scripts/silent-sink.sh"));
+        silent_sink.addArtifactArg(cli);
         silent_sink.has_side_effects = true;
-        run_c_abi_smoke.step.dependOn(&silent_sink.step);
+        run_c_abi_smoke.addFileArg(silent_sink.captureStdOut(.{}));
     }
 
     const test_step = b.step("test", "Run all unit and integration tests");

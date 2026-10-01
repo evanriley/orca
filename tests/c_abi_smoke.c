@@ -18,6 +18,7 @@
 
 #include "orca.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -36,50 +37,62 @@
  *
  * Selection order:
  *   1. ORCA_TEST_DEVICE, if set, names an orca device id explicitly.
- *   2. Otherwise a sink published by scripts/silent-sink.sh, found by name.
- *      This is the case that matters: it makes `zig build test` silent with
- *      no ceremony, for anyone who has ever run that script.
- *   3. Otherwise device 0, because a CI host has no silent sink and the test
- *      must still exercise a real output rather than skipping.
+ *   2. Otherwise argv[1] names a file holding the device id that
+ *      scripts/silent-sink.sh printed; `zig build test` passes it.
+ *   3. Otherwise, on Linux, the test fails rather than open the default
+ *      output.
+ *   4. Otherwise device 0: liborca has no output backend there.
  *
  * A null sink is a real PipeWire sink, so this weakens nothing: quantum
  * negotiation, render callbacks and underrun accounting all still run. */
-#define SILENT_SINK_PREFIX "Orca Silent Test Sink"
+static int read_device_id_file(const char *path, uint64_t *device_id) {
+    char text[32];
+    FILE *file = fopen(path, "r");
+    if (file == 0) {
+        fprintf(stderr, "c-abi-smoke: cannot open device id file %s: %s\n", path,
+                strerror(errno));
+        return -1;
+    }
+    size_t length = fread(text, 1, sizeof text - 1, file);
+    fclose(file);
+    text[length] = 0;
 
-struct silent_device_search {
-    uint64_t id;
-    int found;
-};
-
-static void note_silent_device(void *context, const orca_device_view *device) {
-    struct silent_device_search *search = context;
-    size_t prefix_length = sizeof(SILENT_SINK_PREFIX) - 1;
-    if (search->found) return;
-    if (device->name.length < prefix_length) return;
-    if (memcmp(device->name.pointer, SILENT_SINK_PREFIX, prefix_length) != 0) return;
-    search->id = device->id;
-    search->found = 1;
+    char *cursor = text;
+    while (isspace((unsigned char)*cursor)) cursor += 1;
+    char *end = cursor;
+    errno = 0;
+    unsigned long long parsed = strtoull(cursor, &end, 10);
+    int digits_read = end != cursor && isdigit((unsigned char)*cursor);
+    while (isspace((unsigned char)*end)) end += 1;
+    if (!digits_read || errno != 0 || *end != 0) {
+        fprintf(stderr,
+                "c-abi-smoke: device id file %s holds \"%s\", expected one decimal "
+                "device id as printed by scripts/silent-sink.sh\n",
+                path, text);
+        return -1;
+    }
+    *device_id = (uint64_t)parsed;
+    return 0;
 }
 
-static uint64_t test_device_id(orca_runtime *runtime) {
-    struct silent_device_search search;
+static int test_device_id(int argc, char **argv, uint64_t *device_id) {
     const char *configured = getenv("ORCA_TEST_DEVICE");
     if (configured != 0 && configured[0] != 0) {
-        return (uint64_t)strtoull(configured, 0, 10);
+        *device_id = (uint64_t)strtoull(configured, 0, 10);
+        return 0;
     }
-
-    search.id = 0;
-    search.found = 0;
-    if (orca_enumerate_output_devices(runtime, &search, note_silent_device) ==
-            ORCA_STATUS_OK &&
-        search.found) {
-        printf("routing playback at silent device %llu\n",
-               (unsigned long long)search.id);
-        return search.id;
-    }
-
-    printf("no silent sink found; opening the default output (this is audible)\n");
+    if (argc > 1) return read_device_id_file(argv[1], device_id);
+#ifdef __linux__
+    fprintf(stderr,
+            "c-abi-smoke: no silent output given; refusing to open the default output, "
+            "which is audible. Pass the file holding scripts/silent-sink.sh's device id "
+            "as the first argument, set ORCA_TEST_DEVICE, or run under "
+            "scripts/headless-audio.sh zig build test\n");
+    return -1;
+#else
+    *device_id = 0;
     return 0;
+#endif
 }
 
 /* The host's loop sleeps on a self-pipe, as a GUI main loop sleeps on an
@@ -488,7 +501,10 @@ close:
     return result;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    uint64_t device_id = 0;
+    if (test_device_id(argc, argv, &device_id) != 0) return 234;
+    printf("routing playback at device %llu\n", (unsigned long long)device_id);
     if (orca_version()[0] == 0) return 186;
     orca_runtime *runtime = orca_runtime_create();
     if (runtime == 0) return 1;
@@ -876,7 +892,7 @@ int main(void) {
         return 41;
 
     orca_handle zone;
-    if (orca_player_open_default_output(runtime, player, test_device_id(runtime), &zone) !=
+    if (orca_player_open_default_output(runtime, player, device_id, &zone) !=
         ORCA_STATUS_OK)
         return 42;
 

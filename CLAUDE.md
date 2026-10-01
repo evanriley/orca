@@ -221,9 +221,11 @@ zig build dependency-smoke      # Linux foreign-library linking pattern
 zig build pipewire-live-smoke   # opens a short silent stream on the user's PipeWire server
 ```
 
-Ordinary tests require no audio server. The C ABI smoke test (`c-abi-smoke`,
-part of `zig build test`) opens an output: on the desktop it plays into
-`scripts/silent-sink.sh`'s sink, and `scripts/headless-audio.sh` gives it a
+Unit and integration tests require no audio server. The C ABI smoke test (`c-abi-smoke`,
+part of `zig build test`) opens an output, so on Linux `zig build test` needs
+PipeWire: the build creates `scripts/silent-sink.sh`'s sink and passes its
+device id to the test, and fails rather than fall back to the default output.
+On the desktop it plays into that sink; `scripts/headless-audio.sh` gives it a
 private PipeWire and WirePlumber where no audio server runs, as in CI.
 
 ### Testing playback without making noise
