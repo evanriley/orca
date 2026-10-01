@@ -154,12 +154,17 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = liborca_module });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    const integration_options = b.addOptions();
+    integration_options.addOptionPath("orca_cli", cli.getEmittedBin());
     const integration_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+            .imports = &.{
+                .{ .name = "liborca", .module = liborca_module },
+                .{ .name = "integration_options", .module = integration_options.createModule() },
+            },
         }),
     });
     const run_integration_tests = b.addRunArtifact(integration_tests);

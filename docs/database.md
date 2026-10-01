@@ -528,6 +528,23 @@ accepted proposals name. See
   that cannot take it defers recovery to the next holder, and refuses with
   `error.MutationInProgress` when a migration is due. See [metadata.md](metadata.md#the-journal-lock).
 - Prepared batch statements are reused within one transaction.
+- On Linux, liborca switches SQLite's `unix` VFS from POSIX record locks to
+  open file description (OFD) locks before its first connection opens. A
+  POSIX lock belongs to the process, so any `close` of the database, `-wal`
+  or `-shm` file anywhere in the process, such as a GTK file dialog browsing
+  the folder, released it. A second Orca process then took itself for the
+  last connection, check-pointed and deleted the WAL, and the first process's
+  later writes went to an unlinked file and were lost. An OFD lock belongs to
+  the open file and survives other closes. Caveats:
+  - The override is process-wide: it applies to every SQLite connection in
+    the process, the embedder's included.
+  - An embedder's own multi-connection SQLite use in rollback-journal mode
+    in the same process can see spurious `SQLITE_BUSY`.
+  - An embedder must not open SQLite connections before liborca's first
+    open: SQLite's system-call table must not change under open
+    connections.
+  - macOS has no OFD locks and keeps POSIX locks; see
+    [roadmap.md](roadmap.md#known-issues).
 
 Automated coverage verifies that a migrated library files every Track exactly
 where a fresh projection does, that an album returns in disc-then-track order,

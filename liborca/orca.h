@@ -48,6 +48,9 @@ extern "C" {
  *
  * The one exception is the wake callback of orca_runtime_set_wake_callback,
  * which liborca also calls from its own threads.
+ *
+ * On Linux, the first Library open switches SQLite to OFD locks for the whole
+ * process. Open no SQLite connection of your own before it.
  */
 
 typedef struct orca_runtime orca_runtime;

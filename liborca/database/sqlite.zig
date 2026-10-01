@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlite_locks = @import("sqlite_locks.zig");
 
 pub const c = @import("sqlite");
 
@@ -29,6 +30,7 @@ pub const Database = struct {
     }
 
     fn openWithFlags(path: [:0]const u8, flags: c_int) Error!Database {
+        sqlite_locks.installOnce();
         var raw: ?*c.sqlite3 = null;
         if (c.sqlite3_open_v2(path.ptr, &raw, flags, null) != c.SQLITE_OK) {
             if (raw) |failed| _ = c.sqlite3_close_v2(failed);

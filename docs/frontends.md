@@ -21,6 +21,9 @@ scan — and its object pools take no lock, so a GUI timer racing
 `orca_runtime_destroy` is a real use-after-free. The one exception is the wake
 callback, which liborca calls from its own threads; see [Wakeup](#wakeup).
 
+On Linux, liborca switches SQLite to OFD locks for the whole process on its
+first database open; see [database.md](database.md#concurrency).
+
 The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root

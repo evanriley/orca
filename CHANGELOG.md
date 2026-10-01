@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A second Orca process no longer deletes the WAL under a live Library on
+  Linux.** Any close of the database, `-wal` or `-shm` file in the process,
+  such as a GTK file dialog browsing its folder, dropped SQLite's POSIX
+  locks, so another process check-pointed and deleted the WAL and later
+  writes were lost without an error. liborca now switches SQLite's `unix`
+  VFS to OFD locks, process-wide, before its first open.
+
 ## 0.7.0 - 2026-10-01
 
 Ships Library schema version 27. Close every Orca process before upgrading.

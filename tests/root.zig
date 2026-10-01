@@ -841,3 +841,7 @@ test "the queue reports the rows a host displays, in the order it will play them
     try std.testing.expectEqual(@as(usize, 1), tail.items.len);
     try std.testing.expectEqualStrings("Entry 0", tail.items[0].title);
 }
+
+test {
+    _ = @import("library_locks.zig");
+}

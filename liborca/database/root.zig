@@ -3,6 +3,7 @@ pub const library = @import("library.zig");
 pub const migrations = @import("migrations.zig");
 pub const repository = @import("repository.zig");
 pub const sqlite = @import("sqlite.zig");
+pub const sqlite_locks = @import("sqlite_locks.zig");
 pub const text_key = @import("text_key.zig");
 
 pub const LibraryDatabase = library.LibraryDatabase;
@@ -120,5 +121,6 @@ test {
     _ = @import("migrations.zig");
     _ = @import("repository.zig");
     _ = @import("sqlite.zig");
+    _ = @import("sqlite_locks.zig");
     _ = @import("text_key.zig");
 }

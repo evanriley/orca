@@ -267,11 +267,12 @@ Small defects that are not yet scheduled:
 - Removing a root leaves its recordings, and their love and hate, ratings
   and playlist entries, in the Library; rescanning the folder creates new
   recordings, so those entries show as unavailable.
-- Opening and closing a Library's database, `-wal` or `-shm` file from
-  another part of the same process, as a GTK file dialog browsing the
-  database's folder may do, drops SQLite's POSIX locks on it. A second Orca
-  process can then check-point and delete the WAL under the first. Seen once
-  while testing playlist import; not reproduced in isolation.
+- On macOS, which has no OFD locks, opening and closing a Library's
+  database, `-wal` or `-shm` file from another part of the same process
+  drops SQLite's POSIX locks on it. A second Orca process can then
+  check-point and delete the WAL under the first, and the first process's
+  later writes are lost. Linux uses OFD locks; see
+  [database.md](database.md#concurrency).
 - Ratings are neither read from nor written to tags (POPM, FMPS_RATING).
 - `orca-gtk` ignores a Library that fails to open, including one with a newer
   schema, and shows the welcome page.
