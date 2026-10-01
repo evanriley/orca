@@ -17,6 +17,13 @@
   and `confidentCount` share the selection, and a higher threshold never
   accepts more.
 
+### Fixed
+
+- **Writing tags to a FLAC file with a comment block of 256 bytes or more no
+  longer crashes.** The block header's length was narrowed to one byte, so a
+  Debug or ReleaseSafe build panicked mid-write on nearly every real FLAC file
+  and startup recovery rolled the write back.
+
 ## 0.5.0 - 2026-09-30
 
 Ships Library schema version 20.

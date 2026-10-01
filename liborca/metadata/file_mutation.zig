@@ -370,12 +370,9 @@ fn writeMetadataHeader(
     block_type: u7,
     length: u24,
 ) !void {
-    const header = [4]u8{
-        @as(u8, block_type) | @as(u8, if (is_last) 0x80 else 0),
-        @intCast(length >> 16),
-        @intCast(length >> 8),
-        @intCast(length),
-    };
+    var header: [4]u8 = undefined;
+    header[0] = @as(u8, block_type) | @as(u8, if (is_last) 0x80 else 0);
+    std.mem.writeInt(u24, header[1..4], length, .big);
     try file.writeStreamingAll(io, &header);
 }
 
@@ -562,6 +559,56 @@ test "FLAC replacement rewrites comments and preserves audio bytes" {
     try readExact(stage, std.testing.io, staged, 0);
     try std.testing.expect(std.mem.indexOf(u8, staged, "TITLE=New title") != null);
     try std.testing.expect(std.mem.endsWith(u8, staged, "generated audio frames"));
+}
+
+test "FLAC replacement writes a comment block longer than one length byte with its full length" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const prefix = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    const source_path = try std.fmt.allocPrint(allocator, "{s}/source.flac", .{prefix});
+    const stage_path = try std.fmt.allocPrint(allocator, "{s}/stage.flac", .{prefix});
+    const long_entry = try std.mem.concat(allocator, u8, &.{ "CUSTOM=", "x" ** 70_000 });
+
+    var comments: std.ArrayList(u8) = .empty;
+    var length: [4]u8 = undefined;
+    std.mem.writeInt(u32, &length, 9, .little);
+    try comments.appendSlice(allocator, &length);
+    try comments.appendSlice(allocator, "Generated");
+    std.mem.writeInt(u32, &length, 2, .little);
+    try comments.appendSlice(allocator, &length);
+    std.mem.writeInt(u32, &length, 15, .little);
+    try comments.appendSlice(allocator, &length);
+    try comments.appendSlice(allocator, "TITLE=Old title");
+    std.mem.writeInt(u32, &length, @intCast(long_entry.len), .little);
+    try comments.appendSlice(allocator, &length);
+    try comments.appendSlice(allocator, long_entry);
+    var source_bytes: std.ArrayList(u8) = .empty;
+    try source_bytes.appendSlice(allocator, "fLaC\x00\x00\x00\x22");
+    try source_bytes.appendNTimes(allocator, 0, 34);
+    var comment_header: [4]u8 = .{ 0x84, 0, 0, 0 };
+    std.mem.writeInt(u24, comment_header[1..4], @intCast(comments.items.len), .big);
+    try source_bytes.appendSlice(allocator, &comment_header);
+    try source_bytes.appendSlice(allocator, comments.items);
+    try source_bytes.appendSlice(allocator, "generated audio frames");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "source.flac", .data = source_bytes.items });
+
+    try stageFlac(
+        allocator,
+        std.testing.io,
+        source_path,
+        stage_path,
+        try identity(std.testing.io, source_path),
+        &.{.{ .field = .title, .before = "Old title", .after = "New title" }},
+    );
+    const staged = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, stage_path, allocator, .limited(1 << 20));
+    const block_length = std.mem.readInt(u24, staged[43..46], .big);
+    const block = staged[46..][0..block_length];
+    try std.testing.expect(std.mem.indexOf(u8, block, "TITLE=New title") != null);
+    try std.testing.expect(std.mem.indexOf(u8, block, long_entry) != null);
+    try std.testing.expectEqualStrings("generated audio frames", staged[46 + block_length ..]);
 }
 
 test "FLAC replacement remains decodable by the Zig-native codec" {
