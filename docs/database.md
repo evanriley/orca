@@ -21,9 +21,12 @@ A scan re-finds a file through a cascade, cheapest first:
    move within one filesystem.
 3. `files.quick_hash` — BLAKE3 over (first 64 KiB ‖ last 64 KiB ‖ size), from
    `storage/quick_hash.zig`. Catches copies, cross-volume moves and restores.
-4. `files.audio_hash` — over the decoded audio payload only, so it survives
-   Orca's own tag writes. Written by `library/analysis_pass.zig`, which is the
-   only pass that decodes a whole file, and never by a scanner.
+4. `files.audio_hash` — over the decoded audio payload only, so a tag write
+   does not change it. Written by `library/analysis_pass.zig`, which is the
+   only pass that decodes a whole file, and never by a scanner. It holds for
+   the bytes it was measured from: an update that records a different
+   `quick_hash` clears it, and it stays NULL until the analysis pass decodes
+   the new bytes.
 
 Volumes are identified by a `stable_key` the platform adapter resolves — a
 filesystem UUID, else an identifier persisted at the mount root, else
@@ -238,6 +241,13 @@ scan, reconcile or watch pass re-observes them: an ID3v2 tag holding only a
 cover was read in preference to the file's ID3v1 trailer or `LIST`/`INFO`
 chunk, and now the cover is kept on those values. File rows, quick hashes and
 Orca's values are left alone.
+
+Migration 23 sets `files.audio_hash` to NULL unless the file has an
+`orca.temporal-fingerprint` version 2 row in `analysis_results` whose
+`source_identity` equals the file's current `quick_hash`. Before it, a rescan
+of changed bytes kept the hash of the old audio, and the duplicate pass reported
+files as exact duplicates of audio they no longer held. The analysis pass
+measures the cleared files again.
 
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables

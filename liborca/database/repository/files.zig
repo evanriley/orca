@@ -138,7 +138,10 @@ pub const FileRepository = struct {
         var statement = try self.db.prepare(
             \\UPDATE files SET audio_format=?1, codec=?2, size_bytes=?3, sample_rate=?4,
             \\    bit_depth=?5, channels=?6, duration_ms=?7, quick_hash=?8,
-            \\    audio_hash=COALESCE(?9, audio_hash), content_hash=COALESCE(?10, content_hash)
+            \\    audio_hash=CASE WHEN ?9 IS NOT NULL THEN ?9
+            \\        WHEN quick_hash IS ?8 THEN audio_hash ELSE NULL END,
+            \\    content_hash=CASE WHEN ?10 IS NOT NULL THEN ?10
+            \\        WHEN quick_hash IS ?8 THEN content_hash ELSE NULL END
             \\WHERE id=?11;
         );
         defer statement.deinit();
@@ -394,8 +397,9 @@ pub const FileRepository = struct {
     }
 
     /// Tier 4 of the identity cascade, written by the analysis job rather than
-    /// the scanner: a hash of the audio payload alone survives Orca's own tag
-    /// writes, which change size, mtime and quick hash but not the audio.
+    /// the scanner: a hash of the audio payload alone, which Orca's own tag
+    /// writes do not change. `update` clears it when the quick hash changes,
+    /// because it was measured from the old bytes.
     pub fn setAudioHash(self: *FileRepository, file_id: i64, digest: []const u8) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();

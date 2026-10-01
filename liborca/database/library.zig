@@ -666,6 +666,51 @@ test "reopening drives a nonterminal journal record out of staged state" {
     );
 }
 
+fn expectAudioHash(library: *LibraryDatabase, file_id: i64, expected: ?[]const u8) !void {
+    var statement = try library.database.prepare("SELECT audio_hash FROM files WHERE id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    try std.testing.expectEqual(sqlite.Step.row, try statement.step());
+    if (expected) |bytes| {
+        try std.testing.expectEqualSlices(u8, bytes, statement.columnBlob(0));
+    } else {
+        try std.testing.expect(statement.columnIsNull(0));
+    }
+}
+
+test "a file's audio hash survives an update only while its quick hash stays the same" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-audio-hash?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const original_bytes: [32]u8 = @splat(1);
+    const changed_bytes: [32]u8 = @splat(2);
+    const measured_audio: [32]u8 = @splat(0xaa);
+    const remeasured_audio: [32]u8 = @splat(0xbb);
+    const file_id = try library.files.create(.{
+        .audio_format = 1,
+        .size_bytes = 4096,
+        .quick_hash = &original_bytes,
+        .audio_hash = &measured_audio,
+    });
+
+    try library.files.update(file_id, .{ .audio_format = 1, .size_bytes = 4096, .quick_hash = &original_bytes });
+    try expectAudioHash(&library, file_id, &measured_audio);
+
+    try library.files.update(file_id, .{ .audio_format = 1, .size_bytes = 4097, .quick_hash = &changed_bytes });
+    try expectAudioHash(&library, file_id, null);
+
+    try library.files.update(file_id, .{
+        .audio_format = 1,
+        .size_bytes = 4097,
+        .quick_hash = &original_bytes,
+        .audio_hash = &remeasured_audio,
+    });
+    try expectAudioHash(&library, file_id, &remeasured_audio);
+}
+
 test "a renamed file keeps its identity and everything attached to it" {
     var library = try LibraryDatabase.open(
         std.testing.allocator,

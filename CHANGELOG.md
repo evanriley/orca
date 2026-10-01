@@ -31,6 +31,10 @@
 - **Library schema version 22.** Files observed with a cover and no other
   tag value are re-read by the next scan, reconcile or watch pass, so a
   library scanned before the fix below gains their trailer and INFO values.
+- **Library schema version 23.** `files.audio_hash` is cleared unless a
+  current fingerprint was measured from the file's present bytes, so stale
+  hashes in an existing library stop producing exact-duplicate findings;
+  `orca-cli analyze-library` measures those files again.
 
 - **Accept Confident takes each file's best match.** Before, a file's match
   was accepted in bulk only when it was the file's one pending proposal at the
@@ -74,6 +78,10 @@
   scan.** A rescan of changed bytes that found no tags, or could not read
   them, kept the tags observed from the old bytes. They are now cleared, as a
   fresh import of the same file would have none.
+- **A file whose audio changed is no longer reported as an exact duplicate of
+  its old audio.** A rescan of changed bytes kept `files.audio_hash`, the hash
+  of the decoded audio, and the duplicate pass trusted it. A new quick hash
+  now clears it until the analysis pass decodes the file again.
 
 ## 0.5.0 - 2026-09-30
 

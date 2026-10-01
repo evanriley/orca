@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 22;
+pub const current_version = 23;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -967,6 +967,18 @@ const migration_22 =
     \\);
 ;
 
+const migration_23 =
+    \\UPDATE files SET audio_hash = NULL
+    \\WHERE audio_hash IS NOT NULL AND NOT EXISTS (
+    \\    SELECT 1 FROM analysis_results AS fingerprint
+    \\    WHERE fingerprint.file_id = files.id
+    \\      AND fingerprint.kind = 2
+    \\      AND fingerprint.algorithm_id = 'orca.temporal-fingerprint'
+    \\      AND fingerprint.algorithm_version = 2
+    \\      AND fingerprint.source_identity = files.quick_hash
+    \\);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1113,6 +1125,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 20 and target_version >= 20) try db.exec(migration_20);
     if (version < 21 and target_version >= 21) try db.exec(migration_21);
     if (version < 22 and target_version >= 22) try db.exec(migration_22);
+    if (version < 23 and target_version >= 23) try db.exec(migration_23);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1997,5 +2010,39 @@ test "a version-21 library re-observes present files whose tags held only a cove
     try std.testing.expectEqual(@as(i64, 500), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 3;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM locations WHERE modified_ns <> 500;"));
     try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM observed_file_tags;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-22 library keeps an audio hash only where a current fingerprint was measured from the file's bytes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "audio-hash.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 22);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash, audio_hash) VALUES
+        \\    (1, 1, 10, X'01', X'AA'),
+        \\    (2, 1, 10, X'02', X'AA'),
+        \\    (3, 1, 10, X'03', X'AA'),
+        \\    (4, 1, 10, X'04', NULL),
+        \\    (5, 1, 10, X'05', X'AA'),
+        \\    (6, 1, 10, X'06', X'AA');
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result) VALUES
+        \\    (1, 2, 'orca.temporal-fingerprint', 2, X'00', X'01', X'00'),
+        \\    (2, 2, 'orca.temporal-fingerprint', 2, X'00', X'01', X'00'),
+        \\    (4, 2, 'orca.temporal-fingerprint', 2, X'00', X'04', X'00'),
+        \\    (5, 2, 'orca.temporal-fingerprint', 1, X'00', X'05', X'00'),
+        \\    (6, 1, 'orca.audio-diagnostics', 2, X'00', X'06', X'00');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE audio_hash IS NOT NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM files WHERE id = 1 AND audio_hash = X'AA';"));
+    try std.testing.expectEqual(@as(i64, 6), try scalar(db, "SELECT count(*) FROM files WHERE quick_hash IS NOT NULL;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM analysis_results;"));
     try checkForeignKeys(db);
 }
