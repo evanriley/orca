@@ -160,6 +160,24 @@ fn measureClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startAnalysis(self);
 }
 
+fn analysisThreadsSubtitle(buffer: []u8, threads: u16) [:0]const u8 {
+    if (threads == liborca.analysisAvailableThreads())
+        return "Uses every processor core. Playback and the rest of the system may slow down while measuring.";
+    return strings.printZ(buffer, "Default: {d}", .{liborca.analysisDefaultThreads()}) catch "";
+}
+
+fn analysisThreadsChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const value = adw.adw_spin_row_get_value(gtk.cast(adw.SpinRow, row));
+    const available: f64 = @floatFromInt(liborca.analysisAvailableThreads());
+    const threads: u16 = @intFromFloat(std.math.clamp(@round(value), 1, available));
+    var buffer: [32]u8 = undefined;
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), analysisThreadsSubtitle(&buffer, threads).ptr);
+    if (self.analysis_threads == threads) return;
+    self.analysis_threads = threads;
+    settings.save(self);
+}
+
 fn duplicatesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     closeDialog(self);
@@ -279,6 +297,16 @@ fn libraryPage(self: *App) *gtk.Widget {
     const measure_button = suffixButton(measure, "Measure", null, gtk.callback(measureClicked), self);
     if (unmeasured == 0) gtk.gtk_widget_set_sensitive(measure_button, gtk.false_);
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), measure);
+    const available_threads = liborca.analysisAvailableThreads();
+    const shown_threads = @min(self.analysis_threads orelse liborca.analysisDefaultThreads(), available_threads);
+    const threads = adw.adw_spin_row_new_with_range(1, @floatFromInt(available_threads), 1);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threads), "Analysis threads");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threads), analysisThreadsSubtitle(&buffer, shown_threads).ptr);
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threads), 3);
+    adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threads), 0);
+    adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threads), @floatFromInt(shown_threads));
+    _ = gtk.signalConnect(threads, "notify::value", gtk.callback(analysisThreadsChanged), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), threads);
     const duplicates = actionRow("Find Duplicates", "Compares measured audio, so files that are the same recording show up in Health.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, duplicates), 3);
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);

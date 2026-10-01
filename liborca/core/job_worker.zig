@@ -112,6 +112,9 @@ pub const AnalysisRequest = struct {
     /// Files per selected page and per bounded commit. Small on purpose: see
     /// `library.LibraryAnalysis.batch_size`.
     batch_size: usize = 32,
+    /// Files decoded at once, at most `batch_size`. Null takes
+    /// `analysisDefaultThreads`; see `library.LibraryAnalysis.threads`.
+    threads: ?u16 = null,
 };
 
 pub const DuplicateScanRequest = struct {
@@ -655,6 +658,7 @@ pub const JobWorker = struct {
             .cancellation = &self.token,
             .progress = &self.progress,
             .batch_size = request.batch_size,
+            .threads = request.threads,
         };
         const result = pass.run() catch {
             self.failed.store(true, .release);

@@ -10,6 +10,7 @@
 //! theoretical one.
 const builtin = @import("builtin");
 const std = @import("std");
+const analysis_pass = @import("library/analysis_pass.zig");
 const audio = @import("audio/root.zig");
 const control = @import("core/control.zig");
 const core = @import("core/root.zig");
@@ -219,7 +220,9 @@ pub const AnalysisOptions = extern struct {
     /// default, which is much smaller than a scan's because one unit of this
     /// job's work is a whole file decoded end to end.
     batch_size: u32,
-    _reserved: [4]u8 = @splat(0),
+    /// Files decoded at once. Zero selects `orca_analysis_default_threads`.
+    threads: u16 = 0,
+    _reserved: [2]u8 = @splat(0),
 };
 
 pub const DuplicateScanOptions = extern struct {
@@ -365,6 +368,14 @@ const last_error_capacity = 255;
 
 pub export fn orca_version() callconv(.c) [*:0]const u8 {
     return std.fmt.comptimePrint("{f}", .{version.value});
+}
+
+pub export fn orca_analysis_available_threads() callconv(.c) u16 {
+    return analysis_pass.availableThreads();
+}
+
+pub export fn orca_analysis_default_threads() callconv(.c) u16 {
+    return analysis_pass.defaultThreads();
 }
 
 pub export fn orca_runtime_last_error(runtime: ?*const Runtime) callconv(.c) [*:0]const u8 {
@@ -951,6 +962,7 @@ pub export fn orca_library_start_analysis(
     var request: core.runtime.AnalysisRequest = .{};
     if (options) |value| {
         if (value.batch_size != 0) request.batch_size = value.batch_size;
+        if (value.threads != 0) request.threads = value.threads;
     }
     const started = box.runtime.startLibraryAnalysis(
         importLibrary(library),

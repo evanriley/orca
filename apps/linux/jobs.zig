@@ -134,7 +134,7 @@ pub fn rescan(self: *App) void {
 pub fn startAnalysis(self: *App) void {
     const library = self.library orelse return;
     if (!idle(self)) return;
-    const job = self.runtime.startLibraryAnalysis(library, .{}) catch return self.toast("Could not start measuring");
+    const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch return self.toast("Could not start measuring");
     begin(self, .analysis, job, "Measuring loudness");
 }
 

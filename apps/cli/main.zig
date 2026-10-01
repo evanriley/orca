@@ -20,6 +20,7 @@ fn describe(err: anyerror) []const u8 {
         error.RootVolumeChanged => "the folder is not on the drive it was added from, so nothing was scanned; mount that drive, or run add-root to accept the drive it is on now",
         error.OpenFailed => "could not open the database",
         error.InvalidCharacter, error.Overflow => "expected a number",
+        error.InvalidThreadCount => "--threads must be at least 1",
         error.UnknownOption => "unknown option",
         error.LibraryJobRunning => "a job is running on this library",
         error.LibraryScanRunning => "a scan is already running on this library; wait for it to finish",
@@ -114,7 +115,13 @@ const commands = [_]Command{
     .{ .name = "project", .usage = "project DATABASE", .min_arguments = 1, .max_arguments = 1, .run = projectLibrary, .shares_usage_line = true },
     .{ .name = "backfill", .usage = "backfill DATABASE [--force] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = backfillProperties },
     .{ .name = "analyze", .usage = "analyze DATABASE AUDIO", .min_arguments = 2, .max_arguments = 2, .run = analyzeFile },
-    .{ .name = "analyze-library", .usage = "analyze-library DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = analyzeLibrary },
+    .{
+        .name = "analyze-library",
+        .usage = "analyze-library DATABASE [--batch=N] [--threads=N]\n" ++ usage_indent ++ "  [--cancel-after=MS]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = analyzeLibrary,
+    },
     .{ .name = "duplicates", .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = findDuplicates },
     .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
     .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
@@ -310,12 +317,14 @@ const help_details =
     \\request.
     \\
     \\analyze-library decodes every file the Library has not measured yet and
-    \\stores its loudness, peak, clipping, silence and fingerprint. That
-    \\measurement is what ReplayGain on playback reads; without it every track
-    \\plays at unity. It decodes whole files, so it is slow, and it is meant to
-    \\be stopped and restarted: --cancel-after=MS interrupts it inside a file,
-    \\the batch already measured is still committed, and the next run selects
-    \\only what is left.
+    \\stores its loudness, peak, clipping, silence, fingerprint and AcoustID
+    \\fingerprint. That measurement is what ReplayGain on playback reads;
+    \\without it every track plays at unity. It decodes whole files, so it is
+    \\slow, and it is meant to be stopped and restarted: --cancel-after=MS
+    \\interrupts it inside a file, the batch already measured is still
+    \\committed, and the next run selects only what is left. --threads=N
+    \\decodes up to N files of a batch at once (--batch=N, default 32); the
+    \\default is one fewer than the machine's processors.
     \\
     \\duplicates reports every file whose audio the Library also holds
     \\somewhere else, as health issues that `health` then lists. It compares
@@ -518,6 +527,7 @@ fn projectLibrary(context: Context) !void {
 const JobOption = enum {
     batch,
     limit,
+    threads,
     cancel_after,
     force,
     no_fingerprints,
@@ -535,6 +545,7 @@ const JobOption = enum {
         return switch (self) {
             .batch => "--batch=",
             .limit => "--limit=",
+            .threads => "--threads=",
             .cancel_after => "--cancel-after=",
             .force => "--force",
             .no_fingerprints => "--no-fingerprints",
@@ -554,6 +565,7 @@ const JobOption = enum {
 const JobOptions = struct {
     batch_size: ?usize = null,
     limit: ?u32 = null,
+    threads: ?u16 = null,
     cancel_after_ms: ?u64 = null,
     force: bool = false,
     no_fingerprints: bool = false,
@@ -583,6 +595,7 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                 switch (option) {
                     .batch => options.batch_size = try std.fmt.parseInt(usize, value, 10),
                     .limit => options.limit = try std.fmt.parseInt(u32, value, 10),
+                    .threads => options.threads = try parseThreads(value),
                     .cancel_after => options.cancel_after_ms = try std.fmt.parseInt(u64, value, 10),
                     .force => options.force = true,
                     .no_fingerprints => options.no_fingerprints = true,
@@ -602,6 +615,12 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
         return error.UnknownOption;
     }
     return options;
+}
+
+fn parseThreads(text: []const u8) !u16 {
+    const threads = try std.fmt.parseInt(u16, text, 10);
+    if (threads == 0) return error.InvalidThreadCount;
+    return threads;
 }
 
 /// Repairs `files` rows whose declared audio properties are missing, with no
@@ -632,11 +651,13 @@ fn backfillProperties(context: Context) !void {
 /// what is left.
 fn analyzeLibrary(context: Context) !void {
     const stdout = context.stdout;
-    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
-    var runtime = liborca.Runtime.init(context.allocator);
+    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .threads, .cancel_after });
+    // Not the process arena: it would keep every decoded file's buffers
+    // until the run ends.
+    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
-    var request: liborca.AnalysisRequest = .{};
+    var request: liborca.AnalysisRequest = .{ .threads = options.threads };
     if (options.batch_size) |batch_size| if (batch_size != 0) {
         request.batch_size = batch_size;
     };
@@ -682,7 +703,7 @@ fn analyzeFile(context: Context) !void {
     const result = try runtime.libraryAnalyzeFile(library_handle, context.io, context.arguments[1]);
     defer result.deinit();
     try context.stdout.print(
-        "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d}\n",
+        "cache={s} peak={d:.6} rms={d:.6} clipped={d} silent={d} fingerprint_blocks={d} chromaprint={s}\n",
         .{
             if (result.cache_hit) "hit" else "miss",
             result.diagnostics.sample_peak,
@@ -690,6 +711,7 @@ fn analyzeFile(context: Context) !void {
             result.diagnostics.clipped_samples,
             result.diagnostics.silent_frames,
             result.fingerprint.signatures.len,
+            if (result.chromaprint != null) "yes" else "no",
         },
     );
     if (result.diagnostics.integrated_lufs) |loudness| try context.stdout.print(

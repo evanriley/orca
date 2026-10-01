@@ -349,7 +349,13 @@ typedef struct orca_analysis_options {
      * run throws away.
      */
     uint32_t batch_size;
-    uint8_t reserved[4];
+    /*
+     * Files decoded at once, each on its own thread. Zero selects
+     * orca_analysis_default_threads(). A batch is shared between at most this
+     * many threads, so more threads than batch_size gain nothing.
+     */
+    uint16_t threads;
+    uint8_t reserved[2];
 } orca_analysis_options;
 
 typedef struct orca_duplicate_scan_options {
@@ -822,9 +828,12 @@ orca_status orca_library_start_property_backfill(
 
 /*
  * Starts the library-wide analysis: decodes every file the Library has not
- * measured yet and stores its loudness, peak, clipping, silence, waveform and
- * temporal fingerprint. This is what makes ReplayGain on playback possible;
- * without it every track plays at unity. `options` may be null.
+ * measured yet and stores its loudness, peak, clipping, silence, waveform,
+ * temporal fingerprint and, unless the audio is too short, its AcoustID
+ * fingerprint. This is what makes ReplayGain on playback possible; without it
+ * every track plays at unity. `options` may be null.
+ *
+ * Each batch's files are decoded by up to `options->threads` threads at once.
  *
  * It decodes whole files, so it is slow by nature and is expected to be
  * stopped and started again: orca_job_cancel takes effect inside a file, the
@@ -847,6 +856,15 @@ orca_status orca_library_start_analysis(
     const orca_analysis_options *options,
     orca_handle *job
 );
+
+/* The machine's logical processors, at least 1: the most analysis threads
+ * that can each have a processor of their own. Callable from any thread. */
+uint16_t orca_analysis_available_threads(void);
+
+/* What orca_analysis_options.threads = 0 selects: one fewer than
+ * orca_analysis_available_threads(), and at least 1. Callable from any
+ * thread. */
+uint16_t orca_analysis_default_threads(void);
 
 /*
  * Starts the duplicate scan: reports every file whose audio the Library also

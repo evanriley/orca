@@ -2,10 +2,11 @@
 
 `analysis/` measures what a file's audio *is*: integrated loudness (a gated
 ITU-R BS.1770 mean), a ReplayGain figure derived from it, sample peak, RMS,
-clipped samples, leading/trailing/total silence, a bucketed waveform, and a
-temporal fingerprint with a decoded-audio hash. `analysis/service.zig` runs all
-of that in one streaming pass over a `ReadableSource`, so a file is decoded
-once no matter how many of those numbers a caller wants.
+clipped samples, leading/trailing/total silence, a bucketed waveform, a
+temporal fingerprint with a decoded-audio hash, and the AcoustID fingerprint.
+`analysis/service.zig` runs all of that in one streaming pass over a
+`ReadableSource`, so a file is decoded once no matter how many of those
+numbers a caller wants.
 
 Two things use the result: **ReplayGain on playback**, and duplicate detection.
 Neither can use a measurement that does not exist, which is what
@@ -37,9 +38,18 @@ resampler, which is LGPL and accepts only 11,025 Hz input; see
   at least 95 % bit agreement with `fpcalc`'s
   (`fixtures/audio/chromaprint-test.fpcalc.txt`).
 
-Matching and AcoustID submission take fingerprints as they need them;
-`Runtime.libraryTrackFingerprint` and `orca-cli fingerprint` take one for a
-single Track.
+`chromaprint.Analyzer` takes the fingerprint from audio fed to it a chunk at a
+time, so the analysis service takes it in the same decode as everything else
+and the analysis pass stores it where a standalone fingerprint is cached:
+matching and AcoustID submission then find it there instead of decoding the
+file again. Audio too
+short to fingerprint is measured without one. The service feeds the analyzer
+the chunks a standalone fingerprint reads, and a unit test holds the two
+fingerprints of `fixtures/audio/chromaprint-test.mp3` byte-identical.
+
+Matching and AcoustID submission take the fingerprints the pass has not stored
+yet as they need them; `Runtime.libraryTrackFingerprint` and
+`orca-cli fingerprint` take one for a single Track.
 
 ## The pass
 
@@ -101,8 +111,9 @@ every reason to measure a file again is already a reason the selection sees it.
 
 ### Outcomes
 
-- **Measured.** Both encoded results, the decoded-audio hash into
-  `files.audio_hash` (tier 4 of the identity cascade — the only tier that
+- **Measured.** The encoded diagnostics and temporal fingerprint, the AcoustID
+  fingerprint unless the audio is too short for one, the decoded-audio hash
+  into `files.audio_hash` (tier 4 of the identity cascade — the only tier that
   survives Orca's own tag writes), and `corrupt_audio` cleared, all in one
   bounded transaction per batch. A file with no gateable loudness — too short,
   or silent — is still stored, so it is not re-decoded on every run; it simply
@@ -129,6 +140,38 @@ decoded end to end. The cursor is a `files.id`, so a file this run declined
 does not make the next page re-serve it, and a run that stops resumes by asking
 the same question and getting a shorter answer — there is no checkpoint of its
 own.
+
+`orca-cli analyze-library` builds its runtime on `std.heap.smp_allocator`
+rather than on the process arena: the arena would keep every decoded file's
+buffers until the run ends.
+
+### Threads
+
+A batch's files are decoded by `min(threads, files in the batch)` threads at
+once: the job's own thread and helpers it starts for that batch. Each thread
+claims the next file of the batch, measures it with its own `std.Io`, and
+keeps the result in that file's slot. The job's thread then joins every helper
+and commits the slots in `files.id` order in one transaction, exactly as one
+thread would. No helper touches SQLite.
+
+- `AnalysisRequest.threads` sets the count; `orca_analysis_options.threads`
+  and `orca-cli analyze-library --threads=N` reach it. Unset (zero in the C
+  ABI) takes `analysisDefaultThreads()`: one fewer than
+  `analysisAvailableThreads()`, the logical processors, and at least 1, so
+  playback keeps a processor. There is no upper limit, but a batch is all the
+  work there is to share, so more than 32 threads needs a larger
+  `batch_size`.
+- One thread, or a batch of one file, starts no helper. A helper that fails to
+  start leaves its share to the threads that did.
+- Cancellation stops every thread from claiming another file. Files already
+  measured are committed; a file abandoned mid-decode or never claimed is not
+  counted, and the next run selects it again.
+- Any other error, such as running out of memory, fails the batch: every
+  thread is joined and nothing of the batch is committed.
+- Progress counts each file as its thread finishes it.
+- The thread count does not change the results: a unit test holds a
+  four-thread run's `analysis_results` rows and audio hashes byte-identical to
+  a one-thread run's.
 
 ## ReplayGain on playback
 
@@ -350,6 +393,6 @@ settings, and are reported as `exact_duplicate`.
 ### Memory
 
 `orca-cli duplicates` builds its runtime on `std.heap.smp_allocator` rather
-than on the process arena every other subcommand uses. The pass frees each
+than on the process arena most subcommands use. The pass frees each
 fingerprint as soon as it has been compared, and an arena does not honour that:
 it would keep one fingerprint per comparison for the length of the run.

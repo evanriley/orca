@@ -4,6 +4,7 @@ const database = @import("../database/root.zig");
 const scanner = @import("../library/scanner.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
 const storage = @import("../storage/root.zig");
+const chromaprint = @import("chromaprint.zig");
 const diagnostics = @import("diagnostics.zig");
 const encoding = @import("encoding.zig");
 const fingerprint = @import("fingerprint.zig");
@@ -91,6 +92,10 @@ pub const ProgressCallback = struct {
 pub const Analysis = struct {
     diagnostics: diagnostics.Result,
     fingerprint: fingerprint.Result,
+    /// The AcoustID fingerprint under the default `chromaprint.Parameters`.
+    /// Null when the audio is too short to fingerprint, when Chromaprint
+    /// failed, or on a cache hit that stored none.
+    chromaprint: ?chromaprint.Fingerprint,
     cache_hit: bool,
     /// The identity of the bytes this measurement describes, as the Service
     /// observed them. A caller that stores the result itself keys on this
@@ -101,6 +106,7 @@ pub const Analysis = struct {
     pub fn deinit(self: Analysis) void {
         self.diagnostics.deinit();
         self.fingerprint.deinit();
+        if (self.chromaprint) |value| value.deinit();
     }
 };
 
@@ -134,17 +140,21 @@ pub const Service = struct {
         const source_identity = try quick_hash.fromSource(local.readable());
         const diagnostics_key = diagnosticsKey(file_id orelse 0, source_identity, parameters);
         const fingerprint_key = fingerprintKey(file_id orelse 0, source_identity);
+        const chromaprint_key = chromaprint.cacheKey(file_id orelse 0, source_identity, .{});
         if (if (file_id == null) null else self.cache) |cache| {
             const cached_diagnostics = try self.loadDiagnostics(cache, diagnostics_key);
             const cached_fingerprint = try self.loadFingerprint(cache, fingerprint_key);
             if (cached_diagnostics != null and cached_fingerprint != null) {
                 errdefer cached_diagnostics.?.deinit();
                 errdefer cached_fingerprint.?.deinit();
+                const cached_chromaprint = try self.loadChromaprint(cache, chromaprint_key);
+                errdefer if (cached_chromaprint) |value| value.deinit();
                 if (self.cancelled()) return error.Cancelled;
                 try self.verifyIdentity(path, initial_identity);
                 return .{
                     .diagnostics = cached_diagnostics.?,
                     .fingerprint = cached_fingerprint.?,
+                    .chromaprint = cached_chromaprint,
                     .cache_hit = true,
                     .source_identity = source_identity,
                 };
@@ -153,7 +163,6 @@ pub const Service = struct {
             if (cached_fingerprint) |result| result.deinit();
         }
 
-        const source_hash = try self.hashSource(local.readable());
         var decoder = try self.codecs.openDetected(self.allocator, local.readable());
         defer decoder.deinit();
         var analyzer = try diagnostics.Analyzer.init(
@@ -170,6 +179,18 @@ pub const Service = struct {
             decoder.format.channels,
         );
         defer fingerprinter.deinit();
+        // This analyzer never reads the source, so none of its errors is a
+        // decode error: each costs the AcoustID fingerprint, never the file.
+        var acoustid: ?chromaprint.Analyzer = chromaprint.Analyzer.init(
+            self.allocator,
+            decoder.format.sample_rate,
+            decoder.format.channels,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => null,
+        };
+        defer if (acoustid) |*value| value.deinit();
         const samples = try self.allocator.alloc(f32, 4096 * @as(usize, decoder.format.channels));
         defer self.allocator.free(samples);
         var completed_frames: u64 = 0;
@@ -177,8 +198,13 @@ pub const Service = struct {
             if (self.cancelled()) return error.Cancelled;
             const frames = try decoder.readFrames(samples);
             if (frames == 0) break;
-            try analyzer.process(samples[0 .. frames * decoder.format.channels]);
-            try fingerprinter.process(samples[0 .. frames * decoder.format.channels]);
+            const chunk = samples[0 .. frames * decoder.format.channels];
+            try analyzer.process(chunk);
+            try fingerprinter.process(chunk);
+            if (acoustid) |*value| value.process(chunk) catch {
+                value.deinit();
+                acoustid = null;
+            };
             completed_frames += frames;
             if (self.progress) |callback| callback.update(callback.context, .{
                 .completed_frames = completed_frames,
@@ -189,9 +215,16 @@ pub const Service = struct {
         if (self.cancelled()) return error.Cancelled;
         const result = try analyzer.finish();
         errdefer result.deinit();
-        var fingerprint_result = try fingerprinter.finish();
+        const fingerprint_result = try fingerprinter.finish();
         errdefer fingerprint_result.deinit();
-        fingerprint_result.source_hash = source_hash;
+        const acoustid_result: ?chromaprint.Fingerprint = if (acoustid) |*value|
+            value.finish(completed_frames, decoder.frame_count) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => null,
+            }
+        else
+            null;
+        errdefer if (acoustid_result) |value| value.deinit();
 
         try self.verifyIdentity(path, initial_identity);
         if (if (file_id == null) null else self.cache) |cache| {
@@ -201,10 +234,16 @@ pub const Service = struct {
             const fingerprint_bytes = try fingerprint.encode(self.allocator, fingerprint_result);
             defer self.allocator.free(fingerprint_bytes);
             try cache.put(fingerprint_key, fingerprint_bytes);
+            if (acoustid_result) |value| {
+                const chromaprint_bytes = try value.encode(self.allocator);
+                defer self.allocator.free(chromaprint_bytes);
+                try cache.put(chromaprint_key, chromaprint_bytes);
+            }
         }
         return .{
             .diagnostics = result,
             .fingerprint = fingerprint_result,
+            .chromaprint = acoustid_result,
             .cache_hit = false,
             .source_identity = source_identity,
         };
@@ -219,23 +258,6 @@ pub const Service = struct {
         defer identity_check.close();
         if (!sameIdentity(expected, identity_check.readable().identity()))
             return error.SourceChangedDuringAnalysis;
-    }
-
-    fn hashSource(self: Service, source: storage.ReadableSource) ![32]u8 {
-        var hasher = std.crypto.hash.Blake3.init(.{});
-        var buffer: [64 * 1024]u8 = undefined;
-        var offset: u64 = 0;
-        while (offset < source.size()) {
-            if (self.cancelled()) return error.Cancelled;
-            const read = try source.readAt(offset, &buffer);
-            if (read == 0) return error.UnexpectedEndOfSource;
-            hasher.update(buffer[0..read]);
-            offset += read;
-            if (self.yield_between_chunks) std.Thread.yield() catch {};
-        }
-        var digest: [32]u8 = undefined;
-        hasher.final(&digest);
-        return digest;
     }
 
     fn loadDiagnostics(
@@ -256,6 +278,16 @@ pub const Service = struct {
         const bytes = (try cache.get(self.allocator, key)) orelse return null;
         defer self.allocator.free(bytes);
         return fingerprint.decode(self.allocator, bytes) catch null;
+    }
+
+    fn loadChromaprint(
+        self: Service,
+        cache: *database.AnalysisCacheRepository,
+        key: database.AnalysisCacheKey,
+    ) !?chromaprint.Fingerprint {
+        const bytes = (try cache.get(self.allocator, key)) orelse return null;
+        defer self.allocator.free(bytes);
+        return chromaprint.Fingerprint.decode(self.allocator, bytes) catch null;
     }
 };
 
@@ -300,7 +332,7 @@ test "service streams codecs into cache and cancellation publishes nothing" {
     defer second.deinit();
     try std.testing.expect(second.cache_hit);
     try std.testing.expectEqual(first.diagnostics.sample_peak, second.diagnostics.sample_peak);
-    try std.testing.expectEqual(first.fingerprint.source_hash.?, second.fingerprint.source_hash.?);
+    try std.testing.expectEqual(first.fingerprint.decoded_audio_hash, second.fingerprint.decoded_audio_hash);
 
     var cancellation: scanner.CancellationToken = .{};
     cancellation.cancel();
@@ -311,4 +343,41 @@ test "service streams codecs into cache and cancellation publishes nothing" {
         "fixtures/audio/generated-reference.qoa",
         .{ .waveform_buckets = 16 },
     ));
+}
+
+test "the AcoustID fingerprint taken in the analysis decode is the one a standalone fingerprint takes" {
+    const allocator = std.testing.allocator;
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+    };
+    const analysis = try service.analyzeFile(null, "fixtures/audio/chromaprint-test.mp3", .{});
+    defer analysis.deinit();
+    const fingerprinter: chromaprint.Fingerprinter = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+    };
+    const standalone = try fingerprinter.fingerprintFile(null, "fixtures/audio/chromaprint-test.mp3");
+    defer standalone.fingerprint.deinit();
+
+    const measured = analysis.chromaprint.?;
+    try std.testing.expectEqualStrings(standalone.fingerprint.encoded, measured.encoded);
+    try std.testing.expectEqual(standalone.fingerprint.duration_ms, measured.duration_ms);
+}
+
+test "audio too short to fingerprint is still measured, without an AcoustID fingerprint" {
+    const allocator = std.testing.allocator;
+    const codecs = codec.CodecRegistry.builtins();
+    const service: Service = .{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .codecs = &codecs,
+    };
+    const analysis = try service.analyzeFile(null, "fixtures/audio/generated-reference.qoa", .{});
+    defer analysis.deinit();
+    try std.testing.expect(analysis.chromaprint == null);
+    try std.testing.expect(analysis.fingerprint.signatures.len > 0);
 }

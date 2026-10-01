@@ -277,7 +277,7 @@ pub const DuplicateScan = struct {
                 // than folded into the match: if either skip is ever relaxed,
                 // this is where the stronger verdict has to be handled instead
                 // of being quietly downgraded to "resembles".
-                .exact_audio, .exact_file, .none => continue,
+                .exact_audio, .none => continue,
             }
         }
         const matched = best_peer orelse return .unique;

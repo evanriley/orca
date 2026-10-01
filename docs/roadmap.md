@@ -20,8 +20,8 @@ versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is faster
-analysis.
+`orca-gtk` sleeps on instead of polling. The next milestone is tag writers
+for the remaining formats and the C ABI's catch-up.
 
 ## Works today
 
@@ -140,7 +140,9 @@ analysis.
 - Loudness and ReplayGain, peaks, silence, waveform and a temporal
   fingerprint, cached by algorithm version and parameters.
 - AcoustID fingerprints (Chromaprint over libsamplerate), cached per file.
-- Library-wide analysis and indexed duplicate detection as cancellable jobs.
+- Library-wide analysis on a pool of threads, taking each file's AcoustID
+  fingerprint in the same decode, and indexed duplicate detection, as
+  cancellable jobs.
 - Library health issues.
 
 ### Clients
@@ -183,27 +185,23 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Faster analysis.** The analysis pass decodes on one thread and reads
-   every file twice, once for a whole-file hash nothing uses. Decode on a
-   bounded pool of threads, drop the hash, and compute the Chromaprint
-   fingerprint in the same decode.
-2. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
+1. **Tag writers for the remaining formats, and the C ABI's catch-up.** FLAC,
    MP3 and ADTS are written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3
    tag are reported as not writable. No writer stores an accepted recording
    ID in a file yet: ID3 needs a `UFID` frame and Vorbis comments a
    `MUSICBRAINZ_TRACKID` field. The C ABI covers about a third of the Zig API:
    it lacks tag writes, queue editing, artwork, DSP, track details, matching
    and AcoustID submission.
-3. **Playlists and ratings.** `tracks.rating` exists; playlists have no
+2. **Playlists and ratings.** `tracks.rating` exists; playlists have no
    schema yet. Play history, love and hate, and Now Playing are done.
-4. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-5. **Apply MusicBrainz metadata from accepted matches.** An accepted match
+4. **Apply MusicBrainz metadata from accepted matches.** An accepted match
    records only the recording ID; its title, artist, track number and the
    rest should become Orca metadata too, under the same lock and provenance
    rules.
-6. **An optional fixed output rate with a band-limited resampler**, for
+5. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -242,8 +240,8 @@ Small defects that are not yet scheduled:
   it on change, never on a tick.
 - `Telemetry.job_progress` is never published, so `ORCA_EVENT_JOB_PROGRESS`
   never fires; `Runtime.publishTelemetry` has no callers.
-- `orca-cli` runs every command but `duplicates` on an arena, so a cold scan
-  holds memory for every file until it exits.
+- `orca-cli` runs every command but `duplicates` and `analyze-library` on an
+  arena, so a cold scan holds memory for every file until it exits.
 - `write-tags` rewrites a file whose permissions make it read-only.
 - The scanner skips symbolic links to files without counting them.
 - On a volume with no filesystem UUID, such as NFS, SMB or tmpfs, adding a

@@ -65,6 +65,9 @@ const Measurement = struct {
         source_identity: quick_hash.Digest,
         diagnostics_bytes: []u8,
         fingerprint_bytes: []u8,
+        /// Null when the audio is too short to fingerprint or Chromaprint
+        /// failed; the other measurements are stored regardless.
+        chromaprint_bytes: ?[]u8,
         /// BLAKE3 over the decoded samples: tier 4 of the identity cascade,
         /// and the only tier that survives Orca writing a tag into the file.
         audio_hash: [32]u8,
@@ -89,6 +92,7 @@ const Measurement = struct {
                 .measured => |value| {
                     allocator.free(value.diagnostics_bytes);
                     allocator.free(value.fingerprint_bytes);
+                    if (value.chromaprint_bytes) |bytes| allocator.free(bytes);
                 },
                 .unreadable, .skipped => {},
             }
@@ -97,6 +101,65 @@ const Measurement = struct {
 
     fn deinit(self: Measurement, allocator: std.mem.Allocator) void {
         self.outcome.deinit(allocator);
+    }
+};
+
+/// Logical processors, at least 1 and at most `maxInt(u16)`: the most
+/// analysis threads that can each have a processor of their own.
+pub fn availableThreads() u16 {
+    const count = std.Thread.getCpuCount() catch return 1;
+    return @intCast(std.math.clamp(count, 1, std.math.maxInt(u16)));
+}
+
+/// One thread fewer than `availableThreads`, and at least 1, so playback and
+/// the host keep a processor while the library is measured.
+pub fn defaultThreads() u16 {
+    return @max(1, availableThreads() - 1);
+}
+
+/// One page of candidates measured by several threads at once. Each thread
+/// claims the next index and writes only that index's slot, and the
+/// coordinator reads the slots only after joining every thread.
+const Batch = struct {
+    pass: *const LibraryAnalysis,
+    codecs: *const codec.CodecRegistry,
+    items: []const database.repository.AnalysisCandidate,
+    /// Null for a file no thread claimed.
+    slots: []?(anyerror!Measurement.Outcome),
+    next: std.atomic.Value(usize) = .init(0),
+    failed: std.atomic.Value(bool) = .init(false),
+
+    fn work(self: *Batch, io: std.Io) void {
+        while (!self.failed.load(.acquire) and !self.pass.isCancelled()) {
+            const index = self.next.fetchAdd(1, .monotonic);
+            if (index >= self.items.len) return;
+            const outcome = self.pass.measure(io, self.codecs, self.items[index]);
+            self.slots[index] = outcome;
+            if (outcome) |_| {
+                if (self.pass.progress) |counter| _ = counter.fetchAdd(1, .release);
+            } else |err| switch (err) {
+                error.Cancelled => return,
+                else => {
+                    self.failed.store(true, .release);
+                    return;
+                },
+            }
+        }
+    }
+
+    fn helper(self: *Batch) void {
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        defer threaded.deinit();
+        self.work(threaded.io());
+    }
+
+    fn deinitSlots(self: *Batch, allocator: std.mem.Allocator) void {
+        for (self.slots) |*slot| {
+            if (slot.*) |value| {
+                if (value) |outcome| outcome.deinit(allocator) else |_| {}
+            }
+            slot.* = null;
+        }
     }
 };
 
@@ -115,6 +178,10 @@ pub const LibraryAnalysis = struct {
     /// Rows carried to a commit so far, published for a host showing progress.
     /// The denominator is separate and indexed: `unanalyzedCount`.
     progress: ?*std.atomic.Value(u64) = null,
+    /// Files decoded at once. A page of `batch_size` files is shared between
+    /// at most this many threads, so more threads than `batch_size` gain
+    /// nothing. Null takes `defaultThreads`.
+    threads: ?u16 = null,
     /// Files per selected page and per bounded commit.
     ///
     /// Much smaller than the backfill's 256 on purpose. A batch is the unit of
@@ -131,6 +198,8 @@ pub const LibraryAnalysis = struct {
 
     pub fn run(self: *LibraryAnalysis) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
+        const threads: usize = self.threads orelse defaultThreads();
+        if (threads == 0) return error.InvalidThreadCount;
         var result: Result = .{};
         if (self.isCancelled()) {
             result.cancelled = true;
@@ -144,6 +213,11 @@ pub const LibraryAnalysis = struct {
         ));
         const measurement_selector = self.selector();
 
+        const slots = try self.allocator.alloc(?(anyerror!Measurement.Outcome), page_limit);
+        defer self.allocator.free(slots);
+        @memset(slots, null);
+        const helpers = try self.allocator.alloc(std.Thread, @min(threads, page_limit) - 1);
+        defer self.allocator.free(helpers);
         var measurements: std.ArrayList(Measurement) = .empty;
         defer {
             for (measurements.items) |item| item.deinit(self.allocator);
@@ -162,30 +236,32 @@ pub const LibraryAnalysis = struct {
             );
             defer page.deinit();
             if (page.items.len == 0) break;
+            cursor = page.items[page.items.len - 1].id;
 
-            for (page.items) |item| {
-                if (self.isCancelled()) {
-                    result.cancelled = true;
-                    break;
-                }
-                cursor = item.id;
-                const outcome = self.measure(codecs, item) catch |err| switch (err) {
-                    // Interrupted mid-decode. The partial work is discarded and
-                    // the file is not counted: it was not examined, and the run
-                    // that resumes will select it again.
+            var batch: Batch = .{
+                .pass = self,
+                .codecs = codecs,
+                .items = page.items,
+                .slots = slots[0..page.items.len],
+            };
+            defer batch.deinitSlots(self.allocator);
+            self.measureBatch(&batch, helpers[0..@min(helpers.len, page.items.len - 1)]);
+            try measurements.ensureUnusedCapacity(self.allocator, batch.slots.len);
+            for (batch.slots, page.items) |*slot, item| {
+                const outcome = (slot.* orelse error.Cancelled) catch |err| switch (err) {
+                    // Interrupted mid-decode, or never started. The partial
+                    // work is discarded and the file is not counted: it was
+                    // not examined, and the run that resumes will select it
+                    // again.
                     error.Cancelled => {
                         result.cancelled = true;
-                        break;
+                        continue;
                     },
                     else => return err,
                 };
+                slot.* = null;
                 result.files_seen += 1;
-                if (self.progress) |counter| counter.store(result.files_seen, .release);
-                errdefer outcome.deinit(self.allocator);
-                try measurements.append(
-                    self.allocator,
-                    .{ .file_id = item.id, .outcome = outcome },
-                );
+                measurements.appendAssumeCapacity(.{ .file_id = item.id, .outcome = outcome });
             }
             // A cancelled run still commits what it already measured. Losing a
             // decoded file to a cancellation that arrived a moment later would
@@ -212,11 +288,26 @@ pub const LibraryAnalysis = struct {
         return token.isCancelled();
     }
 
-    /// Decodes one file end to end. Never holds the write lane: this is the
-    /// slow half, and parking every reader of the Library behind it for the
-    /// length of a song would be indistinguishable from a hang.
+    /// Measures a batch on this thread and `helpers.len` more, and returns once
+    /// every thread that started has been joined. A thread that fails to
+    /// start leaves its share to the others.
+    fn measureBatch(self: *const LibraryAnalysis, batch: *Batch, helpers: []std.Thread) void {
+        var started: usize = 0;
+        defer for (helpers[0..started]) |thread| thread.join();
+        for (helpers) |*thread| {
+            thread.* = std.Thread.spawn(.{}, Batch.helper, .{batch}) catch break;
+            started += 1;
+        }
+        batch.work(self.io);
+    }
+
+    /// Decodes one file end to end, on whichever thread claimed it, so it
+    /// touches no SQLite. Never holds the write lane: this is the slow half,
+    /// and parking every reader of the Library behind it for the length of a
+    /// song would be indistinguishable from a hang.
     fn measure(
-        self: *LibraryAnalysis,
+        self: *const LibraryAnalysis,
+        io: std.Io,
         codecs: *const codec.CodecRegistry,
         candidate: database.repository.AnalysisCandidate,
     ) !Measurement.Outcome {
@@ -229,7 +320,7 @@ pub const LibraryAnalysis = struct {
         // 64 KiB reads decline it instead, and a scan is the pass that repairs
         // the record.
         {
-            var local = storage.LocalFileSource.open(self.io, candidate.uri) catch
+            var local = storage.LocalFileSource.open(io, candidate.uri) catch
                 return .skipped;
             defer local.close();
             const observed = quick_hash.fromSource(local.readable()) catch return .skipped;
@@ -238,7 +329,7 @@ pub const LibraryAnalysis = struct {
 
         const service: analysis.service.Service = .{
             .allocator = self.allocator,
-            .io = self.io,
+            .io = io,
             .codecs = codecs,
             // No cache: this pass owns the write, and it commits a whole batch
             // of results, identities and health together rather than letting
@@ -274,10 +365,16 @@ pub const LibraryAnalysis = struct {
             self.allocator,
             measured.fingerprint,
         );
+        errdefer self.allocator.free(fingerprint_bytes);
+        const chromaprint_bytes = if (measured.chromaprint) |value|
+            try value.encode(self.allocator)
+        else
+            null;
         return .{ .measured = .{
             .source_identity = measured.source_identity,
             .diagnostics_bytes = diagnostics_bytes,
             .fingerprint_bytes = fingerprint_bytes,
+            .chromaprint_bytes = chromaprint_bytes,
             .audio_hash = measured.fingerprint.decoded_audio_hash,
             .has_loudness = measured.diagnostics.replay_gain_db != null,
         } };
@@ -311,6 +408,13 @@ pub const LibraryAnalysis = struct {
                     ),
                     value.fingerprint_bytes,
                 );
+                if (value.chromaprint_bytes) |bytes| {
+                    try self.analysis_cache.putLocked(
+                        analysis.chromaprint.cacheKey(measurement.file_id, value.source_identity, .{}),
+                        bytes,
+                    );
+                    result.bytes_stored += bytes.len;
+                }
                 try self.files.setAudioHashLocked(measurement.file_id, &value.audio_hash);
                 // Safe to retire: only a pass that decoded the whole stream
                 // may raise or clear this kind, and this is that pass.
@@ -595,15 +699,14 @@ test "an analysis pass counts a file that is not there without reporting it as a
 /// write them, and must not count the file it abandoned mid-decode.
 const InterruptingCodec = struct {
     var token: ?*CancellationToken = null;
-    var opens: usize = 0;
+    var opens: std.atomic.Value(usize) = .init(0);
     var cancel_at: usize = 0;
 
     fn open(
         allocator: std.mem.Allocator,
         source: storage.ReadableSource,
     ) anyerror!codec.Decoder {
-        opens += 1;
-        if (opens >= cancel_at) {
+        if (opens.fetchAdd(1, .acq_rel) + 1 >= cancel_at) {
             if (token) |requested| requested.cancel();
         }
         return codec.flac.openDecoder(allocator, source);
@@ -611,7 +714,7 @@ const InterruptingCodec = struct {
 
     fn registry(stop: *CancellationToken, after: usize) codec.CodecRegistry {
         token = stop;
-        opens = 0;
+        opens.store(0, .release);
         cancel_at = after;
         var codecs: codec.CodecRegistry = .{};
         codecs.register(.{
@@ -623,25 +726,38 @@ const InterruptingCodec = struct {
     }
 };
 
-/// A decoder that records how many files were actually opened for decoding.
+/// Decoders that record how many files were actually opened for decoding.
 const CountingCodec = struct {
-    var opens: usize = 0;
+    var opens: std.atomic.Value(usize) = .init(0);
 
-    fn open(
+    fn openFlac(
         allocator: std.mem.Allocator,
         source: storage.ReadableSource,
     ) anyerror!codec.Decoder {
-        opens += 1;
+        _ = opens.fetchAdd(1, .acq_rel);
         return codec.flac.openDecoder(allocator, source);
     }
 
+    fn openMp3(
+        allocator: std.mem.Allocator,
+        source: storage.ReadableSource,
+    ) anyerror!codec.Decoder {
+        _ = opens.fetchAdd(1, .acq_rel);
+        return codec.mp3.openDecoder(allocator, source);
+    }
+
     fn registry() codec.CodecRegistry {
-        opens = 0;
+        opens.store(0, .release);
         var codecs: codec.CodecRegistry = .{};
         codecs.register(.{
             .name = "counting FLAC",
             .format = .flac,
-            .open = open,
+            .open = openFlac,
+        }) catch unreachable;
+        codecs.register(.{
+            .name = "counting MPEG Audio",
+            .format = .mp3,
+            .open = openMp3,
         }) catch unreachable;
         return codecs;
     }
@@ -667,7 +783,7 @@ test "a file whose recorded identity is stale is declined before it is decoded" 
     try testing.expectEqual(@as(u64, 2), result.files_seen);
     try testing.expectEqual(@as(u64, 1), result.unsupported);
     try testing.expectEqual(@as(u64, 1), result.changed + result.unchanged);
-    try testing.expectEqual(@as(usize, 1), CountingCodec.opens);
+    try testing.expectEqual(@as(usize, 1), CountingCodec.opens.load(.acquire));
 }
 
 test "an interrupted analysis commits what it measured and resumes at the rest" {
@@ -695,6 +811,7 @@ test "an interrupted analysis commits what it measured and resumes at the rest" 
     var first = fixture.pass();
     first.cancellation = &token;
     first.codecs = &codecs;
+    first.threads = 1;
     const interrupted = try first.run();
     try testing.expect(interrupted.cancelled);
     try testing.expectEqual(@as(u64, 2), interrupted.files_seen);
@@ -756,4 +873,172 @@ test "a file whose bytes changed is measured again once a scan has recorded them
     const again = try pass.run();
     try testing.expectEqual(@as(u64, 1), again.files_seen);
     try testing.expectEqual(@as(u64, 1), again.changed + again.unchanged);
+}
+
+test "a parallel analysis interrupted part way commits what finished and resumes at the rest" {
+    var fixture = try Fixture.init("file:orca-analysis-parallel-resume?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        testing.io,
+        "fixtures/audio/generated-reference.flac",
+        testing.allocator,
+        .limited(8 * 1024 * 1024),
+    );
+    defer testing.allocator.free(bytes);
+    const total = 12;
+    for (0..total) |index| {
+        const name = try std.fmt.allocPrint(testing.allocator, "copy-{d}.flac", .{index});
+        defer testing.allocator.free(name);
+        try fixture.writeBytes(name, bytes);
+        _ = try fixture.record(name);
+    }
+
+    var token: CancellationToken = .{};
+    const codecs = InterruptingCodec.registry(&token, 5);
+    var first = fixture.pass();
+    first.cancellation = &token;
+    first.codecs = &codecs;
+    first.threads = 4;
+    var progress: std.atomic.Value(u64) = .init(0);
+    first.progress = &progress;
+    const interrupted = try first.run();
+    try testing.expect(interrupted.cancelled);
+    try testing.expect(interrupted.files_seen < total);
+    try testing.expectEqual(interrupted.files_seen, progress.load(.acquire));
+    try testing.expectEqual(@as(i64, @intCast(interrupted.files_seen)), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM analysis_results WHERE kind = 1;",
+    ));
+
+    var second = fixture.pass();
+    second.threads = 4;
+    const resumed = try second.run();
+    try testing.expect(!resumed.cancelled);
+    try testing.expectEqual(@as(u64, total), interrupted.files_seen + resumed.files_seen);
+    try testing.expectEqual(@as(u64, 0), try fixture.library.files.unanalyzedCount(
+        second.selector(),
+    ));
+}
+
+const parity_audio = "fixtures/audio/chromaprint-test.mp3";
+
+fn expectSameRows(
+    first: database.sqlite.Database,
+    second: database.sqlite.Database,
+    sql: [:0]const u8,
+    columns: c_int,
+) !usize {
+    var first_rows = try first.prepare(sql);
+    defer first_rows.deinit();
+    var second_rows = try second.prepare(sql);
+    defer second_rows.deinit();
+    var rows: usize = 0;
+    while (true) {
+        const step = try first_rows.step();
+        try testing.expectEqual(step, try second_rows.step());
+        if (step == .done) return rows;
+        rows += 1;
+        var column: c_int = 0;
+        while (column < columns) : (column += 1) try testing.expectEqualSlices(
+            u8,
+            first_rows.columnBlob(column),
+            second_rows.columnBlob(column),
+        );
+    }
+}
+
+test "measuring on four threads stores exactly what measuring on one thread stores" {
+    const names = [_][]const u8{
+        "generated-reference.flac",
+        "generated-reference.qoa",
+        "chromaprint-test.mp3",
+        "midside-reference.flac",
+        "stereo-reference.qoa",
+        "tagged-reference.ogg",
+        "tagged-reference.opus",
+        "generated-reference.wav",
+        "tagged-reference-aac.m4a",
+        "tagged-reference-alac.m4a",
+        "tagged-reference.mp3",
+        "tagged-reference.aiff",
+    };
+    var sequential = try Fixture.init("file:orca-analysis-sequential?mode=memory&cache=shared");
+    defer sequential.deinit();
+    var parallel = try Fixture.init("file:orca-analysis-parallel?mode=memory&cache=shared");
+    defer parallel.deinit();
+    for (names) |name| {
+        try sequential.copyFixture(name, name);
+        _ = try sequential.record(name);
+        try parallel.copyFixture(name, name);
+        _ = try parallel.record(name);
+    }
+
+    var one = sequential.pass();
+    one.threads = 1;
+    var four = parallel.pass();
+    four.threads = 4;
+    const one_result = try one.run();
+    const four_result = try four.run();
+    try testing.expectEqual(one_result, four_result);
+    try testing.expectEqual(@as(u64, names.len), four_result.changed + four_result.unchanged);
+
+    const stored = try expectSameRows(
+        sequential.library.database,
+        parallel.library.database,
+        "SELECT file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result " ++
+            "FROM analysis_results ORDER BY file_id, kind;",
+        7,
+    );
+    try testing.expect(stored > 2 * names.len);
+    _ = try expectSameRows(
+        sequential.library.database,
+        parallel.library.database,
+        "SELECT id, audio_hash FROM files ORDER BY id;",
+        2,
+    );
+}
+
+test "the pass stores the AcoustID fingerprint, so taking it again decodes nothing" {
+    var fixture = try Fixture.init("file:orca-analysis-chromaprint?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.copyFixture("chromaprint-test.mp3", "song.mp3");
+    try fixture.copyFixture("generated-reference.qoa", "blip.qoa");
+    const song = try fixture.record("song.mp3");
+    _ = try fixture.record("blip.qoa");
+
+    var pass = fixture.pass();
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 2), result.changed + result.unchanged);
+    // Too short to fingerprint, and measured all the same.
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        fixture.library.database,
+        "SELECT count(*) FROM analysis_results WHERE kind = 3;",
+    ));
+
+    const uri = try fixture.path("song.mp3");
+    defer testing.allocator.free(uri);
+    const codecs = CountingCodec.registry();
+    const fingerprinter: analysis.chromaprint.Fingerprinter = .{
+        .allocator = testing.allocator,
+        .io = testing.io,
+        .codecs = &codecs,
+        .cache = &fixture.library.analysis_cache,
+    };
+    const cached = try fingerprinter.fingerprintFile(song, uri);
+    defer cached.fingerprint.deinit();
+    try testing.expect(cached.cache_hit);
+    try testing.expectEqual(@as(usize, 0), CountingCodec.opens.load(.acquire));
+
+    const fresh = try fingerprinter.fingerprintFile(null, parity_audio);
+    defer fresh.fingerprint.deinit();
+    try testing.expectEqualStrings(fresh.fingerprint.encoded, cached.fingerprint.encoded);
+    try testing.expectEqual(fresh.fingerprint.duration_ms, cached.fingerprint.duration_ms);
+}
+
+test "an analysis refuses zero threads" {
+    var fixture = try Fixture.init("file:orca-analysis-zero-threads?mode=memory&cache=shared");
+    defer fixture.deinit();
+    var pass = fixture.pass();
+    pass.threads = 0;
+    try testing.expectError(error.InvalidThreadCount, pass.run());
 }

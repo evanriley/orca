@@ -3,10 +3,10 @@
 //! Only choices a host keeps for itself live here: which output to open, the
 //! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
-//! Accept Confident takes, whether matching uses audio fingerprints, and
-//! whether the music folders are watched. Nothing about the library does, and
-//! never the ListenBrainz token or the AcoustID key, which live in the Secret
-//! Service.
+//! Accept Confident takes, whether matching uses audio fingerprints, whether
+//! the music folders are watched, and how many files Measure Loudness decodes
+//! at once. Nothing about the library does, and never the ListenBrainz token
+//! or the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -76,6 +76,12 @@ fn parseThreshold(text: []const u8) ?u8 {
     const percent = std.fmt.parseInt(u8, std.mem.trim(u8, text, " "), 10) catch return null;
     if (percent < threshold_range[0] or percent > threshold_range[1]) return null;
     return percent;
+}
+
+/// A thread count of at least 1, or null.
+fn parseThreads(text: []const u8) ?u16 {
+    const threads = std.fmt.parseInt(u16, std.mem.trim(u8, text, " "), 10) catch return null;
+    return if (threads == 0) null else threads;
 }
 
 fn isEnabled(flag: ?[]const u8) bool {
@@ -148,6 +154,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.watch_folders = isEnabled(std.mem.span(value));
     }
+    if (getString(keys, "library", "analysis_threads")) |value| {
+        defer gtk.g_free(value);
+        self.analysis_threads = parseThreads(std.mem.span(value));
+    }
     if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
         defer gtk.g_free(value);
         self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
@@ -177,6 +187,10 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "matching", "accept_confidence", strings.format(&threshold_buffer, "{d}", .{self.match_threshold_percent}).ptr);
     gtk.g_key_file_set_string(keys, "matching", "fingerprints", if (self.match_fingerprints) "true" else "false");
     gtk.g_key_file_set_string(keys, "library", "watch", if (self.watch_folders) "true" else "false");
+    if (self.analysis_threads) |threads| {
+        var threads_buffer: [8]u8 = undefined;
+        gtk.g_key_file_set_string(keys, "library", "analysis_threads", strings.format(&threads_buffer, "{d}", .{threads}).ptr);
+    }
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

@@ -33,7 +33,11 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_start_projection` reprojects without a walk.
   `orca_library_start_reconcile` walks only the given directories of one
   root, or the whole root when given none, and reports as
-  `ORCA_JOB_KIND_RECONCILE`.
+  `ORCA_JOB_KIND_RECONCILE`. `orca_library_start_analysis` measures the files
+  not measured yet, `orca_analysis_options.threads` at once; zero takes
+  `orca_analysis_default_threads()`, one fewer than
+  `orca_analysis_available_threads()`. See
+  [analysis.md](analysis.md#threads).
 - **Watching.** `orca_library_watch` watches a Library's roots, with an
   `orca_watch_options` or NULL for the defaults, and returns
   `ORCA_STATUS_UNSUPPORTED` off Linux; `orca_library_unwatch` stops it and

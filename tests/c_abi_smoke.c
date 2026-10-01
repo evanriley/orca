@@ -616,6 +616,10 @@ int main(void) {
     orca_analysis_options analysis_options;
     memset(&analysis_options, 0, sizeof analysis_options);
     analysis_options.batch_size = 4;
+    analysis_options.threads = 2;
+    if (orca_analysis_available_threads() == 0) return 203;
+    if (orca_analysis_default_threads() == 0) return 204;
+    if (orca_analysis_default_threads() > orca_analysis_available_threads()) return 205;
     if (orca_library_start_analysis(runtime, library, &analysis_options, &analysis_job) !=
         ORCA_STATUS_OK)
         return 150;

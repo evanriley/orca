@@ -148,6 +148,12 @@ pub const ReconcileRequest = runtime.ReconcileRequest;
 pub const ReconcileScope = runtime.ReconcileScope;
 pub const BackfillRequest = runtime.BackfillRequest;
 pub const AnalysisRequest = runtime.AnalysisRequest;
+/// Logical processors: the most `AnalysisRequest.threads` that can each have
+/// one of their own.
+pub const analysisAvailableThreads = internal.library.analysis_pass.availableThreads;
+/// What a null `AnalysisRequest.threads` takes: one fewer than
+/// `analysisAvailableThreads`, and at least 1.
+pub const analysisDefaultThreads = internal.library.analysis_pass.defaultThreads;
 pub const DuplicateScanRequest = runtime.DuplicateScanRequest;
 pub const ScanStats = runtime.ScanStats;
 pub const JobSnapshot = job.Snapshot;

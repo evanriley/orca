@@ -6,6 +6,21 @@ Ships Library schema version 20.
 
 ### Added
 
+- **The analysis decodes on a pool of threads.** `AnalysisRequest.threads`
+  sets how many files of a batch are decoded at once; unset, it takes
+  `analysisDefaultThreads()`, one fewer than `analysisAvailableThreads()`,
+  the logical processors. `orca_analysis_options.threads` (zero for the
+  default), `orca_analysis_default_threads()` and
+  `orca_analysis_available_threads()` reach them through the C ABI, and
+  `orca-cli analyze-library --threads=N` and an Analysis threads row in
+  `orca-gtk`'s Preferences, saved in `settings.ini`, set them. The stored
+  results are the same at any thread count.
+- **The analysis stores each file's AcoustID fingerprint.** The new streaming
+  `chromaprint.Analyzer` takes it in the same decode as the loudness, so
+  matching and AcoustID submission find it cached instead of decoding the
+  file again. `FileAnalysis.chromaprint` holds it, null for audio too short
+  to fingerprint, and `orca-cli analyze` prints `chromaprint=yes|no`.
+
 - **Match Album and Cover Art Archive covers.** `MatchRequest.release_id`
   limits matching to one Release; with it, `accept_minimum_confidence`
   accepts that Release's confident matches and `cover_art` fetches its front
@@ -32,6 +47,16 @@ Ships Library schema version 20.
 - **`nix flake check` builds the package, runs `zig fmt --check` and
   evaluates the NixOS module.**
 - The dev shell provides Python, `ffprobe` and the `sqlite3` shell.
+
+### Changed
+
+- **Breaking (Zig API): the analysis no longer hashes the whole file.** It
+  read every file a second time for a BLAKE3 hash nothing used.
+  `FileAnalysis.fingerprint.source_hash` and `DuplicateKind.exact_file` are
+  gone; a stored temporal fingerprint keeps its layout, with the hash's bytes
+  written as zeros.
+- `orca-cli analyze-library` runs on `std.heap.smp_allocator` rather than
+  the process arena, which kept every decoded file's buffers until it exited.
 
 ### Fixed
 

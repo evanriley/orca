@@ -8,7 +8,6 @@ pub const Result = struct {
     signatures: []u16,
     digest: [32]u8,
     decoded_audio_hash: [32]u8,
-    source_hash: ?[32]u8 = null,
 
     pub fn deinit(self: Result) void {
         self.allocator.free(self.signatures);
@@ -128,11 +127,9 @@ pub fn encode(allocator: std.mem.Allocator, result: Result) ![]u8 {
     @memset(bytes, 0);
     @memcpy(bytes[0..4], "ORFP");
     std.mem.writeInt(u16, bytes[4..6], 1, .little);
-    std.mem.writeInt(u16, bytes[6..8], if (result.source_hash != null) 1 else 0, .little);
     std.mem.writeInt(u32, bytes[8..12], @intCast(result.signatures.len), .little);
     @memcpy(bytes[12..44], &result.digest);
     @memcpy(bytes[44..76], &result.decoded_audio_hash);
-    if (result.source_hash) |source_hash| @memcpy(bytes[76..108], &source_hash);
     for (result.signatures, 0..) |signature, index|
         std.mem.writeInt(u16, bytes[encoded_header_size + index * 2 ..][0..2], signature, .little);
     return bytes;
@@ -162,10 +159,6 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !Result {
         .signatures = signatures,
         .digest = bytes[12..44].*,
         .decoded_audio_hash = bytes[44..76].*,
-        .source_hash = if (std.mem.readInt(u16, bytes[6..8], .little) & 1 != 0)
-            bytes[76..108].*
-        else
-            null,
     };
 }
 
@@ -186,7 +179,7 @@ pub fn similarity(first: []const u16, second: []const u16) f32 {
         @as(f64, @floatFromInt(longer * 60)));
 }
 
-pub const DuplicateKind = enum { none, likely_recording, exact_audio, exact_file };
+pub const DuplicateKind = enum { none, likely_recording, exact_audio };
 
 /// The one pairwise duplicate comparison in the codebase.
 ///
@@ -195,8 +188,6 @@ pub const DuplicateKind = enum { none, likely_recording, exact_audio, exact_file
 /// candidates by decoded-audio hash and by duration and calls this only inside
 /// a bucket bounded by a constant.
 pub fn classifyDuplicate(first: Result, second: Result, likely_threshold: f32) DuplicateKind {
-    if (first.source_hash != null and second.source_hash != null and
-        std.mem.eql(u8, &first.source_hash.?, &second.source_hash.?)) return .exact_file;
     if (std.mem.eql(u8, &first.decoded_audio_hash, &second.decoded_audio_hash)) return .exact_audio;
     if (similarity(first.signatures, second.signatures) >= likely_threshold)
         return .likely_recording;

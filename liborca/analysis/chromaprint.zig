@@ -102,6 +102,121 @@ pub const Fingerprint = struct {
 
 const chunk_frames = 4096;
 
+/// Fingerprints interleaved audio fed to it a chunk at a time, so a caller
+/// already decoding a file for something else takes its fingerprint in the
+/// same pass. Frames past the window are ignored.
+pub const Analyzer = struct {
+    allocator: std.mem.Allocator,
+    context: *anyopaque,
+    converter: ?resampler.SampleRate,
+    channels: usize,
+    sample_rate: u32,
+    window_frames: u64,
+    frames_fed: u64 = 0,
+    mono: []f32,
+    resampled: []f32,
+    samples: []i16,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        sample_rate: u32,
+        channels: u16,
+        parameters: Parameters,
+    ) !Analyzer {
+        if (channels == 0 or sample_rate == 0) return error.InvalidAudioFormat;
+        const target_rate = orca_chromaprint_sample_rate;
+
+        const context = orca_chromaprint_create(@intFromEnum(parameters.algorithm)) orelse
+            return error.FingerprinterUnavailable;
+        errdefer orca_chromaprint_destroy(context);
+        if (orca_chromaprint_start(context, 1) != 0) return error.FingerprinterUnavailable;
+
+        var converter: ?resampler.SampleRate = if (sample_rate == target_rate)
+            null
+        else
+            try resampler.SampleRate.init(parameters.converter, sample_rate, target_rate, 1);
+        errdefer if (converter) |*value| value.deinit();
+
+        const mono = try allocator.alloc(f32, chunk_frames);
+        errdefer allocator.free(mono);
+        const resampled_capacity = chunk_frames * @as(usize, target_rate) / sample_rate + 64;
+        const resampled = try allocator.alloc(f32, resampled_capacity);
+        errdefer allocator.free(resampled);
+        const samples = try allocator.alloc(i16, resampled_capacity);
+        return .{
+            .allocator = allocator,
+            .context = context,
+            .converter = converter,
+            .channels = channels,
+            .sample_rate = sample_rate,
+            .window_frames = @as(u64, parameters.max_seconds) * sample_rate,
+            .mono = mono,
+            .resampled = resampled,
+            .samples = samples,
+        };
+    }
+
+    pub fn deinit(self: *Analyzer) void {
+        if (self.converter) |*value| value.deinit();
+        orca_chromaprint_destroy(self.context);
+        self.allocator.free(self.samples);
+        self.allocator.free(self.resampled);
+        self.allocator.free(self.mono);
+        self.* = undefined;
+    }
+
+    fn windowFull(self: *const Analyzer) bool {
+        return self.frames_fed >= self.window_frames;
+    }
+
+    pub fn process(self: *Analyzer, interleaved: []const f32) !void {
+        if (interleaved.len % self.channels != 0) return error.IncompleteAudioFrame;
+        const frames = interleaved.len / self.channels;
+        var offset: usize = 0;
+        while (offset < frames and !self.windowFull()) {
+            const take: usize = @intCast(@min(chunk_frames, frames - offset, self.window_frames - self.frames_fed));
+            const mono = self.mono[0..take];
+            downmix(interleaved[offset * self.channels ..][0 .. take * self.channels], self.channels, mono);
+            if (self.converter) |*value| {
+                try resampleInto(self.context, value, mono, self.resampled, self.samples, false);
+            } else {
+                try feed(self.context, mono, self.samples);
+            }
+            self.frames_fed += take;
+            offset += take;
+        }
+    }
+
+    /// `total_frames` is how many frames the caller has counted in the whole
+    /// stream and `declared_frames` what the container declares. Below a full
+    /// window the frames fed are the whole stream; past it the length is the
+    /// larger of the two, or the count alone when nothing is declared.
+    pub fn finish(self: *Analyzer, total_frames: u64, declared_frames: ?u64) !Fingerprint {
+        if (self.converter) |*value| try resampleInto(self.context, value, &.{}, self.resampled, self.samples, true);
+        if (orca_chromaprint_finish(self.context) != 0) return error.FingerprintFailed;
+
+        const length_frames = if (!self.windowFull())
+            self.frames_fed
+        else if (declared_frames) |declared|
+            @max(declared, total_frames)
+        else
+            total_frames;
+        const duration_ms = length_frames * 1000 / self.sample_rate;
+        if ((duration_ms + 500) / 1000 == 0) return error.AudioTooShortToFingerprint;
+
+        var encoded: ?[*:0]u8 = null;
+        var raw_size: u32 = 0;
+        if (orca_chromaprint_fingerprint(self.context, &encoded, &raw_size) != 0) return error.FingerprintFailed;
+        defer orca_chromaprint_release(encoded);
+        if (raw_size == 0) return error.AudioTooShortToFingerprint;
+        return .{
+            .allocator = self.allocator,
+            .encoded = try self.allocator.dupe(u8, std.mem.span(encoded.?)),
+            .duration_ms = duration_ms,
+        };
+    }
+};
+
 /// Fingerprints what `decoder` produces from its current position. Any decode
 /// error fails the whole fingerprint: a partial one is never returned.
 pub fn fingerprintDecoder(
@@ -111,67 +226,23 @@ pub fn fingerprintDecoder(
     cancellation: ?*const scanner.CancellationToken,
 ) !Fingerprint {
     const channels: usize = decoder.format.channels;
-    const input_rate = decoder.format.sample_rate;
-    if (channels == 0 or input_rate == 0) return error.InvalidAudioFormat;
-    const target_rate = orca_chromaprint_sample_rate;
-
-    const context = orca_chromaprint_create(@intFromEnum(parameters.algorithm)) orelse
-        return error.FingerprinterUnavailable;
-    defer orca_chromaprint_destroy(context);
-    if (orca_chromaprint_start(context, 1) != 0) return error.FingerprinterUnavailable;
-
-    var converter: ?resampler.SampleRate = if (input_rate == target_rate)
-        null
-    else
-        try resampler.SampleRate.init(parameters.converter, input_rate, target_rate, 1);
-    defer if (converter) |*value| value.deinit();
-
+    var analyzer = try Analyzer.init(allocator, decoder.format.sample_rate, decoder.format.channels, parameters);
+    defer analyzer.deinit();
     const decoded = try allocator.alloc(f32, chunk_frames * channels);
     defer allocator.free(decoded);
-    var mono: [chunk_frames]f32 = undefined;
-    const resampled_capacity = chunk_frames * @as(usize, target_rate) / input_rate + 64;
-    const resampled = try allocator.alloc(f32, resampled_capacity);
-    defer allocator.free(resampled);
-    const samples = try allocator.alloc(i16, resampled_capacity);
-    defer allocator.free(samples);
 
-    const window_frames = @as(u64, parameters.max_seconds) * input_rate;
-    var frames_read: u64 = 0;
-    while (frames_read < window_frames) {
+    while (!analyzer.windowFull()) {
         if (isCancelled(cancellation)) return error.Cancelled;
-        const wanted: usize = @intCast(@min(chunk_frames, window_frames - frames_read));
+        const wanted: usize = @intCast(@min(chunk_frames, analyzer.window_frames - analyzer.frames_fed));
         const frames = try decoder.readFrames(decoded[0 .. wanted * channels]);
         if (frames == 0) break;
-        frames_read += frames;
-        downmix(decoded[0 .. frames * channels], channels, mono[0..frames]);
-        if (converter) |*value| {
-            try resampleInto(context, value, mono[0..frames], resampled, samples, false);
-        } else {
-            try feed(context, mono[0..frames], samples);
-        }
+        try analyzer.process(decoded[0 .. frames * channels]);
     }
-    if (converter) |*value| try resampleInto(context, value, &.{}, resampled, samples, true);
-    if (orca_chromaprint_finish(context) != 0) return error.FingerprintFailed;
-
-    const total_frames = if (frames_read < window_frames)
-        frames_read
-    else if (decoder.frame_count) |declared|
-        @max(declared, frames_read)
+    const total_frames = if (!analyzer.windowFull() or decoder.frame_count != null)
+        analyzer.frames_fed
     else
-        frames_read + try countRemaining(decoder, decoded, cancellation);
-    const duration_ms = total_frames * 1000 / input_rate;
-    if ((duration_ms + 500) / 1000 == 0) return error.AudioTooShortToFingerprint;
-
-    var encoded: ?[*:0]u8 = null;
-    var raw_size: u32 = 0;
-    if (orca_chromaprint_fingerprint(context, &encoded, &raw_size) != 0) return error.FingerprintFailed;
-    defer orca_chromaprint_release(encoded);
-    if (raw_size == 0) return error.AudioTooShortToFingerprint;
-    return .{
-        .allocator = allocator,
-        .encoded = try allocator.dupe(u8, std.mem.span(encoded.?)),
-        .duration_ms = duration_ms,
-    };
+        analyzer.frames_fed + try countRemaining(decoder, decoded, cancellation);
+    return analyzer.finish(total_frames, decoder.frame_count);
 }
 
 fn isCancelled(cancellation: ?*const scanner.CancellationToken) bool {

@@ -260,6 +260,8 @@ pub const App = struct {
 
     preferences_dialog: ?*adw.Dialog = null,
 
+    /// Files Measure Loudness decodes at once; null takes liborca's default.
+    analysis_threads: ?u16 = null,
     watch_folders: bool = true,
     watch_row: ?*gtk.Widget = null,
     watch_status_text: [320]u8 = undefined,
