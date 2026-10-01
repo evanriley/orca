@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-01
+
+Ships Library schema version 26. Run `orca-cli analyze-library`, or Measure
+Loudness in `orca-gtk` Preferences, to measure loudness and ReplayGain again,
+and close every Orca process before upgrading.
+
 ### Added
 
 - **Write Tags to Files from the context menu, with recording IDs.** A track
