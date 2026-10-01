@@ -700,7 +700,7 @@ const CurrentTags = struct {
 fn currentTags(allocator: std.mem.Allocator, loaded: ?LoadedTag, trailer: ?id3v1.Tag) !CurrentTags {
     if (loaded) |tag| {
         const tags = try parseFrames(allocator, tag.span, tag.major);
-        if (!tags.isEmpty()) return .{ .tags = tags, .origin = .id3v2 };
+        if (tags.hasValuesBesidesArtwork()) return .{ .tags = tags, .origin = .id3v2 };
     }
     const legacy = trailer orelse return .{ .tags = .{}, .origin = .none };
     var tags: model.ObservedTags = .{
@@ -1540,4 +1540,49 @@ test "an ID3v2 tag with values of its own gains nothing from the trailer" {
     try std.testing.expectEqualStrings("Tagged", after.title.?);
     try std.testing.expect(after.artist == null);
     try std.testing.expectEqual(@as(usize, 0), after.genres.len);
+}
+
+test "a recording id written to a cover-only ID3v2.3 tag keeps the cover byte for byte and gains the trailer values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cover = try buildFrame(allocator, "APIC", 3, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 3, 0, cover),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+    const before = (try expectTags(allocator, original)).?;
+    try std.testing.expect(!before.hasValuesBesidesArtwork());
+    const recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .musicbrainz_recording_id, .before = null, .after = recording_id },
+    });
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    try std.testing.expectEqualSlices(u8, cover, written[10 .. 10 + cover.len]);
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Song", "1999");
+    try std.testing.expectEqualStrings(recording_id, after.musicbrainz_recording_id.?);
+    try std.testing.expectEqual(@as(u64, 32), after.artwork.?.byte_size);
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+}
+
+test "a title change to a cover-only ID3v2 tag is checked against the trailer title and keeps the other trailer values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const cover = try buildFrame(allocator, "APIC", 4, "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 4, 0, cover),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .title, .before = "Song", .after = "Anthem" },
+    });
+    try expectTrailerValues((try expectTags(allocator, written)).?, "Anthem", "1999");
 }

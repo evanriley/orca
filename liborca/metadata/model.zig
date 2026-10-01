@@ -250,6 +250,12 @@ pub const ObservedTags = struct {
         return true;
     }
 
+    pub fn hasValuesBesidesArtwork(self: ObservedTags) bool {
+        var without_artwork = self;
+        without_artwork.artwork = null;
+        return !without_artwork.isEmpty();
+    }
+
     /// Project the resolution-participating subset onto the layered model.
     pub fn observedFileMetadata(self: ObservedTags) ObservedFileMetadata {
         return .{
@@ -279,4 +285,14 @@ test "observed tags project onto the layered metadata model with file provenance
     try std.testing.expect(observed.album == null);
     try std.testing.expect(!tags.isEmpty());
     try std.testing.expect((ObservedTags{}).isEmpty());
+}
+
+test "artwork alone is not a value besides artwork, while any other field or a genre is" {
+    const cover: Artwork = .{ .mime_type = "image/jpeg", .byte_size = 64, .kind = .front_cover };
+    try std.testing.expect(!(ObservedTags{}).hasValuesBesidesArtwork());
+    try std.testing.expect(!(ObservedTags{ .artwork = cover }).hasValuesBesidesArtwork());
+    try std.testing.expect(!(ObservedTags{ .artwork = cover }).isEmpty());
+    try std.testing.expect((ObservedTags{ .artwork = cover, .title = "Song" }).hasValuesBesidesArtwork());
+    try std.testing.expect((ObservedTags{ .musicbrainz_recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }).hasValuesBesidesArtwork());
+    try std.testing.expect((ObservedTags{ .artwork = cover, .genres = &.{"Rock"} }).hasValuesBesidesArtwork());
 }

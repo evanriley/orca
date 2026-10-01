@@ -67,30 +67,33 @@ fn readValues(
     };
 }
 
-/// ID3v2 is authoritative when present; the 128-byte ID3v1 trailer is only a
-/// fallback, because essentially every tagged MP3 written this century carries
-/// ID3v2 and many carry a stale v1 trailer alongside it.
+/// ID3v2 is authoritative when it holds anything besides a cover; the 128-byte
+/// ID3v1 trailer is only a fallback, because essentially every tagged MP3
+/// written this century carries ID3v2 and many carry a stale v1 trailer
+/// alongside it. A cover-only ID3v2 tag keeps its cover on the trailer's values.
 fn readMpegTags(
     allocator: std.mem.Allocator,
     readable: storage.ReadableSource,
 ) !?metadata.ObservedTags {
-    if (try metadata.id3v2.read(allocator, readable)) |tags| {
-        if (!tags.isEmpty()) return tags;
+    const tagged = try metadata.id3v2.read(allocator, readable);
+    if (tagged) |tags| {
+        if (tags.hasValuesBesidesArtwork()) return tags;
     }
+    var tags: metadata.ObservedTags = .{ .artwork = if (tagged) |cover_only| cover_only.artwork else null };
     var trailer: [128]u8 = undefined;
-    const legacy = try metadata.id3v1.read(readable, &trailer) orelse return null;
-    var tags: metadata.ObservedTags = .{};
-    tags.title = try own(allocator, legacy.title);
-    tags.artist = try own(allocator, legacy.artist);
-    tags.album = try own(allocator, legacy.album);
-    tags.date = try own(allocator, legacy.year);
-    if (legacy.track_number) |number| {
-        if (number != 0) tags.track_number = number;
-    }
-    if (metadata.id3v1.genreName(legacy.genre)) |name| {
-        const genres = try allocator.alloc([]const u8, 1);
-        genres[0] = name;
-        tags.genres = genres;
+    if (try metadata.id3v1.read(readable, &trailer)) |legacy| {
+        tags.title = try own(allocator, legacy.title);
+        tags.artist = try own(allocator, legacy.artist);
+        tags.album = try own(allocator, legacy.album);
+        tags.date = try own(allocator, legacy.year);
+        if (legacy.track_number) |number| {
+            if (number != 0) tags.track_number = number;
+        }
+        if (metadata.id3v1.genreName(legacy.genre)) |name| {
+            const genres = try allocator.alloc([]const u8, 1);
+            genres[0] = name;
+            tags.genres = genres;
+        }
     }
     if (tags.isEmpty()) return null;
     return tags;
@@ -172,6 +175,97 @@ test "MP3 files without ID3v2 fall back to the ID3v1 trailer" {
     try std.testing.expectEqual(@as(?u32, 4), tags.values.track_number);
     try std.testing.expectEqualStrings("1994", tags.values.date.?);
     try std.testing.expectEqualStrings("Metal", tags.values.genres[0]);
+}
+
+fn id3v23Frame(allocator: std.mem.Allocator, identifier: *const [4]u8, payload: []const u8) ![]u8 {
+    const frame = try allocator.alloc(u8, 10 + payload.len);
+    @memcpy(frame[0..4], identifier);
+    std.mem.writeInt(u32, frame[4..8], @intCast(payload.len), .big);
+    frame[8] = 0;
+    frame[9] = 0;
+    @memcpy(frame[10..], payload);
+    return frame;
+}
+
+fn mpegStream(allocator: std.mem.Allocator, frames: []const []const u8, trailer: ?[128]u8) ![]u8 {
+    const body = try std.mem.concat(allocator, u8, frames);
+    var header: [10]u8 = .{ 'I', 'D', '3', 3, 0, 0, 0, 0, 0, 0 };
+    const length: u32 = @intCast(body.len);
+    header[6] = @intCast((length >> 21) & 0x7f);
+    header[7] = @intCast((length >> 14) & 0x7f);
+    header[8] = @intCast((length >> 7) & 0x7f);
+    header[9] = @intCast(length & 0x7f);
+    const legacy: []const u8 = if (trailer != null) &trailer.? else "";
+    return std.mem.concat(allocator, u8, &.{ &header, body, "\xff\xfb\x90\x64audio", legacy });
+}
+
+fn frontCover(allocator: std.mem.Allocator) ![]u8 {
+    return id3v23Frame(allocator, "APIC", "\x00image/png\x00\x03\x00" ++ "\x5a" ** 32);
+}
+
+fn songTrailer() ![128]u8 {
+    return metadata.id3v1.encode(.{
+        .title = "Song",
+        .artist = "Band",
+        .album = "Record",
+        .year = "1999",
+        .comment = "",
+        .track_number = 3,
+        .genre = 17,
+    });
+}
+
+test "an MP3 whose ID3v2 tag holds only a cover reads the ID3v1 trailer's values and keeps the cover" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const bytes = try mpegStream(allocator, &.{try frontCover(allocator)}, try songTrailer());
+
+    var memory = storage.MemorySource{ .bytes = bytes };
+    const tags = (try read(std.testing.allocator, .mp3, memory.readable())).?;
+    defer tags.deinit();
+
+    try std.testing.expectEqualStrings("Song", tags.values.title.?);
+    try std.testing.expectEqualStrings("Band", tags.values.artist.?);
+    try std.testing.expectEqualStrings("Record", tags.values.album.?);
+    try std.testing.expectEqualStrings("1999", tags.values.date.?);
+    try std.testing.expectEqual(@as(?u32, 3), tags.values.track_number);
+    try std.testing.expectEqualStrings("Rock", tags.values.genres[0]);
+    try std.testing.expectEqualStrings("image/png", tags.values.artwork.?.mime_type);
+    try std.testing.expectEqual(@as(u64, 32), tags.values.artwork.?.byte_size);
+    try std.testing.expectEqual(metadata.ArtworkKind.front_cover, tags.values.artwork.?.kind);
+}
+
+test "an MP3 whose ID3v2 tag holds only a cover and no trailer observes the cover alone" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const bytes = try mpegStream(allocator, &.{try frontCover(allocator)}, null);
+
+    var memory = storage.MemorySource{ .bytes = bytes };
+    const tags = (try read(std.testing.allocator, .mp3, memory.readable())).?;
+    defer tags.deinit();
+
+    try std.testing.expect(tags.values.title == null);
+    try std.testing.expect(!tags.values.hasValuesBesidesArtwork());
+    try std.testing.expectEqual(@as(u64, 32), tags.values.artwork.?.byte_size);
+}
+
+test "an MP3 whose ID3v2 tag has a cover and any other value ignores the trailer" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const ufid = try id3v23Frame(allocator, "UFID", "http://musicbrainz.org\x008f3471b5-7e6a-48da-86a9-c1c07a0f5b4a");
+    const title = try id3v23Frame(allocator, "TIT2", "\x00Tagged");
+    for ([_][]const u8{ ufid, title }) |frame| {
+        const bytes = try mpegStream(allocator, &.{ try frontCover(allocator), frame }, try songTrailer());
+        var memory = storage.MemorySource{ .bytes = bytes };
+        const tags = (try read(std.testing.allocator, .mp3, memory.readable())).?;
+        defer tags.deinit();
+        try std.testing.expect(tags.values.artist == null);
+        try std.testing.expectEqual(@as(usize, 0), tags.values.genres.len);
+        try std.testing.expectEqual(@as(u64, 32), tags.values.artwork.?.byte_size);
+    }
 }
 
 test "untagged and unsupported files observe no tags rather than failing" {

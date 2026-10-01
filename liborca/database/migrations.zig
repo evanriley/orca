@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 21;
+pub const current_version = 22;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -944,6 +944,29 @@ const migration_21 =
     \\ALTER TABLE orca_metadata_values ADD COLUMN written_at INTEGER;
 ;
 
+const migration_22 =
+    \\UPDATE locations SET modified_ns = -1
+    \\WHERE state = 'present' AND file_id IN (
+    \\    SELECT file_id FROM observed_file_tags AS observed
+    \\    WHERE artwork_byte_size IS NOT NULL
+    \\      AND title IS NULL AND artist IS NULL AND album IS NULL
+    \\      AND album_artist IS NULL AND composer IS NULL
+    \\      AND track_number IS NULL AND track_total IS NULL
+    \\      AND disc_number IS NULL AND disc_total IS NULL
+    \\      AND date IS NULL AND original_date IS NULL AND compilation IS NULL
+    \\      AND label IS NULL AND media IS NULL AND isrc IS NULL
+    \\      AND release_country IS NULL AND release_type IS NULL
+    \\      AND release_status IS NULL
+    \\      AND musicbrainz_recording_id IS NULL AND musicbrainz_release_id IS NULL
+    \\      AND musicbrainz_release_group_id IS NULL
+    \\      AND musicbrainz_release_track_id IS NULL
+    \\      AND musicbrainz_artist_id IS NULL AND musicbrainz_album_artist_id IS NULL
+    \\      AND NOT EXISTS (
+    \\          SELECT 1 FROM observed_file_genres AS genre WHERE genre.file_id = observed.file_id
+    \\      )
+    \\);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1089,6 +1112,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 19 and target_version >= 19) try db.exec(migration_19);
     if (version < 20 and target_version >= 20) try db.exec(migration_20);
     if (version < 21 and target_version >= 21) try db.exec(migration_21);
+    if (version < 22 and target_version >= 22) try db.exec(migration_22);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -1923,5 +1947,55 @@ test "a version-20 library gains a write time on Orca's values, unset for every 
 
     try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM orca_metadata_values WHERE written_at IS NULL;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-21 library re-observes present files whose tags held only a cover" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "cover-only.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 21);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10), (3, 1, 10), (4, 1, 10), (5, 1, 10);
+        \\INSERT INTO locations(file_id, volume_id, uri, native_inode, size_bytes, modified_ns, state) VALUES
+        \\    (1, 1, '/m/cover-only.mp3', 11, 10, 500, 'present'),
+        \\    (2, 1, '/m/titled.mp3', 12, 10, 500, 'present'),
+        \\    (3, 1, '/m/gone.mp3', 13, 10, 500, 'missing'),
+        \\    (4, 1, '/m/genre.mp3', 14, 10, 500, 'present'),
+        \\    (5, 1, '/m/untagged.mp3', 15, 10, 500, 'present');
+        \\INSERT INTO observed_file_tags(file_id, title, artwork_mime_type, artwork_byte_size, artwork_kind) VALUES
+        \\    (1, NULL, 'image/jpeg', 2048, 3),
+        \\    (2, 'Song', 'image/jpeg', 2048, 3),
+        \\    (3, NULL, 'image/jpeg', 2048, 3),
+        \\    (4, NULL, 'image/jpeg', 2048, 3);
+        \\INSERT INTO observed_file_genres(file_id, ordinal, value) VALUES (4, 0, 'Rock');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    var write_lane: repository.WriteLane = .{ .io = std.testing.io };
+    const locations: repository.LocationRepository = .{ .db = db, .write_lane = &write_lane };
+    const cases = [_]struct { uri: []const u8, inode: i64, unchanged: bool }{
+        .{ .uri = "/m/cover-only.mp3", .inode = 11, .unchanged = false },
+        .{ .uri = "/m/titled.mp3", .inode = 12, .unchanged = true },
+        .{ .uri = "/m/genre.mp3", .inode = 14, .unchanged = true },
+        .{ .uri = "/m/untagged.mp3", .inode = 15, .unchanged = true },
+    };
+    for (cases) |case| {
+        const found = try locations.unchangedLocationId(1, case.uri, .{
+            .volume_id = 1,
+            .native_inode = case.inode,
+            .size_bytes = 10,
+            .modified_ns = 500,
+        });
+        try std.testing.expectEqual(case.unchanged, found != null);
+    }
+    try std.testing.expectEqual(@as(i64, 500), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 3;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM locations WHERE modified_ns <> 500;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM observed_file_tags;"));
     try checkForeignKeys(db);
 }

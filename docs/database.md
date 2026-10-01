@@ -231,6 +231,14 @@ locations is a journaled `stage_path`, `backup_path` or
 and Artists left without Tracks, and journal rows that named it keep their paths
 with `file_id` set to NULL, as `remove-root` leaves them.
 
+Migration 22 sets `modified_ns` to -1 on the present locations of files whose
+`observed_file_tags` row holds artwork and nothing else, with no
+`observed_file_genres` rows. No file has that modification time, so the next
+scan, reconcile or watch pass re-observes them: an ID3v2 tag holding only a
+cover was read in preference to the file's ID3v1 trailer or `LIST`/`INFO`
+chunk, and now the cover is kept on those values. File rows, quick hashes and
+Orca's values are left alone.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the

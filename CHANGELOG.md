@@ -28,6 +28,9 @@
   when a tag write put a value into its file, so a recording ID Orca wrote
   stays eligible for AcoustID submission; IDs Orca did not choose are still
   never sent.
+- **Library schema version 22.** Files observed with a cover and no other
+  tag value are re-read by the next scan, reconcile or watch pass, so a
+  library scanned before the fix below gains their trailer and INFO values.
 
 - **Accept Confident takes each file's best match.** Before, a file's match
   was accepted in bulk only when it was the file's one pending proposal at the
@@ -54,6 +57,12 @@
   ID3v2 first, so the file lost its title, artist, album, year, track and
   genre. The trailer's values are now written into the new tag too, unless a
   change replaces them.
+- **An MP3, ADTS, WAV or AIFF file whose ID3v2 tag holds only a cover shows
+  its ID3v1 or `LIST`/`INFO` values.** The cover counted as a tag value, so
+  the ID3v2 tag was read in preference to the trailer or INFO chunk and the
+  file had no title, artist, album, year, track or genre. Such a tag now
+  falls back to them and keeps its cover, and a tag write to it carries the
+  trailer's values into the new tag.
 
 ## 0.5.0 - 2026-09-30
 
