@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Added
+
+- **Star ratings.** `librarySetRating` rates the song behind each Track from
+  1 to 100 or clears it, `TrackSummary.rating` and `TrackDetails.rating`
+  report it, and `TrackSort.rating` sorts by it with unrated Tracks last. A
+  rating belongs to the Recording, so an edit that gives a Track a new id
+  keeps it. `orca-cli rate` sets it, `tracks --sort rating` sorts by it and
+  `track` prints it.
+- **Playlists.** Named, ordered lists of up to 10,000 songs, kept per
+  Recording, with `libraryPlaylists`, `libraryCreatePlaylist`,
+  `libraryRenamePlaylist`, `libraryDeletePlaylist`,
+  `libraryPlaylistEntries`, `libraryPlaylistInsert`,
+  `libraryPlaylistRemove`, `libraryPlaylistMove` and `playerPlayPlaylist`.
+  An entry whose song has no Track is listed as unavailable and skipped when
+  played. `orca-cli` has `playlists`, `playlist`, `playlist-create`,
+  `-rename`, `-delete`, `-add`, `-remove`, `-move` and
+  `play-tracks --playlist`. See [docs/playlists.md](docs/playlists.md).
+- **M3U and M3U8 import and export.** `libraryImportPlaylist` matches each
+  entry by path, relative or `file://`, then by a unique `#EXTINF` artist,
+  title and length, and reports what it could not match;
+  `libraryExportPlaylist` writes absolute or relative paths atomically.
+  `orca-cli playlist-import` and `playlist-export` run them, and the parser
+  has a fuzz target.
+
+### Changed
+
+- **Library schema version 27.** Adds `ratings`, `playlists` and
+  `playlist_entries`, and the indexes `tracks_by_recording` and
+  `locations_by_uri`. `tracks.rating` is dropped after each Recording's
+  highest value is copied into `ratings`.
+
+### Removed
+
+- `TrackRepository.setRatings` and `countWithRating`, which wrote and read
+  the dropped column.
+
 ## 0.6.0 - 2026-10-01
 
 Ships Library schema version 26. Run `orca-cli analyze-library`, or Measure

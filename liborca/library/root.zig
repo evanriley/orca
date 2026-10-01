@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 pub const acoustid_submission = @import("acoustid_submission.zig");
 pub const analysis_pass = @import("analysis_pass.zig");
 pub const duplicate_pass = @import("duplicate_pass.zig");
+pub const m3u = @import("m3u.zig");
 pub const matching = @import("matching.zig");
 pub const projection = @import("projection.zig");
 pub const property_backfill = @import("property_backfill.zig");
@@ -28,6 +29,7 @@ test {
     _ = @import("acoustid_submission.zig");
     _ = @import("analysis_pass.zig");
     _ = @import("duplicate_pass.zig");
+    _ = @import("m3u.zig");
     _ = @import("matching.zig");
     _ = @import("projection.zig");
     _ = @import("property_backfill.zig");

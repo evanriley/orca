@@ -372,8 +372,8 @@ lease expiry for a worker to sleep until.
 
 `feedback` (version 16) holds the user's love and hate. It is keyed on
 `recordings.id`, so every file and Track of one song shares a row and a
-reprojection that gives a Track a new id keeps it. `tracks.rating`, the unused
-star rating, is a separate thing. Rows are removed with their recording
+reprojection that gives a Track a new id keeps it. Star ratings are a
+separate thing (below). Rows are removed with their recording
 (`ON DELETE CASCADE`), which nothing does today.
 
 `score` is what the user wants (`-1`, `0`, `1`) and `synced_score` what
@@ -404,6 +404,29 @@ and the same statement selects `TrackSummary.recording_id` so a host can tell
 which rows share a song. `FeedbackRepository.set` changes a bounded batch of
 Tracks (`max_page`) in one write-lane transaction and skips, and counts, Tracks
 without a Recording.
+
+## Playlists and ratings
+
+Migration 27 (version 27) adds `ratings`, `playlists` and `playlist_entries`,
+and drops `tracks.rating` with its index after copying each Recording's
+highest rating into `ratings`. The column lived on a row whose id changes
+when an edit reprojects a Track, so no rating could have survived there.
+
+- `ratings` is keyed on `recordings.id`, like `feedback`, with `rating`
+  between 1 and 100 and no row for unrated.
+- `playlist_entries` is `WITHOUT ROWID`, keyed on `(playlist_id, position)`,
+  and names a `recording_id`. Positions are contiguous from 0. A shift parks
+  the moved range on negative positions before landing it, because SQLite
+  checks the primary key row by row and an in-place shift collides with a
+  neighbour that has not moved yet.
+- Entries and ratings go with their Recording, and entries with their
+  playlist (`ON DELETE CASCADE`).
+- `tracks_by_recording ON tracks(recording_id)` resolves an entry or rating to
+  its Tracks, and `locations_by_uri ON locations(uri)` finds the location an
+  imported playlist names.
+
+`TrackSort.rating` has no index; on 500,000 Tracks a page sorts in about
+0.1 s. See [playlists.md](playlists.md) for the behaviour.
 
 ## Identification proposals
 

@@ -145,6 +145,14 @@ defer page.deinit();
   recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
   the changes still waiting as `feedback_pending`, and the end of a
   ListenBrainz block the Library records as `blocked_until`.
+- `librarySetRating(library, track_ids, ?u8)` rates the song behind each
+  Track from 1 to 100, or clears it, and returns a `RatingChange`; it shows as
+  `TrackSummary.rating` and `TrackDetails.rating`. Playlists are
+  `libraryPlaylists`, `libraryCreatePlaylist`, `libraryRenamePlaylist`,
+  `libraryDeletePlaylist`, `libraryPlaylistEntries`, `libraryPlaylistInsert`,
+  `libraryPlaylistRemove` and `libraryPlaylistMove`, with
+  `playerPlayPlaylist` to play one and `libraryImportPlaylist` and
+  `libraryExportPlaylist` for M3U files. See [playlists.md](playlists.md).
 - `startLibraryMatching(library, MatchRequest)` starts a `metadata_lookup`
   Job that searches MusicBrainz, and AcoustID by fingerprint, for the Tracks
   without a recording ID and stores proposals; its snapshot's total is the

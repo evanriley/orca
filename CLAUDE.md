@@ -135,7 +135,7 @@ zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 # browse
 zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
 zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
-zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]
+zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating
 zig build run -- track DATABASE ID
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
@@ -144,9 +144,22 @@ zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then wr
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
 
+# ratings and playlists -- kept per recording in the library; no file is written
+zig build run -- rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)
+zig build run -- playlists DATABASE
+zig build run -- playlist DATABASE ID [--limit N] [--offset N]
+zig build run -- playlist-create DATABASE NAME
+zig build run -- playlist-rename DATABASE ID NAME
+zig build run -- playlist-delete DATABASE ID
+zig build run -- playlist-add DATABASE ID IDS [--at=N]   # appends, or inserts before position N
+zig build run -- playlist-remove DATABASE ID POSITIONS
+zig build run -- playlist-move DATABASE ID FROM TO
+zig build run -- playlist-import DATABASE FILE [--name=NAME]   # M3U/M3U8; matches by path, then #EXTINF; never scans
+zig build run -- playlist-export DATABASE ID FILE [--relative] [--force]   # atomic; refuses an existing FILE without --force
+
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
-zig build run -- play-tracks DATABASE IDS --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
+zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
     [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
     [--eq=PRESET|G1,...,G10[:PREAMP]] [--crossfeed=0..1]   # prints a `signal:` line
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min

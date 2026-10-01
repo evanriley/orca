@@ -78,3 +78,9 @@ a track numbered `B6`.
 1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
 Chromaprint is MIT-licensed. The fingerprint parity test compares Orca's
 fingerprint of the MP3 with the reference.
+
+`playlists/relative.m3u8` is a UTF-8 extended M3U with relative paths, a
+percent-encoded `file://` URI, an `http://` stream and `#EXTINF` lines.
+`playlists/latin1.m3u` is Latin-1 with CRLF line ends, and
+`playlists/bom.m3u8` starts with a UTF-8 byte order mark and uses CRLF. They
+seed the M3U parser's tests and fuzz target; no path in them names a real file.

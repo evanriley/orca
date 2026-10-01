@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const codec = @import("codec/root.zig");
+const m3u = @import("library/m3u.zig");
 const metadata = @import("metadata/root.zig");
 const storage = @import("storage/root.zig");
 
@@ -59,44 +60,55 @@ const mp3_stream_fixtures = [_][]const u8{
 };
 const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtures ++ wav_fixtures ++
     aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
+const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
 const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner" };
+const audio_fixture_dir = "fixtures/audio";
 
 test "fuzz: ID3v2 tags parse or fail cleanly" {
-    try fuzzTarget(exerciseId3v2, &id3v2_fixtures, &.{"id3v2"});
+    try fuzzTarget(exerciseId3v2, audio_fixture_dir, &id3v2_fixtures, &.{"id3v2"});
 }
 
 test "fuzz: MP4 boxes, tracks, decoders and tags parse or fail cleanly" {
-    try fuzzTarget(exerciseMp4, &mp4_fixtures, &.{"mp4"});
+    try fuzzTarget(exerciseMp4, audio_fixture_dir, &mp4_fixtures, &.{"mp4"});
 }
 
 test "fuzz: Vorbis comments in FLAC, Ogg and bare payloads parse or fail cleanly" {
-    try fuzzTarget(exerciseVorbisComment, &vorbis_comment_fixtures, &.{"vorbis-comment"});
+    try fuzzTarget(exerciseVorbisComment, audio_fixture_dir, &vorbis_comment_fixtures, &.{"vorbis-comment"});
 }
 
 test "fuzz: WAV decoding and RIFF tags parse or fail cleanly" {
-    try fuzzTarget(exerciseWav, &wav_fixtures, &.{"wav"});
+    try fuzzTarget(exerciseWav, audio_fixture_dir, &wav_fixtures, &.{"wav"});
 }
 
 test "fuzz: AIFF decoding and RIFF tags parse or fail cleanly" {
-    try fuzzTarget(exerciseAiff, &aiff_fixtures, &.{"aiff"});
+    try fuzzTarget(exerciseAiff, audio_fixture_dir, &aiff_fixtures, &.{"aiff"});
 }
 
 test "fuzz: ADTS frame tables parse or fail cleanly" {
-    try fuzzTarget(exerciseAdts, &adts_fixtures, &.{"adts"});
+    try fuzzTarget(exerciseAdts, audio_fixture_dir, &adts_fixtures, &.{"adts"});
 }
 
 test "fuzz: MP3 stream framing parses or fails cleanly" {
-    try fuzzTarget(exerciseMp3Stream, &mp3_stream_fixtures, &.{"mp3-stream"});
+    try fuzzTarget(exerciseMp3Stream, audio_fixture_dir, &mp3_stream_fixtures, &.{"mp3-stream"});
 }
 
 test "fuzz: the scanner's detect, probe and artwork path parses or fails cleanly" {
-    try fuzzTarget(exerciseScanner, &scanner_fixtures, &all_targets);
+    try fuzzTarget(exerciseScanner, audio_fixture_dir, &scanner_fixtures, &all_targets);
+}
+
+test "fuzz: M3U playlists parse and resolve or fail cleanly" {
+    try fuzzTarget(exerciseM3u, "fixtures/playlists", &playlist_fixtures, &.{"m3u"});
 }
 
 const Exercise = fn (allocator: std.mem.Allocator, input: []const u8) void;
 
-fn fuzzTarget(comptime exercise: Exercise, fixtures: []const []const u8, seed_dirs: []const []const u8) !void {
-    const corpus = try loadCorpus(std.testing.allocator, fixtures, seed_dirs);
+fn fuzzTarget(
+    comptime exercise: Exercise,
+    fixture_dir: []const u8,
+    fixtures: []const []const u8,
+    seed_dirs: []const []const u8,
+) !void {
+    const corpus = try loadCorpus(std.testing.allocator, fixture_dir, fixtures, seed_dirs);
     defer {
         for (corpus) |seed| std.testing.allocator.free(seed);
         std.testing.allocator.free(corpus);
@@ -113,6 +125,7 @@ fn fuzzTarget(comptime exercise: Exercise, fixtures: []const []const u8, seed_di
 
 fn loadCorpus(
     allocator: std.mem.Allocator,
+    fixture_dir_path: []const u8,
     fixtures: []const []const u8,
     seed_dirs: []const []const u8,
 ) ![]const []const u8 {
@@ -122,7 +135,7 @@ fn loadCorpus(
         for (corpus.items) |seed| allocator.free(seed);
         corpus.deinit(allocator);
     }
-    var fixture_dir = try std.Io.Dir.cwd().openDir(io, "fixtures/audio", .{});
+    var fixture_dir = try std.Io.Dir.cwd().openDir(io, fixture_dir_path, .{});
     defer fixture_dir.close(io);
     for (fixtures) |name| {
         const seed = try readSeed(allocator, fixture_dir, name);
@@ -304,6 +317,19 @@ fn exerciseScanner(allocator: std.mem.Allocator, input: []const u8) void {
     defer arena.deinit();
     var payload: storage.OffsetSource = .{ .inner = readable, .offset = detection.payload_offset };
     ignore(metadata.artwork.readDetected(arena.allocator(), detection.format, payload.readable()));
+}
+
+fn exerciseM3u(allocator: std.mem.Allocator, input: []const u8) void {
+    const parsed = m3u.parse(allocator, input) catch return;
+    defer parsed.deinit(allocator);
+    for (parsed.entries) |entry| {
+        if (entry.info) |info| _ = m3u.splitArtistTitle(info.text);
+        const location = m3u.resolve(allocator, "/music/lists", entry.location) catch continue;
+        switch (location) {
+            .path => |resolved| allocator.free(resolved),
+            .unsupported => {},
+        }
+    }
 }
 
 fn decodeSome(allocator: std.mem.Allocator, opened: codec.Decoder) void {

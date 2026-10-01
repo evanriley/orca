@@ -90,6 +90,7 @@ contains a GPL or LGPL notice.
 | Storage and scanning | [storage.md](storage.md) |
 | Metadata and file mutation | [metadata.md](metadata.md) |
 | Analysis and duplicates | [analysis.md](analysis.md) |
+| Playlists and ratings | [playlists.md](playlists.md) |
 | Providers, listens and scrobbling | [providers.md](providers.md) |
 | Public Zig API | [api.md](api.md) |
 | Frontends and the C ABI | [frontends.md](frontends.md) |

@@ -1,0 +1,5 @@
+﻿#EXTM3U
+#EXTINF:42,A - One
+/music/A/01.flac
+#EXTINF:43,A - Two
+/music/A/02.flac

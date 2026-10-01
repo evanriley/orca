@@ -10,6 +10,7 @@ pub const queue = @import("queue.zig");
 pub const runtime = @import("runtime.zig");
 pub const runtime_jobs = @import("runtime_jobs.zig");
 pub const runtime_listens = @import("runtime_listens.zig");
+pub const runtime_playlists = @import("runtime_playlists.zig");
 pub const runtime_provider_tests = @import("runtime_provider_tests.zig");
 pub const runtime_queue = @import("runtime_queue.zig");
 pub const runtime_roots = @import("runtime_roots.zig");
@@ -42,6 +43,7 @@ test {
     _ = @import("runtime.zig");
     _ = @import("runtime_jobs.zig");
     _ = @import("runtime_listens.zig");
+    _ = @import("runtime_playlists.zig");
     _ = @import("runtime_provider_tests.zig");
     _ = @import("runtime_queue.zig");
     _ = @import("runtime_roots.zig");

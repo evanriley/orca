@@ -808,13 +808,26 @@ test "opening a Library leaves another process's in-flight write alone" {
     try expectTitle(harness.source, "Replaced");
 }
 
+fn rewindToVersion25(db: sqlite.Database) !void {
+    try db.exec(
+        \\DROP TABLE playlist_entries;
+        \\DROP TABLE playlists;
+        \\DROP TABLE ratings;
+        \\DROP INDEX tracks_by_recording;
+        \\DROP INDEX locations_by_uri;
+        \\ALTER TABLE tracks ADD COLUMN rating INTEGER CHECK (rating BETWEEN 0 AND 100);
+        \\CREATE INDEX tracks_rating ON tracks(rating);
+        \\PRAGMA user_version=25;
+    );
+}
+
 test "a Library that still needs a migration refuses to open while another process is mutating it" {
     var harness = try Harness.init();
     defer harness.deinit();
     {
         const db = try sqlite.Database.open(harness.database_path);
         defer db.close();
-        try db.exec("PRAGMA user_version=25;");
+        try rewindToVersion25(db);
     }
     var lock = try harness.holdForeignLock();
 
@@ -1025,7 +1038,8 @@ test "an undo converted by migration 26 finishes in the same open" {
     {
         const db = try sqlite.Database.open(harness.database_path);
         defer db.close();
-        try db.exec("UPDATE mutation_operations SET state = 2 WHERE state = 6; PRAGMA user_version=25;");
+        try db.exec("UPDATE mutation_operations SET state = 2 WHERE state = 6;");
+        try rewindToVersion25(db);
     }
 
     var reopened = try harness.open();

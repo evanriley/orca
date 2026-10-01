@@ -1,0 +1,9 @@
+#EXTM3U
+#EXTINF:321,Björk - Hyperballad
+../Music/Björk/01 Hyperballad.flac
+
+#EXTINF:-1,Björk - Jóga
+file:///mnt/Media/Music/Bj%C3%B6rk/02%20Joga.flac
+# a comment line
+Sub/03.mp3
+http://example.com/stream.mp3

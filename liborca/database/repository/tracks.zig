@@ -102,6 +102,7 @@ pub const TrackSummary = struct {
     artist_id: ?i64 = null,
     recording_id: ?i64 = null,
     feedback: Feedback = .none,
+    rating: ?u8 = null,
 
     pub fn deinit(self: TrackSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -123,11 +124,11 @@ pub const TrackPage = struct {
 
 /// What a Track listing is ordered by.
 ///
-/// Every one of these names an index created by migration 9, and every ORDER BY
-/// they produce ends in `tracks.id`. Both matter. Without the unique tiebreaker
-/// a LIMIT/OFFSET walk over a column with ties is free to return one row on two
-/// pages and skip a third, because SQLite may order equal keys differently
-/// between two evaluations of the same statement.
+/// Every one of these but `rating` names an index created by migration 9, and
+/// every ORDER BY they produce ends in `tracks.id`. Both matter. Without the
+/// unique tiebreaker a LIMIT/OFFSET walk over a column with ties is free to
+/// return one row on two pages and skip a third, because SQLite may order
+/// equal keys differently between two evaluations of the same statement.
 pub const TrackSort = enum {
     /// Insertion order. The cheapest listing there is, and the default, so a
     /// caller that has no opinion pays for none.
@@ -139,6 +140,7 @@ pub const TrackSort = enum {
     track_number,
     duration,
     date_added,
+    rating,
 };
 
 pub const SortDirection = enum {
@@ -239,23 +241,6 @@ pub const TrackRepository = struct {
         }
     }
 
-    pub fn setRatings(self: *TrackRepository, ids: []const i64, rating: u8) !void {
-        if (rating > 100) return error.InvalidRating;
-        self.write_lane.acquire();
-        defer self.write_lane.release();
-        try self.db.exec("BEGIN IMMEDIATE;");
-        errdefer self.db.exec("ROLLBACK;") catch {};
-        var statement = try self.db.prepare("UPDATE tracks SET rating=?1 WHERE id=?2;");
-        defer statement.deinit();
-        for (ids) |id| {
-            try statement.bindInt64(1, rating);
-            try statement.bindInt64(2, id);
-            if (try statement.step() != .done) return error.SqlFailed;
-            try statement.reset();
-        }
-        try self.db.exec("COMMIT;");
-    }
-
     pub fn search(
         self: *const TrackRepository,
         allocator: std.mem.Allocator,
@@ -266,7 +251,7 @@ pub const TrackRepository = struct {
         var statement = try self.db.prepare(track_columns ++
             "FROM track_search\n" ++
             "JOIN tracks ON tracks.id = track_search.rowid\n" ++
-            feedback_join ++
+            recording_joins ++
             "WHERE track_search MATCH ?1\n" ++
             "ORDER BY rank\n" ++
             "LIMIT ?2 OFFSET ?3;");
@@ -401,7 +386,7 @@ pub const TrackRepository = struct {
         allocator: std.mem.Allocator,
         track_id: i64,
     ) !?TrackSummary {
-        var statement = try self.db.prepare(track_columns ++ "FROM tracks\n" ++ feedback_join ++
+        var statement = try self.db.prepare(track_columns ++ "FROM tracks\n" ++ recording_joins ++
             "WHERE tracks.id = ?1;");
         defer statement.deinit();
         try statement.bindInt64(1, track_id);
@@ -567,17 +552,9 @@ pub const TrackRepository = struct {
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
-
-    pub fn countWithRating(self: *const TrackRepository, rating: u8) !u64 {
-        var statement = try self.db.prepare("SELECT count(*) FROM tracks WHERE rating=?1;");
-        defer statement.deinit();
-        try statement.bindInt64(1, rating);
-        if (try statement.step() != .row) return error.SqlFailed;
-        return @intCast(statement.columnInt64(0));
-    }
 };
 
-const track_columns =
+pub const track_columns =
     \\SELECT tracks.id, tracks.title, tracks.artist, tracks.album, tracks.album_artist,
     \\       tracks.duration_ms, tracks.track_number, tracks.disc_number,
     \\       EXISTS(
@@ -585,11 +562,14 @@ const track_columns =
     \\           WHERE locations.file_id = tracks.preferred_file_id
     \\             AND locations.state <> 'missing'
     \\       ),
-    \\       tracks.release_id, tracks.artist_id, COALESCE(feedback.score, 0), tracks.recording_id
+    \\       tracks.release_id, tracks.artist_id, COALESCE(feedback.score, 0), tracks.recording_id,
+    \\       ratings.rating
     \\
 ;
 
-const feedback_join = "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n";
+pub const recording_joins =
+    "LEFT JOIN feedback ON feedback.recording_id = tracks.recording_id\n" ++
+    "LEFT JOIN ratings ON ratings.recording_id = tracks.recording_id\n";
 
 const TrackFilter = enum { none, artist, release, artist_and_release };
 
@@ -619,6 +599,7 @@ pub fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) [
         .track_number => positionTerms(direction) ++ tiebreak,
         .duration => "tracks.duration_ms" ++ suffix ++ tiebreak,
         .date_added => "tracks.created_at" ++ suffix ++ tiebreak,
+        .rating => "ratings.rating IS NULL, ratings.rating" ++ suffix ++ tiebreak,
     };
 }
 
@@ -652,12 +633,12 @@ fn buildTrackQuery(
         .release => "WHERE tracks.release_id = ?4\n",
         .artist_and_release => "WHERE " ++ by_artist ++ " AND tracks.release_id = ?4\n",
     };
-    return track_columns ++ "FROM tracks\n" ++ feedback_join ++ where ++
+    return track_columns ++ "FROM tracks\n" ++ recording_joins ++ where ++
         "ORDER BY " ++ orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;";
 }
 
 /// Every (filter, sort, direction) combination as its own prepared-once
-/// statement text. There are 56 of them; concatenating SQL at runtime instead
+/// statement text. There are 64 of them; concatenating SQL at runtime instead
 /// would mean an allocation and a string the caller could influence, and this
 /// boundary refuses both on principle.
 fn trackQueryText(
@@ -685,31 +666,42 @@ fn collectTrackPage(allocator: std.mem.Allocator, statement: sqlite.Statement) !
         results.deinit(allocator);
     }
     while (try statement.step() == .row) {
-        const title = try allocator.dupe(u8, statement.columnText(1));
-        errdefer allocator.free(title);
-        const artist = try allocator.dupe(u8, statement.columnText(2));
-        errdefer allocator.free(artist);
-        const album = try allocator.dupe(u8, statement.columnText(3));
-        errdefer allocator.free(album);
-        const album_artist = try allocator.dupe(u8, statement.columnText(4));
-        errdefer allocator.free(album_artist);
-        try results.append(allocator, .{
-            .id = statement.columnInt64(0),
-            .title = title,
-            .artist = artist,
-            .album = album,
-            .album_artist = album_artist,
-            .duration_ms = optionalInt64(statement, 5),
-            .track_number = optionalInt64(statement, 6),
-            .disc_number = optionalInt64(statement, 7),
-            .has_playable_file = statement.columnInt64(8) != 0,
-            .release_id = optionalInt64(statement, 9),
-            .artist_id = optionalInt64(statement, 10),
-            .feedback = Feedback.fromScore(statement.columnInt64(11)) orelse return error.InvalidStoredFeedback,
-            .recording_id = optionalInt64(statement, 12),
-        });
+        const summary = try readTrackSummary(allocator, statement);
+        errdefer summary.deinit(allocator);
+        try results.append(allocator, summary);
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
+}
+
+/// One row of `track_columns`, copied out.
+pub fn readTrackSummary(allocator: std.mem.Allocator, statement: sqlite.Statement) !TrackSummary {
+    const title = try allocator.dupe(u8, statement.columnText(1));
+    errdefer allocator.free(title);
+    const artist = try allocator.dupe(u8, statement.columnText(2));
+    errdefer allocator.free(artist);
+    const album = try allocator.dupe(u8, statement.columnText(3));
+    errdefer allocator.free(album);
+    const album_artist = try allocator.dupe(u8, statement.columnText(4));
+    errdefer allocator.free(album_artist);
+    return .{
+        .id = statement.columnInt64(0),
+        .title = title,
+        .artist = artist,
+        .album = album,
+        .album_artist = album_artist,
+        .duration_ms = optionalInt64(statement, 5),
+        .track_number = optionalInt64(statement, 6),
+        .disc_number = optionalInt64(statement, 7),
+        .has_playable_file = statement.columnInt64(8) != 0,
+        .release_id = optionalInt64(statement, 9),
+        .artist_id = optionalInt64(statement, 10),
+        .feedback = Feedback.fromScore(statement.columnInt64(11)) orelse return error.InvalidStoredFeedback,
+        .recording_id = optionalInt64(statement, 12),
+        .rating = if (statement.columnIsNull(13))
+            null
+        else
+            std.math.cast(u8, statement.columnInt64(13)) orelse return error.InvalidStoredRating,
+    };
 }
 
 /// The file a Track plays: its preferred file, else the first file of its

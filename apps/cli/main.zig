@@ -55,6 +55,17 @@ fn describe(err: anyerror) []const u8 {
         error.TagWriteBackupPruned => "the backups for this write were pruned, so it cannot be undone",
         error.TagTargetUnavailable => "a file an interrupted tag write changed is in a folder that is not there; mount it and try again",
         error.NoBackupDirectory => "this library has no database file, so a tag write has nowhere to keep the originals",
+        error.InvalidRating => "a rating must be 1 to 100, or 1 to 5 stars",
+        error.UnknownPlaylist => "no playlist with that id",
+        error.InvalidPlaylistName => "a playlist name must not be empty",
+        error.PlaylistNameTaken => "a playlist with that name already exists",
+        error.PlaylistFull => "a playlist holds at most 10000 entries; nothing was added",
+        error.PositionOutOfRange => "that position is past the end of the playlist; positions start at 0",
+        error.PlaylistEmpty => "the playlist has no entry with a track to play, or the playlist file lists no entries",
+        error.PlaylistTooLarge => "a playlist file may be at most 4 MiB and 10000 entries; nothing was imported",
+        error.PathAlreadyExists => "that file already exists; pass --force to replace it",
+        error.PageOutOfRange => "at most 512 ids at a time, and --limit must be 1 to 512",
+        error.TracksAndPlaylist => "give either IDS or --playlist=ID, not both",
         else => @errorName(err),
     };
 }
@@ -129,9 +140,20 @@ const commands = [_]Command{
     .{ .name = "health", .usage = "health DATABASE [OFFSET]", .min_arguments = 1, .max_arguments = 2, .run = listHealthIssues },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
-    .{ .name = "play-tracks", .usage = "play-tracks DATABASE IDS [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
+    .{ .name = "play-tracks", .usage = "play-tracks DATABASE (IDS | --playlist=ID) [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
     .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
+    .{ .name = "rate", .usage = "rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setRating },
+    .{ .name = "playlists", .usage = "playlists DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listPlaylists },
+    .{ .name = "playlist", .usage = "playlist DATABASE ID [--limit N] [--offset N]", .min_arguments = 2, .max_arguments = 6, .run = showPlaylist },
+    .{ .name = "playlist-create", .usage = "playlist-create DATABASE NAME", .min_arguments = 2, .max_arguments = 2, .run = createPlaylist },
+    .{ .name = "playlist-rename", .usage = "playlist-rename DATABASE ID NAME", .min_arguments = 3, .max_arguments = 3, .run = renamePlaylist, .shares_usage_line = true },
+    .{ .name = "playlist-delete", .usage = "playlist-delete DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = deletePlaylist },
+    .{ .name = "playlist-add", .usage = "playlist-add DATABASE ID IDS [--at=N]", .min_arguments = 3, .max_arguments = 4, .run = addToPlaylist },
+    .{ .name = "playlist-remove", .usage = "playlist-remove DATABASE ID POSITIONS", .min_arguments = 3, .max_arguments = 3, .run = removeFromPlaylist, .shares_usage_line = true },
+    .{ .name = "playlist-move", .usage = "playlist-move DATABASE ID FROM TO", .min_arguments = 4, .max_arguments = 4, .run = moveInPlaylist },
+    .{ .name = "playlist-import", .usage = "playlist-import DATABASE FILE [--name=NAME]", .min_arguments = 2, .max_arguments = 3, .run = importPlaylist },
+    .{ .name = "playlist-export", .usage = "playlist-export DATABASE ID FILE [--relative] [--force]", .min_arguments = 3, .max_arguments = 5, .run = exportPlaylist },
     .{
         .name = "match",
         .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++
@@ -232,16 +254,18 @@ const help_details =
     \\scoped to one Artist or one Release. Options:
     \\  --artist ID        only this Artist
     \\  --release ID       only this Release (tracks only)
-    \\  --sort KEY         id|artist|album|title|track|duration|added (tracks only)
+    \\  --sort KEY         id|artist|album|title|track|duration|added|rating
+    \\                     (tracks only; unrated last either way)
     \\  --desc             reverse the order
     \\  --limit N          page size, 1 to 512 (default 50)
     \\  --offset N         rows to skip
     \\
     \\track prints what the Library recorded about one Track and its file: tags,
-    \\format, size, path, stored loudness and whether the file carries a cover.
-    \\It opens no file.
+    \\format, size, path, stored loudness, whether the file carries a cover, and
+    \\the rating. It opens no file.
     \\
-    \\play-tracks plays a comma-separated list of Track ids as a playback
+    \\play-tracks plays a comma-separated list of Track ids, or with
+    \\--playlist=ID the playlist's entries that have a Track, as a playback
     \\queue. Options:
     \\  --device=ID        output device (0 = server default)
     \\  --volume=LINEAR    volume as a linear gain, 0 to 4 (default 1)
@@ -279,6 +303,30 @@ const help_details =
     \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
     \\many Tracks changed and how many were skipped. It is kept in the Library;
     \\scrobble sends it for recordings with a MusicBrainz ID.
+    \\
+    \\rate rates the Tracks' recordings in whole stars (--stars=N stores N*20)
+    \\or 1 to 100, or clears the rating, and prints how many Tracks changed and
+    \\how many were skipped for having no recording. Ratings are kept in the
+    \\Library only; no file is written.
+    \\
+    \\Playlists are ordered lists of recordings, kept in the Library. playlists
+    \\lists them: id, name, entries, entries with a Track, and length.
+    \\playlist lists one's entries from position 0: the Track each plays (the
+    \\lowest Track id of its recording), or `unavailable` when its recording
+    \\has none. playlist-add appends the Tracks' recordings, or inserts them
+    \\before position --at=N; playlist-remove removes a comma-separated list of
+    \\positions; playlist-move moves the entry at FROM to TO. A playlist holds
+    \\at most 10000 entries.
+    \\
+    \\playlist-import creates a playlist from an M3U or M3U8 file, named after
+    \\the file or --name=NAME, with " (2)" and so on added if that is taken.
+    \\Each entry matches the library file at its path, relative to the playlist
+    \\file or a file:// URI, or else the one Track with the artist, title and
+    \\length (within 2 s) of its #EXTINF line. It prints the counts and the
+    \\first 50 entries that matched nothing; no folder is scanned.
+    \\playlist-export writes a playlist's entries that have a Track as UTF-8
+    \\M3U with absolute paths, or with --relative paths relative to FILE's
+    \\folder. It refuses to replace an existing FILE without --force.
     \\
     \\match searches MusicBrainz for every Track whose file has no MusicBrainz
     \\recording ID, and fingerprints its file and looks it up on AcoustID, once
@@ -903,6 +951,7 @@ const PlayTracksOptions = struct {
     skip_after_ms: ?u64 = null,
     previous_after_ms: ?u64 = null,
     limit_ms: u64 = 10 * 60 * 1000,
+    playlist_id: ?i64 = null,
 };
 
 fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
@@ -954,6 +1003,8 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
         options.previous_after_ms = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--limit")) {
         options.limit_ms = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--playlist")) {
+        options.playlist_id = try std.fmt.parseInt(i64, value, 10);
     } else return error.UnknownOption;
 }
 
@@ -1037,13 +1088,15 @@ fn playTracks(context: Context) !void {
     const io = context.io;
     const stdout = context.stdout;
     const database_path_argument = context.arguments[0];
-    const id_list = context.arguments[1];
-    const option_arguments = context.arguments[2..];
+    const id_list: ?[]const u8 = if (std.mem.startsWith(u8, context.arguments[1], "--")) null else context.arguments[1];
+    const option_arguments = context.arguments[if (id_list == null) 1 else 2..];
     var options: PlayTracksOptions = .{};
     for (option_arguments) |argument| try parseOption(&options, argument);
+    if (id_list != null and options.playlist_id != null) return error.TracksAndPlaylist;
 
-    var ids = try parseTrackIds(allocator, id_list);
+    var ids: std.ArrayList(i64) = if (id_list) |list| try parseTrackIds(allocator, list) else .empty;
     defer ids.deinit(allocator);
+    if (id_list == null and options.playlist_id == null) return error.NoTrackIds;
 
     const database_path = try allocator.dupeSentinel(u8, database_path_argument, 0);
     var runtime = liborca.Runtime.init(allocator);
@@ -1061,7 +1114,9 @@ fn playTracks(context: Context) !void {
     try runtime.playerSetCrossfeed(player, options.crossfeed);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
-    try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
+    if (options.playlist_id) |playlist_id| {
+        try runtime.playerPlayPlaylist(player, library, io, playlist_id, options.start);
+    } else try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
 
     var elapsed_ms: u64 = 0;
     var entry_elapsed_ms: u64 = 0;
@@ -1226,6 +1281,8 @@ fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
                 .duration
             else if (std.mem.eql(u8, value, "added"))
                 .date_added
+            else if (std.mem.eql(u8, value, "rating"))
+                .rating
             else
                 return error.UnknownSortKey;
         } else return error.UnknownOption;
@@ -1444,6 +1501,9 @@ fn showTrack(context: Context) !void {
     try stdout.print("feedback sync: {s}\n", .{
         if (details.feedback_syncable) "yes" else "no (no MusicBrainz recording ID)",
     });
+    if (details.rating) |rating| {
+        try printDetail(stdout, "rating", "{d}", .{rating});
+    } else try printDetail(stdout, "rating", "{s}", .{"none"});
     if (details.musicbrainz_recording_id) |recording_id| {
         try printDetail(stdout, "recording id", "{s} ({s})", .{ recording_id, @tagName(details.musicbrainz_recording_id_source.?) });
     } else try printDetail(stdout, "recording id", "{s}", .{"-"});
@@ -1681,6 +1741,186 @@ fn setFeedback(context: Context) !void {
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const change = try runtime.librarySetFeedback(library, ids.items, feedback);
     try stdout.print("feedback: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
+}
+
+fn setRating(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const option_argument = context.arguments[2];
+    const rating: ?u8 = if (std.mem.eql(u8, option_argument, "--clear"))
+        null
+    else if (std.mem.startsWith(u8, option_argument, "--stars=")) blk: {
+        const stars = try std.fmt.parseInt(u8, option_argument["--stars=".len..], 10);
+        if (stars == 0 or stars > 5) return error.InvalidRating;
+        break :blk stars * 20;
+    } else if (std.mem.startsWith(u8, option_argument, "--rating="))
+        try std.fmt.parseInt(u8, option_argument["--rating=".len..], 10)
+    else
+        return error.UnknownOption;
+    var ids = try parseTrackIds(allocator, context.arguments[1]);
+    defer ids.deinit(allocator);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const change = try runtime.librarySetRating(library, ids.items, rating);
+    try stdout.print("rating: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
+}
+
+fn listPlaylists(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    var offset: u32 = 0;
+    while (true) {
+        var page = try runtime.libraryPlaylists(library, 512, offset);
+        defer page.deinit();
+        for (page.items) |playlist| {
+            try stdout.print("{d}\t{s}\t{d}\t{d}\t", .{ playlist.id, playlist.name, playlist.entries, playlist.available });
+            try writeDuration(stdout, playlist.duration_ms);
+            try stdout.writeAll("\n");
+        }
+        if (page.items.len < 512) break;
+        offset += 512;
+    }
+}
+
+fn showPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const options = try parseBrowseOptions(context.arguments[2..]);
+    if (options.artist_id != null or options.release_id != null or options.filter.len != 0 or
+        options.descending or options.sort != .id) return error.UnknownOption;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    var page = try runtime.libraryPlaylistEntries(library, playlist_id, options.limit, options.offset);
+    defer page.deinit();
+    for (page.items) |entry| {
+        const track = entry.track orelse {
+            try stdout.print("{d}\tunavailable\trecording={d}\n", .{ entry.position, entry.recording_id });
+            continue;
+        };
+        try stdout.print("{d}\t{d}\t{s}\t{s}\t{s}\t", .{ entry.position, track.id, track.title, track.artist, track.album });
+        try writeDuration(stdout, track.duration_ms);
+        try stdout.writeAll("\n");
+    }
+}
+
+fn createPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const playlist_id = try runtime.libraryCreatePlaylist(library, context.arguments[1]);
+    try context.stdout.print("playlist_id={d}\n", .{playlist_id});
+}
+
+fn renamePlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryRenamePlaylist(library, playlist_id, context.arguments[2]);
+}
+
+fn deletePlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryDeletePlaylist(library, playlist_id);
+}
+
+fn addToPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var ids = try parseTrackIds(allocator, context.arguments[2]);
+    defer ids.deinit(allocator);
+    var at: ?u32 = null;
+    for (context.arguments[3..]) |argument| {
+        if (!std.mem.startsWith(u8, argument, "--at=")) return error.UnknownOption;
+        at = try std.fmt.parseInt(u32, argument["--at=".len..], 10);
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const insertion = try runtime.libraryPlaylistInsert(library, playlist_id, ids.items, at);
+    try context.stdout.print("added={d} skipped={d}\n", .{ insertion.added, insertion.skipped });
+}
+
+fn removeFromPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var positions: std.ArrayList(u32) = .empty;
+    defer positions.deinit(allocator);
+    var walk = std.mem.splitScalar(u8, context.arguments[2], ',');
+    while (walk.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " ");
+        if (trimmed.len == 0) continue;
+        try positions.append(allocator, try std.fmt.parseInt(u32, trimmed, 10));
+    }
+    if (positions.items.len == 0) return error.NoPositions;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const removed = try runtime.libraryPlaylistRemove(library, playlist_id, positions.items);
+    try context.stdout.print("removed={d}\n", .{removed});
+}
+
+fn moveInPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const from = try std.fmt.parseInt(u32, context.arguments[2], 10);
+    const to = try std.fmt.parseInt(u32, context.arguments[3], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryPlaylistMove(library, playlist_id, from, to);
+}
+
+fn importPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var name: ?[]const u8 = null;
+    for (context.arguments[2..]) |argument| {
+        if (!std.mem.startsWith(u8, argument, "--name=")) return error.UnknownOption;
+        name = argument["--name=".len..];
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const imported = try runtime.libraryImportPlaylist(library, context.io, context.arguments[1], name);
+    defer imported.deinit();
+    try stdout.print("playlist_id={d} matched_by_path={d} matched_by_info={d} unmatched={d}\n", .{
+        imported.playlist_id,
+        imported.matched_by_path,
+        imported.matched_by_info,
+        imported.unmatched,
+    });
+    for (imported.unmatched_lines) |line| try stdout.print("unmatched: {s}\n", .{line});
+}
+
+fn exportPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var options: liborca.PlaylistExportOptions = .{ .paths = .absolute, .replace = false };
+    for (context.arguments[3..]) |argument| {
+        if (std.mem.eql(u8, argument, "--relative")) {
+            options.paths = .relative;
+        } else if (std.mem.eql(u8, argument, "--force")) {
+            options.replace = true;
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const exported = try runtime.libraryExportPlaylist(library, context.io, playlist_id, context.arguments[2], options);
+    try context.stdout.print("written={d} skipped={d}\n", .{ exported.written, exported.skipped });
 }
 
 /// Names orca-cli to MusicBrainz, AcoustID and ListenBrainz and in the listen

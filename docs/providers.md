@@ -183,7 +183,7 @@ cleared. Feedback is kept in the Library whether or not anything is sent, is
 shown on `TrackSummary.feedback` and `TrackDetails.feedback`, and belongs to
 the song's Recording, not to a file or a Track. A FLAC and an MP3 of one song
 share it, and a reprojection that gives a Track a new id keeps it. It is
-independent of `tracks.rating`, the unused star rating.
+independent of the star rating (see [playlists.md](playlists.md#ratings)).
 
 While the Library scrobbles, feedback is sent to ListenBrainz
 (`POST /1/feedback/recording-feedback`, score `1` love, `-1` hate, `0`

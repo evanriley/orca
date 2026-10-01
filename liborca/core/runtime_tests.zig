@@ -2536,3 +2536,405 @@ test "a subtree reconcile of a root no longer on its recorded volume fails and m
     try std.testing.expect(outcome.stats.volume_changed);
     try std.testing.expectEqual(database.LocationState.present, (try fixture.location("A/one.flac")).?.state);
 }
+
+test "a rating and a playlist entry follow a track that a library edit moves to another album" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-runtime-playlist-edit?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .uri = "/m/Artist/a.flac",
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    } });
+    var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+    _ = try projection.run(.{ .files = &.{file_id} });
+    var before = try runtime.libraryTrackQuery(library, "", .{ .limit = 4 });
+    const track_id = before.items[0].id;
+    before.deinit();
+
+    const rated = try runtime.librarySetRating(library, &.{track_id}, 60);
+    try std.testing.expectEqual(@as(u32, 1), rated.updated);
+    const playlist = try runtime.libraryCreatePlaylist(library, "Mix");
+    _ = try runtime.libraryPlaylistInsert(library, playlist, &.{track_id}, null);
+
+    const moved = try runtime.libraryEditTracks(library, &.{track_id}, &.{.{ .field = .album, .value = "Other Album" }});
+    defer moved.deinit();
+    try std.testing.expectEqual(@as(usize, 1), moved.ids.len);
+    try std.testing.expect(moved.ids[0] != track_id);
+
+    const details = (try runtime.libraryTrackDetails(library, moved.ids[0])).?;
+    defer details.deinit();
+    try std.testing.expectEqual(@as(?u8, 60), details.rating);
+    var entries = try runtime.libraryPlaylistEntries(library, playlist, 10, 0);
+    defer entries.deinit();
+    try std.testing.expectEqual(@as(usize, 1), entries.items.len);
+    try std.testing.expectEqual(moved.ids[0], entries.items[0].track.?.id);
+    try std.testing.expectEqualStrings("Other Album", entries.items[0].track.?.album);
+}
+
+test "playing a playlist queues its available entries, and one with none is refused with the queue untouched" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const fixtures = try openFixtureLibrary(
+        &runtime,
+        "file:orca-playlist-play?mode=memory&cache=shared",
+        &.{
+            "fixtures/audio/generated-reference.wav",
+            "fixtures/audio/generated-reference.flac",
+            "fixtures/audio/generated-reference.qoa",
+        },
+    );
+    const library_database = try libraryDatabase(&runtime, fixtures.library);
+    try library_database.database.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two'), (3, 'Three');
+        \\UPDATE tracks SET recording_id = id - (SELECT min(id) FROM tracks) + 1;
+    );
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, 0);
+
+    const empty = try runtime.libraryCreatePlaylist(fixtures.library, "Empty");
+    try std.testing.expectError(error.PlaylistEmpty, runtime.playerPlayPlaylist(player, fixtures.library, std.testing.io, empty, 0));
+    _ = try runtime.libraryPlaylistInsert(fixtures.library, empty, &.{fixtures.ids[2]}, null);
+    try library_database.database.exec("DELETE FROM tracks WHERE recording_id = 3;");
+    try std.testing.expectError(error.PlaylistEmpty, runtime.playerPlayPlaylist(player, fixtures.library, std.testing.io, empty, 0));
+    try std.testing.expectEqual(@as(u32, 0), (try runtime.playerQueueSnapshot(player)).entries);
+
+    const playlist = try runtime.libraryCreatePlaylist(fixtures.library, "Mix");
+    _ = try runtime.libraryPlaylistInsert(fixtures.library, playlist, &.{ fixtures.ids[1], fixtures.ids[0] }, null);
+    try runtime.libraryPlaylistMove(fixtures.library, playlist, 1, 0);
+    _ = try runtime.libraryPlaylistInsert(fixtures.library, playlist, &.{ fixtures.ids[1], fixtures.ids[0] }, 1);
+    _ = try runtime.libraryPlaylistRemove(fixtures.library, playlist, &.{ 1, 2 });
+    try runtime.playerPlayPlaylist(player, fixtures.library, std.testing.io, playlist, 0);
+
+    try std.testing.expectEqual(@as(u32, 2), (try runtime.playerQueueSnapshot(player)).entries);
+    const now_playing = (try runtime.playerNowPlaying(player)).?;
+    try std.testing.expectEqual(fixtures.ids[0], now_playing.track_id);
+}
+
+const PlaylistFileFixture = struct {
+    runtime: OrcaRuntime,
+    library: LibraryHandle,
+    directory: std.testing.TmpDir,
+    root: []u8,
+
+    fn init(self: *PlaylistFileFixture, uri: [:0]const u8) !void {
+        self.runtime = OrcaRuntime.init(std.testing.allocator);
+        errdefer self.runtime.deinit();
+        self.library = try self.runtime.openLibrary(std.testing.io, uri);
+        self.directory = std.testing.tmpDir(.{ .iterate = true });
+        errdefer self.directory.cleanup();
+        const current = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+        defer std.testing.allocator.free(current);
+        self.root = try std.fmt.allocPrint(std.testing.allocator, "{s}/.zig-cache/tmp/{s}", .{ current, self.directory.sub_path });
+    }
+
+    fn deinit(self: *PlaylistFileFixture) void {
+        std.testing.allocator.free(self.root);
+        self.directory.cleanup();
+        self.runtime.deinit();
+    }
+
+    fn path(self: *const PlaylistFileFixture, name: []const u8) ![]u8 {
+        return std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ self.root, name });
+    }
+
+    fn addTrack(self: *PlaylistFileFixture, name: []const u8, title: []const u8, album: []const u8, number: u32, duration_ms: i64) !i64 {
+        const library_database = try libraryDatabase(&self.runtime, self.library);
+        const uri = try self.path(name);
+        defer std.testing.allocator.free(uri);
+        const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024, .duration_ms = duration_ms });
+        _ = try library_database.locations.upsert(.{
+            .file_id = file_id,
+            .volume_id = database.LibraryDatabase.null_volume,
+            .uri = uri,
+            .state = .present,
+        });
+        try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+            .title = title,
+            .artist = "Artist",
+            .album = album,
+            .album_artist = "Artist",
+            .track_number = number,
+        } });
+        var projection: library_pass.Projection = .{ .allocator = std.testing.allocator, .library = library_database };
+        _ = try projection.run(.{ .files = &.{file_id} });
+        var statement = try library_database.database.prepare(
+            "SELECT tracks.id FROM tracks JOIN files ON files.recording_id = tracks.recording_id WHERE files.id = ?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, file_id);
+        try std.testing.expect(try statement.step() == .row);
+        return statement.columnInt64(0);
+    }
+
+    fn writePlaylist(self: *PlaylistFileFixture, name: []const u8, contents: []const u8) !void {
+        try self.directory.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = contents });
+    }
+
+    fn entryTrackIds(self: *PlaylistFileFixture, playlist_id: i64) ![]?i64 {
+        var page = try self.runtime.libraryPlaylistEntries(self.library, playlist_id, 512, 0);
+        defer page.deinit();
+        const ids = try std.testing.allocator.alloc(?i64, page.items.len);
+        for (ids, page.items) |*id, entry| id.* = if (entry.track) |track| track.id else null;
+        return ids;
+    }
+
+    fn playlistCount(self: *PlaylistFileFixture) !usize {
+        var page = try self.runtime.libraryPlaylists(self.library, 512, 0);
+        defer page.deinit();
+        return page.items.len;
+    }
+};
+
+test "an exported playlist imports back to the same tracks in the same order, with absolute or relative paths" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-round-trip?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const one = try fixture.addTrack("Music/A/01.flac", "One", "Album", 1, 200_000);
+    const two = try fixture.addTrack("Music/A/02.flac", "Two", "Album", 2, 180_400);
+    const three = try fixture.addTrack("Music/B/01.flac", "Three", "Other", 1, 61_600);
+    const playlist = try fixture.runtime.libraryCreatePlaylist(fixture.library, "Mix");
+    _ = try fixture.runtime.libraryPlaylistInsert(fixture.library, playlist, &.{ three, one, two, one }, null);
+    try fixture.directory.dir.createDirPath(std.testing.io, "lists");
+
+    for ([_]runtime_module.PlaylistPathStyle{ .absolute, .relative }) |style| {
+        const target = try fixture.path(if (style == .absolute) "lists/absolute.m3u8" else "lists/relative.m3u8");
+        defer std.testing.allocator.free(target);
+        const exported = try fixture.runtime.libraryExportPlaylist(fixture.library, std.testing.io, playlist, target, .{
+            .paths = style,
+            .replace = false,
+        });
+        try std.testing.expectEqual(@as(u32, 4), exported.written);
+        try std.testing.expectEqual(@as(u32, 0), exported.skipped);
+
+        const imported = try fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, target, null);
+        defer imported.deinit();
+        try std.testing.expectEqual(@as(u32, 4), imported.matched_by_path);
+        try std.testing.expectEqual(@as(u32, 0), imported.unmatched);
+        const ids = try fixture.entryTrackIds(imported.playlist_id);
+        defer std.testing.allocator.free(ids);
+        try std.testing.expectEqualSlices(?i64, &.{ three, one, two, one }, ids);
+    }
+
+    const relative = try fixture.directory.dir.readFileAlloc(std.testing.io, "lists/relative.m3u8", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(relative);
+    try std.testing.expectEqualStrings(
+        "#EXTM3U\n#EXTINF:62,Artist - Three\n../Music/B/01.flac\n#EXTINF:200,Artist - One\n../Music/A/01.flac\n" ++
+            "#EXTINF:180,Artist - Two\n../Music/A/02.flac\n#EXTINF:200,Artist - One\n../Music/A/01.flac\n",
+        relative,
+    );
+    var page = try fixture.runtime.libraryPlaylists(fixture.library, 512, 0);
+    defer page.deinit();
+    try std.testing.expectEqualStrings("absolute", page.items[0].name);
+    try std.testing.expectEqualStrings("relative", page.items[2].name);
+}
+
+test "import resolves relative entries against the playlist's folder and percent-decodes file URIs" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-resolve?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const one = try fixture.addTrack("Music/Björk/01 Joga.flac", "Jóga", "Homogenic", 1, 305_000);
+    const two = try fixture.addTrack("Music/Björk/02.flac", "Unravel", "Homogenic", 2, 201_000);
+    const uri = try std.fmt.allocPrint(std.testing.allocator, "#EXTM3U\n../Music/./Björk//01 Joga.flac\nfile://{s}/Music/Bj%C3%B6rk/02.flac\nhttp://example.com/a.mp3\nfile://host{s}/Music/Bj%C3%B6rk/02.flac\n", .{ fixture.root, fixture.root });
+    defer std.testing.allocator.free(uri);
+    try fixture.directory.dir.createDirPath(std.testing.io, "lists");
+    try fixture.writePlaylist("lists/mix.m3u8", uri);
+    const target = try fixture.path("lists/mix.m3u8");
+    defer std.testing.allocator.free(target);
+
+    const imported = try fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, target, "Björk");
+    defer imported.deinit();
+    try std.testing.expectEqual(@as(u32, 2), imported.matched_by_path);
+    try std.testing.expectEqual(@as(u32, 2), imported.unmatched);
+    try std.testing.expectEqualStrings("http://example.com/a.mp3", imported.unmatched_lines[0]);
+    try std.testing.expect(std.mem.startsWith(u8, imported.unmatched_lines[1], "file://host/"));
+    const ids = try fixture.entryTrackIds(imported.playlist_id);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(?i64, &.{ one, two }, ids);
+
+    const again = try fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, target, "Björk");
+    defer again.deinit();
+    var page = try fixture.runtime.libraryPlaylists(fixture.library, 512, 0);
+    defer page.deinit();
+    try std.testing.expectEqualStrings("Björk (2)", page.items[1].name);
+}
+
+test "an #EXTINF line matches only when exactly one recording has that artist, title and length" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-extinf?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const unique = try fixture.addTrack("Music/A/01.flac", "Unique Song", "Album", 1, 200_000);
+    _ = try fixture.addTrack("Music/A/02.flac", "Twice", "Album", 2, 150_000);
+    _ = try fixture.addTrack("Music/B/02.flac", "Twice", "Other", 2, 151_000);
+    try fixture.writePlaylist("info.m3u", "#EXTM3U\n" ++
+        "#EXTINF:202,ARTIST  -  unique   song\n/gone/one.flac\n" ++
+        "#EXTINF:150,Artist - Twice\n/gone/two.flac\n" ++
+        "#EXTINF:203,Artist - Unique Song\n/gone/late.flac\n" ++
+        "#EXTINF:-1,Artist - Unique Song\n/gone/unknown.flac\n" ++
+        "#EXTINF:200,Unique Song\n/gone/no-separator.flac\n");
+    const target = try fixture.path("info.m3u");
+    defer std.testing.allocator.free(target);
+
+    const imported = try fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, target, null);
+    defer imported.deinit();
+    try std.testing.expectEqual(@as(u32, 0), imported.matched_by_path);
+    try std.testing.expectEqual(@as(u32, 2), imported.matched_by_info);
+    try std.testing.expectEqual(@as(u32, 3), imported.unmatched);
+    try std.testing.expectEqualStrings("/gone/two.flac", imported.unmatched_lines[0]);
+    try std.testing.expectEqualStrings("/gone/late.flac", imported.unmatched_lines[1]);
+    try std.testing.expectEqualStrings("/gone/no-separator.flac", imported.unmatched_lines[2]);
+    const ids = try fixture.entryTrackIds(imported.playlist_id);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(?i64, &.{ unique, unique }, ids);
+}
+
+test "importing an empty or oversized playlist file is refused and creates no playlist" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-limits?mode=memory&cache=shared");
+    defer fixture.deinit();
+    try fixture.writePlaylist("empty.m3u8", "#EXTM3U\n#EXTINF:5,A - B\n\n");
+    const empty = try fixture.path("empty.m3u8");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectError(error.PlaylistEmpty, fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, empty, null));
+
+    const big = try std.testing.allocator.alloc(u8, 5 * 1024 * 1024);
+    defer std.testing.allocator.free(big);
+    @memset(big, '#');
+    try fixture.writePlaylist("big.m3u8", big);
+    const big_path = try fixture.path("big.m3u8");
+    defer std.testing.allocator.free(big_path);
+    try std.testing.expectError(error.PlaylistTooLarge, fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, big_path, null));
+
+    var many: std.ArrayList(u8) = .empty;
+    defer many.deinit(std.testing.allocator);
+    for (0..database.repository.max_playlist_entries + 1) |_| try many.appendSlice(std.testing.allocator, "/x.flac\n");
+    try fixture.writePlaylist("many.m3u8", many.items);
+    const many_path = try fixture.path("many.m3u8");
+    defer std.testing.allocator.free(many_path);
+    try std.testing.expectError(error.PlaylistTooLarge, fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, many_path, null));
+
+    try std.testing.expectEqual(@as(usize, 0), try fixture.playlistCount());
+}
+
+test "exporting over an existing file without replace fails and leaves it unchanged" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-no-replace?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const track = try fixture.addTrack("Music/A/01.flac", "One", "Album", 1, 1_000);
+    const playlist = try fixture.runtime.libraryCreatePlaylist(fixture.library, "Mix");
+    _ = try fixture.runtime.libraryPlaylistInsert(fixture.library, playlist, &.{track}, null);
+    try fixture.writePlaylist("mix.m3u8", "keep me\n");
+    const target = try fixture.path("mix.m3u8");
+    defer std.testing.allocator.free(target);
+
+    try std.testing.expectError(error.PathAlreadyExists, fixture.runtime.libraryExportPlaylist(
+        fixture.library,
+        std.testing.io,
+        playlist,
+        target,
+        .{ .paths = .absolute, .replace = false },
+    ));
+    const kept = try fixture.directory.dir.readFileAlloc(std.testing.io, "mix.m3u8", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(kept);
+    try std.testing.expectEqualStrings("keep me\n", kept);
+
+    const replaced = try fixture.runtime.libraryExportPlaylist(fixture.library, std.testing.io, playlist, target, .{
+        .paths = .absolute,
+        .replace = true,
+    });
+    try std.testing.expectEqual(@as(u32, 1), replaced.written);
+    const written = try fixture.directory.dir.readFileAlloc(std.testing.io, "mix.m3u8", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(written);
+    try std.testing.expect(std.mem.startsWith(u8, written, "#EXTM3U\n#EXTINF:1,Artist - One\n/"));
+}
+
+test "an export whose rename fails leaves no temporary file, and unavailable entries are skipped" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-failed-rename?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const track = try fixture.addTrack("Music/A/01.flac", "One", "Album", 1, 1_000);
+    const gone = try fixture.addTrack("Music/A/02.flac", "Two", "Album", 2, 1_000);
+    const playlist = try fixture.runtime.libraryCreatePlaylist(fixture.library, "Mix");
+    _ = try fixture.runtime.libraryPlaylistInsert(fixture.library, playlist, &.{ track, gone }, null);
+    const library_database = try libraryDatabase(&fixture.runtime, fixture.library);
+    var remove = try library_database.database.prepare("DELETE FROM tracks WHERE id = ?1;");
+    defer remove.deinit();
+    try remove.bindInt64(1, gone);
+    _ = try remove.step();
+    try fixture.directory.dir.createDirPath(std.testing.io, "taken.m3u8/inside");
+    const target = try fixture.path("taken.m3u8");
+    defer std.testing.allocator.free(target);
+
+    if (fixture.runtime.libraryExportPlaylist(fixture.library, std.testing.io, playlist, target, .{
+        .paths = .absolute,
+        .replace = true,
+    })) |_| return error.TestUnexpectedResult else |_| {}
+    var listing = fixture.directory.dir.iterate();
+    var names: usize = 0;
+    while (try listing.next(std.testing.io)) |entry| {
+        names += 1;
+        try std.testing.expectEqualStrings("taken.m3u8", entry.name);
+    }
+    try std.testing.expectEqual(@as(usize, 1), names);
+
+    const exported = try fixture.path("ok.m3u8");
+    defer std.testing.allocator.free(exported);
+    const result = try fixture.runtime.libraryExportPlaylist(fixture.library, std.testing.io, playlist, exported, .{
+        .paths = .absolute,
+        .replace = false,
+    });
+    try std.testing.expectEqual(@as(u32, 1), result.written);
+    try std.testing.expectEqual(@as(u32, 1), result.skipped);
+}
+
+test "#EXTINF lines without a length match only a unique recording when several are imported together" {
+    var fixture: PlaylistFileFixture = undefined;
+    try fixture.init("file:orca-playlist-extinf-unknown?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const unique = try fixture.addTrack("Music/A/01.flac", "Unique Song", "Album", 1, 200_000);
+    _ = try fixture.addTrack("Music/A/02.flac", "Twice", "Album", 2, 150_000);
+    _ = try fixture.addTrack("Music/B/02.flac", "Twice", "Other", 2, 90_000);
+    const shared = try fixture.addTrack("Music/A/03.flac", "Shared", "Album", 3, 100_000);
+    const copy = try fixture.addTrack("Music/C/03.flac", "Shared", "Third", 3, 100_000);
+    const library_database = try libraryDatabase(&fixture.runtime, fixture.library);
+    var share = try library_database.database.prepare(
+        "UPDATE tracks SET recording_id = (SELECT recording_id FROM tracks WHERE id = ?1) WHERE id = ?2;",
+    );
+    defer share.deinit();
+    try share.bindInt64(1, shared);
+    try share.bindInt64(2, copy);
+    _ = try share.step();
+    try fixture.writePlaylist("unknown.m3u", "#EXTM3U\n" ++
+        "#EXTINF:-1,artist - UNIQUE SONG\n/gone/one.flac\n" ++
+        "#EXTINF:-1,Artist - Twice\n/gone/two.flac\n" ++
+        "#EXTINF:-1,Artist - Shared\n/gone/shared.flac\n" ++
+        "#EXTINF:-1,Artist - Missing\n/gone/missing.flac\n" ++
+        "#EXTINF:-1,Artist - Unique Song\n/gone/again.flac\n");
+    const target = try fixture.path("unknown.m3u");
+    defer std.testing.allocator.free(target);
+
+    const imported = try fixture.runtime.libraryImportPlaylist(fixture.library, std.testing.io, target, null);
+    defer imported.deinit();
+    try std.testing.expectEqual(@as(u32, 3), imported.matched_by_info);
+    try std.testing.expectEqual(@as(u32, 2), imported.unmatched);
+    try std.testing.expectEqualStrings("/gone/two.flac", imported.unmatched_lines[0]);
+    try std.testing.expectEqualStrings("/gone/missing.flac", imported.unmatched_lines[1]);
+    const ids = try fixture.entryTrackIds(imported.playlist_id);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(?i64, &.{ unique, @min(shared, copy), unique }, ids);
+}

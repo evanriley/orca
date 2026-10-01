@@ -16,6 +16,7 @@ const network = @import("../network/root.zig");
 const object = @import("object.zig");
 const providers = @import("../providers/root.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const runtime_queue = @import("runtime_queue.zig");
 const runtime_roots = @import("runtime_roots.zig");
@@ -40,6 +41,16 @@ pub const TrackLoudness = track_details.Loudness;
 pub const PlayStats = database.PlayStats;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
+pub const RatingChange = database.RatingChange;
+pub const PlaylistSummary = database.PlaylistSummary;
+pub const PlaylistPage = database.PlaylistPage;
+pub const PlaylistEntry = database.PlaylistEntry;
+pub const PlaylistEntryPage = database.PlaylistEntryPage;
+pub const PlaylistInsertion = database.PlaylistInsertion;
+pub const PlaylistImport = runtime_playlists.PlaylistImport;
+pub const PlaylistExport = runtime_playlists.PlaylistExport;
+pub const PlaylistExportOptions = runtime_playlists.PlaylistExportOptions;
+pub const PlaylistPathStyle = runtime_playlists.PlaylistPathStyle;
 pub const ClientIdentity = network.client.Identity;
 pub const CredentialStore = providers.credentials.Store;
 pub const ScrobblerStatus = listen_worker.Status;
@@ -919,6 +930,105 @@ pub const OrcaRuntime = struct {
 
     pub fn libraryTrackFeedback(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !Feedback {
         return runtime_listens.libraryTrackFeedback(self, library, track_id);
+    }
+
+    pub fn librarySetRating(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+        rating: ?u8,
+    ) !RatingChange {
+        return runtime_playlists.librarySetRating(self, library, track_ids, rating);
+    }
+
+    pub fn libraryPlaylists(self: *OrcaRuntime, library: LibraryHandle, limit: u32, offset: u32) !PlaylistPage {
+        return runtime_playlists.libraryPlaylists(self, library, limit, offset);
+    }
+
+    pub fn libraryCreatePlaylist(self: *OrcaRuntime, library: LibraryHandle, name: []const u8) !i64 {
+        return runtime_playlists.libraryCreatePlaylist(self, library, name);
+    }
+
+    pub fn libraryRenamePlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64, name: []const u8) !void {
+        return runtime_playlists.libraryRenamePlaylist(self, library, playlist_id, name);
+    }
+
+    pub fn libraryDeletePlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64) !void {
+        return runtime_playlists.libraryDeletePlaylist(self, library, playlist_id);
+    }
+
+    /// An entry plays the Track of its recording with the lowest id; one
+    /// whose recording has no Track left has a null `track`.
+    pub fn libraryPlaylistEntries(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        playlist_id: i64,
+        limit: u32,
+        offset: u32,
+    ) !PlaylistEntryPage {
+        return runtime_playlists.libraryPlaylistEntries(self, library, playlist_id, limit, offset);
+    }
+
+    /// Adds the Tracks' recordings at `at`, or at the end when it is null.
+    pub fn libraryPlaylistInsert(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        playlist_id: i64,
+        track_ids: []const i64,
+        at: ?u32,
+    ) !PlaylistInsertion {
+        return runtime_playlists.libraryPlaylistInsert(self, library, playlist_id, track_ids, at);
+    }
+
+    pub fn libraryPlaylistRemove(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        playlist_id: i64,
+        positions: []const u32,
+    ) !u32 {
+        return runtime_playlists.libraryPlaylistRemove(self, library, playlist_id, positions);
+    }
+
+    pub fn libraryPlaylistMove(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64, from: u32, to: u32) !void {
+        return runtime_playlists.libraryPlaylistMove(self, library, playlist_id, from, to);
+    }
+
+    /// `playerPlayTracks` with the playlist's available entries; `start`
+    /// counts only those.
+    pub fn playerPlayPlaylist(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+        playlist_id: i64,
+        start: u32,
+    ) !void {
+        return runtime_playlists.playerPlayPlaylist(self, player, library, io, playlist_id, start);
+    }
+
+    /// Creates a playlist from an M3U or M3U8 file, matching each entry by
+    /// path, then by its #EXTINF artist, title and length. Nothing is scanned.
+    pub fn libraryImportPlaylist(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        path: []const u8,
+        name: ?[]const u8,
+    ) !PlaylistImport {
+        return runtime_playlists.libraryImportPlaylist(self, library, io, path, name);
+    }
+
+    /// Writes the playlist's available entries to `path` as UTF-8 M3U,
+    /// replacing it atomically.
+    pub fn libraryExportPlaylist(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        playlist_id: i64,
+        path: []const u8,
+        options: PlaylistExportOptions,
+    ) !PlaylistExport {
+        return runtime_playlists.libraryExportPlaylist(self, library, io, playlist_id, path, options);
     }
 
     /// How often the Track's file has been heard, and when last.

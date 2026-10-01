@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 26;
+pub const current_version = 27;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -998,6 +998,34 @@ const migration_26 =
     \\  AND group_id NOT IN (SELECT group_id FROM mutation_operations WHERE state IN (0, 1, 4, 5));
 ;
 
+const migration_27 =
+    \\CREATE TABLE ratings (
+    \\    recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 100),
+    \\    updated_at INTEGER NOT NULL
+    \\);
+    \\INSERT INTO ratings SELECT recording_id, max(rating), unixepoch() FROM tracks
+    \\    WHERE rating BETWEEN 1 AND 100 AND recording_id IS NOT NULL GROUP BY recording_id;
+    \\DROP INDEX tracks_rating;
+    \\ALTER TABLE tracks DROP COLUMN rating;
+    \\CREATE INDEX tracks_by_recording ON tracks(recording_id);
+    \\CREATE TABLE playlists (
+    \\    id INTEGER PRIMARY KEY,
+    \\    name TEXT NOT NULL UNIQUE,
+    \\    created_at INTEGER NOT NULL,
+    \\    updated_at INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE playlist_entries (
+    \\    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    \\    position INTEGER NOT NULL,
+    \\    recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    added_at INTEGER NOT NULL,
+    \\    PRIMARY KEY(playlist_id, position)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX playlist_entries_by_recording ON playlist_entries(recording_id);
+    \\CREATE INDEX locations_by_uri ON locations(uri);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1150,6 +1178,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 24 and target_version >= 24) try db.exec(migration_24);
     if (version < 25 and target_version >= 25) try db.exec(migration_25);
     if (version < 26 and target_version >= 26) try db.exec(migration_26);
+    if (version < 27 and target_version >= 27) try db.exec(migration_27);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2173,4 +2202,68 @@ test "a version-25 library resumes an undo that was interrupted between files" {
     try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 12;"));
     try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 8;"));
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT state FROM mutation_operations WHERE id = 11;"));
+}
+
+test "upgrading from version 26 moves each recording's highest track rating into ratings and drops the column" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v26.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 26);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two'), (3, 'Three');
+        \\INSERT INTO tracks(id, recording_id, title, rating) VALUES
+        \\    (1, 1, 'One', 60), (2, 1, 'One again', 80), (3, 2, 'Two', 0),
+        \\    (4, 3, 'Three', NULL), (5, NULL, 'Loose', 100);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM ratings;"));
+    try std.testing.expectEqual(@as(i64, 80), try scalar(db, "SELECT rating FROM ratings WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'rating';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_master WHERE name = 'tracks_rating';"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM tracks;"));
+    for ([_][:0]const u8{ "tracks_by_recording", "playlist_entries_by_recording", "locations_by_uri" }) |index| {
+        var statement = try db.prepare("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1;");
+        defer statement.deinit();
+        try statement.bindText(1, index);
+        try std.testing.expect(try statement.step() == .row);
+        try std.testing.expectEqual(@as(i64, 1), statement.columnInt64(0));
+    }
+    try checkForeignKeys(db);
+}
+
+test "the migrated ratings and playlist tables reject invalid rows and follow their recording and playlist" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "playlists.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try apply(db);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two');
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES (1, 'Mix', 0, 0), (2, 'Other', 0, 0);
+    );
+
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO ratings VALUES (1, 0, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO ratings VALUES (1, 101, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO ratings VALUES (9, 50, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO playlists(name, created_at, updated_at) VALUES ('Mix', 0, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO playlist_entries VALUES (1, 0, 9, 0);"));
+    try db.exec(
+        \\INSERT INTO ratings VALUES (1, 100, 0), (2, 1, 0);
+        \\INSERT INTO playlist_entries VALUES (1, 0, 1, 0), (1, 1, 2, 0), (1, 2, 1, 0), (2, 0, 2, 0);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO playlist_entries VALUES (1, 1, 1, 0);"));
+
+    try db.exec("DELETE FROM recordings WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM ratings;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM playlist_entries;"));
+    try db.exec("DELETE FROM playlists WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM playlist_entries;"));
 }

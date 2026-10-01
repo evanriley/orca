@@ -78,6 +78,7 @@ pub const TrackDetails = struct {
     last_played_at: ?i64,
     feedback: database.Feedback,
     feedback_syncable: bool,
+    rating: ?u8,
     musicbrainz_recording_id: ?[]u8,
     musicbrainz_recording_id_source: ?RecordingIdSource,
 
@@ -140,6 +141,7 @@ pub fn load(
         .last_played_at = plays.last_played_at,
         .feedback = summary.feedback,
         .feedback_syncable = feedback_syncable,
+        .rating = summary.rating,
         .musicbrainz_recording_id = if (recording_mbid) |value| value.text else null,
         .musicbrainz_recording_id_source = if (recording_mbid) |value| RecordingIdSource.of(value.provenance) else null,
     };

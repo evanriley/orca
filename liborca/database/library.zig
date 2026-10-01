@@ -71,6 +71,8 @@ pub const LibraryDatabase = struct {
     scrobbles: repository.ScrobbleQueueRepository,
     listens: repository.ListenRepository,
     feedback: repository.FeedbackRepository,
+    ratings: repository.RatingRepository,
+    playlists: repository.PlaylistRepository,
     identification_proposals: repository.IdentificationProposalRepository,
     acoustid_submissions: repository.AcoustIdSubmissionRepository,
 
@@ -157,6 +159,8 @@ pub const LibraryDatabase = struct {
             .scrobbles = .{ .db = database, .write_lane = write_lane },
             .listens = .{ .db = database, .write_lane = write_lane },
             .feedback = .{ .db = database, .write_lane = write_lane },
+            .ratings = .{ .db = database, .write_lane = write_lane },
+            .playlists = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
             .acoustid_submissions = .{ .db = database, .write_lane = write_lane },
         };
@@ -515,24 +519,27 @@ test "independent libraries retain separate state and FTS indexes" {
     try std.testing.expectEqual(@as(u64, 1), try second.tracks.count());
 }
 
-test "ten thousand ratings update in one transaction" {
+test "a full page of ratings is written in one transaction and a larger page is refused" {
     var library = try LibraryDatabase.open(
         std.testing.allocator,
         std.testing.io,
         "file:orca-test-batch?mode=memory&cache=shared",
     );
     defer library.close();
+    try library.database.exec(
+        \\WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 513)
+        \\INSERT INTO recordings(id, title) SELECT i, 'Batch track' FROM n;
+        \\INSERT INTO tracks(id, recording_id, title) SELECT id, id, title FROM recordings;
+    );
 
-    var tracks: [10_000]repository.TrackInput = undefined;
-    for (&tracks) |*track| track.* = .{ .title = "Batch track" };
-    try library.tracks.upsertTracks(&tracks);
-
-    var ids: [10_000]i64 = undefined;
+    var ids: [513]i64 = undefined;
     for (&ids, 1..) |*id, value| id.* = @intCast(value);
-    try library.tracks.setRatings(&ids, 80);
+    try std.testing.expectError(error.PageOutOfRange, library.ratings.set(&ids, 80));
+    const change = try library.ratings.set(ids[0..repository.max_page], 80);
+    try std.testing.expectEqual(@as(u32, repository.max_page), change.updated);
     try std.testing.expectEqual(
-        @as(u64, 10_000),
-        try library.tracks.countWithRating(80),
+        @as(i64, repository.max_page),
+        try testScalar(library.database, "SELECT count(*) FROM ratings WHERE rating = 80;"),
     );
 }
 
@@ -2536,4 +2543,218 @@ test "clearing a Track that has no feedback changes nothing and is not counted" 
 
     try std.testing.expectEqual(@as(u32, 0), change.updated);
     try std.testing.expectEqual(@as(u32, 0), change.skipped);
+}
+
+test "a rating belongs to the recording, shows on every Track of it and survives a new Track id" {
+    var library = try openFeedbackLibrary("rating-shared");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const flac = try addFeedbackTrack(&library, "Northern Sky", recording, null);
+    const compilation = try addFeedbackTrack(&library, "Northern Sky", recording, null);
+    const bare = try addFeedbackTrack(&library, "Bare", null, null);
+
+    const change = try library.ratings.set(&.{ flac, bare, 9999 }, 80);
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try std.testing.expectEqual(@as(u32, 2), change.skipped);
+    try std.testing.expectEqual(@as(?u8, 80), try library.ratings.forTrack(compilation));
+    try std.testing.expectEqual(@as(?u8, null), try library.ratings.forTrack(bare));
+    const summary = (try library.tracks.byId(std.testing.allocator, compilation)).?;
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?u8, 80), summary.rating);
+
+    try library.database.exec("DELETE FROM tracks WHERE recording_id IS NOT NULL;");
+    const reprojected = try addFeedbackTrack(&library, "Northern Sky", recording, null);
+    var page = try library.tracks.page(std.testing.allocator, .{});
+    defer page.deinit();
+    for (page.items) |item| {
+        const expected: ?u8 = if (item.id == reprojected) 80 else null;
+        try std.testing.expectEqual(expected, item.rating);
+    }
+
+    const cleared = try library.ratings.set(&.{ reprojected, reprojected }, null);
+    try std.testing.expectEqual(@as(u32, 1), cleared.updated);
+    try std.testing.expectEqual(@as(?u8, null), try library.ratings.forTrack(reprojected));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM ratings;"));
+}
+
+test "a rating of 0 or above 100 is refused and writes nothing" {
+    var library = try openFeedbackLibrary("rating-invalid");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), null);
+    _ = try library.ratings.set(&.{track}, 40);
+
+    try std.testing.expectError(error.InvalidRating, library.ratings.set(&.{track}, 0));
+    try std.testing.expectError(error.InvalidRating, library.ratings.set(&.{track}, 101));
+    try std.testing.expectEqual(@as(?u8, 40), try library.ratings.forTrack(track));
+}
+
+test "sorting by rating puts unrated Tracks last in both directions" {
+    var library = try openFeedbackLibrary("rating-sort");
+    defer library.close();
+    const unrated = try addFeedbackTrack(&library, "Unrated", try addRecording(&library), null);
+    const low = try addFeedbackTrack(&library, "Low", try addRecording(&library), null);
+    const high = try addFeedbackTrack(&library, "High", try addRecording(&library), null);
+    _ = try library.ratings.set(&.{low}, 20);
+    _ = try library.ratings.set(&.{high}, 100);
+
+    for ([_]struct { SortDirection, [3]i64 }{
+        .{ .ascending, .{ low, high, unrated } },
+        .{ .descending, .{ high, low, unrated } },
+    }) |case| {
+        var page = try library.tracks.page(std.testing.allocator, .{ .sort = .rating, .direction = case[0] });
+        defer page.deinit();
+        try std.testing.expectEqual(@as(usize, 3), page.items.len);
+        for (case[1], page.items) |expected, item| try std.testing.expectEqual(expected, item.id);
+    }
+}
+
+const SortDirection = repository.SortDirection;
+
+fn expectPlaylist(library: *LibraryDatabase, playlist_id: i64, expected: []const i64) !void {
+    var page = try library.playlists.entries(std.testing.allocator, playlist_id, repository.max_page, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(expected.len, page.items.len);
+    for (page.items, expected, 0..) |entry, recording_id, position| {
+        try std.testing.expectEqual(@as(u32, @intCast(position)), entry.position);
+        try std.testing.expectEqual(recording_id, entry.recording_id);
+    }
+}
+
+test "playlist names are trimmed, non-empty and unique" {
+    var library = try openFeedbackLibrary("playlist-names");
+    defer library.close();
+    const mix = try library.playlists.create("  Mix \t");
+    const other = try library.playlists.create("Other");
+
+    try std.testing.expectError(error.PlaylistNameTaken, library.playlists.create("Mix"));
+    try std.testing.expectError(error.InvalidPlaylistName, library.playlists.create(""));
+    try std.testing.expectError(error.InvalidPlaylistName, library.playlists.create(" \t\n"));
+    try std.testing.expectError(error.PlaylistNameTaken, library.playlists.rename(other, " Mix"));
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.rename(9999, "New"));
+    try library.playlists.rename(mix, "Mix");
+    try library.playlists.rename(mix, "A Mix");
+
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqualStrings("A Mix", page.items[0].name);
+    try std.testing.expectEqualStrings("Other", page.items[1].name);
+}
+
+test "inserting, moving and removing playlist entries keeps positions contiguous" {
+    var library = try openFeedbackLibrary("playlist-order");
+    defer library.close();
+    const a = try addRecording(&library);
+    const b = try addRecording(&library);
+    const c = try addRecording(&library);
+    const track_a = try addFeedbackTrack(&library, "A", a, null);
+    const track_b = try addFeedbackTrack(&library, "B", b, null);
+    const track_c = try addFeedbackTrack(&library, "C", c, null);
+    const bare = try addFeedbackTrack(&library, "Bare", null, null);
+    const playlist = try library.playlists.create("Mix");
+
+    const added = try library.playlists.insert(playlist, &.{ track_a, bare, track_b, track_c }, null);
+    try std.testing.expectEqual(@as(u32, 3), added.added);
+    try std.testing.expectEqual(@as(u32, 1), added.skipped);
+    try expectPlaylist(&library, playlist, &.{ a, b, c });
+
+    try library.playlists.move(playlist, 0, 2);
+    try expectPlaylist(&library, playlist, &.{ b, c, a });
+    try library.playlists.move(playlist, 2, 0);
+    try expectPlaylist(&library, playlist, &.{ a, b, c });
+    try library.playlists.move(playlist, 2, 0);
+    try expectPlaylist(&library, playlist, &.{ c, a, b });
+    try library.playlists.move(playlist, 1, 1);
+    try expectPlaylist(&library, playlist, &.{ c, a, b });
+    try std.testing.expectError(error.PositionOutOfRange, library.playlists.move(playlist, 3, 0));
+
+    try std.testing.expectError(error.PositionOutOfRange, library.playlists.insert(playlist, &.{track_a}, 5));
+    _ = try library.playlists.insert(playlist, &.{track_a}, 3);
+    try expectPlaylist(&library, playlist, &.{ c, a, b, a });
+    _ = try library.playlists.insert(playlist, &.{ track_b, track_c }, 1);
+    try expectPlaylist(&library, playlist, &.{ c, b, c, a, b, a });
+
+    try std.testing.expectError(error.PositionOutOfRange, library.playlists.remove(playlist, &.{ 1, 6 }));
+    try expectPlaylist(&library, playlist, &.{ c, b, c, a, b, a });
+    try std.testing.expectEqual(@as(u32, 3), try library.playlists.remove(playlist, &.{ 4, 0, 0, 2 }));
+    try expectPlaylist(&library, playlist, &.{ b, a, a });
+    try std.testing.expectEqual(@as(u32, 1), try library.playlists.remove(playlist, &.{ 0, 0 }));
+    try expectPlaylist(&library, playlist, &.{ a, a });
+
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(u32, 2), page.items[0].entries);
+    try std.testing.expectEqual(@as(u32, 2), page.items[0].available);
+}
+
+test "an add that would take a playlist past 10,000 entries fails and writes nothing" {
+    var library = try openFeedbackLibrary("playlist-full");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const track = try addFeedbackTrack(&library, "Song", recording, null);
+    const playlist = try library.playlists.create("Long");
+    var sql: [256]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(
+        &sql,
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 9998) " ++
+            "INSERT INTO playlist_entries SELECT {d}, i, {d}, 0 FROM n;",
+        .{ playlist, recording },
+        0,
+    ));
+
+    try std.testing.expectError(error.PlaylistFull, library.playlists.insert(playlist, &.{ track, track }, 0));
+    var many: [repository.max_page + 1]i64 = @splat(track);
+    try std.testing.expectError(error.PageOutOfRange, library.playlists.insert(playlist, &many, null));
+    try std.testing.expectEqual(@as(i64, 9999), try testScalar(library.database, "SELECT count(*) FROM playlist_entries;"));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT min(position) FROM playlist_entries;"));
+    _ = try library.playlists.insert(playlist, &.{track}, 0);
+    try std.testing.expectEqual(@as(i64, 9999), try testScalar(library.database, "SELECT max(position) FROM playlist_entries;"));
+}
+
+test "deleting a playlist removes its entries" {
+    var library = try openFeedbackLibrary("playlist-delete");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Song", try addRecording(&library), null);
+    const playlist = try library.playlists.create("Gone");
+    const kept = try library.playlists.create("Kept");
+    _ = try library.playlists.insert(playlist, &.{ track, track }, null);
+    _ = try library.playlists.insert(kept, &.{track}, null);
+
+    try library.playlists.delete(playlist);
+
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.delete(playlist));
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.entries(std.testing.allocator, playlist, 10, 0));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM playlist_entries;"));
+}
+
+test "a playlist entry plays its recording's lowest Track id and is unavailable without a Track" {
+    var library = try openFeedbackLibrary("playlist-resolve");
+    defer library.close();
+    const shared = try addRecording(&library);
+    const gone = try addRecording(&library);
+    const first = try addFeedbackTrack(&library, "First", shared, null);
+    const second = try addFeedbackTrack(&library, "Second", shared, null);
+    const leaving = try addFeedbackTrack(&library, "Leaving", gone, null);
+    const playlist = try library.playlists.create("Mix");
+    _ = try library.playlists.insert(playlist, &.{ second, leaving, first }, null);
+    var sql: [64]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM tracks WHERE id = {d};", .{leaving}, 0));
+
+    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 3), page.items.len);
+    try std.testing.expectEqual(first, page.items[0].track.?.id);
+    try std.testing.expectEqualStrings("First", page.items[0].track.?.title);
+    try std.testing.expect(page.items[1].track == null);
+    try std.testing.expectEqual(gone, page.items[1].recording_id);
+    try std.testing.expectEqual(first, page.items[2].track.?.id);
+
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(i64, &.{ first, first }, ids);
+
+    var playlists = try library.playlists.list(std.testing.allocator, 10, 0);
+    defer playlists.deinit();
+    try std.testing.expectEqual(@as(u32, 3), playlists.items[0].entries);
+    try std.testing.expectEqual(@as(u32, 2), playlists.items[0].available);
 }
