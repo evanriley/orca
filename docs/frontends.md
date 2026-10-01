@@ -254,6 +254,16 @@ The window is an `AdwNavigationSplitView`:
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
   the page offers Find Matches, or says every song has a recording ID.
 
+  **Corrections**, above the songs and hidden when there are none, lists
+  the album groups a verification proposed (`libraryCorrectionGroups`):
+  each names the album and artist and, expanded, every song's current title
+  and position beside the proposed ones. Accept All
+  (`libraryAcceptCorrectionGroup`) and Dismiss All
+  (`libraryDismissCorrectionGroup`) take the whole group; the songs in a
+  group are not listed among the songs to review. A proposal that would
+  replace the recording ID in effect says "replaces" and the start of that
+  ID beside its source.
+
   Submit to AcoustID (N) appears when an AcoustID key is saved and
   `libraryAcoustIdSubmittableCount` is above zero. It asks first, then runs
   `startAcoustIdSubmission` as a job on the status card, and the count is
@@ -264,7 +274,11 @@ Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
 player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, Edit
 Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
-Play and Remove. A song with no feedback offers Love and Dislike; a loved one
+Play and Remove. A single song in the track list, an album page, the queue or
+a playlist also offers Verify and Re-identify, and an album Match Album,
+Verify Album, Re-identify Album and Fetch Cover Art. Verify needs Match by
+audio fingerprint on in Preferences. Re-identify Album accepts nothing and
+fetches no cover; its proposals wait in Matches. A song with no feedback offers Love and Dislike; a loved one
 offers Remove Love, a disliked one Remove Dislike. On a selection the entries
 apply to every selected song.
 The playing track is marked across its whole row in the track list, on album
@@ -299,7 +313,11 @@ button, and the release, release-group, release-track and album-artist IDs
 when known, each with its source as a tooltip. A song without one shows its top three proposals with Accept and
 Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
 that song; with no proposals it offers Find Match, which searches for that
-song alone. A change made in one place repaints the others, by recording and
+song alone. A song with a recording ID shows its verification under it
+(`libraryTrackVerification`): Verified by AcoustID, AcoustID hears a
+different recording, AcoustID could not confirm, or Could not fingerprint,
+with "out of date" and "suggestion dismissed" appended when they apply, and
+offers Verify while it is unverified or out of date. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
 each button once, in setup, and read the row's song when the button is pressed.

@@ -84,7 +84,7 @@ fn lengthDiffers(track_ms: ?i64, proposal_ms: ?u64) bool {
 
 pub fn updateCount(self: *App) void {
     const library = self.library orelse return;
-    const total = self.runtime.libraryMatchReviewCount(library) catch return;
+    const total = (self.runtime.libraryMatchReviewCount(library) catch return) + self.matches_group_count;
     const label = self.matches_count orelse return;
     var buffer: [24]u8 = undefined;
     const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&buffer, "{f}", .{strings.grouped(total)}) catch "";
@@ -94,6 +94,10 @@ pub fn updateCount(self: *App) void {
 fn refused(self: *App, err: anyerror, fallback: [:0]const u8) void {
     if (err == error.StaleIdentificationProposal or err == error.UnknownIdentificationProposal) {
         self.toast("That match was already handled");
+        return changed(self);
+    }
+    if (err == error.ProposalInGroup) {
+        self.toast("Accept or dismiss it with its album in Matches");
         return changed(self);
     }
     self.toast(fallback);
@@ -129,6 +133,121 @@ pub fn dismiss(self: *App, track_id: i64, proposal_id: i64) void {
     self.runtime.libraryDismissMatch(library, proposal_id) catch |err|
         return refused(self, err, "Could not dismiss that match");
     changed(self);
+}
+
+fn groupOf(button: ?*anyopaque) ?i64 {
+    const stored = gtk.g_object_get_data(button.?, "orca-group") orelse return null;
+    return @intCast(@intFromPtr(stored));
+}
+
+fn groupRefused(self: *App, err: anyerror, fallback: [:0]const u8) void {
+    if (err == error.StaleCorrectionGroup or err == error.UnknownCorrectionGroup) {
+        self.toast("That correction was already handled");
+        return changed(self);
+    }
+    self.toast(fallback);
+}
+
+fn acceptGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const acceptance = self.runtime.libraryAcceptCorrectionGroup(library, groupOf(button) orelse return) catch |err|
+        return groupRefused(self, err, "Could not save the correction");
+    var buffer: [64]u8 = undefined;
+    self.toast(if (acceptance.accepted == 1)
+        "Corrected 1 song"
+    else
+        strings.format(&buffer, "Corrected {f} songs", .{strings.grouped(acceptance.accepted)}));
+    accepted(self);
+}
+
+fn dismissGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    self.runtime.libraryDismissCorrectionGroup(library, groupOf(button) orelse return) catch |err|
+        return groupRefused(self, err, "Could not dismiss the correction");
+    self.toast("Correction dismissed");
+    changed(self);
+}
+
+fn widen(number: ?u32) ?i64 {
+    return if (number) |value| value else null;
+}
+
+fn writePosition(writer: *std.Io.Writer, disc_number: ?i64, track_number: ?i64) std.Io.Writer.Error!void {
+    const track = track_number orelse return;
+    if (disc_number) |disc| if (disc > 1) return writer.print(" ({d}-{d})", .{ disc, track });
+    try writer.print(" ({d})", .{track});
+}
+
+fn correctionMemberRow(member: liborca.CorrectionGroupMember) *gtk.Widget {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    writer.writeAll(if (member.title.len != 0) member.title else "Unknown title") catch {};
+    writePosition(&writer, member.disc_number, member.track_number) catch {};
+    writer.print(" → {s}", .{if (member.proposed_title.len != 0) member.proposed_title else "Unknown title"}) catch {};
+    writePosition(&writer, widen(member.proposed_disc_number), widen(member.proposed_track_number)) catch {};
+    const text = finish(&buffer, &writer);
+    const row = adw.adw_action_row_new();
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), text.ptr);
+    adw.adw_action_row_set_title_lines(gtk.cast(adw.ActionRow, row), 2);
+    var tooltip_buffer: [160]u8 = undefined;
+    gtk.gtk_widget_set_tooltip_text(row, strings.format(&tooltip_buffer, "{s}\nReplaces {s}", .{
+        member.recording_mbid,
+        member.corrects orelse "nothing",
+    }).ptr);
+    return row;
+}
+
+fn groupButton(text: [*:0]const u8, group_id: i64, handler: gtk.GCallback, self: *App) *gtk.Widget {
+    const widget = gtk.gtk_button_new_with_label(text);
+    gtk.gtk_widget_set_valign(widget, gtk.ALIGN_CENTER);
+    gtk.g_object_set_data(widget, "orca-group", @ptrFromInt(@as(usize, @intCast(group_id))));
+    _ = gtk.signalConnect(widget, "clicked", handler, self);
+    return widget;
+}
+
+fn correctionGroupRow(self: *App, group: liborca.CorrectionGroup) *gtk.Widget {
+    const row = adw.adw_expander_row_new();
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    var title_buffer: [512]u8 = undefined;
+    const title = strings.format(&title_buffer, "{s}{s}{s}", .{
+        if (group.album.len != 0) group.album else "Unknown album",
+        if (group.album_artist.len != 0) " — " else "",
+        group.album_artist,
+    });
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), title.ptr);
+    var subtitle_buffer: [128]u8 = undefined;
+    const count = group.proposals.len;
+    adw.adw_expander_row_set_subtitle(gtk.cast(adw.ExpanderRow, row), if (count == 1)
+        "1 song is identified as another track of this album"
+    else
+        strings.format(&subtitle_buffer, "{d} songs are identified as other tracks of this album", .{count}).ptr);
+    adw.adw_expander_row_set_title_lines(gtk.cast(adw.ExpanderRow, row), 1);
+    const accept_button = groupButton("Accept All", group.group_id, gtk.callback(acceptGroupClicked), self);
+    gtk.gtk_widget_set_tooltip_text(accept_button, "Record every song's corrected recording, title and position");
+    gtk.gtk_widget_add_css_class(accept_button, "suggested-action");
+    const dismiss_button = groupButton("Dismiss All", group.group_id, gtk.callback(dismissGroupClicked), self);
+    adw.adw_expander_row_add_suffix(gtk.cast(adw.ExpanderRow, row), accept_button);
+    adw.adw_expander_row_add_suffix(gtk.cast(adw.ExpanderRow, row), dismiss_button);
+    for (group.proposals) |member|
+        adw.adw_expander_row_add_row(gtk.cast(adw.ExpanderRow, row), correctionMemberRow(member));
+    return row;
+}
+
+fn reloadCorrections(self: *App, library: liborca.LibraryHandle) void {
+    const list = self.matches_corrections orelse return;
+    gtk.gtk_list_box_remove_all(list);
+    self.matches_group_count = 0;
+    var page = self.runtime.libraryCorrectionGroups(library, self.allocator, app.page_size, 0) catch {
+        if (self.matches_corrections_box) |box| gtk.gtk_widget_set_visible(box, gtk.false_);
+        return;
+    };
+    defer page.deinit();
+    self.matches_group_count = page.items.len;
+    for (page.items) |group| gtk.gtk_list_box_append(list, correctionGroupRow(self, group));
+    if (self.matches_corrections_box) |box| gtk.gtk_widget_set_visible(box, if (page.items.len == 0) gtk.false_ else gtk.true_);
 }
 
 fn launched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
@@ -346,6 +465,7 @@ fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
     var source_writer = std.Io.Writer.fixed(source_buffer[0 .. source_buffer.len - 1]);
     source_writer.writeAll(separator) catch {};
     writeSource(&source_writer, proposal) catch {};
+    if (proposal.corrects) |replaced| source_writer.print(separator ++ "replaces {s}", .{replaced[0..@min(replaced.len, 8)]}) catch {};
     const source_text = finish(&source_buffer, &source_writer);
     const source = newLabel(source_text, "dim-label");
     gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, source), gtk.ELLIPSIZE_END);
@@ -431,8 +551,19 @@ pub fn build(self: *App) *gtk.Widget {
     self.matches_note = gtk.cast(gtk.Label, note);
     gtk.gtk_widget_add_css_class(note, "dim-label");
     gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, note), gtk.true_);
+    const corrections = gtk.gtk_list_box_new();
+    self.matches_corrections = gtk.cast(gtk.ListBox, corrections);
+    gtk.gtk_list_box_set_selection_mode(self.matches_corrections.?, gtk.SELECTION_NONE);
+    gtk.gtk_widget_add_css_class(corrections, "boxed-list");
+    const corrections_heading = newLabel("Corrections", "heading");
+    const corrections_box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
+    self.matches_corrections_box = corrections_box;
+    gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections_heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections);
+    gtk.gtk_widget_set_visible(corrections_box, gtk.false_);
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 12);
     gtk.gtk_widget_add_css_class(content, "album-page");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), corrections_box);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), list);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), note);
     const clamp = adw.adw_clamp_new();
@@ -533,22 +664,35 @@ pub fn reload(self: *App) void {
     self.matches_focus_row = null;
     gtk.gtk_list_box_remove_all(list);
     const library = self.library orelse return;
+    reloadCorrections(self, library);
     updateCount(self);
     showAcceptConfident(self, library);
     showSubmit(self, library);
     const total = self.runtime.libraryMatchReviewCount(library) catch 0;
     const unidentified = self.runtime.libraryUnidentifiedCount(library) catch 0;
     var buffer: [256]u8 = undefined;
+    const groups = self.matches_group_count;
     if (self.matches_title) |title| {
-        const text = strings.format(&buffer, "{f} {s} to review" ++ separator ++ "{f} not identified", .{
-            strings.grouped(total),
-            if (total == 1) "song" else "songs",
-            strings.grouped(unidentified),
-        });
+        const text = if (groups == 0)
+            strings.format(&buffer, "{f} {s} to review" ++ separator ++ "{f} not identified", .{
+                strings.grouped(total),
+                if (total == 1) "song" else "songs",
+                strings.grouped(unidentified),
+            })
+        else
+            strings.format(&buffer, "{f} {s}" ++ separator ++ "{f} {s} to review" ++ separator ++ "{f} not identified", .{
+                strings.grouped(groups),
+                if (groups == 1) "album correction" else "album corrections",
+                strings.grouped(total),
+                if (total == 1) "song" else "songs",
+                strings.grouped(unidentified),
+            });
         adw.adw_window_title_set_subtitle(title, text.ptr);
     }
-    if (total == 0) showEmpty(self, unidentified);
-    if (self.matches_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
+    const nothing = total == 0 and groups == 0;
+    if (nothing) showEmpty(self, unidentified);
+    if (self.matches_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (nothing) "empty" else "list");
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, list), if (total == 0) gtk.false_ else gtk.true_);
 
     var page = self.runtime.libraryMatchReviewPage(library, app.page_size, 0) catch return;
     defer page.deinit();

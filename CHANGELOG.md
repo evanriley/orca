@@ -39,7 +39,8 @@
   proposed, dismissed proposals stay dismissed, and a Release's proposals are
   aligned as Match Album aligns them. It is refused for the whole library and
   with `accept_minimum_confidence`. `orca-cli match` gains `--track=ID` and
-  `--reidentify`, and prints `confirmed=` in that mode.
+  `--reidentify`, and prints `confirmed=` in that mode. `orca-gtk` offers
+  Re-identify on a single song's menu and Re-identify Album on an album's.
 - **Verification.** `MatchRequest.mode = .verify` checks each identified
   file's recording ID against what AcoustID hears in its fingerprint, one
   Release at a time: `agrees` at a score of 0.5, `disagrees` when another
@@ -50,7 +51,10 @@
   AcoustID (`error.AcoustIdRequired`). `MatchStats` gains `verified`,
   `agreed`, `disagreed`, `unconfirmed`, `skipped` and `correction_groups`,
   and `Runtime.libraryTrackVerification` returns a Track's outcome.
-  `orca-cli verify` runs it and `track` prints the outcome.
+  `orca-cli verify` runs it and `track` prints the outcome. `orca-gtk`
+  offers Verify on a single song's menu and Verify Album on an album's, and
+  its details panel shows the outcome under the recording ID, with Verify
+  while the song is unverified or its outcome is out of date.
 - **Corrections.** A proposal for a file whose recording ID in effect it
   would replace is a correction, `MatchProposal.corrects` naming that ID.
   When a verified Release has a MusicBrainz release ID, the corrections of
@@ -59,7 +63,10 @@
   dismissed only whole by `libraryAcceptCorrectionGroup` and
   `libraryDismissCorrectionGroup`. `orca-cli` has `corrections`,
   `accept-correction` and `dismiss-correction`, and `matches` prints the
-  replaced ID last.
+  replaced ID last. `orca-gtk`'s Matches page lists album groups under
+  Corrections, each song's current and proposed title and position, with
+  Accept All and Dismiss All, and a correction's row names the ID it
+  replaces.
 
 ### Changed
 

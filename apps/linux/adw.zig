@@ -64,6 +64,7 @@ pub extern fn adw_action_row_set_subtitle_lines(row: *ActionRow, lines: c_int) v
 pub extern fn adw_action_row_set_title_lines(row: *ActionRow, lines: c_int) void;
 pub extern fn adw_expander_row_new() *gtk.Widget;
 pub extern fn adw_expander_row_add_row(row: *ExpanderRow, child: *gtk.Widget) void;
+pub extern fn adw_expander_row_add_suffix(row: *ExpanderRow, widget: *gtk.Widget) void;
 pub extern fn adw_expander_row_set_subtitle(row: *ExpanderRow, subtitle: [*:0]const u8) void;
 pub extern fn adw_expander_row_set_expanded(row: *ExpanderRow, expanded: gtk.gboolean) void;
 pub extern fn adw_expander_row_get_expanded(row: *ExpanderRow) gtk.gboolean;

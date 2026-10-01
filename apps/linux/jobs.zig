@@ -167,7 +167,54 @@ fn startMatchingJob(self: *App, track_id: ?i64) void {
         .fingerprints = self.match_fingerprints,
     }) catch |err| return self.toast(matchingRefusal(err));
     self.match_task_track = track_id;
+    self.match_task_mode = .search;
     begin(self, .matching, job, "Finding matches");
+    if (track_id != null) details.invalidate(self);
+}
+
+const MatchTarget = union(enum) { track: i64, release: i64 };
+
+pub fn startTrackVerification(self: *App, track_id: i64) void {
+    startIdentificationJob(self, .verify, .{ .track = track_id });
+}
+
+pub fn startAlbumVerification(self: *App, release_id: i64) void {
+    startIdentificationJob(self, .verify, .{ .release = release_id });
+}
+
+pub fn startTrackReidentification(self: *App, track_id: i64) void {
+    startIdentificationJob(self, .reidentify, .{ .track = track_id });
+}
+
+pub fn startAlbumReidentification(self: *App, release_id: i64) void {
+    startIdentificationJob(self, .reidentify, .{ .release = release_id });
+}
+
+fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarget) void {
+    const library = self.library orelse return;
+    if (!idle(self)) return;
+    const track_id: ?i64 = switch (target) {
+        .track => |id| id,
+        .release => null,
+    };
+    const job = self.runtime.startLibraryMatching(library, .{
+        .mode = mode,
+        .track_id = track_id,
+        .release_id = switch (target) {
+            .track => null,
+            .release => |id| id,
+        },
+        .fingerprints = self.match_fingerprints,
+        .accept_minimum_confidence = null,
+        .cover_art = false,
+    }) catch |err| return self.toast(matchingRefusal(err));
+    self.match_task_track = track_id;
+    self.match_task_mode = mode;
+    begin(self, .matching, job, switch (mode) {
+        .verify => "Verifying",
+        .reidentify => "Re-identifying",
+        .search => unreachable,
+    });
     if (track_id != null) details.invalidate(self);
 }
 
@@ -183,6 +230,7 @@ pub fn startAlbumMatching(self: *App, release_id: i64) void {
         .cover_art = true,
     }) catch |err| return self.toast(matchingRefusal(err));
     self.match_task_release = release_id;
+    self.match_task_mode = .search;
     begin(self, .matching, job, "Matching album");
 }
 
@@ -191,13 +239,18 @@ pub fn startCoverArtFetch(self: *App, release_id: i64) void {
     if (!idle(self)) return;
     const job = self.runtime.startReleaseCoverArtFetch(library, release_id) catch |err| return self.toast(matchingRefusal(err));
     self.match_task_release = release_id;
+    self.match_task_mode = .search;
     begin(self, .matching, job, "Fetching cover art");
 }
+
+const acoustid_required = "Verify needs AcoustID: turn on Match by audio fingerprint in Preferences";
 
 fn matchingRefusal(err: anyerror) [:0]const u8 {
     return switch (err) {
         error.MatchingAlreadyRunning => "Already finding matches",
         error.AcoustIdBusy => "Already submitting to AcoustID",
+        error.AcoustIdRequired => acoustid_required,
+        error.InvalidMatchRequest => "That search cannot run on this selection",
         else => "Could not start finding matches",
     };
 }
@@ -289,10 +342,11 @@ fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.Ma
     if (self.match_task_release != null and snapshot.completed_units == (snapshot.total_units orelse 0))
         return gtk.gtk_label_set_text(label, "Cover Art Archive");
     var buffer: [160]u8 = undefined;
-    const text = strings.printZ(&buffer, "{f} of {f} songs · {f} matched", .{
+    const text = strings.printZ(&buffer, "{f} of {f} songs · {f} {s}", .{
         strings.grouped(snapshot.completed_units),
         strings.grouped(snapshot.total_units orelse snapshot.completed_units),
-        strings.grouped(stats.matched),
+        strings.grouped(if (self.match_task_mode == .verify) stats.verified else stats.matched),
+        if (self.match_task_mode == .verify) "verified" else "matched",
     }) catch return;
     gtk.gtk_label_set_text(label, text.ptr);
 }
@@ -343,7 +397,67 @@ fn albumFinished(self: *App, release_id: i64, state_value: liborca.JobState, sta
     }) catch cover);
 }
 
+fn unreachableText(busy: liborca.BusyService) [:0]const u8 {
+    return switch (busy) {
+        .musicbrainz => "MusicBrainz is in use by another Orca process; try again once it finishes",
+        .acoustid => "AcoustID is in use by another Orca process; try again once it finishes",
+        .none => "MusicBrainz or AcoustID could not be reached; try again later",
+    };
+}
+
+fn verificationFinished(self: *App, track_id: ?i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    if (state_value == .cancelled) return self.toast("Stopped");
+    const result = stats orelse return self.toast("Could not verify");
+    if (state_value != .succeeded) return self.toast(switch (result.acoustid) {
+        .searched => unreachableText(result.busy),
+        .off, .no_client_key => acoustid_required,
+        .invalid_client_key => "AcoustID did not accept Orca's application key",
+    });
+    if (result.correction_groups != 0) return self.toast("Found an album correction to review");
+    if (track_id != null) return self.toast(if (result.disagreed != 0)
+        "AcoustID hears a different recording — review it in Matches"
+    else if (result.agreed != 0)
+        "AcoustID agrees with this song's recording"
+    else if (result.unconfirmed != 0)
+        "AcoustID could not confirm this song"
+    else if (result.verified == 0)
+        "Nothing to verify: the song has no recording ID, or its verification is current"
+    else
+        "Could not fingerprint this song");
+    var buffer: [96]u8 = undefined;
+    self.toast(strings.printZ(&buffer, "Verified {f} {s} · {f} disagree", .{
+        strings.grouped(result.verified),
+        if (result.verified == 1) "song" else "songs",
+        strings.grouped(result.disagreed),
+    }) catch "Verified");
+}
+
+fn reidentificationFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    if (state_value == .cancelled) return self.toast("Stopped");
+    const result = stats orelse return self.toast("Could not search again");
+    if (state_value != .succeeded) return self.toast(unreachableText(result.busy));
+    if (result.matched == 0) return self.toast(if (result.confirmed != 0) "Confirmed the current recording" else "No match found");
+    var buffer: [64]u8 = undefined;
+    self.toast(if (result.matched == 1)
+        "Found a match to review"
+    else
+        strings.printZ(&buffer, "Found {f} matches to review", .{strings.grouped(result.matched)}) catch "Found matches to review");
+}
+
 fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+    const mode = self.match_task_mode;
+    self.match_task_mode = .search;
+    if (mode != .search) {
+        const track_id = self.match_task_track;
+        self.match_task_track = null;
+        matches.reload(self);
+        details.invalidate(self);
+        return switch (mode) {
+            .verify => verificationFinished(self, track_id, state_value, stats),
+            .reidentify => reidentificationFinished(self, state_value, stats),
+            .search => unreachable,
+        };
+    }
     if (self.match_task_release) |release_id| {
         self.match_task_release = null;
         return albumFinished(self, release_id, state_value, stats);
@@ -449,6 +563,7 @@ pub fn tick(self: *App) void {
         self.task_job = null;
         self.match_task_track = null;
         self.match_task_release = null;
+        self.match_task_mode = .search;
         self.shown_matched = 0;
         showScanning(self, false);
         return;

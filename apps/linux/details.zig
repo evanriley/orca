@@ -65,6 +65,8 @@ pub const Panel = struct {
     musicbrainz_group: *gtk.Widget,
     recording_row: *gtk.Widget,
     recording_link: *gtk.Widget,
+    verification_row: *gtk.Widget,
+    verify_row: *gtk.Widget,
     release_id_row: *gtk.Widget,
     release_group_id_row: *gtk.Widget,
     release_track_id_row: *gtk.Widget,
@@ -315,6 +317,8 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
     for (panel.proposal_rows) |proposal_row| gtk.gtk_widget_set_visible(proposal_row, gtk.false_);
     gtk.gtk_widget_set_visible(panel.review_row, gtk.false_);
     gtk.gtk_widget_set_visible(panel.find_row, gtk.false_);
+    gtk.gtk_widget_set_visible(panel.verification_row, gtk.false_);
+    gtk.gtk_widget_set_visible(panel.verify_row, gtk.false_);
     var buffer: [256]u8 = undefined;
     if (details.musicbrainz_recording_id) |recording_mbid| {
         const text = strings.terminated(&buffer, recording_mbid);
@@ -324,6 +328,7 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
         gtk.gtk_widget_add_css_class(panel.recording_row, "recording-id");
         matches.setRecording(panel.recording_link, recording_mbid);
         gtk.gtk_widget_set_visible(panel.recording_link, gtk.true_);
+        populateVerification(panel, details.track_id);
         return;
     }
     adw.adw_preferences_row_set_title(row, "Not identified");
@@ -331,7 +336,7 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
     gtk.gtk_widget_set_tooltip_text(panel.recording_row, null);
     gtk.gtk_widget_set_visible(panel.recording_link, gtk.false_);
     const self = panel.self;
-    const searching = self.task == .matching and self.match_task_track == details.track_id;
+    const searching = self.task == .matching and self.match_task_mode != .verify and self.match_task_track == details.track_id;
     const library = self.library orelse return;
     const proposals = self.runtime.libraryMatchProposals(library, details.track_id, proposal_slots + 1) catch null;
     defer if (proposals) |page| page.deinit();
@@ -349,6 +354,32 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
     }
     gtk.gtk_widget_set_visible(panel.review_row, boolean(pending.len > proposal_slots));
     gtk.gtk_widget_set_visible(panel.find_row, boolean(pending.len == 0 and !searching));
+}
+
+fn populateVerification(panel: *Panel, track_id: i64) void {
+    const self = panel.self;
+    if (self.task == .matching and self.match_task_mode == .verify and self.match_task_track == track_id) {
+        _ = setRow(panel.verification_row, "Checking with AcoustID…");
+        return;
+    }
+    const library = self.library orelse return;
+    const verification = (self.runtime.libraryTrackVerification(library, self.allocator, track_id) catch null) orelse {
+        gtk.gtk_widget_set_visible(panel.verify_row, gtk.true_);
+        return;
+    };
+    defer verification.deinit();
+    var buffer: [128]u8 = undefined;
+    _ = setRow(panel.verification_row, strings.format(&buffer, "{s}{s}{s}", .{
+        switch (verification.outcome) {
+            .agrees => "Verified by AcoustID",
+            .disagrees => "AcoustID hears a different recording",
+            .unconfirmed => "AcoustID could not confirm",
+            .no_fingerprint => "Could not fingerprint",
+        },
+        if (verification.stale) separator ++ "out of date" else "",
+        if (verification.dismissed) separator ++ "suggestion dismissed" else "",
+    }));
+    gtk.gtk_widget_set_visible(panel.verify_row, boolean(verification.stale));
 }
 
 fn showProposal(row: *gtk.Widget, proposal: liborca.MatchProposal) void {
@@ -594,6 +625,11 @@ fn reviewAllActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     matches.reveal(panel.self, panel.shown orelse return);
 }
 
+fn verifyActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    jobs.startTrackVerification(panel.self, panel.shown orelse return);
+}
+
 fn findMatchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     jobs.startTrackMatching(panel.self, panel.shown orelse return);
@@ -683,6 +719,8 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, recording_row), 1);
     const recording_link = matches.linkButton("");
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, recording_row), recording_link);
+    const verification_row = newRow("Verification");
+    gtk.gtk_widget_set_visible(verification_row, gtk.false_);
     const release_id_row = newIdRow("Release");
     const release_group_id_row = newIdRow("Release group");
     const release_track_id_row = newIdRow("Release track");
@@ -691,6 +729,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     for (&proposal_parts, 0..) |*parts, index| parts.* = newProposalRow(index);
     const review_row = buttonRow("Review all", "go-next-symbolic");
     const find_row = buttonRow("Find Match", "system-search-symbolic");
+    const verify_row = buttonRow("Verify", "emblem-ok-symbolic");
     const feedback_row = newRow("Feedback");
     const rating_row = adw.adw_action_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, rating_row), "Rating");
@@ -708,6 +747,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     const tags_group = newGroup("Tags", &.{ album_artist_row, date_row, track_row, disc_row, compilation_row });
     const musicbrainz_group = newGroup("MusicBrainz", &.{
         recording_row,
+        verification_row,
         release_id_row,
         release_group_id_row,
         release_track_id_row,
@@ -717,6 +757,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         proposal_parts[2].row,
         review_row,
         find_row,
+        verify_row,
     });
     const history_group = newGroup("History", &.{ feedback_row, rating_row, plays_row, last_played_row });
     const now_group = newGroup("Now Playing", &.{now_row});
@@ -773,6 +814,8 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
         .musicbrainz_group = musicbrainz_group,
         .recording_row = recording_row,
         .recording_link = recording_link,
+        .verification_row = verification_row,
+        .verify_row = verify_row,
         .release_id_row = release_id_row,
         .release_group_id_row = release_group_id_row,
         .release_track_id_row = release_track_id_row,
@@ -796,6 +839,7 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     }
     _ = gtk.signalConnect(review_row, "activated", gtk.callback(reviewAllActivated), panel);
     _ = gtk.signalConnect(find_row, "activated", gtk.callback(findMatchActivated), panel);
+    _ = gtk.signalConnect(verify_row, "activated", gtk.callback(verifyActivated), panel);
     _ = gtk.signalConnect(root, "destroy", gtk.callback(destroyed), panel);
     slot.* = panel;
 

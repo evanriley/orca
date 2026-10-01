@@ -176,9 +176,18 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, editing));
         gtk.g_object_unref(editing);
     }
+    if (context.tracks.items.len == 1 and rates_songs) {
+        const identification = gtk.g_menu_new();
+        gtk.g_menu_append(identification, "Verify", "app.ctx-verify");
+        gtk.g_menu_append(identification, "Re-identify", "app.ctx-reidentify");
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, identification));
+        gtk.g_object_unref(identification);
+    }
     if (context.kind == .album and context.release_id != null) {
         const identification = gtk.g_menu_new();
         gtk.g_menu_append(identification, "Match Album", "app.ctx-match-album");
+        gtk.g_menu_append(identification, "Verify Album", "app.ctx-verify-album");
+        gtk.g_menu_append(identification, "Re-identify Album", "app.ctx-reidentify-album");
         gtk.g_menu_append(identification, "Fetch Cover Art", "app.ctx-fetch-cover-art");
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, identification));
         gtk.g_object_unref(identification);
@@ -313,6 +322,24 @@ pub fn movePlaylistEntry(self: *App, direction: enum { up, down }) void {
 
 pub fn matchAlbum(self: *App) void {
     jobs.startAlbumMatching(self, self.context.release_id orelse return);
+}
+
+pub fn verifyAlbum(self: *App) void {
+    jobs.startAlbumVerification(self, self.context.release_id orelse return);
+}
+
+pub fn reidentifyAlbum(self: *App) void {
+    jobs.startAlbumReidentification(self, self.context.release_id orelse return);
+}
+
+pub fn verifyTrack(self: *App) void {
+    if (self.context.tracks.items.len != 1) return;
+    jobs.startTrackVerification(self, self.context.tracks.items[0]);
+}
+
+pub fn reidentifyTrack(self: *App) void {
+    if (self.context.tracks.items.len != 1) return;
+    jobs.startTrackReidentification(self, self.context.tracks.items[0]);
 }
 
 pub fn fetchCoverArt(self: *App) void {

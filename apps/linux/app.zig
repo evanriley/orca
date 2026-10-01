@@ -129,6 +129,7 @@ pub const App = struct {
     match_task_track: ?i64 = null,
     /// The Release a `.matching` task matches or fetches the cover of.
     match_task_release: ?i64 = null,
+    match_task_mode: liborca.MatchMode = .search,
     /// The Track whose own search last found nothing, so its details say so.
     unmatched_track: ?i64 = null,
     /// Tracks the running matching job had matched when the badge was last
@@ -242,6 +243,9 @@ pub const App = struct {
     health_count: ?*gtk.Label = null,
 
     matches_list: ?*gtk.ListBox = null,
+    matches_corrections: ?*gtk.ListBox = null,
+    matches_corrections_box: ?*gtk.Widget = null,
+    matches_group_count: u64 = 0,
     matches_note: ?*gtk.Label = null,
     matches_body: ?*gtk.Stack = null,
     matches_title: ?*adw.WindowTitle = null,

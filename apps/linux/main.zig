@@ -225,6 +225,22 @@ fn activateContextMatchAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) 
     menu.matchAlbum(@ptrCast(@alignCast(data.?)));
 }
 
+fn activateContextVerifyAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.verifyAlbum(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextReidentifyAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.reidentifyAlbum(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextVerify(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.verifyTrack(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextReidentify(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.reidentifyTrack(@ptrCast(@alignCast(data.?)));
+}
+
 fn activateContextFetchCoverArt(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.fetchCoverArt(@ptrCast(@alignCast(data.?)));
 }
@@ -513,6 +529,10 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
     addAction(application, "ctx-match-album", activateContextMatchAlbum, null, &self);
+    addAction(application, "ctx-verify-album", activateContextVerifyAlbum, null, &self);
+    addAction(application, "ctx-reidentify-album", activateContextReidentifyAlbum, null, &self);
+    addAction(application, "ctx-verify", activateContextVerify, null, &self);
+    addAction(application, "ctx-reidentify", activateContextReidentify, null, &self);
     addAction(application, "ctx-fetch-cover-art", activateContextFetchCoverArt, null, &self);
     addIntegerAction(application, "ctx-rate", activateContextRate, &self);
     addIntegerAction(application, "ctx-add-to-playlist", activateContextAddToPlaylist, &self);
