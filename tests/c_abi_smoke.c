@@ -668,6 +668,138 @@ static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle p
     return 0;
 }
 
+struct track_ids {
+    uint32_t count;
+    int64_t ids[64];
+};
+
+static void collect_playable_ids(void *context, const orca_track_view *track) {
+    struct track_ids *capture = context;
+    if (track->has_file && capture->count < 64) {
+        capture->ids[capture->count] = track->id;
+        capture->count += 1;
+    }
+}
+
+static void capture_is_flac(void *context, const orca_track_details_view *details) {
+    int *is_flac = context;
+    *is_flac = details->codec.length == 4 && memcmp(details->codec.pointer, "flac", 4) == 0;
+}
+
+struct signal_path_capture {
+    uint32_t count;
+    orca_signal_path_view view;
+    char codec[16];
+};
+
+static void capture_signal_path(void *context, const orca_signal_path_view *signal_path) {
+    struct signal_path_capture *capture = context;
+    capture->count += 1;
+    capture->view = *signal_path;
+    size_t length = signal_path->codec.length;
+    if (length >= sizeof capture->codec) length = sizeof capture->codec - 1;
+    memcpy(capture->codec, signal_path->codec.pointer, length);
+    capture->codec[length] = 0;
+}
+
+static int has_reason(const orca_signal_path_view *signal_path, uint8_t reason) {
+    for (uint32_t i = 0; i < signal_path->reason_count && i < ORCA_SIGNAL_MAX_REASONS; i += 1)
+        if (signal_path->reasons[i] == reason) return 1;
+    return 0;
+}
+
+static int read_signal_path(orca_runtime *runtime, orca_handle player,
+                            struct signal_path_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_player_signal_path(runtime, player, capture, capture_signal_path) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->count == 1);
+    return 0;
+}
+
+static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    struct track_ids playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_playable_ids) == ORCA_STATUS_OK);
+    int64_t flac_id = 0;
+    for (uint32_t i = 0; i < playable.count && flac_id == 0; i += 1) {
+        int is_flac = 0;
+        SMOKE_CHECK(orca_library_track_details(runtime, library, playable.ids[i], &is_flac,
+                                               capture_is_flac) == ORCA_STATUS_OK);
+        if (is_flac) flac_id = playable.ids[i];
+    }
+    SMOKE_CHECK(flac_id != 0);
+
+    orca_equalizer bass;
+    SMOKE_CHECK(orca_equalizer_preset_get(ORCA_EQUALIZER_PRESET_BASS, &bass) == ORCA_STATUS_OK);
+    SMOKE_CHECK(bass.gains_db[0] == 6.0f && bass.preamp_db == -6.0f);
+    SMOKE_CHECK(orca_equalizer_preset_get(9, &bass) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, &bass) == ORCA_STATUS_OK);
+    orca_equalizer read_back;
+    uint8_t enabled = 0;
+    SMOKE_CHECK(orca_player_equalizer(runtime, player, &read_back, &enabled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(enabled == 1 && memcmp(&read_back, &bass, sizeof bass) == 0);
+    orca_equalizer too_loud = bass;
+    too_loud.gains_db[4] = 13.0f;
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, &too_loud) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_player_set_crossfeed(runtime, player, 1, 0.5f) == ORCA_STATUS_OK);
+    float amount = 0;
+    SMOKE_CHECK(orca_player_crossfeed(runtime, player, &enabled, &amount) == ORCA_STATUS_OK);
+    SMOKE_CHECK(enabled == 1 && amount == 0.5f);
+    SMOKE_CHECK(orca_player_set_crossfeed(runtime, player, 1, 1.5f) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_crossfeed(runtime, player, &enabled, &amount) == ORCA_STATUS_OK);
+    SMOKE_CHECK(enabled == 1 && amount == 0.5f);
+
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ONE) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_tracks(runtime, player, &flac_id, 1, 0) == ORCA_STATUS_OK);
+    struct signal_path_capture path;
+    long deadline = now_ms() + 3000;
+    int heard = 0;
+    while (!heard && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
+        heard = path.view.has_source && path.view.has_output && strcmp(path.codec, "flac") == 0;
+    }
+    SMOKE_CHECK(heard);
+    SMOKE_CHECK(path.view.has_equalizer == 1);
+    SMOKE_CHECK(memcmp(&path.view.equalizer, &bass, sizeof bass) == 0);
+    SMOKE_CHECK(path.view.has_crossfeed == 1 && path.view.crossfeed == 0.5f);
+    SMOKE_CHECK(path.view.bit_perfect_eligible == 0);
+    SMOKE_CHECK(has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
+    SMOKE_CHECK(!has_reason(&path.view, ORCA_SIGNAL_REASON_LOSSY_SOURCE));
+    SMOKE_CHECK(path.view.source.sample_rate != 0 && path.view.output.sample_rate != 0);
+
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_equalizer(runtime, player, &read_back, &enabled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(enabled == 0 && read_back.preamp_db == 0.0f);
+    SMOKE_CHECK(orca_player_set_crossfeed(runtime, player, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_volume(runtime, player, 1.0f) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_OFF) ==
+                ORCA_STATUS_OK);
+    deadline = now_ms() + 3000;
+    int unprocessed = 0;
+    while (!unprocessed && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
+        unprocessed = path.view.has_source &&
+                      !has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING);
+    }
+    SMOKE_CHECK(unprocessed);
+    SMOKE_CHECK(path.view.has_equalizer == 0 && path.view.has_crossfeed == 0);
+    SMOKE_CHECK(path.view.has_replay_gain == 0 && path.view.volume == 1.0f);
+    SMOKE_CHECK(strcmp(path.codec, "flac") == 0);
+
+    SMOKE_CHECK(orca_player_set_volume(runtime, player, 0.25f) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -1548,6 +1680,7 @@ int main(int argc, char **argv) {
     }
 
     if (queue_smoke(runtime, library, player) != 0) return 1;
+    if (dsp_smoke(runtime, library, player) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

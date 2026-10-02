@@ -28,6 +28,9 @@ const struct_pairs = .{
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
     .{ c_api.PlayerStatus, c.orca_player_status },
     .{ c_api.ZoneStatus, c.orca_zone_status },
+    .{ c_api.EqualizerView, c.orca_equalizer },
+    .{ c_api.PcmFormatView, c.orca_pcm_format },
+    .{ c_api.SignalPathView, c.orca_signal_path_view },
     .{ c_api.JobSnapshot, c.orca_job_snapshot },
     .{ c_api.ScanStats, c.orca_scan_stats },
     .{ c_api.ScanOptions, c.orca_scan_options },
@@ -110,6 +113,20 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_SAMPLE_FORMAT_";
+        pub const Tag = audio.pcm.SampleFormat;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportSampleFormat(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_SIGNAL_REASON_";
+        pub const Tag = audio.signal_path.Reason;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportSignalReason(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_JOB_";
         pub const Tag = core.job.State;
         pub fn produce(tag: Tag) ?i64 {
@@ -152,6 +169,13 @@ const export_mappings = .{
 
 const import_mappings = .{
     struct {
+        pub const prefix = "ORCA_EQUALIZER_PRESET_";
+        pub const Tag = audio.dsp.Preset;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importEqualizerPreset(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_REPLAY_GAIN_";
         pub const Tag = audio.processing.ReplayGainMode;
         pub fn consume(value: u8) ?Tag {
@@ -192,6 +216,11 @@ const import_mappings = .{
 const non_enum_constants = [_][]const u8{
     "ORCA_ABI_VERSION",
     "ORCA_PUMP_NO_TIMEOUT",
+    "ORCA_EQUALIZER_BANDS",
+    "ORCA_EQUALIZER_MAX_GAIN_DB",
+    "ORCA_EQUALIZER_MIN_PREAMP_DB",
+    "ORCA_EQUALIZER_MAX_PREAMP_DB",
+    "ORCA_SIGNAL_MAX_REASONS",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -430,6 +459,15 @@ test "every orca.h enum constant is checked against liborca" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), unchecked);
+}
+
+test "the equalizer and signal path limits orca.h declares are liborca's" {
+    try std.testing.expectEqual(audio.dsp.band_count, c.ORCA_EQUALIZER_BANDS);
+    try std.testing.expectEqual(audio.dsp.max_band_gain_db, @as(f32, c.ORCA_EQUALIZER_MAX_GAIN_DB));
+    try std.testing.expectEqual(audio.dsp.min_preamp_db, @as(f32, c.ORCA_EQUALIZER_MIN_PREAMP_DB));
+    try std.testing.expectEqual(audio.dsp.max_preamp_db, @as(f32, c.ORCA_EQUALIZER_MAX_PREAMP_DB));
+    try std.testing.expect(audio.dsp.SignalPath.max_reasons <= c.ORCA_SIGNAL_MAX_REASONS);
+    try std.testing.expectEqual(@as(usize, c.ORCA_SIGNAL_MAX_REASONS), @typeInfo(@FieldType(c_api.SignalPathView, "reasons")).array.len);
 }
 
 test "a finished job is reported as a job_finished event carrying its state" {

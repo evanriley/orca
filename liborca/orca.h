@@ -1365,6 +1365,181 @@ orca_status orca_player_effective_gain(
     float *output
 );
 
+/*
+ * The Player's ten-band equalizer: peaking filters one octave apart (Q 1.41)
+ * centred, from band 0 to band 9, on 31, 62, 125, 250, 500, 1000, 2000, 4000,
+ * 8000 and 16000 Hz. A band at or above the source's Nyquist frequency is
+ * skipped. It runs on canonical PCM before fanout, after the preamp and before
+ * crossfeed and the volume, so every Zone hears the same result.
+ */
+#define ORCA_EQUALIZER_BANDS 10
+/* Each band's gain lies in [-ORCA_EQUALIZER_MAX_GAIN_DB,
+ * ORCA_EQUALIZER_MAX_GAIN_DB] dB. */
+#define ORCA_EQUALIZER_MAX_GAIN_DB 12
+/* The preamp lies in [ORCA_EQUALIZER_MIN_PREAMP_DB,
+ * ORCA_EQUALIZER_MAX_PREAMP_DB] dB. */
+#define ORCA_EQUALIZER_MIN_PREAMP_DB (-24)
+#define ORCA_EQUALIZER_MAX_PREAMP_DB 12
+
+typedef struct orca_equalizer {
+    /* dB per band, indexed as listed above; 0 leaves a band flat. */
+    float gains_db[ORCA_EQUALIZER_BANDS];
+    /* dB applied before the bands, to leave headroom for a boost. */
+    float preamp_db;
+} orca_equalizer;
+
+typedef enum orca_equalizer_preset {
+    ORCA_EQUALIZER_PRESET_FLAT = 0,
+    ORCA_EQUALIZER_PRESET_BASS = 1,
+    ORCA_EQUALIZER_PRESET_TREBLE = 2,
+    ORCA_EQUALIZER_PRESET_VOCAL = 3,
+    ORCA_EQUALIZER_PRESET_LOUDNESS = 4,
+} orca_equalizer_preset;
+
+/* Writes the gains of an orca_equalizer_preset to `output`, with the preamp
+ * at minus the largest boost, or 0 when no band boosts. Pure: it takes no
+ * runtime, is callable from any thread, and so leaves no last error.
+ * INVALID_ARGUMENT for an unknown preset or a NULL output. */
+orca_status orca_equalizer_preset_get(uint8_t preset, orca_equalizer *output);
+
+/* Turns the equalizer on with `equalizer`, or off with NULL. INVALID_ARGUMENT,
+ * with the previous setting kept, when a gain or the preamp is outside its
+ * range or not a finite number. An equalizer with every band and the preamp at
+ * 0 is on but transparent: it is not sample processing. The engine is paused
+ * while the setting is written, and applies it from its next pass. */
+orca_status orca_player_set_equalizer(
+    orca_runtime *runtime,
+    orca_handle player,
+    const orca_equalizer *equalizer
+);
+/* `enabled` receives 1 and `output` the setting while the equalizer is on;
+ * `enabled` 0 leaves `output` zeroed. */
+orca_status orca_player_equalizer(
+    orca_runtime *runtime,
+    orca_handle player,
+    orca_equalizer *output,
+    uint8_t *enabled
+);
+
+/* Stereo crossfeed, which blends some of each channel into the other for
+ * headphone listening. `enabled` 0 turns it off and `amount` is ignored;
+ * otherwise `amount` lies in [0, 1], and anything else, NaN included, is
+ * INVALID_ARGUMENT. It applies to two-channel audio only; other layouts pass
+ * through. */
+orca_status orca_player_set_crossfeed(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t enabled,
+    float amount
+);
+/* `amount` receives 0 when crossfeed is off. */
+orca_status orca_player_crossfeed(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t *enabled,
+    float *amount
+);
+
+typedef enum orca_sample_format {
+    ORCA_SAMPLE_FORMAT_UNSIGNED_8 = 0,
+    ORCA_SAMPLE_FORMAT_SIGNED_16 = 1,
+    ORCA_SAMPLE_FORMAT_SIGNED_24 = 2,
+    ORCA_SAMPLE_FORMAT_SIGNED_32 = 3,
+    ORCA_SAMPLE_FORMAT_FLOAT_32 = 4,
+    ORCA_SAMPLE_FORMAT_FLOAT_64 = 5,
+} orca_sample_format;
+
+typedef struct orca_pcm_format {
+    uint32_t sample_rate;
+    uint16_t channels;
+    uint16_t bits_per_sample;
+    uint16_t bytes_per_frame;
+    uint8_t sample_format;  /* orca_sample_format */
+    uint8_t reserved[1];
+} orca_pcm_format;
+
+/* Why a signal path is not bit-perfect. */
+typedef enum orca_signal_reason {
+    /* The equalizer, crossfeed, a volume other than 1 or a ReplayGain
+     * correction changes the samples. */
+    ORCA_SIGNAL_REASON_SAMPLE_PROCESSING = 0,
+    /* The output, or the device behind it, runs at another rate. */
+    ORCA_SIGNAL_REASON_SAMPLE_RATE_CONVERSION = 1,
+    /* The output has another channel count than the source. */
+    ORCA_SIGNAL_REASON_CHANNEL_LAYOUT_CONVERSION = 2,
+    /* The output's sample format differs from the source's, other than an
+     * exact widening of 8-, 16- or 24-bit integers to float32. */
+    ORCA_SIGNAL_REASON_SAMPLE_FORMAT_CONVERSION = 3,
+    /* The source's codec discarded audio before Orca decoded it. */
+    ORCA_SIGNAL_REASON_LOSSY_SOURCE = 4,
+} orca_signal_reason;
+
+/* The capacity of orca_signal_path_view.reasons; more than the reasons that
+ * exist today, so new ones fit without a layout change. */
+#define ORCA_SIGNAL_MAX_REASONS 8
+
+/* What the audio being heard passes through on its way to the output. */
+typedef struct orca_signal_path_view {
+    /* The decoder's source format, before conversion to canonical float32.
+     * Valid when `has_source`; see `source_declared`. */
+    orca_pcm_format source;
+    /* What the output stream was opened with. Valid when `has_output`, which
+     * is 0 while no output is open. */
+    orca_pcm_format output;
+    /* Valid when `has_equalizer`. */
+    orca_equalizer equalizer;
+    /* The correction applied to the audible entry in dB. Valid when
+     * `has_replay_gain`, which is 0 when the correction is exactly 1. */
+    float replay_gain_db;
+    /* Valid when `has_crossfeed`. */
+    float crossfeed;
+    /* The linear gain being applied now, not the target it ramps toward. */
+    float volume;
+    /* The rate the output device runs at, as the backend reports it. Valid
+     * when `has_device_rate`. It differs from output.sample_rate when the
+     * backend resamples. */
+    uint32_t device_rate;
+    /* The first `reason_count` entries of `reasons` are orca_signal_reason
+     * values; zero when the path is bit-perfect eligible. */
+    uint32_t reason_count;
+    uint8_t reasons[ORCA_SIGNAL_MAX_REASONS];
+    uint8_t has_source;
+    /* 0 when the decoder declared no source format: `source` then holds the
+     * canonical format, and only its rate and channels are meaningful. */
+    uint8_t source_declared;
+    uint8_t has_output;
+    uint8_t has_replay_gain;
+    uint8_t has_equalizer;
+    uint8_t has_crossfeed;
+    uint8_t has_device_rate;
+    /* 0 as soon as any reason applies. With no source or no output the
+     * format conversions cannot be judged, so only sample processing
+     * counts. */
+    uint8_t bit_perfect_eligible;
+    /* The integer source reaches float32 unchanged, which is not a reason. */
+    uint8_t widened_exactly;
+    uint8_t reserved[7];
+    /* Canonical codec identifier of the source, such as "flac"; empty when
+     * nothing is audible. */
+    orca_string_view codec;
+} orca_signal_path_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_signal_path_callback)(
+    void *context,
+    const orca_signal_path_view *signal_path
+);
+
+/* Invokes the callback once with the Player's signal path, and whether it
+ * could be bit-perfect. The source, codec and ReplayGain figure are the
+ * audible entry's. The engine is paused while they are read. */
+orca_status orca_player_signal_path(
+    orca_runtime *runtime,
+    orca_handle player,
+    void *context,
+    orca_signal_path_callback callback
+);
+
 orca_status orca_player_seek(
     orca_runtime *runtime,
     orca_handle player,

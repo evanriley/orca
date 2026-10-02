@@ -301,6 +301,51 @@ pub const PlayerStatus = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const EqualizerView = extern struct {
+    gains_db: [audio.dsp.band_count]f32,
+    preamp_db: f32,
+};
+
+pub const PcmFormatView = extern struct {
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+    bytes_per_frame: u16,
+    sample_format: u8,
+    _reserved: [1]u8 = @splat(0),
+};
+
+const signal_max_reasons = 8;
+
+comptime {
+    std.debug.assert(audio.dsp.SignalPath.max_reasons <= signal_max_reasons);
+}
+
+pub const SignalPathView = extern struct {
+    source: PcmFormatView,
+    output: PcmFormatView,
+    equalizer: EqualizerView,
+    replay_gain_db: f32,
+    crossfeed: f32,
+    volume: f32,
+    device_rate: u32,
+    reason_count: u32,
+    reasons: [signal_max_reasons]u8,
+    has_source: u8,
+    source_declared: u8,
+    has_output: u8,
+    has_replay_gain: u8,
+    has_equalizer: u8,
+    has_crossfeed: u8,
+    has_device_rate: u8,
+    bit_perfect_eligible: u8,
+    widened_exactly: u8,
+    _reserved: [7]u8 = @splat(0),
+    codec: StringView,
+};
+
+pub const SignalPathCallback = *const fn (?*anyopaque, *const SignalPathView) callconv(.c) void;
+
 pub const ZoneStatus = extern struct {
     output_state: u8,
     _reserved: [3]u8 = @splat(0),
@@ -1596,6 +1641,85 @@ pub export fn orca_player_effective_gain(
     return .ok;
 }
 
+pub export fn orca_equalizer_preset_get(preset: u8, output: ?*EqualizerView) callconv(.c) Status {
+    const destination = output orelse return .invalid_argument;
+    const kind = importEqualizerPreset(preset) orelse return .invalid_argument;
+    destination.* = exportEqualizer(audio.dsp.Equalizer.preset(kind));
+    return .ok;
+}
+
+pub export fn orca_player_set_equalizer(
+    runtime: ?*Runtime,
+    player: Handle,
+    equalizer: ?*const EqualizerView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const setting: ?audio.dsp.Equalizer = if (equalizer) |value| importEqualizer(value) else null;
+    box.runtime.playerSetEqualizer(importPlayer(player), setting) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_equalizer(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*EqualizerView,
+    enabled: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const enabled_destination = enabled orelse return box.reject(@src(), .invalid_argument, "enabled is null");
+    const setting = box.runtime.playerEqualizer(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = if (setting) |value| exportEqualizer(value) else std.mem.zeroes(EqualizerView);
+    enabled_destination.* = @intFromBool(setting != null);
+    return .ok;
+}
+
+pub export fn orca_player_set_crossfeed(
+    runtime: ?*Runtime,
+    player: Handle,
+    enabled: u8,
+    amount: f32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const setting: ?f32 = if (enabled != 0) amount else null;
+    box.runtime.playerSetCrossfeed(importPlayer(player), setting) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_crossfeed(
+    runtime: ?*Runtime,
+    player: Handle,
+    enabled: ?*u8,
+    amount: ?*f32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const enabled_destination = enabled orelse return box.reject(@src(), .invalid_argument, "enabled is null");
+    const amount_destination = amount orelse return box.reject(@src(), .invalid_argument, "amount is null");
+    const setting = box.runtime.playerCrossfeed(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    enabled_destination.* = @intFromBool(setting != null);
+    amount_destination.* = setting orelse 0;
+    return .ok;
+}
+
+pub export fn orca_player_signal_path(
+    runtime: ?*Runtime,
+    player: Handle,
+    context: ?*anyopaque,
+    callback: ?SignalPathCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const path = box.runtime.playerSignalPath(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    const view = exportSignalPath(&path);
+    visit(context, &view);
+    return .ok;
+}
+
 pub export fn orca_player_seek_ms(
     runtime: ?*Runtime,
     player: Handle,
@@ -2161,6 +2285,83 @@ pub fn importReplayGainMode(mode: u8) ?audio.processing.ReplayGainMode {
     };
 }
 
+pub fn importEqualizerPreset(preset: u8) ?audio.dsp.Preset {
+    return switch (preset) {
+        0 => .flat,
+        1 => .bass,
+        2 => .treble,
+        3 => .vocal,
+        4 => .loudness,
+        else => null,
+    };
+}
+
+pub fn exportSampleFormat(format: audio.pcm.SampleFormat) u8 {
+    return switch (format) {
+        .unsigned_8 => 0,
+        .signed_16 => 1,
+        .signed_24 => 2,
+        .signed_32 => 3,
+        .float_32 => 4,
+        .float_64 => 5,
+    };
+}
+
+pub fn exportSignalReason(reason: audio.signal_path.Reason) u8 {
+    return switch (reason) {
+        .sample_processing => 0,
+        .sample_rate_conversion => 1,
+        .channel_layout_conversion => 2,
+        .sample_format_conversion => 3,
+        .lossy_source => 4,
+    };
+}
+
+fn exportEqualizer(equalizer: audio.dsp.Equalizer) EqualizerView {
+    return .{ .gains_db = equalizer.gains_db, .preamp_db = equalizer.preamp_db };
+}
+
+fn importEqualizer(equalizer: *const EqualizerView) audio.dsp.Equalizer {
+    return .{ .gains_db = equalizer.gains_db, .preamp_db = equalizer.preamp_db };
+}
+
+fn exportPcmFormat(format: ?audio.pcm.Format) PcmFormatView {
+    const value = format orelse return std.mem.zeroes(PcmFormatView);
+    return .{
+        .sample_rate = value.sample_rate,
+        .channels = value.channels,
+        .bits_per_sample = value.bits_per_sample,
+        .bytes_per_frame = value.bytes_per_frame,
+        .sample_format = exportSampleFormat(value.sample_format),
+    };
+}
+
+fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
+    var view: SignalPathView = .{
+        .source = exportPcmFormat(path.source),
+        .output = exportPcmFormat(path.output),
+        .equalizer = if (path.equalizer) |value| exportEqualizer(value) else std.mem.zeroes(EqualizerView),
+        .replay_gain_db = path.replay_gain_db orelse 0,
+        .crossfeed = path.crossfeed orelse 0,
+        .volume = path.volume,
+        .device_rate = path.device_rate orelse 0,
+        .reason_count = @intCast(path.reason_count),
+        .reasons = @splat(0),
+        .has_source = @intFromBool(path.source != null),
+        .source_declared = @intFromBool(path.source_declared),
+        .has_output = @intFromBool(path.output != null),
+        .has_replay_gain = @intFromBool(path.replay_gain_db != null),
+        .has_equalizer = @intFromBool(path.equalizer != null),
+        .has_crossfeed = @intFromBool(path.crossfeed != null),
+        .has_device_rate = @intFromBool(path.device_rate != null),
+        .bit_perfect_eligible = @intFromBool(path.bit_perfect_eligible),
+        .widened_exactly = @intFromBool(path.widened_exactly),
+        .codec = stringView(path.codec orelse ""),
+    };
+    for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
+    return view;
+}
+
 pub fn importRenderPolicy(policy: u8) ?audio.zone.RenderPolicy {
     return switch (policy) {
         0 => .robust,
@@ -2317,6 +2518,9 @@ fn mapError(err: anyerror) Status {
         error.InvalidWatchOptions,
         error.InvalidReconcileDirectory,
         error.PositionOutOfRange,
+        error.EqualizerGainOutOfRange,
+        error.EqualizerPreampOutOfRange,
+        error.CrossfeedAmountOutOfRange,
         => .invalid_argument,
         else => .internal,
     };
@@ -2722,4 +2926,96 @@ test "queue stats are all zero before a Player has played, and a destroyed Playe
     }, stats);
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
     try std.testing.expectEqual(Status.stale_handle, orca_player_queue_stats(runtime, player, &stats));
+}
+
+test "an unknown equalizer preset or a null output is refused, and a preset leaves headroom for its largest boost" {
+    var equalizer: EqualizerView = std.mem.zeroes(EqualizerView);
+    try std.testing.expectEqual(Status.invalid_argument, orca_equalizer_preset_get(5, &equalizer));
+    try std.testing.expectEqual(Status.invalid_argument, orca_equalizer_preset_get(255, &equalizer));
+    try std.testing.expectEqual(Status.invalid_argument, orca_equalizer_preset_get(0, null));
+    try std.testing.expectEqual(@as(f32, 0), equalizer.preamp_db);
+    try std.testing.expectEqual(Status.ok, orca_equalizer_preset_get(1, &equalizer));
+    try std.testing.expectEqual(@as(f32, 6), equalizer.gains_db[0]);
+    try std.testing.expectEqual(@as(f32, -6), equalizer.preamp_db);
+}
+
+test "a NaN or out-of-range equalizer or crossfeed is refused and leaves the previous setting in place" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+
+    var bass: EqualizerView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_equalizer_preset_get(1, &bass));
+    try std.testing.expectEqual(Status.ok, orca_player_set_equalizer(runtime, player, &bass));
+
+    var invalid = bass;
+    invalid.gains_db[3] = std.math.nan(f32);
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_equalizer(runtime, player, &invalid));
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.span(orca_runtime_last_error(runtime)), "orca_player_set_equalizer") != null);
+    invalid = bass;
+    invalid.gains_db[0] = 12.5;
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_equalizer(runtime, player, &invalid));
+    invalid = bass;
+    invalid.preamp_db = std.math.nan(f32);
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_equalizer(runtime, player, &invalid));
+    invalid.preamp_db = -24.5;
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_equalizer(runtime, player, &invalid));
+
+    var read_back: EqualizerView = undefined;
+    var enabled: u8 = 9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_equalizer(runtime, player, null, &enabled));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_equalizer(runtime, player, &read_back, null));
+    try std.testing.expectEqual(Status.ok, orca_player_equalizer(runtime, player, &read_back, &enabled));
+    try std.testing.expectEqual(@as(u8, 1), enabled);
+    try std.testing.expectEqual(bass, read_back);
+
+    try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 1, 0.25));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_crossfeed(runtime, player, 1, std.math.nan(f32)));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_crossfeed(runtime, player, 1, -0.1));
+    try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 0, std.math.nan(f32)));
+    var amount: f32 = 9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_crossfeed(runtime, player, null, &amount));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_crossfeed(runtime, player, &enabled, null));
+    try std.testing.expectEqual(Status.ok, orca_player_crossfeed(runtime, player, &enabled, &amount));
+    try std.testing.expectEqual(@as(u8, 0), enabled);
+    try std.testing.expectEqual(@as(f32, 0), amount);
+
+    try std.testing.expectEqual(Status.ok, orca_player_set_equalizer(runtime, player, null));
+    try std.testing.expectEqual(Status.ok, orca_player_equalizer(runtime, player, &read_back, &enabled));
+    try std.testing.expectEqual(@as(u8, 0), enabled);
+    try std.testing.expectEqual(std.mem.zeroes(EqualizerView), read_back);
+}
+
+fn captureSignalPath(context: ?*anyopaque, view: *const SignalPathView) callconv(.c) void {
+    const destination: *SignalPathView = @ptrCast(@alignCast(context.?));
+    destination.* = view.*;
+}
+
+test "a Player with no output reports a signal path with no source, no output and only the processing it applies" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_signal_path(runtime, player, null, null));
+
+    var path: SignalPathView = std.mem.zeroes(SignalPathView);
+    try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+    try std.testing.expectEqual(@as(u8, 0), path.has_source);
+    try std.testing.expectEqual(@as(u8, 0), path.has_output);
+    try std.testing.expectEqual(@as(u8, 0), path.has_equalizer);
+    try std.testing.expectEqual(@as(u32, 0), path.reason_count);
+    try std.testing.expectEqual(@as(u8, 1), path.bit_perfect_eligible);
+    try std.testing.expectEqual(@as(usize, 0), path.codec.length);
+
+    try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 1, 0.5));
+    try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+    try std.testing.expectEqual(@as(u8, 1), path.has_crossfeed);
+    try std.testing.expectEqual(@as(f32, 0.5), path.crossfeed);
+    try std.testing.expectEqual(@as(u32, 1), path.reason_count);
+    try std.testing.expectEqual(exportSignalReason(.sample_processing), path.reasons[0]);
+    try std.testing.expectEqual(@as(u8, 0), path.bit_perfect_eligible);
+
+    try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
+    try std.testing.expectEqual(Status.stale_handle, orca_player_signal_path(runtime, player, &path, captureSignalPath));
 }

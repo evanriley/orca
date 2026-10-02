@@ -89,6 +89,14 @@ The boundary covers the whole engine, not a fragment of it:
   lists the queue as track views in playback order, and
   `orca_player_queue_stats` reads the engine's counters, stopping it to do
   so, for diagnostics rather than UI polling.
+- **Equalizer, crossfeed and signal path.** `orca_player_set_equalizer`
+  turns the ten-band equalizer on with an `orca_equalizer` of band gains and
+  a preamp, or off with NULL; `orca_equalizer_preset_get` fills one from an
+  `orca_equalizer_preset` without a runtime. `orca_player_set_crossfeed` sets
+  stereo crossfeed, and `orca_player_equalizer` and `orca_player_crossfeed`
+  read both back. `orca_player_signal_path` reports the audible entry's source
+  format and codec, the output and device formats, the processing applied and
+  each `orca_signal_reason` the path is not bit-perfect.
 - **Devices and Zones.** Enumeration, Zone create/attach/open/close/status, and
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.

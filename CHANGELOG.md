@@ -154,6 +154,15 @@
   playback order, and `orca_player_queue_stats` returns an
   `orca_queue_stats` of the engine's entry, transition, open-failure and
   decode-error counts.
+- **The C ABI sets the equalizer and crossfeed and reports the signal
+  path.** `orca_player_set_equalizer` and `orca_player_equalizer` set and read
+  an `orca_equalizer` of ten band gains and a preamp, NULL turning it off;
+  `orca_equalizer_preset_get` fills one from an `orca_equalizer_preset`.
+  `orca_player_set_crossfeed` and `orca_player_crossfeed` set and read the
+  crossfeed amount. `orca_player_signal_path` hands an
+  `orca_signal_path_view` of the source and output `orca_pcm_format`s, codec,
+  ReplayGain, equalizer, crossfeed, volume, device rate and the
+  `orca_signal_reason`s the path is not bit-perfect.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's
