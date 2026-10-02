@@ -37,18 +37,17 @@ const secret = @import("secret.zig");
 const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
 const playlists = @import("playlists.zig");
-
-const stylesheet = @embedFile("style.css");
+const appearance = @import("appearance.zig");
 
 const App = app.App;
 
 fn failureText(failure: liborca.Failure) [:0]const u8 {
     return switch (failure) {
-        .track_has_no_file => "That track has no file",
-        .track_file_missing => "That track's file is missing",
+        .track_has_no_file => "That song has no file",
+        .track_file_missing => "That song's file is missing",
         .codec_unavailable => "No codec can read that file",
         .player_not_bound => "No library is open",
-        .not_playable => "That track is not playable",
+        .not_playable => "That song is not playable",
         else => "Playback failed",
     };
 }
@@ -133,16 +132,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         gtk.gtk_window_present(existing);
         return;
     }
-    if (gtk.gdk_display_get_default()) |display| {
-        const provider = gtk.gtk_css_provider_new();
-        gtk.gtk_css_provider_load_from_string(provider, stylesheet);
-        gtk.gtk_style_context_add_provider_for_display(
-            display,
-            provider,
-            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        gtk.g_object_unref(provider);
-    }
+    if (gtk.gdk_display_get_default()) |display| appearance.apply(self.io, display);
     _ = window.build(self, gtk.cast(gtk.Application, application));
     transport.refreshDevices(self);
     // The output is opened on first play, not here: an idle window must not
@@ -154,6 +144,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     health.reload(self);
     matches.reload(self);
     if (self.library == null) self.toast("The library could not be opened");
+    if (self.sidebar) |sidebar| _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, sidebar));
     gtk.gtk_window_present(self.window.?);
     self.requestTick();
 }
@@ -288,20 +279,28 @@ fn activateContextPlaylistDown(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque
     menu.movePlaylistEntry(@ptrCast(@alignCast(data.?)), .down);
 }
 
-fn activatePlaylistRename(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    playlists.askRename(@ptrCast(@alignCast(data.?)));
+fn activatePlaylistPlay(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.playWhole(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return), false);
 }
 
-fn activatePlaylistExport(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    playlists.chooseExport(@ptrCast(@alignCast(data.?)));
+fn activatePlaylistShuffle(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.playWhole(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return), true);
 }
 
-fn activatePlaylistDelete(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    playlists.confirmDelete(@ptrCast(@alignCast(data.?)));
+fn activatePlaylistRename(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.askRename(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistExport(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.chooseExport(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistDelete(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.confirmDelete(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
 }
 
 fn activatePreferences(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    preferences.present(@ptrCast(@alignCast(data.?)));
+    window.showPage(@ptrCast(@alignCast(data.?)), .settings);
 }
 
 fn activateUndoTags(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -353,19 +352,19 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     const sections = [_]struct { title: [*:0]const u8, items: []const [2][*:0]const u8 }{
         .{ .title = "Playback", .items = &.{
             .{ "Play / Pause", "space" },
-            .{ "Next Track", "<Control>Right" },
-            .{ "Previous Track", "<Control>Left" },
+            .{ "Next Song", "<Control>Right" },
+            .{ "Previous Song", "<Control>Left" },
         } },
         .{ .title = "Library", .items = &.{
             .{ "Search", "<Control>f" },
             .{ "Show Queue", "<Control>l" },
             .{ "Lyrics", "<Control><Shift>l" },
-            .{ "Track Details", "<Control>i" },
+            .{ "Inspector", "<Control>i" },
             .{ "Back", "<Alt>Left" },
             .{ "Add Music Folder", "<Control>o" },
         } },
         .{ .title = "General", .items = &.{
-            .{ "Preferences", "<Control>comma" },
+            .{ "Settings", "<Control>comma" },
             .{ "Keyboard Shortcuts", "<Control>question" },
             .{ "Quit", "<Control>q" },
         } },
@@ -566,9 +565,11 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-playlist-remove", activateContextPlaylistRemove, null, &self);
     addAction(application, "ctx-playlist-up", activateContextPlaylistUp, null, &self);
     addAction(application, "ctx-playlist-down", activateContextPlaylistDown, null, &self);
-    addAction(application, "playlist-rename", activatePlaylistRename, null, &self);
-    addAction(application, "playlist-export", activatePlaylistExport, null, &self);
-    addAction(application, "playlist-delete", activatePlaylistDelete, null, &self);
+    addIntegerAction(application, "playlist-play", activatePlaylistPlay, &self);
+    addIntegerAction(application, "playlist-shuffle", activatePlaylistShuffle, &self);
+    addIntegerAction(application, "playlist-rename", activatePlaylistRename, &self);
+    addIntegerAction(application, "playlist-export", activatePlaylistExport, &self);
+    addIntegerAction(application, "playlist-delete", activatePlaylistDelete, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);

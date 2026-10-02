@@ -9,7 +9,9 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const app = @import("app.zig");
 const track_model = @import("track_model.zig");
+const song_table = @import("song_table.zig");
 const albums = @import("albums.zig");
+const artists = @import("artists.zig");
 const details = @import("details.zig");
 const queue = @import("queue.zig");
 const nowplaying = @import("nowplaying.zig");
@@ -182,6 +184,7 @@ fn repaint(self: *App, changed: *const Recordings, value: liborca.Feedback) void
 pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
     repaintRows(self, changed, change_value);
     albums.repaint(self, changed, change_value);
+    artists.repaint(self, changed, change_value);
     queue.repaint(self, changed, change_value);
     nowplaying.repaint(changed, change_value);
     playlists.repaint(self, changed, change_value);
@@ -216,14 +219,5 @@ pub fn replaceRows(store: *gtk.ListStore, changed: *const Recordings, change_val
 }
 
 fn repaintRows(self: *App, changed: *const Recordings, change_value: track_model.Change) void {
-    const store = self.tracks orelse return;
-    const selection = self.selection orelse return;
-    const live = gtk.gtk_selection_model_get_selection(selection);
-    defer gtk.gtk_bitset_unref(live);
-    const selected = gtk.gtk_bitset_copy(live);
-    defer gtk.gtk_bitset_unref(selected);
-    if (!replaceRows(store, changed, change_value)) return;
-    const everything = gtk.gtk_bitset_new_range(0, gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)));
-    defer gtk.gtk_bitset_unref(everything);
-    _ = gtk.gtk_selection_model_set_selection(selection, selected, everything);
+    song_table.repaint(&self.songs, changed, change_value);
 }

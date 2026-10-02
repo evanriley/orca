@@ -7,10 +7,10 @@ const gtk = @import("gtk.zig");
 pub const Application = opaque {};
 pub const ApplicationWindow = opaque {};
 pub const NavigationSplitView = opaque {};
+pub const OverlaySplitView = opaque {};
 pub const NavigationPage = opaque {};
 pub const ToolbarView = opaque {};
 pub const HeaderBar = opaque {};
-pub const WindowTitle = opaque {};
 pub const Toast = opaque {};
 pub const ToastOverlay = opaque {};
 pub const StatusPage = opaque {};
@@ -27,8 +27,6 @@ pub const ShortcutsItem = opaque {};
 pub const NavigationView = opaque {};
 pub const Clamp = opaque {};
 pub const Avatar = opaque {};
-pub const PreferencesDialog = opaque {};
-pub const PreferencesPage = opaque {};
 pub const PreferencesGroup = opaque {};
 pub const PreferencesRow = opaque {};
 pub const ActionRow = opaque {};
@@ -41,18 +39,17 @@ pub const ExpanderRow = opaque {};
 pub const Banner = opaque {};
 pub const ViewStack = opaque {};
 pub const ViewSwitcher = opaque {};
+pub const StyleManager = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
 pub const RESPONSE_SUGGESTED: c_int = 1;
 pub const RESPONSE_DESTRUCTIVE: c_int = 2;
 
-pub extern fn adw_preferences_dialog_new() *Dialog;
-pub extern fn adw_preferences_dialog_add(dialog: *PreferencesDialog, page: *PreferencesPage) void;
-pub extern fn adw_preferences_dialog_add_toast(dialog: *PreferencesDialog, toast: *Toast) void;
-pub extern fn adw_preferences_page_new() *gtk.Widget;
-pub extern fn adw_preferences_page_add(page: *PreferencesPage, group: *PreferencesGroup) void;
-pub extern fn adw_preferences_page_set_title(page: *PreferencesPage, title: [*:0]const u8) void;
-pub extern fn adw_preferences_page_set_icon_name(page: *PreferencesPage, icon_name: ?[*:0]const u8) void;
+pub const COLOR_SCHEME_FORCE_DARK: c_int = 4;
+
+pub extern fn adw_style_manager_get_default() *StyleManager;
+pub extern fn adw_style_manager_set_color_scheme(manager: *StyleManager, color_scheme: c_int) void;
+
 pub extern fn adw_preferences_group_new() *gtk.Widget;
 pub extern fn adw_preferences_group_add(group: *PreferencesGroup, child: *gtk.Widget) void;
 pub extern fn adw_preferences_group_set_title(group: *PreferencesGroup, title: [*:0]const u8) void;
@@ -89,8 +86,6 @@ pub extern fn adw_combo_row_new() *gtk.Widget;
 pub extern fn adw_combo_row_set_model(row: *ComboRow, model: ?*gtk.ListModel) void;
 pub extern fn adw_combo_row_get_selected(row: *ComboRow) c_uint;
 pub extern fn adw_combo_row_set_selected(row: *ComboRow, position: c_uint) void;
-pub extern fn adw_button_row_new() *gtk.Widget;
-pub extern fn adw_button_row_set_start_icon_name(row: *gtk.Widget, icon_name: ?[*:0]const u8) void;
 pub extern fn adw_alert_dialog_new(heading: ?[*:0]const u8, body: ?[*:0]const u8) *Dialog;
 pub extern fn adw_alert_dialog_add_response(dialog: *AlertDialog, id: [*:0]const u8, label: [*:0]const u8) void;
 pub extern fn adw_alert_dialog_set_response_appearance(dialog: *AlertDialog, response: [*:0]const u8, appearance: c_int) void;
@@ -136,12 +131,26 @@ pub extern fn adw_navigation_split_view_set_show_content(view: *NavigationSplitV
 pub extern fn adw_navigation_split_view_set_min_sidebar_width(view: *NavigationSplitView, width: f64) void;
 pub extern fn adw_navigation_split_view_set_max_sidebar_width(view: *NavigationSplitView, width: f64) void;
 
+pub extern fn adw_overlay_split_view_new() *gtk.Widget;
+pub extern fn adw_overlay_split_view_set_content(view: *OverlaySplitView, content: ?*gtk.Widget) void;
+pub extern fn adw_overlay_split_view_set_sidebar(view: *OverlaySplitView, sidebar: ?*gtk.Widget) void;
+pub extern fn adw_overlay_split_view_set_sidebar_position(view: *OverlaySplitView, position: c_int) void;
+pub extern fn adw_overlay_split_view_set_collapsed(view: *OverlaySplitView, collapsed: gtk.gboolean) void;
+pub extern fn adw_overlay_split_view_get_show_sidebar(view: *OverlaySplitView) gtk.gboolean;
+pub extern fn adw_overlay_split_view_set_show_sidebar(view: *OverlaySplitView, show_sidebar: gtk.gboolean) void;
+pub extern fn adw_overlay_split_view_set_pin_sidebar(view: *OverlaySplitView, pin_sidebar: gtk.gboolean) void;
+pub extern fn adw_overlay_split_view_set_enable_show_gesture(view: *OverlaySplitView, enable_show_gesture: gtk.gboolean) void;
+pub extern fn adw_overlay_split_view_set_min_sidebar_width(view: *OverlaySplitView, width: f64) void;
+pub extern fn adw_overlay_split_view_set_max_sidebar_width(view: *OverlaySplitView, width: f64) void;
+
 pub extern fn adw_navigation_view_new() *gtk.Widget;
 pub extern fn adw_navigation_view_add(view: *NavigationView, page: *NavigationPage) void;
 pub extern fn adw_navigation_view_push(view: *NavigationView, page: *NavigationPage) void;
+pub extern fn adw_navigation_view_push_by_tag(view: *NavigationView, tag: [*:0]const u8) void;
 pub extern fn adw_navigation_view_pop(view: *NavigationView) gtk.gboolean;
 pub extern fn adw_navigation_view_pop_to_tag(view: *NavigationView, tag: [*:0]const u8) gtk.gboolean;
 pub extern fn adw_navigation_view_get_visible_page_tag(view: *NavigationView) ?[*:0]const u8;
+pub extern fn adw_navigation_view_get_visible_page(view: *NavigationView) ?*NavigationPage;
 
 pub const VIEW_SWITCHER_POLICY_WIDE: c_int = 1;
 
@@ -153,6 +162,8 @@ pub extern fn adw_view_stack_add_titled_with_icon(
     title: [*:0]const u8,
     icon_name: [*:0]const u8,
 ) ?*anyopaque;
+pub extern fn adw_view_stack_set_visible_child_name(stack: *ViewStack, name: [*:0]const u8) void;
+pub extern fn adw_view_stack_get_visible_child_name(stack: *ViewStack) ?[*:0]const u8;
 pub extern fn adw_view_switcher_new() *gtk.Widget;
 pub extern fn adw_view_switcher_set_stack(switcher: *ViewSwitcher, stack: ?*ViewStack) void;
 pub extern fn adw_view_switcher_set_policy(switcher: *ViewSwitcher, policy: c_int) void;
@@ -160,25 +171,24 @@ pub extern fn adw_view_switcher_set_policy(switcher: *ViewSwitcher, policy: c_in
 pub extern fn adw_clamp_new() *gtk.Widget;
 pub extern fn adw_clamp_set_maximum_size(clamp: *Clamp, size: c_int) void;
 pub extern fn adw_clamp_set_child(clamp: *Clamp, child: ?*gtk.Widget) void;
+pub extern fn adw_clamp_set_tightening_threshold(clamp: *Clamp, threshold: c_int) void;
 
 pub extern fn adw_navigation_page_new(child: *gtk.Widget, title: [*:0]const u8) *NavigationPage;
 pub extern fn adw_navigation_page_set_title(page: *NavigationPage, title: [*:0]const u8) void;
 pub extern fn adw_navigation_page_set_tag(page: *NavigationPage, tag: ?[*:0]const u8) void;
+pub extern fn adw_navigation_page_get_title(page: *NavigationPage) [*:0]const u8;
 
 pub extern fn adw_toolbar_view_new() *gtk.Widget;
 pub extern fn adw_toolbar_view_set_content(view: *ToolbarView, content: ?*gtk.Widget) void;
 pub extern fn adw_toolbar_view_add_top_bar(view: *ToolbarView, widget: *gtk.Widget) void;
 pub extern fn adw_toolbar_view_add_bottom_bar(view: *ToolbarView, widget: *gtk.Widget) void;
 pub extern fn adw_toolbar_view_set_bottom_bar_style(view: *ToolbarView, style: c_int) void;
+pub extern fn adw_toolbar_view_set_extend_content_to_top_edge(view: *ToolbarView, extend: gtk.gboolean) void;
 
 pub extern fn adw_header_bar_new() *gtk.Widget;
 pub extern fn adw_header_bar_pack_start(bar: *HeaderBar, child: *gtk.Widget) void;
 pub extern fn adw_header_bar_pack_end(bar: *HeaderBar, child: *gtk.Widget) void;
-pub extern fn adw_header_bar_set_title_widget(bar: *HeaderBar, title_widget: ?*gtk.Widget) void;
-
-pub extern fn adw_window_title_new(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget;
-pub extern fn adw_window_title_set_subtitle(title: *WindowTitle, subtitle: [*:0]const u8) void;
-pub extern fn adw_window_title_set_title(title: *WindowTitle, text: [*:0]const u8) void;
+pub extern fn adw_header_bar_set_show_title(bar: *HeaderBar, show_title: gtk.gboolean) void;
 
 pub extern fn adw_toast_new(title: [*:0]const u8) *Toast;
 pub extern fn adw_toast_set_timeout(toast: *Toast, seconds: c_uint) void;

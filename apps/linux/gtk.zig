@@ -54,7 +54,6 @@ pub const GInputStream = opaque {};
 pub const Button = opaque {};
 pub const ToggleButton = opaque {};
 pub const MenuButton = opaque {};
-pub const ScaleButton = opaque {};
 pub const Box = opaque {};
 pub const HeaderBar = opaque {};
 pub const SearchEntry = opaque {};
@@ -94,12 +93,15 @@ pub const GAsyncResult = opaque {};
 pub const GCancellable = opaque {};
 pub const CenterBox = opaque {};
 pub const Picture = opaque {};
+pub const AspectFrame = opaque {};
 pub const Stack = opaque {};
 pub const ListBox = opaque {};
 pub const ListBoxRow = opaque {};
 pub const Revealer = opaque {};
 pub const CssProvider = opaque {};
 pub const GdkDisplay = opaque {};
+pub const IconTheme = opaque {};
+pub const PangoFontMap = opaque {};
 pub const GMenu = opaque {};
 pub const GMenuModel = opaque {};
 pub const Actionable = opaque {};
@@ -109,6 +111,7 @@ pub const Overlay = opaque {};
 pub const FlowBox = opaque {};
 pub const FlowBoxChild = opaque {};
 pub const GestureSingle = opaque {};
+pub const Orientable = opaque {};
 pub const Gesture = opaque {};
 pub const GdkClipboard = opaque {};
 pub const UriLauncher = opaque {};
@@ -136,6 +139,11 @@ pub const ALIGN_FILL: c_int = 0;
 pub const ALIGN_START: c_int = 1;
 pub const ALIGN_END: c_int = 2;
 pub const ALIGN_CENTER: c_int = 3;
+
+pub const PACK_END: c_int = 1;
+
+pub const JUSTIFY_RIGHT: c_int = 1;
+pub const JUSTIFY_CENTER: c_int = 2;
 
 pub const ELLIPSIZE_NONE: c_int = 0;
 pub const ELLIPSIZE_MIDDLE: c_int = 2;
@@ -165,6 +173,7 @@ pub const BUS_NAME_OWNER_FLAGS_NONE: c_uint = 0;
 
 pub const OVERFLOW_HIDDEN: c_int = 1;
 pub const CONTENT_FIT_COVER: c_int = 2;
+pub const CONNECT_SWAPPED: c_uint = 2;
 pub const POLICY_AUTOMATIC: c_int = 1;
 pub const POLICY_NEVER: c_int = 2;
 
@@ -253,6 +262,14 @@ pub extern fn g_signal_connect_data(
     connect_flags: c_uint,
 ) c_ulong;
 
+pub extern fn g_signal_connect_object(
+    instance: ?*anyopaque,
+    detailed_signal: [*:0]const u8,
+    c_handler: GCallback,
+    gobject: ?*anyopaque,
+    connect_flags: c_uint,
+) c_ulong;
+
 /// The `g_signal_connect` macro, spelled out.
 pub inline fn signalConnect(
     instance: ?*anyopaque,
@@ -300,6 +317,9 @@ pub extern fn g_date_time_new_from_unix_local(t: i64) ?*GDateTime;
 pub extern fn g_date_time_add_days(datetime: *GDateTime, days: c_int) ?*GDateTime;
 pub extern fn g_date_time_format(datetime: *GDateTime, format: [*:0]const u8) ?[*:0]u8;
 pub extern fn g_date_time_unref(datetime: *GDateTime) void;
+pub extern fn g_date_time_difference(end: *GDateTime, begin: *GDateTime) i64;
+pub extern fn g_utf8_casefold(text: [*]const u8, length: isize) ?[*:0]u8;
+pub extern fn g_utf8_strup(text: [*]const u8, length: isize) ?[*:0]u8;
 
 pub extern fn gtk_link_button_new_with_label(uri: [*:0]const u8, label: [*:0]const u8) *Widget;
 pub extern fn g_timeout_add(
@@ -371,6 +391,12 @@ pub extern fn gdk_pixbuf_new_from_stream_at_scale(
     err: *?*GError,
 ) ?*GdkPixbuf;
 pub extern fn gdk_texture_new_for_pixbuf(pixbuf: *GdkPixbuf) *GdkTexture;
+pub extern fn gdk_texture_get_width(texture: *GdkTexture) c_int;
+pub extern fn gdk_texture_get_height(texture: *GdkTexture) c_int;
+pub extern fn gdk_texture_download(texture: *GdkTexture, data: [*]u8, stride: usize) void;
+pub const MEMORY_B8G8R8A8_PREMULTIPLIED: c_int = 0;
+pub extern fn gdk_memory_texture_new(width: c_int, height: c_int, format: c_int, bytes: *GBytes, stride: usize) *GdkTexture;
+pub extern fn g_bytes_new(data: ?*const anyopaque, size: usize) *GBytes;
 pub extern fn gdk_pixbuf_get_pixels(pixbuf: *GdkPixbuf) [*]u8;
 pub extern fn gdk_pixbuf_get_width(pixbuf: *GdkPixbuf) c_int;
 pub extern fn gdk_pixbuf_get_height(pixbuf: *GdkPixbuf) c_int;
@@ -537,6 +563,8 @@ pub extern fn gtk_button_get_child(button: *Button) ?*Widget;
 pub extern fn gtk_widget_set_overflow(widget: *Widget, overflow: c_int) void;
 pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
+pub extern fn gtk_widget_is_ancestor(widget: *Widget, ancestor: *Widget) gboolean;
+pub extern fn gtk_window_get_focus(window: *Window) ?*Widget;
 pub extern fn gtk_css_provider_new() *CssProvider;
 pub extern fn gtk_css_provider_load_from_string(provider: *CssProvider, string: [*:0]const u8) void;
 pub extern fn gdk_display_get_default() ?*GdkDisplay;
@@ -545,12 +573,26 @@ pub extern fn gtk_style_context_add_provider_for_display(
     provider: *CssProvider,
     priority: c_uint,
 ) void;
+pub extern fn gtk_icon_theme_get_for_display(display: *GdkDisplay) *IconTheme;
+pub extern fn gtk_icon_theme_add_search_path(theme: *IconTheme, path: [*:0]const u8) void;
+pub extern fn pango_cairo_font_map_get_default() *PangoFontMap;
+pub const PangoAttrList = opaque {};
+pub const PangoAttribute = opaque {};
+pub extern fn pango_attr_list_new() *PangoAttrList;
+pub extern fn pango_attr_list_unref(list: *PangoAttrList) void;
+pub extern fn pango_attr_list_insert(list: *PangoAttrList, attribute: *PangoAttribute) void;
+pub extern fn pango_attr_letter_spacing_new(letter_spacing: c_int) *PangoAttribute;
+pub extern fn gtk_label_set_attributes(label: *Label, attributes: ?*PangoAttrList) void;
+pub extern fn pango_font_map_add_font_file(fontmap: *PangoFontMap, filename: [*:0]const u8, err: *?*GError) gboolean;
 pub extern fn gtk_center_box_new() *Widget;
 pub extern fn gtk_center_box_set_start_widget(box: *CenterBox, child: ?*Widget) void;
 pub extern fn gtk_center_box_set_center_widget(box: *CenterBox, child: ?*Widget) void;
 pub extern fn gtk_center_box_set_end_widget(box: *CenterBox, child: ?*Widget) void;
 pub extern fn gtk_picture_new() *Widget;
+pub extern fn gtk_aspect_frame_new(xalign: f32, yalign: f32, ratio: f32, obey_child: gboolean) *Widget;
+pub extern fn gtk_aspect_frame_set_child(frame: *AspectFrame, child: ?*Widget) void;
 pub extern fn gtk_picture_set_paintable(picture: *Picture, paintable: ?*GdkPaintable) void;
+pub extern fn gtk_image_get_paintable(image: *Image) ?*GdkPaintable;
 pub extern fn gtk_picture_set_content_fit(picture: *Picture, content_fit: c_int) void;
 pub extern fn gtk_picture_set_can_shrink(picture: *Picture, can_shrink: gboolean) void;
 pub extern fn gtk_stack_new() *Widget;
@@ -566,6 +608,8 @@ pub extern fn gtk_grid_view_set_single_click_activate(view: *GridView, single: g
 pub extern fn gtk_overlay_new() *Widget;
 pub extern fn gtk_overlay_set_child(overlay: *Overlay, child: ?*Widget) void;
 pub extern fn gtk_overlay_add_overlay(overlay: *Overlay, widget: *Widget) void;
+pub extern fn gtk_overlay_set_measure_overlay(overlay: *Overlay, widget: *Widget, measure: gboolean) void;
+pub extern fn gtk_orientable_set_orientation(orientable: *Orientable, orientation: c_int) void;
 
 pub extern fn gtk_list_box_new() *Widget;
 pub extern fn gtk_list_box_append(box: *ListBox, child: *Widget) void;
@@ -651,8 +695,13 @@ pub extern fn gtk_widget_set_margin_top(widget: *Widget, margin: c_int) void;
 pub extern fn gtk_widget_set_margin_bottom(widget: *Widget, margin: c_int) void;
 pub extern fn gtk_widget_add_css_class(widget: *Widget, css_class: [*:0]const u8) void;
 pub extern fn gtk_widget_remove_css_class(widget: *Widget, css_class: [*:0]const u8) void;
+pub extern fn gtk_widget_has_css_class(widget: *Widget, css_class: [*:0]const u8) gboolean;
+pub extern fn gtk_widget_activate_action_variant(widget: *Widget, name: [*:0]const u8, args: ?*GVariant) gboolean;
 pub extern fn gtk_widget_add_controller(widget: *Widget, controller: *EventController) void;
 pub extern fn gtk_widget_get_first_child(widget: *Widget) ?*Widget;
+pub extern fn gtk_widget_set_can_target(widget: *Widget, can_target: gboolean) void;
+pub extern fn gtk_widget_get_width(widget: *Widget) c_int;
+pub extern fn gtk_widget_get_height(widget: *Widget) c_int;
 pub extern fn gtk_widget_get_next_sibling(widget: *Widget) ?*Widget;
 
 pub extern fn gtk_header_bar_new() *Widget;
@@ -666,18 +715,13 @@ pub extern fn gtk_button_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
 pub extern fn gtk_button_set_icon_name(button: *Button, icon_name: [*:0]const u8) void;
 pub extern fn gtk_toggle_button_new() *Widget;
 pub extern fn gtk_toggle_button_get_active(button: *ToggleButton) gboolean;
+pub extern fn gtk_toggle_button_set_group(button: *ToggleButton, group: ?*ToggleButton) void;
 pub extern fn gtk_menu_button_new() *Widget;
 pub extern fn gtk_menu_button_set_icon_name(button: *MenuButton, icon_name: [*:0]const u8) void;
 pub extern fn gtk_menu_button_set_label(button: *MenuButton, label: [*:0]const u8) void;
 pub extern fn gtk_menu_button_set_popover(button: *MenuButton, popover: ?*Widget) void;
-pub extern fn gtk_scale_button_new(
-    min: f64,
-    max: f64,
-    step: f64,
-    icons: ?[*]const ?[*:0]const u8,
-) *Widget;
-pub extern fn gtk_scale_button_set_value(button: *ScaleButton, value: f64) void;
-pub extern fn gtk_scale_button_get_value(button: *ScaleButton) f64;
+pub extern fn gtk_menu_button_set_child(button: *MenuButton, child: ?*Widget) void;
+pub extern fn gtk_menu_button_set_always_show_arrow(button: *MenuButton, always_show_arrow: gboolean) void;
 
 pub extern fn gtk_search_entry_new() *Widget;
 pub extern fn gtk_search_entry_set_placeholder_text(
@@ -695,12 +739,16 @@ pub extern fn gtk_image_set_pixel_size(image: *Image, pixel_size: c_int) void;
 
 pub extern fn gtk_label_new(text: ?[*:0]const u8) *Widget;
 pub extern fn gtk_label_set_text(label: *Label, text: [*:0]const u8) void;
+pub extern fn gtk_label_get_text(label: *Label) [*:0]const u8;
 pub extern fn gtk_label_set_xalign(label: *Label, xalign: f32) void;
 pub extern fn gtk_label_set_ellipsize(label: *Label, mode: c_int) void;
 pub extern fn gtk_label_set_max_width_chars(label: *Label, n_chars: c_int) void;
 
 pub extern fn gtk_box_new(orientation: c_int, spacing: c_int) *Widget;
 pub extern fn gtk_box_append(box: *Box, child: *Widget) void;
+pub extern fn gtk_box_prepend(box: *Box, child: *Widget) void;
+pub extern fn gtk_box_remove(box: *Box, child: *Widget) void;
+pub extern fn gtk_box_insert_child_after(box: *Box, child: *Widget, sibling: ?*Widget) void;
 pub extern fn gtk_box_set_homogeneous(box: *Box, homogeneous: gboolean) void;
 pub extern fn gtk_separator_new(orientation: c_int) *Widget;
 
@@ -738,6 +786,7 @@ pub extern fn gtk_adjustment_set_value(adjustment: *Adjustment, value: f64) void
 
 pub extern fn gtk_scale_new(orientation: c_int, adjustment: ?*Adjustment) *Widget;
 pub extern fn gtk_scale_set_draw_value(scale: *Scale, draw_value: gboolean) void;
+pub extern fn gtk_scale_set_digits(scale: *Scale, digits: c_int) void;
 pub extern fn gtk_scale_add_mark(scale: *Scale, value: f64, position: c_int, markup: ?[*:0]const u8) void;
 pub extern fn gtk_range_set_inverted(range: *Range, setting: gboolean) void;
 pub extern fn gtk_range_set_value(range: *Range, value: f64) void;
@@ -766,6 +815,8 @@ pub extern fn gtk_multi_selection_new(model: ?*ListModel) *SelectionModel;
 pub extern fn gtk_single_selection_new(model: ?*ListModel) *SingleSelection;
 pub extern fn gtk_single_selection_get_selected(selection: *SingleSelection) c_uint;
 pub extern fn gtk_single_selection_set_selected(selection: *SingleSelection, position: c_uint) void;
+pub extern fn gtk_single_selection_set_autoselect(selection: *SingleSelection, autoselect: gboolean) void;
+pub extern fn gtk_single_selection_set_can_unselect(selection: *SingleSelection, can_unselect: gboolean) void;
 pub extern fn gtk_no_selection_new(model: ?*ListModel) *SelectionModel;
 pub extern fn gtk_selection_model_get_selection(model: *SelectionModel) *Bitset;
 pub extern fn gtk_selection_model_set_selection(model: *SelectionModel, selected: *Bitset, mask: *Bitset) gboolean;
@@ -793,6 +844,7 @@ pub extern fn gtk_column_view_append_column(view: *ColumnView, column: *ColumnVi
 pub extern fn gtk_column_view_get_sorter(view: *ColumnView) ?*Sorter;
 pub extern fn gtk_column_view_set_show_column_separators(view: *ColumnView, show: gboolean) void;
 pub extern fn gtk_column_view_set_reorderable(view: *ColumnView, reorderable: gboolean) void;
+pub extern fn gtk_column_view_get_columns(view: *ColumnView) *ListModel;
 pub extern fn gtk_column_view_column_new(
     title: ?[*:0]const u8,
     factory: ?*ListItemFactory,

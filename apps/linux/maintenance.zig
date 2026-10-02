@@ -39,7 +39,7 @@ pub fn tick(self: *App) void {
     const library = self.library orelse return;
     const stats = if (current.last) |unit| unit.stats else return;
     const found = stats.disagreed != 0 or stats.proposals_stored != 0;
-    const shown = self.health_issues_shown;
+    const shown = self.health.issues_shown;
     const total = self.runtime.libraryHealthIssueCount(library) catch shown;
     if (found or total != shown) health.reload(self);
     if (!found) return;

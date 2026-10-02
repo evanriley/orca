@@ -95,7 +95,7 @@ more identification sources.
   details panel. `orca-cli play-tracks` records listens too.
 - ListenBrainz scrobbling, off until enabled: a leased, restart-safe queue, a
   gateway that identifies Orca, spaces requests and honours `429`, and a token
-  held in the Secret Service (`orca-gtk` Preferences > Listening) or read from
+  held in the Secret Service (`orca-gtk` Settings > Listening) or read from
   `ORCA_LISTENBRAINZ_TOKEN` (`orca-cli scrobble`). See
   [providers.md](providers.md).
 - Provider blocks, backoffs, quota windows and request spacing for
@@ -114,7 +114,7 @@ more identification sources.
   `releases --loved`, and in `orca-gtk` a heart on the album page, Love Album
   in album menus, and a Loved page of loved albums and songs.
 - Now Playing, off until enabled: the playing track is announced to
-  ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
+  ListenBrainz after 10 s (`orca-gtk` Settings > Listening).
 - Star ratings, kept in the Library per recording: `orca-cli rate`, a sort
   by rating, and stars on every song row, in the details panel and in song
   menus in `orca-gtk`.
@@ -129,7 +129,7 @@ more identification sources.
   fetched lyrics are cached in the Library and never written to a file.
   `orca-cli lyrics` and `play-tracks --lyrics`, and in `orca-gtk` a Lyrics
   page in the sidebar that highlights the line being heard and keeps it
-  centred, with fetching off until enabled (Preferences > Listening).
+  centred, with fetching off until enabled (Settings > Listening).
 
 ### Identification
 
@@ -141,14 +141,14 @@ more identification sources.
   explicit action. Reachable through `orca-cli match`, `matches`,
   `accept-match`, `dismiss-match` and `accept-matches`, and in `orca-gtk`
   through the Matches page, the details panel's MusicBrainz section (with a
-  single-song Find Match) and the confidence threshold in Preferences. See
+  single-song Find Match) and the confidence threshold in Settings. See
   [providers.md](providers.md#matching).
 - AcoustID matching: the same job fingerprints each file with Chromaprint and
   looks up to 20 fingerprints at a time on AcoustID, merging both services'
   candidates into one proposal per recording; each service is asked once per
   file. Reachable through `orca-cli match` (`--no-fingerprints` leaves it
   out), `matches` and `fingerprint`, and in `orca-gtk` through Find Matches
-  (Preferences > Library > Match by audio fingerprint turns it off), with
+  (Settings > Library > Match by audio fingerprint turns it off), with
   each proposal's source and AcoustID score on the Matches page and in the
   details panel.
 - Match Album and cover art: a matching job scoped to one Release searches
@@ -193,7 +193,7 @@ more identification sources.
   files whose recording ID came from an edit or from a match accepted one at
   a time that AcoustID did not propose, once per file and ID, with the user
   key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk` sends them from the Matches
-  page's Submit to AcoustID, with the key saved in Preferences > Library. See
+  page's Submit to AcoustID, with the key saved in Settings > Library. See
   [providers.md](providers.md#acoustid-submission).
 
 ### Analysis
@@ -213,7 +213,7 @@ more identification sources.
 - Idle maintenance: while no Player plays and no other Job runs, one bounded
   unit at a time verifies an album's recording IDs against AcoustID, within
   the provider rate limits and leases; findings land in Health. Off until
-  enabled, through `orca-cli watch --maintenance[=MS]` or Preferences >
+  enabled, through `orca-cli watch --maintenance[=MS]` or Settings >
   Library in `orca-gtk`. See [control-plane.md](control-plane.md#idle-maintenance).
 
 ### Clients
@@ -225,7 +225,7 @@ more identification sources.
 - `orca-gtk`: a libadwaita window with an album grid and album pages, artist
   pages, track browsing and search, Now Playing, an editable queue, context
   menus, tag editing with write-back and undo (Write Tags to Files on track and
-  album menus), Preferences, a Health page, a player bar with cover art and an
+  album menus), Settings, a Health page, a player bar with cover art and an
   output menu, job progress, a welcome page, toasts, a shortcuts dialog, MPRIS,
   Health actions and dismissals, an idle maintenance switch,
   ListenBrainz submission with play counts in the details panel, love and
@@ -273,6 +273,22 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
+4. **What the redesign needs from liborca.** `orca-gtk`'s redesign has pages
+   liborca cannot back yet: genre and folder browsing, an artist's photo,
+   genres, biography, monthly listeners, external links, related artists
+   and love, album genres and descriptions, the Albums grid's High
+   Resolution and Needs Review filters, its Filters panel and Grid/List
+   toggle (a Release has no format summary or review state to filter on),
+   smart playlists, pinned playlists, a playlist's description, tags, genre,
+   creator and avatar and love, the Playlists page's Created by Me tab, All
+   Types filter and list view, a parametric equalizer, a search across
+   artists, albums and playlists behind a command palette, queue history, a
+   Loved Artists tab and count on the Loved page, an explicit badge on a
+   song, an artist page's Top Tracks by play count, and per-song format,
+   sample-rate, play-count, Date Added and Last Played columns
+   (`TrackSummary` has no codec, sample rate, play count, explicit flag,
+   added date or last-played time), and Now Playing's Track Info "3 of 16"
+   track and disc totals and genre (`TrackDetails` has neither).
 
 ## Releases
 

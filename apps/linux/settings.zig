@@ -6,7 +6,7 @@
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
 //! files Measure Loudness decodes at once, whether lyrics are fetched from
-//! LRCLIB, and what the sidebar shows. Nothing about the library does, and never the ListenBrainz token
+//! LRCLIB, and what the inspector shows. Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
@@ -175,6 +175,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .details;
     }
+    if (getString(keys, "view", "signal_path")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .signal_path;
+    }
 }
 
 pub fn save(self: *App) void {
@@ -208,6 +212,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "lyrics", "fetch", if (self.lyrics.fetch) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.sidebar_page == .details) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "lyrics", if (self.sidebar_page == .lyrics) "true" else "false");
+    gtk.g_key_file_set_string(keys, "view", "signal_path", if (self.sidebar_page == .signal_path) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

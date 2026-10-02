@@ -14,6 +14,7 @@ const details = @import("details.zig");
 const window = @import("window.zig");
 const secret = @import("secret.zig");
 const tags = @import("tags.zig");
+const page_ui = @import("page.zig");
 
 const App = app.App;
 
@@ -576,6 +577,7 @@ pub fn build(self: *App) *gtk.Widget {
     self.matches_list = gtk.cast(gtk.ListBox, list);
     gtk.gtk_list_box_set_selection_mode(self.matches_list.?, gtk.SELECTION_NONE);
     gtk.gtk_widget_add_css_class(list, "boxed-list");
+    gtk.gtk_widget_add_css_class(list, "match-list");
     const note = gtk.gtk_label_new("");
     self.matches_note = gtk.cast(gtk.Label, note);
     gtk.gtk_widget_add_css_class(note, "dim-label");
@@ -584,23 +586,22 @@ pub fn build(self: *App) *gtk.Widget {
     self.matches_corrections = gtk.cast(gtk.ListBox, corrections);
     gtk.gtk_list_box_set_selection_mode(self.matches_corrections.?, gtk.SELECTION_NONE);
     gtk.gtk_widget_add_css_class(corrections, "boxed-list");
-    const corrections_heading = newLabel("Corrections", "heading");
-    const corrections_box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
+    gtk.gtk_widget_add_css_class(corrections, "match-list");
+    const corrections_heading = newLabel("Corrections", "section-title");
+    const corrections_box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
     self.matches_corrections_box = corrections_box;
     gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections_heading);
     gtk.gtk_box_append(gtk.cast(gtk.Box, corrections_box), corrections);
     gtk.gtk_widget_set_visible(corrections_box, gtk.false_);
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 12);
-    gtk.gtk_widget_add_css_class(content, "album-page");
+    gtk.gtk_widget_add_css_class(content, "matches-body");
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), corrections_box);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), list);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), note);
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), 1000);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
     const scroller = gtk.gtk_scrolled_window_new();
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), clamp);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
 
     const empty = adw.adw_status_page_new();
     self.matches_empty = gtk.cast(adw.StatusPage, empty);
@@ -618,36 +619,34 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.matches_body.?, scroller, "list");
     _ = gtk.gtk_stack_add_named(self.matches_body.?, empty, "empty");
 
-    const header = adw.adw_header_bar_new();
-    const title = adw.adw_window_title_new("Matches", "");
-    self.matches_title = gtk.cast(adw.WindowTitle, title);
-    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), title);
-    const find = gtk.gtk_button_new_with_label("Find Matches");
-    gtk.gtk_widget_set_tooltip_text(find, "About one song a second");
-    _ = gtk.signalConnect(find, "clicked", gtk.callback(findClicked), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), find);
-    const accept_confident = gtk.gtk_button_new_with_label("Accept Confident");
-    self.matches_accept_button = accept_confident;
-    _ = gtk.signalConnect(accept_confident, "clicked", gtk.callback(acceptConfidentClicked), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), accept_confident);
+    const title = page_ui.title("Matches");
+    self.matches_meta = title.meta;
     const submit = gtk.gtk_button_new_with_label("Submit to AcoustID");
     self.matches_submit_button = submit;
     gtk.gtk_widget_set_tooltip_text(submit, "Send the matches you accepted to AcoustID");
     gtk.gtk_widget_set_visible(submit, gtk.false_);
     _ = gtk.signalConnect(submit, "clicked", gtk.callback(submitClicked), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), submit);
+    title.add(submit);
+    const accept_confident = gtk.gtk_button_new_with_label("Accept Confident");
+    self.matches_accept_button = accept_confident;
+    _ = gtk.signalConnect(accept_confident, "clicked", gtk.callback(acceptConfidentClicked), self);
+    title.add(accept_confident);
+    const find = gtk.gtk_button_new_with_label("Find Matches");
+    gtk.gtk_widget_set_tooltip_text(find, "About one song a second");
+    _ = gtk.signalConnect(find, "clicked", gtk.callback(findClicked), self);
+    title.add(find);
     checkAcoustIdKey(self);
 
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, body));
     return view;
 }
 
 fn showEmpty(self: *App, unidentified: u64) void {
     const page = self.matches_empty orelse return;
     if (unidentified == 0) {
-        adw.adw_status_page_set_icon_name(page, "emblem-ok-symbolic");
+        adw.adw_status_page_set_icon_name(page, "object-select-symbolic");
         adw.adw_status_page_set_title(page, "Every song has a recording ID");
         adw.adw_status_page_set_description(page, null);
     } else {
@@ -701,7 +700,7 @@ pub fn reload(self: *App) void {
     const unidentified = self.runtime.libraryUnidentifiedCount(library) catch 0;
     var buffer: [256]u8 = undefined;
     const groups = self.matches_group_count;
-    if (self.matches_title) |title| {
+    if (self.matches_meta) |meta| {
         const text = if (groups == 0)
             strings.format(&buffer, "{f} {s} to review" ++ separator ++ "{f} not identified", .{
                 strings.grouped(total),
@@ -716,7 +715,7 @@ pub fn reload(self: *App) void {
                 if (total == 1) "song" else "songs",
                 strings.grouped(unidentified),
             });
-        adw.adw_window_title_set_subtitle(title, text.ptr);
+        gtk.gtk_label_set_text(meta, text.ptr);
     }
     const nothing = total == 0 and groups == 0;
     if (nothing) showEmpty(self, unidentified);

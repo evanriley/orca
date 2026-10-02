@@ -1,7 +1,7 @@
-//! The Health page: what liborca found wrong with the library, most severe
-//! first as the engine orders it, one bounded page. Each issue carries the
-//! action liborca offers to resolve it, and can be dismissed until its file
-//! changes.
+//! The Health page: what liborca found wrong with the library, one card per
+//! kind of issue, most severe first as the engine orders them. A card opens
+//! onto its files in bounded pages. Each issue carries the action liborca
+//! offers to resolve it, and can be dismissed until its file changes.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -12,8 +12,28 @@ const app = @import("app.zig");
 const jobs = @import("jobs.zig");
 const tags = @import("tags.zig");
 const matches = @import("matches.zig");
+const page_ui = @import("page.zig");
+const loved = @import("loved.zig");
+const window = @import("window.zig");
 
 const App = app.App;
+
+pub const State = struct {
+    cards: ?*gtk.Box = null,
+    scroller: ?*gtk.ScrolledWindow = null,
+    body: ?*gtk.Stack = null,
+    meta: ?*gtk.Label = null,
+    count: ?*gtk.Label = null,
+    analysis: ?*gtk.Widget = null,
+    unanalysed: ?*gtk.Label = null,
+    album_count: ?*gtk.Label = null,
+    song_count: ?*gtk.Label = null,
+    artist_count: ?*gtk.Label = null,
+    issues_shown: u64 = 0,
+    restore_scroll: ?f64 = null,
+    expanded: std.EnumSet(liborca.HealthIssueKind) = .initEmpty(),
+    loaded: std.EnumArray(liborca.HealthIssueKind, u32) = .initFill(0),
+};
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -55,11 +75,38 @@ fn kindTitle(kind: liborca.HealthIssueKind) [*:0]const u8 {
     };
 }
 
-fn severityIcon(severity: liborca.HealthSeverity) [*:0]const u8 {
-    return switch (severity) {
-        .information => "dialog-information-symbolic",
-        .warning => "dialog-warning-symbolic",
-        .error_severity => "dialog-error-symbolic",
+fn kindIcon(kind: liborca.HealthIssueKind) [*:0]const u8 {
+    return switch (kind) {
+        .missing_metadata => "document-edit-symbolic",
+        .missing_track_number => "view-list-ordered-symbolic",
+        .album_artist_anomaly => "avatar-default-symbolic",
+        .artwork_problem => "image-missing-symbolic",
+        .missing_analysis => "audio-volume-muted-symbolic",
+        .clipping => "audio-volume-overamplified-symbolic",
+        .excessive_silence => "audio-volume-low-symbolic",
+        .technical_anomaly => "dialog-question-symbolic",
+        .corrupt_audio => "action-unavailable-symbolic",
+        .exact_duplicate, .likely_duplicate => "edit-copy-symbolic",
+        .unreadable_file => "dialog-error-symbolic",
+        .recording_mismatch => "system-search-symbolic",
+    };
+}
+
+fn kindExplanation(kind: liborca.HealthIssueKind) [*:0]const u8 {
+    return switch (kind) {
+        .missing_metadata => "The title, artist or album is blank.",
+        .missing_track_number => "The file has no track number, so Orca gave it a position.",
+        .album_artist_anomaly => "The file names an album but no album artist.",
+        .artwork_problem => "No embedded cover, and no cover fetched for the album.",
+        .missing_analysis => "Loudness could not be measured, so these play without ReplayGain.",
+        .clipping => "A channel has runs of three or more samples at full scale.",
+        .excessive_silence => "More than a fifth of the audio is silent.",
+        .technical_anomaly => "Another recording holds the same track number.",
+        .corrupt_audio => "The file opened, but its audio would not decode.",
+        .exact_duplicate => "The same audio is in the library more than once.",
+        .likely_duplicate => "The audio closely resembles another file's.",
+        .unreadable_file => "The file could not be opened, or its header would not read.",
+        .recording_mismatch => "AcoustID hears another recording; a correction awaits review.",
     };
 }
 
@@ -336,129 +383,397 @@ fn addActions(row: *gtk.Widget, issue: *Issue, action: liborca.HealthAction) voi
     gtk.gtk_widget_add_css_class(dismiss, "flat");
 }
 
-pub fn build(self: *App) *gtk.Widget {
+fn reviewMatchesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.showPage(state(data), .matches);
+}
+
+fn addGroupAction(header: *gtk.Widget, self: *App, kind: liborca.HealthIssueKind) void {
+    switch (kind) {
+        .recording_mismatch => {
+            const button = gtk.gtk_button_new_with_label("Review");
+            gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+            gtk.gtk_widget_set_tooltip_text(button, "Review the proposed corrections in Matches");
+            _ = gtk.signalConnect(button, "clicked", gtk.callback(reviewMatchesClicked), self);
+            gtk.gtk_box_append(gtk.cast(gtk.Box, header), button);
+        },
+        else => {},
+    }
+}
+
+const KindCard = struct {
+    self: *App,
+    kind: liborca.HealthIssueKind,
+    count: u64,
+    loaded: u32 = 0,
+    list: *gtk.ListBox,
+    body: *gtk.Widget,
+    more: *gtk.Widget,
+    toggle: *gtk.Widget,
+};
+
+fn kindCardOf(data: ?*anyopaque) *KindCard {
+    return @ptrCast(@alignCast(data.?));
+}
+
+fn freeKindCard(data: ?*anyopaque) callconv(.c) void {
+    const card = kindCardOf(data);
+    card.self.allocator.destroy(card);
+}
+
+fn fileName(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[slash + 1 ..];
+}
+
+fn folderOf(path: []const u8) []const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
+    return path[0..slash];
+}
+
+fn issueRow(self: *App, item: liborca.HealthIssue) ?*gtk.Widget {
+    const issue = self.allocator.create(Issue) catch return null;
+    issue.* = .{
+        .self = self,
+        .file_id = item.file_id,
+        .kind = item.kind,
+        .track_id = item.track_id,
+        .release_id = item.release_id,
+        .related_file_id = item.related_file_id,
+    };
+    const row = adw.adw_action_row_new();
+    gtk.g_object_set_data_full(row, "orca-issue", issue, freeIssue);
+    gtk.gtk_widget_add_css_class(row, "health-issue");
+    adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
+    var buffer: [4096]u8 = undefined;
+    const name = fileName(item.path);
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), if (name.len == 0) "No location" else strings.terminated(&buffer, name).ptr);
+    adw.adw_action_row_set_title_lines(gtk.cast(adw.ActionRow, row), 1);
+    const folder = folderOf(item.path);
+    const subtitle = if (item.details.len != 0 and folder.len != 0)
+        strings.printZ(&buffer, "{s}\n{s}", .{ item.details, folder }) catch ""
+    else if (item.details.len != 0)
+        strings.terminated(&buffer, item.details)
+    else
+        strings.terminated(&buffer, folder);
+    if (subtitle.len != 0) adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), subtitle.ptr);
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, row), 3);
+    if (item.path.len != 0) gtk.gtk_widget_set_tooltip_text(row, strings.terminated(&buffer, item.path).ptr);
+    addActions(row, issue, item.action);
+    return row;
+}
+
+fn loadMore(card: *KindCard) void {
+    const self = card.self;
+    const library = self.library orelse return;
+    var page = self.runtime.libraryHealthIssuePageOfKind(library, card.kind, app.page_size, card.loaded) catch
+        return self.toast("Could not read the issues");
+    defer page.deinit();
+    for (page.items) |item| {
+        const row = issueRow(self, item) orelse continue;
+        gtk.gtk_list_box_append(card.list, row);
+    }
+    card.loaded += @intCast(page.items.len);
+    const exhausted = page.items.len < app.page_size or card.loaded >= card.count;
+    gtk.gtk_widget_set_visible(card.more, if (exhausted) gtk.false_ else gtk.true_);
+}
+
+fn showMoreClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const card = kindCardOf(data);
+    loadMore(card);
+    card.self.health.loaded.set(card.kind, card.loaded);
+}
+
+fn setExpanded(card: *KindCard, expanded: bool) void {
+    gtk.gtk_widget_set_visible(card.body, if (expanded) gtk.true_ else gtk.false_);
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, card.toggle), if (expanded) "pan-up-symbolic" else "pan-down-symbolic");
+    gtk.gtk_widget_set_tooltip_text(card.toggle, if (expanded) "Hide the files" else "Show the files");
+    if (expanded and card.loaded == 0) loadMore(card);
+}
+
+fn expandToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const card = kindCardOf(data);
+    const expanded = gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) != 0;
+    card.self.health.expanded.setPresent(card.kind, expanded);
+    setExpanded(card, expanded);
+    card.self.health.loaded.set(card.kind, card.loaded);
+}
+
+fn severityClass(severity: liborca.HealthSeverity) [*:0]const u8 {
+    return switch (severity) {
+        .information => "health-information",
+        .warning => "health-warning",
+        .error_severity => "health-error",
+    };
+}
+
+fn kindCard(self: *App, summary: liborca.HealthKindSummary) ?*gtk.Widget {
+    const card = self.allocator.create(KindCard) catch return null;
+
+    const icon = gtk.gtk_image_new_from_icon_name(kindIcon(summary.kind));
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 24);
+    gtk.gtk_widget_set_valign(icon, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(icon, "health-kind-icon");
+    gtk.gtk_widget_add_css_class(icon, severityClass(summary.severity));
+
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(text, gtk.true_);
+    gtk.gtk_widget_set_valign(text, gtk.ALIGN_CENTER);
+    const heading = gtk.gtk_label_new(kindTitle(summary.kind));
+    gtk.gtk_widget_add_css_class(heading, "health-card-title");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 0);
+    const explanation = gtk.gtk_label_new(kindExplanation(summary.kind));
+    gtk.gtk_widget_add_css_class(explanation, "meta");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, explanation), 0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, explanation), gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), explanation);
+
+    const tally = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(tally, "health-tally");
+    gtk.gtk_widget_set_valign(tally, gtk.ALIGN_CENTER);
+    var buffer: [32]u8 = undefined;
+    const number = gtk.gtk_label_new(strings.format(&buffer, "{f}", .{strings.grouped(summary.count)}).ptr);
+    gtk.gtk_widget_add_css_class(number, "health-tally-number");
+    gtk.gtk_widget_add_css_class(number, "numeric");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, number), 0);
+    const unit = gtk.gtk_label_new(if (summary.count == 1) "file" else "files");
+    gtk.gtk_widget_add_css_class(unit, "meta");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, unit), 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, tally), number);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, tally), unit);
+
+    const toggle = gtk.gtk_toggle_button_new();
+    gtk.gtk_widget_add_css_class(toggle, "flat");
+    gtk.gtk_widget_add_css_class(toggle, "circular");
+    gtk.gtk_widget_set_valign(toggle, gtk.ALIGN_CENTER);
+
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
+    gtk.gtk_widget_add_css_class(header, "health-card-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), tally);
+    addGroupAction(header, self, summary.kind);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), toggle);
+
     const list = gtk.gtk_list_box_new();
-    self.health_list = gtk.cast(gtk.ListBox, list);
-    gtk.gtk_list_box_set_selection_mode(self.health_list.?, gtk.SELECTION_NONE);
-    gtk.gtk_widget_add_css_class(list, "boxed-list");
-    const note = gtk.gtk_label_new("");
-    self.health_note = gtk.cast(gtk.Label, note);
-    gtk.gtk_widget_add_css_class(note, "dim-label");
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, note), gtk.true_);
-    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 12);
-    gtk.gtk_widget_add_css_class(content, "album-page");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), list);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, content), note);
-    const clamp = adw.adw_clamp_new();
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), 900);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
-    const scroller = gtk.gtk_scrolled_window_new();
-    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), clamp);
+    gtk.gtk_list_box_set_selection_mode(gtk.cast(gtk.ListBox, list), gtk.SELECTION_NONE);
+    gtk.gtk_widget_add_css_class(list, "health-issues");
+    const more = gtk.gtk_button_new_with_label("Show more");
+    gtk.gtk_widget_add_css_class(more, "flat");
+    gtk.gtk_widget_add_css_class(more, "health-more");
+    gtk.gtk_widget_set_visible(more, gtk.false_);
+    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), list);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), more);
+
+    const widget = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(widget, "health-card");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, widget), header);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, widget), body);
+
+    card.* = .{
+        .self = self,
+        .kind = summary.kind,
+        .count = summary.count,
+        .list = gtk.cast(gtk.ListBox, list),
+        .body = body,
+        .more = more,
+        .toggle = toggle,
+    };
+    gtk.g_object_set_data_full(widget, "orca-health-kind", card, freeKindCard);
+    _ = gtk.signalConnect(more, "clicked", gtk.callback(showMoreClicked), card);
+
+    const expanded = self.health.expanded.contains(summary.kind);
+    setExpanded(card, expanded);
+    if (expanded) {
+        while (card.loaded < self.health.loaded.get(summary.kind) and gtk.gtk_widget_get_visible(more) != 0) {
+            const before = card.loaded;
+            loadMore(card);
+            if (card.loaded == before) break;
+        }
+        self.health.loaded.set(summary.kind, card.loaded);
+    }
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, toggle), if (expanded) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(toggle, "toggled", gtk.callback(expandToggled), card);
+    return widget;
+}
+
+fn analysisCard(self: *App) *gtk.Widget {
+    const icon = gtk.gtk_image_new_from_icon_name("audio-volume-high-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 24);
+    gtk.gtk_widget_set_valign(icon, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(icon, "health-kind-icon");
+    gtk.gtk_widget_add_css_class(icon, "health-information");
+
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(text, gtk.true_);
+    gtk.gtk_widget_set_valign(text, gtk.ALIGN_CENTER);
+    const heading = gtk.gtk_label_new("");
+    self.health.unanalysed = gtk.cast(gtk.Label, heading);
+    gtk.gtk_widget_add_css_class(heading, "health-card-title");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 0);
+    const explanation = gtk.gtk_label_new("Analysis measures loudness for ReplayGain and finds clipping, silence, damaged audio and duplicates.");
+    gtk.gtk_widget_add_css_class(explanation, "meta");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, explanation), 0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, explanation), gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), explanation);
+
+    const analyse = gtk.gtk_button_new_with_label("Analyse");
+    gtk.gtk_widget_set_valign(analyse, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(analyse, "suggested-action");
+    _ = gtk.signalConnect(analyse, "clicked", gtk.callback(analyseClicked), self);
+
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
+    gtk.gtk_widget_add_css_class(header, "health-card-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), analyse);
+    const widget = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(widget, "health-card");
+    gtk.gtk_widget_add_css_class(widget, "health-analysis");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, widget), header);
+    gtk.gtk_widget_set_visible(widget, gtk.false_);
+    self.health.analysis = widget;
+    return widget;
+}
+
+fn statsRow(self: *App) *gtk.Widget {
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(row, "health-stats");
+    gtk.gtk_widget_set_halign(row, gtk.ALIGN_START);
+    const albums_stat = loved.stat("ALBUMS");
+    self.health.album_count = albums_stat.number;
+    const songs_stat = loved.stat("SONGS");
+    self.health.song_count = songs_stat.number;
+    const artists_stat = loved.stat("ARTISTS");
+    self.health.artist_count = artists_stat.number;
+    for ([_]*gtk.Widget{ albums_stat.widget, songs_stat.widget, artists_stat.widget }) |widget|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, row), widget);
+    return row;
+}
+
+pub fn build(self: *App) *gtk.Widget {
+    const cards = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
+    self.health.cards = gtk.cast(gtk.Box, cards);
 
     const empty = adw.adw_status_page_new();
-    adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, empty), "emblem-ok-symbolic");
+    adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, empty), "object-select-symbolic");
     adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, empty), "Nothing to fix");
     adw.adw_status_page_set_description(
         gtk.cast(adw.StatusPage, empty),
-        "Scans report missing tags and damaged files here. Measure loudness and find duplicates from Preferences or the button above.",
+        "Scans report missing tags and damaged files here. Measure loudness and find duplicates from Settings or the button above.",
     );
     const body = gtk.gtk_stack_new();
-    self.health_body = gtk.cast(gtk.Stack, body);
-    _ = gtk.gtk_stack_add_named(self.health_body.?, scroller, "list");
-    _ = gtk.gtk_stack_add_named(self.health_body.?, empty, "empty");
+    self.health.body = gtk.cast(gtk.Stack, body);
+    gtk.gtk_widget_set_vexpand(body, gtk.true_);
+    _ = gtk.gtk_stack_add_named(self.health.body.?, cards, "list");
+    _ = gtk.gtk_stack_add_named(self.health.body.?, empty, "empty");
 
-    const header = adw.adw_header_bar_new();
-    const title = adw.adw_window_title_new("Health", "");
-    self.health_title = gtk.cast(adw.WindowTitle, title);
-    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), title);
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
+    gtk.gtk_widget_add_css_class(content, "health-body");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), statsRow(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), analysisCard(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), body);
+
+    const scroller = gtk.gtk_scrolled_window_new();
+    self.health.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
+    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), content);
+
+    const title = page_ui.title("Library Health");
+    self.health.meta = title.meta;
     const find = gtk.gtk_button_new_with_label("Find Duplicates");
     gtk.gtk_widget_set_tooltip_text(find, "Compare measured audio across the library");
     _ = gtk.signalConnect(find, "clicked", gtk.callback(findDuplicatesClicked), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), find);
-
-    const banner = adw.adw_banner_new("");
-    self.health_banner = gtk.cast(adw.Banner, banner);
-    adw.adw_banner_set_button_label(self.health_banner.?, "Analyse");
-    _ = gtk.signalConnect(banner, "button-clicked", gtk.callback(analyseClicked), self);
+    title.add(find);
 
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), banner);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, scroller));
     return view;
 }
 
 /// Offers analysis while files owe it and none is running.
 pub fn updateBanner(self: *App) void {
-    const banner = self.health_banner orelse return;
-    const library = self.library orelse return adw.adw_banner_set_revealed(banner, gtk.false_);
+    const card = self.health.analysis orelse return;
+    const library = self.library orelse return gtk.gtk_widget_set_visible(card, gtk.false_);
     const unanalyzed = if (self.task == .analysis) 0 else self.runtime.libraryUnanalyzedCount(library) catch 0;
-    if (unanalyzed != 0) {
+    if (unanalyzed != 0) if (self.health.unanalysed) |label| {
         var buffer: [64]u8 = undefined;
-        adw.adw_banner_set_title(banner, strings.format(&buffer, "{f} {s} not analysed", .{
+        gtk.gtk_label_set_text(label, strings.format(&buffer, "{f} {s} not analysed", .{
             strings.grouped(unanalyzed),
             if (unanalyzed == 1) "file" else "files",
         }).ptr);
+    };
+    gtk.gtk_widget_set_visible(card, if (unanalyzed == 0) gtk.false_ else gtk.true_);
+}
+
+fn showStat(label: ?*gtk.Label, count: u64) void {
+    var buffer: [32]u8 = undefined;
+    gtk.gtk_label_set_text(label orelse return, strings.format(&buffer, "{f}", .{strings.grouped(count)}).ptr);
+}
+
+fn removeCards(cards: *gtk.Box) void {
+    while (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, cards))) |child| gtk.gtk_box_remove(cards, child);
+}
+
+fn focusedKind(self: *App, cards: *gtk.Box) ?liborca.HealthIssueKind {
+    const root = self.window orelse return null;
+    const focus = gtk.gtk_window_get_focus(root) orelse return null;
+    var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, cards));
+    while (child) |widget| : (child = gtk.gtk_widget_get_next_sibling(widget)) {
+        if (focus != widget and gtk.gtk_widget_is_ancestor(focus, widget) == 0) continue;
+        const data = gtk.g_object_get_data(widget, "orca-health-kind") orelse return null;
+        return kindCardOf(data).kind;
     }
-    adw.adw_banner_set_revealed(banner, if (unanalyzed == 0) gtk.false_ else gtk.true_);
+    return null;
 }
 
 pub fn reload(self: *App) void {
     updateBanner(self);
-    const list = self.health_list orelse return;
-    gtk.gtk_list_box_remove_all(list);
+    const cards = self.health.cards orelse return;
+    const scroller = self.health.scroller orelse return;
+    const scrolled = self.health.restore_scroll orelse
+        gtk.gtk_adjustment_get_value(gtk.gtk_scrolled_window_get_vadjustment(scroller));
+    const focused = focusedKind(self, cards);
+    removeCards(cards);
     const library = self.library orelse return;
+    showStat(self.health.album_count, self.runtime.libraryReleaseCount(library) catch 0);
+    showStat(self.health.song_count, self.runtime.libraryTrackCount(library) catch 0);
+    showStat(self.health.artist_count, self.runtime.libraryArtistCount(library) catch 0);
     const total = self.runtime.libraryHealthIssueCount(library) catch 0;
-    self.health_issues_shown = total;
-    if (self.health_count) |label| {
+    self.health.issues_shown = total;
+    if (self.health.count) |label| {
         var count_buffer: [16]u8 = undefined;
         const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&count_buffer, "{d}", .{total}) catch "";
         gtk.gtk_label_set_text(label, text.ptr);
     }
-    var buffer: [512]u8 = undefined;
-    if (self.health_title) |title| {
-        const text: [:0]const u8 = if (total == 1) "1 issue" else strings.printZ(&buffer, "{d} issues", .{total}) catch "";
-        adw.adw_window_title_set_subtitle(title, text.ptr);
+    if (self.health.meta) |meta| {
+        var buffer: [64]u8 = undefined;
+        const text = if (total == 1) "1 issue" else strings.format(&buffer, "{f} issues", .{strings.grouped(total)});
+        gtk.gtk_label_set_text(meta, text.ptr);
     }
-    if (self.health_body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
-    var page = self.runtime.libraryHealthIssuePage(library, app.page_size, 0) catch return;
-    defer page.deinit();
-    for (page.items) |item| {
-        const issue = self.allocator.create(Issue) catch continue;
-        issue.* = .{
-            .self = self,
-            .file_id = item.file_id,
-            .kind = item.kind,
-            .track_id = item.track_id,
-            .release_id = item.release_id,
-            .related_file_id = item.related_file_id,
-        };
-        const row = adw.adw_action_row_new();
-        gtk.g_object_set_data_full(row, "orca-issue", issue, freeIssue);
-        adw.adw_preferences_row_set_use_markup(gtk.cast(adw.PreferencesRow, row), gtk.false_);
-        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, row), kindTitle(item.kind));
-        const subtitle = if (item.details.len != 0)
-            strings.printZ(&buffer, "{s}\n{s}", .{ item.path, item.details }) catch ""
-        else
-            strings.terminated(&buffer, item.path);
-        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), subtitle.ptr);
-        adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, row), 3);
-        const icon = gtk.gtk_image_new_from_icon_name(severityIcon(item.severity));
-        gtk.gtk_widget_add_css_class(icon, switch (item.severity) {
-            .information => "dim-label",
-            .warning => "warning",
-            .error_severity => "error",
-        });
-        adw.adw_action_row_add_prefix(gtk.cast(adw.ActionRow, row), icon);
-        addActions(row, issue, item.action);
-        gtk.gtk_list_box_append(list, row);
+    if (self.health.body) |body| gtk.gtk_stack_set_visible_child_name(body, if (total == 0) "empty" else "list");
+    const summary = self.runtime.libraryHealthSummary(library) catch return self.toast("Could not read the library's health");
+    for (summary.items()) |entry| {
+        const widget = kindCard(self, entry) orelse continue;
+        gtk.gtk_box_append(cards, widget);
+        if (focused == entry.kind) {
+            const card = kindCardOf(gtk.g_object_get_data(widget, "orca-health-kind"));
+            _ = gtk.gtk_widget_grab_focus(card.toggle);
+        }
     }
-    if (self.health_note) |note| {
-        const text: [:0]const u8 = if (total > page.items.len)
-            strings.printZ(&buffer, "Showing the first {d} of {d}. orca-cli health lists them all.", .{ page.items.len, total }) catch ""
-        else
-            "";
-        gtk.gtk_label_set_text(note, text.ptr);
-    }
+    if (self.health.restore_scroll == null) _ = gtk.g_idle_add(restoreScroll, self);
+    self.health.restore_scroll = scrolled;
+}
+
+fn restoreScroll(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const value = self.health.restore_scroll orelse return gtk.false_;
+    self.health.restore_scroll = null;
+    const scroller = self.health.scroller orelse return gtk.false_;
+    gtk.gtk_adjustment_set_value(gtk.gtk_scrolled_window_get_vadjustment(scroller), value);
+    return gtk.false_;
 }

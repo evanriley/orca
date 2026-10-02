@@ -261,6 +261,8 @@ pub fn build(b: *std.Build) void {
         // scaling loader. GTK4 depends on it, but the frontend calls it
         // directly, so it has to be linked directly.
         linux_app_module.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .yes });
+        linux_app_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .yes });
+        linux_app_module.linkSystemLibrary("pango", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .yes });
@@ -276,6 +278,9 @@ pub fn build(b: *std.Build) void {
                 b.fmt("apps/linux/data/{s}.svg", .{icon}),
                 b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),
             );
+        }
+        for ([_][]const u8{ "SourceSerif4Variable-Roman.ttf", "SourceSerif4-OFL.txt", "InterVariable.ttf", "Inter-OFL.txt" }) |font_file| {
+            b.installFile(b.fmt("apps/linux/data/fonts/{s}", .{font_file}), b.fmt("share/orca/fonts/{s}", .{font_file}));
         }
         const run_linux_app = b.addRunArtifact(linux_app);
         run_linux_app.step.dependOn(b.getInstallStep());

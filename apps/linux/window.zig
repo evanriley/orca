@@ -20,24 +20,17 @@ const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
-const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const page_ui = @import("page.zig");
+const song_table = @import("song_table.zig");
+const preferences = @import("preferences.zig");
 
 const App = app.App;
-const TrackObject = track_model.TrackObject;
 const Column = track_model.Column;
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
-}
-
-fn columnData(column: Column) ?*anyopaque {
-    return @ptrFromInt(@intFromEnum(column));
-}
-
-fn columnOf(data: ?*anyopaque) Column {
-    return @enumFromInt(@as(std.meta.Tag(Column), @intCast(@intFromPtr(data))));
 }
 
 fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -50,233 +43,65 @@ fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (remaining < page) self.loadNextPage();
 }
 
-fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const selection = self.selection orelse return;
-    const model = gtk.cast(gtk.ListModel, selection);
-    const chosen = gtk.gtk_selection_model_get_selection(selection);
-
-    // Activation is not selection. Activating a multi-row selection plays that
-    // selection as a queue, from its first row: shift-click leaves GTK's
-    // activated position on the last row selected.
-    if (gtk.gtk_bitset_get_size(chosen) > 1 and gtk.gtk_bitset_contains(chosen, position) != 0) {
-        defer gtk.gtk_bitset_unref(chosen);
-        var ids: std.ArrayList(i64) = .empty;
-        defer ids.deinit(self.allocator);
-        var iter: gtk.BitsetIter = .{};
-        var index: c_uint = 0;
-        var valid = gtk.gtk_bitset_iter_init_first(&iter, chosen, &index);
-        // A bitset iterates ascending, so this is the order the rows are shown
-        // in, which is the order the user highlighted them in.
-        while (valid != 0) : (valid = gtk.gtk_bitset_iter_next(&iter, &index)) {
-            const item = gtk.g_list_model_get_item(model, index) orelse continue;
-            const row: *TrackObject = @ptrCast(@alignCast(item));
-            if (row.hasFile()) ids.append(self.allocator, row.id()) catch {};
-            gtk.g_object_unref(item);
-        }
-        if (ids.items.len != 0)
-            transport.playIds(self, ids.items, 0)
-        else
-            self.toast("None of the selected tracks has a playable file");
-        return;
-    }
-    gtk.gtk_bitset_unref(chosen);
-
-    const item = gtk.g_list_model_get_item(model, position) orelse return;
-    defer gtk.g_object_unref(item);
-    const row: *TrackObject = @ptrCast(@alignCast(item));
-    if (!row.hasFile()) {
-        self.toast("That track has no playable file");
-        return;
-    }
-    const id = row.id();
-    transport.playIds(self, &.{id}, 0);
-}
-
-fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const column = columnOf(data);
-    if (column == .rating) {
-        const stars = ratings.newRowStars(gtk.callback(starClicked), null);
-        gtk.gtk_widget_set_halign(stars, gtk.ALIGN_START);
-        gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), stars);
-        gtk.g_object_set_data(stars, "orca-list-item", item);
-        menu.onSecondaryClick(stars, cellMenu, null);
-        return;
-    }
-    const label = gtk.gtk_label_new(null);
-    gtk.gtk_label_set_xalign(
-        gtk.cast(gtk.Label, label),
-        if (column == .duration or column == .number) 1.0 else 0.0,
-    );
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
-    var child = label;
-    if (column == .title) {
-        const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-        gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
-        child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, child), feedback.newRowButton(gtk.callback(heartClicked), null));
-        gtk.gtk_box_append(gtk.cast(gtk.Box, child), spacer);
-    }
-    gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), child);
-    gtk.g_object_set_data(child, "orca-list-item", item);
-    menu.onSecondaryClick(child, cellMenu, null);
-}
-
-/// The cell factories carry their column as user data, so the right-click
-/// handler reaches the app through this. There is one window.
-var cells_app: ?*App = null;
-
-fn heartClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const self = cells_app orelse return;
-    const cell = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, button)) orelse return;
-    const item = gtk.g_object_get_data(cell, "orca-list-item") orelse return;
-    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
-    const row: *TrackObject = @ptrCast(@alignCast(object));
-    feedback.toggle(self, .{ .track_id = row.id(), .recording_id = row.recordingId(), .feedback = row.feedback() });
-}
-
-fn starClicked(button: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const self = cells_app orelse return;
-    const stars = ratings.starsOf(button) orelse return;
-    const item = gtk.g_object_get_data(stars, "orca-list-item") orelse return;
-    const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse return;
-    const row: *TrackObject = @ptrCast(@alignCast(object));
-    ratings.change(self, &.{.{ .track_id = row.id(), .recording_id = row.recordingId(), .feedback = row.feedback() }}, ratings.chosen(button));
-}
-
-/// A right-click on a selected row acts on the whole selection, as it does in
-/// every file manager; on any other row it selects that row alone first.
-fn cellMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, _: ?*anyopaque) callconv(.c) void {
-    const self = cells_app orelse return;
-    const selection = self.selection orelse return;
-    const label = menu.gestureWidget(gesture);
-    const item = gtk.g_object_get_data(label, "orca-list-item") orelse return;
-    const list_item = gtk.cast(gtk.ListItem, item);
-    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
-    const clicked: *TrackObject = @ptrCast(@alignCast(object));
-    const position = gtk.gtk_list_item_get_position(list_item);
-    if (gtk.gtk_selection_model_is_selected(selection, position) == 0)
-        _ = gtk.gtk_selection_model_select_item(selection, position, gtk.true_);
-
-    self.context.reset(.tracks);
-    self.context.release_id = clicked.releaseId();
-    self.context.artist_id = clicked.artistId();
-    const chosen = gtk.gtk_selection_model_get_selection(selection);
-    defer gtk.gtk_bitset_unref(chosen);
-    const model = gtk.cast(gtk.ListModel, selection);
-    var iter: gtk.BitsetIter = .{};
-    var index: c_uint = 0;
-    var valid = gtk.gtk_bitset_iter_init_first(&iter, chosen, &index);
-    while (valid != 0) : (valid = gtk.gtk_bitset_iter_next(&iter, &index)) {
-        const row_item = gtk.g_list_model_get_item(model, index) orelse continue;
-        defer gtk.g_object_unref(row_item);
-        const row: *TrackObject = @ptrCast(@alignCast(row_item));
-        if (row.hasFile()) self.context.addTrack(self.allocator, row.id(), row.recordingId(), row.feedback()) catch {};
-    }
-    if (self.context.tracks.items.len > 1) {
-        self.context.release_id = null;
-        self.context.artist_id = null;
-    }
-    menu.popup(self, label, x, y);
-}
-
-fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const list_item = gtk.cast(gtk.ListItem, item);
-    const object = gtk.gtk_list_item_get_item(list_item) orelse return;
-    const row: *TrackObject = @ptrCast(@alignCast(object));
-    const child = gtk.gtk_list_item_get_child(list_item) orelse return;
-    const column = columnOf(data);
-    if (column == .rating) {
-        ratings.show(child, row.rating());
-    } else {
-        const label = gtk.cast(gtk.Label, if (column == .title)
-            gtk.gtk_widget_get_first_child(child) orelse return
-        else
-            child);
-        if (column == .title) {
-            const heart = gtk.gtk_widget_get_next_sibling(gtk.cast(gtk.Widget, label)) orelse return;
-            feedback.showRowButton(heart, row.feedback());
-        }
-        var buffer: [32]u8 = undefined;
-        const text: [:0]const u8 = switch (column) {
-            .number => row.numberText(&buffer),
-            .title => row.title(),
-            .artist => row.artist(),
-            .album => row.album(),
-            .duration => row.durationText(&buffer),
-            .rating => unreachable,
-        };
-        gtk.gtk_label_set_text(label, text.ptr);
-    }
-    // A Track whose file is missing is shown, not hidden — the library still
-    // knows about it — but it is visibly not playable.
-    if (row.hasFile())
-        gtk.gtk_widget_remove_css_class(child, "dim-label")
-    else
-        gtk.gtk_widget_add_css_class(child, "dim-label");
-    const row_widget = rowWidget(child) orelse return;
-    if (playing_id != null and playing_id.? == row.id())
-        gtk.gtk_widget_add_css_class(row_widget, "playing")
-    else
-        gtk.gtk_widget_remove_css_class(row_widget, "playing");
-}
-
-fn hasCssName(widget: *gtk.Widget, name: []const u8) bool {
-    return std.mem.eql(u8, std.mem.span(gtk.gtk_widget_get_css_name(widget)), name);
-}
-
-fn rowWidget(child: *gtk.Widget) ?*gtk.Widget {
-    const cell = gtk.gtk_widget_get_parent(child) orelse return null;
-    if (!hasCssName(cell, "cell")) return null;
-    const row = gtk.gtk_widget_get_parent(cell) orelse return null;
-    if (!hasCssName(row, "row")) return null;
-    return row;
-}
-
-/// The Track the list marks as playing. Presentation only: the engine's
-/// audible entry is read on the tick and handed to `markPlaying`.
-var playing_id: ?i64 = null;
-
-/// Moves the playing mark, replacing only the rows that gain or lose it.
 pub fn markPlaying(self: *App, track_id: ?i64) void {
-    const previous = playing_id;
-    playing_id = track_id;
-    const store = self.tracks orelse return;
-    const model = gtk.cast(gtk.ListModel, store);
-    const count = gtk.g_list_model_get_n_items(model);
-    var index: c_uint = 0;
-    while (index < count) : (index += 1) {
-        const item = gtk.g_list_model_get_item(model, index) orelse continue;
-        defer gtk.g_object_unref(item);
-        const row: *TrackObject = @ptrCast(@alignCast(item));
-        const was = previous != null and previous.? == row.id();
-        const is = track_id != null and track_id.? == row.id();
-        if (!was and !is) continue;
-        const copy = track_model.clone(row) orelse continue;
-        var replacement: [1]?*anyopaque = .{copy};
-        gtk.g_list_store_splice(store, index, 1, &replacement, 1);
-        gtk.g_object_unref(copy);
-    }
+    song_table.markPlaying(&.{ &self.songs, &self.loved.songs, &self.playlists.songs }, track_id);
 }
 
-fn makeColumn(
-    title: [*:0]const u8,
-    column: Column,
-    width: c_int,
-    expand: bool,
-) *gtk.ColumnViewColumn {
-    const factory = gtk.gtk_signal_list_item_factory_new();
-    _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCell), columnData(column));
-    _ = gtk.signalConnect(factory, "bind", gtk.callback(bindCell), columnData(column));
-    const result = gtk.gtk_column_view_column_new(title, factory);
-    gtk.gtk_column_view_column_set_resizable(result, gtk.true_);
-    gtk.gtk_column_view_column_set_expand(result, if (expand) gtk.true_ else gtk.false_);
-    if (width > 0) gtk.gtk_column_view_column_set_fixed_width(result, width);
-    const sorter = track_model.headerSorter();
-    gtk.gtk_column_view_column_set_sorter(result, sorter);
-    gtk.g_object_unref(sorter);
-    return result;
+const SortChoice = struct {
+    label: [*:0]const u8,
+    sort: liborca.TrackSort,
+    direction: liborca.SortDirection,
+};
+
+const sort_choices = [_]SortChoice{
+    .{ .label = "Default", .sort = .id, .direction = .ascending },
+    .{ .label = "Title", .sort = .title, .direction = .ascending },
+    .{ .label = "Artist", .sort = .artist, .direction = .ascending },
+    .{ .label = "Album", .sort = .album, .direction = .ascending },
+    .{ .label = "Track Number", .sort = .track_number, .direction = .ascending },
+    .{ .label = "Loved", .sort = .loved, .direction = .ascending },
+    .{ .label = "Rating", .sort = .rating, .direction = .descending },
+    .{ .label = "Duration", .sort = .duration, .direction = .ascending },
+    .{ .label = "Date Added", .sort = .date_added, .direction = .descending },
+};
+
+fn sortChoiceIndex(sort: liborca.TrackSort) c_uint {
+    for (sort_choices, 0..) |choice, index| {
+        if (choice.sort == sort) return @intCast(index);
+    }
+    return 0;
+}
+
+pub fn showSort(self: *App) void {
+    // Sorting the view or choosing an entry is indistinguishable from a user's
+    // click to GTK, and their signals would arrive back as one.
+    const previous = self.suppress_browse_signals;
+    self.suppress_browse_signals = true;
+    defer self.suppress_browse_signals = previous;
+    if (self.sort_dropdown) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
+    const view = self.songs.view orelse return;
+    var chosen: ?*gtk.ColumnViewColumn = null;
+    for (Column.all) |column| {
+        if (column.sortKey()) |key| {
+            if (key == self.browse.sort) chosen = self.songs.header(column);
+        }
+    }
+    gtk.gtk_column_view_sort_by_column(
+        view,
+        chosen,
+        if (self.browse.direction == .descending) gtk.SORT_DESCENDING else gtk.SORT_ASCENDING,
+    );
+}
+
+fn sortChosen(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.suppress_browse_signals) return;
+    const index = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, dropdown));
+    if (index >= sort_choices.len) return;
+    self.browse.sort = sort_choices[index].sort;
+    self.browse.direction = sort_choices[index].direction;
+    showSort(self);
+    self.reload();
 }
 
 /// A header click, turned into a new engine query.
@@ -291,12 +116,19 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
     self.browse.sort = .id;
     self.browse.direction = .ascending;
     if (primary) |chosen| {
-        for (Column.all, self.sort_columns) |column, header| {
-            if (header == chosen) self.browse.sort = column.sortKey();
+        for (Column.all) |column| {
+            if (self.songs.header(column) == chosen) {
+                if (column.sortKey()) |key| self.browse.sort = key;
+            }
         }
         self.browse.direction =
             if (gtk.gtk_column_view_sorter_get_primary_sort_order(column_sorter) ==
             gtk.SORT_DESCENDING) .descending else .ascending;
+    }
+    if (self.sort_dropdown) |dropdown| {
+        self.suppress_browse_signals = true;
+        defer self.suppress_browse_signals = false;
+        gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
     }
     self.reload();
 }
@@ -317,17 +149,8 @@ fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 /// Enter in the search box plays what it found, in the order shown.
 fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const store = self.tracks orelse return;
-    const model = gtk.cast(gtk.ListModel, store);
-    var ids: std.ArrayList(i64) = .empty;
+    var ids = song_table.playableIds(&self.songs, self.allocator);
     defer ids.deinit(self.allocator);
-    var index: c_uint = 0;
-    while (index < gtk.g_list_model_get_n_items(model)) : (index += 1) {
-        const item = gtk.g_list_model_get_item(model, index) orelse continue;
-        const row: *TrackObject = @ptrCast(@alignCast(item));
-        if (row.hasFile()) ids.append(self.allocator, row.id()) catch {};
-        gtk.g_object_unref(item);
-    }
     if (ids.items.len != 0) transport.playIds(self, ids.items, 0);
 }
 
@@ -370,8 +193,6 @@ fn windowKeyPressed(
 
 const mouse_back_button: c_uint = 8;
 
-/// In sidebar order: `AdwSidebar` numbers items across sections. A playlist
-/// has no fixed place there; `sidebarIndex` finds it.
 pub const Page = enum(c_uint) {
     albums,
     artists,
@@ -381,7 +202,8 @@ pub const Page = enum(c_uint) {
     matches,
     now_playing,
     queue,
-    playlist,
+    playlists,
+    settings,
 
     fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -393,7 +215,8 @@ pub const Page = enum(c_uint) {
             .matches => "matches",
             .now_playing => "now-playing",
             .queue => "queue",
-            .playlist => "playlist",
+            .playlists => "playlists",
+            .settings => "settings",
         };
     }
 
@@ -401,13 +224,14 @@ pub const Page = enum(c_uint) {
         return switch (self) {
             .albums => "Albums",
             .artists => "Artists",
-            .tracks => "Tracks",
+            .tracks => "Songs",
             .loved => "Loved",
             .health => "Health",
             .matches => "Matches",
             .now_playing => "Now Playing",
             .queue => "Queue",
-            .playlist => "Playlist",
+            .playlists => "Playlists",
+            .settings => "Settings",
         };
     }
 };
@@ -430,6 +254,7 @@ fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
         .albums => self.albums_navigation,
         .artists => self.artists_navigation,
         .loved => self.loved.navigation,
+        .playlists => self.playlists.navigation,
         else => null,
     };
 }
@@ -456,52 +281,38 @@ fn backPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque
     back(state(data));
 }
 
-/// The sidebar's "New Playlist" and "Import Playlist…" follow the fixed
-/// pages, and the playlists follow them.
-const new_playlist_index: c_uint = @intFromEnum(Page.playlist);
-const import_playlist_index: c_uint = new_playlist_index + 1;
-pub const first_playlist_index: c_uint = new_playlist_index + 2;
+/// `AdwSidebar` numbers items across sections, in the order `buildSidebar`
+/// appends them.
+const sidebar_pages = [_]Page{ .albums, .artists, .tracks, .loved, .playlists, .now_playing, .queue, .health, .matches };
 
-fn sidebarIndex(self: *App, page: Page) c_uint {
-    if (page != .playlist) return @intFromEnum(page);
-    const position = playlists.sidebarPosition(self) orelse return gtk.INVALID_LIST_POSITION;
-    return first_playlist_index + position;
+fn sidebarIndex(page: Page) c_uint {
+    const position = std.mem.indexOfScalar(Page, &sidebar_pages, page) orelse return gtk.INVALID_LIST_POSITION;
+    return @intCast(position);
+}
+
+fn sidebarPage(index: c_uint) ?Page {
+    return if (index < sidebar_pages.len) sidebar_pages[index] else null;
 }
 
 /// Puts the sidebar's highlight back on the page that is showing.
 pub fn syncSidebarSelection(self: *App) void {
     const sidebar = self.sidebar orelse return;
-    const wanted = sidebarIndex(self, self.current_page);
+    const wanted = sidebarIndex(self.current_page);
     if (adw.adw_sidebar_get_selected(sidebar) != wanted) adw.adw_sidebar_set_selected(sidebar, wanted);
-}
-
-/// The open playlist went away: leave its page and forget it was visited.
-pub fn closePlaylistPage(self: *App) void {
-    var kept: usize = 0;
-    for (self.page_history[0..self.page_history_len]) |page| {
-        if (page == .playlist) continue;
-        self.page_history[kept] = page;
-        kept += 1;
-    }
-    self.page_history_len = kept;
-    if (self.current_page != .playlist) return syncSidebarSelection(self);
-    const previous: Page = if (self.page_history_len != 0) blk: {
-        self.page_history_len -= 1;
-        break :blk self.page_history[self.page_history_len];
-    } else .albums;
-    switchTo(self, previous, false);
+    const settings = self.settings_sidebar orelse return;
+    const settings_wanted: c_uint = if (self.current_page == .settings) 0 else gtk.INVALID_LIST_POSITION;
+    if (adw.adw_sidebar_get_selected(settings) != settings_wanted) adw.adw_sidebar_set_selected(settings, settings_wanted);
 }
 
 fn switchTo(self: *App, page: Page, remember_previous: bool) void {
     if (remember_previous and page != self.current_page) remember(self, self.current_page);
+    if (self.current_page == .settings and page != .settings) preferences.leave(self);
     self.current_page = page;
     if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
-    if (self.content_page) |content| adw.adw_navigation_page_set_title(
-        content,
-        if (page == .playlist) playlists.openName(self) else page.title(),
-    );
+    if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
     if (page == .loved) loved.reload(self);
+    if (page == .settings) preferences.show(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -526,19 +337,7 @@ pub fn showArtist(self: *App, artist_id: i64) void {
 
 fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    if (index == new_playlist_index) {
-        syncSidebarSelection(self);
-        return playlists.askNew(self, &.{});
-    }
-    if (index == import_playlist_index) {
-        syncSidebarSelection(self);
-        return playlists.chooseImport(self);
-    }
-    if (index >= first_playlist_index) {
-        const id = playlists.idAt(self, index - first_playlist_index) orelse return;
-        return playlists.open(self, id);
-    }
-    const page: Page = @enumFromInt(index);
+    const page = sidebarPage(index) orelse return;
     if (pageNavigation(self, page)) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, page.name());
     showPage(self, page);
 }
@@ -554,7 +353,7 @@ fn primaryMenu() *gtk.Widget {
     const library = gtk.g_menu_new();
     gtk.g_menu_append(library, "Add Music Folder…", "app.add-folder");
     gtk.g_menu_append(library, "Rescan Library", "app.rescan");
-    gtk.g_menu_append(library, "Preferences", "app.preferences");
+    gtk.g_menu_append(library, "Settings", "app.preferences");
     const help = gtk.g_menu_new();
     gtk.g_menu_append(help, "Keyboard Shortcuts", "app.shortcuts");
     gtk.g_menu_append(help, "About Orca", "app.about");
@@ -572,51 +371,78 @@ fn primaryMenu() *gtk.Widget {
     return button;
 }
 
+fn countSuffix(item: *adw.SidebarItem) *gtk.Label {
+    const count = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(count, "numeric");
+    gtk.gtk_widget_add_css_class(count, "sidebar-count");
+    adw.adw_sidebar_item_set_suffix(item, count);
+    return gtk.cast(gtk.Label, count);
+}
+
+fn titledSection(title: [*:0]const u8) *adw.SidebarSection {
+    const section = adw.adw_sidebar_section_new();
+    adw.adw_sidebar_section_set_title(section, title);
+    return section;
+}
+
+fn settingsSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    syncSidebarSelection(state(data));
+}
+
+fn settingsActivated(_: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.window) |w| _ = gtk.gtk_widget_activate_action_variant(gtk.cast(gtk.Widget, w), "app.preferences", null);
+}
+
+fn buildSettingsItem(self: *App) *gtk.Widget {
+    const sidebar = adw.adw_sidebar_new();
+    gtk.gtk_widget_add_css_class(sidebar, "sidebar-settings");
+    self.settings_sidebar = gtk.cast(adw.Sidebar, sidebar);
+    _ = gtk.signalConnect(sidebar, "notify::selected", gtk.callback(settingsSelected), self);
+    _ = gtk.signalConnect(sidebar, "activated", gtk.callback(settingsActivated), self);
+    const section = adw.adw_sidebar_section_new();
+    _ = sidebarItem(section, "Settings", "emblem-system-symbolic");
+    adw.adw_sidebar_append(gtk.cast(adw.Sidebar, sidebar), section);
+    return sidebar;
+}
+
 fn buildSidebar(self: *App) *gtk.Widget {
     const sidebar = adw.adw_sidebar_new();
     self.sidebar = gtk.cast(adw.Sidebar, sidebar);
     gtk.gtk_widget_set_vexpand(sidebar, gtk.true_);
-    const section = adw.adw_sidebar_section_new();
-    _ = sidebarItem(section, "Albums", "media-optical-symbolic");
-    _ = sidebarItem(section, "Artists", "avatar-default-symbolic");
-    _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
-    _ = sidebarItem(section, "Loved", feedback.filled_icon);
-    const health_item = sidebarItem(section, "Health", "emblem-important-symbolic");
-    const health_count = gtk.gtk_label_new("");
-    self.health_count = gtk.cast(gtk.Label, health_count);
-    gtk.gtk_widget_add_css_class(health_count, "numeric");
-    gtk.gtk_widget_add_css_class(health_count, "dim-label");
-    adw.adw_sidebar_item_set_suffix(health_item, health_count);
-    const matches_item = sidebarItem(section, "Matches", "system-search-symbolic");
-    const matches_count = gtk.gtk_label_new("");
-    self.matches_count = gtk.cast(gtk.Label, matches_count);
-    gtk.gtk_widget_add_css_class(matches_count, "numeric");
-    gtk.gtk_widget_add_css_class(matches_count, "dim-label");
-    adw.adw_sidebar_item_set_suffix(matches_item, matches_count);
-    adw.adw_sidebar_append(self.sidebar.?, section);
-    const playback = adw.adw_sidebar_section_new();
-    adw.adw_sidebar_section_set_title(playback, "Playback");
+
+    const library = titledSection("Library");
+    _ = sidebarItem(library, "Albums", "media-optical-symbolic");
+    _ = sidebarItem(library, "Artists", "avatar-default-symbolic");
+    _ = sidebarItem(library, "Songs", "audio-x-generic-symbolic");
+    _ = sidebarItem(library, "Loved", feedback.filled_icon);
+    adw.adw_sidebar_append(self.sidebar.?, library);
+
+    const collection = titledSection("Collection");
+    _ = sidebarItem(collection, "Playlists", "media-playlist-consecutive-symbolic");
+    adw.adw_sidebar_append(self.sidebar.?, collection);
+
+    const playback = titledSection("Playback");
     _ = sidebarItem(playback, "Now Playing", "media-playback-start-symbolic");
-    const queue_item = sidebarItem(playback, "Queue", "view-list-symbolic");
-    const count = gtk.gtk_label_new("");
-    self.queue_count = gtk.cast(gtk.Label, count);
-    gtk.gtk_widget_add_css_class(count, "numeric");
-    gtk.gtk_widget_add_css_class(count, "dim-label");
-    adw.adw_sidebar_item_set_suffix(queue_item, count);
+    self.queue_count = countSuffix(sidebarItem(playback, "Queue", "view-list-symbolic"));
     adw.adw_sidebar_append(self.sidebar.?, playback);
-    const playlist_section = adw.adw_sidebar_section_new();
-    adw.adw_sidebar_section_set_title(playlist_section, "Playlists");
-    self.playlists.section = playlist_section;
-    playlists.fillSidebar(self);
-    adw.adw_sidebar_append(self.sidebar.?, playlist_section);
+
+    const tools = titledSection("Library Tools");
+    self.health.count = countSuffix(sidebarItem(tools, "Health", "emblem-important-symbolic"));
+    self.matches_count = countSuffix(sidebarItem(tools, "Matches", "system-search-symbolic"));
+    adw.adw_sidebar_append(self.sidebar.?, tools);
     _ = gtk.signalConnect(sidebar, "activated", gtk.callback(sidebarActivated), self);
 
     const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), sidebar);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), buildSettingsItem(self));
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), jobs.build(self));
 
     const header = adw.adw_header_bar_new();
-    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), adw.adw_window_title_new("Orca", ""));
+    adw.adw_header_bar_set_show_title(gtk.cast(adw.HeaderBar, header), gtk.false_);
+    const wordmark = gtk.gtk_label_new("Orca");
+    gtk.gtk_widget_add_css_class(wordmark, "wordmark");
+    adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header), wordmark);
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), primaryMenu());
     const view = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
@@ -637,41 +463,13 @@ pub fn focusSearch(self: *App) void {
 }
 
 fn buildTrackList(self: *App) *gtk.Widget {
-    // The model chain: an owned page store, multi-selectable so a run of tracks
-    // can be activated as a queue. Deliberately *not* wrapped in a
-    // `GtkSortListModel` — the rows in the store are one page of an order the
-    // engine already decided, and a sort model would reshuffle that page.
-    self.tracks = gtk.g_list_store_new(track_model.getType());
-    self.selection = gtk.gtk_multi_selection_new(
-        gtk.cast(gtk.ListModel, gtk.g_object_ref(self.tracks)),
-    );
-    const view = gtk.gtk_column_view_new(self.selection);
-    self.column_view = gtk.cast(gtk.ColumnView, view);
-    gtk.gtk_widget_add_css_class(view, "track-list");
-    gtk.gtk_column_view_set_show_column_separators(self.column_view.?, gtk.false_);
-    gtk.gtk_column_view_set_reorderable(self.column_view.?, gtk.true_);
-    _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), self);
-    _ = gtk.signalConnect(self.selection.?, "selection-changed", gtk.callback(details.selectionChanged), self);
+    const view = song_table.build(&self.songs, self, .{ .multiple = true, .sortable = true });
     _ = gtk.signalConnect(
-        gtk.gtk_column_view_get_sorter(self.column_view.?),
+        gtk.gtk_column_view_get_sorter(self.songs.view.?),
         "changed",
         gtk.callback(sortChanged),
         self,
     );
-
-    const columns: [Column.all.len]*gtk.ColumnViewColumn = .{
-        makeColumn("#", .number, 64, false),
-        makeColumn("Title", .title, 320, true),
-        makeColumn("Rating", .rating, 112, false),
-        makeColumn("Artist", .artist, 220, true),
-        makeColumn("Album", .album, 220, true),
-        makeColumn("Length", .duration, 80, false),
-    };
-    for (columns, 0..) |column, index| {
-        gtk.gtk_column_view_append_column(self.column_view.?, column);
-        self.sort_columns[index] = column;
-        gtk.g_object_unref(column);
-    }
 
     const scroller = gtk.gtk_scrolled_window_new();
     self.scroller = scroller;
@@ -685,6 +483,19 @@ fn buildTrackList(self: *App) *gtk.Widget {
         self,
     );
     return scroller;
+}
+
+fn buildSortDropdown(self: *App) *gtk.Widget {
+    var labels: [sort_choices.len + 1]?[*:0]const u8 = @splat(null);
+    for (sort_choices, 0..) |choice, index| labels[index] = choice.label;
+    const dropdown = gtk.gtk_drop_down_new_from_strings(&labels);
+    self.sort_dropdown = gtk.cast(gtk.DropDown, dropdown);
+    gtk.gtk_widget_add_css_class(dropdown, "sort-dropdown");
+    gtk.gtk_widget_set_tooltip_text(dropdown, "Sort songs");
+    gtk.gtk_widget_set_valign(dropdown, gtk.ALIGN_CENTER);
+    gtk.gtk_drop_down_set_selected(self.sort_dropdown.?, sortChoiceIndex(self.browse.sort));
+    _ = gtk.signalConnect(dropdown, "notify::selected", gtk.callback(sortChosen), self);
+    return dropdown;
 }
 
 fn buildWelcome(self: *App) *gtk.Widget {
@@ -731,10 +542,9 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
 
-    const header = adw.adw_header_bar_new();
-    const title = adw.adw_window_title_new("Tracks", "");
-    self.tracks_title = gtk.cast(adw.WindowTitle, title);
-    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), title);
+    const header = page_ui.header();
+    const title = page_ui.title("Songs");
+    self.tracks_meta = title.meta;
 
     const browse_toggle = gtk.gtk_toggle_button_new();
     self.browse_toggle = browse_toggle;
@@ -743,11 +553,17 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.false_);
     gtk.gtk_widget_set_visible(panes, gtk.false_);
     _ = gtk.signalConnect(browse_toggle, "toggled", gtk.callback(browseToggled), self);
-    adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header), browse_toggle);
+    gtk.gtk_widget_add_css_class(browse_toggle, "flat");
+    const sort_label = gtk.gtk_label_new("Sort by");
+    gtk.gtk_widget_add_css_class(sort_label, "meta");
+    gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
+    title.add(sort_label);
+    title.add(buildSortDropdown(self));
+    title.add(browse_toggle);
 
     const search = gtk.gtk_search_entry_new();
     self.search_entry = gtk.cast(gtk.Editable, search);
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search tracks");
+    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search songs");
     gtk.gtk_widget_set_size_request(search, 260, -1);
     _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
     _ = gtk.signalConnect(search, "activate", gtk.callback(searchActivated), self);
@@ -755,7 +571,7 @@ fn buildTracksPage(self: *App) *gtk.Widget {
 
     const view = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, body, .selection).widget);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, page_ui.withTitle(title, body), .{ .selection = self.songs.selection.? }).widget);
     return view;
 }
 
@@ -785,25 +601,53 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
     setBoolean(breakpoint, split, "collapsed", true);
     if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
     if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
-    if (self.seek_scale) |scale| setInt(breakpoint, scale, "width-request", 120);
+    for (&self.transport_controls.values) |*controls| {
+        if (controls.scale) |scale| setInt(breakpoint, scale, "width-request", 120);
+    }
+    if (self.format_slot) |slot| setBoolean(breakpoint, slot, "visible", false);
+    if (self.device_label) |label| setBoolean(breakpoint, label, "visible", false);
+    if (self.device_icon) |icon| setBoolean(breakpoint, icon, "visible", true);
+    if (self.volume_icon) |icon| setBoolean(breakpoint, icon, "visible", false);
+    if (self.volume_scale) |scale| setBoolean(breakpoint, scale, "visible", false);
+    if (self.volume_menu) |button| setBoolean(breakpoint, button, "visible", true);
     if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", 120);
+    if (self.loved.stats) |stats| setBoolean(breakpoint, stats, "visible", false);
+    for ([_]*song_table.Table{ &self.songs, &self.loved.songs, &self.playlists.songs }) |table| {
+        for ([_]Column{ .album, .rating }) |column| {
+            if (table.header(column)) |header| setBoolean(breakpoint, header, "visible", false);
+        }
+    }
     _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(narrowed), self);
     _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(widened), self);
     adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
 }
 
 fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    details.setNarrow(@ptrCast(@alignCast(data.?)), true);
+    const self = state(data);
+    if (self.window) |w| gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    details.setNarrow(self, true);
+    albums.setNarrow(self);
+    artists.setNarrow(self);
+    playlists.setNarrow(self);
+    nowplaying.setNarrow(self);
+    preferences.setNarrow(self);
 }
 
 fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    details.setNarrow(@ptrCast(@alignCast(data.?)), false);
+    const self = state(data);
+    if (self.window) |w| gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    details.setNarrow(self, false);
+    albums.setNarrow(self);
+    artists.setNarrow(self);
+    playlists.setNarrow(self);
+    nowplaying.setNarrow(self);
+    preferences.setNarrow(self);
+    syncSidebarSelection(self);
 }
 
 pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const window = adw.adw_application_window_new(application);
     self.window = gtk.cast(gtk.Window, window);
-    cells_app = self;
 
     const keys = gtk.gtk_event_controller_key_new();
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
@@ -828,7 +672,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
-    _ = gtk.gtk_stack_add_named(self.pages.?, playlists.build(self), Page.playlist.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, playlists.build(self), Page.playlists.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, preferences.build(self), Page.settings.name());
 
     const content = adw.adw_navigation_page_new(pages, Page.albums.title());
     self.content_page = content;

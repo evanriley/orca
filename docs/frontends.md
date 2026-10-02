@@ -409,36 +409,122 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
 
 The window is an `AdwNavigationSplitView`:
 
-- The sidebar (`AdwSidebar`) lists the pages, shows the queue length, and
-  shows scan progress at its foot while a scan runs.
-- **Albums** is a grid of covers, paged 512 Releases at a time and sorted by
-  artist, title, year or recently added. An album without a cover shows its
-  initials on a colour chosen from its title. Activating one opens its page:
-  the cover, title, artist, year, length, Play, Shuffle and a heart that
-  loves the album (Love Album, Remove Album Love), and its tracks by disc.
-- **Artists** is every Artist with an initials avatar, searchable. An artist
-  opens a page with their first album's cover as an avatar, Play and Shuffle,
-  and their albums; an album there opens its page in place.
-- **Tracks** is the track list, with the Artist and Album browse panes behind
-  the header's toggle. The
-  list pages 512 rows at a time from liborca as it scrolls, and a header
-  click re-queries in the engine's order rather than sorting loaded rows. The
-  playing track is marked. A library with no tracks shows a welcome page with
-  Add Music Folder; a scan in progress shows there too.
-- **Loved** switches between Albums, a grid of loved albums, and Songs, a
-  list of loved songs, each most recently loved first and paged 512 at a
-  time. An album opens its page in place; a song plays on activation, as in
-  the track list. The page is read again each time it is shown, so a heart
-  cleared on it leaves its row in place until then.
-- **Now Playing** is the audible track's cover, large, on a wash of the
-  cover's average colour, with the next five entries. Clicking the cover in
-  the player bar opens it.
-- **Queue** is the Player's queue as the engine resolves it, with thumbnails
-  and the audible entry marked. Clicking an entry plays it; the button at the
-  end of a row removes it.
+- The sidebar (`AdwSidebar`) opens with the Orca wordmark and the main menu,
+  then lists the pages in sections: Library (Albums, Artists, Songs, Loved),
+  Collection (Playlists), Playback
+  (Now Playing, and Queue with its length) and Library Tools (Health and
+  Matches, each with its count). Settings is pinned at its foot, above the
+  scan progress shown while a scan runs.
+- **Albums** is a grid of covers with each album's title, artist and year,
+  paged 512 Releases at a time. Its title row shows the count and a Sort by
+  menu (artist, title, year or recently added); chips under it choose All
+  Albums, Recently Added (the newest Releases first) or Loved (only loved
+  albums, in the chosen sort). An album without a cover shows its initials.
+  Hovering or focusing a tile shows a play button on the cover, which plays
+  the album, and a more button after the artist, which opens the album menu.
+  Activating a tile opens the album's page: the cover beside an Album
+  overline, the title, the artist as a link and a line of year, song count
+  and length, then Play, Shuffle, a heart that loves the album (Love Album,
+  Remove Album Love) and a more button with the album menu; the page opens
+  with focus on Play. Behind them the cover is drawn blurred and darkened,
+  fading into the page; an album without a cover has no backdrop. Its tracks follow by disc under a # / Title /
+  duration header, one thin-ruled row each: the playing track shows a play
+  mark in place of its number and an accent title, and hovering a row shows
+  its rating stars (always shown once rated) and a more button with the
+  track menu. A narrow window shrinks the grid and stacks the album page's
+  cover above its title.
+- **Artists** is every Artist in flush rows, searchable, each with a round
+  thumbnail of their first album's cover (loaded as the row is shown;
+  initials without one) and their album and song counts. An artist opens a
+  page whose hero shows their newest album's cover over a blurred copy of
+  it, an Artist overline, their name, the years their albums span, Play,
+  Shuffle and a more button, and beside it their album and song counts and
+  the time their songs fill in the library. Below sit Songs, their five
+  highest-rated songs, with See All opening Songs scoped to the artist, and
+  Albums, a wrapping grid of their albums; an album there opens its page in
+  place. Activating a song plays the artist's songs in album order from it,
+  and the inspector shows the selected song. A narrow window hides the
+  counts and stacks the hero and the two sections.
+- **Songs** is the song list, searched from the entry in its header
+  (Ctrl+F), with the Artist and Album browse panes behind the toggle in its
+  title row. The title row shows the count and a Sort by menu: Default,
+  Title, Artist, Album, Track Number, Loved, Rating (highest first),
+  Duration and Date Added (newest first), kept in step with the column
+  headers and not saved. The list pages 512 rows at a time from liborca as
+  it scrolls, and a header click re-queries in the engine's order rather
+  than sorting loaded rows. Under an uppercase # / Title / Artist / Album /
+  heart / Rating / Duration header each song is one thin-ruled row: the
+  playing song shows a play mark in place of its number and an accent
+  title, its heart sits in its own column, its rating stars show on hover
+  and once rated, and hovering a row shows a more button with the track
+  menu. A narrow window drops the Album and Rating columns. A library with
+  no tracks shows a welcome page with Add Music Folder; a scan in progress
+  shows there too.
+- **Loved** opens with a large Loved title, Play and Shuffle, and the
+  counts of loved songs and loved albums, which a narrow window hides. Play
+  queues every playable loved song, most recently loved first, and Shuffle
+  does the same with shuffle on. Two tabs follow: Loved Songs, the Songs
+  list's table of loved songs, most recently loved first and paged 512 at a
+  time, with the inspector for the selected song; and Loved Albums, the
+  Albums grid of loved albums. An album opens its page in place; a song
+  plays on activation. The page is read again each time it is shown, so a
+  heart cleared on it leaves its row in place until then.
+- **Playlists** is a grid of every playlist, read again after any change
+  to one. Its title row shows the count and a Sort by menu: Recently Updated
+  (the default), Name or Recently Created; the header holds a Search
+  playlists entry, matched case-insensitively against the names, Import…
+  and New Playlist. Each card shows a mosaic of the first four distinct
+  album covers among the playlist's songs (one cover when there are fewer
+  than four, the playlist icon when there are none), the name, the song
+  count and length, when it was last updated (relative within 30 days, a
+  date after that) and how many of its songs are no longer in the library.
+  Hovering or focusing a card shows a play button on the mosaic, which plays
+  the playlist, and a more button with Play, Shuffle, Rename…, Export… and
+  Delete…; right-clicking a card opens the same menu. Activating a card
+  opens the playlist's page. With no playlists the page offers Import… and
+  New Playlist.
+
+  A playlist's page shows its mosaic beside a Playlist overline, the name,
+  and a line of song count, length and how many songs are unavailable, then
+  Play, Shuffle and a more button with Rename…, Export… and Delete…. Behind
+  them the first cover is drawn blurred and darkened, as on an album page,
+  and a narrow window stacks the mosaic above the name. The songs follow in
+  the Songs list's table, numbered by their position in the playlist, with
+  the inspector for the selected song. Activating a song plays the playlist
+  from it; its menu adds Remove from Playlist, Move Up and Move Down. An
+  entry whose recording has no song left reads Not in your library, is
+  dimmed and does not play.
+- **Now Playing** is the audible song's cover, large, over a blurred and
+  darkened copy of it, with a Now Playing overline, the title in serif, the
+  artist and the album with its year as links, a heart, a more button with
+  the track menu, a seek bar and the transport. Its transport and seek bar
+  are a second set of the player bar's, refreshed from the same tick, so
+  both show the same state and either can drive playback. When a lyrics view
+  has loaded synced lyrics for the song, the line being heard shows under
+  the title; the page never looks lyrics up itself. A wide window adds a
+  column with Up Next, the next ten queue entries with Clear and View Full
+  Queue, and Track Info (title, artist, album, date, track and disc number,
+  the disc only when above one); a narrow one shows only the centre column.
+  With nothing playing it says so. Clicking the cover in the player bar
+  opens it.
+- **Queue** is the Player's queue as the engine resolves it, in flush rows
+  under the page title, the song count and length and a Clear button: the
+  entry's position or a play mark for the audible one, a thumbnail, the
+  title over the artist, the heart, rating stars on hover or once rated, the
+  duration and, on hover, a remove button. Activating an entry plays it.
 
 - **Health** lists what liborca found wrong with the library, with a count in
-  the sidebar and a Find Duplicates button. Each row offers the issue's
+  the sidebar. The page, titled Library Health, opens with the issue count,
+  a Find Duplicates button and the library's album, song and artist counts
+  (`libraryReleaseCount`, `libraryTrackCount`, `libraryArtistCount`), then a
+  card per kind of issue in `libraryHealthSummary`'s order: a symbolic icon
+  tinted by the kind's highest severity, the kind's name and a one-line
+  explanation, its file count and, for `recording_mismatch`, Review, which
+  opens Matches. Expanding a card pages
+  that kind's issues (`libraryHealthIssuePageOfKind`) 512 at a time, with
+  Show more while more remain; each row names the file, the issue's details
+  and its folder. Open cards, how many issues each has loaded and the scroll
+  position are kept across reloads. Each row offers the issue's
   `HealthAction`: Fix, a menu of Match and Edit Tags; Fetch Cover; Compare,
   a dialog of the duplicate's two files (`libraryHealthFile`) side by side,
   each with Reveal, that deletes nothing (a second location of the same
@@ -447,14 +533,15 @@ The window is an `AdwNavigationSplitView`:
   correction in Matches; or Show in Files, which opens the file's folder
   and says "File not found" when the file is gone. Dismiss hides the issue
   until its file changes (`libraryDismissHealthIssue`), with Undo
-  (`libraryRestoreHealthIssue`). A banner offers Analyse while
+  (`libraryRestoreHealthIssue`). A card above the kinds offers Analyse while
   `libraryUnanalyzedCount` is above zero and no analysis runs. The page
   reloads when matching, analysis or duplicate finding finishes.
 - **Matches** lists the songs with MusicBrainz or AcoustID proposals
   awaiting review (`libraryMatchReviewPage`), with their count in the
-  sidebar. Each row shows the song's own title, artist, album and length and
-  its best proposal's score; expanding it lists every proposal with its
-  album and release date, the looked-up release's when there is one, its
+  sidebar, as a card of flush rows under the page title. Each row shows
+  the song's own title, artist, album and length and its best proposal's
+  score; expanding it lists every proposal with its album and release date,
+  the looked-up release's when there is one, its
   source (MusicBrainz, AcoustID or MusicBrainz + AcoustID) and AcoustID's
   fingerprint score when there is one, Accept, Dismiss and a MusicBrainz
   button that opens the recording's page in the browser. Accept toasts
@@ -464,16 +551,17 @@ The window is an `AdwNavigationSplitView`:
   proposal without a title reads Unknown title. A proposal more than 10 s
   longer or shorter than the song shows its length in the warning colour.
   Find Matches starts the matching job, which shares the status card and,
-  unless Match by audio fingerprint is off in Preferences, also asks
+  unless Match by audio fingerprint is off in Settings, also asks
   AcoustID by fingerprint with the application key the app sets at startup.
   Accept Confident asks first, then accepts each song's best proposal at or
-  above the threshold set in Preferences (90% by default,
+  above the threshold set in Settings (90% by default,
   `[matching] accept_confidence` in `settings.ini`). With nothing to review
   the page offers Find Matches, or says every song has a recording ID.
 
-  **Corrections**, above the songs and hidden when there are none, lists
-  the album groups a verification proposed (`libraryCorrectionGroups`):
-  each names the album and artist and, expanded, every song's current title
+  **Corrections**, a card above the songs that is hidden when there are
+  none, lists the album groups a verification proposed
+  (`libraryCorrectionGroups`): each names the album and artist and,
+  expanded, every song's current title
   and position beside the proposed ones. Accept All
   (`libraryAcceptCorrectionGroup`) and Dismiss All
   (`libraryDismissCorrectionGroup`) take the whole group; the songs in a
@@ -496,7 +584,7 @@ Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
 Play and Remove. A single song in the track list, an album page, the queue or
 a playlist also offers Verify and Re-identify, and an album Match Album,
 Verify Album, Re-identify Album and Fetch Cover Art. Verify needs Match by
-audio fingerprint on in Preferences. Re-identify Album accepts nothing and
+audio fingerprint on in Settings. Re-identify Album accepts nothing and
 fetches no cover; its proposals wait in Matches. A song with no feedback offers Love and Dislike; a loved one
 offers Remove Love, a disliked one Remove Dislike. On a selection the entries
 apply to every selected song. An album's menu offers Love Album or Remove
@@ -512,25 +600,32 @@ album, Now Playing, then Back returns to that album. On a selected row in the tr
 whole selection. Play Next and Remove go through `Runtime.playerQueueInsertNext`
 and `playerQueueRemove`, so an entry the engine has already lined up is never
 pulled out from under the output.
-- The player bar spans the window: cover, title and artist; shuffle, previous,
-  play, next and repeat; the seek bar; volume, the output menu and the queue.
-  A heart beside the title loves the audible song and, pressed again, removes
-  the love; it is read when the audible song changes and after any change.
+- The player bar spans the window in three parts. On the left: the cover, the
+  title, and the artist and album on one line. In the centre: shuffle,
+  previous, play, next and repeat over the seek bar, with elapsed and total
+  time in tabular figures. On the right: the source format (such as
+  `FLAC · 16-bit · 44.1 kHz`, hidden while nothing plays), which opens the
+  signal path; the output device's name, which opens the device list; a
+  volume slider; and the queue. A heart beside the title loves the audible
+  song and, pressed again, removes the love; it is read when the audible song
+  changes and after any change. Below the 760sp breakpoint the format line
+  is hidden, the device name becomes an icon that opens the same device list,
+  and the volume slider moves into a popover behind the speaker button.
 
 **Love and dislike** are kept by liborca per recording (`librarySetFeedback`);
 album love is kept per Release (`librarySetReleaseLove`) and changes no song.
-Every song row ends its title with a heart button: the Tracks list, album
-pages, the queue, and the Now Playing page for the audible song and the songs
-up next. A loved song shows a filled red heart; any other song shows an outline
+Every song row has a heart button, in its own column in the Songs and
+Loved lists and after the title on album pages, the queue and the Now Playing page for the audible song and the songs
+up next. A loved song shows a filled heart in the accent colour; any other song shows an outline
 heart, dimmed until the row is hovered or selected. Pressing the button loves
 the song, or removes the love, and a disliked song becomes loved. The button
 does not play the song or change the selection. The player bar's heart does the
 same for the audible song. Disliked songs have no marker on their row, and the
-details panel's Feedback row says Loved, Disliked or None. A song without a
+inspector's Feedback row says Loved, Disliked or None. A song without a
 MusicBrainz recording ID is saved on this computer only, and the Feedback row
 says it won't sync to ListenBrainz.
 
-The details panel's **MusicBrainz** section shows the recording ID in effect
+The inspector's **Identity** section shows the recording ID in effect
 and where it came from (From tags, Matched or Set by you), with a MusicBrainz
 button, and the release, release-group, release-track and album-artist IDs
 when known, each with its source as a tooltip. A song without one shows its top three proposals with Accept and
@@ -545,8 +640,16 @@ without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
 each button once, in setup, and read the row's song when the button is pressed.
 
-Below 760sp the sidebar collapses behind a back button, the browse panes hide
-and the player bar tightens. Messages are toasts. Shortcuts are listed in the
+Each page's header bar is flat and carries no title. A page pushed onto
+another, such as an album or artist page, shows a breadcrumb at its start
+whose first part returns to the page it was opened from (Albums › ABBA); a
+playlist's reads Playlists › its name. Its controls sit at the end. Below
+the header, the sidebar's pages open with a title block: the page name in
+Source Serif 4, its count beneath it, and the page's own actions at the end
+of that row. Album, artist and playlist pages have their own heading instead.
+
+Below 760sp the sidebar collapses behind a back button, the browse panes hide,
+page titles shrink and the player bar tightens. Messages are toasts. Shortcuts are listed in the
 shortcuts dialog (Ctrl+?); Space and Ctrl+←/→ are handled by a bubble-phase key
 controller rather than application accelerators, so a focused search box keeps
 them.
@@ -560,15 +663,22 @@ offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
 files back afterwards, because an edit that moves a track to another album
 gives it a new id.
 
-**Preferences** (Ctrl+,) lists the library's folders with Add, Remove and
-Rescan, starts loudness measurement and duplicate finding, and sets ReplayGain
-and the output device.
+**Settings** is a page, opened from the sidebar's foot, the main menu or
+Ctrl+,. A segmented tab bar under its title switches between four tabs, each
+a scrolling set of cards in two columns, one below the 760sp breakpoint:
+Library (Music Folders with Add Folder, Remove and Rescan All Folders;
+Maintenance with loudness measurement, analysis threads, duplicate finding and
+idle maintenance; AcoustID), Playback (ReplayGain and the output device),
+Sound (equalizer and crossfeed) and Listening (ListenBrainz, and Fetch lyrics
+from LRCLIB, saved as `[lyrics] fetch=true|false`). The tabs are built each
+time the page is shown and destroyed when it is left; the open tab is kept
+for the session.
 
 **Watch folders for changes**, on by default and saved in `settings.ini`,
 calls `libraryWatch` with the default `WatchOptions` once the library opens
 and whenever it is switched on, and `libraryUnwatch` when it is switched off.
 Where watching is unsupported the switch is not shown. Its subtitle shows
-`libraryWatchStatus`, refreshed on each tick while Preferences is open: how
+`libraryWatchStatus`, refreshed on each tick while Settings is showing: how
 many folders are watched and how many are unavailable, and, when the watch
 limit was reached, that `fs.inotify.max_user_watches` must be raised (on
 NixOS through `boot.kernel.sysctl`). **Idle maintenance**, off by default
@@ -577,7 +687,7 @@ default five-minute interval, enabled only while Match by audio fingerprint is
 on (the switch is insensitive otherwise). Its subtitle shows
 `libraryMaintenanceStatus`: the minutes to the next unit and the units run, or
 why it is blocked, kept current by a wake at least every 15 seconds while
-Preferences is open. Each tick reads that status once, and when `units_run`
+Settings is showing. Each tick reads that status once, and when `units_run`
 has grown it reloads Health and Matches without a toast. A job started from
 the frontend while a unit runs is queued and shows as starting until the unit
 stops. The tick rereads every library view once for each drain that brought a `Telemetry.library_changed` for the open
@@ -591,7 +701,7 @@ are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
 settings below. Removing a folder asks first, then forgets its tracks; the
 files on disk are not touched, and it is refused while a job is running.
 
-The **Sound** page drives the Player's DSP chain through
+The **Sound** tab drives the Player's DSP chain through
 `Runtime.playerSetEqualizer` and `playerSetCrossfeed`. The equalizer has ten
 bands from -12 to +12 dB, a preamp and presets (Flat, Bass, Treble, Vocal,
 Loudness); a curve that matches no preset reads Custom, and switching the
@@ -604,19 +714,19 @@ survive while the effect is off, and applied at launch when enabled. A file
 that predates the `*_enabled` keys and holds `off` leaves the effect off with
 the default curve or amount.
 
-The Library page's **AcoustID** group holds Match by audio fingerprint, on
+The Library tab's **AcoustID** card holds Match by audio fingerprint, on
 by default, which is `MatchRequest.fingerprints` for Find Matches and Find
 Match and is saved as `[matching] fingerprints=true|false`. Below it, the
 user's AcoustID key has the same password row, Save, stored row, Remove and
 Unlock as the ListenBrainz token below, stored under
 `acoustid_credential_service` / `acoustid_user_key_account`. Its stored
-state is found without unlocking the keyring, so opening Preferences never
+state is found without unlocking the keyring, so opening Settings never
 prompts; a locked keyring reads "Keyring locked" until Unlock is chosen.
 Get a key opens AcoustID's API key page in the browser. The Matches page
 finds whether a key is saved the same way at startup, and again after each
 save and remove.
 
-The **Listening** page holds the ListenBrainz settings. Submit listens calls
+The **Listening** tab holds the ListenBrainz settings. Submit listens calls
 `Runtime.librarySetScrobbling`. The user token is a password row with a Save
 button, enabled while the field has text; Enter in the field saves too. It is
 stored in the Secret Service through libsecret (`apps/linux/secret.zig`) and
@@ -624,17 +734,17 @@ never in `settings.ini` or the Library. Saving clears the field and calls
 `libraryScrobblerCredentialsChanged`. When a token is stored, a row above the
 field reads "Saved in your keyring" with a Remove button, and the field is
 titled Replace token; Remove deletes the token and calls
-`libraryScrobblerCredentialsChanged`. The stored state is found when the page
-is first shown, and again after each save and remove, by an asynchronous search
+`libraryScrobblerCredentialsChanged`. The stored state is found the first time the
+tab is shown after Settings opens, and again after each save and remove, by an asynchronous search
 that reads no secret; it may prompt to unlock the keyring. A keyring that stays
 locked reads "Keyring locked", with an Unlock button that searches again.
 Saving, removing and searching are asynchronous, so a prompt cannot freeze the
 window.
 The status row is rewritten from `libraryScrobblerStatus` on the tick while
-Preferences is open: connected with the user name and the number of listens
+Settings is showing: connected with the user name and the number of listens
 waiting and, when there are any, the loves and dislikes waiting to sync, token
 rejected, waiting after a rate limit or outage, offline, or not connected.
-Listens are always recorded locally; the page says so. Show what I'm playing
+Listens are always recorded locally; the card says so. Show what I'm playing
 now is the Now Playing argument of `librarySetScrobbling`; it is off by default
 and insensitive while Submit listens is off. `[listening]
 scrobble=true|false` and `now_playing=true|false` are saved and re-applied at
@@ -642,30 +752,45 @@ launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
 instance or a local mock; `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` do
 the same for matching and submission.
 
-The output menu ends with the **signal path**: the source format, then
-ReplayGain, equalizer, crossfeed, volume and the output format as they apply,
-and whether the path is bit-perfect, with the reasons when it is not. An
-eligible path reads "Bit-perfect up to PipeWire", and the label's tooltip, like
-the details panel's signal-path row, says that PipeWire's own volume and
-resampling are not visible to Orca. It comes from `Runtime.playerSignalPath`
-and is read only when the menu opens and when the track changes while it is
-open, never on the tick.
+The **signal path** shows the source format, then ReplayGain, equalizer,
+crossfeed, volume, the output format and the device rate as they apply, and
+whether the path is bit-perfect, with the reasons when it is not. An eligible
+path reads "Bit-perfect up to PipeWire", and a note says that PipeWire's own
+volume and resampling are not visible to Orca. The player bar's format line
+opens it in the inspector's Signal Path mode on a page with an inspector, and
+in a popover on any other page. It comes from `Runtime.playerSignalPath`,
+which pauses the engine briefly, so one read serves the format line, the
+popover and the inspector, and it is read only when the audible track,
+ReplayGain, the equalizer, crossfeed, the volume (once the slider settles) or
+the output device change, and when the popover or the Signal Path mode opens;
+never on the tick.
 
-The **details panel** sits right of the Tracks list and of each album page.
-The header toggle or `Ctrl+I` shows or hides every panel at once, and the
-choice is saved as `[view] details`; it starts hidden and is hidden below the
-760sp breakpoint. The Tracks panel shows the first selected track, otherwise
-the playing one; an album page's panel shows its selected track, otherwise the
-playing track when it belongs to the album. On an album page a click or the
-arrow keys select a row, one per page, and double-click or Enter plays from
-it. The panel is filled from `Runtime.libraryTrackDetails` when the shown
-track changes and when the library changes. The playing track also gets its
-signal path, read when the track changes, never on the tick. A History
-section shows the play count and last play (local time), and is read again
-whenever `Runtime.libraryListensRecorded` reports a newly recorded listen.
+The **inspector** sits at the end of the Songs list, the Loved page and each
+album page.
+Three linked toggles at the end of the header show it in one of three modes,
+or hide it: the track inspector (`Ctrl+I`), lyrics (`Ctrl+Shift+L`) and the
+signal path. The mode is shared by every page and saved as `[view] details`,
+`lyrics` or `signal_path`; it starts hidden. Below the 760sp breakpoint the
+inspector is laid over the page instead of beside it and starts closed; a
+toggle opens it, and clicking beside it or Escape closes it without changing
+the saved mode. The Songs inspector shows the first selected track, otherwise
+the playing one, and the Loved inspector the selected loved song, otherwise
+the playing one; an album page's inspector shows its selected track, otherwise
+the playing track when it belongs to the album. On an album page a click or
+the arrow keys select a row, one per page, and double-click or Enter plays
+from it. The track inspector is filled from `Runtime.libraryTrackDetails` when
+the shown track changes and when the library changes. It opens with the title,
+artist and album, then flat sections, each hidden when it has nothing to
+show: Audio (codec, format, bitrate, duration), Loudness (integrated
+loudness, sample peak, ReplayGain), Identity (the MusicBrainz and AcoustID
+state and IDs, with the matching actions below), Metadata (album artist,
+date, track, disc, compilation), History (feedback, rating, play count and
+last play in local time, read again whenever
+`Runtime.libraryListensRecorded` reports a newly recorded listen) and File
+(size, and the path with a copy button).
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
-to an orca device id, overriding the output menu; see
+to an orca device id, overriding the device list; see
 [Testing playback without making noise](../CLAUDE.md).
 
 Covers go through `apps/linux/art.zig`. A widget asks for a cover while it is
@@ -685,9 +810,18 @@ read from and signaled from authoritative snapshots.
 
 `nix build` installs `share/applications/org.orca_music.Orca.desktop`, the
 icon and the two heart icons, so the package can be installed like any desktop
-application. The heart icons resolve through the icon theme, so `zig build
-run-linux` installs first and puts `zig-out/share` on `XDG_DATA_DIRS`; running
-`zig-out/bin/orca-gtk` directly needs that variable set the same way.
+application. At startup `orca-gtk` adds `<exe dir>/../share/icons` to the icon
+theme's search path, so the heart icons resolve when `zig-out/bin/orca-gtk`
+runs directly, without `XDG_DATA_DIRS`.
+
+The app has its own look rather than the system's: it forces libadwaita's dark
+scheme, and `apps/linux/style.css` defines Orca's palette as CSS variables and
+maps libadwaita's colour variables onto them, so stock widgets match. The
+interface is set in Inter and display titles in Source Serif 4. Both are
+bundled under the SIL Open Font License, installed with their licences to
+`share/orca/fonts`, and registered with Pango from
+`<exe dir>/../share/orca/fonts` before the window is built; if they are
+missing, `orca-gtk` logs a warning and uses system fonts.
 
 ## Listening from a host
 
@@ -701,7 +835,7 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   never prompt or block on user interaction: a locked keyring reads as no
   token, and the worker's shutdown waits for the call to return. `orca-gtk`
   searches the Secret Service without unlocking it; only saving, removing or
-  looking up the token from Preferences, on the main loop, may show an unlock
+  looking up the token from Settings, on the main loop, may show an unlock
   prompt.
 - `Runtime.setClientIdentity` to name the host in submissions and in the
   history. Scrobbling cannot be turned on before it is set; see
@@ -713,7 +847,7 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   `libraryScrobblerStatus` for presentation.
 - `Runtime.librarySetFeedback` and `libraryTrackFeedback` for love and hate,
   which `TrackSummary.feedback` and `TrackDetails.feedback` also report.
-  `orca-gtk` repaints the heart, the rows and the details panel after each
+  `orca-gtk` repaints the heart, the rows and the inspector after each
   change rather than waiting for a reload.
 - `Runtime.librarySetReleaseLove` for album love, which
   `ReleaseSummary.loved` reports; `ReleaseQuery.loved_only` with

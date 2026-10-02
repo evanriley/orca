@@ -244,28 +244,28 @@ pub fn clone(source: *TrackObject) ?*TrackObject {
 /// first page. Nothing here reorders rows that are already loaded: a page is a
 /// window onto a total order the engine owns, and sorting the window would sort
 /// a screenful of a listing that is thousands of rows long.
-pub const Column = enum(usize) {
-    // Carried as the cell factory's user-data pointer, so zero — which is NULL
-    // — is not an available value.
-    number = 1,
+pub const Column = enum {
+    number,
     title,
-    rating,
     artist,
     album,
+    loved,
+    rating,
     duration,
+    more,
 
-    /// Declaration order, which is also the order the headers appear in and the
-    /// order `App.sort_columns` records them in.
-    pub const all = [_]Column{ .number, .title, .rating, .artist, .album, .duration };
+    pub const all = [_]Column{ .number, .title, .artist, .album, .loved, .rating, .duration, .more };
 
-    pub fn sortKey(self: Column) liborca.TrackSort {
+    pub fn sortKey(self: Column) ?liborca.TrackSort {
         return switch (self) {
             .number => .track_number,
             .title => .title,
-            .rating => .rating,
             .artist => .artist,
             .album => .album,
+            .loved => .loved,
+            .rating => .rating,
             .duration => .duration,
+            .more => null,
         };
     }
 };

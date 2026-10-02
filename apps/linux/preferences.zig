@@ -1,7 +1,8 @@
-//! Preferences: the library's folders, maintenance and AcoustID, playback
-//! choices, the sound (equalizer and crossfeed), and listening: sending
-//! listens to ListenBrainz.
-//! Built fresh each time it opens, from the engine's current state.
+//! Settings: a page of four tabs. Library holds the folders, maintenance and
+//! AcoustID; Playback the ReplayGain and output choices; Sound the equalizer
+//! and crossfeed; Listening ListenBrainz and lyrics.
+//! The tabs are built fresh each time the page is shown, from the engine's
+//! current state, and destroyed when it is left.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -17,6 +18,7 @@ const matches = @import("matches.zig");
 const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
 const lyrics = @import("lyrics.zig");
+const page_ui = @import("page.zig");
 
 const App = app.App;
 
@@ -27,11 +29,41 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-fn group(title: [*:0]const u8, description: ?[*:0]const u8) *gtk.Widget {
-    const widget = adw.adw_preferences_group_new();
-    adw.adw_preferences_group_set_title(gtk.cast(adw.PreferencesGroup, widget), title);
-    adw.adw_preferences_group_set_description(gtk.cast(adw.PreferencesGroup, widget), description);
-    return widget;
+const Card = struct {
+    widget: *gtk.Widget,
+    header: *gtk.Widget,
+    group: *gtk.Widget,
+
+    fn add(self: Card, row: *gtk.Widget) void {
+        adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, self.group), row);
+    }
+};
+
+fn card(icon: [*:0]const u8, title: [*:0]const u8, description: [*:0]const u8) Card {
+    const box = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 14);
+    gtk.gtk_widget_add_css_class(box, "settings-card");
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
+    const image = gtk.gtk_image_new_from_icon_name(icon);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), 24);
+    gtk.gtk_widget_set_valign(image, gtk.ALIGN_START);
+    gtk.gtk_widget_add_css_class(image, "settings-card-icon");
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(text, gtk.true_);
+    const heading = gtk.gtk_label_new(title);
+    gtk.gtk_widget_add_css_class(heading, "settings-card-title");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 0);
+    const meta = gtk.gtk_label_new(description);
+    gtk.gtk_widget_add_css_class(meta, "meta");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, meta), 0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, meta), gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), heading);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), meta);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), image);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
+    const rows = adw.adw_preferences_group_new();
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), header);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, box), rows);
+    return .{ .widget = box, .header = header, .group = rows };
 }
 
 fn actionRow(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget {
@@ -53,7 +85,6 @@ fn suffixButton(row: *gtk.Widget, label: ?[*:0]const u8, icon: ?[*:0]const u8, h
 const PendingRemoval = struct {
     self: *App,
     root_id: i64,
-    row: ?*gtk.Widget,
 };
 
 fn removeRootClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -67,17 +98,12 @@ fn removeRootClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         if (root.id == root_id) break root.path;
     } else return;
 
-    var ancestor = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, button));
-    const row = while (ancestor) |widget| : (ancestor = gtk.gtk_widget_get_parent(widget)) {
-        if (gtk.g_object_get_data(widget, "orca-root-row") != null) break widget;
-    } else null;
-
     const trimmed = std.mem.trimEnd(u8, path, "/");
     const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/');
     const folder = if (slash) |index| trimmed[index + 1 ..] else trimmed;
     var buffer: [1024]u8 = undefined;
     const heading = strings.printZ(&buffer, "Remove “{s}”?", .{if (folder.len == 0) path else folder}) catch "Remove this folder?";
-    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its tracks leave the library. The files on disk are not touched.");
+    const dialog = adw.adw_alert_dialog_new(heading.ptr, "Its songs leave the library. The files on disk are not touched.");
     const alert = gtk.cast(adw.AlertDialog, dialog);
     adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
     adw.adw_alert_dialog_add_response(alert, "remove", "Remove");
@@ -85,7 +111,7 @@ fn removeRootClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     adw.adw_alert_dialog_set_default_response(alert, "cancel");
     adw.adw_alert_dialog_set_close_response(alert, "cancel");
     const pending = self.allocator.create(PendingRemoval) catch return;
-    pending.* = .{ .self = self, .root_id = root_id, .row = row };
+    pending.* = .{ .self = self, .root_id = root_id };
     _ = gtk.signalConnect(dialog, "response", gtk.callback(removeRootResponse), pending);
     adw.adw_dialog_present(dialog, gtk.cast(gtk.Widget, button));
 }
@@ -100,26 +126,21 @@ fn removeRootResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque
         error.LibraryJobRunning => "Wait for the running job to finish, then remove the folder",
         else => "Could not remove that folder",
     });
-    if (pending.row) |row| gtk.gtk_widget_set_visible(row, gtk.false_);
     var buffer: [64]u8 = undefined;
     self.toast(strings.format(&buffer, "Removed {d} {s}", .{
         removed.tracks_removed,
-        if (removed.tracks_removed == 1) "track" else "tracks",
+        if (removed.tracks_removed == 1) "song" else "songs",
     }));
     jobs.reloadLibraryViews(self);
     self.requestTick();
 }
 
 fn addFolderActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    closeDialog(self);
-    jobs.chooseFolder(self);
+    jobs.chooseFolder(state(data));
 }
 
 fn rescanActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    closeDialog(self);
-    jobs.rescan(self);
+    jobs.rescan(state(data));
 }
 
 fn watchSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -130,7 +151,7 @@ fn watchSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
     if (watching.apply(self) == .failed) {
         self.watch_folders = !enabled;
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), if (self.watch_folders) gtk.true_ else gtk.false_);
-        dialogToast(self, if (enabled) "Could not watch the music folders" else "Could not stop watching the music folders");
+        self.toast(if (enabled) "Could not watch the music folders" else "Could not stop watching the music folders");
         return;
     }
     settings.save(self);
@@ -164,7 +185,7 @@ fn maintenanceSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) call
     maintenance.apply(self) catch {
         self.idle_maintenance = !enabled;
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), if (self.idle_maintenance) gtk.true_ else gtk.false_);
-        dialogToast(self, if (enabled) "Could not turn on idle maintenance" else "Could not turn off idle maintenance");
+        self.toast(if (enabled) "Could not turn on idle maintenance" else "Could not turn off idle maintenance");
         return;
     };
     settings.save(self);
@@ -190,9 +211,7 @@ fn showMaintenanceStatus(self: *App) void {
 }
 
 fn measureClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    closeDialog(self);
-    jobs.startAnalysis(self);
+    jobs.startAnalysis(state(data));
 }
 
 fn analysisThreadsSubtitle(buffer: []u8, threads: u16) [:0]const u8 {
@@ -214,9 +233,7 @@ fn analysisThreadsChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) c
 }
 
 fn duplicatesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    closeDialog(self);
-    jobs.startDuplicates(self);
+    jobs.startDuplicates(state(data));
 }
 
 fn thresholdChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -237,7 +254,7 @@ fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     self.match_fingerprints = enabled;
     settings.save(self);
     matches.reload(self);
-    maintenance.apply(self) catch dialogToast(self, "Could not change idle maintenance");
+    maintenance.apply(self) catch self.toast("Could not change idle maintenance");
     showMaintenanceStatus(self);
     self.requestTick();
 }
@@ -248,7 +265,7 @@ fn keyPageLaunched(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*any
     var err: ?*gtk.GError = null;
     if (gtk.gtk_uri_launcher_launch_finish(gtk.cast(gtk.UriLauncher, source), result, &err) != 0) return;
     gtk.g_clear_error(&err);
-    dialogToast(state(data), "Could not open AcoustID");
+    state(data).toast("Could not open AcoustID");
 }
 
 fn getKeyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -258,8 +275,9 @@ fn getKeyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     gtk.g_object_unref(launcher);
 }
 
-fn acoustIdGroup(self: *App) *gtk.Widget {
-    const acoustid = group(
+fn acoustIdCard(self: *App) *gtk.Widget {
+    const acoustid = card(
+        "auth-fingerprint-symbolic",
         "AcoustID",
         "AcoustID identifies songs by their sound. With your key, the matches you accept can be sent back from the Matches page, so others can identify them too.",
     );
@@ -268,7 +286,7 @@ fn acoustIdGroup(self: *App) *gtk.Widget {
     adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fingerprints), "Find Matches also sends a fingerprint of each song's audio to AcoustID");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fingerprints), if (self.match_fingerprints) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(fingerprints, "notify::active", gtk.callback(fingerprintsSwitched), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, acoustid), fingerprints);
+    acoustid.add(fingerprints);
 
     AcoustIdKey.add(self, acoustid);
 
@@ -277,64 +295,105 @@ fn acoustIdGroup(self: *App) *gtk.Widget {
     const get_key = suffixButton(link, "Get a key", null, gtk.callback(getKeyClicked), self);
     gtk.gtk_widget_add_css_class(get_key, "flat");
     adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), get_key);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, acoustid), link);
+    acoustid.add(link);
     AcoustIdKey.checkOnce(self);
-    return acoustid;
+    return acoustid.widget;
 }
 
-fn libraryPage(self: *App) *gtk.Widget {
-    const page = adw.adw_preferences_page_new();
-    adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Library");
-    adw.adw_preferences_page_set_icon_name(gtk.cast(adw.PreferencesPage, page), "folder-music-symbolic");
-    const library = self.library orelse return page;
-
-    const folders = group("Music Folders", "Orca reads these folders. It never changes a file unless you write tags to it.");
-    var roots = self.runtime.libraryRootPage(library, app.page_size, 0) catch null;
-    defer if (roots) |*value| value.deinit();
+fn folderRows(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
+    const rows = adw.adw_preferences_group_new();
+    var roots = self.runtime.libraryRootPage(library, app.page_size, 0) catch return rows;
+    defer roots.deinit();
     var buffer: [1024]u8 = undefined;
-    if (roots) |value| for (value.items) |root| {
+    for (roots.items) |root| {
         const row = actionRow(strings.terminated(&buffer, root.path).ptr, if (root.enabled) "" else "Paused");
-        gtk.g_object_set_data(row, "orca-root-row", row);
+        adw.adw_action_row_add_prefix(gtk.cast(adw.ActionRow, row), gtk.gtk_image_new_from_icon_name("folder-symbolic"));
         const remove = suffixButton(row, null, "user-trash-symbolic", gtk.callback(removeRootClicked), self);
         gtk.gtk_widget_set_tooltip_text(remove, "Stop reading this folder");
         const id_text: [:0]const u8 = strings.printZ(&buffer, "{d}", .{root.id}) catch continue;
         gtk.gtk_widget_set_name(remove, id_text.ptr);
-        adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), row);
-    };
-    const add = adw.adw_button_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, add), "Add Folder…");
-    adw.adw_button_row_set_start_icon_name(add, "list-add-symbolic");
-    _ = gtk.signalConnect(add, "activated", gtk.callback(addFolderActivated), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), add);
-    const rescan = adw.adw_button_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, rescan), "Rescan All Folders");
-    adw.adw_button_row_set_start_icon_name(rescan, "view-refresh-symbolic");
-    _ = gtk.signalConnect(rescan, "activated", gtk.callback(rescanActivated), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), rescan);
+        adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, rows), row);
+    }
+    return rows;
+}
+
+fn labelledButton(label: [*:0]const u8, icon: [*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
+    const button = gtk.gtk_button_new();
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_image_new_from_icon_name(icon));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), gtk.gtk_label_new(label));
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), content);
+    _ = gtk.signalConnect(button, "clicked", handler, data);
+    return button;
+}
+
+fn showMeasure(self: *App) void {
+    const page = &self.settings_page;
+    const row = page.measure_row orelse return;
+    const library = self.library orelse return;
+    const unmeasured = self.runtime.libraryUnanalyzedCount(library) catch 0;
+    var buffer: [256]u8 = undefined;
+    const measure_text: [:0]const u8 = if (unmeasured == 0)
+        "Every file is measured. ReplayGain and duplicate finding use these measurements."
+    else
+        strings.printZ(&buffer, "{d} files not measured yet. ReplayGain and duplicate finding need this; it decodes every file, so it takes a while and can be stopped.", .{unmeasured}) catch "";
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), measure_text.ptr);
+    if (page.measure_button) |button| gtk.gtk_widget_set_sensitive(button, if (unmeasured != 0) gtk.true_ else gtk.false_);
+}
+
+pub fn refreshLibrary(self: *App) void {
+    showMeasure(self);
+    const slot = self.settings_page.folder_slot orelse return;
+    const library = self.library orelse return;
+    if (gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, slot))) |old| gtk.gtk_box_remove(slot, old);
+    gtk.gtk_box_append(slot, folderRows(self, library));
+}
+
+fn foldersCard(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
+    const folders = card(
+        "folder-symbolic",
+        "Music Folders",
+        "Orca reads these folders for your music. It never changes a file unless you write tags to it.",
+    );
+    const slot = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, slot), folderRows(self, library));
+    gtk.gtk_box_insert_child_after(gtk.cast(gtk.Box, folders.widget), slot, folders.header);
+    self.settings_page.folder_slot = gtk.cast(gtk.Box, slot);
+
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(actions, "settings-folder-actions");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), labelledButton("Add Folder…", "list-add-symbolic", gtk.callback(addFolderActivated), self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), labelledButton("Rescan All Folders", "view-refresh-symbolic", gtk.callback(rescanActivated), self));
+    gtk.gtk_box_insert_child_after(gtk.cast(gtk.Box, folders.widget), actions, slot);
+
     if (watching.supported(self)) {
         const watch = adw.adw_switch_row_new();
         adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, watch), "Watch folders for changes");
         adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, watch), 4);
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, watch), if (self.watch_folders) gtk.true_ else gtk.false_);
         _ = gtk.signalConnect(watch, "notify::active", gtk.callback(watchSwitched), self);
-        adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, folders), watch);
+        folders.add(watch);
         self.watch_row = watch;
         self.watch_status_len = 0;
         showWatchStatus(self);
     }
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, folders));
+    return folders.widget;
+}
 
-    const maintenance_group = group("Maintenance", null);
-    const unmeasured = self.runtime.libraryUnanalyzedCount(library) catch 0;
-    const measure_text: [:0]const u8 = if (unmeasured == 0)
-        "Every file is measured. ReplayGain and duplicate finding use these measurements."
-    else
-        strings.printZ(&buffer, "{d} files not measured yet. ReplayGain and duplicate finding need this; it decodes every file, so it takes a while and can be stopped.", .{unmeasured}) catch "";
-    const measure = actionRow("Measure Loudness", measure_text.ptr);
+fn maintenanceCard(self: *App) *gtk.Widget {
+    const maintenance_card = card(
+        "applications-engineering-symbolic",
+        "Maintenance",
+        "Measures loudness and finds duplicate recordings when asked, and checks recording IDs while Orca is idle.",
+    );
+    var buffer: [64]u8 = undefined;
+    const measure = actionRow("Measure Loudness", "");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, measure), 3);
     const measure_button = suffixButton(measure, "Measure", null, gtk.callback(measureClicked), self);
-    if (unmeasured == 0) gtk.gtk_widget_set_sensitive(measure_button, gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), measure);
+    self.settings_page.measure_row = measure;
+    self.settings_page.measure_button = measure_button;
+    showMeasure(self);
+    maintenance_card.add(measure);
     const available_threads = liborca.analysisAvailableThreads();
     const shown_threads = @min(self.analysis_threads orelse liborca.analysisDefaultThreads(), available_threads);
     const threads = adw.adw_spin_row_new_with_range(1, @floatFromInt(available_threads), 1);
@@ -344,17 +403,17 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threads), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threads), @floatFromInt(shown_threads));
     _ = gtk.signalConnect(threads, "notify::value", gtk.callback(analysisThreadsChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), threads);
+    maintenance_card.add(threads);
     const duplicates = actionRow("Find Duplicates", "Compares measured audio, so files that are the same recording show up in Health.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, duplicates), 3);
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), duplicates);
+    maintenance_card.add(duplicates);
     const idle = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, idle), "Idle maintenance");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, idle), 3);
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, idle), if (self.idle_maintenance) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(idle, "notify::active", gtk.callback(maintenanceSwitched), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), idle);
+    maintenance_card.add(idle);
     self.maintenance_row = idle;
     self.maintenance_status_len = 0;
     showMaintenanceStatus(self);
@@ -366,10 +425,13 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));
     _ = gtk.signalConnect(threshold, "notify::value", gtk.callback(thresholdChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), threshold);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, maintenance_group));
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, acoustIdGroup(self)));
-    return page;
+    maintenance_card.add(threshold);
+    return maintenance_card.widget;
+}
+
+fn libraryTab(self: *App) *gtk.Widget {
+    const library = self.library orelse return tab(self, .library, &.{}, &.{});
+    return tab(self, .library, &.{ foldersCard(self, library), maintenanceCard(self) }, &.{acoustIdCard(self)});
 }
 
 fn replayGainChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -377,6 +439,7 @@ fn replayGainChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     const selected = adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row));
     const mode: liborca.ReplayGainMode = if (selected == 1) .track else .off;
     self.runtime.playerSetReplayGainMode(self.player, mode) catch return;
+    transport.refreshSignalPath(self);
     settings.save(self);
 }
 
@@ -385,26 +448,21 @@ fn outputChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
     transport.selectDevice(self, adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row)));
 }
 
-fn playbackPage(self: *App) *gtk.Widget {
-    const page = adw.adw_preferences_page_new();
-    adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Playback");
-    adw.adw_preferences_page_set_icon_name(gtk.cast(adw.PreferencesPage, page), "audio-speakers-symbolic");
-
-    const volume = group("Volume", null);
+fn playbackTab(self: *App) *gtk.Widget {
+    const volume = card("multimedia-volume-control-symbolic", "Volume", "ReplayGain plays each song at the loudness Measure Loudness found for it.");
     const modes = [_]?[*:0]const u8{ "Off", "Per Track", null };
     const replay = adw.adw_combo_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, replay), "ReplayGain");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, replay), "Evens out loudness between tracks, using measured loudness");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, replay), "Evens out loudness between songs, using measured loudness");
     const mode_list = gtk.gtk_string_list_new(&modes);
     adw.adw_combo_row_set_model(gtk.cast(adw.ComboRow, replay), gtk.cast(gtk.ListModel, mode_list));
     gtk.g_object_unref(mode_list);
     const mode = self.runtime.playerReplayGainMode(self.player) catch .off;
     adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, replay), if (mode == .track) 1 else 0);
     _ = gtk.signalConnect(replay, "notify::selected", gtk.callback(replayGainChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, volume), replay);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, volume));
+    volume.add(replay);
 
-    const output = group("Output", null);
+    const output = card("audio-card-symbolic", "Output", "Where Orca plays. The device is remembered by name.");
     transport.refreshDevices(self);
     const names = gtk.gtk_string_list_new(null);
     for (self.device_names.items) |name| gtk.gtk_string_list_append(names, name.ptr);
@@ -414,9 +472,8 @@ fn playbackPage(self: *App) *gtk.Widget {
     gtk.g_object_unref(names);
     adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, device), @intCast(self.device_index));
     _ = gtk.signalConnect(device, "notify::selected", gtk.callback(outputChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, output), device);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, output));
-    return page;
+    output.add(device);
+    return tab(self, .playback, &.{volume.widget}, &.{output.widget});
 }
 
 const band_count = app.equalizer_band_count;
@@ -446,13 +503,6 @@ const amount_labels = [_]?[*:0]const u8{ "Light", "Medium", "Strong", null };
 comptime {
     std.debug.assert(preset_count == std.enums.values(liborca.EqualizerPreset).len);
     std.debug.assert(amount_labels.len - 1 == app.crossfeed_amounts.len);
-}
-
-fn dialogToast(self: *App, message: [:0]const u8) void {
-    const dialog = self.preferences_dialog orelse return self.toast(message);
-    const item = adw.adw_toast_new(message.ptr);
-    adw.adw_toast_set_timeout(item, 3);
-    adw.adw_preferences_dialog_add_toast(gtk.cast(adw.PreferencesDialog, dialog), item);
 }
 
 fn matchingPreset(curve: liborca.Equalizer) ?liborca.EqualizerPreset {
@@ -541,7 +591,8 @@ fn cancelEqualizerTimer(self: *App) void {
 fn applyEqualizer(self: *App, enabled: bool) void {
     cancelEqualizerTimer(self);
     self.runtime.playerSetEqualizer(self.player, if (enabled) self.equalizer_curve else null) catch
-        return dialogToast(self, "Could not apply the equalizer");
+        return self.toast("Could not apply the equalizer");
+    transport.refreshSignalPath(self);
     settings.save(self);
 }
 
@@ -592,7 +643,8 @@ fn presetChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
 
 fn applyCrossfeed(self: *App, enabled: bool) void {
     self.runtime.playerSetCrossfeed(self.player, if (enabled) self.crossfeed_amount else null) catch
-        return dialogToast(self, "Could not apply crossfeed");
+        return self.toast("Could not apply crossfeed");
+    transport.refreshSignalPath(self);
     settings.save(self);
 }
 
@@ -648,30 +700,27 @@ fn bandSliders(self: *App, curve: liborca.Equalizer) *gtk.Widget {
     return box;
 }
 
-fn soundPage(self: *App) *gtk.Widget {
-    const page = adw.adw_preferences_page_new();
-    adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Sound");
-    adw.adw_preferences_page_set_icon_name(gtk.cast(adw.PreferencesPage, page), "audio-headphones-symbolic");
+fn soundTab(self: *App) *gtk.Widget {
     const controls = &self.sound_controls;
 
     const current = self.runtime.playerEqualizer(self.player) catch null;
     if (current) |curve| self.equalizer_curve = curve;
     const curve = self.equalizer_curve;
 
-    const equalizer = group("Equalizer", null);
+    const equalizer = card("emblem-system-symbolic", "Equalizer", "Ten bands from 31 Hz to 16 kHz, applied to everything Orca plays.");
     const enabled = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, enabled), "Equalizer");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, enabled), if (current != null) gtk.true_ else gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, equalizer), enabled);
+    equalizer.add(enabled);
 
     const preset = comboRow("Preset", &preset_labels);
     controls.preset_row = preset.row;
     controls.preset_names = preset.names;
     showPreset(self, matchingPreset(curve));
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, equalizer), preset.row);
+    equalizer.add(preset.row);
 
     controls.bands = bandSliders(self, curve);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, equalizer), controls.bands.?);
+    equalizer.add(controls.bands.?);
 
     const preamp = adw.adw_spin_row_new_with_range(preamp_range_db[0], preamp_range_db[1], 0.5);
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, preamp), "Preamp");
@@ -679,15 +728,14 @@ fn soundPage(self: *App) *gtk.Widget {
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, preamp), 1);
     controls.preamp_row = preamp;
     showCurve(self, curve);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, equalizer), preamp);
+    equalizer.add(preamp);
     showEqualizerEnabled(self, current != null);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, equalizer));
 
     _ = gtk.signalConnect(enabled, "notify::active", gtk.callback(equalizerSwitched), self);
     _ = gtk.signalConnect(preset.row, "notify::selected", gtk.callback(presetChanged), self);
     _ = gtk.signalConnect(preamp, "notify::value", gtk.callback(preampChanged), self);
 
-    const headphones = group("Headphones", null);
+    const headphones = card("audio-headphones-symbolic", "Headphones", "Crossfeed for listening on headphones.");
     const crossfeed_amount = self.runtime.playerCrossfeed(self.player) catch null;
     if (crossfeed_amount) |amount| self.crossfeed_amount = amount;
     const crossfeed = adw.adw_switch_row_new();
@@ -697,16 +745,15 @@ fn soundPage(self: *App) *gtk.Widget {
         "Blends a little of each channel into the other, for headphones",
     );
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, crossfeed), if (crossfeed_amount != null) gtk.true_ else gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, headphones), crossfeed);
+    headphones.add(crossfeed);
     const amount = comboRow("Amount", &amount_labels);
     controls.crossfeed_amount_row = amount.row;
     adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, amount.row), nearestAmountIndex(self.crossfeed_amount));
     gtk.gtk_widget_set_sensitive(amount.row, if (crossfeed_amount != null) gtk.true_ else gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, headphones), amount.row);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, headphones));
+    headphones.add(amount.row);
     _ = gtk.signalConnect(crossfeed, "notify::active", gtk.callback(crossfeedSwitched), self);
     _ = gtk.signalConnect(amount.row, "notify::selected", gtk.callback(crossfeedAmountChanged), self);
-    return page;
+    return tab(self, .sound, &.{equalizer.widget}, &.{headphones.widget});
 }
 
 const token_settings_url = "https://listenbrainz.org/settings/";
@@ -718,7 +765,7 @@ fn scrobblingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
     if (enabled == self.scrobbling) return;
     self.runtime.librarySetScrobbling(library, enabled, false, self.announce_now_playing) catch {
-        dialogToast(self, "Could not change listen submission");
+        self.toast("Could not change listen submission");
         const previous = if (self.scrobbling) gtk.true_ else gtk.false_;
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), previous);
         return;
@@ -740,7 +787,7 @@ fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
     if (enabled == self.announce_now_playing) return;
     self.runtime.librarySetScrobbling(library, self.scrobbling, false, enabled) catch {
-        dialogToast(self, "Could not change what is shared while playing");
+        self.toast("Could not change what is shared while playing");
         const previous = if (self.announce_now_playing) gtk.true_ else gtk.false_;
         adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), previous);
         return;
@@ -872,16 +919,16 @@ fn CredentialRows(comptime credential: Credential) type {
 
         fn check(self: *App, locked_items: secret.LockedItems) void {
             secret.check(credential.service, credential.account, locked_items, presenceFound, self) catch
-                dialogToast(self, "Could not check the system keyring");
+                self.toast("Could not check the system keyring");
         }
 
         fn stored(succeeded: bool, data: ?*anyopaque) void {
             const self = state(data);
             setSaving(self, false);
-            if (!succeeded) return dialogToast(self, credential.store_failed);
+            if (!succeeded) return self.toast(credential.store_failed);
             if (credential.controls(self).entry_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
             credential.changed(self);
-            dialogToast(self, credential.saved);
+            self.toast(credential.saved);
             check(self, credential.first_check);
         }
 
@@ -889,10 +936,10 @@ fn CredentialRows(comptime credential: Credential) type {
             const self = state(data);
             if (!succeeded) {
                 if (credential.controls(self).remove_button) |button| gtk.gtk_widget_set_sensitive(button, gtk.true_);
-                return dialogToast(self, credential.remove_failed);
+                return self.toast(credential.remove_failed);
             }
             credential.changed(self);
-            dialogToast(self, credential.removed);
+            self.toast(credential.removed);
             check(self, credential.first_check);
         }
 
@@ -903,11 +950,11 @@ fn CredentialRows(comptime credential: Credential) type {
             defer std.crypto.secureZero(u8, &buffer);
             const text = typed(controls);
             if (text.len == 0) return;
-            if (text.len >= buffer.len) return dialogToast(self, credential.too_long);
+            if (text.len >= buffer.len) return self.toast(credential.too_long);
             @memcpy(buffer[0..text.len], text);
             buffer[text.len] = 0;
             secret.save(credential.service, credential.account, credential.keyring_label, &buffer, stored, self) catch
-                return dialogToast(self, "Out of memory");
+                return self.toast("Out of memory");
             setSaving(self, true);
         }
 
@@ -926,7 +973,7 @@ fn CredentialRows(comptime credential: Credential) type {
         fn removeClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
             const self = state(data);
             secret.clear(credential.service, credential.account, removed, self) catch
-                return dialogToast(self, "Out of memory");
+                return self.toast("Out of memory");
             gtk.gtk_widget_set_sensitive(gtk.cast(gtk.Widget, button), gtk.false_);
         }
 
@@ -941,13 +988,13 @@ fn CredentialRows(comptime credential: Credential) type {
             check(self, credential.first_check);
         }
 
-        fn add(self: *App, target: *gtk.Widget) void {
+        fn add(self: *App, target: Card) void {
             const stored_row = actionRow(credential.title, "Saved in your keyring");
             gtk.gtk_widget_set_visible(stored_row, gtk.false_);
             const remove_button = suffixButton(stored_row, "Remove", null, gtk.callback(removeClicked), self);
             const unlock_button = suffixButton(stored_row, "Unlock", null, gtk.callback(unlockClicked), self);
             gtk.gtk_widget_set_visible(unlock_button, gtk.false_);
-            adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, target), stored_row);
+            target.add(stored_row);
 
             const entry = adw.adw_password_entry_row_new();
             adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, entry), credential.title);
@@ -959,7 +1006,7 @@ fn CredentialRows(comptime credential: Credential) type {
             adw.adw_entry_row_add_suffix(gtk.cast(adw.EntryRow, entry), save_button);
             _ = gtk.signalConnect(entry, "entry-activated", gtk.callback(entryActivated), self);
             _ = gtk.signalConnect(entry, "changed", gtk.callback(entryTyped), self);
-            adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, target), entry);
+            target.add(entry);
 
             credential.controls(self).* = .{
                 .entry_row = entry,
@@ -1033,18 +1080,15 @@ fn showListeningStatus(self: *App) void {
 }
 
 pub fn tick(self: *App) void {
-    if (self.preferences_dialog == null) return;
+    if (self.settings_page.tabs == null) return;
     showListeningStatus(self);
     showWatchStatus(self);
     showMaintenanceStatus(self);
 }
 
-fn listeningPage(self: *App) *gtk.Widget {
-    const page = adw.adw_preferences_page_new();
-    adw.adw_preferences_page_set_title(gtk.cast(adw.PreferencesPage, page), "Listening");
-    adw.adw_preferences_page_set_icon_name(gtk.cast(adw.PreferencesPage, page), "document-open-recent-symbolic");
-
-    const listenbrainz = group(
+fn listeningTab(self: *App) *gtk.Widget {
+    const listenbrainz = card(
+        "document-send-symbolic",
         "ListenBrainz",
         "Orca always records what you play on this computer. Submitting also sends those listens to your ListenBrainz account.",
     );
@@ -1054,15 +1098,15 @@ fn listeningPage(self: *App) *gtk.Widget {
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, submit), if (self.scrobbling) gtk.true_ else gtk.false_);
     gtk.gtk_widget_set_sensitive(submit, if (self.library != null) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(submit, "notify::active", gtk.callback(scrobblingSwitched), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), submit);
+    listenbrainz.add(submit);
 
     const now_playing = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, now_playing), "Show what I'm playing now");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current track to ListenBrainz once it has played for 10 seconds");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current song to ListenBrainz once it has played for 10 seconds");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, now_playing), if (self.announce_now_playing) gtk.true_ else gtk.false_);
     gtk.gtk_widget_set_sensitive(now_playing, if (self.library != null and self.scrobbling) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), now_playing);
+    listenbrainz.add(now_playing);
 
     ListenBrainzToken.add(self, listenbrainz);
 
@@ -1072,51 +1116,122 @@ fn listeningPage(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(link_button, gtk.ALIGN_CENTER);
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, link), link_button);
     adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), link_button);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), link);
+    listenbrainz.add(link);
 
     const status = actionRow("Status", "");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, status), 2);
     self.listening_controls.now_playing_row = now_playing;
     self.listening_controls.status_row = status;
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), status);
+    listenbrainz.add(status);
     showListeningStatus(self);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, listenbrainz));
 
-    const lyrics_group = group("Lyrics", null);
+    const lyrics_card = card(
+        "media-view-subtitles-symbolic",
+        "Lyrics",
+        "Lyrics come from .lrc files beside your songs and from their tags. Orca never writes lyrics to a file.",
+    );
     const fetch = adw.adw_switch_row_new();
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fetch), "Fetch lyrics from LRCLIB");
     adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fetch), "Looks lyrics up on lrclib.net by title, artist, album and duration when the files have none");
     adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fetch), if (self.lyrics.fetch) gtk.true_ else gtk.false_);
     _ = gtk.signalConnect(fetch, "notify::active", gtk.callback(lyricsFetchSwitched), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, lyrics_group), fetch);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, lyrics_group));
-    _ = gtk.signalConnect(page, "map", gtk.callback(listeningMapped), self);
-    return page;
+    lyrics_card.add(fetch);
+
+    const view = tab(self, .listening, &.{listenbrainz.widget}, &.{lyrics_card.widget});
+    _ = gtk.signalConnect(view, "map", gtk.callback(listeningMapped), self);
+    return view;
 }
 
-fn closeDialog(self: *App) void {
-    const dialog = self.preferences_dialog orelse return;
-    _ = adw.adw_dialog_close(dialog);
+fn layOut(columns: *gtk.Widget, narrow: bool) void {
+    gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, columns), if (narrow) gtk.ORIENTATION_VERTICAL else gtk.ORIENTATION_HORIZONTAL);
+    gtk.gtk_box_set_homogeneous(gtk.cast(gtk.Box, columns), if (narrow) gtk.false_ else gtk.true_);
 }
 
-fn dialogClosed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    self.preferences_dialog = null;
+fn tab(self: *App, which: app.SettingsTab, left: []const *gtk.Widget, right: []const *gtk.Widget) *gtk.Widget {
+    const columns = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_widget_add_css_class(columns, "settings-columns");
+    for ([_][]const *gtk.Widget{ left, right }) |cards| {
+        const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
+        gtk.gtk_widget_set_valign(column, gtk.ALIGN_START);
+        gtk.gtk_widget_set_hexpand(column, gtk.true_);
+        for (cards) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, column), widget);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, columns), column);
+    }
+    layOut(columns, self.window_narrow);
+    self.settings_page.columns[@intFromEnum(which)] = columns;
+    const scroller = gtk.gtk_scrolled_window_new();
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), columns);
+    gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
+    return scroller;
+}
+
+pub fn setNarrow(self: *App) void {
+    for (self.settings_page.columns) |columns| if (columns) |widget| layOut(widget, self.window_narrow);
+}
+
+pub fn build(self: *App) *gtk.Widget {
+    const heading = page_ui.title("Settings");
+    const icon = gtk.gtk_image_new_from_icon_name("emblem-system-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 40);
+    gtk.gtk_widget_add_css_class(icon, "settings-page-icon");
+    gtk.gtk_box_prepend(gtk.cast(gtk.Box, heading.widget), icon);
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, heading.meta), gtk.false_);
+
+    const host = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, host), heading.widget);
+    self.settings_page.host = gtk.cast(gtk.Box, host);
+
+    const view = adw.adw_toolbar_view_new();
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), host);
+    return view;
+}
+
+const tab_names = [_][*:0]const u8{ "library", "playback", "sound", "listening" };
+
+pub fn show(self: *App) void {
+    const page = &self.settings_page;
+    const host = page.host orelse return;
+    if (page.tabs != null) return;
+    const views = adw.adw_view_stack_new();
+    const stack = gtk.cast(adw.ViewStack, views);
+    page.tabs = stack;
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, libraryTab(self), tab_names[0], "Library", "folder-symbolic");
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, playbackTab(self), tab_names[1], "Playback", "audio-volume-high-symbolic");
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, soundTab(self), tab_names[2], "Sound", "audio-headphones-symbolic");
+    _ = adw.adw_view_stack_add_titled_with_icon(stack, listeningTab(self), tab_names[3], "Listening", "document-open-recent-symbolic");
+    adw.adw_view_stack_set_visible_child_name(stack, tab_names[@intFromEnum(page.tab)]);
+    gtk.gtk_widget_set_vexpand(views, gtk.true_);
+
+    const switcher = adw.adw_view_switcher_new();
+    adw.adw_view_switcher_set_stack(gtk.cast(adw.ViewSwitcher, switcher), stack);
+    adw.adw_view_switcher_set_policy(gtk.cast(adw.ViewSwitcher, switcher), adw.VIEW_SWITCHER_POLICY_WIDE);
+    gtk.gtk_widget_add_css_class(switcher, "settings-tabs");
+    gtk.gtk_widget_set_hexpand(switcher, gtk.true_);
+
+    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(body, "settings-body");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), switcher);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), views);
+    gtk.gtk_box_append(host, body);
+    page.body = body;
+}
+
+pub fn leave(self: *App) void {
+    const page = &self.settings_page;
+    const stack = page.tabs orelse return;
+    if (adw.adw_view_stack_get_visible_child_name(stack)) |name| {
+        for (tab_names, 0..) |candidate, index| {
+            if (std.mem.eql(u8, std.mem.span(name), std.mem.span(candidate))) page.tab = @enumFromInt(index);
+        }
+    }
+    if (page.host) |host| if (page.body) |body| gtk.gtk_box_remove(host, body);
+    page.* = .{ .host = page.host, .tab = page.tab };
     self.sound_controls = .{};
     self.listening_controls = .{};
     self.acoustid_controls = .{};
     self.watch_row = null;
     self.maintenance_row = null;
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
-}
-
-pub fn present(self: *App) void {
-    const dialog = adw.adw_preferences_dialog_new();
-    self.preferences_dialog = dialog;
-    _ = gtk.signalConnect(dialog, "closed", gtk.callback(dialogClosed), self);
-    adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, libraryPage(self)));
-    adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, playbackPage(self)));
-    adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, soundPage(self)));
-    adw.adw_preferences_dialog_add(gtk.cast(adw.PreferencesDialog, dialog), gtk.cast(adw.PreferencesPage, listeningPage(self)));
-    adw.adw_dialog_present(dialog, if (self.window) |w| gtk.cast(gtk.Widget, w) else null);
 }

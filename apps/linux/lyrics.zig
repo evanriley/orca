@@ -12,6 +12,8 @@ const adw = @import("adw.zig");
 const app = @import("app.zig");
 const settings = @import("settings.zig");
 const details = @import("details.zig");
+const strings = @import("strings.zig");
+const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 
@@ -36,6 +38,9 @@ pub const State = struct {
     stale: bool = true,
     generation: u64 = 1,
     follow_timer: c_uint = 0,
+    quote_slot: ?*gtk.Widget = null,
+    quote: ?*gtk.Widget = null,
+    quote_line: ?usize = null,
     /// Set at shutdown, after which widgets torn down later start nothing.
     closed: bool = false,
 };
@@ -101,8 +106,18 @@ pub const View = struct {
     }
 };
 
+/// Shows the synced line being heard in `label` while `slot` is mapped, using
+/// only lyrics a lyrics view loaded: it never starts a lookup or a fetch.
+pub fn watchQuote(self: *App, slot: *gtk.Widget, label: *gtk.Widget) void {
+    self.lyrics.quote_slot = slot;
+    self.lyrics.quote = label;
+    gtk.gtk_widget_set_visible(label, gtk.false_);
+    _ = gtk.signalConnect(slot, "map", gtk.callback(quoteMappedChanged), self);
+    _ = gtk.signalConnect(slot, "unmap", gtk.callback(quoteMappedChanged), self);
+}
+
 pub fn toggle(self: *App) void {
-    details.showSidebar(self, if (self.sidebar_page == .lyrics) .hidden else .lyrics);
+    details.showSidebar(self, if (details.shownMode(self) == .lyrics) .hidden else .lyrics);
 }
 
 pub fn setFetch(self: *App, fetch: bool) void {
@@ -191,6 +206,7 @@ fn finishJob(self: *App) void {
 
 fn redraw(self: *App) void {
     self.lyrics.generation +%= 1;
+    showQuote(self, null, null);
     forEachMappedView(self, render);
 }
 
@@ -220,6 +236,29 @@ fn mappedChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
 }
 
+fn quoteMapped(self: *const App) bool {
+    const slot = self.lyrics.quote_slot orelse return false;
+    return gtk.gtk_widget_get_mapped(slot) != 0;
+}
+
+fn quoteMappedChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    if (self.lyrics.closed) return;
+    follow(self);
+}
+
+fn showQuote(self: *App, lyrics: ?liborca.Lyrics, line: ?usize) void {
+    const state = &self.lyrics;
+    const quote = state.quote orelse return;
+    if (lyrics != null and optionalEql(line, state.quote_line)) return;
+    state.quote_line = line;
+    const text = if (lyrics) |value| (if (line) |index| value.lines[index].text else "") else "";
+    var buffer: [512]u8 = undefined;
+    const shown = if (text.len != 0) strings.format(&buffer, "“{s}”", .{text}) else "";
+    nowplaying.setUppercase(gtk.cast(gtk.Label, quote), shown);
+    gtk.gtk_widget_set_visible(quote, if (shown.len != 0) gtk.true_ else gtk.false_);
+}
+
 fn adjustmentChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const view: *View = @ptrCast(@alignCast(data.?));
     const half: c_int = @intFromFloat(gtk.gtk_adjustment_get_page_size(gtk.cast(gtk.Adjustment, adjustment)) / 2);
@@ -242,10 +281,15 @@ fn syncedLyrics(self: *const App) ?liborca.Lyrics {
 
 fn step(self: *App) bool {
     const lyrics = syncedLyrics(self) orelse return false;
-    if (!anyViewMapped(self)) return false;
+    const quote_mapped = quoteMapped(self);
+    if (!quote_mapped and !anyViewMapped(self)) return false;
     const status = self.runtime.playerStatus(self.player) catch return false;
-    if (!optionalEql(status.track_id, self.lyrics.track_id)) return false;
+    if (!optionalEql(status.track_id, self.lyrics.track_id)) {
+        showQuote(self, null, null);
+        return false;
+    }
     const line = lyrics.lineAt(status.position_ms);
+    if (quote_mapped) showQuote(self, lyrics, line);
     for (self.details_panels) |maybe| {
         const panel = maybe orelse continue;
         const view = &panel.lyrics;
@@ -285,7 +329,7 @@ fn render(view: *View) void {
     const state = &self.lyrics;
     view.generation = state.generation;
     switch (state.resolution) {
-        .nothing_playing => showStatus(view, "audio-x-generic-symbolic", "Nothing Playing", "Lyrics follow the track that is playing."),
+        .nothing_playing => showStatus(view, "audio-x-generic-symbolic", "Nothing Playing", "Lyrics follow the song that is playing."),
         .resolving => showStatus(view, null, "Looking for Lyrics…", null),
         .failed => showStatus(view, "dialog-warning-symbolic", "Lyrics Could Not Be Read", null),
         .found => |found| if (found.lyrics) |lyrics| switch (lyrics.kind) {
@@ -305,7 +349,7 @@ fn showMissing(view: *View, outcome: liborca.LyricsOutcome) void {
             view,
             "media-view-subtitles-symbolic",
             "No Lyrics",
-            if (view.self.lyrics.fetch) null else "Lyrics can be fetched from LRCLIB in Preferences.",
+            if (view.self.lyrics.fetch) null else "Lyrics can be fetched from LRCLIB in Settings.",
         ),
     }
 }

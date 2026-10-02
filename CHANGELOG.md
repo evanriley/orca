@@ -29,7 +29,7 @@
   details (Ctrl+Shift+L or the header button), shows the playing Track's
   lyrics: synced lyrics highlight the line being heard, dim the lines before
   it and keep it centred, plain lyrics show as selectable text, and an
-  instrumental Track says so. Preferences > Listening > Fetch lyrics from
+  instrumental Track says so. Settings > Listening > Fetch lyrics from
   LRCLIB, off by default, also asks LRCLIB; `ORCA_LRCLIB_URL` points it at
   another server.
 - **Library Health by kind.** `Runtime.libraryHealthSummary` returns each
@@ -41,6 +41,121 @@
 
 ### Changed
 
+- **`orca-gtk` has its own dark look.** It forces the dark scheme, maps
+  libadwaita's colours onto a grayscale palette with a restrained blue
+  accent, sets the interface in Inter and album, artist and Now Playing
+  titles in Source Serif 4 (both bundled, SIL Open Font License, installed to
+  `share/orca/fonts`), aligns durations and counts with tabular figures, and
+  draws albums without covers as initials on a neutral surface instead of a
+  coloured gradient. The heart icons now resolve when `zig-out/bin/orca-gtk`
+  runs without `XDG_DATA_DIRS`.
+- **`orca-gtk`'s sidebar and page headers are reorganised.** The sidebar
+  opens with the Orca wordmark and groups its pages under Library,
+  Collection, Playback and Library Tools, with Settings pinned at its foot.
+  Header bars are flat and untitled; each page opens with a serif title and
+  its count, and an album, artist or playlist page shows a breadcrumb back to
+  where it was opened from. Tracks is now Songs and Preferences is now
+  Settings throughout the interface.
+- **`orca-gtk`'s player bar follows the new design.** It sits on the sidebar
+  colour under a hairline. The left shows the cover, title, artist and album
+  and the heart; the right shows the playing song's format (codec, bit depth
+  and sample rate), which opens the signal path, the output device's name,
+  which opens the device list, an inline volume slider and the queue button.
+  The signal path is no longer in the device list. When the window is narrow
+  the format line hides, the device name becomes an icon and the volume
+  slider moves into a popover. The play button draws its focus ring outside
+  its fill, and the seek handle shows while the seek bar has keyboard focus.
+- **`orca-gtk`'s details panel is now the inspector.** It shows a song as
+  flat Audio, Loudness, Identity, Metadata, History and File sections under
+  a serif title, hiding empty ones, and gains a Signal Path mode that draws
+  the playing audio's path from source to device with the bit-perfect
+  verdict. Three linked header toggles choose the track inspector, lyrics or
+  the signal path, saved as before plus `[view] signal_path`; the player
+  bar's format line opens the Signal Path mode on pages with an inspector.
+  A narrow window lays the inspector over the page instead of hiding it.
+- **`orca-gtk`'s Albums grid and album page follow the new design.** The
+  grid is denser, with each album's year under its artist, a play button and
+  a more button on hover or focus, and a Sort by menu in the title row.
+  Chips under the title choose All Albums, Recently Added or Loved, backed by
+  liborca's recently-added sort and loved-only Release query. The album page
+  opens with a larger cover over a blurred, darkened copy of it, an Album
+  overline, the artist as a link and a more button beside Play, Shuffle and
+  the heart; its track list is flush with the page under a # / Title /
+  duration header, marks the playing track with a play glyph and an accent
+  title, and shows each row's rating stars and more button on hover. A
+  narrow window stacks the album page's cover above its title.
+- **`orca-gtk`'s Songs list and Loved page follow the new design.** Songs
+  are thin-ruled rows under an uppercase header with a heart column: the
+  playing song shows a play mark and an accent title, rating stars show on
+  hover or once rated, and a more button on hover opens the track menu. A
+  Sort by menu beside the count offers the column sorts plus Date Added,
+  and a narrow window drops the Album and Rating columns. Loved opens with a
+  large title, Play and Shuffle for every loved song and the loved song and
+  album counts, then Loved Songs and Loved Albums tabs; Loved Songs uses the
+  Songs table and shows the selected song in the inspector.
+- **`orca-gtk`'s playlists have an overview and follow the new design.**
+  The sidebar lists a single Playlists page instead of each playlist and
+  the New Playlist… and Import Playlist… entries. It is a grid of cards,
+  each with a mosaic of the playlist's first four album covers, its song
+  count and length, when it was updated and how many songs are unavailable;
+  hovering a card shows a play button and a more button with Play, Shuffle,
+  Rename…, Export… and Delete…. The title row offers Sort by Recently
+  Updated, Name or Recently Created, and the header a search over playlist
+  names, Import… and New Playlist; with no playlists the page offers both.
+  A playlist's page opens with the mosaic over a blurred cover, a Playlist
+  overline, the song count, length and unavailable count, Play, Shuffle and
+  a more button, and lists its songs in the Songs table numbered by
+  position, with the inspector for the selected song. A narrow window
+  stacks the mosaic above the name.
+- **`orca-gtk`'s Artists list and artist page follow the new design.** The
+  list is flush rows with a round cover thumbnail, loaded as each row is
+  shown, and each artist's album and song counts. The artist page opens
+  with their newest album's cover over a blurred copy of it, an Artist
+  overline, the years their albums span, Play, Shuffle and a more button,
+  and their album count, song count and time in the library. Songs lists
+  their five highest-rated songs, with See All opening Songs scoped to the
+  artist and the inspector for the selected song; Albums is a wrapping grid
+  with play and more buttons on hover. A narrow window hides the counts and
+  stacks the sections.
+- **`orca-gtk`'s Now Playing and Queue pages follow the new design.** Now
+  Playing shows the cover large over a blurred, darkened copy of it instead
+  of a wash of its average colour, with a Now Playing overline, the title in
+  serif, the artist and the album and year as links, a heart and a more
+  button, a seek bar and a transport that mirrors the player bar's: both are
+  refreshed from one place, so either drives playback and seeking, dragging
+  included, and the other follows. The synced line being heard shows under
+  the title once a lyrics view has loaded the song's lyrics; the page never
+  looks them up or fetches them. A wide window adds Up Next, the next ten
+  entries with Clear and View Full Queue, and Track Info; with nothing
+  playing the page says so. The Queue page lists flush rows with the
+  position or a play mark, a thumbnail, the title over the artist, the
+  heart, rating stars on hover or once rated, the duration and a remove
+  button on hover, under the song count, length and Clear. Secondary and
+  tertiary text over the covers behind album, artist and Now Playing headers
+  is white at reduced opacity, and the tertiary text colour is lighter
+  everywhere, so both stay above 4.5:1 on a light cover. The player bar's
+  format line and the inspector's Signal Path now show the Device stage on
+  the first song played, reading the signal path once more when the output
+  starts running and only while it is on screen.
+- **`orca-gtk`'s Settings is a page following the new design.** The
+  sidebar's Settings item, the main menu and Ctrl+, open it in the content
+  area instead of a dialog, with Settings selected in the sidebar. A
+  segmented tab bar chooses Library, Playback, Sound or Listening, each a
+  set of cards with an icon, a title and a one-line description, in two
+  columns or one when the window is narrow. Add Folder… and Rescan All
+  Folders are buttons under the folder list, and the tab last open is kept
+  until the app quits.
+- **`orca-gtk`'s Library Health and Matches pages follow the new design.**
+  Library Health opens with its issue count and the library's album, song
+  and artist counts, then a card for each kind of issue in
+  `libraryHealthSummary`'s order: a symbolic icon tinted by severity, the
+  kind's name, a one-line explanation, its file count and, for recording
+  mismatches, Review, which opens Matches. Expanding a card lists that
+  kind's files 512 at a time with Show more, each keeping its Fix, Fetch
+  Cover, Compare, Review, Show in Files and Dismiss actions. Open cards,
+  how far each has loaded and the scroll position survive a reload, such
+  as after a dismiss or a fix. The Analyse banner is a card above them.
+  Matches and its Corrections are cards of flush rows under the page title.
 - **Library schema version 31.** Adds `track_lyrics`.
 
 ## 0.8.1 - 2026-10-02

@@ -19,6 +19,14 @@ pub fn formatMs(buffer: []u8, milliseconds: u64) [:0]const u8 {
 }
 
 /// `text` NUL-terminated in `buffer`, or empty if it does not fit.
+pub fn totalDuration(buffer: []u8, duration_ms: i64) []const u8 {
+    const minutes: u64 = @intCast(@divTrunc(@max(duration_ms, 0) + 30_000, 60_000));
+    if (minutes < 60) return std.fmt.bufPrint(buffer, "{d} min", .{minutes}) catch "";
+    const rest = minutes % 60;
+    if (rest == 0) return std.fmt.bufPrint(buffer, "{d} hr", .{minutes / 60}) catch "";
+    return std.fmt.bufPrint(buffer, "{d} hr {d} min", .{ minutes / 60, rest }) catch "";
+}
+
 pub fn terminated(buffer: []u8, text: []const u8) [:0]const u8 {
     return printZ(buffer, "{s}", .{text}) catch "";
 }

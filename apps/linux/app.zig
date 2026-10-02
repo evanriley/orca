@@ -15,20 +15,25 @@ const mpris = @import("mpris.zig");
 const art = @import("art.zig");
 const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
+const song_table = @import("song_table.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
+const artists = @import("artists.zig");
 const details = @import("details.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const health = @import("health.zig");
 const lyrics = @import("lyrics.zig");
+const nowplaying = @import("nowplaying.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
 pub const page_size: u32 = 512;
 pub const page_history_depth = 16;
 pub const open_album_page_limit = 32;
+pub const open_artist_page_limit = 8;
 
-pub const Sidebar = enum { hidden, details, lyrics };
+pub const Sidebar = enum { hidden, details, lyrics, signal_path };
 
 /// Which shelf of the library the track list is showing, and in what order.
 ///
@@ -79,8 +84,8 @@ pub const OwnedText = struct {
 pub const equalizer_band_count = @typeInfo(@FieldType(liborca.Equalizer, "gains_db")).array.len;
 pub const crossfeed_amounts = [_]f32{ 0.2, 0.35, 0.5 };
 
-/// The widgets of Preferences' Sound page that its handlers reach back to.
-/// Reset when the dialog closes, since GTK destroys them with it.
+/// The widgets of Settings' Sound tab that its handlers reach back to.
+/// Reset when the page is left, since GTK destroys them with the tabs.
 pub const SoundControls = struct {
     preset_row: ?*gtk.Widget = null,
     preset_names: ?*gtk.StringList = null,
@@ -88,6 +93,32 @@ pub const SoundControls = struct {
     band_scales: [equalizer_band_count]?*gtk.Widget = @splat(null),
     preamp_row: ?*gtk.Widget = null,
     crossfeed_amount_row: ?*gtk.Widget = null,
+};
+
+pub const SettingsTab = enum { library, playback, sound, listening };
+
+pub const SettingsPage = struct {
+    host: ?*gtk.Box = null,
+    body: ?*gtk.Widget = null,
+    tabs: ?*adw.ViewStack = null,
+    columns: [@typeInfo(SettingsTab).@"enum".fields.len]?*gtk.Widget = @splat(null),
+    folder_slot: ?*gtk.Box = null,
+    measure_row: ?*gtk.Widget = null,
+    measure_button: ?*gtk.Widget = null,
+    tab: SettingsTab = .library,
+};
+
+pub const TransportSurface = enum { bar, now_playing };
+
+pub const TransportControls = struct {
+    shuffle: ?*gtk.Widget = null,
+    previous: ?*gtk.Widget = null,
+    play: ?*gtk.Widget = null,
+    next: ?*gtk.Widget = null,
+    repeat: ?*gtk.Widget = null,
+    scale: ?*gtk.Widget = null,
+    elapsed: ?*gtk.Label = null,
+    total: ?*gtk.Label = null,
 };
 
 pub const CredentialControls = struct {
@@ -139,7 +170,7 @@ pub const App = struct {
     /// Tracks the running matching job had matched when the badge was last
     /// counted.
     shown_matched: u64 = 0,
-    /// The output device chosen in Preferences, by name, so the choice
+    /// The output device chosen in Settings, by name, so the choice
     /// survives device ids being renumbered between runs.
     preferred_output: OwnedText = .{},
     library_path: ?[:0]u8 = null,
@@ -152,18 +183,14 @@ pub const App = struct {
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,
 
-    tracks: ?*gtk.ListStore = null,
-    selection: ?*gtk.SelectionModel = null,
-    column_view: ?*gtk.ColumnView = null,
+    songs: song_table.Table = .{},
     scroller: ?*gtk.Widget = null,
     query: OwnedText = .{},
     loaded_rows: u32 = 0,
     page_exhausted: bool = false,
     track_total: u64 = 0,
     browse: Browse = .{},
-    /// The header widgets, in `track_model.Column.all` order, so the column a
-    /// header click reports can be turned back into a sort key.
-    sort_columns: [track_model.Column.all.len]?*gtk.ColumnViewColumn = @splat(null),
+    sort_dropdown: ?*gtk.DropDown = null,
 
     artists: ?*gtk.ListStore = null,
     artist_selection: ?*gtk.SingleSelection = null,
@@ -196,11 +223,12 @@ pub const App = struct {
     split_view: ?*adw.NavigationSplitView = null,
     content_page: ?*adw.NavigationPage = null,
     sidebar: ?*adw.Sidebar = null,
+    settings_sidebar: ?*adw.Sidebar = null,
     pages: ?*gtk.Stack = null,
     current_page: window.Page = .albums,
     page_history: [page_history_depth]window.Page = undefined,
     page_history_len: usize = 0,
-    tracks_title: ?*adw.WindowTitle = null,
+    tracks_meta: ?*gtk.Label = null,
     /// The Tracks page's body: the browser and list, or a status page when
     /// there is nothing to list.
     tracks_body: ?*gtk.Stack = null,
@@ -212,8 +240,10 @@ pub const App = struct {
 
     /// What the details panels show, restored from settings.
     sidebar_page: Sidebar = .hidden,
-    /// Set while the window is below the breakpoint that hides the panels.
+    /// Set while the window is below the breakpoint that lays the panels over
+    /// the content.
     window_narrow: bool = false,
+    inspector_overlaid: bool = false,
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
     lyrics: lyrics.State = .{},
     seen_recorded_listens: u64 = 0,
@@ -221,20 +251,22 @@ pub const App = struct {
     album_store: ?*gtk.ListStore = null,
     albums_loaded: u32 = 0,
     albums_exhausted: bool = false,
-    albums_title: ?*adw.WindowTitle = null,
+    albums_meta: ?*gtk.Label = null,
     albums_body: ?*gtk.Stack = null,
     albums_navigation: ?*adw.NavigationView = null,
     album_sort: liborca.ReleaseSort = .artist,
+    album_shelf_sort: liborca.ReleaseSort = .artist,
+    album_loved_only: bool = false,
+    album_sort_control: ?*gtk.DropDown = null,
+    album_chips: [3]?*gtk.ToggleButton = @splat(null),
+    albums_empty: ?*adw.StatusPage = null,
+    albums_syncing_controls: bool = false,
     open_album_pages: [open_album_page_limit]*albums.AlbumPage = undefined,
     open_album_page_count: usize = 0,
+    open_artist_pages: [open_artist_page_limit]*artists.ArtistPage = undefined,
+    open_artist_page_count: usize = 0,
 
-    now_cover: ?*gtk.Widget = null,
-    now_title: ?*gtk.Label = null,
-    now_artist: ?*gtk.Label = null,
-    now_album: ?*gtk.Label = null,
-    now_up_next: ?*gtk.ListBox = null,
-    now_up_next_heading: ?*gtk.Widget = null,
-    tint_provider: ?*gtk.CssProvider = null,
+    now_playing: nowplaying.State = .{},
 
     art: art.Cache = .{},
     /// What the open right-click menu acts on.
@@ -242,13 +274,7 @@ pub const App = struct {
     playlists: playlists.State = .{},
     loved: loved.State = .{},
 
-    health_list: ?*gtk.ListBox = null,
-    health_note: ?*gtk.Label = null,
-    health_body: ?*gtk.Stack = null,
-    health_title: ?*adw.WindowTitle = null,
-    health_count: ?*gtk.Label = null,
-    health_banner: ?*adw.Banner = null,
-    health_issues_shown: u64 = 0,
+    health: health.State = .{},
 
     matches_list: ?*gtk.ListBox = null,
     matches_corrections: ?*gtk.ListBox = null,
@@ -256,7 +282,7 @@ pub const App = struct {
     matches_group_count: u64 = 0,
     matches_note: ?*gtk.Label = null,
     matches_body: ?*gtk.Stack = null,
-    matches_title: ?*adw.WindowTitle = null,
+    matches_meta: ?*gtk.Label = null,
     matches_count: ?*gtk.Label = null,
     matches_empty: ?*adw.StatusPage = null,
     matches_empty_button: ?*gtk.Widget = null,
@@ -272,7 +298,7 @@ pub const App = struct {
     acoustid_key_stored: bool = false,
     acoustid_controls: CredentialControls = .{},
 
-    preferences_dialog: ?*adw.Dialog = null,
+    settings_page: SettingsPage = .{},
 
     /// Files Measure Loudness decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,
@@ -306,7 +332,7 @@ pub const App = struct {
     artist_list_loaded: u32 = 0,
     artist_list_exhausted: bool = false,
     artist_list_filter: OwnedText = .{},
-    artist_list_title: ?*adw.WindowTitle = null,
+    artist_list_meta: ?*gtk.Label = null,
     artist_list_search: ?*gtk.Widget = null,
     artists_navigation: ?*adw.NavigationView = null,
 
@@ -314,13 +340,8 @@ pub const App = struct {
     scan_label: ?*gtk.Label = null,
     scan_detail: ?*gtk.Label = null,
 
-    previous_button: ?*gtk.Widget = null,
-    play_button: ?*gtk.Widget = null,
-    next_button: ?*gtk.Widget = null,
-    seek_scale: ?*gtk.Scale = null,
+    transport_controls: std.EnumArray(TransportSurface, TransportControls) = .initFill(.{}),
     seek_adjustment: ?*gtk.Adjustment = null,
-    elapsed_label: ?*gtk.Label = null,
-    total_label: ?*gtk.Label = null,
     now_playing_title: ?*gtk.Label = null,
     now_playing_detail: ?*gtk.Label = null,
     /// The now-playing cover. One widget in two states: a paintable when the
@@ -331,12 +352,21 @@ pub const App = struct {
     now_playing_box: ?*gtk.Widget = null,
     love_button: ?*gtk.Widget = null,
     now_love_button: ?*gtk.Widget = null,
-    volume_button: ?*gtk.Widget = null,
-    shuffle_button: ?*gtk.Widget = null,
-    repeat_button: ?*gtk.Widget = null,
+    volume_adjustment: ?*gtk.Adjustment = null,
+    volume_icon: ?*gtk.Widget = null,
+    volume_scale: ?*gtk.Widget = null,
+    volume_menu: ?*gtk.Widget = null,
     device_list: ?*gtk.ListBox = null,
     device_popover: ?*gtk.Popover = null,
+    device_label: ?*gtk.Label = null,
+    device_icon: ?*gtk.Widget = null,
     signal_path_label: ?*gtk.Label = null,
+    format_slot: ?*gtk.Widget = null,
+    format_button: ?*gtk.Widget = null,
+    format_label: ?*gtk.Label = null,
+    signal_path_popover: ?*gtk.Popover = null,
+    signal_path_has_output: bool = false,
+    volume_settle_timer: c_uint = 0,
     device_ids: std.ArrayList(u64) = .empty,
     device_checks: std.ArrayList(*gtk.Widget) = .empty,
     /// Names in `device_ids` order, as the output menu shows them.
@@ -359,13 +389,15 @@ pub const App = struct {
     repeat_mode: liborca.RepeatMode = .off,
 
     queue_store: ?*gtk.ListStore = null,
-    queue_title: ?*adw.WindowTitle = null,
+    queue_meta: ?*gtk.Label = null,
     queue_body: ?*gtk.Stack = null,
     queue_count: ?*gtk.Label = null,
     /// What the queue page last showed, so it is rebuilt only when the queue
     /// or its position actually moved.
     shown_queue_length: u32 = std.math.maxInt(u32),
     shown_queue_index: u32 = std.math.maxInt(u32),
+    shown_queue_shuffle: ?bool = null,
+    shown_queue_serial: u32 = std.math.maxInt(u32),
     queue_visible: bool = false,
 
     mpris: mpris.Mpris = .{},
@@ -439,23 +471,13 @@ pub const App = struct {
     pub fn applyScopeDefaultSort(self: *App) void {
         self.browse.sort = self.browse.defaultSort();
         self.browse.direction = .ascending;
-        const view = self.column_view orelse return;
-        var chosen: ?*gtk.ColumnViewColumn = null;
-        for (track_model.Column.all, self.sort_columns) |column, header| {
-            if (column.sortKey() == self.browse.sort) chosen = header;
-        }
-        // Sorting the view is indistinguishable from a header click to GTK, and
-        // its "changed" signal would arrive back here as one.
-        const previous = self.suppress_browse_signals;
-        self.suppress_browse_signals = true;
-        defer self.suppress_browse_signals = previous;
-        gtk.gtk_column_view_sort_by_column(view, chosen, gtk.SORT_ASCENDING);
+        window.showSort(self);
     }
 
     fn updateCountLabel(self: *App) void {
-        const title = self.tracks_title orelse return;
+        const meta = self.tracks_meta orelse return;
         if (self.library == null) {
-            adw.adw_window_title_set_subtitle(title, "No library");
+            gtk.gtk_label_set_text(meta, "No library");
             return;
         }
         var buffer: [96]u8 = undefined;
@@ -465,10 +487,10 @@ pub const App = struct {
                 if (self.page_exhausted) "" else "+",
             }) catch ""
         else if (self.track_total == 1)
-            "1 track"
+            "1 song"
         else
-            strings.printZ(&buffer, "{d} tracks", .{self.track_total}) catch "";
-        adw.adw_window_title_set_subtitle(title, text.ptr);
+            strings.printZ(&buffer, "{d} songs", .{self.track_total}) catch "";
+        gtk.gtk_label_set_text(meta, text.ptr);
     }
 
     /// Chooses what the Tracks page shows: the listing, a welcome for a library
@@ -512,7 +534,7 @@ pub const App = struct {
     pub fn loadNextPage(self: *App) void {
         const library = self.library orelse return;
         if (self.page_exhausted) return;
-        const store = self.tracks orelse return;
+        const store = self.songs.store orelse return;
         var page = self.runtime.libraryTrackQuery(
             library,
             self.query.value,
@@ -532,7 +554,7 @@ pub const App = struct {
             self.allocator,
             page.items.len,
         ) catch {
-            self.toast("Out of memory building the track list");
+            self.toast("Out of memory building the song list");
             return;
         };
         defer additions.deinit(self.allocator);
@@ -555,7 +577,7 @@ pub const App = struct {
     }
 
     pub fn reload(self: *App) void {
-        const store = self.tracks orelse return;
+        const store = self.songs.store orelse return;
         gtk.g_list_store_remove_all(store);
         self.loaded_rows = 0;
         self.page_exhausted = false;
@@ -585,6 +607,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
+        if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
         self.query.clear(self.allocator);
         self.artist_filter.clear(self.allocator);
         self.artist_scope_name.clear(self.allocator);

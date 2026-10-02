@@ -135,7 +135,7 @@ pub fn loadNextArtistPage(self: *App) void {
             artist.release_count,
             if (artist.release_count == 1) "album" else "albums",
             artist.track_count,
-            if (artist.track_count == 1) "track" else "tracks",
+            if (artist.track_count == 1) "song" else "songs",
         }) catch "";
         append(store, artist.id, artist.name, detail);
     }
@@ -182,7 +182,7 @@ pub fn loadNextReleasePage(self: *App) void {
     for (page.items) |release| {
         const discs = release.disc_count orelse 1;
         const detail = if (discs > 1)
-            strings.printZ(&buffer, "{s} · {d} tracks · {d} discs", .{
+            strings.printZ(&buffer, "{s} · {d} songs · {d} discs", .{
                 release.album_artist,
                 release.track_count,
                 discs,
@@ -191,7 +191,7 @@ pub fn loadNextReleasePage(self: *App) void {
             strings.printZ(&buffer, "{s} · {d} {s}", .{
                 release.album_artist,
                 release.track_count,
-                if (release.track_count == 1) "track" else "tracks",
+                if (release.track_count == 1) "song" else "songs",
             }) catch "";
         append(store, release.id, release.title, detail);
     }
@@ -245,6 +245,38 @@ pub fn reload(self: *App) void {
     self.applyScopeDefaultSort();
 }
 
+pub fn scopeToArtist(self: *App, artist_id: i64, name: []const u8) void {
+    const previous = self.suppress_browse_signals;
+    self.suppress_browse_signals = true;
+    self.artist_filter.set(self.allocator, name);
+    if (self.artist_search_entry) |entry| gtk.gtk_editable_set_text(entry, self.artist_filter.value.ptr);
+    reloadArtists(self);
+    selectArtist(self, artist_id);
+    self.suppress_browse_signals = previous;
+    self.browse.artist_id = artist_id;
+    self.browse.release_id = null;
+    self.artist_scope_name.set(self.allocator, name);
+    clearSearch(self);
+    reloadReleases(self);
+    self.applyScopeDefaultSort();
+    self.reload();
+}
+
+fn selectArtist(self: *App, artist_id: i64) void {
+    const store = self.artists orelse return;
+    const selection = self.artist_selection orelse return;
+    const model = gtk.cast(gtk.ListModel, store);
+    var position: c_uint = 0;
+    while (position < gtk.g_list_model_get_n_items(model)) : (position += 1) {
+        const item = gtk.g_list_model_get_item(model, position) orelse continue;
+        defer gtk.g_object_unref(item);
+        const row: *BrowseObject = @ptrCast(@alignCast(item));
+        if (row.id() != artist_id) continue;
+        gtk.gtk_single_selection_set_selected(selection, position);
+        return;
+    }
+}
+
 fn artistSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
@@ -279,8 +311,9 @@ fn artistSelected(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
 fn artistFilterChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
-    const text = gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry));
-    self.artist_filter.set(self.allocator, std.mem.span(text));
+    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry)));
+    if (std.mem.eql(u8, text, self.artist_filter.value)) return;
+    self.artist_filter.set(self.allocator, text);
     const had_scope = self.browse.artist_id != null or self.browse.release_id != null;
     reloadArtists(self);
     if (!had_scope) return;

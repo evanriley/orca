@@ -288,7 +288,7 @@ metadata; see [metadata.md](metadata.md#accepting-a-match).
   `cover_art` then fetches the Release's cover as in
   [Cover Art Archive](#cover-art-archive), under the Release id it started
   with; the files given values are then reprojected once. `orca-gtk`'s Match
-  Album runs all three with the review threshold from Preferences.
+  Album runs all three with the review threshold from Settings.
 - **Re-identify.** `MatchRequest.mode = .reidentify` searches one Track
   (`track_id`) or one Release's Tracks (`release_id`) again: every one with a
   playing file, whatever recording ID is in effect and whatever services

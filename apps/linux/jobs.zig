@@ -22,6 +22,7 @@ const tags = @import("tags.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
 const art = @import("art.zig");
+const preferences = @import("preferences.zig");
 
 const App = app.App;
 
@@ -69,8 +70,10 @@ pub fn reloadLibraryViews(self: *App) void {
     artists.reload(self);
     health.reload(self);
     matches.reload(self);
+    playlists.refresh(self);
     playlists.reloadPage(self, true);
     loved.reload(self);
+    preferences.refreshLibrary(self);
 }
 
 pub fn build(self: *App) *gtk.Widget {
@@ -246,7 +249,7 @@ pub fn startCoverArtFetch(self: *App, release_id: i64) void {
     begin(self, .matching, job, "Fetching cover art");
 }
 
-const acoustid_required = "Verify needs AcoustID: turn on Match by audio fingerprint in Preferences";
+const acoustid_required = "Verify needs AcoustID: turn on Match by audio fingerprint in Settings";
 
 fn matchingRefusal(err: anyerror) [:0]const u8 {
     return switch (err) {
@@ -311,6 +314,7 @@ fn folderChosen(
         self.toast("Could not add that folder to the library");
         return;
     };
+    preferences.refreshLibrary(self);
     startScan(self, binding.root_id);
 }
 
@@ -490,7 +494,7 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
     if (state_value == .cancelled) return self.toast("Stopped");
     const result = stats orelse return self.toast("AcoustID could not be reached; try again later");
     if (state_value != .succeeded) return self.toast(switch (result.outcome) {
-        .needs_user_key => "Save your AcoustID key in Preferences first",
+        .needs_user_key => "Save your AcoustID key in Settings first",
         .invalid_user_key => "AcoustID did not accept your key",
         .cancelled => "Stopped",
         .busy => "AcoustID is in use by another Orca process; try again once it finishes",
@@ -533,6 +537,7 @@ fn finished(
                 strings.printZ(&buffer, "{d} new or changed files added", .{found}) catch "Scan complete");
         },
         .analysis => {
+            preferences.refreshLibrary(self);
             const measured = if (stats) |value| value.changed + value.unchanged else 0;
             self.toast(strings.printZ(&buffer, "Analysed {d} {s}", .{ measured, if (measured == 1) "file" else "files" }) catch "Analysed");
         },

@@ -94,11 +94,11 @@ fn playlistMenu(self: *App) *gtk.GMenu {
     const create = gtk.g_menu_new();
     gtk.g_menu_append(create, "New Playlist…", "app.ctx-add-to-new-playlist");
     const existing = gtk.g_menu_new();
-    for (playlists.names(self), playlists.ids(self)) |name, id| {
+    for (playlists.cards(self)) |card| {
         var label_buffer: [512]u8 = undefined;
         var action_buffer: [64]u8 = undefined;
-        const action = strings.printZ(&action_buffer, "app.ctx-add-to-playlist(int64 {d})", .{id}) catch continue;
-        gtk.g_menu_append(existing, playlists.menuLabel(&label_buffer, name).ptr, action.ptr);
+        const action = strings.printZ(&action_buffer, "app.ctx-add-to-playlist(int64 {d})", .{card.id}) catch continue;
+        gtk.g_menu_append(existing, playlists.menuLabel(&label_buffer, card.name).ptr, action.ptr);
     }
     const choices = gtk.g_menu_new();
     gtk.g_menu_append_section(choices, null, gtk.cast(gtk.GMenuModel, create));
@@ -239,7 +239,11 @@ fn closed(popover: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
 pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
     const menu = model(self, &self.context, countFeedback(&self.context));
     defer gtk.g_object_unref(menu);
-    const popover = gtk.gtk_popover_menu_new_from_model(gtk.cast(gtk.GMenuModel, menu));
+    popupModel(widget, gtk.cast(gtk.GMenuModel, menu), x, y);
+}
+
+pub fn popupModel(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, x: f64, y: f64) void {
+    const popover = gtk.gtk_popover_menu_new_from_model(menu_model);
     gtk.gtk_widget_set_parent(popover, widget);
     gtk.gtk_popover_set_has_arrow(gtk.cast(gtk.Popover, popover), gtk.false_);
     const point: gtk.Rectangle = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .width = 1, .height = 1 };

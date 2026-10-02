@@ -26,6 +26,9 @@ why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
 resampler, with libsamplerate (BSD-2-Clause) resampling instead; a build step
 fails if a compiled Chromaprint source carries a GPL or LGPL notice. A frontend dynamically linking its platform's own toolkit or
 keyring, as `orca-gtk` does with LGPL GTK4 and libsecret, is outside that rule.
+So are the fonts `orca-gtk` bundles, Inter and Source Serif 4: they are under
+the SIL Open Font License, ship only with the frontend, and keep their licence
+texts beside them in `apps/linux/data/fonts`.
 
 ## Toolchain
 

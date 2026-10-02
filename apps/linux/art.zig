@@ -58,13 +58,87 @@ pub const Key = struct {
     }
 };
 
-/// The average colour of a large cover, for tinting what surrounds it.
-pub const Tint = struct { red: u8, green: u8, blue: u8 };
+const backdrop_pixels: usize = 64;
+const backdrop_blur_radius: usize = 2;
+const backdrop_blur_passes: usize = 3;
+const backdrop_brightness_percent: u32 = 50;
+
+/// A small, blurred copy of `texture` to draw scaled up behind a page. Under
+/// the cairo renderer a CSS blur of the full cover costs a third of a core
+/// while scrolling.
+pub fn blurredBackdrop(allocator: std.mem.Allocator, texture: *gtk.GdkTexture) ?*gtk.GdkTexture {
+    const source_width: usize = @intCast(@max(gtk.gdk_texture_get_width(texture), 0));
+    const source_height: usize = @intCast(@max(gtk.gdk_texture_get_height(texture), 0));
+    if (source_width == 0 or source_height == 0) return null;
+    const source = allocator.alloc(u8, source_width * source_height * 4) catch return null;
+    defer allocator.free(source);
+    gtk.gdk_texture_download(texture, source.ptr, source_width * 4);
+
+    const longest = @max(source_width, source_height);
+    const width = @max(1, source_width * backdrop_pixels / longest);
+    const height = @max(1, source_height * backdrop_pixels / longest);
+    const pixels = allocator.alloc([4]u8, width * height) catch return null;
+    defer allocator.free(pixels);
+    const scratch = allocator.alloc([4]u8, width * height) catch return null;
+    defer allocator.free(scratch);
+    downscale(source, source_width, source_height, pixels, width, height);
+    for (0..backdrop_blur_passes) |_| {
+        boxBlur(pixels, scratch, width, height, 1, width);
+        boxBlur(scratch, pixels, height, width, width, 1);
+    }
+    for (pixels) |*pixel| {
+        for (pixel[0..3]) |*channel| channel.* = @intCast(@as(u32, channel.*) * backdrop_brightness_percent / 100);
+    }
+
+    const bytes = gtk.g_bytes_new(pixels.ptr, pixels.len * 4);
+    defer gtk.g_bytes_unref(bytes);
+    return gtk.gdk_memory_texture_new(
+        @intCast(width),
+        @intCast(height),
+        gtk.MEMORY_B8G8R8A8_PREMULTIPLIED,
+        bytes,
+        width * 4,
+    );
+}
+
+fn downscale(source: []const u8, source_width: usize, source_height: usize, target: [][4]u8, width: usize, height: usize) void {
+    for (0..height) |y| {
+        const top = y * source_height / height;
+        const bottom = @max(top + 1, (y + 1) * source_height / height);
+        for (0..width) |x| {
+            const left = x * source_width / width;
+            const right = @max(left + 1, (x + 1) * source_width / width);
+            var sums: [4]u32 = @splat(0);
+            for (top..bottom) |row| {
+                for (left..right) |column| {
+                    const pixel = source[(row * source_width + column) * 4 ..][0..4];
+                    for (&sums, pixel) |*sum, channel| sum.* += channel;
+                }
+            }
+            const count: u32 = @intCast((bottom - top) * (right - left));
+            for (&target[y * width + x], sums) |*channel, sum| channel.* = @intCast(sum / count);
+        }
+    }
+}
+
+fn boxBlur(source: []const [4]u8, target: [][4]u8, length: usize, lines: usize, step: usize, line_step: usize) void {
+    const window: u32 = backdrop_blur_radius * 2 + 1;
+    for (0..lines) |line| {
+        const start = line * line_step;
+        for (0..length) |position| {
+            var sums: [4]u32 = @splat(0);
+            for (0..window) |offset| {
+                const sample = std.math.clamp(position + offset, backdrop_blur_radius, length - 1 + backdrop_blur_radius) - backdrop_blur_radius;
+                for (&sums, source[start + sample * step]) |*sum, channel| sum.* += channel;
+            }
+            for (&target[start + position * step], sums) |*channel, sum| channel.* = @intCast(sum / window);
+        }
+    }
+}
 
 const Entry = struct {
     /// Null when the subject has no readable cover.
     texture: ?*gtk.GdkTexture,
-    tint: ?Tint,
     used: u64,
 };
 
@@ -84,7 +158,6 @@ const Decode = struct {
     key: Key,
     image: liborca.EmbeddedImage,
     texture: ?*gtk.GdkTexture = null,
-    tint: ?Tint = null,
 };
 
 pub const Cache = struct {
@@ -99,9 +172,6 @@ pub const Cache = struct {
     decoding: std.AutoHashMapUnmanaged(Key, void) = .empty,
     bindings: std.ArrayList(Binding) = .empty,
     clock: u64 = 0,
-    /// Called on the main thread when a cover finishes, for widgets that are
-    /// not registered bindings (the Now Playing tint).
-    on_ready: ?*const fn (*App, Key) void = null,
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
         var entries = self.entries.valueIterator();
@@ -147,8 +217,8 @@ pub fn iconPlaceholder(pixels: c_int) *gtk.Widget {
     return icon;
 }
 
-/// A placeholder for an album: its initials on a colour chosen from its title,
-/// so a grid of albums without covers still reads as distinct albums.
+/// A placeholder for an album: its initials on a neutral surface, so a grid of
+/// albums without covers still reads as distinct albums.
 pub fn initialsPlaceholder() *gtk.Widget {
     const label = gtk.gtk_label_new(null);
     gtk.gtk_widget_add_css_class(label, "cover-initials");
@@ -171,14 +241,6 @@ pub fn setInitials(stack_widget: *gtk.Widget, title: []const u8) void {
     }
     buffer[length] = 0;
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), @ptrCast(&buffer));
-    const palette = [_][*:0]const u8{ "tile-0", "tile-1", "tile-2", "tile-3", "tile-4", "tile-5" };
-    const chosen = std.hash.Wyhash.hash(0, title) % palette.len;
-    for (palette, 0..) |class, index| {
-        if (index == chosen)
-            gtk.gtk_widget_add_css_class(stack_widget, class)
-        else
-            gtk.gtk_widget_remove_css_class(stack_widget, class);
-    }
 }
 
 fn paint(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
@@ -226,6 +288,11 @@ pub fn forget(self: *App, stack_widget: *gtk.Widget) void {
     }
 }
 
+pub fn clear(self: *App, stack_widget: *gtk.Widget) void {
+    forget(self, stack_widget);
+    paint(gtk.cast(gtk.Stack, stack_widget), null);
+}
+
 /// Drops a Release's cached covers and asks again for each one a widget
 /// shows, so a cover fetched since replaces the placeholder.
 pub fn refreshRelease(self: *App, release_id: i64) void {
@@ -241,19 +308,6 @@ pub fn refreshRelease(self: *App, release_id: i64) void {
         }
         if (isWanted(cache, key)) want(self, key);
     }
-}
-
-/// The cached cover's tint, if its large decode has finished.
-pub fn tintOf(self: *App, key: Key) ?Tint {
-    const entry = self.art.entries.get(key) orelse return null;
-    return entry.tint;
-}
-
-/// Asks for a cover no widget is bound to, so `on_ready` hears of it.
-pub fn prefetch(self: *App, key: Key) bool {
-    if (self.art.entries.contains(key)) return true;
-    want(self, key);
-    return false;
 }
 
 fn isWanted(cache: *const Cache, key: Key) bool {
@@ -291,18 +345,17 @@ fn abandon(self: *App, key: Key) void {
     _ = cache.requests.remove(request);
 }
 
-fn remember(self: *App, key: Key, texture: ?*gtk.GdkTexture, tint: ?Tint) void {
+fn remember(self: *App, key: Key, texture: ?*gtk.GdkTexture) void {
     const cache = &self.art;
     if (cache.entries.count() >= max_entries) evictOldest(cache);
     cache.clock += 1;
-    cache.entries.put(self.allocator, key, .{ .texture = texture, .tint = tint, .used = cache.clock }) catch {
+    cache.entries.put(self.allocator, key, .{ .texture = texture, .used = cache.clock }) catch {
         if (texture) |present| gtk.g_object_unref(present);
         return;
     };
     for (cache.bindings.items) |binding| {
         if (std.meta.eql(binding.key, key)) paint(binding.stack, texture);
     }
-    if (cache.on_ready) |notify| notify(self, key);
 }
 
 fn evictOldest(cache: *Cache) void {
@@ -332,7 +385,7 @@ pub fn tick(self: *App) void {
         _ = cache.requests.remove(result.request);
         _ = cache.pending.remove(key);
         const image = result.image orelse {
-            remember(self, key, null, null);
+            remember(self, key, null);
             continue;
         };
         cache.waiting.append(self.allocator, .{ .key = key, .image = image }) catch {
@@ -378,38 +431,8 @@ fn decodeInThread(task: *gtk.GTask, _: ?*anyopaque, data: ?*anyopaque, _: ?*gtk.
     if (gtk.gdk_pixbuf_new_from_stream_at_scale(stream, pixels, pixels, gtk.true_, null, &err)) |pixbuf| {
         defer gtk.g_object_unref(pixbuf);
         job.texture = gtk.gdk_texture_new_for_pixbuf(pixbuf);
-        if (job.key.size == .large) job.tint = averageColour(pixbuf);
     } else gtk.g_clear_error(&err);
     gtk.g_task_return_pointer(task, job, null);
-}
-
-/// The mean colour of every eighth pixel in each direction, which is plenty
-/// for a background wash.
-fn averageColour(pixbuf: *gtk.GdkPixbuf) Tint {
-    const width: usize = @intCast(gtk.gdk_pixbuf_get_width(pixbuf));
-    const height: usize = @intCast(gtk.gdk_pixbuf_get_height(pixbuf));
-    const stride: usize = @intCast(gtk.gdk_pixbuf_get_rowstride(pixbuf));
-    const channels: usize = @intCast(gtk.gdk_pixbuf_get_n_channels(pixbuf));
-    const data = gtk.gdk_pixbuf_get_pixels(pixbuf);
-    var sums: [3]u64 = .{ 0, 0, 0 };
-    var count: u64 = 0;
-    var y: usize = 0;
-    while (y < height) : (y += 8) {
-        var x: usize = 0;
-        while (x < width) : (x += 8) {
-            const pixel = data + y * stride + x * channels;
-            sums[0] += pixel[0];
-            sums[1] += pixel[1];
-            sums[2] += pixel[2];
-            count += 1;
-        }
-    }
-    if (count == 0) return .{ .red = 128, .green = 128, .blue = 128 };
-    return .{
-        .red = @intCast(sums[0] / count),
-        .green = @intCast(sums[1] / count),
-        .blue = @intCast(sums[2] / count),
-    };
 }
 
 fn decoded(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
@@ -423,6 +446,6 @@ fn decoded(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callc
     defer self.allocator.destroy(job);
     job.image.deinit();
     _ = self.art.decoding.remove(job.key);
-    remember(self, job.key, job.texture, job.tint);
+    remember(self, job.key, job.texture);
     startDecodes(self);
 }

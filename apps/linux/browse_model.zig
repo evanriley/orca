@@ -25,6 +25,7 @@ pub const Fields = struct {
     id: ?i64 = null,
     name: [:0]u8 = &empty,
     detail: [:0]u8 = &empty,
+    caption: [:0]u8 = &empty,
 };
 
 var empty: [0:0]u8 = .{};
@@ -47,6 +48,10 @@ pub const BrowseObject = extern struct {
 
     pub fn detail(self: *BrowseObject) [:0]const u8 {
         return self.fields().detail;
+    }
+
+    pub fn caption(self: *BrowseObject) [:0]const u8 {
+        return self.fields().caption;
     }
 };
 
@@ -86,6 +91,7 @@ fn finalize(object: *gtk.GObject) callconv(.c) void {
     const values = self.fields();
     freeText(values.name);
     freeText(values.detail);
+    freeText(values.caption);
     values.* = .{};
     if (parent_class) |parent| {
         if (parent.finalize) |chain| chain(object);
@@ -102,14 +108,19 @@ fn dupe(text: []const u8) [:0]u8 {
     return allocator.dupeSentinel(u8, text, 0) catch &empty;
 }
 
-/// Copies both strings: the page they came from is caller-owned and is released
+/// Copies the strings: the page they came from is caller-owned and is released
 /// as soon as it has been appended to the store.
 pub fn new(id: ?i64, name: []const u8, detail: []const u8) ?*BrowseObject {
+    return newWithCaption(id, name, detail, "");
+}
+
+pub fn newWithCaption(id: ?i64, name: []const u8, detail: []const u8, caption: []const u8) ?*BrowseObject {
     const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
     const self: *BrowseObject = @ptrCast(object);
     const values = self.fields();
     values.id = id;
     values.name = dupe(name);
     values.detail = dupe(detail);
+    values.caption = dupe(caption);
     return self;
 }

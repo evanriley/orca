@@ -13,6 +13,7 @@ const nowplaying = @import("nowplaying.zig");
 const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
+const page_ui = @import("page.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -31,7 +32,7 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_widget_set_size_request(marker, 28, -1);
     const number = gtk.gtk_label_new(null);
     gtk.gtk_widget_add_css_class(number, "numeric");
-    gtk.gtk_widget_add_css_class(number, "dim-label");
+    gtk.gtk_widget_add_css_class(number, "queue-number");
     const playing = gtk.gtk_image_new_from_icon_name("media-playback-start-symbolic");
     gtk.gtk_widget_add_css_class(playing, "accent");
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, marker), number, "number");
@@ -39,32 +40,28 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
 
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_hexpand(labels, gtk.true_);
+    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
     const title = gtk.gtk_label_new(null);
     const artist = gtk.gtk_label_new(null);
     for ([_]*gtk.Widget{ title, artist }) |label| {
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
         gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, label), gtk.ELLIPSIZE_END);
     }
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
+    gtk.gtk_widget_add_css_class(title, "queue-title");
+    gtk.gtk_widget_add_css_class(artist, "queue-artist");
+
     const heart = feedback.newRowButton(gtk.callback(heartClicked), self);
     gtk.g_object_set_data(heart, "orca-list-item", item);
     const stars = ratings.newRowStars(gtk.callback(starClicked), self);
     gtk.g_object_set_data(stars, "orca-list-item", item);
-    const spacer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_set_hexpand(spacer, gtk.true_);
-    const title_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), heart);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), stars);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, title_row), spacer);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), title_row);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), artist);
-    gtk.gtk_widget_add_css_class(title, "queue-title");
-    gtk.gtk_widget_add_css_class(artist, "caption");
-    gtk.gtk_widget_add_css_class(artist, "dim-label");
 
     const duration = gtk.gtk_label_new(null);
     gtk.gtk_widget_add_css_class(duration, "numeric");
-    gtk.gtk_widget_add_css_class(duration, "dim-label");
+    gtk.gtk_widget_add_css_class(duration, "queue-duration");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, duration), 1.0);
+    gtk.gtk_widget_set_size_request(duration, 44, -1);
 
     const cover = art.newCover(self, art.iconPlaceholder(thumb_pixels), thumb_pixels);
     gtk.gtk_widget_add_css_class(cover, "queue-cover");
@@ -77,11 +74,8 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.g_object_set_data(remove, "orca-list-item", item);
     _ = gtk.signalConnect(remove, "clicked", gtk.callback(removeClicked), self);
 
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), marker);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), cover);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), labels);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), duration);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, row), remove);
+    for ([_]*gtk.Widget{ marker, cover, labels, heart, stars, duration, remove }) |part|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, row), part);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
     gtk.g_object_set_data(row, "orca-list-item", item);
     menu.onSecondaryClick(row, rowMenu, self);
@@ -143,12 +137,11 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     const marker = gtk.gtk_widget_get_first_child(row) orelse return;
     const cover = gtk.gtk_widget_get_next_sibling(marker) orelse return;
     const labels = gtk.gtk_widget_get_next_sibling(cover) orelse return;
-    const duration = gtk.gtk_widget_get_next_sibling(labels) orelse return;
-    const title_row = gtk.gtk_widget_get_first_child(labels) orelse return;
-    const artist = gtk.gtk_widget_get_next_sibling(title_row) orelse return;
-    const title = gtk.gtk_widget_get_first_child(title_row) orelse return;
-    const heart = gtk.gtk_widget_get_next_sibling(title) orelse return;
+    const heart = gtk.gtk_widget_get_next_sibling(labels) orelse return;
     const stars = gtk.gtk_widget_get_next_sibling(heart) orelse return;
+    const duration = gtk.gtk_widget_get_next_sibling(stars) orelse return;
+    const title = gtk.gtk_widget_get_first_child(labels) orelse return;
+    const artist = gtk.gtk_widget_get_next_sibling(title) orelse return;
     const number = gtk.gtk_widget_get_first_child(marker) orelse return;
 
     const position = gtk.gtk_list_item_get_position(list_item);
@@ -208,7 +201,7 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, empty), "Nothing queued");
     adw.adw_status_page_set_description(
         gtk.cast(adw.StatusPage, empty),
-        "Play a track, or select several and press Enter.",
+        "Play a song, or select several and press Enter.",
     );
 
     const body = gtk.gtk_stack_new();
@@ -217,18 +210,17 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.queue_body.?, empty, "empty");
     gtk.gtk_stack_set_visible_child_name(self.queue_body.?, "empty");
 
-    const header = adw.adw_header_bar_new();
-    const title = adw.adw_window_title_new("Queue", "");
-    self.queue_title = gtk.cast(adw.WindowTitle, title);
-    adw.adw_header_bar_set_title_widget(gtk.cast(adw.HeaderBar, header), title);
+    const title = page_ui.title("Queue");
+    self.queue_meta = title.meta;
     const clear = gtk.gtk_button_new_from_icon_name("edit-clear-all-symbolic");
     gtk.gtk_widget_set_tooltip_text(clear, "Clear the queue");
     _ = gtk.signalConnect(clear, "clicked", gtk.callback(clearClicked), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), clear);
+    gtk.gtk_widget_add_css_class(clear, "flat");
+    title.add(clear);
 
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), body);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, body));
     return view;
 }
 
@@ -257,13 +249,19 @@ fn refill(self: *App, status: liborca.PlayerStatus) void {
     }
     if (self.queue_body) |body|
         gtk.gtk_stack_set_visible_child_name(body, if (additions.items.len == 0) "empty" else "list");
-    if (self.queue_title) |title| {
-        var buffer: [64]u8 = undefined;
+    if (self.queue_meta) |meta| {
+        var total_ms: i64 = 0;
+        for (page.items) |item| total_ms += item.duration_ms orelse 0;
+        var buffer: [96]u8 = undefined;
+        var duration_buffer: [32]u8 = undefined;
+        const songs: []const u8 = if (status.queue_length == 1) "song" else "songs";
         const subtitle = if (status.queue_length == 0)
             ""
+        else if (page.items.len < status.queue_length)
+            strings.format(&buffer, "{d} {s}", .{ status.queue_length, songs })
         else
-            strings.printZ(&buffer, "{d} of {d}", .{ status.queue_index + 1, status.queue_length }) catch "";
-        adw.adw_window_title_set_subtitle(title, subtitle.ptr);
+            strings.format(&buffer, "{d} {s} • {s}", .{ status.queue_length, songs, strings.totalDuration(&duration_buffer, total_ms) });
+        gtk.gtk_label_set_text(meta, subtitle.ptr);
     }
 }
 
@@ -276,6 +274,8 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
 pub fn invalidate(self: *App) void {
     self.shown_queue_length = std.math.maxInt(u32);
     self.shown_queue_index = std.math.maxInt(u32);
+    self.shown_queue_shuffle = null;
+    self.shown_queue_serial = std.math.maxInt(u32);
 }
 
 pub fn tick(self: *App) void {
@@ -288,9 +288,14 @@ pub fn tick(self: *App) void {
             strings.printZ(&buffer, "{d}", .{status.queue_length}) catch "";
         gtk.gtk_label_set_text(label, text.ptr);
     }
-    if (status.queue_length == self.shown_queue_length and status.queue_index == self.shown_queue_index) return;
+    if (status.queue_length == self.shown_queue_length and
+        status.queue_index == self.shown_queue_index and
+        status.shuffle == self.shown_queue_shuffle and
+        status.entry_serial == self.shown_queue_serial) return;
     self.shown_queue_length = status.queue_length;
     self.shown_queue_index = status.queue_index;
+    self.shown_queue_shuffle = status.shuffle;
+    self.shown_queue_serial = status.entry_serial;
     if (self.queue_visible) refill(self, status);
     nowplaying.refreshUpNext(self);
 }
