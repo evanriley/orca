@@ -109,6 +109,17 @@
   `settings.ini`, needs Match by audio fingerprint; its subtitle says when the
   next album is checked, how many were, or that AcoustID is unavailable or
   busy. Health and Matches reload when a unit finishes, without a toast.
+- **Album love and loved listings.** `Runtime.librarySetReleaseLove` loves
+  or clears Releases and returns a `ReleaseLoveChange`; the love is stored
+  in the Library's new `release_loves` table (migration 30), never in a file,
+  is never sent to ListenBrainz and changes no song's feedback. It follows
+  its album when a regrouping gives the Release a new id, as a fetched cover
+  does. `ReleaseSummary.loved`, `ReleaseQuery.loved_only` and
+  `ReleaseSort.loved` list loved albums, most recently loved first;
+  `TrackQuery.loved_only` and `TrackSort.loved` do the same for loved songs,
+  where a clear not yet sent is not a love. `orca-cli
+  love-release DATABASE IDS [--clear]`, `releases --loved` (a loved Release
+  ends in `loved`) and `tracks --loved [--sort loved]`.
 
 ### Changed
 

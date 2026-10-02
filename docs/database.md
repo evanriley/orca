@@ -542,14 +542,49 @@ file does.
 
 `release_artwork` (version 20) holds a Release's front cover fetched from the
 Cover Art Archive, one row per Release: `release_id` is its primary key and
-references `releases(id)` with `ON DELETE CASCADE`, so a Release pruned or
-reprojected under a new id loses its row. `musicbrainz_release_id` is the
+references `releases(id)` with `ON DELETE CASCADE`, so a pruned Release loses
+its row; one reprojected under a new id hands it over as
+[Album love](#album-love) describes. `musicbrainz_release_id` is the
 release ID it was fetched for, `image` and `mime` the cover, and
 `fetched_at` Unix seconds. A null `image` records that the archive had no
 cover, which stands for 30 days. `ReleaseArtworkRepository.coverReleaseMbid`
 chooses the release ID: the Release's tagged one, else the one most of its
 accepted proposals name. See
 [providers.md](providers.md#cover-art-archive).
+
+## Album love
+
+`release_loves` (version 30) records the albums the user loves: one row per
+loved Release, `release_id` its primary key referencing `releases(id)` with
+`ON DELETE CASCADE`, and `loved_at` the Unix seconds it was loved. No row
+means not loved. It is kept in the Library only: it is not `feedback`, which
+belongs to a Recording and is sent to ListenBrainz, so loving an album
+changes no song's feedback and is never sent.
+
+A Release's id is not stable. An edit, an accepted match or a retag that
+changes the album, album artist or release ID reprojects its Tracks under a
+new Release and prunes the old one, which would cascade the love away. So,
+like `release_artwork`, the projection hands the row over before pruning
+(`carryReleaseState` in `library/projection.zig`): when a Release is no longer
+used, its row goes to the Release that now holds most of its moved Tracks, a
+tie going to the lower id, and only when that Release has no row of its own.
+Two loved Releases merging into one therefore keep one love, and a split
+album's love goes to the larger side. A Release removed outright, as
+`remove-root` removes the Releases only its files used, takes its row with it.
+
+`ReleaseLoveRepository.set` loves or clears a bounded batch of Releases
+(`max_page`) in one write-lane transaction and skips, and counts, ids that
+name no Release. Loving a loved Release keeps its `loved_at`.
+`ReleaseSummary.loved` comes from a `LEFT JOIN release_loves` in the page's
+own statement; `ReleaseQuery.loved_only` and `ReleaseSort.loved` (most
+recently loved first) read the same table. It has no index on `loved_at`:
+a filtered page reads the whole table, which holds one row per loved album,
+and the unfiltered sort orders every Release however it is indexed.
+
+`TrackQuery.loved_only` and `TrackSort.loved` read `feedback` instead: a
+Track is loved when its Recording's `score` is `1`, so a clear still waiting
+to be sent (`score` `0`) is not, and the sort orders by `feedback.updated_at`,
+most recent first, with Tracks that are not loved last in either direction.
 
 ## Concurrency
 

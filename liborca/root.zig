@@ -73,6 +73,7 @@ pub const TrackEdit = runtime.TrackEdit;
 pub const TrackEditPage = runtime.TrackEditPage;
 pub const EditedTracks = runtime.EditedTracks;
 pub const RatingChange = runtime.RatingChange;
+pub const ReleaseLoveChange = runtime.ReleaseLoveChange;
 pub const PlaylistSummary = runtime.PlaylistSummary;
 pub const PlaylistPage = runtime.PlaylistPage;
 pub const PlaylistEntry = runtime.PlaylistEntry;

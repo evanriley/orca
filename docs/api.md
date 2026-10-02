@@ -162,6 +162,16 @@ defer page.deinit();
   recording id (`TrackDetails.feedback_syncable`). `ScrobblerStatus` reports
   the changes still waiting as `feedback_pending`, and the end of a
   ListenBrainz block the Library records as `blocked_until`.
+- `librarySetReleaseLove(library, release_ids, loved)` loves or clears each
+  Release and returns a `ReleaseLoveChange` counting the Releases changed and
+  the ids that name no Release. It is kept in the Library only: it changes no
+  song's feedback and is never sent to ListenBrainz. It shows as
+  `ReleaseSummary.loved`; `ReleaseQuery.loved_only` lists only loved
+  Releases and `ReleaseSort.loved` orders the most recently loved first.
+  `TrackQuery.loved_only` lists only Tracks whose song is loved, and
+  `TrackSort.loved` orders them most recently loved first, the rest last;
+  `libraryTrackQuery` returns `error.SearchDoesNotFilter` for a text search
+  with `loved_only`, as it does with an Artist or Release filter.
 - `librarySetRating(library, track_ids, ?u8)` rates the song behind each
   Track from 1 to 100, or clears it, and returns a `RatingChange`; it shows as
   `TrackSummary.rating` and `TrackDetails.rating`. Playlists are

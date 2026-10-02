@@ -38,6 +38,7 @@ pub const ReleaseSummary = struct {
     /// Summed over the Tracks that declare one; a Track whose duration is
     /// unknown contributes nothing rather than a zero-length lie.
     total_duration_ms: i64,
+    loved: bool,
 
     pub fn deinit(self: ReleaseSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.title);
@@ -59,6 +60,7 @@ pub const ReleasePage = struct {
 pub const ReleaseQuery = struct {
     album_artist_id: ?i64 = null,
     sort: ReleaseSort = .title,
+    loved_only: bool = false,
     limit: u32 = max_page,
     offset: u32 = 0,
 };
@@ -73,6 +75,8 @@ pub const ReleaseSort = enum {
     year,
     /// Most recently created first.
     recently_added,
+    /// Most recently loved first; Releases that are not loved last.
+    loved,
 
     fn terms(comptime self: ReleaseSort) []const u8 {
         return switch (self) {
@@ -82,6 +86,7 @@ pub const ReleaseSort = enum {
             .year => "releases.release_date IS NULL, releases.release_date DESC, " ++
                 "releases.title COLLATE NOCASE, releases.id",
             .recently_added => "releases.id DESC",
+            .loved => "release_loves.loved_at IS NULL, release_loves.loved_at DESC, releases.id",
         };
     }
 };
@@ -91,9 +96,22 @@ const release_columns =
     \\       releases.release_date, releases.is_compilation, releases.disc_count,
     \\       (SELECT count(*) FROM tracks WHERE tracks.release_id = releases.id),
     \\       (SELECT COALESCE(sum(tracks.duration_ms), 0) FROM tracks
-    \\        WHERE tracks.release_id = releases.id)
+    \\        WHERE tracks.release_id = releases.id),
+    \\       release_loves.release_id IS NOT NULL
+    \\FROM releases
+    \\LEFT JOIN release_loves ON release_loves.release_id = releases.id
     \\
 ;
+
+const by_loved_release = "releases.id IN (SELECT release_id FROM release_loves)";
+
+fn releaseQueryText(comptime sort: ReleaseSort, comptime by_artist: bool, comptime loved_only: bool) [:0]const u8 {
+    const artist_terms = if (by_artist) by_release_artist else "";
+    const loved_terms = if (loved_only) by_loved_release else "";
+    const joiner = if (by_artist and loved_only) " AND " else "";
+    const where = if (by_artist or loved_only) "WHERE " ++ artist_terms ++ joiner ++ loved_terms ++ "\n" else "";
+    return release_columns ++ where ++ "ORDER BY " ++ comptime sort.terms() ++ "\nLIMIT ?1 OFFSET ?2;";
+}
 
 fn collectReleasePage(allocator: std.mem.Allocator, statement: sqlite.Statement) !ReleasePage {
     var results: std.ArrayList(ReleaseSummary) = .empty;
@@ -118,6 +136,7 @@ fn collectReleasePage(allocator: std.mem.Allocator, statement: sqlite.Statement)
             .disc_count = optionalInt64(statement, 6),
             .track_count = @intCast(statement.columnInt64(7)),
             .total_duration_ms = statement.columnInt64(8),
+            .loved = statement.columnInt64(9) != 0,
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
@@ -183,14 +202,15 @@ pub const ReleaseRepository = struct {
         query: ReleaseQuery,
     ) !ReleasePage {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
+        const by_artist = query.album_artist_id != null;
         var statement = switch (query.sort) {
-            inline else => |sort| if (query.album_artist_id == null)
-                try self.db.prepare(release_columns ++
-                    "FROM releases\nORDER BY " ++ comptime sort.terms() ++ "\nLIMIT ?1 OFFSET ?2;")
-            else
-                try self.db.prepare(release_columns ++
-                    "FROM releases\nWHERE " ++ by_release_artist ++
-                    "\nORDER BY " ++ comptime sort.terms() ++ "\nLIMIT ?1 OFFSET ?2;"),
+            inline else => |sort| switch (by_artist) {
+                inline else => |artist_filter| switch (query.loved_only) {
+                    inline else => |loved_filter| try self.db.prepare(
+                        comptime releaseQueryText(sort, artist_filter, loved_filter),
+                    ),
+                },
+            },
         };
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
@@ -199,17 +219,19 @@ pub const ReleaseRepository = struct {
         return collectReleasePage(allocator, statement);
     }
 
-    /// Counts what `page` would return. Shares `by_release_artist` with it
-    /// rather than restating the predicate: `TrackRepository.countMatching`
-    /// had its own copy and drifted from the page it counted the moment the
-    /// definition widened, so the list showed rows the count above it denied.
+    /// Counts what `page` would return. Shares `by_release_artist` and
+    /// `by_loved_release` with it rather than restating the predicate:
+    /// `TrackRepository.countMatching` had its own copy and drifted from the
+    /// page it counted the moment the definition widened, so the list showed
+    /// rows the count above it denied.
     pub fn countMatching(self: *const ReleaseRepository, query: ReleaseQuery) !u64 {
         var statement = try self.db.prepare(
-            "SELECT count(*) FROM releases\nWHERE ?3 IS NULL OR " ++
-                by_release_artist ++ ";",
+            "SELECT count(*) FROM releases\nWHERE (?3 IS NULL OR " ++ by_release_artist ++ ")\n" ++
+                "  AND (?4 = 0 OR " ++ by_loved_release ++ ");",
         );
         defer statement.deinit();
         try statement.bindOptionalInt64(3, query.album_artist_id);
+        try statement.bindInt64(4, @intFromBool(query.loved_only));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -219,9 +241,7 @@ pub const ReleaseRepository = struct {
         allocator: std.mem.Allocator,
         release_id: i64,
     ) !?ReleaseSummary {
-        var statement = try self.db.prepare(release_columns ++
-            \\FROM releases WHERE releases.id = ?1;
-        );
+        var statement = try self.db.prepare(release_columns ++ "WHERE releases.id = ?1;");
         defer statement.deinit();
         try statement.bindInt64(1, release_id);
         var found = try collectReleasePage(allocator, statement);

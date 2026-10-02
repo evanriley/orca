@@ -762,6 +762,38 @@ test "feedback given while scrobbling was off is reported pending and sent once 
     try std.testing.expectEqual(@as(i32, -1), rig.listenbrainz.last_score.load(.acquire));
 }
 
+test "loving a Release leaves the feedback queued for ListenBrainz as it was and asks nothing" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-release-love?mode=memory&cache=shared");
+    try rig.identify(fixture.library, fixture.track_id, feedback_mbid);
+    try rig.runtime.setCredentialStore(rig.listenbrainz.store());
+    const library_database = try libraryDatabase(&rig.runtime, fixture.library);
+    const album = try library_database.releases.upsert(.{ .release_key = "bryter layter", .title = "Bryter Layter" });
+    _ = try rig.runtime.librarySetFeedback(fixture.library, &.{fixture.track_id}, .loved);
+    const before = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(@as(u64, 1), before.feedback_pending);
+
+    const change = try rig.runtime.librarySetReleaseLove(fixture.library, &.{ album, album + 1 }, true);
+
+    try std.testing.expectEqual(@as(u32, 1), change.updated);
+    try std.testing.expectEqual(@as(u32, 1), change.skipped);
+    const after = try rig.runtime.libraryScrobblerStatus(fixture.library);
+    try std.testing.expectEqual(before.feedback_pending, after.feedback_pending);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM feedback;"));
+    try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requestCount());
+    var loved = try rig.runtime.libraryReleasePage(fixture.library, .{ .loved_only = true });
+    defer loved.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loved.items.len);
+    try std.testing.expectEqual(album, loved.items[0].id);
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryReleaseCountMatching(fixture.library, .{ .loved_only = true }));
+    try std.testing.expectError(
+        error.SearchDoesNotFilter,
+        rig.runtime.libraryTrackQuery(fixture.library, "Northern", .{ .loved_only = true }),
+    );
+}
+
 test "love, dislike and love again while the love is being sent ends loved after at most two requests" {
     var rig: ListenRig = undefined;
     rig.init();

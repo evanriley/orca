@@ -72,6 +72,7 @@ pub const LibraryDatabase = struct {
     listens: repository.ListenRepository,
     feedback: repository.FeedbackRepository,
     ratings: repository.RatingRepository,
+    release_loves: repository.ReleaseLoveRepository,
     playlists: repository.PlaylistRepository,
     identification_proposals: repository.IdentificationProposalRepository,
     recording_verifications: repository.RecordingVerificationRepository,
@@ -161,6 +162,7 @@ pub const LibraryDatabase = struct {
             .listens = .{ .db = database, .write_lane = write_lane },
             .feedback = .{ .db = database, .write_lane = write_lane },
             .ratings = .{ .db = database, .write_lane = write_lane },
+            .release_loves = .{ .db = database, .write_lane = write_lane },
             .playlists = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
             .recording_verifications = .{ .db = database, .write_lane = write_lane },
@@ -2874,6 +2876,127 @@ test "sorting by rating puts unrated Tracks last in both directions" {
         try std.testing.expectEqual(@as(usize, 3), page.items.len);
         for (case[1], page.items) |expected, item| try std.testing.expectEqual(expected, item.id);
     }
+}
+
+fn addLoveRelease(library: *LibraryDatabase, title: []const u8) !i64 {
+    return library.releases.upsert(.{ .release_key = title, .title = title });
+}
+
+fn setLovedAt(library: *LibraryDatabase, release_id: i64, loved_at: i64) !void {
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(
+        &sql,
+        "UPDATE release_loves SET loved_at = {d} WHERE release_id = {d};",
+        .{ loved_at, release_id },
+        0,
+    ));
+}
+
+test "loving a loved Release keeps when it was loved, and clearing an unloved one changes nothing" {
+    var library = try openFeedbackLibrary("release-love");
+    defer library.close();
+    const album = try addLoveRelease(&library, "Pink Moon");
+
+    const loved = try library.release_loves.set(&.{ album, 9999 }, true);
+    try std.testing.expectEqual(@as(u32, 1), loved.updated);
+    try std.testing.expectEqual(@as(u32, 1), loved.skipped);
+    try std.testing.expect(try library.release_loves.isLoved(album));
+    try setLovedAt(&library, album, 100);
+
+    const again = try library.release_loves.set(&.{album}, true);
+    try std.testing.expectEqual(@as(u32, 0), again.updated);
+    try std.testing.expectEqual(@as(i64, 100), try testScalar(library.database, "SELECT loved_at FROM release_loves;"));
+
+    const cleared = try library.release_loves.set(&.{ album, album }, false);
+    try std.testing.expectEqual(@as(u32, 1), cleared.updated);
+    try std.testing.expect(!try library.release_loves.isLoved(album));
+    const nothing = try library.release_loves.set(&.{album}, false);
+    try std.testing.expectEqual(@as(u32, 0), nothing.updated);
+    try std.testing.expectEqual(@as(u32, 0), nothing.skipped);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
+
+    var many: [repository.max_page + 1]i64 = undefined;
+    @memset(&many, album);
+    try std.testing.expectError(error.PageOutOfRange, library.release_loves.set(&many, true));
+    try std.testing.expect(!try library.release_loves.isLoved(album));
+}
+
+test "only loved Releases are listed and counted, most recently loved first" {
+    var library = try openFeedbackLibrary("release-love-page");
+    defer library.close();
+    const artist = (try library.artists.ensure(.{ .key = "nick drake", .name = "Nick Drake" })).?;
+    const first = try addLoveRelease(&library, "Five Leaves Left");
+    const second = try addLoveRelease(&library, "Bryter Layter");
+    const third = try addLoveRelease(&library, "Pink Moon");
+    _ = try addLoveRelease(&library, "Unloved");
+    try library.database.exec("UPDATE releases SET album_artist_id = (SELECT id FROM artists) WHERE title <> 'Bryter Layter';");
+    _ = try library.release_loves.set(&.{ first, second, third }, true);
+    try setLovedAt(&library, first, 300);
+    try setLovedAt(&library, second, 100);
+    try setLovedAt(&library, third, 200);
+
+    for ([_]struct { query: repository.ReleaseQuery, expected: []const i64 }{
+        .{ .query = .{ .loved_only = true, .sort = .loved }, .expected = &.{ first, third, second } },
+        .{ .query = .{ .loved_only = true, .album_artist_id = artist, .sort = .loved }, .expected = &.{ first, third } },
+        .{ .query = .{ .loved_only = true, .album_artist_id = artist }, .expected = &.{ first, third } },
+    }) |case| {
+        var page = try library.releases.page(std.testing.allocator, case.query);
+        defer page.deinit();
+        try std.testing.expectEqual(case.expected.len, page.items.len);
+        try std.testing.expectEqual(@as(u64, case.expected.len), try library.releases.countMatching(case.query));
+        for (case.expected, page.items) |expected, item| {
+            try std.testing.expectEqual(expected, item.id);
+            try std.testing.expect(item.loved);
+        }
+    }
+
+    var everything = try library.releases.page(std.testing.allocator, .{ .sort = .loved });
+    defer everything.deinit();
+    try std.testing.expectEqual(@as(usize, 4), everything.items.len);
+    try std.testing.expectEqual(@as(u64, 4), try library.releases.countMatching(.{}));
+    try std.testing.expectEqual(second, everything.items[2].id);
+    try std.testing.expect(!everything.items[3].loved);
+    const unloved = (try library.releases.byId(std.testing.allocator, everything.items[3].id)).?;
+    defer unloved.deinit(std.testing.allocator);
+    try std.testing.expect(!unloved.loved);
+    const summary = (try library.releases.byId(std.testing.allocator, first)).?;
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expect(summary.loved);
+}
+
+test "only loved Tracks are listed and counted, most recently loved first, and a clear waiting to be sent is not a love" {
+    var library = try openFeedbackLibrary("track-love-page");
+    defer library.close();
+    const older = try addFeedbackTrack(&library, "Older", try addRecording(&library), null);
+    const newer = try addFeedbackTrack(&library, "Newer", try addRecording(&library), null);
+    const hated = try addFeedbackTrack(&library, "Hated", try addRecording(&library), null);
+    const clearing = try addFeedbackTrack(&library, "Clearing", try addRecording(&library), feedback_mbid);
+    _ = try addFeedbackTrack(&library, "Plain", try addRecording(&library), null);
+    _ = try library.feedback.set(&.{ older, newer, clearing }, .loved);
+    _ = try library.feedback.set(&.{hated}, .hated);
+    try library.feedback.markSynced(try testScalar(library.database, "SELECT recording_id FROM tracks WHERE title = 'Clearing';"), .loved);
+    _ = try library.feedback.set(&.{clearing}, .none);
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT score FROM feedback WHERE synced_score = 1;"));
+    try library.database.exec(
+        \\UPDATE feedback SET updated_at = 100 WHERE recording_id = (SELECT recording_id FROM tracks WHERE title = 'Older');
+        \\UPDATE feedback SET updated_at = 200 WHERE recording_id = (SELECT recording_id FROM tracks WHERE title = 'Newer');
+    );
+
+    const query: repository.TrackQuery = .{ .loved_only = true, .sort = .loved };
+    var page = try library.tracks.page(std.testing.allocator, query);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(@as(u64, 2), try library.tracks.countMatching(query));
+    try std.testing.expectEqual(newer, page.items[0].id);
+    try std.testing.expectEqual(older, page.items[1].id);
+
+    var everything = try library.tracks.page(std.testing.allocator, .{ .sort = .loved });
+    defer everything.deinit();
+    try std.testing.expectEqual(@as(usize, 5), everything.items.len);
+    try std.testing.expectEqual(@as(u64, 5), try library.tracks.countMatching(.{}));
+    try std.testing.expectEqual(newer, everything.items[0].id);
+    try std.testing.expectEqual(older, everything.items[1].id);
+    for (everything.items[2..]) |item| try std.testing.expect(item.feedback != .loved);
 }
 
 const SortDirection = repository.SortDirection;

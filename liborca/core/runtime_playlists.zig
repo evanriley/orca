@@ -13,6 +13,7 @@ const PlaylistEntryPage = runtime.PlaylistEntryPage;
 const PlaylistInsertion = runtime.PlaylistInsertion;
 const PlaylistPage = runtime.PlaylistPage;
 const RatingChange = runtime.RatingChange;
+const ReleaseLoveChange = runtime.ReleaseLoveChange;
 
 pub fn librarySetRating(
     self: *OrcaRuntime,
@@ -21,6 +22,15 @@ pub fn librarySetRating(
     rating: ?u8,
 ) !RatingChange {
     return (try runtime.libraryDatabase(self, library)).ratings.set(track_ids, rating);
+}
+
+pub fn librarySetReleaseLove(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    release_ids: []const i64,
+    loved: bool,
+) !ReleaseLoveChange {
+    return (try runtime.libraryDatabase(self, library)).release_loves.set(release_ids, loved);
 }
 
 pub fn libraryPlaylists(self: *OrcaRuntime, library: LibraryHandle, limit: u32, offset: u32) !PlaylistPage {

@@ -43,6 +43,7 @@ pub const PlayStats = database.PlayStats;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
 pub const RatingChange = database.RatingChange;
+pub const ReleaseLoveChange = database.ReleaseLoveChange;
 pub const PlaylistSummary = database.PlaylistSummary;
 pub const PlaylistPage = database.PlaylistPage;
 pub const PlaylistEntry = database.PlaylistEntry;
@@ -629,7 +630,7 @@ pub const OrcaRuntime = struct {
     }
 
     /// The browse listing: a bounded page of Tracks in a caller-named order,
-    /// optionally scoped to one Artist or one Release.
+    /// optionally scoped to one Artist or one Release, or to loved Tracks.
     ///
     /// A full-text `query` and a relational filter are alternatives, not a
     /// combination: FTS5 orders by relevance, which no sort key or `tracks.id`
@@ -643,7 +644,7 @@ pub const OrcaRuntime = struct {
     ) !database.TrackPage {
         const tracks = &(try libraryDatabase(self, library)).tracks;
         if (text_query.len == 0) return tracks.page(self.allocator, page_query);
-        if (page_query.artist_id != null or page_query.release_id != null)
+        if (page_query.artist_id != null or page_query.release_id != null or page_query.loved_only)
             return error.SearchDoesNotFilter;
         return tracks.search(self.allocator, text_query, page_query.limit, page_query.offset);
     }
@@ -1016,6 +1017,17 @@ pub const OrcaRuntime = struct {
         rating: ?u8,
     ) !RatingChange {
         return runtime_playlists.librarySetRating(self, library, track_ids, rating);
+    }
+
+    /// Loves or clears whole Releases. Album love is kept in the Library only:
+    /// it is never queued for ListenBrainz.
+    pub fn librarySetReleaseLove(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_ids: []const i64,
+        loved: bool,
+    ) !ReleaseLoveChange {
+        return runtime_playlists.librarySetReleaseLove(self, library, release_ids, loved);
     }
 
     pub fn libraryPlaylists(self: *OrcaRuntime, library: LibraryHandle, limit: u32, offset: u32) !PlaylistPage {

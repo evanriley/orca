@@ -154,6 +154,7 @@ const commands = [_]Command{
     .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
     .{ .name = "rate", .usage = "rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setRating },
+    .{ .name = "love-release", .usage = "love-release DATABASE IDS [--clear]", .min_arguments = 2, .max_arguments = 3, .run = setReleaseLove },
     .{ .name = "playlists", .usage = "playlists DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listPlaylists },
     .{ .name = "playlist", .usage = "playlist DATABASE ID [--limit N] [--offset N]", .min_arguments = 2, .max_arguments = 6, .run = showPlaylist },
     .{ .name = "playlist-create", .usage = "playlist-create DATABASE NAME", .min_arguments = 2, .max_arguments = 2, .run = createPlaylist },
@@ -290,8 +291,11 @@ const help_details =
     \\scoped to one Artist or one Release. Options:
     \\  --artist ID        only this Artist
     \\  --release ID       only this Release (tracks only)
-    \\  --sort KEY         id|artist|album|title|track|duration|added|rating
-    \\                     (tracks only; unrated last either way)
+    \\  --loved            only loved Releases, or Tracks whose recording is
+    \\                     loved
+    \\  --sort KEY         id|artist|album|title|track|duration|added|rating|
+    \\                     loved (tracks only; unrated or unloved last either
+    \\                     way; loved is most recently loved first)
     \\  --desc             reverse the order
     \\  --limit N          page size, 1 to 512 (default 50)
     \\  --offset N         rows to skip
@@ -339,6 +343,10 @@ const help_details =
     \\feedback loves, dislikes or clears the Tracks' recordings, and prints how
     \\many Tracks changed and how many were skipped. It is kept in the Library;
     \\scrobble sends it for recordings with a MusicBrainz ID.
+    \\
+    \\love-release loves the Releases, or clears their love, and prints how
+    \\many changed and how many were skipped as unknown. Album love is kept
+    \\in the Library only; scrobble never sends it.
     \\
     \\rate rates the Tracks' recordings in whole stars (--stars=N stores N*20)
     \\or 1 to 100, or clears the rating, and prints how many Tracks changed and
@@ -1393,6 +1401,7 @@ const BrowseOptions = struct {
     /// `--filter el-p` finds the one spelled with a U+2010 hyphen.
     filter: []const u8 = "",
     release_id: ?i64 = null,
+    loved_only: bool = false,
     sort: liborca.TrackSort = .id,
     descending: bool = false,
     limit: u32 = 50,
@@ -1410,6 +1419,11 @@ fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
         const name = arguments[index];
         if (std.mem.eql(u8, name, "--desc")) {
             options.descending = true;
+            index += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, name, "--loved")) {
+            options.loved_only = true;
             index += 1;
             continue;
         }
@@ -1443,6 +1457,8 @@ fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
                 .date_added
             else if (std.mem.eql(u8, value, "rating"))
                 .rating
+            else if (std.mem.eql(u8, value, "loved"))
+                .loved
             else
                 return error.UnknownSortKey;
         } else return error.UnknownOption;
@@ -1959,6 +1975,23 @@ fn setRating(context: Context) !void {
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     const change = try runtime.librarySetRating(library, ids.items, rating);
     try stdout.print("rating: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
+}
+
+fn setReleaseLove(context: Context) !void {
+    const allocator = context.allocator;
+    const loved = if (context.arguments.len == 2)
+        true
+    else if (std.mem.eql(u8, context.arguments[2], "--clear"))
+        false
+    else
+        return error.UnknownOption;
+    var ids = try parseTrackIds(allocator, context.arguments[1]);
+    defer ids.deinit(allocator);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const change = try runtime.librarySetReleaseLove(library, ids.items, loved);
+    try context.stdout.print("release-love: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
 }
 
 fn listPlaylists(context: Context) !void {
@@ -2684,6 +2717,7 @@ fn listReleases(context: Context) !void {
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     var page = try runtime.libraryReleasePage(library, .{
         .album_artist_id = options.artist_id,
+        .loved_only = options.loved_only,
         .limit = options.limit,
         .offset = options.offset,
     });
@@ -2692,12 +2726,13 @@ fn listReleases(context: Context) !void {
         try stdout.print("{d}\t{s}\t{s}\t", .{ release.id, release.title, release.album_artist });
         try writeDuration(stdout, release.total_duration_ms);
         try stdout.print(
-            "\t{d} tracks\t{d} disc(s)\t{s}{s}\n",
+            "\t{d} tracks\t{d} disc(s)\t{s}{s}{s}\n",
             .{
                 release.track_count,
                 release.disc_count orelse 1,
                 release.release_date orelse "-",
                 if (release.is_compilation) "\tcompilation" else "",
+                if (release.loved) "\tloved" else "",
             },
         );
     }
@@ -2716,6 +2751,7 @@ fn listTracks(context: Context) !void {
     const query: liborca.TrackQuery = .{
         .artist_id = options.artist_id,
         .release_id = options.release_id,
+        .loved_only = options.loved_only,
         .sort = options.sort,
         .direction = if (options.descending) .descending else .ascending,
         .limit = options.limit,

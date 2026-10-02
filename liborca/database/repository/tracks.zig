@@ -124,11 +124,12 @@ pub const TrackPage = struct {
 
 /// What a Track listing is ordered by.
 ///
-/// Every one of these but `rating` names an index created by migration 9, and
-/// every ORDER BY they produce ends in `tracks.id`. Both matter. Without the
-/// unique tiebreaker a LIMIT/OFFSET walk over a column with ties is free to
-/// return one row on two pages and skip a third, because SQLite may order
-/// equal keys differently between two evaluations of the same statement.
+/// Every one of these but `rating` and `loved` names an index created by
+/// migration 9, and every ORDER BY they produce ends in `tracks.id`. Both
+/// matter. Without the unique tiebreaker a LIMIT/OFFSET walk over a column
+/// with ties is free to return one row on two pages and skip a third, because
+/// SQLite may order equal keys differently between two evaluations of the
+/// same statement.
 pub const TrackSort = enum {
     /// Insertion order. The cheapest listing there is, and the default, so a
     /// caller that has no opinion pays for none.
@@ -141,6 +142,8 @@ pub const TrackSort = enum {
     duration,
     date_added,
     rating,
+    /// Most recently loved first; Tracks whose recording is not loved last.
+    loved,
 };
 
 pub const SortDirection = enum {
@@ -153,6 +156,13 @@ pub const SortDirection = enum {
             .descending => " DESC",
         };
     }
+
+    fn reversed(self: SortDirection) SortDirection {
+        return switch (self) {
+            .ascending => .descending,
+            .descending => .ascending,
+        };
+    }
 };
 
 /// One bounded, ordered, filtered request for a page of Tracks.
@@ -163,6 +173,9 @@ pub const SortDirection = enum {
 pub const TrackQuery = struct {
     artist_id: ?i64 = null,
     release_id: ?i64 = null,
+    /// Only Tracks whose recording is loved. A clear still waiting to be sent
+    /// is not a love.
+    loved_only: bool = false,
     sort: TrackSort = .id,
     direction: SortDirection = .ascending,
     limit: u32 = max_page,
@@ -285,7 +298,7 @@ pub const TrackRepository = struct {
         else
             .none;
         var statement = try self.db.prepare(
-            trackQueryText(filter, query.sort, query.direction),
+            trackQueryText(filter, query.loved_only, query.sort, query.direction),
         );
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
@@ -307,11 +320,13 @@ pub const TrackRepository = struct {
         var statement = try self.db.prepare(
             "SELECT count(*) FROM tracks\n" ++
                 "WHERE (?3 IS NULL OR " ++ by_artist ++ ")\n" ++
-                "  AND (?4 IS NULL OR tracks.release_id = ?4);",
+                "  AND (?4 IS NULL OR tracks.release_id = ?4)\n" ++
+                "  AND (?5 = 0 OR " ++ by_loved_recording ++ ");",
         );
         defer statement.deinit();
         try statement.bindOptionalInt64(3, query.artist_id);
         try statement.bindOptionalInt64(4, query.release_id);
+        try statement.bindInt64(5, @intFromBool(query.loved_only));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -600,6 +615,9 @@ pub fn orderTerms(comptime sort: TrackSort, comptime direction: SortDirection) [
         .duration => "tracks.duration_ms" ++ suffix ++ tiebreak,
         .date_added => "tracks.created_at" ++ suffix ++ tiebreak,
         .rating => "ratings.rating IS NULL, ratings.rating" ++ suffix ++ tiebreak,
+        .loved => "COALESCE(feedback.score, 0) <> 1, " ++
+            "CASE WHEN feedback.score = 1 THEN feedback.updated_at END" ++
+            comptime direction.reversed().suffix() ++ tiebreak,
     };
 }
 
@@ -614,6 +632,9 @@ pub const by_artist =
     "(tracks.artist_id = ?3 OR tracks.release_id IN " ++
     "(SELECT id FROM releases WHERE album_artist_id = ?3))";
 
+pub const by_loved_recording =
+    "tracks.recording_id IN (SELECT recording_id FROM feedback WHERE score = 1)";
+
 /// What it means for a Release to be an artist's, mirroring `by_artist`.
 ///
 /// Theirs as album artist, *or* carrying a track credited to them, so a
@@ -624,36 +645,44 @@ pub const by_release_artist =
 
 fn buildTrackQuery(
     comptime filter: TrackFilter,
+    comptime loved_only: bool,
     comptime sort: TrackSort,
     comptime direction: SortDirection,
 ) [:0]const u8 {
-    const where = switch (filter) {
+    const filter_terms = switch (filter) {
         .none => "",
-        .artist => "WHERE " ++ by_artist ++ "\n",
-        .release => "WHERE tracks.release_id = ?4\n",
-        .artist_and_release => "WHERE " ++ by_artist ++ " AND tracks.release_id = ?4\n",
+        .artist => by_artist,
+        .release => "tracks.release_id = ?4",
+        .artist_and_release => by_artist ++ " AND tracks.release_id = ?4",
     };
+    const loved_terms = if (loved_only) by_loved_recording else "";
+    const joiner = if (filter != .none and loved_only) " AND " else "";
+    const where = if (filter != .none or loved_only) "WHERE " ++ filter_terms ++ joiner ++ loved_terms ++ "\n" else "";
     return track_columns ++ "FROM tracks\n" ++ recording_joins ++ where ++
         "ORDER BY " ++ orderTerms(sort, direction) ++ "\nLIMIT ?1 OFFSET ?2;";
 }
 
-/// Every (filter, sort, direction) combination as its own prepared-once
-/// statement text. There are 64 of them; concatenating SQL at runtime instead
-/// would mean an allocation and a string the caller could influence, and this
-/// boundary refuses both on principle.
+/// Every (filter, loved filter, sort, direction) combination as its own
+/// prepared-once statement text. There are 144 of them; concatenating SQL at
+/// runtime instead would mean an allocation and a string the caller could
+/// influence, and this boundary refuses both on principle.
 fn trackQueryText(
     filter: TrackFilter,
+    loved_only: bool,
     sort: TrackSort,
     direction: SortDirection,
 ) [:0]const u8 {
     return switch (filter) {
-        inline else => |resolved_filter| switch (sort) {
-            inline else => |resolved_sort| switch (direction) {
-                inline else => |resolved_direction| comptime buildTrackQuery(
-                    resolved_filter,
-                    resolved_sort,
-                    resolved_direction,
-                ),
+        inline else => |resolved_filter| switch (loved_only) {
+            inline else => |resolved_loved_only| switch (sort) {
+                inline else => |resolved_sort| switch (direction) {
+                    inline else => |resolved_direction| comptime buildTrackQuery(
+                        resolved_filter,
+                        resolved_loved_only,
+                        resolved_sort,
+                        resolved_direction,
+                    ),
+                },
             },
         },
     };

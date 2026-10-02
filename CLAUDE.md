@@ -136,8 +136,8 @@ zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
 zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
-zig build run -- releases DATABASE [--artist ID] [--limit N] [--offset N]
-zig build run -- tracks DATABASE [--artist ID] [--release ID] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating
+zig build run -- releases DATABASE [--artist ID] [--loved] [--limit N] [--offset N]   # a loved Release ends in `loved`
+zig build run -- tracks DATABASE [--artist ID] [--release ID] [--loved] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating, loved
 zig build run -- track DATABASE ID
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
@@ -171,6 +171,7 @@ zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start
 # server from ORCA_LISTENBRAINZ_URL (https, or http to localhost)
 zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
 zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
+zig build run -- love-release DATABASE IDS [--clear]   # album love; kept in the library, never sent
 
 # MusicBrainz and AcoustID matching -- servers from ORCA_MUSICBRAINZ_URL and
 # ORCA_ACOUSTID_URL (https, or http to localhost); AcoustID application key from

@@ -53,13 +53,37 @@ pub const Result = struct {
 
 const MovedTrack = struct { from_release_id: i64, file_id: i64 };
 
-/// A Release left without Tracks hands its fetched cover to the Release that
-/// took most of them, when that one has none, so a cover fetched before a
-/// regrouping survives it. `release_artwork` cascades on the Release row.
-fn carryArtwork(db: database.sqlite.Database, allocator: std.mem.Allocator, moved: []const MovedTrack) !void {
+const CarriedTable = struct {
+    held: database.sqlite.Statement,
+    hand_over: database.sqlite.Statement,
+
+    fn prepare(db: database.sqlite.Database, comptime table: []const u8) !CarriedTable {
+        var held = try db.prepare("SELECT 1 FROM " ++ table ++ " WHERE release_id = ?1;");
+        errdefer held.deinit();
+        return .{
+            .held = held,
+            .hand_over = try db.prepare("UPDATE " ++ table ++ " SET release_id = ?2 WHERE release_id = ?1;"),
+        };
+    }
+
+    fn deinit(self: *CarriedTable) void {
+        self.held.deinit();
+        self.hand_over.deinit();
+    }
+};
+
+/// A Release left without Tracks hands its fetched cover and its love to the
+/// Release that took most of them, each only when that one has none of its
+/// own, so a cover fetched or an album loved before a regrouping survives it.
+/// Both tables cascade on the Release row, so whatever is not handed over
+/// goes with it.
+fn carryReleaseState(db: database.sqlite.Database, allocator: std.mem.Allocator, moved: []const MovedTrack) !void {
     if (moved.len == 0) return;
-    var has_artwork = try db.prepare("SELECT 1 FROM release_artwork WHERE release_id = ?1;");
-    defer has_artwork.deinit();
+    var artwork = try CarriedTable.prepare(db, "release_artwork");
+    defer artwork.deinit();
+    var loves = try CarriedTable.prepare(db, "release_loves");
+    defer loves.deinit();
+    const carried = [_]*CarriedTable{ &artwork, &loves };
     var in_use = try db.prepare("SELECT 1 FROM tracks WHERE release_id = ?1 LIMIT 1;");
     defer in_use.deinit();
     var now_on = try db.prepare(
@@ -67,15 +91,18 @@ fn carryArtwork(db: database.sqlite.Database, allocator: std.mem.Allocator, move
         \\  AND (preferred_file_id = ?1 OR recording_id = (SELECT recording_id FROM files WHERE id = ?1));
     );
     defer now_on.deinit();
-    var hand_over = try db.prepare("UPDATE release_artwork SET release_id = ?2 WHERE release_id = ?1;");
-    defer hand_over.deinit();
 
     var seen: std.ArrayList(i64) = .empty;
     for (moved) |track| {
         const from = track.from_release_id;
         if (std.mem.indexOfScalar(i64, seen.items, from) != null) continue;
         try seen.append(allocator, from);
-        if (!try exists(&has_artwork, from) or try exists(&in_use, from)) continue;
+        if (try exists(&in_use, from)) continue;
+        var holds_any = false;
+        for (carried) |table| {
+            if (try exists(&table.held, from)) holds_any = true;
+        }
+        if (!holds_any) continue;
 
         const Count = struct { release_id: i64, tracks: u32 };
         var counts: std.ArrayList(Count) = .empty;
@@ -99,11 +126,13 @@ fn carryArtwork(db: database.sqlite.Database, allocator: std.mem.Allocator, move
                 (count.tracks == heir.?.tracks and count.release_id < heir.?.release_id)) heir = count;
         }
         const target = heir orelse continue;
-        if (try exists(&has_artwork, target.release_id)) continue;
-        try hand_over.bindInt64(1, from);
-        try hand_over.bindInt64(2, target.release_id);
-        if (try hand_over.step() != .done) return error.SqlFailed;
-        try hand_over.reset();
+        for (carried) |table| {
+            if (!try exists(&table.held, from) or try exists(&table.held, target.release_id)) continue;
+            try table.hand_over.bindInt64(1, from);
+            try table.hand_over.bindInt64(2, target.release_id);
+            if (try table.hand_over.step() != .done) return error.SqlFailed;
+            try table.hand_over.reset();
+        }
     }
 }
 
@@ -294,7 +323,7 @@ pub const Projection = struct {
                 result.tracks_pruned += 1;
             }
         }
-        try carryArtwork(db, allocator, moved.items);
+        try carryReleaseState(db, allocator, moved.items);
         const pruned = try database.repository.pruneOrphanedReleasesAndArtists(
             db,
             allocator,
@@ -2299,6 +2328,119 @@ test "a release that still has other tracks survives one of them moving away" {
     try testing.expectEqual(@as(u64, 0), result.artists_pruned);
     try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM tracks;"));
     try testing.expectEqual(@as(i64, 3), try scalar(library.database, "SELECT max(track_number) FROM tracks;"));
+}
+
+fn albumTags(album: []const u8, track_number: u32) metadata.ObservedTags {
+    return .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = album,
+        .album_artist = "Artist",
+        .track_number = track_number,
+    };
+}
+
+fn observeAlbum(library: *database.LibraryDatabase, files: []i64, album: []const u8) !void {
+    for (files, 1..) |*file_id, track_number| {
+        var uri_buffer: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&uri_buffer, "/m/Artist/{s}/{d}.flac", .{ album, track_number });
+        file_id.* = try observe(library, uri, .flac, albumTags(album, @intCast(track_number)));
+    }
+}
+
+fn retag(library: *database.LibraryDatabase, files: []const i64, album: []const u8) !void {
+    for (files) |file_id| {
+        var buffer: [96]u8 = undefined;
+        const track_number = try scalar(library.database, try std.fmt.bufPrintSentinel(
+            &buffer,
+            "SELECT track_number FROM tracks WHERE preferred_file_id = {d};",
+            .{file_id},
+            0,
+        ));
+        try library.observed_tags.upsert(.{ .file_id = file_id, .values = albumTags(album, @intCast(track_number)) });
+    }
+}
+
+fn releaseOf(library: *database.LibraryDatabase, file_id: i64) !i64 {
+    var buffer: [96]u8 = undefined;
+    return scalar(library.database, try std.fmt.bufPrintSentinel(
+        &buffer,
+        "SELECT release_id FROM tracks WHERE preferred_file_id = {d};",
+        .{file_id},
+        0,
+    ));
+}
+
+test "a loved album stays loved when a regrouping gives its Release a new id" {
+    var library = try openTestLibrary("file:orca-projection-love-regroup?mode=memory&cache=shared");
+    defer library.close();
+    var files: [2]i64 = undefined;
+    try observeAlbum(&library, &files, "Old Title");
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const old = try releaseOf(&library, files[0]);
+    _ = try library.release_loves.set(&.{old}, true);
+    try library.database.exec("UPDATE release_loves SET loved_at = 100;");
+
+    try retag(&library, &files, "New Title");
+    _ = try projection.run(.all);
+
+    const regrouped = try releaseOf(&library, files[0]);
+    try testing.expect(regrouped != old);
+    try testing.expect(try library.release_loves.isLoved(regrouped));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_loves;"));
+    try testing.expectEqual(@as(i64, 100), try scalar(library.database, "SELECT loved_at FROM release_loves;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM feedback;"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "two loved Releases merging into one leave exactly one love" {
+    var library = try openTestLibrary("file:orca-projection-love-merge?mode=memory&cache=shared");
+    defer library.close();
+    var first: [2]i64 = undefined;
+    try observeAlbum(&library, &first, "Disc One");
+    var second: [2]i64 = undefined;
+    try observeAlbum(&library, &second, "Disc Two");
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    _ = try library.release_loves.set(&.{ try releaseOf(&library, first[0]), try releaseOf(&library, second[0]) }, true);
+
+    try retag(&library, &first, "Merged");
+    for (second, 3..) |file_id, track_number| {
+        try library.observed_tags.upsert(.{ .file_id = file_id, .values = albumTags("Merged", @intCast(track_number)) });
+    }
+    _ = try projection.run(.all);
+
+    const merged = try releaseOf(&library, first[0]);
+    try testing.expectEqual(merged, try releaseOf(&library, second[0]));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_loves;"));
+    try testing.expect(try library.release_loves.isLoved(merged));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a split album's love goes to the Release that took most of its Tracks, and to the lower id on a tie" {
+    for ([_]u32{ 7, 5 }) |kept| {
+        var library = try openTestLibrary("file:orca-projection-love-split?mode=memory&cache=shared");
+        defer library.close();
+        var files: [10]i64 = undefined;
+        try observeAlbum(&library, &files, "Whole");
+        var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+        _ = try projection.run(.all);
+        _ = try library.release_loves.set(&.{try releaseOf(&library, files[0])}, true);
+
+        try retag(&library, files[0..kept], "Larger");
+        try retag(&library, files[kept..], "Smaller");
+        _ = try projection.run(.all);
+
+        const larger = try releaseOf(&library, files[0]);
+        const smaller = try releaseOf(&library, files[9]);
+        try testing.expect(larger != smaller);
+        const heir = if (kept > 10 - kept) larger else @min(larger, smaller);
+        try testing.expect(try library.release_loves.isLoved(heir));
+        try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM release_loves;"));
+        try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    }
 }
 
 test "locked album artist, disc, date and compilation values reach the projected release" {
