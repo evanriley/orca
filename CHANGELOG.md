@@ -126,6 +126,20 @@
   Remove Love from All Songs and Remove Dislike from All Songs. A Loved
   sidebar page switches between loved albums and loved songs, most recently
   loved first.
+- **The C ABI browses by love and rating, and describes a Track.**
+  `orca_track_view` gains `feedback` and `has_rating`/`rating`,
+  `orca_release_view` gains `loved`, and `orca_track_query` gains
+  `loved_only` and the sorts `ORCA_TRACK_SORT_RATING` and
+  `ORCA_TRACK_SORT_LOVED`. `orca_library_browse_releases` and
+  `orca_library_release_count_matching` take an `orca_release_query` with an
+  `orca_release_sort` and `loved_only`; `orca_library_browse_artists` and
+  `orca_library_artist_count_matching` take an `orca_artist_query` with a name
+  filter. `orca_library_track_get` returns an `orca_track_summary_view`,
+  `orca_library_track_details` an `orca_track_details_view`, and
+  `orca_library_track_play_stats`, `orca_library_listens_recorded` and
+  `orca_library_unanalyzed_count` the play counts, listens recorded and files
+  still to analyse. `orca_job_kind` names matching, AcoustID submission
+  and tag-write jobs.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

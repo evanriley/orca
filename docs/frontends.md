@@ -28,6 +28,18 @@ The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root
   add/remove/query.
+- **Browsing.** `orca_library_browse_artists`, `orca_library_browse_releases`
+  and `orca_library_browse_tracks` take a query struct: an artist name filter,
+  a release sort including `ORCA_RELEASE_SORT_LOVED`, track sorts by rating
+  and love, and `loved_only` for releases and tracks. Each has a
+  `*_count_matching` (`orca_library_track_match_count` for tracks) that
+  ignores paging. Track views carry the recording's `orca_feedback` and
+  rating, and release views whether the album is loved.
+  `orca_library_track_get` adds the release, artist and recording ids;
+  `orca_library_track_details` is a details view of the Track and its file,
+  read from the database alone. `orca_library_track_play_stats`,
+  `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
+  plain reads.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

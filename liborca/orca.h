@@ -123,6 +123,13 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_ANALYSIS = 3,
     ORCA_JOB_KIND_DUPLICATE_SCAN = 4,
     ORCA_JOB_KIND_RECONCILE = 5,
+    /* MusicBrainz and AcoustID matching, verification, and a release's
+     * cover-art fetch. */
+    ORCA_JOB_KIND_METADATA_LOOKUP = 6,
+    /* Sending recording IDs to AcoustID. */
+    ORCA_JOB_KIND_ACOUSTID_SUBMISSION = 7,
+    /* Writing an approved tag-write plan to files. */
+    ORCA_JOB_KIND_MUTATION = 8,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -130,6 +137,13 @@ typedef struct orca_string_view {
     const char *pointer;
     size_t length;
 } orca_string_view;
+
+/* A person's ListenBrainz feedback on a recording, kept in the Library. */
+typedef enum orca_feedback {
+    ORCA_FEEDBACK_NONE = 0,
+    ORCA_FEEDBACK_LOVED = 1,
+    ORCA_FEEDBACK_HATED = 2,
+} orca_feedback;
 
 /* The `has_*` flags distinguish "zero" from "the library does not know". */
 typedef struct orca_track_view {
@@ -142,7 +156,11 @@ typedef struct orca_track_view {
     uint8_t has_disc_number;
     /* The Track resolves to a file with a location that is not missing. */
     uint8_t has_file;
-    uint8_t reserved[4];
+    uint8_t feedback;  /* orca_feedback, of the Track's recording */
+    /* `rating` is 1..100 when `has_rating` is set. */
+    uint8_t has_rating;
+    uint8_t rating;
+    uint8_t reserved[1];
     orca_string_view title;
     orca_string_view artist;
     orca_string_view album;
@@ -162,6 +180,12 @@ typedef enum orca_track_sort {
     ORCA_TRACK_SORT_TRACK_NUMBER = 4,
     ORCA_TRACK_SORT_DURATION = 5,
     ORCA_TRACK_SORT_DATE_ADDED = 6,
+    /* Lowest rating first, or highest when descending; unrated Tracks last
+     * either way. */
+    ORCA_TRACK_SORT_RATING = 7,
+    /* Most recently loved first, or least recently when descending; Tracks
+     * whose recording is not loved last either way. */
+    ORCA_TRACK_SORT_LOVED = 8,
 } orca_track_sort;
 
 /* One bounded, ordered, filtered request for a page of Tracks.
@@ -169,13 +193,16 @@ typedef enum orca_track_sort {
  * `artist_id` and `release_id` are relational filters; pass -1 for "no
  * filter". Every order this produces ends in the Track id, so paging is a
  * total order: page N+1 continues exactly where page N stopped even when
- * thousands of Tracks share a title. `limit` must be between 1 and 512. */
+ * thousands of Tracks share a title. `limit` must be between 1 and 512.
+ * Nonzero `loved_only` keeps only Tracks whose recording is loved; a clear
+ * not yet sent to ListenBrainz is not a love. */
 typedef struct orca_track_query {
     int64_t artist_id;
     int64_t release_id;
-    uint8_t sort;
+    uint8_t sort;  /* orca_track_sort */
     uint8_t descending;
-    uint8_t reserved[2];
+    uint8_t loved_only;
+    uint8_t reserved[1];
     uint32_t limit;
     uint32_t offset;
 } orca_track_query;
@@ -203,7 +230,9 @@ typedef struct orca_release_view {
     uint8_t has_album_artist_id;
     uint8_t has_disc_count;
     uint8_t is_compilation;
-    uint8_t reserved[3];
+    /* The album itself is loved, apart from any of its Tracks. */
+    uint8_t loved;
+    uint8_t reserved[2];
     orca_string_view title;
     orca_string_view album_artist;
     /* Empty when the release has no date; a date is text, not a number, so it
@@ -213,6 +242,167 @@ typedef struct orca_release_view {
 
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_release_callback)(void *context, const orca_release_view *release);
+
+/* Every order ends in the Release id, so paging is a total order. */
+typedef enum orca_release_sort {
+    ORCA_RELEASE_SORT_TITLE = 0,
+    /* Album artist, then oldest first within an artist: a shelf. */
+    ORCA_RELEASE_SORT_ARTIST = 1,
+    /* Newest first; undated Releases last. */
+    ORCA_RELEASE_SORT_YEAR = 2,
+    /* Most recently created first. */
+    ORCA_RELEASE_SORT_RECENTLY_ADDED = 3,
+    /* Most recently loved first; Releases that are not loved last. */
+    ORCA_RELEASE_SORT_LOVED = 4,
+} orca_release_sort;
+
+/* One bounded, ordered request for a page of Releases. `album_artist_id` of
+ * -1 lists every Release; anything else lists that Artist's. Nonzero
+ * `loved_only` keeps only loved Releases. `limit` must be between 1 and
+ * 512. */
+typedef struct orca_release_query {
+    int64_t album_artist_id;
+    uint8_t sort;  /* orca_release_sort */
+    uint8_t loved_only;
+    uint8_t reserved[2];
+    uint32_t limit;
+    uint32_t offset;
+} orca_release_query;
+
+/* One bounded request for a page of Artists in sort-name order. `filter`
+ * keeps the Artists whose name contains it, compared after the folding that
+ * builds the sort name; an empty filter (length 0, pointer may be null)
+ * keeps every Artist. `limit` must be between 1 and 512. */
+typedef struct orca_artist_query {
+    orca_string_view filter;
+    uint32_t limit;
+    uint32_t offset;
+} orca_artist_query;
+
+/* A Track with the ids it resolves to. */
+typedef struct orca_track_summary_view {
+    orca_track_view track;
+    int64_t release_id;
+    /* The credited Artist, when the projection resolved one. */
+    int64_t artist_id;
+    int64_t recording_id;
+    uint8_t has_release_id;
+    uint8_t has_artist_id;
+    uint8_t has_recording_id;
+    uint8_t reserved[5];
+} orca_track_summary_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_track_summary_callback)(
+    void *context,
+    const orca_track_summary_view *summary
+);
+
+/* Where a MusicBrainz ID came from. */
+typedef enum orca_id_source {
+    /* The Track has no such ID. */
+    ORCA_ID_SOURCE_NONE = 0,
+    /* The file's tags. */
+    ORCA_ID_SOURCE_TAG = 1,
+    /* An accepted match, or a correction from verification. */
+    ORCA_ID_SOURCE_MATCH = 2,
+    /* A person's edit. */
+    ORCA_ID_SOURCE_EDIT = 3,
+} orca_id_source;
+
+/*
+ * Everything the Library recorded about one Track and the file it plays, as
+ * the last scan saw it: the file is neither opened nor hashed. The `has_*`
+ * flags distinguish "zero" from "the library does not know"; an absent text
+ * is an empty string view.
+ */
+typedef struct orca_track_details_view {
+    int64_t track_id;
+    int64_t track_number;
+    int64_t disc_number;
+    int64_t duration_ms;
+    int64_t size_bytes;
+    /* Unix seconds at which the latest listen started. */
+    int64_t last_played_at;
+    /* Listens of the file the Track plays. */
+    uint64_t play_count;
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view album;
+    orca_string_view album_artist;
+    /* The Release's date as the projection resolved it. */
+    orca_string_view date;
+    /* Such as "flac" or "mp3"; empty when the Track has no file or the file
+     * was never probed. */
+    orca_string_view codec;
+    /* The uri of the best location that is not missing. */
+    orca_string_view path;
+    orca_string_view musicbrainz_recording_id;
+    orca_string_view musicbrainz_release_id;
+    orca_string_view musicbrainz_release_group_id;
+    orca_string_view musicbrainz_release_track_id;
+    orca_string_view musicbrainz_album_artist_id;
+    uint32_t sample_rate;
+    uint32_t bit_depth;
+    uint32_t channels;
+    /* File size over duration, so it includes tags and artwork. */
+    uint32_t bitrate_kbps;
+    /* Measured from the file's stored bytes: integrated loudness in LUFS, the
+     * ReplayGain correction toward the analysis target in dB, and the largest
+     * absolute sample, 1.0 being full scale. Valid when `has_loudness`. */
+    float integrated_lufs;
+    float replay_gain_db;
+    float sample_peak;
+    uint8_t has_track_number;
+    uint8_t has_disc_number;
+    uint8_t has_compilation;
+    uint8_t compilation;
+    /* `codec` names an encoding that discards audio; zero for an unknown
+     * codec. */
+    uint8_t lossy;
+    uint8_t has_sample_rate;
+    uint8_t has_bit_depth;
+    uint8_t has_channels;
+    uint8_t has_duration;
+    uint8_t has_size_bytes;
+    uint8_t has_bitrate_kbps;
+    /* The Track has no location that is not missing. */
+    uint8_t file_missing;
+    /* Zero when the file has not been measured, or was measured under other
+     * parameters, an older algorithm, or bytes it no longer has. */
+    uint8_t has_loudness;
+    uint8_t has_artwork;
+    uint8_t has_last_played_at;
+    uint8_t feedback;  /* orca_feedback */
+    /* The feedback can be sent to ListenBrainz. */
+    uint8_t feedback_syncable;
+    /* `rating` is 1..100 when `has_rating` is set. */
+    uint8_t has_rating;
+    uint8_t rating;
+    /* orca_id_source of each MusicBrainz ID; NONE when it is empty. */
+    uint8_t musicbrainz_recording_id_source;
+    uint8_t musicbrainz_release_id_source;
+    uint8_t musicbrainz_release_group_id_source;
+    uint8_t musicbrainz_release_track_id_source;
+    uint8_t musicbrainz_album_artist_id_source;
+    uint8_t reserved[4];
+} orca_track_details_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_track_details_callback)(
+    void *context,
+    const orca_track_details_view *details
+);
+
+typedef struct orca_play_stats {
+    /* Listens of the file the Track plays. */
+    uint64_t play_count;
+    /* Unix seconds at which the latest listen started, when
+     * `has_last_played_at`. */
+    int64_t last_played_at;
+    uint8_t has_last_played_at;
+    uint8_t reserved[7];
+} orca_play_stats;
 
 typedef struct orca_health_issue_view {
     uint8_t kind;
@@ -665,6 +855,85 @@ orca_status orca_library_track_match_count(
     orca_runtime *runtime,
     orca_handle library,
     const orca_track_query *query,
+    uint64_t *output
+);
+
+/* A sorted, filtered page of Releases. `query` may not be null;
+ * INVALID_ARGUMENT for a limit outside 1..512 or an unknown sort. */
+orca_status orca_library_browse_releases(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_release_query *query,
+    void *context,
+    orca_release_callback callback
+);
+/* How many Releases orca_library_browse_releases would list for `query`.
+ * Sort, limit and offset are ignored. */
+orca_status orca_library_release_count_matching(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_release_query *query,
+    uint64_t *output
+);
+
+/* A filtered page of Artists in sort-name order. `query` may not be null;
+ * INVALID_ARGUMENT for a limit outside 1..512, or a null filter pointer with
+ * a nonzero length. */
+orca_status orca_library_browse_artists(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_artist_query *query,
+    void *context,
+    orca_artist_callback callback
+);
+/* How many Artists orca_library_browse_artists would list for `query`.
+ * Limit and offset are ignored. */
+orca_status orca_library_artist_count_matching(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_artist_query *query,
+    uint64_t *output
+);
+
+/* Invokes the callback once with the Track and the ids it resolves to.
+ * NOT_FOUND, without a callback, when no such Track exists. */
+orca_status orca_library_track_get(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_track_summary_callback callback
+);
+/* Invokes the callback once with what the Library recorded about the Track
+ * and its file. Reads the database alone. NOT_FOUND, without a callback, when
+ * no such Track exists. */
+orca_status orca_library_track_details(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_track_details_callback callback
+);
+/* How often the Track's file has been heard, and when last. A Track with no
+ * file, or an unknown id, has a play count of zero. */
+orca_status orca_library_track_play_stats(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    orca_play_stats *output
+);
+/* Listens recorded since the Library was opened: one atomic load, so a host
+ * may poll it every tick to learn when to reread its history. */
+orca_status orca_library_listens_recorded(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *output
+);
+/* Files that still owe the default loudness and fingerprint measurement:
+ * what orca_library_start_analysis would measure. */
+orca_status orca_library_unanalyzed_count(
+    orca_runtime *runtime,
+    orca_handle library,
     uint64_t *output
 );
 

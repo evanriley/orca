@@ -165,11 +165,15 @@ struct track_capture {
     int64_t first_playable_id;
     uint32_t with_duration;
     uint32_t with_artist;
+    uint32_t with_feedback;
+    uint32_t with_rating;
 };
 
 static void capture_track(void *context, const orca_track_view *track) {
     struct track_capture *capture = context;
     capture->count += 1;
+    if (track->feedback != ORCA_FEEDBACK_NONE) capture->with_feedback += 1;
+    if (track->has_rating) capture->with_rating += 1;
     if (track->has_duration && track->duration_ms > 0) capture->with_duration += 1;
     if (track->artist.length != 0) capture->with_artist += 1;
     if (track->has_file && capture->first_playable_id == 0)
@@ -215,6 +219,49 @@ static void capture_release(void *context, const orca_release_view *release) {
     if (release->total_duration_ms > capture->longest_ms)
         capture->longest_ms = release->total_duration_ms;
     if (capture->first_id == 0 && release->track_count != 0) capture->first_id = release->id;
+}
+
+struct artist_name {
+    uint32_t count;
+    char name[256];
+};
+
+static void capture_artist_name(void *context, const orca_artist_view *artist) {
+    struct artist_name *capture = context;
+    if (capture->count == 0 && artist->name.length < sizeof capture->name) {
+        memcpy(capture->name, artist->name.pointer, artist->name.length);
+        capture->name[artist->name.length] = 0;
+    }
+    capture->count += 1;
+}
+
+struct summary_capture {
+    uint32_t count;
+    int64_t track_id;
+    uint8_t has_release_id;
+};
+
+static void capture_summary(void *context, const orca_track_summary_view *summary) {
+    struct summary_capture *capture = context;
+    capture->count += 1;
+    capture->track_id = summary->track.id;
+    capture->has_release_id = summary->has_release_id;
+}
+
+struct details_capture {
+    uint32_t count;
+    int is_flac;
+    uint8_t has_sample_rate;
+    uint8_t file_missing;
+};
+
+static void capture_details(void *context, const orca_track_details_view *details) {
+    struct details_capture *capture = context;
+    capture->count += 1;
+    capture->is_flac =
+        details->codec.length == 4 && memcmp(details->codec.pointer, "flac", 4) == 0;
+    capture->has_sample_rate = details->has_sample_rate && details->sample_rate > 0;
+    capture->file_missing = details->file_missing;
 }
 
 /* Records the disc/track pair of every row, in arrival order, so the album
@@ -636,6 +683,10 @@ int main(int argc, char **argv) {
     if (orca_analysis_available_threads() == 0) return 203;
     if (orca_analysis_default_threads() == 0) return 204;
     if (orca_analysis_default_threads() > orca_analysis_available_threads()) return 205;
+    uint64_t unanalyzed = 0;
+    if (orca_library_unanalyzed_count(runtime, library, &unanalyzed) != ORCA_STATUS_OK ||
+        unanalyzed == 0 || unanalyzed != stats.files_seen - stats.unsupported - stats.errors)
+        return 97;
     if (orca_library_start_analysis(runtime, library, &analysis_options, &analysis_job) !=
         ORCA_STATUS_OK)
         return 150;
@@ -645,6 +696,7 @@ int main(int argc, char **argv) {
     if (analysis_planned.kind != ORCA_JOB_KIND_ANALYSIS) return 152;
     if (analysis_planned.has_total == 0) return 153;
     if (analysis_planned.total_units == 0) return 154;
+    if (analysis_planned.total_units != unanalyzed) return 98;
     uint8_t analysis_state = ORCA_JOB_RUNNING;
     settled = await_job(runtime, analysis_job, &analysis_state, 1, 120000);
     if (settled != 1) return 155;
@@ -665,6 +717,9 @@ int main(int argc, char **argv) {
     if (orca_library_scan_stats(runtime, analysis_job, &analysis_stats) != ORCA_STATUS_OK)
         return 163;
     if (analysis_stats.files_seen != 0) return 164;
+    if (orca_library_unanalyzed_count(runtime, library, &unanalyzed) != ORCA_STATUS_OK ||
+        unanalyzed != 0)
+        return 99;
 
     /* The fixtures were just measured, so this can actually compare them. Its
      * denominator is every file in the Library, because it examines every row
@@ -729,7 +784,8 @@ int main(int argc, char **argv) {
     if (capture.with_duration == 0) return 36; /* decoded properties reached the view */
     if (capture.with_artist == 0) return 37;
     if (capture.first_playable_id == 0) return 38;
-
+    /* Nothing has loved or rated a recording yet. */
+    if (capture.with_feedback != 0 || capture.with_rating != 0) return 206;
 
     uint64_t artist_count = 0;
     if (orca_library_artist_count(runtime, library, &artist_count) != ORCA_STATUS_OK) return 100;
@@ -869,6 +925,148 @@ int main(int argc, char **argv) {
     if (orca_library_browse_tracks(runtime, library, 0, &album, capture_order) !=
         ORCA_STATUS_INVALID_ARGUMENT)
         return 138;
+
+    /* Every release order lists every Release once; nothing is loved yet. */
+    orca_release_query release_query;
+    memset(&release_query, 0, sizeof release_query);
+    release_query.album_artist_id = -1;
+    release_query.limit = 512;
+    for (uint8_t sort = ORCA_RELEASE_SORT_TITLE; sort <= ORCA_RELEASE_SORT_LOVED; sort += 1) {
+        release_query.sort = sort;
+        struct release_capture sorted;
+        memset(&sorted, 0, sizeof sorted);
+        if (orca_library_browse_releases(runtime, library, &release_query, &sorted,
+                                         capture_release) != ORCA_STATUS_OK ||
+            sorted.count != release_count)
+            return 207;
+        uint64_t release_matches = 0;
+        if (orca_library_release_count_matching(runtime, library, &release_query,
+                                                &release_matches) != ORCA_STATUS_OK ||
+            release_matches != release_count)
+            return 208;
+    }
+    release_query.loved_only = 1;
+    struct release_capture loved_releases;
+    memset(&loved_releases, 0, sizeof loved_releases);
+    uint64_t loved_release_count = 1;
+    if (orca_library_browse_releases(runtime, library, &release_query, &loved_releases,
+                                     capture_release) != ORCA_STATUS_OK ||
+        loved_releases.count != 0 ||
+        orca_library_release_count_matching(runtime, library, &release_query,
+                                            &loved_release_count) != ORCA_STATUS_OK ||
+        loved_release_count != 0)
+        return 209;
+    release_query.sort = 99;
+    if (orca_library_browse_releases(runtime, library, &release_query, &loved_releases,
+                                     capture_release) != ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_release_count_matching(runtime, library, 0, &loved_release_count) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 241;
+
+    /* Filtering artists by a scanned artist's name finds it; nonsense finds
+     * none. */
+    struct artist_name first_artist;
+    memset(&first_artist, 0, sizeof first_artist);
+    if (orca_library_artist_get(runtime, library, artists.first_id, &first_artist,
+                                capture_artist_name) != ORCA_STATUS_OK ||
+        first_artist.count != 1)
+        return 242;
+    orca_artist_query artist_query;
+    memset(&artist_query, 0, sizeof artist_query);
+    artist_query.filter.pointer = first_artist.name;
+    artist_query.filter.length = strlen(first_artist.name);
+    artist_query.limit = 512;
+    struct artist_capture filtered;
+    memset(&filtered, 0, sizeof filtered);
+    filtered.sorted = 1;
+    uint64_t artist_matches = 0;
+    if (orca_library_browse_artists(runtime, library, &artist_query, &filtered,
+                                    capture_artist) != ORCA_STATUS_OK ||
+        filtered.count == 0 ||
+        orca_library_artist_count_matching(runtime, library, &artist_query, &artist_matches) !=
+            ORCA_STATUS_OK ||
+        artist_matches != filtered.count)
+        return 242;
+    artist_query.filter.pointer = "zzqx-no-such-artist";
+    artist_query.filter.length = strlen(artist_query.filter.pointer);
+    memset(&filtered, 0, sizeof filtered);
+    if (orca_library_browse_artists(runtime, library, &artist_query, &filtered,
+                                    capture_artist) != ORCA_STATUS_OK ||
+        filtered.count != 0 ||
+        orca_library_artist_count_matching(runtime, library, &artist_query, &artist_matches) !=
+            ORCA_STATUS_OK ||
+        artist_matches != 0)
+        return 243;
+
+    struct summary_capture summary;
+    memset(&summary, 0, sizeof summary);
+    if (orca_library_track_get(runtime, library, capture.first_playable_id, &summary,
+                               capture_summary) != ORCA_STATUS_OK ||
+        summary.count != 1 || summary.track_id != capture.first_playable_id ||
+        summary.has_release_id != 1)
+        return 244;
+    memset(&summary, 0, sizeof summary);
+    if (orca_library_track_get(runtime, library, 999999999, &summary, capture_summary) !=
+            ORCA_STATUS_NOT_FOUND ||
+        summary.count != 0)
+        return 245;
+
+    /* A FLAC fixture's details come from what the scan recorded. */
+    memset(&browse, 0, sizeof browse);
+    browse.artist_id = -1;
+    browse.release_id = -1;
+    browse.limit = 64;
+    struct order_capture every_track;
+    memset(&every_track, 0, sizeof every_track);
+    if (orca_library_browse_tracks(runtime, library, &browse, &every_track, capture_order) !=
+            ORCA_STATUS_OK ||
+        every_track.count == 0 || every_track.count > 64)
+        return 246;
+    struct details_capture flac;
+    memset(&flac, 0, sizeof flac);
+    for (uint32_t i = 0; i < every_track.count && !flac.is_flac; i += 1) {
+        memset(&flac, 0, sizeof flac);
+        if (orca_library_track_details(runtime, library, every_track.ids[i], &flac,
+                                       capture_details) != ORCA_STATUS_OK ||
+            flac.count != 1)
+            return 246;
+    }
+    if (!flac.is_flac || !flac.has_sample_rate || flac.file_missing != 0) return 247;
+    memset(&flac, 0, sizeof flac);
+    if (orca_library_track_details(runtime, library, 999999999, &flac, capture_details) !=
+            ORCA_STATUS_NOT_FOUND ||
+        flac.count != 0)
+        return 248;
+
+    /* Nothing has been played yet. */
+    orca_play_stats play_stats;
+    memset(&play_stats, 0xff, sizeof play_stats);
+    if (orca_library_track_play_stats(runtime, library, capture.first_playable_id,
+                                      &play_stats) != ORCA_STATUS_OK ||
+        play_stats.play_count != 0 || play_stats.has_last_played_at != 0)
+        return 249;
+    uint64_t listens = 1;
+    if (orca_library_listens_recorded(runtime, library, &listens) != ORCA_STATUS_OK ||
+        listens != 0)
+        return 250;
+
+    /* Rating and love orders list every Track; no Track is loved yet. */
+    browse.limit = 512;
+    uint64_t track_matches = 0;
+    for (uint8_t sort = ORCA_TRACK_SORT_RATING; sort <= ORCA_TRACK_SORT_LOVED; sort += 1) {
+        browse.sort = sort;
+        struct track_capture sorted_tracks;
+        memset(&sorted_tracks, 0, sizeof sorted_tracks);
+        if (orca_library_browse_tracks(runtime, library, &browse, &sorted_tracks,
+                                       capture_track) != ORCA_STATUS_OK ||
+            sorted_tracks.count != capture.count)
+            return 251;
+    }
+    browse.loved_only = 1;
+    if (orca_library_track_match_count(runtime, library, &browse, &track_matches) !=
+            ORCA_STATUS_OK ||
+        track_matches != 0)
+        return 251;
 
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;

@@ -53,7 +53,10 @@ pub const TrackView = extern struct {
     has_track_number: u8,
     has_disc_number: u8,
     has_file: u8,
-    _reserved: [4]u8 = @splat(0),
+    feedback: u8,
+    has_rating: u8,
+    rating: u8,
+    _reserved: [1]u8 = @splat(0),
     title: StringView,
     artist: StringView,
     album: StringView,
@@ -70,6 +73,8 @@ pub const TrackSortKey = enum(u8) {
     track_number = 4,
     duration = 5,
     date_added = 6,
+    rating = 7,
+    loved = 8,
 };
 
 /// The POD form of `database.TrackQuery`. Negative ids mean "no filter",
@@ -80,9 +85,17 @@ pub const TrackQueryView = extern struct {
     release_id: i64,
     sort: u8,
     descending: u8,
-    _reserved: [2]u8 = @splat(0),
+    loved_only: u8,
+    _reserved: [1]u8 = @splat(0),
     limit: u32,
     offset: u32,
+};
+
+/// A string a host hands in, whose pointer may be null when it is empty.
+/// Outgoing views use `StringView`, which is never null.
+const StringInput = extern struct {
+    pointer: ?[*]const u8,
+    length: usize,
 };
 
 pub const ArtistView = extern struct {
@@ -104,13 +117,112 @@ pub const ReleaseView = extern struct {
     has_album_artist_id: u8,
     has_disc_count: u8,
     is_compilation: u8,
-    _reserved: [3]u8 = @splat(0),
+    loved: u8,
+    _reserved: [2]u8 = @splat(0),
     title: StringView,
     album_artist: StringView,
     release_date: StringView,
 };
 
 pub const ReleaseCallback = *const fn (?*anyopaque, *const ReleaseView) callconv(.c) void;
+
+pub const ReleaseQueryView = extern struct {
+    album_artist_id: i64,
+    sort: u8,
+    loved_only: u8,
+    _reserved: [2]u8 = @splat(0),
+    limit: u32,
+    offset: u32,
+};
+
+pub const ArtistQueryView = extern struct {
+    filter: StringInput,
+    limit: u32,
+    offset: u32,
+};
+
+pub const TrackSummaryView = extern struct {
+    track: TrackView,
+    release_id: i64,
+    artist_id: i64,
+    recording_id: i64,
+    has_release_id: u8,
+    has_artist_id: u8,
+    has_recording_id: u8,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const TrackSummaryCallback = *const fn (?*anyopaque, *const TrackSummaryView) callconv(.c) void;
+
+pub const IdSource = enum(u8) {
+    none = 0,
+    tag = 1,
+    match = 2,
+    edit = 3,
+};
+
+pub const TrackDetailsView = extern struct {
+    track_id: i64,
+    track_number: i64,
+    disc_number: i64,
+    duration_ms: i64,
+    size_bytes: i64,
+    last_played_at: i64,
+    play_count: u64,
+    title: StringView,
+    artist: StringView,
+    album: StringView,
+    album_artist: StringView,
+    date: StringView,
+    codec: StringView,
+    path: StringView,
+    musicbrainz_recording_id: StringView,
+    musicbrainz_release_id: StringView,
+    musicbrainz_release_group_id: StringView,
+    musicbrainz_release_track_id: StringView,
+    musicbrainz_album_artist_id: StringView,
+    sample_rate: u32,
+    bit_depth: u32,
+    channels: u32,
+    bitrate_kbps: u32,
+    integrated_lufs: f32,
+    replay_gain_db: f32,
+    sample_peak: f32,
+    has_track_number: u8,
+    has_disc_number: u8,
+    has_compilation: u8,
+    compilation: u8,
+    lossy: u8,
+    has_sample_rate: u8,
+    has_bit_depth: u8,
+    has_channels: u8,
+    has_duration: u8,
+    has_size_bytes: u8,
+    has_bitrate_kbps: u8,
+    file_missing: u8,
+    has_loudness: u8,
+    has_artwork: u8,
+    has_last_played_at: u8,
+    feedback: u8,
+    feedback_syncable: u8,
+    has_rating: u8,
+    rating: u8,
+    musicbrainz_recording_id_source: u8,
+    musicbrainz_release_id_source: u8,
+    musicbrainz_release_group_id_source: u8,
+    musicbrainz_release_track_id_source: u8,
+    musicbrainz_album_artist_id_source: u8,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const TrackDetailsCallback = *const fn (?*anyopaque, *const TrackDetailsView) callconv(.c) void;
+
+pub const PlayStatsView = extern struct {
+    play_count: u64,
+    last_played_at: i64,
+    has_last_played_at: u8,
+    _reserved: [7]u8 = @splat(0),
+};
 
 pub const HealthIssueView = extern struct {
     kind: u8,
@@ -650,6 +762,168 @@ pub export fn orca_library_track_match_count(
         return box.reject(@src(), .invalid_argument, "query is null")) orelse
         return box.reject(@src(), .invalid_argument, invalid_track_query);
     destination.* = box.runtime.libraryTrackMatchCount(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_browse_releases(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ReleaseQueryView,
+    context: ?*anyopaque,
+    callback: ?ReleaseCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importReleaseQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_release_query);
+    var page = box.runtime.libraryReleasePage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = releaseView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_release_count_matching(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ReleaseQueryView,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importReleaseQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_release_query);
+    destination.* = box.runtime.libraryReleaseCountMatching(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_browse_artists(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ArtistQueryView,
+    context: ?*anyopaque,
+    callback: ?ArtistCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importArtistQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_artist_query);
+    var page = box.runtime.libraryArtistPage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = artistView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_artist_count_matching(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ArtistQueryView,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importArtistQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_artist_query);
+    destination.* = box.runtime.libraryArtistCountMatching(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_track_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?TrackSummaryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackSummary(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    const item = found orelse return box.reject(@src(), .not_found, "no such track");
+    defer item.deinit(box.runtime.allocator);
+    const view: TrackSummaryView = .{
+        .track = trackView(item),
+        .release_id = item.release_id orelse 0,
+        .artist_id = item.artist_id orelse 0,
+        .recording_id = item.recording_id orelse 0,
+        .has_release_id = @intFromBool(item.release_id != null),
+        .has_artist_id = @intFromBool(item.artist_id != null),
+        .has_recording_id = @intFromBool(item.recording_id != null),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_track_details(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?TrackDetailsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackDetails(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    const details = found orelse return box.reject(@src(), .not_found, "no such track");
+    defer details.deinit();
+    const view = trackDetailsView(&details);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_track_play_stats(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    output: ?*PlayStatsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.libraryTrackPlayStats(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .play_count = stats.play_count,
+        .last_played_at = stats.last_played_at orelse 0,
+        .has_last_played_at = @intFromBool(stats.last_played_at != null),
+    };
+    return .ok;
+}
+
+pub export fn orca_library_listens_recorded(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryListensRecorded(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_unanalyzed_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryUnanalyzedCount(importLibrary(library)) catch |err|
         return box.fail(@src(), err);
     return .ok;
 }
@@ -1502,10 +1776,67 @@ fn importTrackQuery(query: *const TrackQueryView) ?database.TrackQuery {
             .track_number => .track_number,
             .duration => .duration,
             .date_added => .date_added,
+            .rating => .rating,
+            .loved => .loved,
         },
+        .loved_only = query.loved_only != 0,
         .direction = if (query.descending != 0) .descending else .ascending,
         .limit = query.limit,
         .offset = query.offset,
+    };
+}
+
+const invalid_release_query = "query limit must be between 1 and 512 and sort a known orca_release_sort";
+
+fn importReleaseQuery(query: *const ReleaseQueryView) ?database.ReleaseQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    return .{
+        .album_artist_id = optionalId(query.album_artist_id),
+        .sort = importReleaseSort(query.sort) orelse return null,
+        .loved_only = query.loved_only != 0,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+pub fn importReleaseSort(sort: u8) ?database.ReleaseSort {
+    return switch (sort) {
+        0 => .title,
+        1 => .artist,
+        2 => .year,
+        3 => .recently_added,
+        4 => .loved,
+        else => null,
+    };
+}
+
+const invalid_artist_query = "query limit must be between 1 and 512 and filter not null unless empty";
+
+fn importArtistQuery(query: *const ArtistQueryView) ?database.ArtistQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    const filter: []const u8 = if (query.filter.pointer) |pointer|
+        pointer[0..query.filter.length]
+    else if (query.filter.length == 0)
+        ""
+    else
+        return null;
+    return .{ .filter = filter, .limit = query.limit, .offset = query.offset };
+}
+
+pub fn exportFeedback(feedback: database.Feedback) u8 {
+    return switch (feedback) {
+        .none => 0,
+        .loved => 1,
+        .hated => 2,
+    };
+}
+
+fn exportIdSource(source: ?core.track_details.RecordingIdSource) IdSource {
+    const known = source orelse return .none;
+    return switch (known) {
+        .tag => .tag,
+        .match => .match,
+        .edit => .edit,
     };
 }
 
@@ -1529,6 +1860,7 @@ fn releaseView(item: database.ReleaseSummary) ReleaseView {
         .has_album_artist_id = @intFromBool(item.album_artist_id != null),
         .has_disc_count = @intFromBool(item.disc_count != null),
         .is_compilation = @intFromBool(item.is_compilation),
+        .loved = @intFromBool(item.loved),
         .title = stringView(item.title),
         .album_artist = stringView(item.album_artist),
         .release_date = stringView(item.release_date orelse ""),
@@ -1545,10 +1877,69 @@ fn trackView(item: database.TrackSummary) TrackView {
         .has_track_number = @intFromBool(item.track_number != null),
         .has_disc_number = @intFromBool(item.disc_number != null),
         .has_file = @intFromBool(item.has_playable_file),
+        .feedback = exportFeedback(item.feedback),
+        .has_rating = @intFromBool(item.rating != null),
+        .rating = item.rating orelse 0,
         .title = stringView(item.title),
         .artist = stringView(item.artist),
         .album = stringView(item.album),
         .album_artist = stringView(item.album_artist),
+    };
+}
+
+fn trackDetailsView(details: *const core.track_details.TrackDetails) TrackDetailsView {
+    const loudness = details.loudness;
+    return .{
+        .track_id = details.track_id,
+        .track_number = details.track_number orelse 0,
+        .disc_number = details.disc_number orelse 0,
+        .duration_ms = details.duration_ms orelse 0,
+        .size_bytes = details.size_bytes orelse 0,
+        .last_played_at = details.last_played_at orelse 0,
+        .play_count = details.play_count,
+        .title = stringView(details.title),
+        .artist = stringView(details.artist),
+        .album = stringView(details.album),
+        .album_artist = stringView(details.album_artist),
+        .date = stringView(details.date orelse ""),
+        .codec = stringView(details.codec),
+        .path = stringView(details.path orelse ""),
+        .musicbrainz_recording_id = stringView(details.musicbrainz_recording_id orelse ""),
+        .musicbrainz_release_id = stringView(details.musicbrainz_release_id orelse ""),
+        .musicbrainz_release_group_id = stringView(details.musicbrainz_release_group_id orelse ""),
+        .musicbrainz_release_track_id = stringView(details.musicbrainz_release_track_id orelse ""),
+        .musicbrainz_album_artist_id = stringView(details.musicbrainz_album_artist_id orelse ""),
+        .sample_rate = details.sample_rate orelse 0,
+        .bit_depth = details.bit_depth orelse 0,
+        .channels = details.channels orelse 0,
+        .bitrate_kbps = details.bitrate_kbps orelse 0,
+        .integrated_lufs = if (loudness) |value| value.integrated_lufs else 0,
+        .replay_gain_db = if (loudness) |value| value.replay_gain_db else 0,
+        .sample_peak = if (loudness) |value| value.sample_peak else 0,
+        .has_track_number = @intFromBool(details.track_number != null),
+        .has_disc_number = @intFromBool(details.disc_number != null),
+        .has_compilation = @intFromBool(details.compilation != null),
+        .compilation = @intFromBool(details.compilation orelse false),
+        .lossy = @intFromBool(details.lossy),
+        .has_sample_rate = @intFromBool(details.sample_rate != null),
+        .has_bit_depth = @intFromBool(details.bit_depth != null),
+        .has_channels = @intFromBool(details.channels != null),
+        .has_duration = @intFromBool(details.duration_ms != null),
+        .has_size_bytes = @intFromBool(details.size_bytes != null),
+        .has_bitrate_kbps = @intFromBool(details.bitrate_kbps != null),
+        .file_missing = @intFromBool(details.file_missing),
+        .has_loudness = @intFromBool(loudness != null),
+        .has_artwork = @intFromBool(details.has_artwork),
+        .has_last_played_at = @intFromBool(details.last_played_at != null),
+        .feedback = exportFeedback(details.feedback),
+        .feedback_syncable = @intFromBool(details.feedback_syncable),
+        .has_rating = @intFromBool(details.rating != null),
+        .rating = details.rating orelse 0,
+        .musicbrainz_recording_id_source = @intFromEnum(exportIdSource(details.musicbrainz_recording_id_source)),
+        .musicbrainz_release_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_id_source)),
+        .musicbrainz_release_group_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_group_id_source)),
+        .musicbrainz_release_track_id_source = @intFromEnum(exportIdSource(details.musicbrainz_release_track_id_source)),
+        .musicbrainz_album_artist_id_source = @intFromEnum(exportIdSource(details.musicbrainz_album_artist_id_source)),
     };
 }
 
@@ -1626,7 +2017,10 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .analysis => 3,
         .duplicate_scan => 4,
         .reconcile => 5,
-        else => 255,
+        .metadata_lookup => 6,
+        .acoustid_submission => 7,
+        .mutation => 8,
+        .artwork, .conversion, .ripping, .dummy => 255,
     };
 }
 
@@ -1927,6 +2321,113 @@ test "a last error longer than its buffer is truncated and stays terminated" {
     const message = std.mem.span(orca_runtime_last_error(runtime));
     try std.testing.expectEqual(@as(usize, last_error_capacity), message.len);
     try std.testing.expect(std.mem.startsWith(u8, message, "orca_library_open: xxx"));
+}
+
+test "browse queries refuse an unknown sort, an unbounded limit and null pointers" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-browse?mode=memory&cache=shared",
+        &library,
+    ));
+    var visited: usize = 0;
+    var count: u64 = 0;
+
+    var releases: ReleaseQueryView = .{ .album_artist_id = -1, .sort = 5, .loved_only = 0, .limit = 8, .offset = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, &releases, &visited, countRelease));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching(runtime, library, &releases, &count));
+    releases.sort = 4;
+    releases.limit = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, &releases, &visited, countRelease));
+    releases.limit = max_page + 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, &releases, &visited, countRelease));
+    releases.limit = max_page;
+    try std.testing.expectEqual(Status.ok, orca_library_browse_releases(runtime, library, &releases, &visited, countRelease));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, null, &visited, countRelease));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, &releases, &visited, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching(runtime, library, null, &count));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching(runtime, library, &releases, null));
+
+    var artists: ArtistQueryView = .{ .filter = .{ .pointer = null, .length = 3 }, .limit = 8, .offset = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_artists(runtime, library, &artists, &visited, countArtist));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching(runtime, library, &artists, &count));
+    artists.filter.length = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_artist_count_matching(runtime, library, &artists, &count));
+    artists.limit = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_artists(runtime, library, &artists, &visited, countArtist));
+    artists.limit = max_page + 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_artists(runtime, library, &artists, &visited, countArtist));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_artists(runtime, library, null, &visited, countArtist));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching(runtime, library, null, &count));
+    artists.limit = 8;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching(runtime, library, &artists, null));
+
+    var tracks: TrackQueryView = .{ .artist_id = -1, .release_id = -1, .sort = 9, .descending = 0, .loved_only = 1, .limit = 8, .offset = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks(runtime, library, &tracks, &visited, countTrack));
+    tracks.sort = @intFromEnum(TrackSortKey.loved);
+    try std.testing.expectEqual(Status.ok, orca_library_track_match_count(runtime, library, &tracks, &count));
+
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_play_stats(runtime, library, 1, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_listens_recorded(runtime, library, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_unanalyzed_count(runtime, library, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_get(runtime, library, 1, null, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_details(runtime, library, 1, null, null));
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "a Track the Library does not hold is not found, and its callback never runs" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-track-get?mode=memory&cache=shared",
+        &library,
+    ));
+    const box = runtimeBox(runtime).?;
+    try (try core.runtime.databaseOf(&box.runtime, importLibrary(library))).tracks.upsertTracks(&.{
+        .{ .title = "Only", .album = "Generated", .album_artist = "Orca" },
+    });
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_track_get(runtime, library, 1, &visited, countSummary));
+    try std.testing.expectEqual(Status.ok, orca_library_track_details(runtime, library, 1, &visited, countDetails));
+    try std.testing.expectEqual(@as(usize, 2), visited);
+    try std.testing.expectEqual(Status.not_found, orca_library_track_get(runtime, library, 2, &visited, countSummary));
+    try std.testing.expectEqualStrings("orca_library_track_get: no such track", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.not_found, orca_library_track_details(runtime, library, 2, &visited, countDetails));
+    try std.testing.expectEqual(@as(usize, 2), visited);
+    var stats: PlayStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_track_play_stats(runtime, library, 2, &stats));
+    try std.testing.expectEqual(@as(u64, 0), stats.play_count);
+    try std.testing.expectEqual(@as(u8, 0), stats.has_last_played_at);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+fn countRelease(context: ?*anyopaque, release: *const ReleaseView) callconv(.c) void {
+    _ = release;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countArtist(context: ?*anyopaque, artist: *const ArtistView) callconv(.c) void {
+    _ = artist;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countSummary(context: ?*anyopaque, summary: *const TrackSummaryView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(summary.track.feedback == 0 and summary.track.has_rating == 0);
+}
+
+fn countDetails(context: ?*anyopaque, details: *const TrackDetailsView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(details.title.length != 0 and details.has_loudness == 0);
 }
 
 fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {

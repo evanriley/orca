@@ -5,6 +5,7 @@ const c = @import("orca_h");
 const c_api = liborca.internal.c_api;
 const audio = liborca.internal.audio;
 const core = liborca.internal.core;
+const database = liborca.internal.database;
 
 const struct_pairs = .{
     .{ c_api.Handle, c.orca_handle },
@@ -13,6 +14,11 @@ const struct_pairs = .{
     .{ c_api.TrackQueryView, c.orca_track_query },
     .{ c_api.ArtistView, c.orca_artist_view },
     .{ c_api.ReleaseView, c.orca_release_view },
+    .{ c_api.ReleaseQueryView, c.orca_release_query },
+    .{ c_api.ArtistQueryView, c.orca_artist_query },
+    .{ c_api.TrackSummaryView, c.orca_track_summary_view },
+    .{ c_api.TrackDetailsView, c.orca_track_details_view },
+    .{ c_api.PlayStatsView, c.orca_play_stats },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
@@ -48,6 +54,20 @@ const export_mappings = .{
     struct {
         pub const prefix = "ORCA_TRACK_SORT_";
         pub const Tag = c_api.TrackSortKey;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_FEEDBACK_";
+        pub const Tag = database.Feedback;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportFeedback(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ID_SOURCE_";
+        pub const Tag = c_api.IdSource;
         pub fn produce(tag: Tag) ?i64 {
             return @intFromEnum(tag);
         }
@@ -156,6 +176,13 @@ const import_mappings = .{
         pub const Tag = c_api.TrackSortKey;
         pub fn consume(value: u8) ?Tag {
             return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_SORT_";
+        pub const Tag = database.ReleaseSort;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReleaseSort(value);
         }
     },
 };
