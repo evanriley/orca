@@ -419,7 +419,7 @@ pub fn freeListens(self: *OrcaRuntime, library: *LibraryObject) void {
     library.listens = null;
 }
 
-fn sampleTime(self: *OrcaRuntime) listen_worker.SampleTime {
+pub fn sampleTime(self: *OrcaRuntime) listen_worker.SampleTime {
     if (self.listen_hooks.sample_clock) |clock| return clock.now();
     const io = self.control_threaded.io();
     return .{
@@ -480,6 +480,15 @@ pub fn listenSampleDueMs(self: *OrcaRuntime) ?u64 {
     const last = self.last_listen_sample_ms orelse return 0;
     const remaining = listen_fallback_interval_ms - (sampleTime(self).mono_ms - last);
     return @intCast(std.math.clamp(remaining, 0, listen_fallback_interval_ms));
+}
+
+pub fn playersIdle(self: *OrcaRuntime) bool {
+    for (self.players.slots.items) |*slot| {
+        const object_value = if (slot.value) |*value| value else continue;
+        if (object_value.player.state.load(.acquire) == .playing and
+            !object_value.player.drained.load(.acquire)) return false;
+    }
+    return true;
 }
 
 /// Ends the listen a Player is in and hands its final time to `library`'s

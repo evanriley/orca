@@ -19,8 +19,9 @@ events.
 A host sleeps in its own event loop and pumps only when liborca has something
 for it, rather than on a timer. `Runtime.setWaker` installs a `HostWaker`
 (`orca_runtime_set_wake_callback` in the C ABI); `Runtime.pump` executes the
-submitted commands, joins finished jobs and starts the reconciles watchers
-asked for; `Runtime.nextPumpTimeoutMs`
+submitted commands, joins finished jobs, starts a host job that waited for a
+maintenance unit, starts the reconciles watchers asked for, then starts a due
+maintenance unit; `Runtime.nextPumpTimeoutMs`
 (`orca_runtime_pump_timeout`) says how long the host may sleep. A host's loop:
 
 1. Pump, then drain events and telemetry and read the snapshots it shows.
@@ -78,6 +79,10 @@ Some work needs a clock rather than an event, and the pump timeout covers it:
   reconcile now, make it 0. Changes held back by a running job of their
   Library wait on that job's timeout, and the pump that reaps the job starts
   their reconcile.
+- A Library with idle maintenance enabled makes it what remains until its
+  next unit is due, or 0 once it is due. While a unit runs, its worker's
+  timeout covers it. A host job queued behind a unit makes it 0 once the
+  unit's worker has been joined.
 
 A waker installed with `setWaker` is read by worker threads without a lock, so
 it is refused with `error.WorkersRunning` (`ORCA_STATUS_INVALID_STATE`) once any
@@ -124,3 +129,59 @@ whole files, so a library-wide run is long and stopping it is the ordinary way
 to use it: the token is polled inside a decode, the batch already measured is
 still committed, and a later run selects only what is left. `docs/analysis.md`
 covers what that resumption is keyed on.
+
+## Idle maintenance
+
+`libraryMaintenance(library, MaintenanceOptions)` makes the pump verify a
+Library's recording IDs a unit at a time while the process is otherwise
+idle (`liborca/core/runtime_maintenance.zig`). A unit is a `metadata_lookup`
+job in verify mode with origin `maintenance` (`jobOrigin`): one Release with a
+file to verify, after the last one a unit took and wrapping to the first, or,
+once no Release is left, at most 20 Tracks on no Release. Its findings land
+in Health as `recording_mismatch`. There is no scheduler thread: the record
+lives on the Library, and the pump reads the runtime's sampling clock (the
+listen clock) to decide when the next unit is due.
+
+A due Library starts a unit only when every check passes, in this order;
+any other outcome puts it off one whole interval:
+
+1. A client identity is set (`blocked = client_identity_required`).
+2. AcoustID is in scope: an application key is set (`acoustid_required`).
+3. Every Player is idle: stopped, paused, or with its queue played out. No
+   other job runs, and no host job waits. Nothing is reported blocked.
+4. Neither AcoustID nor MusicBrainz has a block recorded in the Library
+   (`provider_busy`), so a unit never sleeps through a backoff inside its
+   worker.
+5. Something is left to verify. Otherwise the cursor goes back to the first
+   Release.
+
+At most one unit runs in the process. Each unit ends, however it ends,
+`interval_ms` before the next one is due. A unit that fails because another
+Orca process held a service's lease is reported `provider_busy`. Starting
+playback never cancels a running unit; it only keeps the next one from
+starting.
+
+A unit gives way to the host:
+
+- `libraryJobRunning` ignores units, so they never refuse a scan or a tag
+  write. A unit can start before a new watcher's first reconcile spawns, and
+  then runs beside it. `libraryRemoveRoot` cancels the Library's unit
+  without waiting for it, then removes the root. A unit whose files are
+  forgotten under it either committed first, and the deletion cascades, or
+  fails its commit on the missing file and rolls the whole unit back.
+- `startLibraryMatching`, `startReleaseCoverArtFetch` and
+  `startAcoustIdSubmission` called while a unit runs cancel the unit and
+  return the new job's handle at once, in state `queued`, with default stats
+  and origin `host`. The handoff has a fixed order. The unit's worker
+  releases its provider leases before it finishes. The pump joins the worker
+  and publishes its `job_finished`, which waits while the event channel is
+  full. Only then does a later step of the pump start the queued job's
+  worker. So two workers never share a lease or write `provider_state`
+  together, and the unit's `job_finished` arrives before any progress of the
+  host job. A second such start while one waits is refused as it would be
+  beside a running job, and so is `libraryRemoveRoot` on its Library
+  (`LibraryJobRunning`).
+- `cancelJob` on a queued job moves it to `cancelling`. It then finishes
+  `cancelled`, with one `job_finished` and no worker. `destroyLibrary` drops
+  its Library's queued job and `shutdown` drops any. Both finish it
+  `cancelled` without an event, so no worker or pending slot outlives them.

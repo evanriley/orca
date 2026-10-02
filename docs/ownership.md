@@ -35,6 +35,15 @@ again for every other Library still watched, and each of their roots is
 reconciled whole, since the drain may have cancelled a reconcile or missed an
 event. Destroying the watched Library itself leaves nothing to restart.
 
+A Library with idle maintenance enabled keeps its schedule, its cursor and
+the last unit's result on its own record, which holds no pointer and
+survives a drain. Its unit is an ordinary job worker with origin
+`maintenance` and goes with the other job workers; the drain finalizes it,
+and the next unit starts one interval later. A host job queued behind a unit
+holds a Library handle and a request, not a worker. `destroyLibrary` finishes
+its Library's queued job `cancelled`, so no pending job names a Library that
+is gone. See [control-plane.md](control-plane.md#idle-maintenance).
+
 The `CredentialStore` and server URL passed to `setCredentialStore` and
 `setListenBrainzServer` are borrowed: their strings and context must outlive
 the runtime, because a worker may read them at any time. `setClientIdentity`
@@ -55,7 +64,8 @@ work → Zones → Players → Libraries:
 2. End open listens, stop every Player's engine thread, cancel job workers and
    all other registered work (listen workers, artwork loaders, watchers), and
    block until every worker has finished. Then release the drained workers,
-   discard tag write plans awaiting approval, and cancel and drain Jobs.
+   discard tag write plans awaiting approval, finish a host job queued
+   behind a maintenance unit `cancelled`, and cancel and drain Jobs.
 3. Destroy Zones, closing their output sessions; Zones depend on Players and
    output resources.
 4. Free Players.

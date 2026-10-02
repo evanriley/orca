@@ -123,7 +123,7 @@ zig build run -- scan DATABASE ROOT
 zig build run -- roots DATABASE
 zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now
 zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
-zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS]   # Linux; reconciles folders as they change
+zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]

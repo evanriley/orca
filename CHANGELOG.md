@@ -91,6 +91,19 @@
   or as an album group, on the Matches page offers the tag write for the
   corrected songs. The page reloads when matching, analysis or duplicate
   finding finishes.
+- **Idle maintenance verifies the library.** `Runtime.libraryMaintenance`
+  (`MaintenanceOptions`, off until enabled) has `pump` verify one Release's
+  recording IDs, or at most 20 Tracks on no Release once every Release is
+  verified, every `interval_ms` (default 5 minutes). A unit starts only while
+  every Player is stopped, paused or played out and no other job runs, and
+  never while AcoustID or MusicBrainz is blocked or backing off. Disagreements
+  land in Health as `recording_mismatch`. `libraryMaintenanceStatus` returns
+  a `MaintenanceStatus`, and `jobOrigin` says whether a job was started by
+  the host, a watcher or maintenance (`JobOrigin`). A matching, cover-fetch
+  or AcoustID submission job started while a unit runs cancels the unit and
+  starts once the unit has finished; scans, tag writes and root removal
+  never wait for a unit. `orca-cli watch --maintenance[=MS]` runs it
+  headless and prints a `maintenance:` line per unit.
 - **Library schema version 29.** Adds `health_dismissals` and
   `library_health_issues.related_file_id` with its index.
 - **Breaking: `orca-cli health` prints the file id and the action.** Each

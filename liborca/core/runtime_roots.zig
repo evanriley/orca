@@ -7,6 +7,7 @@ const track_details = @import("track_details.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
+const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_watch = @import("runtime_watch.zig");
 
 const EditedTracks = runtime.EditedTracks;
@@ -119,6 +120,7 @@ pub fn libraryRemoveRoot(
     try runtime.requireRunning(self);
     const library_database = try runtime.libraryDatabase(self, library);
     runtime_watch.preemptAutoReconcile(self, library);
+    runtime_maintenance.preemptUnit(self, library);
     if (runtime_jobs.libraryJobRunning(self, library)) return error.LibraryJobRunning;
     const removal = try library_database.library_roots.remove(self.allocator, root_id);
     defer removal.deinit();

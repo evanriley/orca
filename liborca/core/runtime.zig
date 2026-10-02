@@ -16,6 +16,7 @@ const network = @import("../network/root.zig");
 const object = @import("object.zig");
 const providers = @import("../providers/root.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_zones = @import("runtime_zones.zig");
 const runtime_queue = @import("runtime_queue.zig");
@@ -79,6 +80,8 @@ pub const LibraryObject = struct {
     watch: ?*runtime_watch.LibraryWatch = null,
     /// Set while the host wants the Library watched; survives drains.
     watch_options: ?runtime_watch.WatchOptions = null,
+    /// Set while idle maintenance is enabled; survives drains.
+    maintenance: ?runtime_maintenance.LibraryMaintenance = null,
 };
 
 pub const ArtworkLoader = struct {
@@ -89,6 +92,12 @@ pub const ArtworkLoader = struct {
 pub const WatchOptions = runtime_watch.WatchOptions;
 pub const WatchState = runtime_watch.WatchState;
 pub const WatchStatus = runtime_watch.WatchStatus;
+pub const MaintenanceOptions = runtime_maintenance.MaintenanceOptions;
+pub const MaintenanceState = runtime_maintenance.MaintenanceState;
+pub const MaintenanceBlock = runtime_maintenance.MaintenanceBlock;
+pub const MaintenanceUnit = runtime_maintenance.MaintenanceUnit;
+pub const MaintenanceStatus = runtime_maintenance.MaintenanceStatus;
+pub const JobOrigin = job_worker.Origin;
 
 pub const ArtworkSubject = artwork.Subject;
 pub const ArtworkResult = artwork.Result;
@@ -369,6 +378,9 @@ pub const OrcaRuntime = struct {
     job_workers: std.ArrayList(*JobWorker) = .empty,
     /// Tag-write plans awaiting approval. Control lane only.
     pending_tag_writes: [max_pending_tag_writes]?*PendingTagWrite = @splat(null),
+    /// A host's provider job waiting for a maintenance unit to stop.
+    /// Control lane only.
+    pending_host_job: ?runtime_jobs.PendingHostJob = null,
     /// Null until the host calls `setClientIdentity`.
     client_identity: ?network.client.OwnedIdentity = null,
     credential_store: ?CredentialStore = null,
@@ -462,6 +474,7 @@ pub const OrcaRuntime = struct {
         runtime_watch.releaseDrainedWatchers(self);
         runtime_jobs.freeAllJobWorkers(self);
         runtime_jobs.discardPendingTagWrites(self, null);
+        runtime_jobs.dropQueuedHostJob(self, null);
         self.jobs.cancelAndDrain();
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |zone| zone.zone.destroy();
@@ -517,6 +530,7 @@ pub const OrcaRuntime = struct {
         // before the database is closed.
         self.unbindLibraryFromPlayers(library);
         runtime_jobs.discardPendingTagWrites(self, library);
+        runtime_jobs.dropQueuedHostJob(self, library);
         var removed = try self.libraries.remove(library);
         self.closeLibraryDatabase(&removed);
         runtime_listens.freeListens(self, &removed);
@@ -1753,6 +1767,9 @@ pub const OrcaRuntime = struct {
 
     /// At most one runs per runtime, so MusicBrainz sees one request a second,
     /// and not while an AcoustID submission runs, so AcoustID sees one client.
+    /// Started while a maintenance unit runs, it cancels the unit and is
+    /// returned queued; `pump` starts it once the unit's `job_finished` is
+    /// published. Its stats read as empty until then.
     pub fn startLibraryMatching(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -1765,7 +1782,8 @@ pub const OrcaRuntime = struct {
     /// Library, unless one of its files carries a cover, under the release ID
     /// its tags give or most of its accepted matches name. `jobMatchStats`
     /// reports the `CoverArtOutcome`. Refused with
-    /// `error.MatchingAlreadyRunning` beside a matching job.
+    /// `error.MatchingAlreadyRunning` beside a matching job; queued like
+    /// `startLibraryMatching` beside a maintenance unit.
     pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
         return runtime_jobs.startReleaseCoverArtFetch(self, library, release_id);
     }
@@ -1774,6 +1792,7 @@ pub const OrcaRuntime = struct {
     /// or an edit and sends it to AcoustID, as the user whose key the
     /// credential store holds under `org.acoustid`/`user-key`. Fails with
     /// `needs_user_key` or `invalid_user_key` without marking anything sent.
+    /// Queued like `startLibraryMatching` beside a maintenance unit.
     pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobHandle {
         return runtime_jobs.startAcoustIdSubmission(self, library);
     }
@@ -1839,6 +1858,26 @@ pub const OrcaRuntime = struct {
 
     pub fn libraryWatchStatus(self: *OrcaRuntime, library: LibraryHandle) !WatchStatus {
         return runtime_watch.libraryWatchStatus(self, library);
+    }
+
+    /// Verifies the Library's recording IDs a unit at a time while no
+    /// Player plays and no other job runs: the next Release every
+    /// `interval_ms`, or at most twenty Tracks on no Release once none is
+    /// left. Off until enabled; enabling makes a unit due at once, and
+    /// disabling cancels a running one. Units start from `pump`, one per
+    /// runtime, and their findings land in Health.
+    pub fn libraryMaintenance(self: *OrcaRuntime, library: LibraryHandle, options: MaintenanceOptions) !void {
+        return runtime_maintenance.libraryMaintenance(self, library, options);
+    }
+
+    pub fn libraryMaintenanceStatus(self: *OrcaRuntime, library: LibraryHandle) !MaintenanceStatus {
+        return runtime_maintenance.libraryMaintenanceStatus(self, library);
+    }
+
+    /// Who started a job: the host, a watcher's automatic reconcile, or
+    /// idle maintenance.
+    pub fn jobOrigin(self: *OrcaRuntime, job_handle: JobHandle) !JobOrigin {
+        return runtime_jobs.jobOrigin(self, job_handle);
     }
 
     /// A matching job's counters, live while it runs and retained for a
@@ -2045,14 +2084,20 @@ pub const OrcaRuntime = struct {
     /// How long the host may wait for the waker before it pumps again: 0 to
     /// pump now, null to wait for the waker alone. Read after draining
     /// events and immediately before waiting. A bound Player that is playing
-    /// needs a listen sample at least every second, and a running job's
-    /// progress is worth reading every `job_progress_interval_ms`.
+    /// needs a listen sample at least every second, a running job's
+    /// progress is worth reading every `job_progress_interval_ms`, and an
+    /// enabled maintenance schedule needs its next unit started.
     pub fn nextPumpTimeoutMs(self: *OrcaRuntime) ?u64 {
         if (self.state.load(.acquire) != .running) return null;
         if (self.host_signal.isPending() or self.commands.count() != 0 or
             self.events.count() != 0 or self.telemetry.count() != 0) return 0;
         var due: ?u64 = runtime_listens.listenSampleDueMs(self);
-        for ([_]?u64{ runtime_jobs.jobPumpDueMs(self), runtime_watch.watchPumpDueMs(self) }) |candidate| {
+        for ([_]?u64{
+            runtime_jobs.jobPumpDueMs(self),
+            runtime_jobs.queuedJobPumpDueMs(self),
+            runtime_watch.watchPumpDueMs(self),
+            runtime_maintenance.maintenancePumpDueMs(self),
+        }) |candidate| {
             const value = candidate orelse continue;
             due = if (due) |current| @min(current, value) else value;
         }
@@ -2061,13 +2106,16 @@ pub const OrcaRuntime = struct {
 
     /// One turn of the host's loop: executes the commands already submitted,
     /// at most the command queue's capacity so a host that keeps submitting
-    /// cannot trap its loop here, joins finished job workers, then takes
-    /// what watchers reported and starts their reconciles.
+    /// cannot trap its loop here, joins finished job workers, starts a host
+    /// job that waited for a maintenance unit, takes what watchers reported
+    /// and starts their reconciles, then starts a due maintenance unit.
     pub fn pump(self: *OrcaRuntime) void {
         var executed: usize = 0;
         while (executed < control.CommandQueue.capacity and self.processNextCommand()) executed += 1;
         self.reapFinishedJobs();
+        runtime_jobs.startQueuedHostJob(self);
         runtime_watch.pumpWatchers(self);
+        runtime_maintenance.pumpMaintenance(self);
     }
 
     /// Executes at most one command on the runtime's serialized logical control

@@ -343,6 +343,7 @@ pub fn jobFinalized(self: *OrcaRuntime, worker: *JobWorker, state: job.State) vo
             if (state == .cancelled) library_watch.requeue(self.allocator, active.root_id);
         },
         .host => library_watch.uncover(self.allocator, worker.job, state == .succeeded),
+        .maintenance => {},
     }
 }
 

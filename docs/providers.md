@@ -462,6 +462,17 @@ recording. MusicBrainz is asked only for the Release a correction names.
   one a second. Answers come from the 90-day AcoustID and 30-day MusicBrainz
   caches when they can, so a file that disagrees, verified again beside a
   stale one, costs no request.
+- **Idle maintenance.** `libraryMaintenance` verifies the library one
+  Release per unit while nothing plays and no other job runs, one unit
+  every `interval_ms` (default 5 minutes). Once no Release is left, a unit
+  takes at most 20 Tracks with no Release. A unit is a verify job like any
+  other: same Gateway, same rate limit and same leases. Before starting one,
+  the runtime reads `provider_state`. While AcoustID or MusicBrainz has a
+  block recorded, it starts nothing and reports `provider_busy`, so a unit
+  never waits out a backoff. A matching, cover-fetch or submission job the
+  host starts while a unit runs cancels the unit. It starts once the unit's
+  worker has released its leases and been joined, so the two never send
+  together. See [control-plane.md](control-plane.md#idle-maintenance).
 
 `jobMatchStats` reports `verified`, `agreed`, `disagreed`, `unconfirmed`,
 `skipped`, `correction_groups` and `proposals_stored` besides the fingerprint

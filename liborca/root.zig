@@ -193,6 +193,13 @@ pub const WatchOptions = runtime.WatchOptions;
 pub const WatchState = runtime.WatchState;
 pub const WatchStatus = runtime.WatchStatus;
 
+pub const MaintenanceOptions = runtime.MaintenanceOptions;
+pub const MaintenanceState = runtime.MaintenanceState;
+pub const MaintenanceBlock = runtime.MaintenanceBlock;
+pub const MaintenanceUnit = runtime.MaintenanceUnit;
+pub const MaintenanceStatus = runtime.MaintenanceStatus;
+pub const JobOrigin = runtime.JobOrigin;
+
 // The control lane: commands in, completions and telemetry out.
 pub const Action = control.Action;
 pub const RequestId = control.RequestId;

@@ -27,6 +27,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidReconcileDirectory => "each DIR must be a path relative to the root, with no '.', '..', empty or trailing component",
         error.WatchingUnsupported => "watching folders needs Linux",
         error.InvalidWatchOptions => "--quiet must be at least 1 and --max-delay at least --quiet",
+        error.InvalidMaintenanceOptions => "--maintenance must be at least 1",
         error.WatchInstanceLimit => "too many inotify instances are open; raise fs.inotify.max_user_instances",
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
@@ -125,7 +126,7 @@ const commands = [_]Command{
     .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
     .{
         .name = "watch",
-        .usage = "watch DATABASE [--quiet=MS] [--max-delay=MS] [--once]\n" ++ usage_indent ++ "  [--limit=MS]",
+        .usage = "watch DATABASE [--quiet=MS] [--max-delay=MS] [--once]\n" ++ usage_indent ++ "  [--limit=MS] [--maintenance[=MS]]",
         .min_arguments = 1,
         .max_arguments = null,
         .run = watchLibrary,
@@ -241,6 +242,15 @@ const help_details =
     \\the first reconcile that recorded or marked missing a file, the arming
     \\one included. A root that is deleted, moved or unmounted is reported as
     \\unavailable and never marked missing. Linux only.
+    \\
+    \\watch --maintenance also verifies recording IDs, as verify does, while
+    \\nothing plays and no other job runs: one Release per unit, or at most 20
+    \\Tracks on no Release once every Release is verified, with each unit
+    \\starting --maintenance=MS (default 300000) after the last one ended. It
+    \\prints a `maintenance:` line per unit; a disagreement lands in health
+    \\as a recording_mismatch. `maintenance: blocked=REASON` reports a
+    \\missing AcoustID key, or a provider that is backing off or in use by
+    \\another Orca process; `blocked=none` follows once that clears.
     \\
     \\roots lists the registered folders. remove-root forgets one and every
     \\file, Track, Release and Artist that exists only under it; a file also
@@ -570,10 +580,17 @@ fn reconcileRoot(context: Context) !void {
 
 fn watchLibrary(context: Context) !void {
     const stdout = context.stdout;
-    const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit });
+    const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit, .maintenance });
     const limit_ms: u64 = options.limit orelse 10 * 60 * 1000;
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
+    if (options.maintenance_ms != null) {
+        try identifyOrca(&runtime);
+        if (context.environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
+            if (url.len > 0) try runtime.setMusicBrainzServer(try context.allocator.dupe(u8, url));
+        }
+        try configureAcoustId(context.allocator, &runtime, context.environ);
+    }
     const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     const root_count = try enabledRootCount(&runtime, library);
     const started_ms = monotonicMs(context.io);
@@ -581,14 +598,29 @@ fn watchLibrary(context: Context) !void {
         .quiet_ms = options.quiet_ms orelse 2000,
         .max_delay_ms = options.max_delay_ms orelse 30_000,
     });
+    if (options.maintenance_ms) |interval_ms| {
+        try runtime.libraryMaintenance(library, .{ .enabled = true, .interval_ms = interval_ms });
+    }
     var armed = false;
     var unavailable: u32 = 0;
     var limit_reported = false;
+    var maintenance_blocked: ?liborca.MaintenanceBlock = null;
     while (monotonicMs(context.io) - started_ms < limit_ms) {
         runtime.pump();
         var changed = false;
         while (runtime.pollEvent()) |event| switch (event.outcome) {
             .job_finished => |finished| {
+                if (try runtime.jobOrigin(finished.job) == .maintenance) {
+                    const unit = (try runtime.libraryMaintenanceStatus(library)).last orelse continue;
+                    try stdout.print("maintenance: release={?d} state={t} verified={d} disagreed={d} corrections={d}\n", .{
+                        unit.release_id,
+                        unit.state,
+                        unit.stats.verified,
+                        unit.stats.disagreed,
+                        unit.stats.proposals_stored,
+                    });
+                    continue;
+                }
                 const root_id = try runtime.jobReconcileRoot(finished.job) orelse continue;
                 const stats = try runtime.jobScanStats(finished.job);
                 try stdout.print("reconcile root={d} state={t} ", .{ root_id, finished.state });
@@ -622,6 +654,17 @@ fn watchLibrary(context: Context) !void {
                 status.roots_degraded,
                 status.directories_watched,
             });
+        }
+        if (options.maintenance_ms != null) {
+            const maintenance = try runtime.libraryMaintenanceStatus(library);
+            if (maintenance.blocked != maintenance_blocked) {
+                maintenance_blocked = maintenance.blocked;
+                if (maintenance.blocked) |blocked| {
+                    try stdout.print("maintenance: blocked={t}\n", .{blocked});
+                } else {
+                    try stdout.writeAll("maintenance: blocked=none\n");
+                }
+            }
         }
         try stdout.flush();
         if (options.once and changed) return;
@@ -673,6 +716,7 @@ const JobOption = enum {
     accept_min_score,
     cover_art,
     reidentify,
+    maintenance,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -693,6 +737,7 @@ const JobOption = enum {
             .accept_min_score => "--accept-min-score=",
             .cover_art => "--cover-art",
             .reidentify => "--reidentify",
+            .maintenance => "--maintenance",
         };
     }
 };
@@ -715,11 +760,18 @@ const JobOptions = struct {
     accept_min_score: ?f32 = null,
     cover_art: bool = false,
     reidentify: bool = false,
+    maintenance_ms: ?u32 = null,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
     var options: JobOptions = .{};
     next_argument: for (arguments) |argument| {
+        if (comptime std.mem.indexOfScalar(JobOption, accepted, .maintenance) != null) {
+            if (std.mem.startsWith(u8, argument, "--maintenance=")) {
+                options.maintenance_ms = try std.fmt.parseInt(u32, argument["--maintenance=".len..], 10);
+                continue;
+            }
+        }
         inline for (accepted) |option| {
             const spelling = comptime option.spelling();
             const takes_value = comptime std.mem.endsWith(u8, spelling, "=");
@@ -747,6 +799,7 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .accept_min_score => options.accept_min_score = try std.fmt.parseFloat(f32, value),
                     .cover_art => options.cover_art = true,
                     .reidentify => options.reidentify = true,
+                    .maintenance => options.maintenance_ms = (liborca.MaintenanceOptions{ .enabled = true }).interval_ms,
                 }
                 continue :next_argument;
             }

@@ -57,7 +57,8 @@ defer page.deinit();
   write-back (`TagWritePlan`, `TagWriteConflict`, `TagWriteDigest`, ...),
   artwork
   (`ArtworkSubject`, `ArtworkResult`), watching (`WatchOptions`,
-  `WatchStatus`, `WatchState`) and the control lane (`Action`, `Event`,
+  `WatchStatus`, `WatchState`), idle maintenance (`MaintenanceOptions`,
+  `MaintenanceStatus`, `JobOrigin`, ...) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`, `HostWaker`).
 - A host's event loop sleeps until liborca has something for it:
   `setWaker(HostWaker)`, called right after `init` and refused with
@@ -82,6 +83,22 @@ defer page.deinit();
   recorded or marked missing a file publishes `Telemetry.library_changed`,
   and `jobReconcileRoot` names the root a reconcile job walks. See
   [storage.md](storage.md#watching-roots).
+- `libraryMaintenance(library, MaintenanceOptions)` turns idle maintenance on
+  or off. It is off until enabled. When on, `pump` verifies one Release's
+  recording IDs (or at most 20 Tracks on no Release) every
+  `interval_ms` while every Player is idle and no other job runs. A
+  disagreement lands in Health as `recording_mismatch`.
+  `error.InvalidMaintenanceOptions` refuses an interval of 0.
+  `libraryMaintenanceStatus` returns a `MaintenanceStatus`: its
+  `MaintenanceState` (`off`, `waiting`, `running` or `blocked`), the
+  `MaintenanceBlock` (`client_identity_required`, `acoustid_required` or
+  `provider_busy`), the time until the next unit, the units run and the
+  last one as a `MaintenanceUnit`. `jobOrigin` returns a job's `JobOrigin`
+  (`host`, `watcher` or `maintenance`). `startLibraryMatching`,
+  `startReleaseCoverArtFetch` and `startAcoustIdSubmission` called while a
+  unit runs cancel it and return a `queued` job, which `pump` starts once
+  the unit has finished. See
+  [control-plane.md](control-plane.md#idle-maintenance).
 - A scan or reconcile of a root whose path now lies on another volume than
   the one recorded, as an unmounted drive's mount point does, walks and
   sweeps nothing and ends `failed`. See

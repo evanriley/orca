@@ -15,6 +15,8 @@ const runtime_module = @import("runtime.zig");
 const runtime_tests = @import("runtime_tests.zig");
 
 const AcoustIdUse = runtime_module.AcoustIdUse;
+const MaintenanceStatus = runtime_module.MaintenanceStatus;
+const MaintenanceUnit = runtime_module.MaintenanceUnit;
 const BusyService = runtime_module.BusyService;
 const CredentialStore = runtime_module.CredentialStore;
 const Feedback = runtime_module.Feedback;
@@ -1801,6 +1803,9 @@ const FakeAcoustId = struct {
     http: network.testing.ScriptedTransport = .{},
     /// Lookups from this one on hang until the job is cancelled.
     hang_lookups_from: ?u32 = null,
+    /// While set, a lookup waits whether or not its job is cancelled, so the
+    /// job's thread outlives its cancellation.
+    held: std.atomic.Value(bool) = .init(false),
     lookup_status: u16 = 200,
     lookup_body: []const u8 = "{\"status\":\"ok\",\"fingerprints\":[]}",
     submit_status: u16 = 200,
@@ -1822,6 +1827,8 @@ const FakeAcoustId = struct {
         if (std.mem.endsWith(u8, exchange.request.url, "/v2/lookup")) {
             const index = self.lookups.fetchAdd(1, .acq_rel);
             if (self.hang_lookups_from) |first| if (index >= first) return .hang;
+            var deadline: runtime_tests.TestDeadline = .init(10_000);
+            while (self.held.load(.acquire) and deadline.tick()) {}
             return .{ .respond = .{ .status = self.lookup_status, .body = self.lookup_body } };
         }
         _ = self.submissions.fetchAdd(1, .acq_rel);
@@ -3502,4 +3509,691 @@ fn trackFile(library_database: *database.LibraryDatabase, track_id: i64) !i64 {
     const files = try library_database.tracks.fileIds(std.testing.allocator, track_id);
     defer std.testing.allocator.free(files);
     return files[0];
+}
+
+fn addTaggedFile(
+    library_database: *database.LibraryDatabase,
+    temporary: *std.testing.TmpDir,
+    name: []const u8,
+    recording_mbid: []const u8,
+    release_id: ?i64,
+) !i64 {
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+    defer std.testing.allocator.free(path);
+    const binding = try library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:maintenance" });
+    try library_database.observed_tags.upsert(.{ .file_id = binding.file_id, .values = .{
+        .title = name,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .musicbrainz_recording_id = recording_mbid,
+    } });
+    try library_database.tracks.upsertTracks(&.{.{
+        .release_id = release_id,
+        .title = name,
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 15_000,
+        .preferred_file_id = binding.file_id,
+    }});
+    return trackOfFile(library_database, binding.file_id);
+}
+
+fn addUnreadableFile(library_database: *database.LibraryDatabase, temporary: *std.testing.TmpDir, name: []const u8, release_id: ?i64) !i64 {
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = name });
+    return addTaggedFile(library_database, temporary, name, northern_sky_mbid, release_id);
+}
+
+fn addHashlessTrack(library_database: *database.LibraryDatabase, release_id: i64) !i64 {
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Hashless",
+        .musicbrainz_recording_id = northern_sky_mbid,
+    } });
+    try library_database.tracks.upsertTracks(&.{.{
+        .release_id = release_id,
+        .title = "Hashless",
+        .artist = "Nick Drake",
+        .album = "Bryter Layter",
+        .duration_ms = 180_000,
+        .preferred_file_id = file_id,
+    }});
+    return trackOfFile(library_database, file_id);
+}
+
+fn finishedJobs(runtime: *OrcaRuntime, buffer: []runtime_module.JobHandle) []runtime_module.JobHandle {
+    var count: usize = 0;
+    while (runtime.pollEvent()) |event| switch (event.outcome) {
+        .job_finished => |finished| {
+            if (count < buffer.len) buffer[count] = finished.job;
+            count += 1;
+        },
+        else => {},
+    };
+    return buffer[0..@min(count, buffer.len)];
+}
+
+const MaintenanceRig = struct {
+    verify: VerifyRig,
+    clock: network.testing.TestClock,
+
+    const interval_ms: u32 = 60_000;
+
+    fn init(self: *MaintenanceRig, uri: [:0]const u8) !void {
+        self.clock = .{ .wall_offset_ms = FakeMusicBrainz.wall_base_ms };
+        try self.verify.init(uri);
+        self.verify.runtime.listen_hooks.sample_clock = sampleClock(&self.clock);
+        self.verify.acoustid.lookup_body = acoustIdAnswer(heardBy("0", heardResult("0.95", northern_sky_heard)));
+    }
+
+    fn deinit(self: *MaintenanceRig) void {
+        self.verify.acoustid.held.store(false, .release);
+        self.verify.deinit();
+    }
+
+    fn runtime(self: *MaintenanceRig) *OrcaRuntime {
+        return &self.verify.runtime;
+    }
+
+    fn enable(self: *MaintenanceRig, library: LibraryHandle) !void {
+        try self.runtime().libraryMaintenance(library, .{ .enabled = true, .interval_ms = interval_ms });
+    }
+
+    fn status(self: *MaintenanceRig, library: LibraryHandle) !MaintenanceStatus {
+        return self.runtime().libraryMaintenanceStatus(library);
+    }
+
+    fn awaitUnits(self: *MaintenanceRig, library: LibraryHandle, units: u64) !MaintenanceUnit {
+        var deadline: runtime_tests.TestDeadline = .init(10_000);
+        while (deadline.tick()) {
+            self.runtime().pump();
+            const current = try self.status(library);
+            if (current.units_run >= units) return current.last.?;
+        }
+        return error.UnitDidNotFinish;
+    }
+
+    fn awaitLookupCount(self: *MaintenanceRig, lookups: u32) !void {
+        var deadline: runtime_tests.TestDeadline = .init(10_000);
+        while (self.verify.acoustid.lookups.load(.acquire) < lookups) {
+            if (!deadline.tick()) return error.LookupNeverSent;
+        }
+    }
+
+    fn awaitLookups(self: *MaintenanceRig, lookups: u32) !runtime_module.JobHandle {
+        const unit = runtime_jobs.maintenanceUnitRunning(self.runtime()) orelse return error.UnitNotRunning;
+        try self.awaitLookupCount(lookups);
+        return unit.job;
+    }
+
+    fn pumpFor(self: *MaintenanceRig, milliseconds: u64) void {
+        var deadline: runtime_tests.TestDeadline = .init(milliseconds);
+        while (deadline.tick()) self.runtime().pump();
+    }
+};
+
+test "maintenance is off until enabled, then verifies one Release per interval while idle" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-interval?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    const first_release = try addRelease(library_database, "Bryter Layter", null);
+    const second_release = try addRelease(library_database, "Pink Moon", null);
+    const first = try rig.verify.addTone("first.wav", 300, "Northern Sky", northern_sky_mbid, first_release);
+    const second = try rig.verify.addTone("second.wav", 420, "Northern Sky", northern_sky_mbid, second_release);
+
+    rig.pumpFor(20);
+    const off = try rig.status(library);
+    try std.testing.expect(!off.enabled);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.off, off.state);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
+
+    try rig.enable(library);
+    try std.testing.expectEqual(@as(?u64, 0), (try rig.status(library)).next_due_ms);
+    rig.runtime().pump();
+    try std.testing.expectEqual(runtime_module.MaintenanceState.running, (try rig.status(library)).state);
+    const unit = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(@as(?i64, first_release), unit.release_id);
+    try std.testing.expectEqual(job.State.succeeded, unit.state);
+    try std.testing.expectEqual(@as(u64, 1), unit.stats.verified);
+    try std.testing.expect(try rig.verify.outcomeOf(first) != null);
+    try std.testing.expect(try rig.verify.outcomeOf(second) == null);
+    const waiting = try rig.status(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, waiting.state);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), waiting.next_due_ms);
+
+    rig.clock.advance(MaintenanceRig.interval_ms - 1);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(u64, 1), (try rig.status(library)).units_run);
+    try std.testing.expectEqual(@as(?u64, 1), (try rig.status(library)).next_due_ms);
+    try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
+
+    rig.clock.advance(1);
+    try std.testing.expectEqual(@as(?i64, second_release), (try rig.awaitUnits(library, 2)).release_id);
+    try std.testing.expect(try rig.verify.outcomeOf(second) != null);
+    try std.testing.expectEqual(@as(u32, 2), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "a due unit waits while a Player plays, starts once it is paused, and a drained Player counts as idle" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-idle?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    _ = try addUnreadableFile(library_database, &rig.verify.temporary, "a.wav", try addRelease(library_database, "A", null));
+    _ = try addUnreadableFile(library_database, &rig.verify.temporary, "b.wav", try addRelease(library_database, "B", null));
+    const player = (try rig.runtime().players.get(try rig.runtime().createPlayer())).player;
+    player.state.store(.playing, .release);
+
+    try rig.enable(library);
+    rig.pumpFor(20);
+    const deferred = try rig.status(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, deferred.state);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), deferred.next_due_ms);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
+
+    player.state.store(.paused, .release);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(library, 1)).state);
+
+    player.state.store(.playing, .release);
+    player.drained.store(true, .release);
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(library, 2)).state);
+}
+
+test "no unit starts beside a host job or an automatic reconcile, and playback starting does not cancel one" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-beside?mode=memory&cache=shared");
+    defer rig.deinit();
+    const runtime = rig.runtime();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    const host_release = try addRelease(library_database, "Host", null);
+    _ = try rig.verify.addTone("host.wav", 300, "Northern Sky", northern_sky_mbid, host_release);
+    const watcher_release = try addRelease(library_database, "Watcher", null);
+    _ = try rig.verify.addTone("watcher.wav", 360, "Northern Sky", northern_sky_mbid, watcher_release);
+    const unit_release = try addRelease(library_database, "Unit", null);
+    _ = try rig.verify.addTone("unit.wav", 420, "Northern Sky", northern_sky_mbid, unit_release);
+
+    rig.verify.acoustid.held.store(true, .release);
+    const host = try runtime.startLibraryMatching(library, .{ .release_id = host_release, .mode = .verify });
+    try rig.awaitLookupCount(1);
+    try rig.enable(library);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(usize, 1), runtime.job_workers.items.len);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), (try rig.status(library)).next_due_ms);
+    rig.verify.acoustid.held.store(false, .release);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, host));
+
+    rig.verify.acoustid.held.store(true, .release);
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    const reconcile = try runtime_jobs.spawnJobWorker(runtime, library, .{ .metadata_lookup = .{
+        .batch_size = 64,
+        .limit = null,
+        .setup = .{
+            .io = try runtime_listens.networkIo(runtime),
+            .server = runtime.musicbrainz_server,
+            .identity = runtime.client_identity.?,
+            .hooks = runtime.matching_hooks,
+            .scope = .{ .release = watcher_release },
+            .mode = .verify,
+            .acoustid = runtime_jobs.acoustIdSetup(runtime),
+            .cover_art_server = runtime.coverartarchive_server,
+        },
+    } }, .watcher);
+    try rig.awaitLookupCount(2);
+    rig.pumpFor(20);
+    const beside_watcher = try rig.status(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, beside_watcher.state);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), beside_watcher.next_due_ms);
+    try std.testing.expect(runtime_jobs.maintenanceUnitRunning(runtime) == null);
+    rig.verify.acoustid.held.store(false, .release);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, reconcile));
+
+    rig.verify.acoustid.held.store(true, .release);
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    runtime.pump();
+    const unit = try rig.awaitLookups(3);
+    const player = (try runtime.players.get(try runtime.createPlayer())).player;
+    player.state.store(.playing, .release);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.running, (try rig.status(library)).state);
+    try std.testing.expectEqual(job.State.running, (try runtime.jobSnapshotSynced(unit)).state);
+    rig.verify.acoustid.held.store(false, .release);
+    const finished = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(job.State.succeeded, finished.state);
+    try std.testing.expectEqual(@as(?i64, unit_release), finished.release_id);
+}
+
+test "with no Release left, a unit verifies at most twenty loose Tracks, then nothing verifiable is a no-op due again after the interval" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-loose?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    for (0..21) |index| {
+        var name_buffer: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "loose-{d}.wav", .{index});
+        _ = try addUnreadableFile(library_database, &rig.verify.temporary, name, null);
+    }
+
+    try rig.enable(library);
+    const first = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(@as(?i64, null), first.release_id);
+    try std.testing.expectEqual(@as(u64, 20), first.stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 20), first.stats.verified);
+    try std.testing.expectEqual(@as(u64, 1), try library_database.recording_verifications.verifiableCount(.library, null));
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    try std.testing.expectEqual(@as(u64, 1), (try rig.awaitUnits(library, 2)).stats.tracks_examined);
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    rig.pumpFor(20);
+    const idle = try rig.status(library);
+    try std.testing.expectEqual(@as(u64, 2), idle.units_run);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, idle.state);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), idle.next_due_ms);
+    try std.testing.expectEqual(@as(usize, 2), rig.runtime().job_workers.items.len);
+    try std.testing.expectEqual(@as(u32, 0), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "a Release that stores no outcome is passed over for the next, and the cursor wraps to the first" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-cursor?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    const hashless_release = try addRelease(library_database, "Hashless", null);
+    _ = try addHashlessTrack(library_database, hashless_release);
+    const readable_release = try addRelease(library_database, "Readable", null);
+    _ = try addUnreadableFile(library_database, &rig.verify.temporary, "readable.wav", readable_release);
+
+    try rig.enable(library);
+    const first = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(@as(?i64, hashless_release), first.release_id);
+    try std.testing.expectEqual(@as(u64, 1), first.stats.skipped);
+    try std.testing.expectEqual(@as(u64, 0), first.stats.verified);
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    const second = try rig.awaitUnits(library, 2);
+    try std.testing.expectEqual(@as(?i64, readable_release), second.release_id);
+    try std.testing.expectEqual(@as(u64, 1), second.stats.verified);
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    try std.testing.expectEqual(@as(?i64, hashless_release), (try rig.awaitUnits(library, 3)).release_id);
+}
+
+test "maintenance is blocked without a client identity or AcoustID and reports which" {
+    var musicbrainz: FakeMusicBrainz = .{};
+    var acoustid: FakeAcoustId = .{};
+    var clock: network.testing.TestClock = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = musicbrainz.hooks();
+    runtime.matching_hooks.acoustid_transport = acoustid.transport();
+    runtime.listen_hooks.sample_clock = sampleClock(&clock);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-maintenance-blocked?mode=memory&cache=shared");
+    try runtime.libraryMaintenance(library, .{ .enabled = true, .interval_ms = MaintenanceRig.interval_ms });
+
+    runtime.pump();
+    const anonymous = try runtime.libraryMaintenanceStatus(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.blocked, anonymous.state);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, .client_identity_required), anonymous.blocked);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), anonymous.next_due_ms);
+
+    try runtime.setClientIdentity(network.testing.test_identity);
+    clock.advance(MaintenanceRig.interval_ms);
+    runtime.pump();
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, .acoustid_required), (try runtime.libraryMaintenanceStatus(library)).blocked);
+
+    try runtime.setAcoustIdClientKey("test-client");
+    clock.advance(MaintenanceRig.interval_ms);
+    runtime.pump();
+    const unblocked = try runtime.libraryMaintenanceStatus(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, unblocked.state);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, null), unblocked.blocked);
+    try std.testing.expectEqual(@as(usize, 0), runtime.job_workers.items.len);
+    try std.testing.expectEqual(@as(u32, 0), musicbrainz.requestCount() + acoustid.lookups.load(.acquire));
+    try std.testing.expectError(error.InvalidMaintenanceOptions, runtime.libraryMaintenance(library, .{ .enabled = true, .interval_ms = 0 }));
+}
+
+test "a provider block recorded in the Library defers the unit a full interval without a request" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-backoff?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(library_database, "A", null));
+    try library_database.provider_state.put(providers.acoustid.service, .{
+        .blocked_until_ms = FakeMusicBrainz.wall_base_ms + MaintenanceRig.interval_ms + MaintenanceRig.interval_ms / 2,
+        .backoff_ms = 60_000,
+    });
+
+    try rig.enable(library);
+    rig.pumpFor(20);
+    const blocked = try rig.status(library);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.blocked, blocked.state);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, .provider_busy), blocked.blocked);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), blocked.next_due_ms);
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), (try rig.status(library)).next_due_ms);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
+    try std.testing.expectEqual(@as(u32, 0), rig.verify.acoustid.lookups.load(.acquire));
+
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(library, 1)).state);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, null), (try rig.status(library)).blocked);
+    try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "a unit that finds AcoustID held by another process is blocked as provider busy for a full interval" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-lease?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(library_database, "A", null));
+    const now_ms = FakeMusicBrainz.wall_base_ms;
+    try std.testing.expect(try library_database.provider_state.claimLease(
+        providers.acoustid.service,
+        99,
+        now_ms,
+        now_ms + network.client.lease_duration_ms,
+    ));
+
+    try rig.enable(library);
+    const busy = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(job.State.failed, busy.state);
+    try std.testing.expectEqual(BusyService.acoustid, busy.stats.busy);
+    const blocked = try rig.status(library);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, .provider_busy), blocked.blocked);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), blocked.next_due_ms);
+    try std.testing.expectEqual(@as(u32, 0), rig.verify.acoustid.lookups.load(.acquire));
+
+    try library_database.provider_state.releaseLease(providers.acoustid.service, 99);
+    rig.clock.advance(MaintenanceRig.interval_ms - 1);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(u64, 1), (try rig.status(library)).units_run);
+    rig.clock.advance(1);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(library, 2)).state);
+    try std.testing.expectEqual(@as(?runtime_module.MaintenanceBlock, null), (try rig.status(library)).blocked);
+}
+
+test "a host matching job started during a unit cancels it, is queued with default stats, and starts once the unit is reaped, after its job_finished" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-handoff?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const library_database = rig.verify.library_database;
+    _ = try rig.verify.addTone("unit.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(library_database, "A", null));
+    const release = try addRelease(library_database, "B", null);
+    const track = try rig.verify.addTone("host.wav", 500, "Northern Sky", northern_sky_mbid, release);
+    rig.verify.acoustid.held.store(true, .release);
+    try rig.enable(library);
+    rig.runtime().pump();
+    const unit = try rig.awaitLookups(1);
+
+    const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
+    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(runtime_module.MatchStats{}, try rig.runtime().jobMatchStats(host));
+    try std.testing.expectEqual(runtime_module.JobOrigin.host, try rig.runtime().jobOrigin(host));
+    try std.testing.expectEqual(runtime_module.JobOrigin.maintenance, try rig.runtime().jobOrigin(unit));
+    try std.testing.expectError(error.MatchingAlreadyRunning, rig.runtime().startLibraryMatching(library, .{}));
+    try std.testing.expectError(error.AcoustIdBusy, rig.runtime().startAcoustIdSubmission(library));
+
+    rig.pumpFor(50);
+    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(@as(usize, 1), rig.runtime().work_registry.count());
+
+    while (rig.runtime().events.hasCapacity())
+        try rig.runtime().events.publish(.{ .request_id = 0, .outcome = .{ .job_started = unit } });
+    rig.verify.acoustid.held.store(false, .release);
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (!runtime_jobs.maintenanceUnitRunning(rig.runtime()).?.registration.isFinished()) {
+        if (!deadline.tick()) return error.UnitDidNotStop;
+    }
+    rig.pumpFor(20);
+    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+
+    var finished_buffer: [4]runtime_module.JobHandle = undefined;
+    try std.testing.expectEqual(@as(usize, 0), finishedJobs(rig.runtime(), &finished_buffer).len);
+    rig.runtime().pump();
+    try std.testing.expect((try rig.runtime().jobSnapshotSynced(host)).state != .queued);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(rig.runtime(), host));
+    const finished = finishedJobs(rig.runtime(), &finished_buffer);
+    try std.testing.expectEqual(@as(usize, 2), finished.len);
+    try std.testing.expect(finished[0].eql(unit));
+    try std.testing.expect(finished[1].eql(host));
+
+    const status = try rig.status(library);
+    try std.testing.expectEqual(job.State.cancelled, status.last.?.state);
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), status.next_due_ms);
+    const stats = try rig.runtime().jobMatchStats(host);
+    try std.testing.expectEqual(BusyService.none, stats.busy);
+    try std.testing.expectEqual(@as(u64, 1), stats.verified);
+    try std.testing.expect(try rig.verify.outcomeOf(track) != null);
+    try std.testing.expectEqual(@as(u32, 2), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "a queued host job cancelled before it starts finishes cancelled with one job_finished and no worker" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-cancel-queued?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const release = try addRelease(rig.verify.library_database, "A", null);
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, release);
+    rig.verify.acoustid.held.store(true, .release);
+    try rig.enable(library);
+    rig.runtime().pump();
+    const unit = try rig.awaitLookups(1);
+
+    const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
+    try rig.runtime().cancelJob(host);
+    try std.testing.expectEqual(job.State.cancelling, (try rig.runtime().jobSnapshotSynced(host)).state);
+    rig.verify.acoustid.held.store(false, .release);
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (!runtime_jobs.maintenanceUnitRunning(rig.runtime()).?.registration.isFinished()) {
+        if (!deadline.tick()) return error.UnitDidNotStop;
+    }
+    while (rig.runtime().events.hasCapacity())
+        try rig.runtime().events.publish(.{ .request_id = 0, .outcome = .{ .job_started = unit } });
+    _ = rig.runtime().pollEvent();
+    rig.runtime().pump();
+    try std.testing.expectEqual(job.State.cancelled, (try rig.status(library)).last.?.state);
+    try std.testing.expectEqual(job.State.cancelling, (try rig.runtime().jobSnapshotSynced(host)).state);
+    var finished_buffer: [4]runtime_module.JobHandle = undefined;
+    var finished = finishedJobs(rig.runtime(), &finished_buffer);
+    try std.testing.expectEqual(@as(usize, 1), finished.len);
+    try std.testing.expect(finished[0].eql(unit));
+
+    rig.runtime().pump();
+    try std.testing.expectEqual(job.State.cancelled, (try rig.runtime().jobSnapshotSynced(host)).state);
+    finished = finishedJobs(rig.runtime(), &finished_buffer);
+    try std.testing.expectEqual(@as(usize, 1), finished.len);
+    try std.testing.expect(finished[0].eql(host));
+    try std.testing.expectEqual(@as(usize, 1), rig.runtime().job_workers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().work_registry.count());
+    try std.testing.expectError(error.StaleHandle, rig.runtime().jobMatchStats(host));
+    try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "shutdown with a running unit and a queued host job leaves no worker" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-shutdown?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const release = try addRelease(rig.verify.library_database, "A", null);
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, release);
+    rig.verify.acoustid.hang_lookups_from = 0;
+    try rig.enable(library);
+    rig.runtime().pump();
+    _ = try rig.awaitLookups(1);
+    const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
+
+    rig.runtime().shutdown();
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().work_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
+    try std.testing.expect(rig.runtime().pending_host_job == null);
+    try std.testing.expectError(error.StaleHandle, rig.runtime().jobs.snapshot(host));
+    rig.runtime().pump();
+    try std.testing.expect(rig.runtime().pollEvent() == null);
+    try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "destroying the Library of a queued host job drops it and leaves another Library's maintenance waiting" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-destroy-a?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const release = try addRelease(rig.verify.library_database, "A", null);
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, release);
+    const other = try rig.runtime().openLibrary(std.testing.io, "file:orca-maintenance-destroy-b?mode=memory&cache=shared");
+    const other_database = try libraryDatabase(rig.runtime(), other);
+    _ = try addUnreadableFile(other_database, &rig.verify.temporary, "other.wav", try addRelease(other_database, "B", null));
+    rig.verify.acoustid.hang_lookups_from = 0;
+    try rig.enable(library);
+    try rig.enable(other);
+    rig.runtime().pump();
+    _ = try rig.awaitLookups(1);
+    const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
+
+    try rig.runtime().destroyLibrary(library);
+    try std.testing.expect(rig.runtime().pending_host_job == null);
+    try std.testing.expectEqual(job.State.cancelled, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().work_registry.count());
+    const waiting = try rig.status(other);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, waiting.state);
+    try std.testing.expectEqual(@as(u64, 0), waiting.units_run);
+
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(other, 1)).state);
+    var finished_buffer: [4]runtime_module.JobHandle = undefined;
+    for (finishedJobs(rig.runtime(), &finished_buffer)) |finished| try std.testing.expect(!finished.eql(host));
+    try std.testing.expectEqual(@as(u32, 1), rig.verify.acoustid.lookups.load(.acquire));
+}
+
+test "removing a root cancels a running unit instead of refusing" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-remove-root?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(rig.verify.library_database, "A", null));
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    const root = try rig.runtime().libraryAddRoot(library, std.testing.io, root_path);
+    rig.verify.acoustid.hang_lookups_from = 0;
+    try rig.enable(library);
+    rig.runtime().pump();
+    _ = try rig.awaitLookups(1);
+
+    _ = try rig.runtime().libraryRemoveRoot(library, root.root_id);
+    const unit = try rig.awaitUnits(library, 1);
+    try std.testing.expectEqual(job.State.cancelled, unit.state);
+    try std.testing.expect(unit.stats.cancelled);
+}
+
+test "removing a root refuses while a host job waits behind a unit" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-remove-root-queued?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    const release = try addRelease(rig.verify.library_database, "A", null);
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, release);
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{rig.verify.temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+    const root = try rig.runtime().libraryAddRoot(library, std.testing.io, root_path);
+    rig.verify.acoustid.held.store(true, .release);
+    try rig.enable(library);
+    rig.runtime().pump();
+    _ = try rig.awaitLookups(1);
+    const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
+    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+
+    try std.testing.expectError(error.LibraryJobRunning, rig.runtime().libraryRemoveRoot(library, root.root_id));
+    rig.verify.acoustid.held.store(false, .release);
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while ((try rig.runtime().jobSnapshotSynced(host)).state == .queued) {
+        if (!deadline.tick()) return error.HostJobNeverStarted;
+        rig.runtime().pump();
+    }
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(rig.runtime(), host));
+    _ = try rig.runtime().libraryRemoveRoot(library, root.root_id);
+}
+
+test "disabling maintenance cancels the running unit and reports off" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-disable?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(rig.verify.library_database, "A", null));
+    rig.verify.acoustid.hang_lookups_from = 0;
+    try rig.enable(library);
+    rig.runtime().pump();
+    const unit = try rig.awaitLookups(1);
+
+    try rig.runtime().libraryMaintenance(library, .{ .enabled = false });
+    const off = try rig.status(library);
+    try std.testing.expect(!off.enabled);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.off, off.state);
+    try std.testing.expectEqual(job.State.cancelled, try runtime_tests.awaitJob(rig.runtime(), unit));
+    rig.clock.advance(MaintenanceRig.interval_ms);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.off, (try rig.status(library)).state);
+    try std.testing.expectEqual(@as(usize, 1), rig.runtime().job_workers.items.len);
+    var finished_buffer: [2]runtime_module.JobHandle = undefined;
+    try std.testing.expectEqual(@as(usize, 1), finishedJobs(rig.runtime(), &finished_buffer).len);
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime().nextPumpTimeoutMs());
+}
+
+test "the pump timeout is the time to the next unit, zero when due, and null when off" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-timeout?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime().nextPumpTimeoutMs());
+
+    try rig.enable(library);
+    try std.testing.expectEqual(@as(?u64, 0), rig.runtime().nextPumpTimeoutMs());
+    rig.runtime().pump();
+    try std.testing.expectEqual(@as(?u64, MaintenanceRig.interval_ms), rig.runtime().nextPumpTimeoutMs());
+    rig.clock.advance(MaintenanceRig.interval_ms - 10);
+    try std.testing.expectEqual(@as(?u64, 10), rig.runtime().nextPumpTimeoutMs());
+    rig.clock.advance(10);
+    try std.testing.expectEqual(@as(?u64, 0), rig.runtime().nextPumpTimeoutMs());
+
+    try rig.runtime().libraryMaintenance(library, .{ .enabled = false });
+    try std.testing.expectEqual(@as(?u64, null), rig.runtime().nextPumpTimeoutMs());
+}
+
+test "two Libraries with maintenance run one unit at a time" {
+    var rig: MaintenanceRig = undefined;
+    try rig.init("file:orca-maintenance-two-a?mode=memory&cache=shared");
+    defer rig.deinit();
+    const library = rig.verify.library;
+    _ = try rig.verify.addTone("tone.wav", 300, "Northern Sky", northern_sky_mbid, try addRelease(rig.verify.library_database, "A", null));
+    const other = try rig.runtime().openLibrary(std.testing.io, "file:orca-maintenance-two-b?mode=memory&cache=shared");
+    const other_database = try libraryDatabase(rig.runtime(), other);
+    _ = try addUnreadableFile(other_database, &rig.verify.temporary, "other.wav", try addRelease(other_database, "B", null));
+    rig.verify.acoustid.held.store(true, .release);
+    try rig.enable(library);
+    try rig.enable(other);
+
+    rig.runtime().pump();
+    _ = try rig.awaitLookups(1);
+    rig.pumpFor(20);
+    try std.testing.expectEqual(@as(usize, 1), rig.runtime().job_workers.items.len);
+    const other_waiting = try rig.status(other);
+    try std.testing.expectEqual(runtime_module.MaintenanceState.waiting, other_waiting.state);
+    try std.testing.expectEqual(@as(?u64, 0), other_waiting.next_due_ms);
+    while (rig.runtime().pollEvent()) |_| {}
+    try std.testing.expectEqual(@as(?u64, runtime_jobs.job_progress_interval_ms), rig.runtime().nextPumpTimeoutMs());
+
+    rig.verify.acoustid.held.store(false, .release);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(library, 1)).state);
+    try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(other, 1)).state);
+    try std.testing.expectEqual(@as(usize, 2), rig.runtime().job_workers.items.len);
 }

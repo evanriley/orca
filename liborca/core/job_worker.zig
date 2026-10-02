@@ -530,7 +530,7 @@ pub const Stats = union(enum) {
     }
 };
 
-pub const Origin = enum { host, watcher };
+pub const Origin = enum { host, watcher, maintenance };
 
 /// One background worker behind a `JobHandle`.
 ///
