@@ -24,8 +24,8 @@ callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
 `orca-gtk` sleeps on instead of polling. The C ABI reaches everything
 `orca-gtk` uses, and `scripts/check-abi-coverage.sh` names, for each
-`Runtime` method it does not reach, the reason. The next milestone is more
-identification sources.
+`Runtime` method it does not reach, the reason. The next milestone is
+lyrics.
 
 ## Works today
 
@@ -256,13 +256,20 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+1. **Lyrics.** Plain and synced lyrics from the file's own tags (ID3v2
+   `USLT` and `SYLT`, Vorbis comment `LYRICS` and `UNSYNCEDLYRICS`, MP4
+   `©lyr`) and from a sidecar `.lrc` with the file's base name, then, opt-in,
+   from LRCLIB's `/api/get` by title, artist, album and duration. Fetched
+   lyrics are cached in the Library and never written to a file. `orca-gtk`
+   highlights the line being heard as the track plays. LRCLIB holds no licence
+   to the lyrics it serves, so fetching stays off until the user turns it on.
+2. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-2. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+3. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-3. **An optional fixed output rate with a band-limited resampler**, for
+4. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -447,6 +454,9 @@ are sniffed or not recognized until then:
   (`libraryTrackFingerprint`). The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
+- Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain
+  lyrics from a sidecar `.txt`. A `.txt` needs a rule for telling lyrics from
+  the other text files that sit in album folders.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.
