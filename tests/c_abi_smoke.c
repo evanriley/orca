@@ -2072,6 +2072,40 @@ static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t tr
     return 0;
 }
 
+static void count_acoustid_submittable(void *context, const orca_acoustid_submittable_view *item) {
+    (void)item;
+    ((struct match_smoke_count *)context)->calls += 1;
+}
+
+static int acoustid_submission_smoke(orca_runtime *runtime, orca_handle library) {
+    orca_handle job;
+    memset(&job, 0, sizeof job);
+    SMOKE_CHECK(orca_library_start_acoustid_submission(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_start_acoustid_submission(runtime, library, &job) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime),
+                       "orca_library_start_acoustid_submission: ClientIdentityRequired") == 0);
+    SMOKE_CHECK(orca_job_submission_stats(runtime, job, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    uint64_t count = 1;
+    SMOKE_CHECK(orca_library_acoustid_submittable_count(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_acoustid_submittable_count(runtime, library, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 0);
+
+    struct match_smoke_count calls = {0};
+    SMOKE_CHECK(orca_library_query_acoustid_submittable(runtime, library, 0, 0, &calls,
+                                                        count_acoustid_submittable) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_acoustid_submittable(runtime, library, 0, 513, &calls,
+                                                        count_acoustid_submittable) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_acoustid_submittable(runtime, library, 0, 10, &calls, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_acoustid_submittable(runtime, library, 0, 512, &calls,
+                                                        count_acoustid_submittable) == ORCA_STATUS_OK);
+    SMOKE_CHECK(calls.calls == 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -2826,6 +2860,7 @@ int main(int argc, char **argv) {
     if (tag_write_smoke(runtime, library) != 0) return 1;
     if (provider_smoke(runtime, library) != 0) return 1;
     if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;
+    if (acoustid_submission_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

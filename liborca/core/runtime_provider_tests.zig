@@ -1850,7 +1850,7 @@ pub const FakeAcoustId = struct {
         return self.http.transport();
     }
 
-    fn lastForm(self: *const FakeAcoustId) []const u8 {
+    pub fn lastForm(self: *const FakeAcoustId) []const u8 {
         return self.http.lastForm();
     }
 

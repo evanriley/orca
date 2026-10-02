@@ -64,6 +64,8 @@ const struct_pairs = .{
     .{ c_api.Event, c.orca_event },
     .{ c_api.MatchOptions, c.orca_match_options },
     .{ c_api.MatchStatsView, c.orca_match_stats },
+    .{ c_api.SubmissionStatsView, c.orca_submission_stats },
+    .{ c_api.AcoustIdSubmittableView, c.orca_acoustid_submittable_view },
     .{ c_api.MatchProposalView, c.orca_match_proposal_view },
     .{ c_api.MatchAcceptanceView, c.orca_match_acceptance },
     .{ c_api.ConfidentAcceptanceView, c.orca_confident_acceptance },
@@ -94,6 +96,13 @@ const export_mappings = .{
         pub const Tag = core.runtime.CoverArtOutcome;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportCoverArtOutcome(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_SUBMISSION_OUTCOME_";
+        pub const Tag = core.runtime.SubmissionOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportSubmissionOutcome(tag);
         }
     },
     struct {

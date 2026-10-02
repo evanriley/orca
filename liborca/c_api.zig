@@ -697,6 +697,46 @@ pub const MatchStatsView = extern struct {
     _reserved: [4]u8 = @splat(0),
 };
 
+pub const SubmissionStatsView = extern struct {
+    files_examined: u64,
+    submitted: u64,
+    sent_as_metadata: u64,
+    fingerprinted: u64,
+    fingerprint_cache_hits: u64,
+    fingerprint_failures: u64,
+    rejected: u64,
+    requests: u64,
+    outcome: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const AcoustIdSubmittableView = extern struct {
+    file_id: i64,
+    track_id: i64,
+    track_number: i64,
+    disc_number: i64,
+    duration_ms: i64,
+    size_bytes: i64,
+    recording_length_ms: u64,
+    year: u32,
+    has_track_number: u8,
+    has_disc_number: u8,
+    has_year: u8,
+    has_duration_ms: u8,
+    has_recording_length_ms: u8,
+    has_path: u8,
+    _reserved: [2]u8 = @splat(0),
+    recording_mbid: StringView,
+    title: StringView,
+    artist: StringView,
+    album: StringView,
+    album_artist: StringView,
+    codec: StringView,
+    path: StringView,
+};
+
+pub const AcoustIdSubmittableCallback = *const fn (?*anyopaque, *const AcoustIdSubmittableView) callconv(.c) void;
+
 pub const MatchProposalView = extern struct {
     id: i64,
     duration_ms: u64,
@@ -2306,6 +2346,93 @@ pub export fn orca_job_match_stats(
     return .ok;
 }
 
+pub export fn orca_library_start_acoustid_submission(
+    runtime: ?*Runtime,
+    library: Handle,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const started = box.runtime.startAcoustIdSubmission(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_submission_stats(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*SubmissionStatsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobSubmissionStats(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = .{
+        .files_examined = stats.files_examined,
+        .submitted = stats.submitted,
+        .sent_as_metadata = stats.sent_as_metadata,
+        .fingerprinted = stats.fingerprinted,
+        .fingerprint_cache_hits = stats.fingerprint_cache_hits,
+        .fingerprint_failures = stats.fingerprint_failures,
+        .rejected = stats.rejected,
+        .requests = stats.requests,
+        .outcome = exportSubmissionOutcome(stats.outcome),
+    };
+    return .ok;
+}
+
+pub export fn orca_library_acoustid_submittable_count(runtime: ?*Runtime, library: Handle, output: ?*u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryAcoustIdSubmittableCount(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_acoustid_submittable(
+    runtime: ?*Runtime,
+    library: Handle,
+    cursor: i64,
+    limit: u32,
+    context: ?*anyopaque,
+    callback: ?AcoustIdSubmittableCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const page = box.runtime.libraryAcoustIdSubmittablePage(importLibrary(library), cursor, limit) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |*item| {
+        const path = item.path orelse "";
+        const view: AcoustIdSubmittableView = .{
+            .file_id = item.file_id,
+            .track_id = item.track_id,
+            .track_number = item.track_number orelse 0,
+            .disc_number = item.disc_number orelse 0,
+            .duration_ms = item.duration_ms orelse 0,
+            .size_bytes = item.size_bytes,
+            .recording_length_ms = item.recording_length_ms orelse 0,
+            .year = item.year orelse 0,
+            .has_track_number = @intFromBool(item.track_number != null),
+            .has_disc_number = @intFromBool(item.disc_number != null),
+            .has_year = @intFromBool(item.year != null),
+            .has_duration_ms = @intFromBool(item.duration_ms != null),
+            .has_recording_length_ms = @intFromBool(item.recording_length_ms != null),
+            .has_path = @intFromBool(item.path != null),
+            .recording_mbid = stringView(item.recording_mbid),
+            .title = stringView(item.title),
+            .artist = stringView(item.artist),
+            .album = stringView(item.album),
+            .album_artist = stringView(item.album_artist),
+            .codec = stringView(item.codec),
+            .path = stringView(path),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
 pub export fn orca_library_query_match_proposals(
     runtime: ?*Runtime,
     library: Handle,
@@ -2615,6 +2742,19 @@ pub fn exportCoverArtOutcome(outcome: core.runtime.CoverArtOutcome) u8 {
         .unavailable => 8,
         .busy => 9,
         .cancelled => 10,
+    };
+}
+
+pub fn exportSubmissionOutcome(outcome: core.runtime.SubmissionOutcome) u8 {
+    return switch (outcome) {
+        .completed => 0,
+        .cancelled => 1,
+        .needs_client_key => 2,
+        .invalid_client_key => 3,
+        .needs_user_key => 4,
+        .invalid_user_key => 5,
+        .unavailable => 6,
+        .busy => 7,
     };
 }
 
@@ -5462,6 +5602,21 @@ const MatchingRig = struct {
         return provider_tests.trackOfFile(self.library_database, binding.file_id);
     }
 
+    fn addUntaggedTone(self: *MatchingRig, name: []const u8, frequency: f32, title: []const u8) !i64 {
+        try provider_tests.writeToneWave(self.temporary.dir, name, frequency);
+        const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, name });
+        defer std.testing.allocator.free(path);
+        const binding = try self.library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:c-submit" });
+        try self.library_database.tracks.upsertTracks(&.{.{
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .duration_ms = 15_000,
+            .preferred_file_id = binding.file_id,
+        }});
+        return provider_tests.trackOfFile(self.library_database, binding.file_id);
+    }
+
     fn lastError(self: *MatchingRig) []const u8 {
         return std.mem.span(orca_runtime_last_error(self.runtime));
     }
@@ -5599,6 +5754,43 @@ fn captureImage(context: ?*anyopaque, image: *const ImageView) callconv(.c) void
     captured.count += 1;
     captured.length = @min(image.length, captured.bytes.len);
     @memcpy(captured.bytes[0..captured.length], image.bytes[0..captured.length]);
+}
+
+const CapturedSubmittable = struct {
+    count: usize = 0,
+    last_file_id: i64 = 0,
+    track_id: i64 = 0,
+    recording_mbid: CapturedText = .{},
+    title: CapturedText = .{},
+    artist: CapturedText = .{},
+    codec: CapturedText = .{},
+    path: CapturedText = .{},
+    has_path: u8 = 0,
+    has_duration_ms: u8 = 0,
+    duration_ms: i64 = 0,
+    has_track_number: u8 = 255,
+    has_year: u8 = 255,
+    has_recording_length_ms: u8 = 255,
+    size_bytes: i64 = 0,
+};
+
+fn captureSubmittable(context: ?*anyopaque, item: *const AcoustIdSubmittableView) callconv(.c) void {
+    const captured: *CapturedSubmittable = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.last_file_id = item.file_id;
+    captured.track_id = item.track_id;
+    captured.recording_mbid.set(item.recording_mbid);
+    captured.title.set(item.title);
+    captured.artist.set(item.artist);
+    captured.codec.set(item.codec);
+    captured.path.set(item.path);
+    captured.has_path = item.has_path;
+    captured.has_duration_ms = item.has_duration_ms;
+    captured.duration_ms = item.duration_ms;
+    captured.has_track_number = item.has_track_number;
+    captured.has_year = item.has_year;
+    captured.has_recording_length_ms = item.has_recording_length_ms;
+    captured.size_bytes = item.size_bytes;
 }
 
 const nick_drake_answers = [_]std.meta.Elem(@FieldType(provider_tests.FakeMusicBrainz, "answers")){
@@ -5991,4 +6183,142 @@ test "a cover fetched through the C ABI is a metadata lookup whose stats say fet
     try std.testing.expectEqual(Status.ok, orca_library_release_artwork(rig.runtime, rig.library, album, &image, captureImage));
     try std.testing.expectEqual(@as(usize, 1), image.count);
     try std.testing.expectEqualStrings(provider_tests.jpeg_cover, image.bytes[0..image.length]);
+}
+
+test "a submission started through the C ABI sends an accepted recording ID once, and fails without a user key leaving it unsent" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-submission?mode=memory&cache=shared", "test-client");
+    defer rig.deinit();
+    rig.musicbrainz.answers = &nick_drake_answers;
+    rig.acoustid.submit_body = "{\"status\":\"ok\",\"submissions\":[{\"id\":71,\"status\":\"pending\",\"index\":\"0\"}]}";
+    var keyring: FakeKeyring = .{ .result = @intFromEnum(CredentialResult.not_found), .secret = "userkey" };
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_credential_callback(rig.runtime, FakeKeyring.lookup, &keyring));
+    const northern_sky = try rig.addUntaggedTone("northern.wav", 440, "Northern Sky");
+
+    var count: u64 = 7;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_acoustid_submittable_count(rig.runtime, rig.library, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_acoustid_submittable_count(rig.runtime, .{ .index = 7, .generation = 3 }, &count));
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+
+    var matching: Handle = undefined;
+    const options: MatchOptions = .{
+        .batch_size = 0,
+        .limit = 0,
+        .track_id = 0,
+        .release_id = 0,
+        .accept_minimum_confidence = 0,
+        .mode = 0,
+        .has_limit = 0,
+        .has_track_id = 0,
+        .has_release_id = 0,
+        .skip_fingerprints = 1,
+        .has_accept_minimum_confidence = 0,
+        .cover_art = 0,
+    };
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(matching));
+    var proposal: CapturedProposal = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, northern_sky, &proposal, captureProposal));
+    try std.testing.expectEqual(@as(usize, 1), proposal.count);
+    var acceptance: MatchAcceptanceView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_accept_match(rig.runtime, rig.library, proposal.id, &acceptance));
+
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
+    var submittable: CapturedSubmittable = .{};
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 0, &submittable, captureSubmittable));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 513, &submittable, captureSubmittable));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 10, &submittable, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_query_acoustid_submittable(rig.runtime, .{ .index = 7, .generation = 3 }, 0, 10, &submittable, captureSubmittable));
+    try std.testing.expectEqual(Status.ok, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 10, &submittable, captureSubmittable));
+    try std.testing.expectEqual(@as(usize, 1), submittable.count);
+    try std.testing.expectEqual(acceptance.file_id, submittable.last_file_id);
+    try std.testing.expectEqual(try provider_tests.trackOfFile(rig.library_database, acceptance.file_id), submittable.track_id);
+    try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, submittable.recording_mbid.text());
+    try std.testing.expectEqualStrings("Northern Sky", submittable.title.text());
+    try std.testing.expectEqualStrings("Nick Drake", submittable.artist.text());
+    try std.testing.expectEqual(@as(u8, 1), submittable.has_path);
+    try std.testing.expect(std.mem.endsWith(u8, submittable.path.text(), "northern.wav"));
+    try std.testing.expectEqual(@as(u8, 0), submittable.has_duration_ms);
+    try std.testing.expectEqual(@as(i64, 0), submittable.duration_ms);
+    try std.testing.expectEqual(@as(u8, 1), submittable.has_track_number);
+    try std.testing.expectEqual(@as(u8, 1), submittable.has_recording_length_ms);
+    try std.testing.expect(submittable.size_bytes > 0);
+    submittable = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_acoustid_submittable(rig.runtime, rig.library, acceptance.file_id, 10, &submittable, captureSubmittable));
+    try std.testing.expectEqual(@as(usize, 0), submittable.count);
+
+    var submitting: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_acoustid_submission(rig.runtime, rig.library, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_start_acoustid_submission(rig.runtime, .{ .index = 7, .generation = 3 }, &submitting));
+    try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(rig.runtime, submitting, &snapshot));
+    try std.testing.expectEqual(exportJobKind(.acoustid_submission), snapshot.kind);
+    try std.testing.expectEqual(job.State.failed, try rig.finish(submitting));
+    var stats: SubmissionStatsView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_submission_stats(rig.runtime, submitting, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_job_submission_stats(rig.runtime, .{ .index = 7, .generation = 3 }, &stats));
+    try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
+    try std.testing.expectEqual(exportSubmissionOutcome(.needs_user_key), stats.outcome);
+    try std.testing.expectEqual(@as(u64, 0), stats.submitted);
+    try std.testing.expectEqual(@as(u32, 0), rig.acoustid.submissions.load(.acquire));
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
+
+    keyring.result = @intFromEnum(CredentialResult.unavailable);
+    try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
+    try std.testing.expectEqual(job.State.failed, try rig.finish(submitting));
+    try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
+    try std.testing.expectEqual(exportSubmissionOutcome(.needs_user_key), stats.outcome);
+    try std.testing.expectEqual(@as(u32, 0), rig.acoustid.submissions.load(.acquire));
+
+    keyring.result = @intFromEnum(CredentialResult.found);
+    try std.testing.expectEqual(Status.ok, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(submitting));
+    try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, submitting, &stats));
+    try std.testing.expectEqual(exportSubmissionOutcome(.completed), stats.outcome);
+    try std.testing.expectEqual(@as(u64, 1), stats.files_examined);
+    try std.testing.expectEqual(@as(u64, 1), stats.submitted);
+    try std.testing.expectEqual(@as(u64, 1), stats.fingerprinted);
+    try std.testing.expectEqual(@as(u64, 0), stats.rejected);
+    try std.testing.expectEqual(@as(u64, 1), stats.requests);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.submissions.load(.acquire));
+    try std.testing.expect(std.mem.indexOf(u8, rig.acoustid.lastForm(), "&user=userkey&") != null);
+    try std.testing.expectEqual(Status.ok, orca_library_acoustid_submittable_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    submittable = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_acoustid_submittable(rig.runtime, rig.library, 0, 10, &submittable, captureSubmittable));
+    try std.testing.expectEqual(@as(usize, 0), submittable.count);
+}
+
+test "a submission refuses to start beside a running match or without a client identity, and its stats are zero for another job" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-submission-busy?mode=memory&cache=shared", "test-client");
+    defer rig.deinit();
+    rig.musicbrainz.hang_from = 0;
+    rig.musicbrainz.answers = &nick_drake_answers;
+    _ = try rig.addUntaggedTone("northern.wav", 440, "Northern Sky");
+
+    var matching: Handle = undefined;
+    var options = std.mem.zeroes(MatchOptions);
+    options.skip_fingerprints = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    var submitting: Handle = undefined;
+    try std.testing.expectEqual(Status.busy, orca_library_start_acoustid_submission(rig.runtime, rig.library, &submitting));
+    try std.testing.expectEqualStrings("orca_library_start_acoustid_submission: AcoustIdBusy", rig.lastError());
+    var stats: SubmissionStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_submission_stats(rig.runtime, matching, &stats));
+    try std.testing.expectEqual(@as(u64, 0), stats.files_examined);
+    try std.testing.expectEqual(exportSubmissionOutcome(.completed), stats.outcome);
+    try std.testing.expectEqual(Status.ok, orca_job_cancel(rig.runtime, matching));
+    _ = try rig.finish(matching);
+
+    const unnamed = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(unnamed);
+    var unnamed_library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(unnamed, "file:orca-c-api-submission-unnamed?mode=memory&cache=shared", &unnamed_library));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_acoustid_submission(unnamed, unnamed_library, &submitting));
+    try std.testing.expectEqualStrings("orca_library_start_acoustid_submission: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(unnamed)));
 }

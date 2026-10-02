@@ -227,6 +227,14 @@
   `orca_library_accept_correction_group` and
   `orca_library_dismiss_correction_group` act on album groups of
   corrections.
+- **The C ABI submits recording IDs to AcoustID.**
+  `orca_library_start_acoustid_submission` starts an
+  `ORCA_JOB_KIND_ACOUSTID_SUBMISSION` job whose `orca_submission_stats`
+  `orca_job_submission_stats` reads, with its `orca_submission_outcome`.
+  `orca_library_acoustid_submittable_count` counts the files it would send,
+  and `orca_library_query_acoustid_submittable` pages them by file id as
+  `orca_acoustid_submittable_view`s. A submission beside a matching job is
+  `ORCA_STATUS_BUSY`.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

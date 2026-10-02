@@ -2399,6 +2399,124 @@ orca_status orca_library_accept_correction_group(
  * orca_library_accept_correction_group. */
 orca_status orca_library_dismiss_correction_group(orca_runtime *runtime, orca_handle library, int64_t group_id);
 
+/* ------------------------------------------------------ AcoustID submission */
+
+/* Why an AcoustID submission job stopped. Every outcome but COMPLETED and
+ * CANCELLED leaves the job FAILED, with nothing from the failed request
+ * marked sent. NEEDS_CLIENT_KEY: no application key is set. NEEDS_USER_KEY:
+ * the credential callback has none for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
+ * ORCA_CREDENTIAL_ACCOUNT_USER_KEY, or its answer was UNAVAILABLE or
+ * TOO_LARGE. INVALID_CLIENT_KEY and INVALID_USER_KEY: AcoustID refused the
+ * key. UNAVAILABLE: AcoustID did not answer after retries. BUSY: another Orca
+ * process holds AcoustID. */
+typedef enum orca_submission_outcome {
+    ORCA_SUBMISSION_OUTCOME_COMPLETED = 0,
+    ORCA_SUBMISSION_OUTCOME_CANCELLED = 1,
+    ORCA_SUBMISSION_OUTCOME_NEEDS_CLIENT_KEY = 2,
+    ORCA_SUBMISSION_OUTCOME_INVALID_CLIENT_KEY = 3,
+    ORCA_SUBMISSION_OUTCOME_NEEDS_USER_KEY = 4,
+    ORCA_SUBMISSION_OUTCOME_INVALID_USER_KEY = 5,
+    ORCA_SUBMISSION_OUTCOME_UNAVAILABLE = 6,
+    ORCA_SUBMISSION_OUTCOME_BUSY = 7,
+} orca_submission_outcome;
+
+/*
+ * Starts sending AcoustID the fingerprints of files whose recording ID a
+ * person chose, through an accepted match or an edit, and returns
+ * immediately. The job's kind is ORCA_JOB_KIND_ACOUSTID_SUBMISSION, and its
+ * counts are read with orca_job_submission_stats. IDs read from a file's
+ * tags are never sent, and a file is sent once per ID. A file whose length is
+ * far from its recording's is sent as metadata instead of the ID. It needs
+ * the AcoustID application key and the user's key, which liborca reads
+ * through the credential callback. It writes no file.
+ *
+ * While an idle-maintenance unit runs, returns OK with a job that stays
+ * ORCA_JOB_QUEUED until the unit has stopped. INVALID_STATE without a client
+ * identity. BUSY while a matching job or another submission runs or is
+ * queued.
+ */
+orca_status orca_library_start_acoustid_submission(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_handle *job
+);
+
+/*
+ * What an AcoustID submission job did so far. `files_examined` counts the
+ * submittable files it went through, `submitted` those AcoustID accepted,
+ * `sent_as_metadata` those of them sent as metadata rather than the ID,
+ * `rejected` the files in batches AcoustID refused, which stay unsent, and
+ * `requests` its submit requests.
+ * `outcome` is an orca_submission_outcome: COMPLETED while the job runs.
+ */
+typedef struct orca_submission_stats {
+    uint64_t files_examined;
+    uint64_t submitted;
+    uint64_t sent_as_metadata;
+    uint64_t fingerprinted;
+    uint64_t fingerprint_cache_hits;
+    uint64_t fingerprint_failures;
+    uint64_t rejected;
+    uint64_t requests;
+    uint8_t outcome;
+    uint8_t reserved[7];
+} orca_submission_stats;
+
+/* All zero for a queued job or a job of another kind. STALE_HANDLE for an
+ * unknown job. */
+orca_status orca_job_submission_stats(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_submission_stats *output
+);
+
+/* How many files a submission would send now, fingerprints permitting. */
+orca_status orca_library_acoustid_submittable_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
+
+/* A file whose chosen recording ID has not been sent to AcoustID. Each
+ * optional value has a `has_*` flag and reads 0 when absent; `path` is empty
+ * without `has_path`. `recording_length_ms` is the accepted match's
+ * recording length. Valid only for the duration of the callback. */
+typedef struct orca_acoustid_submittable_view {
+    int64_t file_id;
+    int64_t track_id;
+    int64_t track_number;
+    int64_t disc_number;
+    int64_t duration_ms;
+    int64_t size_bytes;
+    uint64_t recording_length_ms;
+    uint32_t year;
+    uint8_t has_track_number;
+    uint8_t has_disc_number;
+    uint8_t has_year;
+    uint8_t has_duration_ms;
+    uint8_t has_recording_length_ms;
+    uint8_t has_path;
+    uint8_t reserved[2];
+    orca_string_view recording_mbid;
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view album;
+    orca_string_view album_artist;
+    orca_string_view codec;
+    orca_string_view path;
+} orca_acoustid_submittable_view;
+
+typedef void (*orca_acoustid_submittable_callback)(void *context, const orca_acoustid_submittable_view *item);
+
+/* Invokes the callback for up to `limit` submittable files with a file_id
+ * above `cursor`, by file_id. Pass 0 for the first page, then the last
+ * file_id seen; fewer than `limit` items is the last page. `limit` is 1 to
+ * 512, else INVALID_ARGUMENT. */
+orca_status orca_library_query_acoustid_submittable(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t cursor,
+    uint32_t limit,
+    void *context,
+    orca_acoustid_submittable_callback callback
+);
+
 /* ------------------------------------------------------------- watching */
 
 typedef enum orca_watch_state {

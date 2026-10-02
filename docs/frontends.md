@@ -184,6 +184,16 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_query_correction_groups` pages album groups of corrections
   with their members, accepted or dismissed only whole. Acceptance writes the
   library, never a file.
+- **AcoustID submission.** `orca_library_start_acoustid_submission` starts an
+  `ORCA_JOB_KIND_ACOUSTID_SUBMISSION` job that sends the fingerprints of files
+  whose recording ID a person chose, and `orca_job_submission_stats` reads its
+  `orca_submission_stats`; why it stopped is an `orca_submission_outcome`,
+  and a missing user key is `ORCA_SUBMISSION_OUTCOME_NEEDS_USER_KEY`, read
+  through the credential callback as `ORCA_CREDENTIAL_ACCOUNT_USER_KEY`.
+  `orca_library_acoustid_submittable_count` and
+  `orca_library_query_acoustid_submittable` (keyset paging after the last
+  `file_id` seen) list what it would send. It cannot run beside a matching
+  job.
 
 `orca_player_play` is refused unless the Player has a loaded source or a
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while
