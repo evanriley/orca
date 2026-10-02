@@ -61,6 +61,8 @@ const struct_pairs = .{
     .{ c_api.EventPayload, c.orca_event_payload },
     .{ c_api.WatchOptions, c.orca_watch_options },
     .{ c_api.WatchStatus, c.orca_watch_status },
+    .{ c_api.MaintenanceOptions, c.orca_maintenance_options },
+    .{ c_api.MaintenanceStatus, c.orca_maintenance_status },
     .{ c_api.Event, c.orca_event },
     .{ c_api.MatchOptions, c.orca_match_options },
     .{ c_api.MatchStatsView, c.orca_match_stats },
@@ -277,6 +279,27 @@ const export_mappings = .{
         pub const Tag = core.runtime.WatchState;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportWatchState(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_MAINTENANCE_STATE_";
+        pub const Tag = core.runtime.MaintenanceState;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportMaintenanceState(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_MAINTENANCE_BLOCK_";
+        pub const Tag = core.runtime.MaintenanceBlock;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportMaintenanceBlock(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_JOB_ORIGIN_";
+        pub const Tag = core.runtime.JobOrigin;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportJobOrigin(tag);
         }
     },
     struct {

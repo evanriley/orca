@@ -241,6 +241,14 @@
   `ORCA_STATUS_INVALID_STATE`. `orca_library_scrobbler_status` hands an
   `orca_scrobbler_status_view` of the `orca_scrobbler_state`, user name, last
   error, retry and block times and queue counts.
+- **The C ABI runs idle maintenance and says who started a job.**
+  `orca_library_set_maintenance` turns a Library's idle maintenance on or
+  off with an `orca_maintenance_options`, and
+  `orca_library_maintenance_status` hands an `orca_maintenance_status` with
+  its `orca_maintenance_state`, `orca_maintenance_block` and the last unit's
+  `orca_match_stats`. `orca_job_origin_get` returns a job's
+  `orca_job_origin`, and `orca_job_reconcile_root` the root a reconcile job
+  walks.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

@@ -645,6 +645,27 @@ pub const WatchStatus = extern struct {
     directories_watched: u64,
 };
 
+pub const MaintenanceOptions = extern struct {
+    interval_ms: u32,
+    enabled: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const MaintenanceStatus = extern struct {
+    next_due_ms: u64,
+    units_run: u64,
+    last_release_id: i64,
+    last_stats: MatchStatsView,
+    enabled: u8,
+    state: u8,
+    blocked: u8,
+    has_blocked: u8,
+    has_next_due_ms: u8,
+    has_last: u8,
+    has_last_release_id: u8,
+    last_state: u8,
+};
+
 pub const Event = extern struct {
     kind: u8,
     _reserved: [7]u8 = @splat(0),
@@ -2394,34 +2415,7 @@ pub export fn orca_job_match_stats(
     const box = enter(runtime) orelse return refusal(runtime);
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const stats = box.runtime.jobMatchStats(importJob(job_handle)) catch |err| return box.fail(@src(), err);
-    destination.* = .{
-        .tracks_examined = stats.tracks_examined,
-        .matched = stats.matched,
-        .unmatched = stats.unmatched,
-        .insufficient_evidence = stats.insufficient_evidence,
-        .refused = stats.refused,
-        .proposals_stored = stats.proposals_stored,
-        .confirmed = stats.confirmed,
-        .verified = stats.verified,
-        .agreed = stats.agreed,
-        .disagreed = stats.disagreed,
-        .unconfirmed = stats.unconfirmed,
-        .skipped = stats.skipped,
-        .correction_groups = stats.correction_groups,
-        .requests = stats.requests,
-        .cache_hits = stats.cache_hits,
-        .fingerprinted = stats.fingerprinted,
-        .fingerprint_cache_hits = stats.fingerprint_cache_hits,
-        .fingerprint_failures = stats.fingerprint_failures,
-        .acoustid_requests = stats.acoustid_requests,
-        .acoustid_cache_hits = stats.acoustid_cache_hits,
-        .acoustid_refused = stats.acoustid_refused,
-        .accepted = stats.accepted,
-        .acoustid = exportAcoustIdUse(stats.acoustid),
-        .busy = exportBusyService(stats.busy),
-        .cover_art = exportCoverArtOutcome(stats.cover_art),
-        .cancelled = @intFromBool(stats.cancelled),
-    };
+    destination.* = exportMatchStats(stats);
     return .ok;
 }
 
@@ -2995,6 +2989,39 @@ pub export fn orca_library_watch_status(
     return .ok;
 }
 
+pub export fn orca_library_set_maintenance(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const MaintenanceOptions,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    var maintenance_options: core.runtime.MaintenanceOptions = .{ .enabled = false };
+    if (options) |value| {
+        maintenance_options.enabled = switch (value.enabled) {
+            0 => false,
+            1 => true,
+            else => return box.reject(@src(), .invalid_argument, "enabled is not 0 or 1"),
+        };
+        if (value.interval_ms != 0) maintenance_options.interval_ms = value.interval_ms;
+    }
+    box.runtime.libraryMaintenance(importLibrary(library), maintenance_options) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_maintenance_status(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*MaintenanceStatus,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const status = box.runtime.libraryMaintenanceStatus(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportMaintenanceStatus(status);
+    return .ok;
+}
+
 pub export fn orca_library_start_projection(
     runtime: ?*Runtime,
     library: Handle,
@@ -3135,6 +3162,33 @@ pub export fn orca_library_scan_stats(
         .releases_written = stats.releases_written,
         .cancelled = @intFromBool(stats.cancelled),
     };
+    return .ok;
+}
+
+pub export fn orca_job_origin_get(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    origin: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = origin orelse return box.reject(@src(), .invalid_argument, "origin is null");
+    destination.* = exportJobOrigin(box.runtime.jobOrigin(importJob(job_handle)) catch |err|
+        return box.fail(@src(), err));
+    return .ok;
+}
+
+pub export fn orca_job_reconcile_root(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    root_id: ?*i64,
+    has_root_id: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const root_destination = root_id orelse return box.reject(@src(), .invalid_argument, "root_id is null");
+    const has_destination = has_root_id orelse return box.reject(@src(), .invalid_argument, "has_root_id is null");
+    const root = box.runtime.jobReconcileRoot(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    root_destination.* = root orelse 0;
+    has_destination.* = @intFromBool(root != null);
     return .ok;
 }
 
@@ -4238,6 +4292,81 @@ pub fn exportWatchState(state: core.runtime.WatchState) u8 {
     };
 }
 
+fn exportMatchStats(stats: core.runtime.MatchStats) MatchStatsView {
+    return .{
+        .tracks_examined = stats.tracks_examined,
+        .matched = stats.matched,
+        .unmatched = stats.unmatched,
+        .insufficient_evidence = stats.insufficient_evidence,
+        .refused = stats.refused,
+        .proposals_stored = stats.proposals_stored,
+        .confirmed = stats.confirmed,
+        .verified = stats.verified,
+        .agreed = stats.agreed,
+        .disagreed = stats.disagreed,
+        .unconfirmed = stats.unconfirmed,
+        .skipped = stats.skipped,
+        .correction_groups = stats.correction_groups,
+        .requests = stats.requests,
+        .cache_hits = stats.cache_hits,
+        .fingerprinted = stats.fingerprinted,
+        .fingerprint_cache_hits = stats.fingerprint_cache_hits,
+        .fingerprint_failures = stats.fingerprint_failures,
+        .acoustid_requests = stats.acoustid_requests,
+        .acoustid_cache_hits = stats.acoustid_cache_hits,
+        .acoustid_refused = stats.acoustid_refused,
+        .accepted = stats.accepted,
+        .acoustid = exportAcoustIdUse(stats.acoustid),
+        .busy = exportBusyService(stats.busy),
+        .cover_art = exportCoverArtOutcome(stats.cover_art),
+        .cancelled = @intFromBool(stats.cancelled),
+    };
+}
+
+pub fn exportMaintenanceState(state: core.runtime.MaintenanceState) u8 {
+    return switch (state) {
+        .off => 0,
+        .waiting => 1,
+        .running => 2,
+        .blocked => 3,
+    };
+}
+
+pub fn exportMaintenanceBlock(block: core.runtime.MaintenanceBlock) u8 {
+    return switch (block) {
+        .client_identity_required => 0,
+        .acoustid_required => 1,
+        .provider_busy => 2,
+    };
+}
+
+pub fn exportJobOrigin(origin: core.runtime.JobOrigin) u8 {
+    return switch (origin) {
+        .host => 0,
+        .watcher => 1,
+        .maintenance => 2,
+    };
+}
+
+fn exportMaintenanceStatus(status: core.runtime.MaintenanceStatus) MaintenanceStatus {
+    const last = status.last;
+    const last_release_id = if (last) |unit| unit.release_id else null;
+    return .{
+        .next_due_ms = status.next_due_ms orelse 0,
+        .units_run = status.units_run,
+        .last_release_id = last_release_id orelse 0,
+        .last_stats = if (last) |unit| exportMatchStats(unit.stats) else std.mem.zeroes(MatchStatsView),
+        .enabled = @intFromBool(status.enabled),
+        .state = exportMaintenanceState(status.state),
+        .blocked = if (status.blocked) |block| exportMaintenanceBlock(block) else 0,
+        .has_blocked = @intFromBool(status.blocked != null),
+        .has_next_due_ms = @intFromBool(status.next_due_ms != null),
+        .has_last = @intFromBool(last != null),
+        .has_last_release_id = @intFromBool(last_release_id != null),
+        .last_state = if (last) |unit| @intFromEnum(unit.state) else 0,
+    };
+}
+
 fn exportFailure(failure: control.Failure) u8 {
     return switch (failure) {
         .runtime_not_running => 0,
@@ -4403,6 +4532,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidNetworkConfiguration,
         error.InvalidMatchRequest,
         error.InvalidMinimumConfidence,
+        error.InvalidMaintenanceOptions,
         error.PageOutOfRange,
         => .invalid_argument,
         else => .internal,
@@ -6597,4 +6727,125 @@ test "scrobbling refuses flags other than 0 or 1, a host that has not named itse
     try std.testing.expectEqual(Status.ok, orca_library_open(unnamed, "file:orca-c-api-scrobble-unnamed?mode=memory&cache=shared", &unnamed_library));
     try std.testing.expectEqual(Status.invalid_state, orca_library_set_scrobbling(unnamed, unnamed_library, 1, 1, 0));
     try std.testing.expectEqualStrings("orca_library_set_scrobbling: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(unnamed)));
+}
+
+fn maintenanceStatus(runtime: *Runtime, library: Handle) !MaintenanceStatus {
+    var status: MaintenanceStatus = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_maintenance_status(runtime, library, &status));
+    return status;
+}
+
+test "a maintenance unit enabled through the C ABI is a metadata lookup of origin maintenance whose stats the status reports as its last unit" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-maintenance?mode=memory&cache=shared", "test-client");
+    defer rig.deinit();
+    const album = try provider_tests.addRelease(rig.library_database, "Bryter Layter", null);
+    _ = try rig.addTone("northern.wav", 300, "Northern Sky", provider_tests.northern_sky_mbid, album);
+    rig.acoustid.lookup_body = provider_tests.acoustIdAnswer(
+        provider_tests.heardBy("0", provider_tests.heardResult("0.95", provider_tests.northern_sky_heard)),
+    );
+
+    const off = try maintenanceStatus(rig.runtime, rig.library);
+    try std.testing.expectEqual(@as(u8, 0), off.enabled);
+    try std.testing.expectEqual(exportMaintenanceState(.off), off.state);
+    try std.testing.expectEqual(@as(u8, 0), off.has_last);
+    try std.testing.expectEqual(@as(u8, 0), off.has_next_due_ms);
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(rig.runtime, rig.library, &.{ .interval_ms = 0, .enabled = 1 }));
+    const due = try maintenanceStatus(rig.runtime, rig.library);
+    try std.testing.expectEqual(exportMaintenanceState(.waiting), due.state);
+    try std.testing.expectEqual(@as(u8, 1), due.has_next_due_ms);
+    try std.testing.expectEqual(@as(u64, 0), due.next_due_ms);
+
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump(rig.runtime));
+    try std.testing.expectEqual(exportMaintenanceState(.running), (try maintenanceStatus(rig.runtime, rig.library)).state);
+    const running = core.runtime_jobs.maintenanceUnitRunning(&runtimeBox(rig.runtime).?.runtime) orelse return error.UnitNotRunning;
+    const unit = exportJobHandle(running.job);
+    var origin: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_job_origin_get(rig.runtime, unit, &origin));
+    try std.testing.expectEqual(exportJobOrigin(.maintenance), origin);
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(rig.runtime, unit, &snapshot));
+    try std.testing.expectEqual(exportJobKind(.metadata_lookup), snapshot.kind);
+    var root_id: i64 = -1;
+    var has_root_id: u8 = 1;
+    try std.testing.expectEqual(Status.ok, orca_job_reconcile_root(rig.runtime, unit, &root_id, &has_root_id));
+    try std.testing.expectEqual(@as(i64, 0), root_id);
+    try std.testing.expectEqual(@as(u8, 0), has_root_id);
+
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(unit));
+    var deadline: core.runtime_tests.TestDeadline = .init(10_000);
+    var waiting = try maintenanceStatus(rig.runtime, rig.library);
+    while (waiting.units_run < 1) {
+        if (!deadline.tick()) return error.UnitDidNotFinish;
+        try std.testing.expectEqual(Status.ok, orca_runtime_pump(rig.runtime));
+        waiting = try maintenanceStatus(rig.runtime, rig.library);
+    }
+    try std.testing.expectEqual(@as(u8, 1), waiting.enabled);
+    try std.testing.expectEqual(exportMaintenanceState(.waiting), waiting.state);
+    try std.testing.expectEqual(@as(u8, 0), waiting.has_blocked);
+    try std.testing.expectEqual(@as(u8, 1), waiting.has_next_due_ms);
+    try std.testing.expect(waiting.next_due_ms > 0 and waiting.next_due_ms <= 5 * 60 * 1000);
+    try std.testing.expectEqual(@as(u8, 1), waiting.has_last);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(job.State.succeeded)), waiting.last_state);
+    try std.testing.expectEqual(@as(u8, 1), waiting.has_last_release_id);
+    try std.testing.expectEqual(album, waiting.last_release_id);
+    try std.testing.expectEqual(@as(u64, 1), waiting.last_stats.verified);
+    try std.testing.expectEqual(exportAcoustIdUse(.searched), waiting.last_stats.acoustid);
+    var unit_stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, unit, &unit_stats));
+    try std.testing.expectEqual(unit_stats, waiting.last_stats);
+    try std.testing.expectEqual(Status.ok, orca_job_origin_get(rig.runtime, unit, &origin));
+    try std.testing.expectEqual(exportJobOrigin(.maintenance), origin);
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(rig.runtime, rig.library, null));
+    const disabled = try maintenanceStatus(rig.runtime, rig.library);
+    try std.testing.expectEqual(@as(u8, 0), disabled.enabled);
+    try std.testing.expectEqual(exportMaintenanceState(.off), disabled.state);
+    try std.testing.expectEqual(@as(u8, 0), disabled.has_last);
+}
+
+test "maintenance refuses an enabled flag other than 0 or 1, null outputs and stale handles, and reports why it is blocked" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-maintenance-refusals?mode=memory&cache=shared", &library));
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_maintenance(runtime, library, &.{ .interval_ms = 0, .enabled = 2 }));
+    try std.testing.expectEqualStrings("orca_library_set_maintenance: enabled is not 0 or 1", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_maintenance_status(runtime, library, null));
+    const stale: Handle = .{ .index = library.index, .generation = library.generation + 1 };
+    try std.testing.expectEqual(Status.stale_handle, orca_library_set_maintenance(runtime, stale, &.{ .interval_ms = 0, .enabled = 1 }));
+    var status: MaintenanceStatus = undefined;
+    try std.testing.expectEqual(Status.stale_handle, orca_library_maintenance_status(runtime, stale, &status));
+
+    var origin: u8 = 0;
+    var root_id: i64 = 0;
+    var has_root_id: u8 = 0;
+    const unknown_job: Handle = .{ .index = 7, .generation = 3 };
+    try std.testing.expectEqual(Status.stale_handle, orca_job_origin_get(runtime, unknown_job, &origin));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_origin_get(runtime, unknown_job, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_job_reconcile_root(runtime, unknown_job, &root_id, &has_root_id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_reconcile_root(runtime, unknown_job, null, &has_root_id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_reconcile_root(runtime, unknown_job, &root_id, null));
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(runtime, library, &.{ .interval_ms = 60_000, .enabled = 1 }));
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump(runtime));
+    status = try maintenanceStatus(runtime, library);
+    try std.testing.expectEqual(exportMaintenanceState(.blocked), status.state);
+    try std.testing.expectEqual(@as(u8, 1), status.has_blocked);
+    try std.testing.expectEqual(exportMaintenanceBlock(.client_identity_required), status.blocked);
+    try std.testing.expectEqual(@as(u8, 1), status.has_next_due_ms);
+    try std.testing.expect(status.next_due_ms > 0 and status.next_due_ms <= 60_000);
+
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Host", "1.0", "https://host.invalid"));
+    try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(runtime, library, &.{ .interval_ms = 60_000, .enabled = 1 }));
+    try std.testing.expectEqual(Status.ok, orca_runtime_pump(runtime));
+    status = try maintenanceStatus(runtime, library);
+    try std.testing.expectEqual(exportMaintenanceState(.blocked), status.state);
+    try std.testing.expectEqual(exportMaintenanceBlock(.acoustid_required), status.blocked);
+    try std.testing.expectEqual(@as(u8, 0), status.has_last);
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_maintenance(runtime, library, &.{ .interval_ms = 0, .enabled = 0 }));
+    try std.testing.expectEqual(exportMaintenanceState(.off), (try maintenanceStatus(runtime, library)).state);
 }

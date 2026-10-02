@@ -201,6 +201,18 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_query_acoustid_submittable` (keyset paging after the last
   `file_id` seen) list what it would send. It cannot run beside a matching
   job.
+- **Idle maintenance.** `orca_library_set_maintenance` turns a Library's
+  idle maintenance on or off with an `orca_maintenance_options`, NULL turning
+  it off, and `orca_library_maintenance_status` fills an
+  `orca_maintenance_status`: the `orca_maintenance_state`, the
+  `orca_maintenance_block` that keeps units from running, the time to the
+  next unit, the units run and the last unit's `orca_job_state`, Release and
+  `orca_match_stats`. Units start from `orca_runtime_pump` as
+  `ORCA_JOB_KIND_METADATA_LOOKUP` jobs the host never started.
+  `orca_job_origin_get` tells a host's job from a watcher's reconcile and a
+  maintenance unit by its `orca_job_origin`, and `orca_job_reconcile_root`
+  names the root a reconcile job walks. See
+  [control-plane.md](control-plane.md#idle-maintenance).
 
 `orca_player_play` is refused unless the Player has a loaded source or a
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while

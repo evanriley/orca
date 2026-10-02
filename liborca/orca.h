@@ -2673,6 +2673,90 @@ orca_status orca_library_watch_status(
     orca_watch_status *output
 );
 
+/* ----------------------------------------------------- idle maintenance */
+
+/* Zero in a field selects its default. */
+typedef struct orca_maintenance_options {
+    /* The time between one unit's end and the next one's start. Default
+     * 300000 (five minutes). */
+    uint32_t interval_ms;
+    /* 1 turns maintenance on, 0 off. */
+    uint8_t enabled;
+    uint8_t reserved[3];
+} orca_maintenance_options;
+
+typedef enum orca_maintenance_state {
+    ORCA_MAINTENANCE_STATE_OFF = 0,
+    /* Enabled; the next unit is due in `next_due_ms`. */
+    ORCA_MAINTENANCE_STATE_WAITING = 1,
+    ORCA_MAINTENANCE_STATE_RUNNING = 2,
+    /* Enabled, but the last unit could not start or stopped for `blocked`. */
+    ORCA_MAINTENANCE_STATE_BLOCKED = 3,
+} orca_maintenance_state;
+
+/* Why units do not run. CLIENT_IDENTITY_REQUIRED: no
+ * orca_runtime_set_client_identity. ACOUSTID_REQUIRED: neither an AcoustID
+ * application key nor a credential callback, or AcoustID refused the key.
+ * PROVIDER_BUSY: a provider's backoff is recorded, or another Orca process
+ * holds it. */
+typedef enum orca_maintenance_block {
+    ORCA_MAINTENANCE_BLOCK_CLIENT_IDENTITY_REQUIRED = 0,
+    ORCA_MAINTENANCE_BLOCK_ACOUSTID_REQUIRED = 1,
+    ORCA_MAINTENANCE_BLOCK_PROVIDER_BUSY = 2,
+} orca_maintenance_block;
+
+/*
+ * A Library's maintenance schedule. `next_due_ms` counts from now and is set
+ * only while WAITING or BLOCKED (`has_next_due_ms`). `blocked` is an
+ * orca_maintenance_block when `has_blocked` is set; a WAITING schedule may
+ * carry one from its last attempt. `has_last` says a unit has finished:
+ * `last_state` is its orca_job_state, `last_stats` its counts as
+ * orca_job_match_stats reports them, and `last_release_id` the Release it
+ * verified, unset (`has_last_release_id` 0) for a unit of Tracks on no
+ * Release. Unset fields are zero.
+ */
+typedef struct orca_maintenance_status {
+    uint64_t next_due_ms;
+    uint64_t units_run;
+    int64_t last_release_id;
+    orca_match_stats last_stats;
+    uint8_t enabled;
+    uint8_t state;  /* orca_maintenance_state */
+    uint8_t blocked;  /* orca_maintenance_block */
+    uint8_t has_blocked;
+    uint8_t has_next_due_ms;
+    uint8_t has_last;
+    uint8_t has_last_release_id;
+    uint8_t last_state;  /* orca_job_state */
+} orca_maintenance_status;
+
+/*
+ * Turns idle maintenance on or off for the Library. While on,
+ * orca_runtime_pump verifies the Library's recording IDs against AcoustID a
+ * unit at a time, while no Player plays and no other job runs: the next
+ * Release every `interval_ms`, or at most twenty Tracks on no Release once
+ * none is left. Each unit is an ORCA_JOB_KIND_METADATA_LOOKUP job with origin
+ * ORCA_JOB_ORIGIN_MAINTENANCE that reports ORCA_EVENT_JOB_FINISHED like any
+ * job, and its findings land in Health. Enabling makes a unit due at once;
+ * enabling again changes the interval and makes a unit due at once;
+ * disabling cancels a running unit. `options` may be NULL, which turns
+ * maintenance off. One unit runs per runtime at a time. Nothing is saved:
+ * a host enables it again after opening the Library.
+ *
+ * INVALID_ARGUMENT for `enabled` other than 0 or 1. INVALID_STATE for a
+ * Library with no database.
+ */
+orca_status orca_library_set_maintenance(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_maintenance_options *options
+);
+orca_status orca_library_maintenance_status(
+    orca_runtime *runtime,
+    orca_handle library,
+    orca_maintenance_status *output
+);
+
 /*
  * Starts the property backfill: re-reads the headers of `files` rows whose
  * declared audio properties are missing, and reprojects each repaired batch.
@@ -2781,6 +2865,31 @@ orca_status orca_library_scan_stats(
     orca_runtime *runtime,
     orca_handle job,
     orca_scan_stats *output
+);
+
+/* Who started a job. WATCHER: a reconcile orca_library_watch started.
+ * MAINTENANCE: a unit of idle maintenance (orca_library_set_maintenance). */
+typedef enum orca_job_origin {
+    ORCA_JOB_ORIGIN_HOST = 0,
+    ORCA_JOB_ORIGIN_WATCHER = 1,
+    ORCA_JOB_ORIGIN_MAINTENANCE = 2,
+} orca_job_origin;
+
+/* Writes the job's orca_job_origin. STALE_HANDLE for an unknown job, or one
+ * finished so long ago that it is no longer retained. */
+orca_status orca_job_origin_get(
+    orca_runtime *runtime,
+    orca_handle job,
+    uint8_t *origin
+);
+/* The root a reconcile job walks, with `has_root_id` 1; `has_root_id` 0 and
+ * `root_id` 0 for a job of another kind or a queued one. STALE_HANDLE as
+ * orca_job_origin_get. */
+orca_status orca_job_reconcile_root(
+    orca_runtime *runtime,
+    orca_handle job,
+    int64_t *root_id,
+    uint8_t *has_root_id
 );
 
 /* --------------------------------------------------------------- player */

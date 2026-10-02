@@ -2193,6 +2193,93 @@ static int scrobbling_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+static int read_maintenance(orca_runtime *runtime, orca_handle library, orca_maintenance_status *status) {
+    memset(status, 0xff, sizeof *status);
+    SMOKE_CHECK(orca_library_maintenance_status(runtime, library, status) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int maintenance_library_steps(orca_runtime *runtime) {
+    orca_handle library;
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-maintenance?mode=memory&cache=shared", &library) ==
+                ORCA_STATUS_OK);
+    orca_maintenance_status status;
+    orca_maintenance_options options;
+    memset(&options, 0, sizeof options);
+    options.enabled = 1;
+    SMOKE_CHECK(orca_library_set_maintenance(runtime, library, &options) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_pump(runtime) == ORCA_STATUS_OK);
+    if (read_maintenance(runtime, library, &status) != 0) return 1;
+    SMOKE_CHECK(status.enabled == 1 && status.state == ORCA_MAINTENANCE_STATE_BLOCKED);
+    SMOKE_CHECK(status.has_blocked == 1 && status.blocked == ORCA_MAINTENANCE_BLOCK_CLIENT_IDENTITY_REQUIRED);
+    SMOKE_CHECK(status.has_next_due_ms == 1 && status.next_due_ms <= 300000);
+    SMOKE_CHECK(status.has_last == 0 && status.units_run == 0);
+    SMOKE_CHECK(orca_library_set_maintenance(runtime, library, 0) == ORCA_STATUS_OK);
+    if (read_maintenance(runtime, library, &status) != 0) return 1;
+    SMOKE_CHECK(status.enabled == 0 && status.state == ORCA_MAINTENANCE_STATE_OFF);
+    return 0;
+}
+
+static int host_job_origin_is(orca_runtime *runtime, orca_handle job, int64_t root_id, uint8_t has_root_id) {
+    uint8_t origin = 255;
+    SMOKE_CHECK(orca_job_origin_get(runtime, job, &origin) == ORCA_STATUS_OK);
+    SMOKE_CHECK(origin == ORCA_JOB_ORIGIN_HOST);
+    int64_t reconciled = -1;
+    uint8_t has_reconciled = 255;
+    SMOKE_CHECK(orca_job_reconcile_root(runtime, job, &reconciled, &has_reconciled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(has_reconciled == has_root_id && reconciled == root_id);
+    uint8_t state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(orca_job_origin_get(runtime, job, &origin) == ORCA_STATUS_OK && origin == ORCA_JOB_ORIGIN_HOST);
+    return 0;
+}
+
+static int maintenance_smoke(orca_runtime *runtime, orca_handle library, int64_t root_id) {
+    orca_maintenance_status status;
+    if (read_maintenance(runtime, library, &status) != 0) return 1;
+    SMOKE_CHECK(status.enabled == 0 && status.state == ORCA_MAINTENANCE_STATE_OFF);
+    SMOKE_CHECK(status.has_blocked == 0 && status.has_next_due_ms == 0 && status.has_last == 0);
+    SMOKE_CHECK(status.units_run == 0 && status.last_stats.verified == 0);
+    SMOKE_CHECK(orca_library_maintenance_status(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    orca_maintenance_options options;
+    memset(&options, 0, sizeof options);
+    options.enabled = 2;
+    SMOKE_CHECK(orca_library_set_maintenance(runtime, library, &options) == ORCA_STATUS_INVALID_ARGUMENT);
+    options.enabled = 1;
+    SMOKE_CHECK(orca_library_set_maintenance(runtime, library, &options) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_pump(runtime) == ORCA_STATUS_OK);
+    if (read_maintenance(runtime, library, &status) != 0) return 1;
+    SMOKE_CHECK(status.enabled == 1 && status.state == ORCA_MAINTENANCE_STATE_BLOCKED);
+    SMOKE_CHECK(status.has_blocked == 1 && status.blocked == ORCA_MAINTENANCE_BLOCK_ACOUSTID_REQUIRED);
+    SMOKE_CHECK(orca_library_set_maintenance(runtime, library, 0) == ORCA_STATUS_OK);
+    if (read_maintenance(runtime, library, &status) != 0) return 1;
+    SMOKE_CHECK(status.enabled == 0 && status.state == ORCA_MAINTENANCE_STATE_OFF);
+
+    orca_handle job;
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, root_id, 0, &job) == ORCA_STATUS_OK);
+    if (host_job_origin_is(runtime, job, 0, 0) != 0) return 1;
+    SMOKE_CHECK(orca_library_start_reconcile(runtime, library, root_id, 0, 0, &job) == ORCA_STATUS_OK);
+    if (host_job_origin_is(runtime, job, root_id, 1) != 0) return 1;
+    SMOKE_CHECK(drain_events(runtime) == 0);
+
+    uint8_t origin = 0;
+    SMOKE_CHECK(orca_job_origin_get(runtime, job, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    orca_handle stale = job;
+    stale.generation += 1;
+    SMOKE_CHECK(orca_job_origin_get(runtime, stale, &origin) == ORCA_STATUS_STALE_HANDLE);
+    stale = library;
+    stale.generation += 1;
+    SMOKE_CHECK(orca_library_maintenance_status(runtime, stale, &status) == ORCA_STATUS_STALE_HANDLE);
+
+    orca_runtime *fresh = orca_runtime_create();
+    SMOKE_CHECK(fresh != 0);
+    int failed = maintenance_library_steps(fresh) != 0;
+    orca_runtime_destroy(fresh);
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -2949,6 +3036,7 @@ int main(int argc, char **argv) {
     if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;
     if (acoustid_submission_smoke(runtime, library) != 0) return 1;
     if (scrobbling_smoke(runtime, library) != 0) return 1;
+    if (maintenance_smoke(runtime, library, root_id) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;
