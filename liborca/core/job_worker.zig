@@ -16,6 +16,7 @@ const JobHandle = object.JobHandle;
 const WorkHandle = work.WorkHandle;
 const OwnedIdentity = network.client.OwnedIdentity;
 const CredentialStore = providers.credentials.Store;
+const OwnedServer = providers.url.OwnedServer;
 
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
@@ -147,21 +148,21 @@ pub const MatchingHooks = struct {
 };
 
 pub const AcoustIdSetup = struct {
-    server: []const u8,
-    client_key: ?[]const u8,
+    server: OwnedServer,
+    client_key: ?OwnedAcoustIdKey,
     credentials: ?CredentialStore,
 };
 
 pub const MatchingSetup = struct {
     io: std.Io,
-    server: []const u8,
+    server: OwnedServer,
     identity: OwnedIdentity,
     hooks: MatchingHooks,
     scope: database.MatchScope,
     mode: library_pass.matching.Mode = .search,
     /// Null when the job looks nothing up on AcoustID.
     acoustid: ?AcoustIdSetup,
-    cover_art_server: []const u8,
+    cover_art_server: OwnedServer,
 };
 
 pub const SubmissionSetup = struct {
@@ -187,7 +188,7 @@ fn resolveClientKey(allocator: std.mem.Allocator, setup: AcoustIdSetup) !?[]u8 {
         }
     }
     const key = setup.client_key orelse return null;
-    return try allocator.dupe(u8, key);
+    return try allocator.dupe(u8, key.view());
 }
 
 pub fn validAcoustIdKey(key: []const u8) bool {
@@ -195,6 +196,22 @@ pub fn validAcoustIdKey(key: []const u8) bool {
     for (key) |byte| if (byte <= 0x20 or byte >= 0x7f) return false;
     return true;
 }
+
+pub const OwnedAcoustIdKey = struct {
+    bytes: [providers.acoustid.max_key_bytes]u8,
+    len: u16,
+
+    pub fn init(key: []const u8) error{InvalidAcoustIdKey}!OwnedAcoustIdKey {
+        if (!validAcoustIdKey(key)) return error.InvalidAcoustIdKey;
+        var owned: OwnedAcoustIdKey = .{ .bytes = @splat(0), .len = @intCast(key.len) };
+        @memcpy(owned.bytes[0..key.len], key);
+        return owned;
+    }
+
+    pub fn view(self: *const OwnedAcoustIdKey) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
 
 /// A sealed plan and where each of its files lives, owned by the runtime until
 /// a worker takes it.
@@ -840,7 +857,7 @@ pub const JobWorker = struct {
         defer gateway.releaseLease();
         var archive: providers.coverartarchive.CoverArtArchive = .{
             .gateway = &gateway,
-            .server = setup.cover_art_server,
+            .server = setup.cover_art_server.view(),
         };
         var fetch: cover_art.Fetch = .{
             .allocator = self.allocator,
@@ -883,7 +900,7 @@ pub const JobWorker = struct {
             .gateway = &gateway,
             .cache = &self.database.provider_cache,
             .wall_clock = wall_clock,
-            .server = setup.server,
+            .server = setup.server.view(),
         };
         var acoustid_gateway: network.Gateway = .{
             .transport = setup.hooks.acoustid_transport orelse services.transport,
@@ -904,7 +921,7 @@ pub const JobWorker = struct {
             .gateway = &acoustid_gateway,
             .cache = &self.database.provider_cache,
             .wall_clock = wall_clock,
-            .server = setup.acoustid.?.server,
+            .server = setup.acoustid.?.server.view(),
             .client_key = key,
         } else null;
         stats.acoustid.store(if (acoustid != null) .searched else if (setup.acoustid == null) .off else .no_client_key, .release);
@@ -1000,7 +1017,7 @@ pub const JobWorker = struct {
             .gateway = &gateway,
             .cache = &self.database.provider_cache,
             .wall_clock = wall_clock,
-            .server = setup.acoustid.server,
+            .server = setup.acoustid.server.view(),
             .client_key = client_key,
         };
         const codecs = codec.CodecRegistry.builtins();

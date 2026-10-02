@@ -18,8 +18,9 @@ single-consumer. Debug builds record the creating thread and return
 `ORCA_STATUS_WRONG_THREAD` on a violation. The runtime behind the boundary is
 genuinely multithreaded — a decode engine per Player, a registered worker per
 scan — and its object pools take no lock, so a GUI timer racing
-`orca_runtime_destroy` is a real use-after-free. The one exception is the wake
-callback, which liborca calls from its own threads; see [Wakeup](#wakeup).
+`orca_runtime_destroy` is a real use-after-free. The two exceptions are the
+wake callback and the credential callback, which liborca calls from its own
+threads; see [Wakeup](#wakeup) and [Credentials](#credentials).
 
 On Linux, liborca switches SQLite to OFD locks for the whole process on its
 first database open; see [database.md](database.md#concurrency).
@@ -152,6 +153,17 @@ The boundary covers the whole engine, not a fragment of it:
 - **Devices and Zones.** Enumeration, Zone create/attach/open/close/status, and
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.
+- **Providers and credentials.** `orca_runtime_set_client_identity` names the
+  host to MusicBrainz, AcoustID and ListenBrainz.
+  `orca_runtime_set_provider_server` points one `orca_provider_service` at
+  another server: `https`, or `http` to `127.0.0.1`, `[::1]` or `localhost`
+  only, copied, and `NULL` restores the public one.
+  `orca_runtime_set_acoustid_client_key` sets the AcoustID application key.
+  `orca_runtime_set_credential_callback` is how liborca reads tokens and keys
+  from the host's secure store, and
+  `orca_library_scrobbler_credentials_changed` has a Library's listen worker
+  read and validate a changed ListenBrainz token; see
+  [Credentials](#credentials).
 
 `orca_player_play` is refused unless the Player has a loaded source or a
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while
@@ -226,6 +238,44 @@ The callback is the one exception to the threading contract:
 
 [control-plane.md](control-plane.md#waking-the-host) lists what wakes the host
 and what the timeout covers.
+
+### Credentials
+
+liborca keeps no token or key in a Library, a log or a cache key. It asks the
+host's secure store, through the credential callback, each time it needs one:
+the ListenBrainz user token (`ORCA_CREDENTIAL_SERVICE_LISTENBRAINZ`,
+`ORCA_CREDENTIAL_ACCOUNT_USER_TOKEN`) and the AcoustID user and application keys
+(`ORCA_CREDENTIAL_SERVICE_ACOUSTID`, `ORCA_CREDENTIAL_ACCOUNT_USER_KEY` or
+`ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY`).
+
+The callback writes the secret into liborca's buffer of
+`ORCA_CREDENTIAL_MAX_BYTES` and returns an `orca_credential_result`:
+
+- `FOUND`, with the length written. A length above the capacity is treated as
+  `TOO_LARGE`; liborca never truncates a secret.
+- `NOT_FOUND` when the store holds none. That is absence: scrobbling waits for
+  a token.
+- `UNAVAILABLE` when the store cannot answer, such as a locked keyring, and
+  `TOO_LARGE` when the secret does not fit. The listen worker treats both as
+  errors, not absence: it reports the error and asks again later. AcoustID
+  jobs treat both as absence: a lookup uses the application key, and a
+  submission reports that it needs a user key.
+
+liborca zeroes the buffer before freeing it, whatever the callback returned.
+
+The callback is the second exception to the threading contract:
+
+- It is called from liborca's listen and job threads, sometimes from two at
+  once, so it must be thread-safe. It must not call any `orca_*` function. It
+  may block on the store, which delays whatever waits for that thread,
+  `orca_runtime_destroy` included.
+- It is never called after `orca_runtime_destroy` returns, and `context` must
+  stay valid until then.
+- `orca_runtime_set_credential_callback` returns `ORCA_STATUS_INVALID_STATE`
+  once any worker thread exists, as `orca_runtime_set_wake_callback` does, so a
+  host installs both right after `orca_runtime_create`. To have liborca read a
+  token the host has changed, it calls
+  `orca_library_scrobbler_credentials_changed` instead.
 
 ### Versions
 
@@ -605,12 +655,13 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   `ReleaseSort.loved`, and `TrackQuery.loved_only` with `TrackSort.loved`,
   list what is loved for the Loved page. Album love is never sent.
 
-The identity is copied. The store's context and the server string are
-borrowed and must outlive the runtime. The setters may be called at any time
+The identity and the server are copied. The store's context is borrowed and
+must outlive the runtime. The setters may be called at any time
 and reach each listen worker on its next pass; a host that sets them before
 binding a Player to a Library avoids a first pass with the defaults. Listens are sampled inside
-`processNextCommand`, so a host pumps it as it already does. The C ABI does not
-expose listening yet. [providers.md](providers.md) describes what a listen is
+`processNextCommand`, so a host pumps it as it already does. The C ABI sets the
+store, the identity and the server ([Credentials](#credentials)) but does not
+turn scrobbling on yet. [providers.md](providers.md) describes what a listen is
 and what is sent.
 
 ## macOS SwiftUI

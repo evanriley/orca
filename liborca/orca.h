@@ -46,8 +46,9 @@ extern "C" {
  * of that callback: copy what you need. Re-entering the ABI from inside a
  * callback is not supported.
  *
- * The one exception is the wake callback of orca_runtime_set_wake_callback,
- * which liborca also calls from its own threads.
+ * The two exceptions are the wake callback of orca_runtime_set_wake_callback
+ * and the credential callback of orca_runtime_set_credential_callback, which
+ * liborca calls from its own threads.
  *
  * On Linux, the first Library open switches SQLite to OFD locks for the whole
  * process. Open no SQLite connection of your own before it.
@@ -860,7 +861,7 @@ orca_status orca_runtime_poll_event(
  * changes in a way the host did not cause. It is called at most once between
  * two calls to orca_runtime_pump.
  *
- * It is the one exception to the threading contract: it is called from
+ * It is an exception to the threading contract: it is called from
  * liborca's own threads, and from inside other orca_* calls on the owning
  * thread, sometimes from two threads at once. It must only signal the host's
  * loop - write to an eventfd or a pipe, CFRunLoopSourceSignal and
@@ -891,6 +892,134 @@ orca_status orca_runtime_set_wake_callback(orca_runtime *runtime, orca_wake_fn c
  * it was pumping.
  */
 orca_status orca_runtime_pump_timeout(orca_runtime *runtime, int64_t *timeout_ms);
+
+/* ------------------------------------------------------------ providers */
+
+/*
+ * Names the host to MusicBrainz, AcoustID and ListenBrainz, in the User-Agent
+ * "name/version ( contact ) liborca/<version>", and in its listen history.
+ * Required before matching, AcoustID submission or scrobbling. Each string is
+ * non-empty and free of control characters and parentheses, at most 256 bytes
+ * together; anything else is ORCA_STATUS_INVALID_ARGUMENT. The strings are
+ * copied.
+ */
+orca_status orca_runtime_set_client_identity(
+    orca_runtime *runtime,
+    const char *name,
+    const char *version,
+    const char *contact
+);
+
+typedef enum orca_provider_service {
+    ORCA_PROVIDER_SERVICE_LISTENBRAINZ = 0,
+    ORCA_PROVIDER_SERVICE_MUSICBRAINZ = 1,
+    ORCA_PROVIDER_SERVICE_ACOUSTID = 2,
+    ORCA_PROVIDER_SERVICE_COVER_ART_ARCHIVE = 3,
+} orca_provider_service;
+
+/*
+ * Points one provider at a self-hosted or compatible server. `base_url` is
+ * `https` to any host, or `http` to 127.0.0.1, [::1] or localhost only,
+ * because tokens and the user's library travel in its requests; it carries no
+ * user name, password, query or fragment and is at most 2048 bytes. Anything
+ * else is ORCA_STATUS_INVALID_ARGUMENT and leaves the server unchanged. The
+ * string is copied; NULL restores the provider's public server.
+ *
+ * ListenBrainz applies from each listen worker's next pass, the others to
+ * jobs started afterwards. `service` is an orca_provider_service.
+ */
+orca_status orca_runtime_set_provider_server(
+    orca_runtime *runtime,
+    uint8_t service,
+    const char *base_url
+);
+
+/*
+ * The AcoustID application key matching and submission jobs use, unless the
+ * credential callback returns one for ORCA_CREDENTIAL_SERVICE_ACOUSTID /
+ * ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY. Without either, matching skips AcoustID.
+ * Printable ASCII without spaces, at most 256 bytes; anything else is
+ * ORCA_STATUS_INVALID_ARGUMENT. Copied; NULL clears it.
+ */
+orca_status orca_runtime_set_acoustid_client_key(orca_runtime *runtime, const char *key);
+
+/* The largest secret liborca reads through the credential callback. */
+#define ORCA_CREDENTIAL_MAX_BYTES 1024
+
+/* The service and account pairs liborca asks the credential callback for. */
+#define ORCA_CREDENTIAL_SERVICE_LISTENBRAINZ "org.listenbrainz"
+#define ORCA_CREDENTIAL_ACCOUNT_USER_TOKEN "user-token"
+#define ORCA_CREDENTIAL_SERVICE_ACOUSTID "org.acoustid"
+#define ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY "client-key"
+#define ORCA_CREDENTIAL_ACCOUNT_USER_KEY "user-key"
+
+typedef enum orca_credential_result {
+    ORCA_CREDENTIAL_RESULT_FOUND = 0,
+    ORCA_CREDENTIAL_RESULT_NOT_FOUND = 1,
+    ORCA_CREDENTIAL_RESULT_UNAVAILABLE = 2,
+    ORCA_CREDENTIAL_RESULT_TOO_LARGE = 3,
+} orca_credential_result;
+
+/*
+ * Credentials: liborca never stores a token or key in a Library, a log or a
+ * cache key. It asks the host's secure store - Keychain, Secret Service - for
+ * one each time it needs it.
+ *
+ * liborca calls `callback(context, service, account, buffer, capacity,
+ * length)` with NUL-terminated `service` and `account`, such as
+ * ORCA_CREDENTIAL_SERVICE_LISTENBRAINZ and ORCA_CREDENTIAL_ACCOUNT_USER_TOKEN.
+ * The callback returns:
+ *
+ * - ORCA_CREDENTIAL_RESULT_FOUND after writing the secret's bytes to
+ *   `buffer` and their count to `*length`. The secret is not NUL-terminated.
+ * - ORCA_CREDENTIAL_RESULT_NOT_FOUND when the store holds no such secret.
+ *   Scrobbling then waits for a token.
+ * - ORCA_CREDENTIAL_RESULT_UNAVAILABLE when the store cannot answer, such as
+ *   a locked keyring. The listen worker treats it as an error, not absence:
+ *   it reports it and asks again later. AcoustID jobs treat it, and
+ *   TOO_LARGE, as absence: a lookup uses the application key, and a
+ *   submission reports that it needs a user key.
+ * - ORCA_CREDENTIAL_RESULT_TOO_LARGE when the secret is longer than
+ *   `capacity` (ORCA_CREDENTIAL_MAX_BYTES). Never truncate a secret: FOUND
+ *   with `*length` above `capacity` is treated as TOO_LARGE as well.
+ *
+ * Any other value is treated as UNAVAILABLE. liborca zeroes `buffer` before
+ * it frees it, whatever the callback returned.
+ *
+ * Like the wake callback, it is an exception to the threading contract: it is
+ * called from liborca's worker threads - listen workers and provider jobs -
+ * and from two of them at once, so it must be thread-safe. It must not call
+ * any orca_* function. It may block on the secure store, which delays
+ * whatever is waiting for that worker, orca_runtime_destroy included. It is
+ * never called after orca_runtime_destroy has returned. `context` must stay
+ * valid until then.
+ *
+ * Call it right after orca_runtime_create: once any worker thread exists (a
+ * Player's engine, a job, a listen worker or an artwork loader) it returns
+ * ORCA_STATUS_INVALID_STATE. A NULL callback removes the callback, under the
+ * same rule. To have liborca read a changed token, call
+ * orca_library_scrobbler_credentials_changed instead.
+ */
+typedef orca_credential_result (*orca_credential_fn)(
+    void *context,
+    const char *service,
+    const char *account,
+    uint8_t *buffer,
+    size_t capacity,
+    size_t *length
+);
+orca_status orca_runtime_set_credential_callback(
+    orca_runtime *runtime,
+    orca_credential_fn callback,
+    void *context
+);
+
+/*
+ * Tells the Library's listen worker the ListenBrainz token may have changed.
+ * It reads and validates the token once, the next time it could make a
+ * request. Call it after the host stores, replaces or deletes the token.
+ */
+orca_status orca_library_scrobbler_credentials_changed(orca_runtime *runtime, orca_handle library);
 
 /* -------------------------------------------------------------- library */
 

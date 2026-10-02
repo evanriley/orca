@@ -385,14 +385,14 @@ pub const OrcaRuntime = struct {
     /// Null until the host calls `setClientIdentity`.
     client_identity: ?network.client.OwnedIdentity = null,
     credential_store: ?CredentialStore = null,
-    listenbrainz_server: []const u8 = providers.listenbrainz.default_server,
-    musicbrainz_server: []const u8 = providers.musicbrainz.default_server,
+    listenbrainz_server: providers.url.OwnedServer = .fixed(providers.listenbrainz.default_server),
+    musicbrainz_server: providers.url.OwnedServer = .fixed(providers.musicbrainz.default_server),
     /// Version of the three settings above, copied into every Library's
     /// listen config.
     listen_settings: u32 = 0,
-    acoustid_server: []const u8 = providers.acoustid.default_server,
-    acoustid_client_key: ?[]const u8 = null,
-    coverartarchive_server: []const u8 = providers.coverartarchive.default_server,
+    acoustid_server: providers.url.OwnedServer = .fixed(providers.acoustid.default_server),
+    acoustid_client_key: ?job_worker.OwnedAcoustIdKey = null,
+    coverartarchive_server: providers.url.OwnedServer = .fixed(providers.coverartarchive.default_server),
     /// One per runtime, created with the first listen worker and deinitialized
     /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
     /// handlers and `deinit` restores what it found, so a second instance torn
@@ -832,44 +832,46 @@ pub const OrcaRuntime = struct {
     }
 
     /// Where listen workers read the ListenBrainz user token, from each
-    /// worker's next pass. `store.get` is called on a worker's thread;
-    /// `store` must outlive the runtime.
-    pub fn setCredentialStore(self: *OrcaRuntime, store: CredentialStore) !void {
+    /// worker's next pass, and jobs started afterwards the AcoustID keys; null
+    /// removes it. `store.get` is called on a worker's thread; `store` must
+    /// outlive the runtime.
+    pub fn setCredentialStore(self: *OrcaRuntime, store: ?CredentialStore) !void {
         return runtime_listens.setCredentialStore(self, store);
     }
 
     /// Points scrobbling at a self-hosted or compatible ListenBrainz server,
     /// from each listen worker's next pass. `https` anywhere, or `http` to
     /// `127.0.0.1`, `[::1]` or `localhost` only, because the user token
-    /// travels in every request. `base_url` must outlive the runtime.
-    pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+    /// travels in every request; at most `providers.url.max_server_bytes`.
+    /// `base_url` is copied; null restores the default server.
+    pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
         return runtime_listens.setListenBrainzServer(self, base_url);
     }
 
-    /// `base_url` must outlive the runtime.
-    pub fn setMusicBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+    /// Points matching jobs started afterwards at another MusicBrainz server,
+    /// under the same rule as `setListenBrainzServer`.
+    pub fn setMusicBrainzServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
         return runtime_listens.setMusicBrainzServer(self, base_url);
     }
 
     /// The AcoustID application key matching and submission jobs use, unless
     /// the credential store holds one under `org.acoustid`/`client-key`.
-    /// Without either, matching skips AcoustID. `key` must outlive the
-    /// runtime.
-    pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: []const u8) !void {
+    /// Without either, matching skips AcoustID. `key` is copied; null clears
+    /// it. Applies to jobs started afterwards.
+    pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: ?[]const u8) !void {
         return runtime_listens.setAcoustIdClientKey(self, key);
     }
 
-    /// Points AcoustID lookups and submissions at another server, under the
-    /// same rule as `setListenBrainzServer`. `base_url` must outlive the
-    /// runtime.
-    pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: []const u8) !void {
+    /// Points AcoustID lookups and submissions started afterwards at another
+    /// server, under the same rule as `setListenBrainzServer`.
+    pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
         return runtime_listens.setAcoustIdServer(self, base_url);
     }
 
-    /// Points cover fetches at another Cover Art Archive, under the same rule
-    /// as `setListenBrainzServer`. A loopback server may redirect to itself.
-    /// `base_url` must outlive the runtime.
-    pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: []const u8) !void {
+    /// Points cover fetches started afterwards at another Cover Art Archive,
+    /// under the same rule as `setListenBrainzServer`. A loopback server may
+    /// redirect to itself.
+    pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
         return runtime_listens.setCoverArtArchiveServer(self, base_url);
     }
 

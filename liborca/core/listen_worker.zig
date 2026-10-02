@@ -51,7 +51,7 @@ pub const Config = struct {
     /// Null until the host names itself; scrobbling cannot be enabled before.
     identity: ?network.client.OwnedIdentity = null,
     credentials: ?providers.credentials.Store = null,
-    server: []const u8 = listenbrainz.default_server,
+    server: providers.url.OwnedServer = .fixed(listenbrainz.default_server),
     /// Bumped by the control lane whenever `identity`, `credentials` or
     /// `server` changes.
     settings: u32 = 0,
@@ -228,6 +228,8 @@ pub const Worker = struct {
     hooks: Hooks,
     /// What `gateway.config.identity` points into.
     identity: ?network.client.OwnedIdentity = null,
+    /// What `delivery.server` points into.
+    server: providers.url.OwnedServer = .fixed(listenbrainz.default_server),
     listen_failures: u32 = 0,
     feedback_failures: u32 = 0,
     published: Status = .{},
@@ -257,7 +259,8 @@ pub const Worker = struct {
             self.credentialStore(initial),
             &self.database.scrobbles,
         );
-        delivery.server = initial.server;
+        self.server = initial.server;
+        delivery.server = self.server.view();
         self.adoptIdentity(&gateway, initial);
         self.serve(&gateway, &delivery, initial);
         gateway.releaseLease();
@@ -293,7 +296,8 @@ pub const Worker = struct {
             if (current.settings != config.settings) {
                 self.adoptIdentity(gateway, current);
                 if (!sameDestination(current, config)) {
-                    delivery.server = current.server;
+                    self.server = current.server;
+                    delivery.server = self.server.view();
                     delivery.credentials = self.credentialStore(current);
                     delivery.credentialsChanged();
                     wake_at_ms = now_ms;
@@ -594,7 +598,7 @@ pub const Worker = struct {
 /// Whether two configs send to the same server with the same token store,
 /// so a rejected token or a backoff still applies.
 fn sameDestination(a: Config, b: Config) bool {
-    if (!std.mem.eql(u8, a.server, b.server)) return false;
+    if (!std.mem.eql(u8, a.server.view(), b.server.view())) return false;
     const left = a.credentials orelse return b.credentials == null;
     const right = b.credentials orelse return false;
     return left.context == right.context and left.get_fn == right.get_fn;

@@ -564,7 +564,7 @@ test "a ListenBrainz server is refused unless it is https or loopback" {
     try std.testing.expectError(error.InvalidServerUrl, rig.runtime.setListenBrainzServer("http://127.0.0.1@example.org"));
     try rig.runtime.setListenBrainzServer("http://127.0.0.1:8080");
     try rig.runtime.setListenBrainzServer("https://lb.example.org");
-    try std.testing.expectEqualStrings("https://lb.example.org", rig.runtime.listenbrainz_server);
+    try std.testing.expectEqualStrings("https://lb.example.org", rig.runtime.listenbrainz_server.view());
 }
 
 test "a changed token is validated once, and only once scrobbling is on" {

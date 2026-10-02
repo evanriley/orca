@@ -315,6 +315,20 @@ const import_mappings = .{
             return c_api.importReleaseSort(value);
         }
     },
+    struct {
+        pub const prefix = "ORCA_PROVIDER_SERVICE_";
+        pub const Tag = c_api.ProviderService;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importProviderService(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_CREDENTIAL_RESULT_";
+        pub const Tag = c_api.CredentialResult;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importCredentialResult(value);
+        }
+    },
 };
 
 const non_enum_constants = [_][]const u8{
@@ -326,6 +340,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_EQUALIZER_MAX_PREAMP_DB",
     "ORCA_SIGNAL_MAX_REASONS",
     "ORCA_TAG_WRITE_DIGEST_BYTES",
+    "ORCA_CREDENTIAL_MAX_BYTES",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -578,6 +593,15 @@ test "the equalizer and signal path limits orca.h declares are liborca's" {
 test "the tag-write digest orca.h declares is as long as liborca's" {
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @sizeOf(metadata.mutation.Digest));
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @typeInfo(@FieldType(c_api.TagWriteDigest, "bytes")).array.len);
+}
+
+test "the credential limit and names orca.h declares are liborca's" {
+    try std.testing.expectEqual(@as(usize, c.ORCA_CREDENTIAL_MAX_BYTES), c_api.credential_max_bytes);
+    try std.testing.expectEqualStrings(liborca.listenbrainz_token_service, c.ORCA_CREDENTIAL_SERVICE_LISTENBRAINZ);
+    try std.testing.expectEqualStrings(liborca.listenbrainz_token_account, c.ORCA_CREDENTIAL_ACCOUNT_USER_TOKEN);
+    try std.testing.expectEqualStrings(liborca.acoustid_credential_service, c.ORCA_CREDENTIAL_SERVICE_ACOUSTID);
+    try std.testing.expectEqualStrings(liborca.acoustid_client_key_account, c.ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY);
+    try std.testing.expectEqualStrings(liborca.acoustid_user_key_account, c.ORCA_CREDENTIAL_ACCOUNT_USER_KEY);
 }
 
 test "a finished job is reported as a job_finished event carrying its state" {

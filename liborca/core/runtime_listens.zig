@@ -49,41 +49,36 @@ pub fn setClientIdentity(self: *OrcaRuntime, identity: ClientIdentity) !void {
     publishListenSettings(self);
 }
 
-pub fn setCredentialStore(self: *OrcaRuntime, store: CredentialStore) !void {
+pub fn setCredentialStore(self: *OrcaRuntime, store: ?CredentialStore) !void {
     try runtime.requireRunning(self);
     self.credential_store = store;
     publishListenSettings(self);
 }
 
-pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+pub fn setListenBrainzServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
     try runtime.requireRunning(self);
-    try providers.url.validateServer(base_url);
-    self.listenbrainz_server = base_url;
+    self.listenbrainz_server = try .init(base_url orelse providers.listenbrainz.default_server);
     publishListenSettings(self);
 }
 
-pub fn setMusicBrainzServer(self: *OrcaRuntime, base_url: []const u8) !void {
+pub fn setMusicBrainzServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
     try runtime.requireRunning(self);
-    try providers.url.validateServer(base_url);
-    self.musicbrainz_server = base_url;
+    self.musicbrainz_server = try .init(base_url orelse providers.musicbrainz.default_server);
 }
 
-pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: []const u8) !void {
+pub fn setAcoustIdClientKey(self: *OrcaRuntime, key: ?[]const u8) !void {
     try runtime.requireRunning(self);
-    if (!job_worker.validAcoustIdKey(key)) return error.InvalidAcoustIdKey;
-    self.acoustid_client_key = key;
+    self.acoustid_client_key = if (key) |value| try .init(value) else null;
 }
 
-pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: []const u8) !void {
+pub fn setAcoustIdServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
     try runtime.requireRunning(self);
-    try providers.url.validateServer(base_url);
-    self.acoustid_server = base_url;
+    self.acoustid_server = try .init(base_url orelse providers.acoustid.default_server);
 }
 
-pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: []const u8) !void {
+pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
     try runtime.requireRunning(self);
-    try providers.url.validateServer(base_url);
-    self.coverartarchive_server = base_url;
+    self.coverartarchive_server = try .init(base_url orelse providers.coverartarchive.default_server);
 }
 
 fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {

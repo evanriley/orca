@@ -199,6 +199,16 @@
   `ORCA_STATUS_ALREADY_DONE`, `ORCA_STATUS_NEEDS_RECONCILIATION` and
   `ORCA_STATUS_GONE` report an undo already done, one a person must decide,
   and one whose backups were pruned.
+- **The C ABI configures providers and reads credentials from the host.**
+  `orca_runtime_set_client_identity` names the host to MusicBrainz, AcoustID
+  and ListenBrainz, `orca_runtime_set_provider_server` points an
+  `orca_provider_service` at another `https` or loopback server, and
+  `orca_runtime_set_acoustid_client_key` sets the AcoustID application key.
+  `orca_runtime_set_credential_callback` installs an `orca_credential_fn` that
+  liborca's worker threads call for a token or key, which liborca never
+  truncates and zeroes after use; `orca_credential_result` tells absence from
+  an unavailable store. `orca_library_scrobbler_credentials_changed` has the
+  listen worker read and validate a changed ListenBrainz token.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's
@@ -216,6 +226,12 @@
 - **Breaking (Zig API): `HealthIssue` gains `track_id`, `release_id`,
   `related_file_id` and `action`,** and `HealthIssueKind` gains
   `recording_mismatch`.
+- **Breaking (Zig API): provider servers and the AcoustID key are copied.**
+  `Runtime.setListenBrainzServer`, `setMusicBrainzServer`, `setAcoustIdServer`,
+  `setCoverArtArchiveServer` and `setAcoustIdClientKey` copy their argument,
+  so it no longer has to outlive the runtime, and take an optional: null
+  restores the public server or clears the key. A server is at most 2048
+  bytes. `setCredentialStore` takes an optional, and null removes the store.
 
 - **Library schema version 28.** Adds `recording_verifications` and
   `identification_proposals.album_group` with its index.

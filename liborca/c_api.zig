@@ -17,6 +17,8 @@ const core = @import("core/root.zig");
 const database = @import("database/root.zig");
 const job = @import("core/job.zig");
 const metadata = @import("metadata/root.zig");
+const network = @import("network/root.zig");
+const providers = @import("providers/root.zig");
 const version = @import("version.zig");
 
 pub const Runtime = opaque {};
@@ -660,6 +662,7 @@ const RuntimeBox = struct {
     /// cost of one comparison per call buys a whole class of bug report.
     owner_thread: std.Thread.Id,
     last_error: [last_error_capacity:0]u8 = @splat(0),
+    credential: CredentialSlot = .{},
 
     fn io(self: *RuntimeBox) std.Io {
         return self.threaded.io();
@@ -1923,6 +1926,139 @@ pub export fn orca_runtime_pump_timeout(runtime: ?*Runtime, timeout_ms: ?*i64) c
         std.math.cast(i64, milliseconds) orelse std.math.maxInt(i64)
     else
         pump_no_timeout;
+    return .ok;
+}
+
+pub const credential_max_bytes = 1024;
+
+pub const ProviderService = enum { listenbrainz, musicbrainz, acoustid, cover_art_archive };
+
+pub fn importProviderService(value: u8) ?ProviderService {
+    return switch (value) {
+        0 => .listenbrainz,
+        1 => .musicbrainz,
+        2 => .acoustid,
+        3 => .cover_art_archive,
+        else => null,
+    };
+}
+
+pub const CredentialResult = enum { found, not_found, unavailable, too_large };
+
+pub fn importCredentialResult(value: c_int) ?CredentialResult {
+    return switch (value) {
+        0 => .found,
+        1 => .not_found,
+        2 => .unavailable,
+        3 => .too_large,
+        else => null,
+    };
+}
+
+pub const CredentialCallback = *const fn (
+    ?*anyopaque,
+    [*:0]const u8,
+    [*:0]const u8,
+    [*]u8,
+    usize,
+    *usize,
+) callconv(.c) c_int;
+
+const CredentialSlot = struct {
+    callback: ?CredentialCallback = null,
+    context: ?*anyopaque = null,
+};
+
+fn hostCredential(
+    context: *anyopaque,
+    allocator: std.mem.Allocator,
+    service: []const u8,
+    account: []const u8,
+) anyerror!?[]u8 {
+    const slot: *const CredentialSlot = @ptrCast(@alignCast(context));
+    const callback = slot.callback orelse return null;
+    const service_text = try allocator.dupeZ(u8, service);
+    defer allocator.free(service_text);
+    const account_text = try allocator.dupeZ(u8, account);
+    defer allocator.free(account_text);
+    const scratch = try allocator.alloc(u8, credential_max_bytes);
+    defer providers.credentials.wipeAndFree(allocator, scratch);
+    var length: usize = 0;
+    const result = callback(slot.context, service_text.ptr, account_text.ptr, scratch.ptr, scratch.len, &length);
+    switch (importCredentialResult(result) orelse return error.CredentialUnavailable) {
+        .found => {
+            if (length > scratch.len) return error.CredentialTooLarge;
+            return try allocator.dupe(u8, scratch[0..length]);
+        },
+        .not_found => return null,
+        .unavailable => return error.CredentialUnavailable,
+        .too_large => return error.CredentialTooLarge,
+    }
+}
+
+pub export fn orca_runtime_set_client_identity(
+    runtime: ?*Runtime,
+    name: ?[*:0]const u8,
+    client_version: ?[*:0]const u8,
+    contact: ?[*:0]const u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const name_text = name orelse return box.reject(@src(), .invalid_argument, "name is null");
+    const version_text = client_version orelse return box.reject(@src(), .invalid_argument, "version is null");
+    const contact_text = contact orelse return box.reject(@src(), .invalid_argument, "contact is null");
+    box.runtime.setClientIdentity(.{
+        .name = std.mem.span(name_text),
+        .version = std.mem.span(version_text),
+        .contact = std.mem.span(contact_text),
+    }) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_runtime_set_provider_server(
+    runtime: ?*Runtime,
+    service: u8,
+    base_url: ?[*:0]const u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const provider = importProviderService(service) orelse
+        return box.reject(@src(), .invalid_argument, "unknown provider service");
+    const server: ?[]const u8 = if (base_url) |text| std.mem.span(text) else null;
+    const set = switch (provider) {
+        .listenbrainz => box.runtime.setListenBrainzServer(server),
+        .musicbrainz => box.runtime.setMusicBrainzServer(server),
+        .acoustid => box.runtime.setAcoustIdServer(server),
+        .cover_art_archive => box.runtime.setCoverArtArchiveServer(server),
+    };
+    set catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_runtime_set_acoustid_client_key(runtime: ?*Runtime, key: ?[*:0]const u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const value: ?[]const u8 = if (key) |text| std.mem.span(text) else null;
+    box.runtime.setAcoustIdClientKey(value) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_runtime_set_credential_callback(
+    runtime: ?*Runtime,
+    callback: ?CredentialCallback,
+    context: ?*anyopaque,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    if (box.runtime.work_registry.count() != 0) return box.fail(@src(), error.WorkersRunning);
+    const store: ?providers.credentials.Store = if (callback != null)
+        .{ .context = &box.credential, .get_fn = hostCredential }
+    else
+        null;
+    box.runtime.setCredentialStore(store) catch |err| return box.fail(@src(), err);
+    box.credential = .{ .callback = callback, .context = context };
+    return .ok;
+}
+
+pub export fn orca_library_scrobbler_credentials_changed(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryScrobblerCredentialsChanged(importLibrary(library)) catch |err| return box.fail(@src(), err);
     return .ok;
 }
 
@@ -3474,6 +3610,9 @@ fn mapError(err: anyerror) Status {
         error.InvalidEditValue,
         error.InvalidMutationGroup,
         error.MutationApprovalMismatch,
+        error.InvalidServerUrl,
+        error.InvalidAcoustIdKey,
+        error.InvalidNetworkConfiguration,
         => .invalid_argument,
         else => .internal,
     };
@@ -4439,4 +4578,258 @@ fn countPlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c) v
     _ = plan;
     const calls: *usize = @ptrCast(@alignCast(context.?));
     calls.* += 1;
+}
+
+const FakeKeyring = struct {
+    result: c_int = 0,
+    secret: []const u8 = "host-secret",
+    rotated: std.atomic.Value(bool) = .init(false),
+    reported_length: ?usize = null,
+    capacity: usize = 0,
+    calls: std.atomic.Value(u32) = .init(0),
+    late_calls: std.atomic.Value(u32) = .init(0),
+    destroyed: std.atomic.Value(bool) = .init(false),
+    thread: std.atomic.Value(std.Thread.Id) = .init(0),
+    service: [32]u8 = @splat(0),
+    account: [32]u8 = @splat(0),
+
+    fn lookup(
+        context: ?*anyopaque,
+        service: [*:0]const u8,
+        account: [*:0]const u8,
+        buffer: [*]u8,
+        capacity: usize,
+        length: *usize,
+    ) callconv(.c) c_int {
+        const self: *FakeKeyring = @ptrCast(@alignCast(context.?));
+        if (self.destroyed.load(.acquire)) _ = self.late_calls.fetchAdd(1, .acq_rel);
+        self.capacity = capacity;
+        const service_text = std.mem.span(service);
+        const account_text = std.mem.span(account);
+        @memcpy(self.service[0..service_text.len], service_text);
+        @memcpy(self.account[0..account_text.len], account_text);
+        self.thread.store(std.Thread.getCurrentId(), .release);
+        const secret = if (self.rotated.load(.acquire)) "changed-secret" else self.secret;
+        const written = @min(secret.len, capacity);
+        @memcpy(buffer[0..written], secret[0..written]);
+        length.* = self.reported_length orelse written;
+        _ = self.calls.fetchAdd(1, .acq_rel);
+        return self.result;
+    }
+
+    fn serviceName(self: *const FakeKeyring) []const u8 {
+        return std.mem.sliceTo(&self.service, 0);
+    }
+
+    fn accountName(self: *const FakeKeyring) []const u8 {
+        return std.mem.sliceTo(&self.account, 0);
+    }
+};
+
+fn expectNoSecret(backing: []const u8, secret: []const u8) !void {
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, backing, secret));
+}
+
+test "a credential the host finds is returned whole, and no copy of it is left behind once freed" {
+    var backing: [4096]u8 = @splat(0);
+    var fixed: std.heap.FixedBufferAllocator = .init(&backing);
+    var keyring: FakeKeyring = .{};
+    var slot: CredentialSlot = .{ .callback = FakeKeyring.lookup, .context = &keyring };
+
+    const secret = (try hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token")).?;
+    try std.testing.expectEqualStrings("host-secret", secret);
+    try std.testing.expectEqual(credential_max_bytes, keyring.capacity);
+    try std.testing.expectEqualStrings("org.listenbrainz", keyring.serviceName());
+    try std.testing.expectEqualStrings("user-token", keyring.accountName());
+    providers.credentials.wipeAndFree(fixed.allocator(), secret);
+    try expectNoSecret(&backing, "host-secret");
+
+    var full: [credential_max_bytes]u8 = @splat('k');
+    keyring.secret = &full;
+    const largest = (try hostCredential(&slot, fixed.allocator(), "org.acoustid", "user-key")).?;
+    try std.testing.expectEqual(credential_max_bytes, largest.len);
+    providers.credentials.wipeAndFree(fixed.allocator(), largest);
+    try expectNoSecret(&backing, &full);
+}
+
+test "a missing credential is absent, while an unavailable or oversized one is an error, and none leaves the secret behind" {
+    var backing: [4096]u8 = @splat(0);
+    var fixed: std.heap.FixedBufferAllocator = .init(&backing);
+    var keyring: FakeKeyring = .{};
+    var slot: CredentialSlot = .{ .callback = FakeKeyring.lookup, .context = &keyring };
+
+    keyring.result = @intFromEnum(CredentialResult.not_found);
+    try std.testing.expectEqual(@as(?[]u8, null), try hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try expectNoSecret(&backing, "host-secret");
+
+    keyring.result = @intFromEnum(CredentialResult.unavailable);
+    try std.testing.expectError(error.CredentialUnavailable, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try expectNoSecret(&backing, "host-secret");
+
+    keyring.result = @intFromEnum(CredentialResult.too_large);
+    try std.testing.expectError(error.CredentialTooLarge, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try expectNoSecret(&backing, "host-secret");
+
+    keyring.result = @intFromEnum(CredentialResult.found);
+    keyring.reported_length = credential_max_bytes + 1;
+    try std.testing.expectError(error.CredentialTooLarge, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try expectNoSecret(&backing, "host-secret");
+
+    keyring.reported_length = null;
+    keyring.result = 7;
+    try std.testing.expectError(error.CredentialUnavailable, hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try expectNoSecret(&backing, "host-secret");
+    try std.testing.expectEqual(@as(u32, 5), keyring.calls.load(.acquire));
+
+    slot = .{};
+    try std.testing.expectEqual(@as(?[]u8, null), try hostCredential(&slot, fixed.allocator(), "org.listenbrainz", "user-token"));
+    try std.testing.expectEqual(@as(u32, 5), keyring.calls.load(.acquire));
+}
+
+test "a provider server is copied out of the caller's buffer, refused unless https or loopback http, and NULL restores the default" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+
+    var caller: [64:0]u8 = @splat(0);
+    const local = "http://127.0.0.1:8080/mb";
+    @memcpy(caller[0..local.len], local);
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 1, &caller));
+    const stored = box.runtime.musicbrainz_server.view();
+    try std.testing.expect(@intFromPtr(stored.ptr) < @intFromPtr(&caller) or
+        @intFromPtr(stored.ptr) >= @intFromPtr(&caller) + caller.len);
+    @memset(caller[0..local.len], 'x');
+    try std.testing.expectEqualStrings(local, box.runtime.musicbrainz_server.view());
+
+    for ([_][*:0]const u8{
+        "http://127.0.0.1@example.org",
+        "http://example.org",
+        "https://user:secret@example.org",
+        "ftp://example.org",
+    }) |refused| {
+        try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 1, refused));
+        try std.testing.expectEqualStrings(
+            "orca_runtime_set_provider_server: InvalidServerUrl",
+            std.mem.span(orca_runtime_last_error(runtime)),
+        );
+        try std.testing.expectEqualStrings(local, box.runtime.musicbrainz_server.view());
+    }
+    var long: [providers.url.max_server_bytes + 1:0]u8 = @splat('a');
+    @memcpy(long[0.."https://".len], "https://");
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 1, &long));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 4, "https://example.org"));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_set_provider_server: unknown provider service",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 0, "https://lb.example.org"));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 2, "http://[::1]:9/acoustid"));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 3, "http://localhost:9"));
+    try std.testing.expectEqualStrings("https://lb.example.org", box.runtime.listenbrainz_server.view());
+    try std.testing.expectEqualStrings("http://[::1]:9/acoustid", box.runtime.acoustid_server.view());
+    try std.testing.expectEqualStrings("http://localhost:9", box.runtime.coverartarchive_server.view());
+
+    for (0..4) |service| try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, @intCast(service), null));
+    try std.testing.expectEqualStrings(providers.listenbrainz.default_server, box.runtime.listenbrainz_server.view());
+    try std.testing.expectEqualStrings(providers.musicbrainz.default_server, box.runtime.musicbrainz_server.view());
+    try std.testing.expectEqualStrings(providers.acoustid.default_server, box.runtime.acoustid_server.view());
+    try std.testing.expectEqualStrings(providers.coverartarchive.default_server, box.runtime.coverartarchive_server.view());
+}
+
+test "the client identity and AcoustID key are copied, and invalid ones are refused" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_client_identity(runtime, null, "1.0", "https://host.invalid"));
+    try std.testing.expectEqualStrings("orca_runtime_set_client_identity: name is null", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_client_identity(runtime, "Host", null, "https://host.invalid"));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_client_identity(runtime, "Host", "1.0", null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_client_identity(runtime, "Player (beta)", "1.0", "https://host.invalid"));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_set_client_identity: InvalidNetworkConfiguration",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    try std.testing.expectEqual(@as(?core.runtime.ClientIdentity, null), if (box.runtime.client_identity) |owned| owned.view() else null);
+
+    var name = "Host".*;
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, &name, "1.0", "https://host.invalid"));
+    name = "Xxxx".*;
+    try std.testing.expectEqualStrings("Host", box.runtime.client_identity.?.view().name);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_acoustid_client_key(runtime, "with space"));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_set_acoustid_client_key: InvalidAcoustIdKey",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    var key = "AbC123".*;
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_acoustid_client_key(runtime, &key));
+    key = "zzzzzz".*;
+    try std.testing.expectEqualStrings("AbC123", box.runtime.acoustid_client_key.?.view());
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_acoustid_client_key(runtime, null));
+    try std.testing.expect(box.runtime.acoustid_client_key == null);
+}
+
+test "the credential callback answers a listen worker on its own thread, cannot change while work exists, and is never called after destroy" {
+    var transport: network.testing.ScriptedTransport = .{
+        .otherwise = .{ .respond = .{ .body = "{\"valid\":true,\"user_name\":\"listener\"}" } },
+    };
+    defer transport.deinit();
+    var clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 };
+    var keyring: FakeKeyring = .{};
+
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    var destroyed = false;
+    defer if (!destroyed) orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_credential_callback(runtime, FakeKeyring.lookup, &keyring));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Host", "1.0", "https://host.invalid"));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 0, "http://127.0.0.1:8080"));
+    box.runtime.listen_hooks = .{
+        .transport = transport.transport(),
+        .clock = clock.clock(),
+        .wall_clock = clock.wallClock(),
+        .poll_ms = 1,
+    };
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-credentials?mode=memory&cache=shared", &library));
+    try box.runtime.librarySetScrobbling(importLibrary(library), true, false, false);
+    try std.testing.expectEqual(Status.ok, orca_library_scrobbler_credentials_changed(runtime, library));
+
+    var deadline: core.runtime_tests.TestDeadline = .init(5_000);
+    while (transport.requestCount() < 1) {
+        if (!deadline.tick()) return error.TokenNeverValidated;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, transport.lastUrl(), "http://127.0.0.1:8080/1/validate-token"));
+    try std.testing.expectEqualStrings("Token host-secret", transport.lastAuthorization());
+    try std.testing.expectEqualStrings("org.listenbrainz", keyring.serviceName());
+    try std.testing.expectEqualStrings("user-token", keyring.accountName());
+    try std.testing.expect(keyring.thread.load(.acquire) != std.Thread.getCurrentId());
+
+    try std.testing.expectEqual(Status.invalid_state, orca_runtime_set_credential_callback(runtime, FakeKeyring.lookup, &keyring));
+    try std.testing.expectEqualStrings(
+        "orca_runtime_set_credential_callback: WorkersRunning",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    try std.testing.expectEqual(Status.invalid_state, orca_runtime_set_credential_callback(runtime, null, null));
+
+    const lookups = keyring.calls.load(.acquire);
+    keyring.rotated.store(true, .release);
+    try std.testing.expectEqual(Status.ok, orca_library_scrobbler_credentials_changed(runtime, library));
+    deadline = .init(5_000);
+    while (transport.requestCount() < 2) {
+        if (!deadline.tick()) return error.ChangedTokenNeverValidated;
+    }
+    try std.testing.expect(keyring.calls.load(.acquire) > lookups);
+    try std.testing.expectEqualStrings("Token changed-secret", transport.lastAuthorization());
+    try std.testing.expectEqual(Status.stale_handle, orca_library_scrobbler_credentials_changed(runtime, .{ .index = library.index, .generation = library.generation + 1 }));
+
+    orca_runtime_destroy(runtime);
+    destroyed = true;
+    keyring.destroyed.store(true, .release);
+    var settle: core.runtime_tests.TestDeadline = .init(20);
+    while (settle.tick()) {}
+    try std.testing.expectEqual(@as(u32, 0), keyring.late_calls.load(.acquire));
 }

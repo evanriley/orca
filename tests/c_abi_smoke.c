@@ -1883,6 +1883,86 @@ static int tag_write_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+static orca_credential_result smoke_credential(void *context, const char *service, const char *account,
+                                               uint8_t *buffer, size_t capacity, size_t *length) {
+    (void)context;
+    (void)service;
+    (void)account;
+    (void)buffer;
+    (void)capacity;
+    *length = 0;
+    return ORCA_CREDENTIAL_RESULT_NOT_FOUND;
+}
+
+static int provider_settings_steps(orca_runtime *runtime) {
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, smoke_credential, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, smoke_credential, 0) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, 0, "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Player (beta)", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    static const char *const accepted[] = {
+        "https://lb.example.org",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        "http://localhost:8080",
+    };
+    for (uint8_t service = ORCA_PROVIDER_SERVICE_LISTENBRAINZ; service <= ORCA_PROVIDER_SERVICE_COVER_ART_ARCHIVE;
+         service++) {
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, accepted[service]) == ORCA_STATUS_OK);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://127.0.0.1@example.org") ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_runtime_set_provider_server: InvalidServerUrl") == 0);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://example.org") ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, 0) == ORCA_STATUS_OK);
+    }
+    SMOKE_CHECK(orca_runtime_set_provider_server(runtime, 99, "https://example.org") == ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, "smoke-key") == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, "with space") == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_runtime_set_acoustid_client_key(runtime, 0) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int provider_work_steps(orca_runtime *runtime) {
+    orca_handle library;
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-providers?mode=memory&cache=shared", &library) ==
+                ORCA_STATUS_OK);
+    orca_handle player;
+    SMOKE_CHECK(orca_player_create(runtime, &player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_library(runtime, player, library) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, smoke_credential, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_runtime_set_credential_callback: WorkersRunning") == 0);
+    SMOKE_CHECK(orca_runtime_set_credential_callback(runtime, 0, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_runtime_set_provider_server(runtime, ORCA_PROVIDER_SERVICE_LISTENBRAINZ, "http://127.0.0.1:9") ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_provider_server(runtime, ORCA_PROVIDER_SERVICE_LISTENBRAINZ, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_scrobbler_credentials_changed(runtime, library) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int provider_smoke(orca_runtime *runtime, orca_handle library) {
+    orca_runtime *fresh = orca_runtime_create();
+    SMOKE_CHECK(fresh != 0);
+    int failed = provider_settings_steps(fresh) != 0 || provider_work_steps(fresh) != 0;
+    orca_runtime_destroy(fresh);
+    SMOKE_CHECK(failed == 0);
+
+    SMOKE_CHECK(orca_library_scrobbler_credentials_changed(runtime, library) == ORCA_STATUS_OK);
+    orca_handle stale = library;
+    stale.generation += 1;
+    SMOKE_CHECK(orca_library_scrobbler_credentials_changed(runtime, stale) == ORCA_STATUS_STALE_HANDLE);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -2635,6 +2715,7 @@ int main(int argc, char **argv) {
     if (artwork_smoke(runtime, library) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;
+    if (provider_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

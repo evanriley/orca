@@ -216,8 +216,8 @@ defer page.deinit();
   [metadata.md](metadata.md#accepting-a-match).
   `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
   the same rules as `setListenBrainzServer`, from the next job.
-  `setAcoustIdClientKey(key)` sets the AcoustID application key; the key
-  must outlive the runtime, and a `CredentialStore` value under
+  `setAcoustIdClientKey(key)` copies the AcoustID application key, or clears
+  it when null, and a `CredentialStore` value under
   `acoustid_credential_service` / `acoustid_client_key_account` overrides
   it. See [providers.md](providers.md#matching) and
   [metadata.md](metadata.md#musicbrainz-recording-ids).

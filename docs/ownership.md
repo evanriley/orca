@@ -44,11 +44,11 @@ holds a Library handle and a request, not a worker. `destroyLibrary` finishes
 its Library's queued job `cancelled`, so no pending job names a Library that
 is gone. See [control-plane.md](control-plane.md#idle-maintenance).
 
-The `CredentialStore` and server URL passed to `setCredentialStore` and
-`setListenBrainzServer` are borrowed: their strings and context must outlive
-the runtime, because a worker may read them at any time. `setClientIdentity`
-copies its strings into the runtime, and each worker holds its own copy, so a
-later call never frees text a worker is reading. `CredentialStore.get` is called on a listen worker's
+The `CredentialStore` passed to `setCredentialStore` is borrowed: its context
+must outlive the runtime, because a worker may call it at any time.
+`setClientIdentity`, the server setters and `setAcoustIdClientKey` copy their
+strings into fixed buffers in the runtime, and each worker copies those by
+value, so a later call never frees text a worker is reading. `CredentialStore.get` is called on a listen worker's
 thread, never on the caller's.
 
 Listen workers share one network `std.Io`, created with the first worker and
