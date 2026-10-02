@@ -2,8 +2,9 @@
 //! file, beside the Tracks list and beside an album's tracks.
 //!
 //! liborca answers `libraryTrackDetails`; this only words the answer. The
-//! panels share one on/off state, kept on the `App`, and each queries only when
-//! the Track it shows changes.
+//! panels share one sidebar choice, kept on the `App`: hidden, details or the
+//! playing Track's lyrics. Each panel queries only when the Track it shows
+//! changes.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -17,6 +18,7 @@ const track_model = @import("track_model.zig");
 const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
 const ratings = @import("ratings.zig");
+const lyrics = @import("lyrics.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -42,6 +44,8 @@ pub const Panel = struct {
     source: Source,
     root: *gtk.Widget,
     toggle: *gtk.Widget,
+    lyrics_toggle: *gtk.Widget,
+    lyrics: lyrics.View = undefined,
     placeholder: *gtk.Widget,
     content: *gtk.Widget,
     title: *gtk.Widget,
@@ -100,7 +104,7 @@ fn panelData(data: ?*anyopaque) *Panel {
 }
 
 fn shownNow(self: *const App) bool {
-    return self.details_visible and !self.window_narrow;
+    return self.sidebar_page == .details and !self.window_narrow;
 }
 
 pub fn setNarrow(self: *App, narrow: bool) void {
@@ -109,30 +113,42 @@ pub fn setNarrow(self: *App, narrow: bool) void {
 }
 
 pub fn toggle(self: *App) void {
-    setVisible(self, !self.details_visible);
+    showSidebar(self, if (self.sidebar_page == .details) .hidden else .details);
 }
 
-fn setVisible(self: *App, visible: bool) void {
-    self.details_visible = visible;
+pub fn showSidebar(self: *App, sidebar: app.Sidebar) void {
+    if (sidebar == self.sidebar_page) return;
+    self.sidebar_page = sidebar;
     applyVisibility(self);
     settings.save(self);
 }
 
 pub fn applyVisibility(self: *App) void {
-    const on = shownNow(self);
+    const page: [*:0]const u8 = if (self.sidebar_page == .lyrics) "lyrics" else "details";
     for (self.details_panels) |maybe| {
         const panel = maybe orelse continue;
-        gtk.gtk_widget_set_visible(panel.root, boolean(on));
-        gtk.gtk_widget_set_visible(panel.toggle, boolean(!self.window_narrow));
-        gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.toggle), boolean(self.details_visible));
+        gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), page);
+        gtk.gtk_widget_set_visible(panel.root, boolean(self.sidebar_page != .hidden and !self.window_narrow));
+        for ([_]*gtk.Widget{ panel.toggle, panel.lyrics_toggle }) |button| gtk.gtk_widget_set_visible(button, boolean(!self.window_narrow));
+        gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.toggle), boolean(self.sidebar_page == .details));
+        gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.lyrics_toggle), boolean(self.sidebar_page == .lyrics));
         update(panel);
     }
+    lyrics.sync(self);
 }
 
 fn toggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
+    sidebarToggled(state(data), button, .details);
+}
+
+fn lyricsToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    sidebarToggled(state(data), button, .lyrics);
+}
+
+fn sidebarToggled(self: *App, button: ?*anyopaque, sidebar: app.Sidebar) void {
     const active = gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) != 0;
-    if (active != self.details_visible) setVisible(self, active);
+    if (active == (self.sidebar_page == sidebar)) return;
+    showSidebar(self, if (active) sidebar else .hidden);
 }
 
 /// The library changed under the panels: what they show may no longer be true.
@@ -677,11 +693,12 @@ fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         if (slot.* == panel) slot.* = null;
     }
     setPath(panel, null);
+    panel.lyrics.deinit();
     self.allocator.destroy(panel);
 }
 
-/// A panel and the header toggle that shows it. The caller places `root` beside
-/// its content and `toggle` in its header bar.
+/// A panel and the header toggles that show it. The caller places `root` beside
+/// its content and the toggles in its header bar.
 pub fn newPanel(self: *App, source: Source) ?*Panel {
     const slot = for (&self.details_panels) |*candidate| {
         if (candidate.* == null) break candidate;
@@ -692,6 +709,10 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, toggle_button), "sidebar-show-right-symbolic");
     gtk.gtk_widget_set_tooltip_text(toggle_button, "Track Details");
     _ = gtk.signalConnect(toggle_button, "toggled", gtk.callback(toggled), self);
+    const lyrics_toggle = gtk.gtk_toggle_button_new();
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, lyrics_toggle), "media-view-subtitles-symbolic");
+    gtk.gtk_widget_set_tooltip_text(lyrics_toggle, "Lyrics");
+    _ = gtk.signalConnect(lyrics_toggle, "toggled", gtk.callback(lyricsToggled), self);
 
     const title = newLabel("details-title");
     const artist = newLabel(null);
@@ -778,19 +799,23 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), placeholder);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), content);
 
-    const root = gtk.gtk_scrolled_window_new();
+    const scroller = gtk.gtk_scrolled_window_new();
+    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
+    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), body);
+
+    const root = gtk.gtk_stack_new();
     gtk.gtk_widget_add_css_class(root, "details-panel");
     gtk.gtk_widget_set_size_request(root, panel_width, -1);
     gtk.gtk_widget_set_hexpand(root, gtk.false_);
     gtk.gtk_widget_set_vexpand(root, gtk.true_);
-    gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, root), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
-    gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, root), body);
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scroller, "details");
 
     panel.* = .{
         .self = self,
         .source = source,
         .root = root,
         .toggle = toggle_button,
+        .lyrics_toggle = lyrics_toggle,
         .placeholder = placeholder,
         .content = content,
         .title = title,
@@ -840,12 +865,16 @@ pub fn newPanel(self: *App, source: Source) ?*Panel {
     _ = gtk.signalConnect(review_row, "activated", gtk.callback(reviewAllActivated), panel);
     _ = gtk.signalConnect(find_row, "activated", gtk.callback(findMatchActivated), panel);
     _ = gtk.signalConnect(verify_row, "activated", gtk.callback(verifyActivated), panel);
+    panel.lyrics.init(self);
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), panel.lyrics.root, "lyrics");
     _ = gtk.signalConnect(root, "destroy", gtk.callback(destroyed), panel);
     slot.* = panel;
 
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, toggle_button), boolean(self.details_visible));
-    gtk.gtk_widget_set_visible(toggle_button, boolean(!self.window_narrow));
-    gtk.gtk_widget_set_visible(root, boolean(shownNow(self)));
+    gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, root), if (self.sidebar_page == .lyrics) "lyrics" else "details");
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, toggle_button), boolean(self.sidebar_page == .details));
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, lyrics_toggle), boolean(self.sidebar_page == .lyrics));
+    for ([_]*gtk.Widget{ toggle_button, lyrics_toggle }) |button| gtk.gtk_widget_set_visible(button, boolean(!self.window_narrow));
+    gtk.gtk_widget_set_visible(root, boolean(self.sidebar_page != .hidden and !self.window_narrow));
     update(panel);
     return panel;
 }
@@ -855,11 +884,12 @@ pub const Placed = struct {
     panel: ?*Panel,
 };
 
-/// `content` with a details panel on its right, and the panel's toggle at the
+/// `content` with a details panel on its right, and the panel's toggles at the
 /// end of `header`. Without a free panel slot, `content` alone.
 pub fn besideContent(self: *App, header: *gtk.Widget, content: *gtk.Widget, source: Source) Placed {
     const panel = newPanel(self, source) orelse return .{ .widget = content, .panel = null };
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), panel.toggle);
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), panel.lyrics_toggle);
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_set_hexpand(content, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), content);

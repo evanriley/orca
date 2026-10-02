@@ -530,6 +530,7 @@ pub extern fn gtk_widget_set_name(widget: *Widget, name: [*:0]const u8) void;
 pub extern fn gtk_widget_get_name(widget: *Widget) [*:0]const u8;
 pub extern fn gtk_list_box_row_new() *Widget;
 pub extern fn gtk_list_box_row_set_child(row: *ListBoxRow, child: ?*Widget) void;
+pub extern fn gtk_list_box_row_set_activatable(row: *ListBoxRow, activatable: gboolean) void;
 pub extern fn gtk_button_new() *Widget;
 pub extern fn gtk_button_set_child(button: *Button, child: ?*Widget) void;
 pub extern fn gtk_button_get_child(button: *Button) ?*Widget;
@@ -586,6 +587,7 @@ pub extern fn gtk_label_set_wrap(label: *Label, wrap: gboolean) void;
 pub extern fn gtk_label_set_wrap_mode(label: *Label, wrap_mode: c_int) void;
 pub extern fn gtk_label_set_lines(label: *Label, lines: c_int) void;
 pub extern fn gtk_label_set_justify(label: *Label, justify: c_int) void;
+pub extern fn gtk_label_set_selectable(label: *Label, selectable: gboolean) void;
 pub extern fn gtk_widget_set_cursor_from_name(widget: *Widget, name: ?[*:0]const u8) void;
 pub extern fn gtk_gesture_click_new() *EventController;
 pub extern fn gtk_gesture_single_set_button(gesture: *GestureSingle, button: c_uint) void;
@@ -630,6 +632,16 @@ pub extern fn gtk_accessible_update_property(accessible: *Accessible, first_prop
 pub extern fn gtk_widget_get_clipboard(widget: *Widget) *GdkClipboard;
 pub extern fn gdk_clipboard_set_text(clipboard: *GdkClipboard, text: [*:0]const u8) void;
 pub extern fn gtk_widget_get_visible(widget: *Widget) gboolean;
+pub extern fn gtk_widget_get_mapped(widget: *Widget) gboolean;
+
+/// `graphene_rect_t`: an origin point and a size, four floats.
+pub const Rect = extern struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    width: f32 = 0,
+    height: f32 = 0,
+};
+pub extern fn gtk_widget_compute_bounds(widget: *Widget, target: *Widget, out_bounds: *Rect) gboolean;
 pub extern fn gtk_widget_set_focus_on_click(widget: *Widget, focus_on_click: gboolean) void;
 pub extern fn gtk_widget_set_sensitive(widget: *Widget, sensitive: gboolean) void;
 pub extern fn gtk_widget_set_opacity(widget: *Widget, opacity: f64) void;

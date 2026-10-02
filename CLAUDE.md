@@ -225,6 +225,9 @@ ORCA_ACOUSTID_URL=http://127.0.0.1:PORT zig build run-linux
 
 # Point cover fetches at a local mock instead of coverartarchive.org
 ORCA_COVERARTARCHIVE_URL=http://127.0.0.1:PORT zig build run-linux
+
+# Point lyrics fetches at a local mock instead of lrclib.net
+ORCA_LRCLIB_URL=http://127.0.0.1:PORT zig build run-linux
 ```
 
 The app opens an output on first play, not at launch, so an idle window does

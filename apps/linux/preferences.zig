@@ -16,6 +16,7 @@ const transport = @import("transport.zig");
 const matches = @import("matches.zig");
 const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
+const lyrics = @import("lyrics.zig");
 
 const App = app.App;
 
@@ -729,6 +730,10 @@ fn scrobblingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     self.requestTick();
 }
 
+fn lyricsFetchSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    lyrics.setFetch(state(data), adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0);
+}
+
 fn nowPlayingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const library = self.library orelse return;
@@ -1076,6 +1081,15 @@ fn listeningPage(self: *App) *gtk.Widget {
     adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, listenbrainz), status);
     showListeningStatus(self);
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, listenbrainz));
+
+    const lyrics_group = group("Lyrics", null);
+    const fetch = adw.adw_switch_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fetch), "Fetch lyrics from LRCLIB");
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fetch), "Looks lyrics up on lrclib.net by title, artist, album and duration when the files have none");
+    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fetch), if (self.lyrics.fetch) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(fetch, "notify::active", gtk.callback(lyricsFetchSwitched), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, lyrics_group), fetch);
+    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, lyrics_group));
     _ = gtk.signalConnect(page, "map", gtk.callback(listeningMapped), self);
     return page;
 }

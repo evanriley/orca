@@ -331,6 +331,28 @@ button.album-artist {
   font-size: 1.2em;
 }
 
+list.lyrics {
+  background: none;
+  padding: 18px 6px;
+}
+
+list.lyrics > row {
+  padding: 4px 12px;
+}
+
+.lyrics-line {
+  font-size: 1.1em;
+}
+
+.lyrics-current {
+  font-weight: 800;
+  color: var(--accent-color);
+}
+
+.lyrics-plain {
+  padding: 18px;
+}
+
 .loved-heart {
   color: @red_3;
 }

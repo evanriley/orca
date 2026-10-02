@@ -25,6 +25,13 @@
   `orca_job_lyrics_outcome` reports where the lyrics came from and
   `orca_job_lyrics` hands them over once as an `orca_lyrics_view`.
   `ORCA_PROVIDER_SERVICE_LRCLIB` points LRCLIB at another server.
+- **Lyrics in `orca-gtk`.** A Lyrics page in the sidebar, in place of track
+  details (Ctrl+Shift+L or the header button), shows the playing Track's
+  lyrics: synced lyrics highlight the line being heard, dim the lines before
+  it and keep it centred, plain lyrics show as selectable text, and an
+  instrumental Track says so. Preferences > Listening > Fetch lyrics from
+  LRCLIB, off by default, also asks LRCLIB; `ORCA_LRCLIB_URL` points it at
+  another server.
 
 ### Changed
 

@@ -21,6 +21,7 @@ const browse_model = @import("browse_model.zig");
 const browse = @import("browse.zig");
 const transport = @import("transport.zig");
 const details = @import("details.zig");
+const lyrics = @import("lyrics.zig");
 const queue = @import("queue.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
@@ -87,6 +88,7 @@ fn tick(self: *App) void {
     maintenance.tick(self);
     preferences.tick(self);
     details.tick(self);
+    lyrics.tick(self);
     armTimeout(self);
 }
 
@@ -178,6 +180,10 @@ fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
 
 fn activateDetails(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     details.toggle(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateLyrics(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    lyrics.toggle(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateBack(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -353,6 +359,7 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
         .{ .title = "Library", .items = &.{
             .{ "Search", "<Control>f" },
             .{ "Show Queue", "<Control>l" },
+            .{ "Lyrics", "<Control><Shift>l" },
             .{ "Track Details", "<Control>i" },
             .{ "Back", "<Alt>Left" },
             .{ "Add Music Folder", "<Control>o" },
@@ -493,6 +500,8 @@ pub fn main(init: std.process.Init) !u8 {
         runtime.setAcoustIdServer(server) catch {};
     if (resolveServer(allocator, init.environ_map, "ORCA_COVERARTARCHIVE_URL")) |server|
         runtime.setCoverArtArchiveServer(server) catch {};
+    if (resolveServer(allocator, init.environ_map, "ORCA_LRCLIB_URL")) |server|
+        runtime.setLrclibServer(server) catch {};
     if (self.library_path) |path| {
         if (runtime.openLibrary(init.io, path)) |library| {
             self.library = library;
@@ -524,6 +533,7 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "search", activateSearch, "<Control>f", &self);
     addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);
     addAction(application, "details", activateDetails, "<Control>i", &self);
+    addAction(application, "lyrics", activateLyrics, "<Control><Shift>l", &self);
     addAction(application, "back", activateBack, null, &self);
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);
@@ -575,6 +585,7 @@ pub fn main(init: std.process.Init) !u8 {
     _ = gtk.g_source_remove(wake_source);
     if (self.timeout_source != 0) _ = gtk.g_source_remove(self.timeout_source);
     self.timeout_source = 0;
+    lyrics.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};

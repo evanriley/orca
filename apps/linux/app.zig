@@ -20,12 +20,15 @@ const albums = @import("albums.zig");
 const details = @import("details.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const lyrics = @import("lyrics.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
 pub const page_size: u32 = 512;
 pub const page_history_depth = 16;
 pub const open_album_page_limit = 32;
+
+pub const Sidebar = enum { hidden, details, lyrics };
 
 /// Which shelf of the library the track list is showing, and in what order.
 ///
@@ -207,11 +210,12 @@ pub const App = struct {
     browse_panes: ?*gtk.Widget = null,
     browse_toggle: ?*gtk.Widget = null,
 
-    /// The one on/off choice the details panels share, restored from settings.
-    details_visible: bool = false,
+    /// What the details panels show, restored from settings.
+    sidebar_page: Sidebar = .hidden,
     /// Set while the window is below the breakpoint that hides the panels.
     window_narrow: bool = false,
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
+    lyrics: lyrics.State = .{},
     seen_recorded_listens: u64 = 0,
 
     album_store: ?*gtk.ListStore = null,

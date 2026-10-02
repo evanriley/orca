@@ -4,8 +4,9 @@
 //! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
-//! the music folders are watched, whether idle maintenance runs, and how many
-//! files Measure Loudness decodes at once. Nothing about the library does, and never the ListenBrainz token
+//! the music folders are watched, whether idle maintenance runs, how many
+//! files Measure Loudness decodes at once, whether lyrics are fetched from
+//! LRCLIB, and what the sidebar shows. Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
@@ -162,10 +163,18 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.analysis_threads = parseThreads(std.mem.span(value));
     }
-    if (gtk.g_key_file_get_string(keys, "view", "details", &err)) |value| {
+    if (getString(keys, "lyrics", "fetch")) |value| {
         defer gtk.g_free(value);
-        self.details_visible = std.mem.eql(u8, std.mem.span(value), "true");
-    } else gtk.g_clear_error(&err);
+        self.lyrics.fetch = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "view", "lyrics")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .lyrics;
+    }
+    if (getString(keys, "view", "details")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .details;
+    }
 }
 
 pub fn save(self: *App) void {
@@ -196,7 +205,9 @@ pub fn save(self: *App) void {
         gtk.g_key_file_set_string(keys, "library", "analysis_threads", strings.format(&threads_buffer, "{d}", .{threads}).ptr);
     }
     gtk.g_key_file_set_string(keys, "maintenance", "enabled", if (self.idle_maintenance) "true" else "false");
-    gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
+    gtk.g_key_file_set_string(keys, "lyrics", "fetch", if (self.lyrics.fetch) "true" else "false");
+    gtk.g_key_file_set_string(keys, "view", "details", if (self.sidebar_page == .details) "true" else "false");
+    gtk.g_key_file_set_string(keys, "view", "lyrics", if (self.sidebar_page == .lyrics) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);
