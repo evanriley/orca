@@ -67,6 +67,7 @@ pub fn setAlbumContext(self: *App, release_id: i64) bool {
     if (self.runtime.libraryRelease(library, release_id) catch null) |release| {
         defer release.deinit(self.allocator);
         self.context.artist_id = release.album_artist_id;
+        self.context.release_loved = release.loved;
     }
     var tracks = self.runtime.libraryTrackQuery(library, "", .{
         .release_id = release_id,
@@ -140,13 +141,18 @@ pub fn reload(self: *App) void {
 fn loadNextPage(self: *App) void {
     const store = self.album_store orelse return;
     if (self.albums_exhausted) return;
-    const library = self.library orelse return;
-    var page = self.runtime.libraryReleasePage(library, request(self, self.albums_loaded)) catch {
+    const loaded = appendReleasePage(self, store, request(self, self.albums_loaded)) orelse {
         self.albums_exhausted = true;
         return;
     };
+    if (loaded < app.page_size) self.albums_exhausted = true;
+    self.albums_loaded += loaded;
+}
+
+pub fn appendReleasePage(self: *App, store: *gtk.ListStore, query: liborca.ReleaseQuery) ?u32 {
+    const library = self.library orelse return null;
+    var page = self.runtime.libraryReleasePage(library, query) catch return null;
     defer page.deinit();
-    if (page.items.len < app.page_size) self.albums_exhausted = true;
     var additions: std.ArrayList(?*anyopaque) = .empty;
     defer additions.deinit(self.allocator);
     for (page.items) |release| {
@@ -166,7 +172,7 @@ fn loadNextPage(self: *App) void {
         );
         for (additions.items) |row| gtk.g_object_unref(row);
     }
-    self.albums_loaded += @intCast(page.items.len);
+    return @intCast(page.items.len);
 }
 
 fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -190,17 +196,12 @@ fn sortChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
 fn tileActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const store = self.album_store orelse return;
-    const item = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), position) orelse return;
-    defer gtk.g_object_unref(item);
-    const row: *BrowseObject = @ptrCast(@alignCast(item));
-    const id = row.id() orelse return;
+    const id = releaseAt(store, position) orelse return;
     const navigation = self.albums_navigation orelse return;
     openAlbum(self, navigation, id);
 }
 
-pub fn build(self: *App) *gtk.Widget {
-    const store = gtk.g_list_store_new(browse_model.getType()).?;
-    self.album_store = store;
+pub fn newGrid(self: *App, store: *gtk.ListStore, activated: gtk.GCallback) *gtk.Widget {
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupTile), self);
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindTile), self);
@@ -213,7 +214,21 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_grid_view_set_max_columns(gtk.cast(gtk.GridView, grid), 12);
     gtk.gtk_grid_view_set_min_columns(gtk.cast(gtk.GridView, grid), 2);
     gtk.gtk_grid_view_set_single_click_activate(gtk.cast(gtk.GridView, grid), gtk.true_);
-    _ = gtk.signalConnect(grid, "activate", gtk.callback(tileActivated), self);
+    _ = gtk.signalConnect(grid, "activate", activated, self);
+    return grid;
+}
+
+pub fn releaseAt(store: *gtk.ListStore, position: c_uint) ?i64 {
+    const item = gtk.g_list_model_get_item(gtk.cast(gtk.ListModel, store), position) orelse return null;
+    defer gtk.g_object_unref(item);
+    const row: *BrowseObject = @ptrCast(@alignCast(item));
+    return row.id();
+}
+
+pub fn build(self: *App) *gtk.Widget {
+    const store = gtk.g_list_store_new(browse_model.getType()).?;
+    self.album_store = store;
+    const grid = newGrid(self, store, gtk.callback(tileActivated));
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), grid);
@@ -270,6 +285,8 @@ pub const AlbumPage = struct {
     disc_lists: std.ArrayList(*gtk.Widget) = .empty,
     release_id: i64,
     album_artist_id: ?i64,
+    loved: bool,
+    love_button: ?*gtk.Widget = null,
     details: ?*details.Panel = null,
 };
 
@@ -336,6 +353,23 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
             }
         }
     }
+}
+
+pub fn setReleaseLove(self: *App, release_id: i64, release_loved: bool) void {
+    const library = self.library orelse return;
+    const result = self.runtime.librarySetReleaseLove(library, &.{release_id}, release_loved) catch
+        return self.toast("Could not save that");
+    if (result.skipped != 0) return self.toast("That album is no longer in the library");
+    for (self.open_album_pages[0..self.open_album_page_count]) |page| {
+        if (page.release_id != release_id) continue;
+        page.loved = release_loved;
+        if (page.love_button) |button| feedback.showAlbumButton(button, release_loved);
+    }
+}
+
+fn albumHeartClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const page = pageData(data);
+    setReleaseLove(page.self, page.release_id, !page.loved);
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
@@ -523,6 +557,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
         .rows = &.{},
         .release_id = release_id,
         .album_artist_id = release.album_artist_id,
+        .loved = release.loved,
     };
     page.ids = self.allocator.alloc(i64, tracks.items.len) catch {
         self.allocator.destroy(page);
@@ -600,7 +635,11 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     _ = gtk.signalConnect(play, "clicked", gtk.callback(playClicked), page);
     _ = gtk.signalConnect(shuffle, "clicked", gtk.callback(shuffleClicked), page);
     gtk.gtk_box_append(gtk.cast(gtk.Box, actions), play);
+    const heart = feedback.newAlbumButton(gtk.callback(albumHeartClicked), page);
+    feedback.showAlbumButton(heart, release.loved);
+    page.love_button = heart;
     gtk.gtk_box_append(gtk.cast(gtk.Box, actions), shuffle);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), heart);
     gtk.gtk_box_append(gtk.cast(gtk.Box, facts), actions);
     gtk.gtk_box_append(gtk.cast(gtk.Box, hero), facts);
     gtk.gtk_box_append(gtk.cast(gtk.Box, content), hero);

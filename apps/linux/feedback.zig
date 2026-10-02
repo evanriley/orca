@@ -14,13 +14,15 @@ const details = @import("details.zig");
 const queue = @import("queue.zig");
 const nowplaying = @import("nowplaying.zig");
 const playlists = @import("playlists.zig");
+const loved = @import("loved.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
 
-const filled_icon = "orca-heart-filled-symbolic";
+pub const filled_icon = "orca-heart-filled-symbolic";
 const outline_icon = "orca-heart-outline-symbolic";
 const heart_pixels: c_int = 14;
+const album_heart_pixels: c_int = 16;
 const change_batch = 512;
 
 pub fn newRowButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
@@ -33,6 +35,20 @@ pub fn newRowButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
 
 pub fn showRowButton(button: *gtk.Widget, feedback: liborca.Feedback) void {
     showButton(button, feedback);
+}
+
+pub fn newAlbumButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
+    const button = newHeartButton(handler, data);
+    gtk.gtk_widget_remove_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, "album-heart");
+    if (gtk.gtk_button_get_child(gtk.cast(gtk.Button, button))) |image|
+        gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), album_heart_pixels);
+    showAlbumButton(button, false);
+    return button;
+}
+
+pub fn showAlbumButton(button: *gtk.Widget, album_loved: bool) void {
+    showHeart(button, album_loved, if (album_loved) "Remove Album Love" else "Love Album");
 }
 
 pub fn newButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
@@ -64,17 +80,20 @@ fn newHeartButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
 }
 
 fn showButton(button: *gtk.Widget, feedback: liborca.Feedback) void {
+    const is_loved = feedback == .loved;
+    showHeart(button, is_loved, if (is_loved) "Remove Love" else "Love");
+}
+
+fn showHeart(button: *gtk.Widget, filled: bool, label: [*:0]const u8) void {
     const image = gtk.gtk_button_get_child(gtk.cast(gtk.Button, button)) orelse return;
-    const loved = feedback == .loved;
-    gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), if (loved) filled_icon else outline_icon);
-    if (loved) {
+    gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, image), if (filled) filled_icon else outline_icon);
+    if (filled) {
         gtk.gtk_widget_add_css_class(image, "loved-heart");
         gtk.gtk_widget_add_css_class(button, "loved");
     } else {
         gtk.gtk_widget_remove_css_class(image, "loved-heart");
         gtk.gtk_widget_remove_css_class(button, "loved");
     }
-    const label: [*:0]const u8 = if (loved) "Remove Love" else "Love";
     gtk.gtk_widget_set_tooltip_text(button, label);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
 }
@@ -166,6 +185,7 @@ pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_
     queue.repaint(self, changed, change_value);
     nowplaying.repaint(changed, change_value);
     playlists.repaint(self, changed, change_value);
+    loved.repaint(self, changed, change_value);
     details.invalidate(self);
 }
 

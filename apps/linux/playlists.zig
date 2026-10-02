@@ -282,7 +282,14 @@ fn rowActivated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c
 }
 
 fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
+    setupSongRow(state(data), item, rowMenu);
+}
+
+pub fn setupSongRow(
+    self: *App,
+    item: ?*anyopaque,
+    context_menu: *const fn (?*anyopaque, c_int, f64, f64, ?*anyopaque) callconv(.c) void,
+) void {
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(row, "playlist-row");
     const number = gtk.gtk_label_new(null);
@@ -320,10 +327,10 @@ fn setupRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     for ([_]*gtk.Widget{ number, labels, duration }) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, row), widget);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), row);
     gtk.g_object_set_data(row, "orca-list-item", item);
-    menu.onSecondaryClick(row, rowMenu, self);
+    menu.onSecondaryClick(row, context_menu, self);
 }
 
-fn bindRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+pub fn bindRow(_: ?*anyopaque, item: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     const list_item = gtk.cast(gtk.ListItem, item);
     const object = gtk.gtk_list_item_get_item(list_item) orelse return;
     const track: *TrackObject = @ptrCast(@alignCast(object));

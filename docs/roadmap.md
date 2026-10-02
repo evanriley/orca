@@ -106,6 +106,10 @@ Health.
   player bar, a heart button on every song row and context menu entries, and
   its details panel says when a love cannot sync; `orca-cli feedback` sets
   it.
+- Love for albums, kept in the Library per Release and never sent, since
+  ListenBrainz feedback takes recordings only: `orca-cli love-release` and
+  `releases --loved`, and in `orca-gtk` a heart on the album page, Love Album
+  in album menus, and a Loved page of loved albums and songs.
 - Now Playing, off until enabled: the playing track is announced to
   ListenBrainz after 10 s (`orca-gtk` Preferences > Listening).
 - Star ratings, kept in the Library per recording: `orca-cli rate`, a sort
@@ -241,22 +245,19 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
-   feedback takes recordings only), and a Loved page in `orca-gtk` listing
-   loved albums and songs.
-2. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+1. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
    tag writes, library edits and undo, queue insertion, moves and removal,
    artwork, DSP and the signal path, track details, matching, AcoustID
    submission, verification and corrections, love and hate, ratings,
    playlists, scrobbling, Health actions and dismissals, and idle
    maintenance.
-3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+2. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-4. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+3. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-5. **An optional fixed output rate with a band-limited resampler**, for
+4. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.

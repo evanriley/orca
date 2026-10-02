@@ -120,6 +120,12 @@
   where a clear not yet sent is not a love. `orca-cli
   love-release DATABASE IDS [--clear]`, `releases --loved` (a loved Release
   ends in `loved`) and `tracks --loved [--sort loved]`.
+- **Album love and a Loved page in `orca-gtk`.** An album page has a heart
+  beside Play and Shuffle, and album menus offer Love Album or Remove Album
+  Love, with their song entries renamed Love All Songs, Dislike All Songs,
+  Remove Love from All Songs and Remove Dislike from All Songs. A Loved
+  sidebar page switches between loved albums and loved songs, most recently
+  loved first.
 
 ### Changed
 

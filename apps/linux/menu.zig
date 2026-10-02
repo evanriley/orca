@@ -18,6 +18,7 @@ const strings = @import("strings.zig");
 const jobs = @import("jobs.zig");
 const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
+const albums = @import("albums.zig");
 
 const App = app.App;
 
@@ -34,6 +35,7 @@ pub const Context = struct {
     tracks: std.ArrayList(i64) = .empty,
     songs: std.ArrayList(feedback.Target) = .empty,
     release_id: ?i64 = null,
+    release_loved: bool = false,
     artist_id: ?i64 = null,
     queue_position: ?u32 = null,
     playlist_id: ?i64 = null,
@@ -45,6 +47,7 @@ pub const Context = struct {
         self.tracks.clearRetainingCapacity();
         self.songs.clearRetainingCapacity();
         self.release_id = null;
+        self.release_loved = false;
         self.artist_id = null;
         self.queue_position = null;
         self.playlist_id = null;
@@ -143,12 +146,21 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
     };
     const opinion = gtk.g_menu_new();
     defer gtk.g_object_unref(opinion);
-    if (counts.none != 0) {
-        gtk.g_menu_append(opinion, "Love", "app.ctx-love");
-        gtk.g_menu_append(opinion, "Dislike", "app.ctx-dislike");
+    const whole_album = context.kind == .album;
+    if (whole_album and context.release_id != null) {
+        if (context.release_loved)
+            gtk.g_menu_append(opinion, "Remove Album Love", "app.ctx-remove-album-love")
+        else
+            gtk.g_menu_append(opinion, "Love Album", "app.ctx-love-album");
     }
-    if (counts.loved != 0) gtk.g_menu_append(opinion, "Remove Love", "app.ctx-remove-love");
-    if (counts.hated != 0) gtk.g_menu_append(opinion, "Remove Dislike", "app.ctx-remove-dislike");
+    if (counts.none != 0) {
+        gtk.g_menu_append(opinion, if (whole_album) "Love All Songs" else "Love", "app.ctx-love");
+        gtk.g_menu_append(opinion, if (whole_album) "Dislike All Songs" else "Dislike", "app.ctx-dislike");
+    }
+    if (counts.loved != 0)
+        gtk.g_menu_append(opinion, if (whole_album) "Remove Love from All Songs" else "Remove Love", "app.ctx-remove-love");
+    if (counts.hated != 0)
+        gtk.g_menu_append(opinion, if (whole_album) "Remove Dislike from All Songs" else "Remove Dislike", "app.ctx-remove-dislike");
     const rates_songs = switch (context.kind) {
         .tracks, .queue, .playlist => true,
         .album, .artist => false,
@@ -290,6 +302,14 @@ pub fn removeLove(self: *App) void {
 
 pub fn removeDislike(self: *App) void {
     feedback.change(self, self.context.songs.items, .hated, .none);
+}
+
+pub fn loveAlbum(self: *App) void {
+    albums.setReleaseLove(self, self.context.release_id orelse return, true);
+}
+
+pub fn removeAlbumLove(self: *App) void {
+    albums.setReleaseLove(self, self.context.release_id orelse return, false);
 }
 
 pub fn rate(self: *App, stars: i64) void {

@@ -208,6 +208,14 @@ fn activateContextDislike(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     menu.dislike(@ptrCast(@alignCast(data.?)));
 }
 
+fn activateContextLoveAlbum(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.loveAlbum(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateContextRemoveAlbumLove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    menu.removeAlbumLove(@ptrCast(@alignCast(data.?)));
+}
+
 fn activateContextRemoveLove(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.removeLove(@ptrCast(@alignCast(data.?)));
 }
@@ -532,6 +540,8 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "ctx-dislike", activateContextDislike, null, &self);
     addAction(application, "ctx-remove-love", activateContextRemoveLove, null, &self);
     addAction(application, "ctx-remove-dislike", activateContextRemoveDislike, null, &self);
+    addAction(application, "ctx-love-album", activateContextLoveAlbum, null, &self);
+    addAction(application, "ctx-remove-album-love", activateContextRemoveAlbumLove, null, &self);
     addAction(application, "ctx-show-album", activateContextShowAlbum, null, &self);
     addAction(application, "ctx-show-artist", activateContextShowArtist, null, &self);
     addAction(application, "ctx-match-album", activateContextMatchAlbum, null, &self);

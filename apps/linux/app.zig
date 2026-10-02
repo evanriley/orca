@@ -19,6 +19,7 @@ const window = @import("window.zig");
 const albums = @import("albums.zig");
 const details = @import("details.zig");
 const playlists = @import("playlists.zig");
+const loved = @import("loved.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
@@ -235,6 +236,7 @@ pub const App = struct {
     /// What the open right-click menu acts on.
     context: menu.Context = .{},
     playlists: playlists.State = .{},
+    loved: loved.State = .{},
 
     health_list: ?*gtk.ListBox = null,
     health_note: ?*gtk.Label = null,

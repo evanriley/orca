@@ -213,8 +213,8 @@ The window is an `AdwNavigationSplitView`:
 - **Albums** is a grid of covers, paged 512 Releases at a time and sorted by
   artist, title, year or recently added. An album without a cover shows its
   initials on a colour chosen from its title. Activating one opens its page:
-  the cover, title, artist, year, length, Play and Shuffle, and its tracks by
-  disc.
+  the cover, title, artist, year, length, Play, Shuffle and a heart that
+  loves the album (Love Album, Remove Album Love), and its tracks by disc.
 - **Artists** is every Artist with an initials avatar, searchable. An artist
   opens a page with their first album's cover as an avatar, Play and Shuffle,
   and their albums; an album there opens its page in place.
@@ -224,6 +224,11 @@ The window is an `AdwNavigationSplitView`:
   click re-queries in the engine's order rather than sorting loaded rows. The
   playing track is marked. A library with no tracks shows a welcome page with
   Add Music Folder; a scan in progress shows there too.
+- **Loved** switches between Albums, a grid of loved albums, and Songs, a
+  list of loved songs, each most recently loved first and paged 512 at a
+  time. An album opens its page in place; a song plays on activation, as in
+  the track list. The page is read again each time it is shown, so a heart
+  cleared on it leaves its row in place until then.
 - **Now Playing** is the audible track's cover, large, on a wash of the
   cover's average colour, with the next five entries. Clicking the cover in
   the player bar opens it.
@@ -293,7 +298,10 @@ Verify Album, Re-identify Album and Fetch Cover Art. Verify needs Match by
 audio fingerprint on in Preferences. Re-identify Album accepts nothing and
 fetches no cover; its proposals wait in Matches. A song with no feedback offers Love and Dislike; a loved one
 offers Remove Love, a disliked one Remove Dislike. On a selection the entries
-apply to every selected song.
+apply to every selected song. An album's menu offers Love Album or Remove
+Album Love, and names its song entries Love All Songs, Dislike All Songs,
+Remove Love from All Songs and Remove Dislike from All Songs; album love and
+song love are independent of each other.
 The playing track is marked across its whole row in the track list, on album
 pages and in the queue.
 
@@ -308,7 +316,8 @@ pulled out from under the output.
   A heart beside the title loves the audible song and, pressed again, removes
   the love; it is read when the audible song changes and after any change.
 
-**Love and dislike** are kept by liborca per recording (`librarySetFeedback`).
+**Love and dislike** are kept by liborca per recording (`librarySetFeedback`);
+album love is kept per Release (`librarySetReleaseLove`) and changes no song.
 Every song row ends its title with a heart button: the Tracks list, album
 pages, the queue, and the Now Playing page for the audible song and the songs
 up next. A loved song shows a filled red heart; any other song shows an outline
@@ -505,6 +514,10 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   which `TrackSummary.feedback` and `TrackDetails.feedback` also report.
   `orca-gtk` repaints the heart, the rows and the details panel after each
   change rather than waiting for a reload.
+- `Runtime.librarySetReleaseLove` for album love, which
+  `ReleaseSummary.loved` reports; `ReleaseQuery.loved_only` with
+  `ReleaseSort.loved`, and `TrackQuery.loved_only` with `TrackSort.loved`,
+  list what is loved for the Loved page. Album love is never sent.
 
 The identity is copied. The store's context and the server string are
 borrowed and must outlive the runtime. The setters may be called at any time

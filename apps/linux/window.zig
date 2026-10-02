@@ -22,6 +22,7 @@ const health = @import("health.zig");
 const matches = @import("matches.zig");
 const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
+const loved = @import("loved.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -375,6 +376,7 @@ pub const Page = enum(c_uint) {
     albums,
     artists,
     tracks,
+    loved,
     health,
     matches,
     now_playing,
@@ -386,6 +388,7 @@ pub const Page = enum(c_uint) {
             .albums => "albums",
             .artists => "artists",
             .tracks => "tracks",
+            .loved => loved.navigation_tag,
             .health => "health",
             .matches => "matches",
             .now_playing => "now-playing",
@@ -399,6 +402,7 @@ pub const Page = enum(c_uint) {
             .albums => "Albums",
             .artists => "Artists",
             .tracks => "Tracks",
+            .loved => "Loved",
             .health => "Health",
             .matches => "Matches",
             .now_playing => "Now Playing",
@@ -421,12 +425,17 @@ fn remember(self: *App, page: Page) void {
     self.page_history_len += 1;
 }
 
-fn popPushedPage(self: *App) bool {
-    const navigation = switch (self.current_page) {
+fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
+    return switch (page) {
         .albums => self.albums_navigation,
         .artists => self.artists_navigation,
+        .loved => self.loved.navigation,
         else => null,
-    } orelse return false;
+    };
+}
+
+fn popPushedPage(self: *App) bool {
+    const navigation = pageNavigation(self, self.current_page) orelse return false;
     const at_root = if (adw.adw_navigation_view_get_visible_page_tag(navigation)) |tag|
         std.mem.eql(u8, std.mem.span(tag), std.mem.span(self.current_page.name()))
     else
@@ -492,6 +501,7 @@ fn switchTo(self: *App, page: Page, remember_previous: bool) void {
         if (page == .playlist) playlists.openName(self) else page.title(),
     );
     syncSidebarSelection(self);
+    if (page == .loved) loved.reload(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -529,12 +539,7 @@ fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.
         return playlists.open(self, id);
     }
     const page: Page = @enumFromInt(index);
-    if (page == .albums) if (self.albums_navigation) |navigation| {
-        _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
-    };
-    if (page == .artists) if (self.artists_navigation) |navigation| {
-        _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
-    };
+    if (pageNavigation(self, page)) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, page.name());
     showPage(self, page);
 }
 
@@ -575,6 +580,7 @@ fn buildSidebar(self: *App) *gtk.Widget {
     _ = sidebarItem(section, "Albums", "media-optical-symbolic");
     _ = sidebarItem(section, "Artists", "avatar-default-symbolic");
     _ = sidebarItem(section, "Tracks", "audio-x-generic-symbolic");
+    _ = sidebarItem(section, "Loved", feedback.filled_icon);
     const health_item = sidebarItem(section, "Health", "emblem-important-symbolic");
     const health_count = gtk.gtk_label_new("");
     self.health_count = gtk.cast(gtk.Label, health_count);
@@ -817,6 +823,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, loved.build(self), Page.loved.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());

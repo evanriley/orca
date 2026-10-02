@@ -39,6 +39,8 @@ pub const EntryRow = opaque {};
 pub const AlertDialog = opaque {};
 pub const ExpanderRow = opaque {};
 pub const Banner = opaque {};
+pub const ViewStack = opaque {};
+pub const ViewSwitcher = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
 pub const RESPONSE_SUGGESTED: c_int = 1;
@@ -140,6 +142,20 @@ pub extern fn adw_navigation_view_push(view: *NavigationView, page: *NavigationP
 pub extern fn adw_navigation_view_pop(view: *NavigationView) gtk.gboolean;
 pub extern fn adw_navigation_view_pop_to_tag(view: *NavigationView, tag: [*:0]const u8) gtk.gboolean;
 pub extern fn adw_navigation_view_get_visible_page_tag(view: *NavigationView) ?[*:0]const u8;
+
+pub const VIEW_SWITCHER_POLICY_WIDE: c_int = 1;
+
+pub extern fn adw_view_stack_new() *gtk.Widget;
+pub extern fn adw_view_stack_add_titled_with_icon(
+    stack: *ViewStack,
+    child: *gtk.Widget,
+    name: ?[*:0]const u8,
+    title: [*:0]const u8,
+    icon_name: [*:0]const u8,
+) ?*anyopaque;
+pub extern fn adw_view_switcher_new() *gtk.Widget;
+pub extern fn adw_view_switcher_set_stack(switcher: *ViewSwitcher, stack: ?*ViewStack) void;
+pub extern fn adw_view_switcher_set_policy(switcher: *ViewSwitcher, policy: c_int) void;
 
 pub extern fn adw_clamp_new() *gtk.Widget;
 pub extern fn adw_clamp_set_maximum_size(clamp: *Clamp, size: c_int) void;
