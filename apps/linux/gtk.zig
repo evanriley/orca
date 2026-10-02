@@ -112,6 +112,9 @@ pub const GestureSingle = opaque {};
 pub const Gesture = opaque {};
 pub const GdkClipboard = opaque {};
 pub const UriLauncher = opaque {};
+pub const FileLauncher = opaque {};
+pub const GSimpleActionGroup = opaque {};
+pub const GActionGroup = opaque {};
 pub const FileFilter = opaque {};
 pub const Entry = opaque {};
 
@@ -330,11 +333,15 @@ pub extern fn g_list_store_append(store: *ListStore, item: *anyopaque) void;
 
 pub extern fn g_simple_action_new(name: [*:0]const u8, parameter_type: ?*const GVariantType) ?*GSimpleAction;
 pub extern fn g_action_map_add_action(action_map: *GActionMap, action: *GAction) void;
+pub extern fn g_simple_action_group_new() *GSimpleActionGroup;
+pub extern fn gtk_widget_insert_action_group(widget: *Widget, name: [*:0]const u8, group: ?*GActionGroup) void;
 pub extern fn g_application_run(application: *GApplication, argc: c_int, argv: ?[*]const ?[*:0]const u8) c_int;
 pub extern fn g_application_quit(application: *GApplication) void;
 pub extern fn g_application_activate(application: *GApplication) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
+pub extern fn g_file_new_for_path(path: [*:0]const u8) *GFile;
+pub extern fn g_file_query_exists(file: *GFile, cancellable: ?*GCancellable) gboolean;
 pub extern fn g_menu_new() *GMenu;
 pub extern fn g_menu_model_get_n_items(model: *GMenuModel) c_int;
 pub extern fn g_menu_append(menu: *GMenu, label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) void;
@@ -649,6 +656,7 @@ pub extern fn gtk_toggle_button_new() *Widget;
 pub extern fn gtk_toggle_button_get_active(button: *ToggleButton) gboolean;
 pub extern fn gtk_menu_button_new() *Widget;
 pub extern fn gtk_menu_button_set_icon_name(button: *MenuButton, icon_name: [*:0]const u8) void;
+pub extern fn gtk_menu_button_set_label(button: *MenuButton, label: [*:0]const u8) void;
 pub extern fn gtk_menu_button_set_popover(button: *MenuButton, popover: ?*Widget) void;
 pub extern fn gtk_scale_button_new(
     min: f64,
@@ -827,6 +835,16 @@ pub extern fn gtk_uri_launcher_launch(
     data: ?*anyopaque,
 ) void;
 pub extern fn gtk_uri_launcher_launch_finish(launcher: *UriLauncher, result: *GAsyncResult, err: *?*GError) gboolean;
+
+pub extern fn gtk_file_launcher_new(file: ?*GFile) *FileLauncher;
+pub extern fn gtk_file_launcher_open_containing_folder(
+    launcher: *FileLauncher,
+    parent: ?*Window,
+    cancellable: ?*GCancellable,
+    callback: ?AsyncReadyCallback,
+    data: ?*anyopaque,
+) void;
+pub extern fn gtk_file_launcher_open_containing_folder_finish(launcher: *FileLauncher, result: *GAsyncResult, err: *?*GError) gboolean;
 
 pub extern fn gtk_file_dialog_new() *FileDialog;
 pub extern fn gtk_file_dialog_set_title(dialog: *FileDialog, title: [*:0]const u8) void;

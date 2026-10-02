@@ -119,12 +119,20 @@ pub fn accepted(self: *App) void {
 }
 
 pub fn accept(self: *App, track_id: i64, proposal_id: i64) void {
-    const library = self.library orelse return;
+    _ = acceptProposal(self, track_id, proposal_id);
+}
+
+/// Whether accepting changed the library's values.
+fn acceptProposal(self: *App, track_id: i64, proposal_id: i64) bool {
+    const library = self.library orelse return false;
     self.matches_open_track = track_id;
-    const acceptance = self.runtime.libraryAcceptMatch(library, proposal_id) catch |err|
-        return refused(self, err, "Could not save that match");
+    const acceptance = self.runtime.libraryAcceptMatch(library, proposal_id) catch |err| {
+        refused(self, err, "Could not save that match");
+        return false;
+    };
     self.toast(if (acceptance.values_written == 0) "Kept your values" else "Match saved");
     accepted(self);
+    return acceptance.values_written != 0;
 }
 
 pub fn dismiss(self: *App, track_id: i64, proposal_id: i64) void {
@@ -148,10 +156,25 @@ fn groupRefused(self: *App, err: anyerror, fallback: [:0]const u8) void {
     self.toast(fallback);
 }
 
+/// The Tracks a correction group would change, for the tag write offered
+/// once it is accepted.
+fn groupTracks(self: *App, library: liborca.LibraryHandle, group_id: i64, tracks: *std.ArrayList(i64)) void {
+    var page = self.runtime.libraryCorrectionGroups(library, self.allocator, app.page_size, 0) catch return;
+    defer page.deinit();
+    for (page.items) |group| {
+        if (group.group_id != group_id) continue;
+        for (group.proposals) |member| if (member.track_id) |id| tracks.append(self.allocator, id) catch return;
+    }
+}
+
 fn acceptGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const library = self.library orelse return;
-    const acceptance = self.runtime.libraryAcceptCorrectionGroup(library, groupOf(button) orelse return) catch |err|
+    const group_id = groupOf(button) orelse return;
+    var tracks: std.ArrayList(i64) = .empty;
+    defer tracks.deinit(self.allocator);
+    groupTracks(self, library, group_id, &tracks);
+    const acceptance = self.runtime.libraryAcceptCorrectionGroup(library, group_id) catch |err|
         return groupRefused(self, err, "Could not save the correction");
     var buffer: [64]u8 = undefined;
     self.toast(if (acceptance.accepted == 1)
@@ -159,6 +182,7 @@ fn acceptGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void 
     else
         strings.format(&buffer, "Corrected {f} songs", .{strings.grouped(acceptance.accepted)}));
     accepted(self);
+    if (acceptance.values_written != 0 and tracks.items.len != 0) tags.confirmWrite(self, tracks.items);
 }
 
 fn dismissGroupClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -297,7 +321,11 @@ fn proposalOf(button: ?*anyopaque) ?i64 {
 
 fn acceptClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const info = rowInfo(data);
-    accept(info.self, info.track_id, proposalOf(button) orelse return);
+    const self = info.self;
+    const track_id = info.track_id;
+    const correction = gtk.g_object_get_data(button.?, "orca-correction") != null;
+    const written = acceptProposal(self, track_id, proposalOf(button) orelse return);
+    if (written and correction) tags.confirmWrite(self, &.{track_id});
 }
 
 fn dismissClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -477,6 +505,7 @@ fn proposalRow(info: *RowInfo, proposal: liborca.MatchProposal) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), line);
     const accept_button = proposalButton("Accept", "Record this recording ID", proposal.id, gtk.callback(acceptClicked), info);
     gtk.gtk_widget_add_css_class(accept_button, "suggested-action");
+    if (proposal.corrects != null) gtk.g_object_set_data(accept_button, "orca-correction", accept_button);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), accept_button);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), proposalButton("Dismiss", "Not this recording", proposal.id, gtk.callback(dismissClicked), info));
     const link = linkButton(proposal.recording_mbid);

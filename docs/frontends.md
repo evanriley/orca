@@ -232,7 +232,18 @@ The window is an `AdwNavigationSplitView`:
   end of a row removes it.
 
 - **Health** lists what liborca found wrong with the library, with a count in
-  the sidebar and a Find Duplicates button.
+  the sidebar and a Find Duplicates button. Each row offers the issue's
+  `HealthAction`: Fix, a menu of Match and Edit Tags; Fetch Cover; Compare,
+  a dialog of the duplicate's two files (`libraryHealthFile`) side by side,
+  each with Reveal, that deletes nothing (a second location of the same
+  file, which has no `related_file_id`, is described instead of shown);
+  Review, which opens the
+  correction in Matches; or Show in Files, which opens the file's folder
+  and says "File not found" when the file is gone. Dismiss hides the issue
+  until its file changes (`libraryDismissHealthIssue`), with Undo
+  (`libraryRestoreHealthIssue`). A banner offers Analyse while
+  `libraryUnanalyzedCount` is above zero and no analysis runs. The page
+  reloads when matching, analysis or duplicate finding finishes.
 - **Matches** lists the songs with MusicBrainz or AcoustID proposals
   awaiting review (`libraryMatchReviewPage`), with their count in the
   sidebar. Each row shows the song's own title, artist, album and length and
@@ -262,7 +273,9 @@ The window is an `AdwNavigationSplitView`:
   (`libraryDismissCorrectionGroup`) take the whole group; the songs in a
   group are not listed among the songs to review. A proposal that would
   replace the recording ID in effect says "replaces" and the start of that
-  ID beside its source.
+  ID beside its source. Accepting a correction, alone or with Accept All,
+  opens the tag-write preview for the corrected songs when the accept
+  changed their values.
 
   Submit to AcoustID (N) appears when an AcoustID key is saved and
   `libraryAcoustIdSubmittableCount` is above zero. It asks first, then runs

@@ -38,6 +38,7 @@ pub const SpinRow = opaque {};
 pub const EntryRow = opaque {};
 pub const AlertDialog = opaque {};
 pub const ExpanderRow = opaque {};
+pub const Banner = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
 pub const RESPONSE_SUGGESTED: c_int = 1;
@@ -176,6 +177,11 @@ pub extern fn adw_status_page_set_description(page: *StatusPage, description: ?[
 pub extern fn adw_status_page_set_child(page: *StatusPage, child: ?*gtk.Widget) void;
 
 pub extern fn adw_spinner_new() *gtk.Widget;
+
+pub extern fn adw_banner_new(title: [*:0]const u8) *gtk.Widget;
+pub extern fn adw_banner_set_title(banner: *Banner, title: [*:0]const u8) void;
+pub extern fn adw_banner_set_button_label(banner: *Banner, label: ?[*:0]const u8) void;
+pub extern fn adw_banner_set_revealed(banner: *Banner, revealed: gtk.gboolean) void;
 
 pub extern fn adw_avatar_new(size: c_int, text: ?[*:0]const u8, show_initials: gtk.gboolean) *gtk.Widget;
 pub extern fn adw_avatar_set_text(avatar: *Avatar, text: ?[*:0]const u8) void;

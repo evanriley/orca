@@ -241,6 +241,7 @@ pub const App = struct {
     health_body: ?*gtk.Stack = null,
     health_title: ?*adw.WindowTitle = null,
     health_count: ?*gtk.Label = null,
+    health_banner: ?*adw.Banner = null,
 
     matches_list: ?*gtk.ListBox = null,
     matches_corrections: ?*gtk.ListBox = null,

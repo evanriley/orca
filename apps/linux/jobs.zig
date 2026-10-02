@@ -55,6 +55,7 @@ fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u
     showScanning(self, true);
     if (self.scan_label) |label| gtk.gtk_label_set_text(label, title);
     if (self.scan_detail) |label| gtk.gtk_label_set_text(label, "Starting…");
+    health.updateBanner(self);
     self.updateTracksBody();
     self.requestTick();
 }
@@ -533,7 +534,6 @@ fn finished(
             self.toast(strings.printZ(&buffer, "Analysed {d} {s}", .{ measured, if (measured == 1) "file" else "files" }) catch "Analysed");
         },
         .duplicates => {
-            health.reload(self);
             const found = if (stats) |value| value.tracks_written + value.releases_written else 0;
             self.toast(if (found == 0)
                 "No duplicates found"
@@ -566,6 +566,7 @@ pub fn tick(self: *App) void {
         self.match_task_mode = .search;
         self.shown_matched = 0;
         showScanning(self, false);
+        health.updateBanner(self);
         return;
     };
     const stats: ?liborca.ScanStats = switch (task) {
@@ -595,5 +596,9 @@ pub fn tick(self: *App) void {
     self.shown_matched = 0;
     showScanning(self, false);
     finished(self, task, snapshot.state, stats, match_stats, submission_stats);
+    switch (task) {
+        .analysis, .duplicates, .matching => health.reload(self),
+        .scan, .tag_write, .submission => health.updateBanner(self),
+    }
     self.updateTracksBody();
 }

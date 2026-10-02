@@ -83,6 +83,14 @@
   warning naming the recording AcoustID heard and its score, for a file it
   leaves a pending correction for, and clears it for any other outcome; accepting
   the correction, or dismissing the file's last pending proposal, clears it.
+- **`orca-gtk` acts on Health issues.** Each row offers its issue's action:
+  Fix (Match or Edit Tags), Fetch Cover, Compare (the two files of a
+  duplicate side by side, each with Reveal; nothing is deleted), Review (the
+  correction in Matches) or Show in Files, and Dismiss with Undo. A banner
+  offers Analyse while files are not analysed. Accepting a correction, alone
+  or as an album group, on the Matches page offers the tag write for the
+  corrected songs. The page reloads when matching, analysis or duplicate
+  finding finishes.
 - **Library schema version 29.** Adds `health_dismissals` and
   `library_health_issues.related_file_id` with its index.
 - **Breaking: `orca-cli health` prints the file id and the action.** Each
