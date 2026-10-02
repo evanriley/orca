@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.8.1 - 2026-10-02
+
+Ships Library schema version 30, unchanged from 0.8.0.
+
 ### Added
 
 - **Tag-write plans skip a file whose folder Orca cannot create files in.**
