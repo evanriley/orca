@@ -1410,7 +1410,7 @@ test "a diverged copy carries the file's Orca values and locks but none of its a
     try std.testing.expectEqual(@as(i64, 0), try copies.writtenValuesOf(diverged));
     inline for (.{
         "analysis_results",
-        "library_health_issues",
+        "(SELECT file_id FROM library_health_issues WHERE kind = 5)",
         "listens",
         "identification_proposals",
         "identification_searches",

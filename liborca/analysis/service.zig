@@ -15,7 +15,7 @@ pub const diagnostics_algorithm_id = "orca.audio-diagnostics";
 /// The version covers the *input* a measurement was taken from as much as the
 /// arithmetic taken over it: bump it whenever a decoder's samples change, so
 /// stored figures are re-measured.
-pub const diagnostics_algorithm_version: u32 = 3;
+pub const diagnostics_algorithm_version: u32 = 4;
 pub const fingerprint_algorithm_id = "orca.temporal-fingerprint";
 /// Bumped whenever a decoder's samples change, as the diagnostics version is. The
 /// fingerprint carries `decoded_audio_hash`, which becomes `files.audio_hash`
@@ -97,6 +97,8 @@ pub const Analysis = struct {
     /// failed, or on a cache hit that stored none.
     chromaprint: ?chromaprint.Fingerprint,
     cache_hit: bool,
+    /// Frames decoded, or null on a cache hit, which decodes nothing.
+    decoded_frames: ?u64,
     /// The identity of the bytes this measurement describes, as the Service
     /// observed them. A caller that stores the result itself keys on this
     /// rather than on what a database row claims, so a measurement can never
@@ -156,6 +158,7 @@ pub const Service = struct {
                     .fingerprint = cached_fingerprint.?,
                     .chromaprint = cached_chromaprint,
                     .cache_hit = true,
+                    .decoded_frames = null,
                     .source_identity = source_identity,
                 };
             }
@@ -245,6 +248,7 @@ pub const Service = struct {
             .fingerprint = fingerprint_result,
             .chromaprint = acoustid_result,
             .cache_hit = false,
+            .decoded_frames = completed_frames,
             .source_identity = source_identity,
         };
     }

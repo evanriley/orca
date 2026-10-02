@@ -2941,6 +2941,21 @@ const VerifyRig = struct {
         defer std.testing.allocator.free(files);
         return files[0];
     }
+
+    fn mismatchCount(self: *VerifyRig, track_id: i64) !i64 {
+        return self.fileMismatchCount(try self.fileOf(track_id));
+    }
+
+    fn fileMismatchCount(self: *VerifyRig, file_id: i64) !i64 {
+        var count = try self.library_database.database.prepare(
+            "SELECT count(*) FROM library_health_issues WHERE file_id=?1 AND kind=?2;",
+        );
+        defer count.deinit();
+        try count.bindInt64(1, file_id);
+        try count.bindInt64(2, @intFromEnum(database.HealthIssueKind.recording_mismatch));
+        if (try count.step() != .row) return error.TestExpectedRow;
+        return count.columnInt64(0);
+    }
 };
 
 fn writeDamagedFlac(dir: std.Io.Dir, name: []const u8) !void {
@@ -3014,10 +3029,30 @@ test "verification stores what AcoustID hears of each file's recording ID and pr
     try std.testing.expectEqualStrings(northern_sky_mbid, proposals.items[0].corrects.?);
     try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryMatchReviewCount(rig.library));
 
+    for ([_]i64{ agrees, weak, empty, damaged, refused }) |track_id|
+        try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(track_id));
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryHealthIssueCount(rig.library));
+    const issues = try rig.runtime.libraryHealthIssuePage(rig.library, 10, 0);
+    defer issues.deinit();
+    const mismatch = issues.items[0];
+    try std.testing.expectEqual(database.HealthIssueKind.recording_mismatch, mismatch.kind);
+    try std.testing.expectEqual(database.HealthSeverity.warning, mismatch.severity);
+    try std.testing.expectEqual(database.HealthAction.review_correction, mismatch.action);
+    try std.testing.expectEqual(try rig.fileOf(disagrees), mismatch.file_id);
+    try std.testing.expectEqual(@as(?i64, disagrees), mismatch.track_id);
+    try std.testing.expectEqualStrings("AcoustID heard \"Pink Moon\" by Nick Drake (" ++ pink_moon_mbid ++ ") at 95%", mismatch.details);
+
     try rig.runtime.libraryDismissMatch(rig.library, proposals.items[0].id);
     const dismissed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, disagrees)).?;
     defer dismissed.deinit();
     try std.testing.expect(dismissed.dismissed);
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(disagrees));
+    try std.testing.expectEqual(@as(u64, 0), try rig.runtime.libraryHealthIssueCount(rig.library));
+
+    const again = try rig.verify(.{ .track_id = disagrees });
+    try std.testing.expectEqual(@as(u64, 1), again.stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 0), try rig.runtime.libraryMatchReviewCount(rig.library));
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(disagrees));
 }
 
 test "a verified file is looked up again only when its bytes or its recording ID change, and one that disagrees only beside such a file or alone" {
@@ -3060,7 +3095,16 @@ test "a verified file is looked up again only when its bytes or its recording ID
     const changed = (try rig.runtime.libraryTrackVerification(rig.library, std.testing.allocator, reidentified)).?;
     defer changed.deinit();
     try std.testing.expect(changed.stale);
+    try std.testing.expectEqual(@as(i64, 1), try rig.fileMismatchCount(disputed_file));
+    var raised = try rig.library_database.database.prepare(
+        "INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES (?1, ?2, 1, 'stale');",
+    );
+    defer raised.deinit();
+    try raised.bindInt64(1, agreeing_file);
+    try raised.bindInt64(2, @intFromEnum(database.HealthIssueKind.recording_mismatch));
+    try std.testing.expectEqual(database.sqlite.Step.done, try raised.step());
     const after_edit = try rig.verify(.{});
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(reidentified));
     try std.testing.expectEqual(@as(?u64, 2), after_edit.total_units);
     try std.testing.expectEqual(@as(u64, 2), after_edit.stats.verified);
     try std.testing.expectEqual(@as(u64, 1), after_edit.stats.agreed);
@@ -3092,7 +3136,7 @@ test "an album correction forms again with every file it disputes once one file 
     defer rig.deinit();
     const album = try addRelease(rig.library_database, "Bryter Layter", bryter_layter_mbid);
     const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", pink_moon_mbid, album);
-    _ = try rig.addTone("pink.wav", 420, "Northern Sky", northern_sky_mbid, album);
+    const sounds_pink = try rig.addTone("pink.wav", 420, "Northern Sky", northern_sky_mbid, album);
     rig.acoustid.lookup_body = acoustIdAnswer(
         heardBy("0", heardResult("0.97", northern_sky_heard)) ++ "," ++ heardBy("1", heardResult("0.96", pink_moon_heard)),
     );
@@ -3123,6 +3167,13 @@ test "an album correction forms again with every file it disputes once one file 
     try std.testing.expectEqual(@as(usize, 1), groups.items.len);
     try std.testing.expect(groups.items[0].group_id != formed.items[0].group_id);
     try std.testing.expectEqual(@as(usize, 2), groups.items[0].proposals.len);
+    try std.testing.expectEqual(@as(i64, 1), try rig.mismatchCount(sounds_northern));
+    try std.testing.expectEqual(@as(i64, 1), try rig.mismatchCount(sounds_pink));
+
+    try rig.runtime.libraryDismissCorrectionGroup(rig.library, groups.items[0].group_id);
+
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(sounds_northern));
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(sounds_pink));
 }
 
 test "cancelling a verification while a unit's lookup is in flight commits nothing for that unit and keeps the unit before it" {
@@ -3260,10 +3311,14 @@ test "a Release whose files carry each other's tags is proposed one album correc
     try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryAcceptMatch(rig.library, moved.proposal_id));
     try std.testing.expectError(error.ProposalInGroup, rig.runtime.libraryDismissMatch(rig.library, moved.proposal_id));
     try std.testing.expectError(error.UnknownCorrectionGroup, rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id + 100));
+    try std.testing.expectEqual(@as(i64, 1), try rig.fileMismatchCount(sounds_northern));
+    try std.testing.expectEqual(@as(i64, 1), try rig.fileMismatchCount(sounds_pink));
 
     const acceptance = try rig.runtime.libraryAcceptCorrectionGroup(rig.library, group.group_id);
 
     try std.testing.expectEqual(@as(u64, 2), acceptance.accepted);
+    try std.testing.expectEqual(@as(i64, 0), try rig.fileMismatchCount(sounds_northern));
+    try std.testing.expectEqual(@as(i64, 0), try rig.fileMismatchCount(sounds_pink));
     for ([_]struct { file: i64, recording: []const u8, title: []const u8, position: []const u8, track_mbid: []const u8 }{
         .{ .file = sounds_northern, .recording = northern_sky_mbid, .title = "Northern Sky", .position = "3", .track_mbid = northern_sky_track_mbid },
         .{ .file = sounds_pink, .recording = pink_moon_mbid, .title = "Pink Moon", .position = "4", .track_mbid = pink_moon_track_mbid },
@@ -3342,8 +3397,11 @@ test "a disputed file with no tagged release is proposed a correction of its rec
     defer proposals.deinit();
     try std.testing.expectEqual(@as(usize, 1), proposals.items.len);
     try std.testing.expectEqual(@as(?u32, null), proposals.items[0].track_number);
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(chosen_track));
+    try std.testing.expectEqual(@as(i64, 1), try rig.mismatchCount(disputed_track));
 
     _ = try rig.runtime.libraryAcceptMatch(rig.library, proposals.items[0].id);
+    try std.testing.expectEqual(@as(i64, 0), try rig.mismatchCount(disputed_track));
 
     try expectOrcaValue(rig.library_database, disputed_file, .musicbrainz_recording_id, pink_moon_mbid);
     try expectOrcaValue(rig.library_database, disputed_file, .artist, "Nick Drake");

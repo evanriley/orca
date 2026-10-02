@@ -127,7 +127,9 @@ zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
-zig build run -- health DATABASE [OFFSET]
+zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
+zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
+zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS]
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]

@@ -3,6 +3,7 @@ const sqlite = @import("../sqlite.zig");
 const metadata = @import("../../metadata/model.zig");
 const columns = @import("../columns.zig");
 const identification = @import("identification.zig");
+const health = @import("health.zig");
 
 const max_page = columns.max_page;
 const track_play_file = @import("tracks.zig").track_play_file;
@@ -46,7 +47,8 @@ pub const ReleaseArtworkRepository = struct {
     }
 
     /// Records what the archive answered for `release_mbid`: its cover, or
-    /// with `image` null that it has none.
+    /// with `image` null that it has none. A cover retires `artwork_problem`
+    /// for the Release's files in the same transaction.
     pub fn put(
         self: *ReleaseArtworkRepository,
         release_id: i64,
@@ -57,6 +59,8 @@ pub const ReleaseArtworkRepository = struct {
         if (!metadata.isMusicBrainzId(release_mbid)) return error.InvalidMusicBrainzId;
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
         var statement = try self.db.prepare(
             \\INSERT INTO release_artwork(release_id, musicbrainz_release_id, image, mime, fetched_at)
             \\VALUES (?1, ?2, ?3, ?4, ?5)
@@ -75,6 +79,8 @@ pub const ReleaseArtworkRepository = struct {
         }
         try statement.bindInt64(5, fetched_at);
         if (try statement.step() != .done) return error.SqlFailed;
+        if (image != null) try health.clearReleaseLocked(self.db, release_id, .artwork_problem);
+        try self.db.exec("COMMIT;");
     }
 
     /// The fetched cover of a Release, as a caller-owned image.

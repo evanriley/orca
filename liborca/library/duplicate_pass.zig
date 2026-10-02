@@ -83,6 +83,9 @@ const Finding = struct {
     /// stored issue for every kind it did not raise.
     exact_details: ?[]u8 = null,
     likely_details: ?[]u8 = null,
+    /// The other row of the finding, or null when the duplicate is a second
+    /// location of this same row.
+    related_file_id: ?i64 = null,
 
     fn deinit(self: Finding, allocator: std.mem.Allocator) void {
         if (self.exact_details) |details| allocator.free(details);
@@ -217,7 +220,7 @@ pub const DuplicateScan = struct {
         finding: *Finding,
         result: *Result,
     ) !Outcome {
-        if (try self.exactDetails(candidate)) |details| {
+        if (try self.exactDetails(candidate, &finding.related_file_id)) |details| {
             finding.exact_details = details;
             return .exact;
         }
@@ -288,6 +291,7 @@ pub const DuplicateScan = struct {
             analysis.health.likely_duplicate_details,
             .{ path, 100 * best_score },
         );
+        finding.related_file_id = matched;
         return .likely;
     }
 
@@ -301,6 +305,7 @@ pub const DuplicateScan = struct {
     fn exactDetails(
         self: *DuplicateScan,
         candidate: database.repository.DuplicateCandidate,
+        related_file_id: *?i64,
     ) !?[]u8 {
         if (try self.locations.secondPresentPath(self.allocator, candidate.id)) |copy| {
             defer self.allocator.free(copy);
@@ -316,11 +321,13 @@ pub const DuplicateScan = struct {
         if (found == 0) return null;
         const path = try self.pathOf(peers[0]);
         defer self.allocator.free(path);
-        return try std.fmt.allocPrint(
+        const details = try std.fmt.allocPrint(
             self.allocator,
             analysis.health.exact_duplicate_details,
             .{path},
         );
+        related_file_id.* = peers[0];
+        return details;
     }
 
     /// How a peer is named to a person. A file with no location on any known
@@ -375,6 +382,7 @@ pub const DuplicateScan = struct {
                     .kind = .exact_duplicate,
                     .severity = .warning,
                     .details = details,
+                    .related_file_id = finding.related_file_id,
                 });
             } else {
                 try self.health_issues.clearLocked(finding.file_id, .exact_duplicate);
@@ -384,6 +392,7 @@ pub const DuplicateScan = struct {
                     .kind = .likely_duplicate,
                     .severity = .information,
                     .details = details,
+                    .related_file_id = finding.related_file_id,
                 });
             } else {
                 try self.health_issues.clearLocked(finding.file_id, .likely_duplicate);
@@ -582,6 +591,38 @@ test "two files whose decoded audio hashes alike are reported as exact duplicate
     const backward = (try fixture.finding(second, .exact_duplicate)).?;
     defer testing.allocator.free(backward);
     try testing.expect(std.mem.endsWith(u8, backward, "/music/album/track.flac"));
+}
+
+test "each exact duplicate names the other file, and keeps its finding when that file is deleted" {
+    var fixture = try Fixture.init("file:orca-duplicate-related?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const samples = try Fixture.tone(3, 1, 0.6);
+    defer testing.allocator.free(samples);
+    const first = try fixture.recordMeasured("/music/album/track.flac", samples);
+    const second = try fixture.recordMeasured("/music/rip/track.wav", samples);
+    var pass = fixture.scan();
+    _ = try pass.run();
+
+    var page = try fixture.library.health_issues.page(testing.allocator, 256, 0);
+    defer page.deinit();
+    try testing.expectEqual(@as(usize, 2), page.items.len);
+    for (page.items) |issue| {
+        try testing.expectEqual(database.HealthAction.compare_duplicate, issue.action);
+        try testing.expectEqual(@as(?i64, if (issue.file_id == first) second else first), issue.related_file_id);
+    }
+
+    var sql_buffer: [160]u8 = undefined;
+    try fixture.library.database.exec(try std.fmt.bufPrintSentinel(
+        &sql_buffer,
+        "DELETE FROM locations WHERE file_id = {d}; DELETE FROM analysis_results WHERE file_id = {d}; DELETE FROM files WHERE id = {d};",
+        .{ second, second, second },
+        0,
+    ));
+    var after = try fixture.library.health_issues.page(testing.allocator, 256, 0);
+    defer after.deinit();
+    try testing.expectEqual(@as(usize, 1), after.items.len);
+    try testing.expectEqual(first, after.items[0].file_id);
+    try testing.expectEqual(@as(?i64, null), after.items[0].related_file_id);
 }
 
 test "a byte-identical copy is one file at two paths and is still reported" {

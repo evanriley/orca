@@ -16,8 +16,9 @@
 //! of the most expensive work in the codebase.
 //!
 //! Like the scanner and the backfill it writes only what it owns: the analysis
-//! results, the audio hash it just computed, and the one health-issue kind
-//! that belongs to a pass which actually decoded the audio.
+//! results, the audio hash it just computed, and the health-issue kinds that
+//! belong to a pass which actually decoded the audio: `corrupt_audio`,
+//! `clipping`, `excessive_silence` and `missing_analysis`.
 
 const std = @import("std");
 const analysis = @import("../analysis/root.zig");
@@ -72,6 +73,11 @@ const Measurement = struct {
         /// and the only tier that survives Orca writing a tag into the file.
         audio_hash: [32]u8,
         has_loudness: bool,
+        integrated_lufs: ?f32,
+        clipped_runs: u64,
+        clipped_samples: u64,
+        silent_frames: u64,
+        decoded_frames: u64,
     };
 
     const Outcome = union(enum) {
@@ -377,6 +383,11 @@ pub const LibraryAnalysis = struct {
             .chromaprint_bytes = chromaprint_bytes,
             .audio_hash = measured.fingerprint.decoded_audio_hash,
             .has_loudness = measured.diagnostics.replay_gain_db != null,
+            .integrated_lufs = measured.diagnostics.integrated_lufs,
+            .clipped_runs = measured.diagnostics.clipped_runs,
+            .clipped_samples = measured.diagnostics.clipped_samples,
+            .silent_frames = measured.diagnostics.silent_frames,
+            .decoded_frames = measured.decoded_frames orelse return error.UnexpectedCachedAnalysis,
         } };
     }
 
@@ -419,6 +430,22 @@ pub const LibraryAnalysis = struct {
                 // Safe to retire: only a pass that decoded the whole stream
                 // may raise or clear this kind, and this is that pass.
                 try self.health_issues.clearLocked(measurement.file_id, .corrupt_audio);
+                var details: analysis.health.DetailsBuffer = undefined;
+                try self.health_issues.settleLocked(
+                    measurement.file_id,
+                    .clipping,
+                    analysis.health.clipping(&details, value.clipped_runs, value.clipped_samples),
+                );
+                try self.health_issues.settleLocked(
+                    measurement.file_id,
+                    .excessive_silence,
+                    analysis.health.excessiveSilence(&details, value.silent_frames, value.decoded_frames),
+                );
+                try self.health_issues.settleLocked(
+                    measurement.file_id,
+                    .missing_analysis,
+                    analysis.health.missingAnalysis(value.integrated_lufs),
+                );
                 result.bytes_stored += value.diagnostics_bytes.len +
                     value.fingerprint_bytes.len;
                 if (value.has_loudness) {
@@ -433,6 +460,8 @@ pub const LibraryAnalysis = struct {
                     .severity = .error_severity,
                     .details = details,
                 });
+                for ([_]database.HealthIssueKind{ .clipping, .excessive_silence, .missing_analysis }) |kind|
+                    try self.health_issues.clearLocked(measurement.file_id, kind);
                 result.errors += 1;
             },
             .skipped => result.unsupported += 1,
@@ -681,14 +710,16 @@ test "an analysis pass counts a file that is not there without reporting it as a
     defer fixture.deinit();
     try fixture.copyFixture("generated-reference.flac", "present.flac");
     _ = try fixture.record("present.flac");
-    _ = try fixture.recordWithIdentity("never-written.flac", @splat(0x11));
+    const absent = try fixture.recordWithIdentity("never-written.flac", @splat(0x11));
 
     var pass = fixture.pass();
     const result = try pass.run();
     try testing.expectEqual(@as(u64, 2), result.files_seen);
     try testing.expectEqual(@as(u64, 1), result.unsupported);
     try testing.expectEqual(@as(u64, 1), result.changed + result.unchanged);
-    try testing.expectEqual(@as(u64, 0), try fixture.library.health_issues.count());
+    const kinds = try issueKinds(&fixture.library, absent);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{}, kinds);
 }
 
 /// A decoder that cancels the pass part way through a file's decode.
@@ -1041,4 +1072,128 @@ test "an analysis refuses zero threads" {
     var pass = fixture.pass();
     pass.threads = 0;
     try testing.expectError(error.InvalidThreadCount, pass.run());
+}
+
+/// One second of 16-bit mono PCM at 48 kHz, every sample `amplitude` times a
+/// 1 kHz sine.
+fn sineWav(amplitude: f32) ![]u8 {
+    const rate = 48_000;
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(testing.allocator);
+    const data_size: u32 = rate * 2;
+    try bytes.appendSlice(testing.allocator, "RIFF");
+    try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, 36 + data_size)));
+    try bytes.appendSlice(testing.allocator, "WAVEfmt ");
+    for ([_]u32{ 16, 0x0001_0001, rate, rate * 2, 0x0010_0002 }) |word|
+        try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, word)));
+    try bytes.appendSlice(testing.allocator, "data");
+    try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(u32, data_size)));
+    for (0..rate) |frame| {
+        const phase = 2 * std.math.pi * 1000 * @as(f32, @floatFromInt(frame)) / rate;
+        const sample = std.math.clamp(amplitude * @sin(phase) * 32768, -32768, 32767);
+        try bytes.appendSlice(testing.allocator, &std.mem.toBytes(std.mem.nativeToLittle(i16, @intFromFloat(sample))));
+    }
+    return bytes.toOwnedSlice(testing.allocator);
+}
+
+fn issueKinds(library: *database.LibraryDatabase, file_id: i64) ![]database.HealthIssueKind {
+    var issues = try library.health_issues.page(testing.allocator, 16, 0);
+    defer issues.deinit();
+    var kinds: std.ArrayList(database.HealthIssueKind) = .empty;
+    for (issues.items) |issue| {
+        if (issue.file_id == file_id) try kinds.append(testing.allocator, issue.kind);
+    }
+    return kinds.toOwnedSlice(testing.allocator);
+}
+
+fn rewrite(fixture: *Fixture, name: []const u8, file_id: i64, bytes: []const u8) !void {
+    try fixture.writeBytes(name, bytes);
+    const uri = try fixture.path(name);
+    defer testing.allocator.free(uri);
+    const digest = try quick_hash.fromPath(testing.io, uri);
+    var update = try fixture.library.database.prepare("UPDATE files SET quick_hash = ?1 WHERE id = ?2;");
+    defer update.deinit();
+    try update.bindBlob(1, &digest);
+    try update.bindInt64(2, file_id);
+    try testing.expectEqual(database.sqlite.Step.done, try update.step());
+}
+
+test "analysis raises clipping and retires it when the file is clean" {
+    var fixture = try Fixture.init("file:orca-analysis-clipping?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const clipped = try sineWav(2);
+    defer testing.allocator.free(clipped);
+    try fixture.writeBytes("song.wav", clipped);
+    const file_id = try fixture.record("song.wav");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    const before = try issueKinds(&fixture.library, file_id);
+    defer testing.allocator.free(before);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.clipping}, before);
+
+    const clean = try sineWav(0.5);
+    defer testing.allocator.free(clean);
+    try rewrite(&fixture, "song.wav", file_id, clean);
+
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.changed);
+    const after = try issueKinds(&fixture.library, file_id);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{}, after);
+}
+
+test "a single full-scale sample in an otherwise clean file is not clipping" {
+    var fixture = try Fixture.init("file:orca-analysis-one-full-scale-sample?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const bytes = try sineWav(0.5);
+    defer testing.allocator.free(bytes);
+    const first_sample = 44;
+    std.mem.writeInt(i16, bytes[first_sample + 200 ..][0..2], -32768, .little);
+    try fixture.writeBytes("song.wav", bytes);
+    const file_id = try fixture.record("song.wav");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    const kinds = try issueKinds(&fixture.library, file_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{}, kinds);
+}
+
+test "a silent file is reported as silent and too quiet to measure" {
+    var fixture = try Fixture.init("file:orca-analysis-silence?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const silent = try sineWav(0);
+    defer testing.allocator.free(silent);
+    try fixture.writeBytes("silence.wav", silent);
+    const file_id = try fixture.record("silence.wav");
+
+    var pass = fixture.pass();
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.unchanged);
+    const kinds = try issueKinds(&fixture.library, file_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(
+        database.HealthIssueKind,
+        &.{ .excessive_silence, .missing_analysis },
+        kinds,
+    );
+}
+
+test "a file that turns corrupt keeps only corrupt audio" {
+    var fixture = try Fixture.init("file:orca-analysis-turns-corrupt?mode=memory&cache=shared");
+    defer fixture.deinit();
+    const clipped = try sineWav(2);
+    defer testing.allocator.free(clipped);
+    try fixture.writeBytes("song.wav", clipped);
+    const file_id = try fixture.record("song.wav");
+
+    var pass = fixture.pass();
+    _ = try pass.run();
+    try rewrite(&fixture, "song.wav", file_id, "fLaC but not a stream at all, truly");
+    const result = try pass.run();
+    try testing.expectEqual(@as(u64, 1), result.errors);
+    const kinds = try issueKinds(&fixture.library, file_id);
+    defer testing.allocator.free(kinds);
+    try testing.expectEqualSlices(database.HealthIssueKind, &.{.corrupt_audio}, kinds);
 }

@@ -115,10 +115,11 @@ every reason to measure a file again is already a reason the selection sees it.
 - **Measured.** The encoded diagnostics and temporal fingerprint, the AcoustID
   fingerprint unless the audio is too short for one, the decoded-audio hash
   into `files.audio_hash` (tier 4 of the identity cascade — the only tier that
-  survives Orca's own tag writes), and `corrupt_audio` cleared, all in one
+  survives Orca's own tag writes), `corrupt_audio` cleared and `clipping`,
+  `excessive_silence` and `missing_analysis` raised or cleared, all in one
   bounded transaction per batch. A file with no gateable loudness — too short,
-  or silent — is still stored, so it is not re-decoded on every run; it simply
-  yields no correction.
+  or silent — is still stored, so it is not re-decoded on every run; it
+  yields no correction and raises `missing_analysis`.
 - **Declined.** Not reachable, not audio, or the identity the Library recorded
   is not the file's identity any more. Counted, no health issue:
   `locations.state` already models absence, a stale identity is a scan's job to
@@ -127,7 +128,9 @@ every reason to measure a file again is already a reason the selection sees it.
   64 KiB reads, because a stale row is selected again on every run and paying a
   whole decode to reach the same conclusion each time would make a drifted
   library as expensive as an unmeasured one.
-- **Corrupt.** A file that opened and would not decode raises `corrupt_audio`.
+- **Corrupt.** A file that opened and would not decode raises `corrupt_audio`
+  and clears the pass's other three kinds, which describe audio it could not
+  read.
   Not `unreadable_file`: that kind belongs to the property backfill, and the
   split is deliberate in both directions — a header-only pass must not be able
   to clear a finding made by reading audio it never looked at, and a pass that
@@ -368,10 +371,9 @@ over such a library would be a lie of omission, so those files are counted as
 **uncomparable** and the count is printed on its own line. A zero-finding run
 with a large uncomparable count means *not measured*, not *no duplicates*.
 
-No health issue is filed per uncomparable file. `missing_analysis` already
-means that, and one fresh defect per file on an unanalyzed library would bury
-every real finding — the same argument the analysis pass makes about absent
-files.
+No health issue is filed per uncomparable file. The count already says it, and
+one fresh defect per file on an unanalyzed library would bury every real
+finding — the same argument the analysis pass makes about absent files.
 
 ### Re-running
 
@@ -400,3 +402,85 @@ settings, and are reported as `exact_duplicate`.
 than on the process arena most subcommands use. The pass frees each
 fingerprint as soon as it has been compared, and an arena does not honour that:
 it would keep one fingerprint per comparison for the length of the run.
+
+## Health issues
+
+`library_health_issues` holds at most one row per file and kind. Each kind has
+one owning pass, which records or clears only its own kinds, inside its own
+write transaction, with `recordLocked`, `clearLocked` or `settleLocked`.
+`replaceFile` would erase other passes' findings, so production code never
+calls it. The rules and their wording live in `analysis/health.zig`.
+
+| Kind | Severity | Owner | Raised when |
+| --- | --- | --- | --- |
+| `missing_metadata` | warning | projection | the effective title, artist or album is blank, judged before the file name stands in for a missing title |
+| `missing_track_number` | information | projection | the file has no track number and was given a synthetic position |
+| `album_artist_anomaly` | information | projection | the file has an album but no album artist |
+| `artwork_problem` | information | projection | the file has no embedded cover and its Release has no fetched cover |
+| `technical_anomaly` | warning | projection | the file's track number is held by another recording |
+| `missing_analysis` | information | analysis pass | the measured audio is too short or silent for an integrated loudness |
+| `clipping` | warning | analysis pass | one channel has a run of at least three consecutive samples at full scale; see [Clipping](#clipping) |
+| `excessive_silence` | warning | analysis pass | more than a fifth of the decoded frames are silent |
+| `corrupt_audio` | error | analysis pass | the file opened and would not decode |
+| `exact_duplicate` | warning | duplicate pass | see [Duplicate detection](#duplicate-detection) |
+| `likely_duplicate` | information | duplicate pass | see [Duplicate detection](#duplicate-detection) |
+| `unreadable_file` | warning | property backfill | the file could not be opened or its header would not read |
+| `recording_mismatch` | warning | verification | AcoustID hears another recording and a correction was proposed; the details name the recording heard and its score |
+
+A file not analysed yet has no row: the analysis job's own count of files still
+owing work says that.
+
+`exact_duplicate` and `likely_duplicate` name the other file in
+`related_file_id`, which becomes null when that file is deleted; the issue
+stays. Copies with identical bytes are one file with two locations, so their
+`exact_duplicate` has no related file.
+
+`recording_mismatch` is raised by `recordVerifications` in the transaction
+that stores the verification, only when the outcome is `disagrees` and the
+verification left a pending correction, so `review_correction` always has
+one to review. A file whose recording ID is the user's locked edit gets none,
+nor does a file whose correction was already dismissed or accepted. Any other
+outcome clears it. Accepting a proposal of the file, alone, in bulk or in an
+album group, clears it in the same transaction, and dismissing one clears it
+once the file has no pending proposal left.
+
+### Clipping
+
+A sample is at full scale when its magnitude is at least `1 - 1/32768`, so
+16-bit PCM's positive limit, 32767, counts as well as its negative limit. A
+clip is a run of at least three consecutive full-scale samples in one
+channel: a single full-scale sample is a peak, not clipping. Runs carry
+across decode blocks, and samples in different channels of interleaved audio
+never join one run. `clipped_samples` counts only the samples inside such
+runs, and the details read `N clipped runs (M samples at full scale)`.
+
+### Dismissals
+
+`Runtime.libraryDismissHealthIssue` (`orca-cli health-dismiss`) hides one
+kind on one file. `health_dismissals` keeps the file's `quick_hash` at the
+time, and the page and count leave out an issue whose dismissal holds the
+hash the file still has, so the issue shows again once the file's bytes
+change. A file never hashed is dismissed under a null hash and stays hidden.
+The issue row itself is untouched: its owning pass still records and clears
+it. `libraryRestoreHealthIssue` (`orca-cli health-restore`) drops the
+dismissal. A dismissal goes with its file.
+
+### Actions
+
+`HealthIssue` names the lowest Track id the file backs (`track_id`), that
+Track's Release (`release_id`), and `action`, what a host offers to resolve
+the issue. `Runtime.libraryHealthFile` returns the file's path, codec,
+format, size and length, and whether every location is missing, for
+`reveal_file`.
+
+| Action | Kinds |
+| --- | --- |
+| `match_or_edit` | `missing_metadata`, `missing_track_number`, `album_artist_anomaly`; `artwork_problem` when the Release has no MusicBrainz release ID |
+| `fetch_cover_art` | `artwork_problem` when the Release has a MusicBrainz release ID, tagged or named by its accepted matches |
+| `compare_duplicate` | `exact_duplicate`, `likely_duplicate` |
+| `review_correction` | `recording_mismatch` |
+| `reveal_file` | every other kind |
+
+Storing a fetched cover (`ReleaseArtworkRepository.put` with an image, used by
+every cover-art fetch) clears `artwork_problem` for every file of the
+Release's Tracks in the same transaction. A recorded miss clears nothing.

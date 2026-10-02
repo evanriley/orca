@@ -71,6 +71,8 @@ fn describe(err: anyerror) []const u8 {
         error.PathAlreadyExists => "that file already exists; pass --force to replace it",
         error.PageOutOfRange => "at most 512 ids at a time, and --limit must be 1 to 512",
         error.TracksAndPlaylist => "give either IDS or --playlist=ID, not both",
+        error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping or exact_duplicate",
+        error.UnknownFile => "no file with that id",
         else => @errorName(err),
     };
 }
@@ -145,6 +147,8 @@ const commands = [_]Command{
     .{ .name = "health", .usage = "health DATABASE [OFFSET]", .min_arguments = 1, .max_arguments = 2, .run = listHealthIssues },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
+    .{ .name = "health-dismiss", .usage = "health-dismiss DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = dismissHealthIssue },
+    .{ .name = "health-restore", .usage = "health-restore DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = restoreHealthIssue, .shares_usage_line = true },
     .{ .name = "play-tracks", .usage = "play-tracks DATABASE (IDS | --playlist=ID) [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
     .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
@@ -454,6 +458,12 @@ const help_details =
     \\many files it could say nothing about, and a zero-finding run over a
     \\library with a large uncomparable count means "not measured", not "no
     \\duplicates".
+    \\
+    \\health prints one issue per line: file id, severity, kind, the action
+    \\that resolves it (match_or_edit, fetch_cover_art, compare_duplicate,
+    \\review_correction or reveal_file), path and details. health-dismiss
+    \\hides an issue of a file until the file's bytes change; health-restore
+    \\shows it again. KIND is the kind health prints.
     \\
     \\backfill re-reads the headers of files whose declared audio properties
     \\are missing and reprojects the Tracks derived from them, without walking
@@ -858,9 +868,29 @@ fn listHealthIssues(context: Context) !void {
     var page = try runtime.libraryHealthIssuePage(library_handle, 256, offset);
     defer page.deinit();
     for (page.items) |issue| try context.stdout.print(
-        "{s}\t{s}\t{s}\t{s}\n",
-        .{ @tagName(issue.severity), @tagName(issue.kind), issue.path, issue.details },
+        "{d}\t{s}\t{s}\t{s}\t{s}\t{s}\n",
+        .{ issue.file_id, @tagName(issue.severity), @tagName(issue.kind), @tagName(issue.action), issue.path, issue.details },
     );
+}
+
+fn dismissHealthIssue(context: Context) !void {
+    const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const kind = std.meta.stringToEnum(liborca.HealthIssueKind, context.arguments[2]) orelse return error.UnknownHealthKind;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryDismissHealthIssue(library, file_id, kind);
+    try context.stdout.print("dismissed {s} for file {d}\n", .{ @tagName(kind), file_id });
+}
+
+fn restoreHealthIssue(context: Context) !void {
+    const file_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const kind = std.meta.stringToEnum(liborca.HealthIssueKind, context.arguments[2]) orelse return error.UnknownHealthKind;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryRestoreHealthIssue(library, file_id, kind);
+    try context.stdout.print("restored {s} for file {d}\n", .{ @tagName(kind), file_id });
 }
 
 fn listRoots(context: Context) !void {

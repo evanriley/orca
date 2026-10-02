@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 28;
+pub const current_version = 29;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1040,6 +1040,20 @@ const migration_28 =
     \\    ON identification_proposals(album_group, state) WHERE album_group IS NOT NULL;
 ;
 
+const migration_29 =
+    \\CREATE TABLE health_dismissals (
+    \\    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    \\    kind INTEGER NOT NULL,
+    \\    quick_hash BLOB,
+    \\    dismissed_at INTEGER NOT NULL,
+    \\    PRIMARY KEY(file_id, kind)
+    \\) WITHOUT ROWID;
+    \\ALTER TABLE library_health_issues
+    \\    ADD COLUMN related_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL;
+    \\CREATE INDEX library_health_by_related
+    \\    ON library_health_issues(related_file_id) WHERE related_file_id IS NOT NULL;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1194,6 +1208,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 26 and target_version >= 26) try db.exec(migration_26);
     if (version < 27 and target_version >= 27) try db.exec(migration_27);
     if (version < 28 and target_version >= 28) try db.exec(migration_28);
+    if (version < 29 and target_version >= 29) try db.exec(migration_29);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2311,5 +2326,36 @@ test "upgrading from version 27 adds an empty verification table that follows it
         \\DELETE FROM files WHERE id = 1;
     );
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM recording_verifications;"));
+    try checkForeignKeys(db);
+}
+
+test "upgrading from version 28 keeps every health issue with no related file and adds dismissals that follow their file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v28.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 28);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes, quick_hash) VALUES (1, 1, 10, x'01'), (2, 1, 10, NULL);
+        \\INSERT INTO library_health_issues(file_id, kind, severity, details) VALUES
+        \\    (1, 5, 1, 'clipped'), (2, 9, 1, 'content also appears at /m/a.flac');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE related_file_id IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM health_dismissals;"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO health_dismissals VALUES (9, 5, NULL, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("UPDATE library_health_issues SET related_file_id = 9 WHERE file_id = 2;"));
+    try db.exec(
+        \\UPDATE library_health_issues SET related_file_id = 1 WHERE file_id = 2;
+        \\INSERT INTO health_dismissals VALUES (1, 5, x'01', 0), (2, 9, NULL, 0);
+        \\DELETE FROM files WHERE id = 1;
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE file_id = 2 AND related_file_id IS NULL;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM health_dismissals;"));
     try checkForeignKeys(db);
 }

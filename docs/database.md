@@ -478,6 +478,16 @@ group holds the proposals of one unit. The partial index
 album_group IS NOT NULL` lists and finds groups. The review page and its
 count leave grouped proposals out.
 
+`health_dismissals` (version 29) holds one row per dismissed health issue,
+keyed on `(file_id, kind)` and going with its file: the file's `quick_hash`
+when it was dismissed, null for a file never hashed, and `dismissed_at` in
+Unix seconds. The health page and count leave out an issue whose dismissal
+`quick_hash IS files.quick_hash`, through the primary key. Version 29 also
+adds `library_health_issues.related_file_id`, the other file of a duplicate,
+set to null when that file is deleted, with the partial index
+`library_health_by_related` the delete uses. See
+[analysis.md](analysis.md#dismissals).
+
 `recording_verifications` (version 28) holds each file's latest
 [verification](providers.md#verification), keyed on `files.id` and going
 with its file: the `quick_hash` the file had, the `recording_mbid` in effect,

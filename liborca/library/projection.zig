@@ -17,6 +17,7 @@ const std = @import("std");
 const database = @import("../database/root.zig");
 const metadata = @import("../metadata/root.zig");
 const storage = @import("../storage/root.zig");
+const health = @import("../analysis/health.zig");
 
 /// Which files the projection should reconsider.
 ///
@@ -155,6 +156,10 @@ const Entry = struct {
     compilation: ?bool,
     musicbrainz_release_id: ?[]const u8,
     musicbrainz_recording_id: ?[]const u8,
+    embedded_artwork: bool = false,
+    /// Decided on the tags before the filename stands in for a missing title.
+    missing_metadata: ?database.HealthIssueInput = null,
+    release_id: i64 = 0,
     /// Assigned during position resolution; `synthetic` records whether the
     /// file supplied it or the projection invented it.
     position: i64 = 0,
@@ -300,6 +305,23 @@ pub const Projection = struct {
         result.artists_pruned += pruned.artists;
     }
 
+    /// Runs after `pruneStale`, because a cover carried to a Release by a
+    /// regrouping counts for its files.
+    fn settleArtwork(self: *Projection, entries: []const Entry) !void {
+        var fetched = try self.library.database.prepare(
+            "SELECT 1 FROM release_artwork WHERE release_id = ?1 AND image IS NOT NULL;",
+        );
+        defer fetched.deinit();
+        for (entries) |entry| {
+            const release_has_cover = !entry.embedded_artwork and try exists(&fetched, entry.release_id);
+            try self.library.health_issues.settleLocked(
+                entry.file_id,
+                .artwork_problem,
+                health.artworkProblem(entry.embedded_artwork, release_has_cover),
+            );
+        }
+    }
+
     /// Orca values for the fields `metadata.resolve` does not cover, resolved
     /// under the same rule: a locked value wins, the policy decides the rest.
     fn applyExtraOverrides(self: *const Projection, entry: *Entry, extra: ExtraOverrides) void {
@@ -393,6 +415,7 @@ pub const Projection = struct {
             start = end;
         }
         try self.pruneStale(allocator, entries, written.items, result);
+        try self.settleArtwork(entries);
         try self.library.database.exec("COMMIT;");
     }
 
@@ -411,7 +434,8 @@ pub const Projection = struct {
             \\       t.title, t.artist, t.album, t.album_artist,
             \\       t.track_number, t.disc_number, t.date, t.compilation,
             \\       t.musicbrainz_release_id, t.musicbrainz_recording_id,
-            \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id
+            \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id,
+            \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL
             \\FROM locations l
             \\JOIN files f ON f.id = l.file_id
             \\LEFT JOIN observed_file_tags t ON t.file_id = l.file_id
@@ -501,8 +525,10 @@ pub const Projection = struct {
                     statement.columnInt64(15) != 0,
                 .musicbrainz_release_id = try dupeNullable(allocator, statement, 16),
                 .musicbrainz_recording_id = try dupeNullable(allocator, statement, 17),
+                .embedded_artwork = statement.columnInt64(20) != 0,
             };
             self.applyExtraOverrides(&entry, extra);
+            entry.missing_metadata = health.missingMetadata(entry.title, entry.artist, entry.album);
             // A blank row helps nobody find their music; the filename often
             // carries the title the tags lack.
             if (entry.title.len == 0) {
@@ -577,7 +603,18 @@ pub const Projection = struct {
 
             for (members) |index| {
                 const entry = &entries[index];
+                entry.release_id = release_id;
                 try self.library.files.setRecordingLocked(entry.file_id, recording_id);
+                try self.library.health_issues.settleLocked(
+                    entry.file_id,
+                    .missing_metadata,
+                    entry.missing_metadata,
+                );
+                try self.library.health_issues.settleLocked(
+                    entry.file_id,
+                    .album_artist_anomaly,
+                    health.albumArtistAnomaly(entry.album, entry.album_artist),
+                );
                 if (entry.synthetic) {
                     result.synthetic_positions += 1;
                     try self.library.health_issues.recordLocked(entry.file_id, .{
@@ -1128,6 +1165,125 @@ fn trackTitles(library: *database.LibraryDatabase) !database.TrackPage {
 
 const scalar = database.columns.scalar;
 
+fn filesWithIssue(library: *database.LibraryDatabase, kind: database.HealthIssueKind) ![]i64 {
+    var issues = try library.health_issues.page(testing.allocator, 256, 0);
+    defer issues.deinit();
+    var files: std.ArrayList(i64) = .empty;
+    for (issues.items) |issue| {
+        if (issue.kind == kind) try files.append(testing.allocator, issue.file_id);
+    }
+    return files.toOwnedSlice(testing.allocator);
+}
+
+test "the projection raises missing tags before falling back to the file name" {
+    var library = try openTestLibrary("file:orca-projection-missing-tags?mode=memory&cache=shared");
+    defer library.close();
+    const untitled = try observe(&library, "/m/Artist/03 - Blue Monday.flac", .flac, .{
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 3,
+    });
+    _ = try observe(&library, "/m/Artist/04 - Thieves.flac", .flac, .{
+        .title = "Thieves",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 4,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const first = try projection.run(.all);
+    try testing.expectEqual(@as(u64, 1), first.filename_titles);
+    const flagged = try filesWithIssue(&library, .missing_metadata);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{untitled}, flagged);
+
+    try library.orca_metadata.upsert(.{
+        .file_id = untitled,
+        .field = .title,
+        .value = "Blue Monday",
+        .provenance = .user,
+        .locked = true,
+    });
+    _ = try projection.run(.{ .files = &.{untitled} });
+    const after = try filesWithIssue(&library, .missing_metadata);
+    defer testing.allocator.free(after);
+    try testing.expectEqualSlices(i64, &.{}, after);
+}
+
+test "an album without an album artist is an anomaly and a file with no album is not" {
+    var library = try openTestLibrary("file:orca-projection-album-artist-anomaly?mode=memory&cache=shared");
+    defer library.close();
+    const no_album_artist = try observe(&library, "/m/Artist/a.flac", .flac, .{
+        .title = "A",
+        .artist = "Artist",
+        .album = "Album",
+        .track_number = 1,
+    });
+    const no_album = try observe(&library, "/m/Loose/b.flac", .flac, .{
+        .title = "B",
+        .artist = "Artist",
+        .track_number = 1,
+    });
+    _ = try observe(&library, "/m/Other/c.flac", .flac, .{
+        .title = "C",
+        .artist = "Artist",
+        .album = "Other",
+        .album_artist = "Artist",
+        .track_number = 1,
+    });
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const anomalies = try filesWithIssue(&library, .album_artist_anomaly);
+    defer testing.allocator.free(anomalies);
+    try testing.expectEqualSlices(i64, &.{no_album_artist}, anomalies);
+    const untagged = try filesWithIssue(&library, .missing_metadata);
+    defer testing.allocator.free(untagged);
+    try testing.expectEqualSlices(i64, &.{no_album}, untagged);
+}
+
+test "a fetched cover clears the release's artwork problem" {
+    var library = try openTestLibrary("file:orca-projection-artwork-problem?mode=memory&cache=shared");
+    defer library.close();
+    const tags: metadata.ObservedTags = .{
+        .title = "Bare",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    };
+    const bare = try observe(&library, "/m/Artist/bare.flac", .flac, tags);
+    var covered_tags = tags;
+    covered_tags.title = "Covered";
+    covered_tags.track_number = 2;
+    covered_tags.artwork = .{ .mime_type = "image/png", .byte_size = 128, .kind = .front_cover };
+    _ = try observe(&library, "/m/Artist/covered.flac", .flac, covered_tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const before = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(before);
+    try testing.expectEqualSlices(i64, &.{bare}, before);
+
+    const release_id = try scalar(library.database, "SELECT id FROM releases;");
+    try library.release_artwork.put(release_id, "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b", null, 1_800_000_000);
+    const after_miss = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(after_miss);
+    try testing.expectEqualSlices(i64, &.{bare}, after_miss);
+
+    try library.release_artwork.put(release_id, "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b", .{
+        .bytes = "\xff\xd8\xff\xe0fetched",
+        .mime_type = "image/jpeg",
+    }, 1_800_000_000);
+    const after_fetch = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(after_fetch);
+    try testing.expectEqualSlices(i64, &.{}, after_fetch);
+
+    _ = try projection.run(.all);
+    const after_reprojection = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(after_reprojection);
+    try testing.expectEqualSlices(i64, &.{}, after_reprojection);
+}
+
 test "an explicit album artist names the release and keeps it off the compilation list" {
     var library = try openTestLibrary("file:orca-projection-albumartist?mode=memory&cache=shared");
     defer library.close();
@@ -1299,14 +1455,9 @@ test "a missing track number becomes a synthetic position and a health issue" {
         @as(i64, 2),
         try scalar(library.database, "SELECT track_number FROM tracks WHERE title='Stray';"),
     );
-    var issues = try library.health_issues.page(testing.allocator, 16, 0);
-    defer issues.deinit();
-    try testing.expectEqual(@as(usize, 1), issues.items.len);
-    try testing.expectEqual(stray, issues.items[0].file_id);
-    try testing.expectEqual(
-        database.HealthIssueKind.missing_track_number,
-        issues.items[0].kind,
-    );
+    const flagged = try filesWithIssue(&library, .missing_track_number);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{stray}, flagged);
 }
 
 test "two songs claiming one track number both stay in the library" {
@@ -1351,14 +1502,9 @@ test "two songs claiming one track number both stay in the library" {
         @as(i64, 3),
         try scalar(library.database, "SELECT track_number FROM tracks WHERE title LIKE '%instrumental%';"),
     );
-    var issues = try library.health_issues.page(testing.allocator, 16, 0);
-    defer issues.deinit();
-    try testing.expectEqual(@as(usize, 1), issues.items.len);
-    try testing.expectEqual(displaced, issues.items[0].file_id);
-    try testing.expectEqual(
-        database.HealthIssueKind.technical_anomaly,
-        issues.items[0].kind,
-    );
+    const flagged = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{displaced}, flagged);
 }
 
 test "an untitled file is listed under its filename rather than as a blank row" {

@@ -67,8 +67,29 @@
   Corrections, each song's current and proposed title and position, with
   Accept All and Dismiss All, and a correction's row names the ID it
   replaces.
-
-### Changed
+- **Dismissable health issues.** `Runtime.libraryDismissHealthIssue` and
+  `orca-cli health-dismiss` hide one kind of issue on one file until the
+  file's bytes change; `libraryRestoreHealthIssue` and `health-restore` show
+  it again. The page and count leave dismissed issues out.
+- **Each health issue names the action that resolves it.** `HealthIssue`
+  carries `action` (`HealthAction`: `match_or_edit`, `fetch_cover_art`,
+  `compare_duplicate`, `review_correction`, `reveal_file`), the lowest
+  `track_id` its file backs, that Track's `release_id`, and for a duplicate
+  the other file in `related_file_id`. `Runtime.libraryHealthFile` returns
+  the file behind an issue (`HealthFile`). `HealthIssue`, `HealthIssueKind`,
+  `HealthSeverity`, `HealthAction` and `HealthFile` are exported from
+  `liborca`.
+- **`recording_mismatch` health issue.** Verification raises it, as a
+  warning naming the recording AcoustID heard and its score, for a file it
+  leaves a pending correction for, and clears it for any other outcome; accepting
+  the correction, or dismissing the file's last pending proposal, clears it.
+- **Library schema version 29.** Adds `health_dismissals` and
+  `library_health_issues.related_file_id` with its index.
+- **Breaking: `orca-cli health` prints the file id and the action.** Each
+  line is `file_id severity kind action path details`, tab-separated.
+- **Breaking (Zig API): `HealthIssue` gains `track_id`, `release_id`,
+  `related_file_id` and `action`,** and `HealthIssueKind` gains
+  `recording_mismatch`.
 
 - **Library schema version 28.** Adds `recording_verifications` and
   `identification_proposals.album_group` with its index.
@@ -96,8 +117,26 @@
   longer only 0 or 1. Matching makes about one more MusicBrainz request per
   album.
 
+- **Clipping needs a run of samples at full scale.** A `clipping` health
+  issue is raised only for at least three consecutive full-scale samples in
+  one channel, so a single full-scale peak is no longer clipping, and full
+  scale now includes 16-bit PCM's positive limit (any magnitude of at least
+  `1 - 1/32768`). The details give the clipped runs and the samples inside
+  them. Diagnostics are measured again (algorithm version 4, result encoding
+  version 2; `diagnostics.Result` gains `clipped_runs`), and ReplayGain is
+  unavailable for a file until it is analysed again.
+
 ### Fixed
 
+- **Health raises missing tags, album-artist, artwork, clipping, silence and
+  loudness issues.** Nothing raised `missing_metadata`, `album_artist_anomaly`,
+  `artwork_problem`, `clipping`, `excessive_silence` or `missing_analysis`.
+  The projection now raises and clears the first three, judging a missing
+  title before the file name stands in for it, and the analysis pass the
+  other three; `missing_analysis` means the audio is too short or silent for
+  a loudness figure, not that it was never measured. Storing a fetched cover
+  clears `artwork_problem` for the Release's files. `docs/analysis.md` lists
+  which pass owns each kind.
 - **A second Orca process no longer deletes the WAL under a live Library on
   Linux.** Any close of the database, `-wal` or `-shm` file in the process,
   such as a GTK file dialog browsing its folder, dropped SQLite's POSIX

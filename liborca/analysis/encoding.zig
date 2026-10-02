@@ -2,10 +2,10 @@ const std = @import("std");
 const diagnostics = @import("diagnostics.zig");
 
 const magic = "ORAD";
-const version: u16 = 1;
+const version: u16 = 2;
 /// Public because the playback path reads the header alone out of a row it
 /// deliberately never fully materializes, so it has to size its buffer.
-pub const header_size = 64;
+pub const header_size = 72;
 
 pub fn encode(allocator: std.mem.Allocator, result: diagnostics.Result) ![]u8 {
     const bytes = try allocator.alloc(u8, header_size + result.waveform.len * 8);
@@ -22,6 +22,7 @@ pub fn encode(allocator: std.mem.Allocator, result: diagnostics.Result) ![]u8 {
     writeInt(u64, bytes[40..48], result.leading_silence_frames);
     writeInt(u64, bytes[48..56], result.trailing_silence_frames);
     writeInt(u32, bytes[56..60], @intCast(result.waveform.len));
+    writeInt(u64, bytes[64..72], result.clipped_runs);
     for (result.waveform, 0..) |bucket, index| {
         const offset = header_size + index * 8;
         writeFloat(bytes[offset..][0..4], bucket.minimum);
@@ -53,6 +54,7 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !diagnostics.Resu
         .replay_gain_db = if (has_loudness) readFloat(bytes[12..16]) else null,
         .sample_peak = readFloat(bytes[16..20]),
         .rms = readFloat(bytes[20..24]),
+        .clipped_runs = readInt(u64, bytes[64..72]),
         .clipped_samples = readInt(u64, bytes[24..32]),
         .silent_frames = readInt(u64, bytes[32..40]),
         .leading_silence_frames = readInt(u64, bytes[40..48]),
@@ -131,6 +133,7 @@ test "diagnostic result encoding is versioned and portable" {
         .replay_gain_db = -3.8,
         .sample_peak = 1,
         .rms = 0.25,
+        .clipped_runs = 1,
         .clipped_samples = 4,
         .silent_frames = 5,
         .leading_silence_frames = 2,
@@ -142,6 +145,7 @@ test "diagnostic result encoding is versioned and portable" {
     defer allocator.free(bytes);
     const restored = try decode(allocator, bytes);
     defer restored.deinit();
+    try std.testing.expectEqual(original.clipped_runs, restored.clipped_runs);
     try std.testing.expectEqual(original.clipped_samples, restored.clipped_samples);
     try std.testing.expectEqual(original.integrated_lufs, restored.integrated_lufs);
     try std.testing.expectEqualSlices(
@@ -163,6 +167,7 @@ test "loudness is read from an encoded result without materializing its waveform
         .replay_gain_db = -6.71,
         .sample_peak = 0.940_46,
         .rms = 0.278_838,
+        .clipped_runs = 0,
         .clipped_samples = 0,
         .silent_frames = 0,
         .leading_silence_frames = 0,
@@ -187,6 +192,7 @@ test "a result with no measurable loudness reads as absent rather than as no cor
         .replay_gain_db = null,
         .sample_peak = 0.5,
         .rms = 0.1,
+        .clipped_runs = 0,
         .clipped_samples = 0,
         .silent_frames = 0,
         .leading_silence_frames = 0,

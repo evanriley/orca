@@ -488,6 +488,221 @@ test "library health state is atomically replaced and paged" {
     try std.testing.expectEqual(@as(u64, 0), try library.health_issues.count());
 }
 
+fn openHealthLibrary(comptime name: []const u8) !LibraryDatabase {
+    return LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-health-" ++ name ++ "?mode=memory&cache=shared",
+    );
+}
+
+fn addHealthFile(library: *LibraryDatabase, uri: []const u8, hash: ?[]const u8) !i64 {
+    const file_id = try library.files.create(.{ .size_bytes = 100, .quick_hash = hash });
+    _ = try library.locations.upsert(.{ .file_id = file_id, .volume_id = LibraryDatabase.null_volume, .uri = uri });
+    return file_id;
+}
+
+fn setQuickHash(library: *LibraryDatabase, file_id: i64, hash: u8) !void {
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE files SET quick_hash = x'{x:0>2}' WHERE id = {d};", .{ hash, file_id }, 0));
+}
+
+test "a dismissed health issue stays hidden until its file's bytes change, and shows again once restored" {
+    var library = try openHealthLibrary("dismiss");
+    defer library.close();
+    const hash: [32]u8 = @splat(1);
+    const file_id = try addHealthFile(&library, "music/hashed.flac", &hash);
+    const unhashed = try addHealthFile(&library, "music/unhashed.flac", null);
+    try library.health_issues.replaceFile(file_id, &.{
+        .{ .kind = .clipping, .severity = .warning, .details = "3 clipped samples" },
+        .{ .kind = .missing_analysis, .severity = .information },
+    });
+    try library.health_issues.replaceFile(unhashed, &.{.{ .kind = .clipping, .severity = .warning }});
+    try std.testing.expectEqual(@as(u64, 3), try library.health_issues.count());
+
+    try library.health_issues.dismiss(file_id, .clipping);
+    try library.health_issues.dismiss(unhashed, .clipping);
+    try library.health_issues.dismiss(file_id, .unreadable_file);
+
+    try std.testing.expectEqual(@as(u64, 1), try library.health_issues.count());
+    var dismissed = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer dismissed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), dismissed.items.len);
+    try std.testing.expectEqual(repository.HealthIssueKind.missing_analysis, dismissed.items[0].kind);
+    try std.testing.expectEqual(@as(i64, 3), try testScalar(library.database, "SELECT count(*) FROM library_health_issues;"));
+
+    try setQuickHash(&library, file_id, 2);
+    try std.testing.expectEqual(@as(u64, 2), try library.health_issues.count());
+    var changed = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer changed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), changed.items.len);
+    try std.testing.expectEqual(repository.HealthIssueKind.clipping, changed.items[0].kind);
+    try std.testing.expectEqual(file_id, changed.items[0].file_id);
+
+    try library.health_issues.dismiss(file_id, .clipping);
+    try std.testing.expectEqual(@as(u64, 1), try library.health_issues.count());
+    try library.health_issues.restore(file_id, .clipping);
+    try library.health_issues.restore(file_id, .clipping);
+    try library.health_issues.restore(unhashed, .clipping);
+    try std.testing.expectEqual(@as(u64, 3), try library.health_issues.count());
+    try std.testing.expectError(error.UnknownFile, library.health_issues.dismiss(unhashed + 100, .clipping));
+
+    try library.health_issues.dismiss(file_id, .clipping);
+    try library.database.exec("DELETE FROM locations;");
+    var sql: [64]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM files WHERE id = {d};", .{file_id}, 0));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM health_dismissals;"));
+}
+
+test "each health issue names the lowest Track its file backs, that Track's Release, and the action that resolves it" {
+    var library = try openHealthLibrary("targets");
+    defer library.close();
+    const tagged = try library.releases.upsert(.{
+        .release_key = "nick drake|bryter layter",
+        .title = "Bryter Layter",
+        .musicbrainz_release_id = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    });
+    const untagged = try library.releases.upsert(.{ .release_key = "nick drake|pink moon", .title = "Pink Moon" });
+    const shared = try addHealthFile(&library, "music/shared.flac", null);
+    const fetchable = try addHealthFile(&library, "music/fetchable.flac", null);
+    const loose = try addHealthFile(&library, "music/loose.flac", null);
+    try library.tracks.upsertTracks(&.{
+        .{ .title = "First", .release_id = untagged, .preferred_file_id = shared },
+        .{ .title = "Second", .release_id = tagged, .preferred_file_id = shared },
+        .{ .title = "Third", .release_id = tagged, .preferred_file_id = fetchable },
+    });
+    const first = try testScalar(library.database, "SELECT id FROM tracks WHERE title = 'First';");
+    try std.testing.expect(first < try testScalar(library.database, "SELECT id FROM tracks WHERE title = 'Second';"));
+    const third = try testScalar(library.database, "SELECT id FROM tracks WHERE title = 'Third';");
+    try library.health_issues.replaceFile(shared, &.{
+        .{ .kind = .artwork_problem, .severity = .information },
+        .{ .kind = .exact_duplicate, .severity = .information, .related_file_id = loose },
+        .{ .kind = .missing_track_number, .severity = .information },
+    });
+    try library.health_issues.replaceFile(fetchable, &.{
+        .{ .kind = .artwork_problem, .severity = .information },
+        .{ .kind = .recording_mismatch, .severity = .warning },
+    });
+    try library.health_issues.replaceFile(loose, &.{
+        .{ .kind = .unreadable_file, .severity = .error_severity },
+        .{ .kind = .likely_duplicate, .severity = .information, .related_file_id = shared },
+    });
+
+    var page = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer page.deinit();
+    const Expected = struct {
+        file_id: i64,
+        kind: repository.HealthIssueKind,
+        track_id: ?i64,
+        release_id: ?i64,
+        related_file_id: ?i64 = null,
+        action: repository.HealthAction,
+    };
+    const expected = [_]Expected{
+        .{ .file_id = loose, .kind = .unreadable_file, .track_id = null, .release_id = null, .action = .reveal_file },
+        .{ .file_id = fetchable, .kind = .recording_mismatch, .track_id = third, .release_id = tagged, .action = .review_correction },
+        .{ .file_id = shared, .kind = .missing_track_number, .track_id = first, .release_id = untagged, .action = .match_or_edit },
+        .{ .file_id = shared, .kind = .artwork_problem, .track_id = first, .release_id = untagged, .action = .match_or_edit },
+        .{ .file_id = fetchable, .kind = .artwork_problem, .track_id = third, .release_id = tagged, .action = .fetch_cover_art },
+        .{ .file_id = shared, .kind = .exact_duplicate, .track_id = first, .release_id = untagged, .related_file_id = loose, .action = .compare_duplicate },
+        .{ .file_id = loose, .kind = .likely_duplicate, .track_id = null, .release_id = null, .related_file_id = shared, .action = .compare_duplicate },
+    };
+    try std.testing.expectEqual(expected.len, page.items.len);
+    for (expected, page.items) |want, issue| {
+        try std.testing.expectEqual(want.file_id, issue.file_id);
+        try std.testing.expectEqual(want.kind, issue.kind);
+        try std.testing.expectEqual(want.track_id, issue.track_id);
+        try std.testing.expectEqual(want.release_id, issue.release_id);
+        try std.testing.expectEqual(want.related_file_id, issue.related_file_id);
+        try std.testing.expectEqual(want.action, issue.action);
+    }
+}
+
+test "artwork issues on one Release share its fetch action whether the release ID is tagged or named by an accepted match" {
+    var library = try openHealthLibrary("artwork-actions");
+    defer library.close();
+    const tagged = try library.releases.upsert(.{
+        .release_key = "nick drake|bryter layter",
+        .title = "Bryter Layter",
+        .musicbrainz_release_id = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    });
+    const matched = try library.releases.upsert(.{ .release_key = "nick drake|pink moon", .title = "Pink Moon" });
+    const unknown = try library.releases.upsert(.{ .release_key = "nick drake|five leaves left", .title = "Five Leaves Left" });
+    const releases = [_]i64{ tagged, tagged, matched, matched, unknown, unknown };
+    var file_ids: [releases.len]i64 = undefined;
+    for (releases, &file_ids, 0..) |release_id, *file_id, index| {
+        var uri: [32]u8 = undefined;
+        file_id.* = try addHealthFile(&library, try std.fmt.bufPrint(&uri, "music/{d}.flac", .{index}), null);
+        try library.tracks.upsertTracks(&.{.{ .title = "Song", .track_number = @intCast(index + 1), .release_id = release_id, .preferred_file_id = file_id.* }});
+        try library.health_issues.replaceFile(file_id.*, &.{.{ .kind = .artwork_problem, .severity = .information }});
+    }
+    try std.testing.expectEqual(matched, try testScalar(library.database, "SELECT release_id FROM tracks WHERE track_number = 3;"));
+    const proposal = try putProposal(&library, file_ids[2], match_mbid, 0.9, "{\"title\":\"Song\",\"release_mbid\":\"2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091\"}");
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE identification_proposals SET state = 1 WHERE id = {d};", .{proposal}, 0));
+
+    var page = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(releases.len, page.items.len);
+    for (page.items, file_ids, releases) |issue, file_id, release_id| {
+        try std.testing.expectEqual(file_id, issue.file_id);
+        try std.testing.expectEqual(@as(?i64, release_id), issue.release_id);
+        const expected: repository.HealthAction = if (release_id == unknown) .match_or_edit else .fetch_cover_art;
+        try std.testing.expectEqual(expected, issue.action);
+    }
+}
+
+test "listing and counting health issues reach dismissals and Tracks through indexes" {
+    var library = try openHealthLibrary("plans");
+    defer library.close();
+    const health = @import("repository/health.zig");
+    const plans = [_][]u8{
+        try queryPlan(&library, health.health_page_sql),
+        try queryPlan(&library, health.health_count_sql),
+    };
+    defer for (plans) |plan| std.testing.allocator.free(plan);
+    for (plans) |plan| {
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN health_dismissals") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+        try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN tracks") == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, plans[0], "tracks_by_preferred_file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[0], "tracks_by_recording") != null);
+}
+
+test "the file behind a health issue reports its properties and its best location, or that every location is missing" {
+    var library = try openHealthLibrary("file");
+    defer library.close();
+    const file_id = try library.files.create(.{
+        .codec = "flac",
+        .size_bytes = 4096,
+        .sample_rate = 44_100,
+        .bit_depth = 16,
+        .channels = 2,
+        .duration_ms = 15_000,
+    });
+    _ = try library.locations.upsert(.{ .file_id = file_id, .volume_id = LibraryDatabase.null_volume, .uri = "music/gone.flac", .state = .missing });
+    _ = try library.locations.upsert(.{ .file_id = file_id, .volume_id = LibraryDatabase.null_volume, .uri = "music/here.flac" });
+
+    const found = (try library.health_issues.file(std.testing.allocator, file_id)).?;
+    defer found.deinit();
+    try std.testing.expectEqualStrings("music/here.flac", found.path.?);
+    try std.testing.expect(!found.missing);
+    try std.testing.expectEqualStrings("flac", found.codec);
+    try std.testing.expectEqual(@as(?u32, 44_100), found.sample_rate);
+    try std.testing.expectEqual(@as(?u32, 16), found.bit_depth);
+    try std.testing.expectEqual(@as(?u32, 2), found.channels);
+    try std.testing.expectEqual(@as(?i64, 4096), found.size_bytes);
+    try std.testing.expectEqual(@as(?i64, 15_000), found.duration_ms);
+
+    try library.database.exec("UPDATE locations SET state = 'missing';");
+    const lost = (try library.health_issues.file(std.testing.allocator, file_id)).?;
+    defer lost.deinit();
+    try std.testing.expect(lost.missing);
+    try std.testing.expectEqual(@as(?[]u8, null), lost.path);
+    try std.testing.expectEqual(@as(?repository.HealthFile, null), try library.health_issues.file(std.testing.allocator, file_id + 1));
+}
+
 test "independent libraries retain separate state and FTS indexes" {
     var first = try LibraryDatabase.open(
         std.testing.allocator,

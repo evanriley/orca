@@ -13,6 +13,7 @@ const track_file_ids_sql = @import("tracks.zig").track_file_ids_sql;
 const file_track_ids_sql = @import("tracks.zig").file_track_ids_sql;
 const WriteLane = @import("write_lane.zig").WriteLane;
 const recording_verifications = @import("recording_verifications.zig");
+const health = @import("health.zig");
 
 pub const ProposalState = enum(u8) { pending, accepted, dismissed };
 
@@ -880,6 +881,7 @@ pub const IdentificationProposalRepository = struct {
         try settle.bindInt64(5, @intFromEnum(ProposalState.pending));
         try settle.bindInt64(6, @intFromBool(review == .bulk));
         if (try settle.step() != .done) return error.SqlFailed;
+        try health.clearIssueLocked(self.db, file_id, .recording_mismatch);
         if (written) |files| try appendUnique(files, allocator, file_id);
 
         var values_written = writer.values_written;
@@ -1128,20 +1130,28 @@ pub const IdentificationProposalRepository = struct {
         return list;
     }
 
-    /// A proposal in an album group is dismissed only with its group.
+    /// A proposal in an album group is dismissed only with its group. The
+    /// file's `recording_mismatch` goes with its last pending proposal.
     pub fn dismiss(self: *IdentificationProposalRepository, proposal_id: i64) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
         var update = try self.db.prepare(
             "UPDATE identification_proposals SET state=?2, updated_at=unixepoch()\n" ++
-                "WHERE id=?1 AND state=?3 AND album_group IS NULL;",
+                "WHERE id=?1 AND state=?3 AND album_group IS NULL RETURNING file_id;",
         );
         defer update.deinit();
         try update.bindInt64(1, proposal_id);
         try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
         try update.bindInt64(3, @intFromEnum(ProposalState.pending));
-        if (try update.step() != .done) return error.SqlFailed;
-        if (self.db.changes() == 1) return;
+        if (try update.step() == .row) {
+            const file_id = update.columnInt64(0);
+            if (try update.step() != .done) return error.SqlFailed;
+            try self.clearSettledMismatchLocked(file_id);
+            try self.db.exec("COMMIT;");
+            return;
+        }
         var exists = try self.db.prepare("SELECT state, album_group FROM identification_proposals WHERE id=?1;");
         defer exists.deinit();
         try exists.bindInt64(1, proposal_id);
@@ -1248,16 +1258,35 @@ pub const IdentificationProposalRepository = struct {
     pub fn dismissCorrectionGroup(self: *IdentificationProposalRepository, group_id: i64) !void {
         self.write_lane.acquire();
         defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        var members: [max_page]i64 = undefined;
+        const dismissed = try self.groupMembersLocked(group_id, &members);
         var update = try self.db.prepare(
-            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch() WHERE album_group=?1 AND state=?3;",
+            "UPDATE identification_proposals SET state=?2, updated_at=unixepoch() WHERE id=?1 RETURNING file_id;",
         );
         defer update.deinit();
-        try update.bindInt64(1, group_id);
-        try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
-        try update.bindInt64(3, @intFromEnum(ProposalState.pending));
-        if (try update.step() != .done) return error.SqlFailed;
-        if (self.db.changes() != 0) return;
-        return if (try self.groupExists(group_id)) error.StaleCorrectionGroup else error.UnknownCorrectionGroup;
+        for (dismissed) |proposal_id| {
+            try update.bindInt64(1, proposal_id);
+            try update.bindInt64(2, @intFromEnum(ProposalState.dismissed));
+            if (try update.step() != .row) return error.SqlFailed;
+            const file_id = update.columnInt64(0);
+            if (try update.step() != .done) return error.SqlFailed;
+            try update.reset();
+            try self.clearSettledMismatchLocked(file_id);
+        }
+        try self.db.exec("COMMIT;");
+    }
+
+    fn clearSettledMismatchLocked(self: *IdentificationProposalRepository, file_id: i64) !void {
+        var pending_left = try self.db.prepare(
+            "SELECT 1 FROM identification_proposals WHERE file_id=?1 AND state=?2 LIMIT 1;",
+        );
+        defer pending_left.deinit();
+        try pending_left.bindInt64(1, file_id);
+        try pending_left.bindInt64(2, @intFromEnum(ProposalState.pending));
+        if (try pending_left.step() == .row) return;
+        try health.clearIssueLocked(self.db, file_id, .recording_mismatch);
     }
 
     fn groupMembersLocked(self: *const IdentificationProposalRepository, group_id: i64, buffer: *[max_page]i64) ![]i64 {
@@ -1652,15 +1681,50 @@ pub const IdentificationProposalRepository = struct {
             try ungroup.bindInt64(1, file_id);
             if (try ungroup.step() != .done) return error.SqlFailed;
             try ungroup.reset();
+            var left_pending = false;
             for (file.evidence, 0..) |*item, index| {
                 const in_group = file.grouped == index;
                 if (try self.mergeLocked(allocator, file_id, item, if (in_group) group else null) != .pending) continue;
                 record.pending += 1;
+                left_pending = true;
                 if (in_group) record.group = group;
             }
+            try self.settleMismatchLocked(allocator, file, left_pending);
         }
         try self.db.exec("COMMIT;");
         return record;
+    }
+
+    fn settleMismatchLocked(
+        self: *IdentificationProposalRepository,
+        allocator: std.mem.Allocator,
+        file: VerifiedFile,
+        left_pending: bool,
+    ) !void {
+        const verification = file.verification;
+        if (verification.outcome != .disagrees or !left_pending or verification.heard.len == 0)
+            return health.clearIssueLocked(self.db, verification.file_id, .recording_mismatch);
+        const strongest = verification.heard[0];
+        const percent = 100 * strongest.score;
+        const described = for (file.evidence) |item| {
+            if (std.ascii.eqlIgnoreCase(item.recording_mbid, strongest.mbid)) break item.payload;
+        } else null;
+        const details = if (described) |payload| details: {
+            const title = payload.track_title orelse payload.title;
+            const artist = payload.track_artist orelse payload.artist;
+            if (title.len == 0) break :details null;
+            break :details if (artist.len == 0)
+                try std.fmt.allocPrint(allocator, "AcoustID heard \"{s}\" ({s}) at {d:.0}%", .{ title, strongest.mbid, percent })
+            else
+                try std.fmt.allocPrint(allocator, "AcoustID heard \"{s}\" by {s} ({s}) at {d:.0}%", .{ title, artist, strongest.mbid, percent });
+        } else null;
+        const text = details orelse try std.fmt.allocPrint(allocator, "AcoustID heard {s} at {d:.0}%", .{ strongest.mbid, percent });
+        defer allocator.free(text);
+        try health.recordIssueLocked(self.db, verification.file_id, .{
+            .kind = .recording_mismatch,
+            .severity = .warning,
+            .details = text,
+        });
     }
 
     fn nextAlbumGroupLocked(self: *const IdentificationProposalRepository) !i64 {

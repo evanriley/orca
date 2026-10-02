@@ -1116,6 +1116,37 @@ pub const OrcaRuntime = struct {
         );
     }
 
+    /// Hides one issue of a file until the file's bytes change.
+    pub fn libraryDismissHealthIssue(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        file_id: i64,
+        kind: database.HealthIssueKind,
+    ) !void {
+        return (try libraryDatabase(self, library)).health_issues.dismiss(file_id, kind);
+    }
+
+    /// Shows a dismissed issue again.
+    pub fn libraryRestoreHealthIssue(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        file_id: i64,
+        kind: database.HealthIssueKind,
+    ) !void {
+        return (try libraryDatabase(self, library)).health_issues.restore(file_id, kind);
+    }
+
+    /// The file behind an issue as the Library last saw it, or null when it
+    /// does not exist.
+    pub fn libraryHealthFile(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        file_id: i64,
+    ) !?database.HealthFile {
+        return (try libraryDatabase(self, library)).health_issues.file(allocator, file_id);
+    }
+
     pub fn createPlayer(self: *OrcaRuntime) !PlayerHandle {
         try requireRunning(self);
         const player = try self.allocator.create(audio.player.Player);

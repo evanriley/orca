@@ -17,6 +17,7 @@ pub const Result = struct {
     replay_gain_db: ?f32,
     sample_peak: f32,
     rms: f32,
+    clipped_runs: u64,
     clipped_samples: u64,
     silent_frames: u64,
     leading_silence_frames: u64,
@@ -54,6 +55,9 @@ const ChannelFilter = struct {
     }
 };
 
+pub const minimum_clipped_run = 3;
+pub const full_scale_magnitude: f32 = 1.0 - 1.0 / 32768.0;
+
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     parameters: Parameters,
@@ -71,6 +75,8 @@ pub const Analyzer = struct {
     sample_count: u64 = 0,
     frame_index: u64 = 0,
     peak: f32 = 0,
+    full_scale_run_lengths: [32]u64 = @splat(0),
+    clipped_runs: u64 = 0,
     clipped_samples: u64 = 0,
     silent_frames: u64 = 0,
     leading_silence_frames: u64 = 0,
@@ -132,7 +138,7 @@ pub const Analyzer = struct {
                 const magnitude = @abs(sample);
                 frame_peak = @max(frame_peak, magnitude);
                 self.peak = @max(self.peak, magnitude);
-                if (magnitude >= 1.0) self.clipped_samples += 1;
+                self.countClipping(channel, magnitude);
                 self.sum_squares += @as(f64, sample) * sample;
                 self.sample_count += 1;
                 const weighted = self.filters[channel].process(sample);
@@ -179,6 +185,7 @@ pub const Analyzer = struct {
                 null,
             .sample_peak = self.peak,
             .rms = @floatCast(@sqrt(self.sum_squares / @as(f64, @floatFromInt(self.sample_count)))),
+            .clipped_runs = self.clipped_runs,
             .clipped_samples = self.clipped_samples,
             .silent_frames = self.silent_frames,
             .leading_silence_frames = self.leading_silence_frames,
@@ -187,6 +194,21 @@ pub const Analyzer = struct {
         };
         self.waveform = &.{};
         return result;
+    }
+
+    fn countClipping(self: *Analyzer, channel: usize, magnitude: f32) void {
+        const run_length = &self.full_scale_run_lengths[channel];
+        if (!(magnitude >= full_scale_magnitude)) {
+            run_length.* = 0;
+            return;
+        }
+        run_length.* += 1;
+        if (run_length.* == minimum_clipped_run) {
+            self.clipped_runs += 1;
+            self.clipped_samples += minimum_clipped_run;
+        } else if (run_length.* > minimum_clipped_run) {
+            self.clipped_samples += 1;
+        }
     }
 
     fn updateWaveform(self: *Analyzer, frame: []const f32) void {
@@ -260,7 +282,7 @@ fn highPass(sample_rate: u32) Biquad {
     };
 }
 
-test "streaming diagnostics measure peak clipping silence and waveform" {
+test "streaming diagnostics measure peak silence and waveform" {
     const allocator = std.testing.allocator;
     const sample_rate = 48_000;
     var samples: [sample_rate * 2]f32 = undefined;
@@ -282,10 +304,71 @@ test "streaming diagnostics measure peak clipping silence and waveform" {
     const result = try analyzer.finish();
     defer result.deinit();
     try std.testing.expectApproxEqAbs(@as(f32, 1.1), result.sample_peak, 0.0001);
-    try std.testing.expectEqual(@as(u64, 1), result.clipped_samples);
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_samples);
     try std.testing.expectEqual(@as(u64, 480), result.leading_silence_frames);
     try std.testing.expectEqual(@as(u64, 960), result.trailing_silence_frames);
     try std.testing.expectEqual(@as(usize, 100), result.waveform.len);
+}
+
+fn measureClipping(channels: u16, blocks: []const []const f32) !Result {
+    var analyzer = try Analyzer.init(std.testing.allocator, 48_000, channels, null, .{});
+    defer analyzer.deinit();
+    for (blocks) |block| try analyzer.process(block);
+    return analyzer.finish();
+}
+
+test "a single full-scale sample is not clipping" {
+    const result = try measureClipping(1, &.{&.{ 0.5, 1.0, 0.5, -1.0, 0.5 }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_samples);
+}
+
+test "three consecutive full-scale samples in one channel are one clipped run" {
+    const result = try measureClipping(1, &.{&.{ 0.5, 1.0, -1.0, 1.2, 1.0, 0.5, 1.0, 1.0, 0.5 }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 1), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 4), result.clipped_samples);
+}
+
+test "a run of three samples at 16-bit positive full scale is clipping" {
+    const positive_limit: f32 = 32767.0 / 32768.0;
+    const result = try measureClipping(1, &.{&.{ 0.5, positive_limit, positive_limit, positive_limit, 0.5 }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 1), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 3), result.clipped_samples);
+}
+
+test "a run just below 16-bit full scale is not clipping" {
+    const below_limit: f32 = 32766.0 / 32768.0;
+    const result = try measureClipping(1, &.{&.{ below_limit, below_limit, below_limit }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_runs);
+}
+
+test "a NaN sample breaks a full-scale run rather than extending it" {
+    const nan = std.math.nan(f32);
+    const result = try measureClipping(1, &.{&.{ 1.0, nan, 1.0, 1.0, nan }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_runs);
+}
+
+test "a full-scale run split across two decode blocks counts once" {
+    const result = try measureClipping(2, &.{
+        &.{ 0.5, 0.5, 1.0, 0.5, 1.0, 0.5 },
+        &.{ 1.0, 0.5, 0.5, 0.5 },
+    });
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 1), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 3), result.clipped_samples);
+}
+
+test "full-scale samples alternating between stereo channels are not a run" {
+    const result = try measureClipping(2, &.{&.{ 1.0, 0.5, 0.5, 1.0, 1.0, 0.5, 0.5, 1.0 }});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_runs);
+    try std.testing.expectEqual(@as(u64, 0), result.clipped_samples);
 }
 
 const SineChannels = enum { mono, left_only, both };

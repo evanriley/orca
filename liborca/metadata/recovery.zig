@@ -810,6 +810,9 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion25(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP TABLE health_dismissals;
+        \\DROP INDEX library_health_by_related;
+        \\ALTER TABLE library_health_issues DROP COLUMN related_file_id;
         \\DROP TABLE recording_verifications;
         \\DROP INDEX identification_proposals_album_group;
         \\ALTER TABLE identification_proposals DROP COLUMN album_group;

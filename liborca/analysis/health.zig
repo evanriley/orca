@@ -1,183 +1,142 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
-const diagnostics = @import("diagnostics.zig");
-
-pub const Facts = struct {
-    title: ?[]const u8 = null,
-    artist: ?[]const u8 = null,
-    album: ?[]const u8 = null,
-    album_artist: ?[]const u8 = null,
-    track_number: ?u32 = null,
-    artwork_present: bool = false,
-    sample_rate: ?u32 = null,
-    frame_count: ?u64 = null,
-    audio: ?*const diagnostics.Result = null,
-    corrupt_details: ?[]const u8 = null,
-    exact_duplicate_path: ?[]const u8 = null,
-    likely_duplicate_path: ?[]const u8 = null,
-    /// How closely the likely duplicate's temporal fingerprint matched, as a
-    /// percentage. A likely match is a claim that will sometimes be wrong, so
-    /// the number behind it travels with it rather than being discarded at the
-    /// point the claim is made.
-    likely_duplicate_similarity: f32 = 0,
-};
 
 /// The one wording for each duplicate finding.
 ///
-/// Shared by `evaluate` and by `library/duplicate_pass.zig`, which is what
-/// actually produces these two kinds at library scale. Two spellings would
-/// drift, and `orca-cli health` would describe the same finding two ways
-/// depending on which pass filed it.
+/// Shared with `library/duplicate_pass.zig`, which is what produces these two
+/// kinds at library scale. Two spellings would drift, and `orca-cli health`
+/// would describe the same finding two ways depending on which pass filed it.
 pub const exact_duplicate_details = "content also appears at {s}";
 pub const likely_duplicate_details = "audio resembles {s} ({d:.1}% match)";
 
-pub const Evaluation = struct {
-    allocator: std.mem.Allocator,
-    issues: std.ArrayList(database.HealthIssueInput) = .empty,
-    owned_details: std.ArrayList([]u8) = .empty,
+/// Room for the longest formatted details a rule here produces.
+pub const DetailsBuffer = [96]u8;
 
-    pub fn deinit(self: *Evaluation) void {
-        for (self.owned_details.items) |details| self.allocator.free(details);
-        self.owned_details.deinit(self.allocator);
-        self.issues.deinit(self.allocator);
-        self.* = undefined;
-    }
+pub fn missingMetadata(
+    title: []const u8,
+    artist: []const u8,
+    album: []const u8,
+) ?database.HealthIssueInput {
+    if (!missing(title) and !missing(artist) and !missing(album)) return null;
+    return .{
+        .kind = .missing_metadata,
+        .severity = .warning,
+        .details = "title, artist, or album is missing",
+    };
+}
 
-    fn add(
-        self: *Evaluation,
-        kind: database.HealthIssueKind,
-        severity: database.HealthSeverity,
-        details: []const u8,
-    ) !void {
-        try self.issues.append(self.allocator, .{
-            .kind = kind,
-            .severity = severity,
-            .details = details,
-        });
-    }
+pub fn albumArtistAnomaly(album: []const u8, album_artist: ?[]const u8) ?database.HealthIssueInput {
+    if (missing(album) or !missing(album_artist orelse "")) return null;
+    return .{
+        .kind = .album_artist_anomaly,
+        .severity = .information,
+        .details = "album artist is missing",
+    };
+}
 
-    fn addFormatted(
-        self: *Evaluation,
-        kind: database.HealthIssueKind,
-        severity: database.HealthSeverity,
-        comptime format: []const u8,
-        arguments: anytype,
-    ) !void {
-        const details = try std.fmt.allocPrint(self.allocator, format, arguments);
-        errdefer self.allocator.free(details);
-        try self.owned_details.append(self.allocator, details);
-        try self.add(kind, severity, details);
-    }
-};
+pub fn artworkProblem(embedded: bool, fetched: bool) ?database.HealthIssueInput {
+    if (embedded or fetched) return null;
+    return .{
+        .kind = .artwork_problem,
+        .severity = .information,
+        .details = "artwork is missing",
+    };
+}
 
-pub fn evaluate(allocator: std.mem.Allocator, facts: Facts) !Evaluation {
-    var evaluation: Evaluation = .{ .allocator = allocator };
-    errdefer evaluation.deinit();
-    if (missing(facts.title) or missing(facts.artist) or missing(facts.album))
-        try evaluation.add(.missing_metadata, .warning, "title, artist, or album is missing");
-    if (facts.track_number == null)
-        try evaluation.add(.missing_track_number, .information, "track number is missing");
-    if (!missing(facts.album) and missing(facts.album_artist))
-        try evaluation.add(.album_artist_anomaly, .information, "album artist is missing");
-    if (!facts.artwork_present)
-        try evaluation.add(.artwork_problem, .information, "artwork is missing");
+pub fn clipping(
+    buffer: *DetailsBuffer,
+    clipped_runs: u64,
+    clipped_samples: u64,
+) ?database.HealthIssueInput {
+    if (clipped_runs == 0) return null;
+    return .{
+        .kind = .clipping,
+        .severity = .warning,
+        .details = std.fmt.bufPrint(
+            buffer,
+            "{d} clipped {s} ({d} samples at full scale)",
+            .{ clipped_runs, if (clipped_runs == 1) "run" else "runs", clipped_samples },
+        ) catch unreachable,
+    };
+}
 
-    if (facts.corrupt_details) |details| {
-        try evaluation.add(.corrupt_audio, .error_severity, details);
-    } else if (facts.audio) |audio| {
-        if (audio.clipped_samples > 0) try evaluation.addFormatted(
-            .clipping,
-            .warning,
-            "{d} samples reach or exceed full scale",
-            .{audio.clipped_samples},
-        );
-        if (facts.frame_count) |frames| {
-            if (frames > 0 and audio.silent_frames * 5 > frames) try evaluation.addFormatted(
-                .excessive_silence,
-                .warning,
-                "{d:.1}% of frames are silent",
-                .{100 * @as(f64, @floatFromInt(audio.silent_frames)) /
-                    @as(f64, @floatFromInt(frames))},
-            );
-        }
-        if (audio.integrated_lufs == null)
-            try evaluation.add(.missing_analysis, .information, "track is too short or silent for loudness analysis");
-    } else {
-        try evaluation.add(.missing_analysis, .information, "audio analysis has not run");
-    }
-    if (facts.sample_rate) |rate| if (rate < 32_000) try evaluation.addFormatted(
-        .technical_anomaly,
-        .information,
-        "unusually low sample rate: {d} Hz",
-        .{rate},
-    );
-    if (facts.exact_duplicate_path) |path| try evaluation.addFormatted(
-        .exact_duplicate,
-        .warning,
-        exact_duplicate_details,
-        .{path},
-    );
-    if (facts.likely_duplicate_path) |path| try evaluation.addFormatted(
-        .likely_duplicate,
-        .information,
-        likely_duplicate_details,
-        .{ path, facts.likely_duplicate_similarity },
-    );
-    return evaluation;
+pub fn excessiveSilence(
+    buffer: *DetailsBuffer,
+    silent_frames: u64,
+    frames: u64,
+) ?database.HealthIssueInput {
+    if (frames == 0 or silent_frames * 5 <= frames) return null;
+    return .{
+        .kind = .excessive_silence,
+        .severity = .warning,
+        .details = std.fmt.bufPrint(
+            buffer,
+            "{d:.1}% of frames are silent",
+            .{100 * @as(f64, @floatFromInt(silent_frames)) / @as(f64, @floatFromInt(frames))},
+        ) catch unreachable,
+    };
+}
+
+pub fn missingAnalysis(integrated_lufs: ?f32) ?database.HealthIssueInput {
+    if (integrated_lufs != null) return null;
+    return .{
+        .kind = .missing_analysis,
+        .severity = .information,
+        .details = "track is too short or silent for loudness analysis",
+    };
 }
 
 fn missing(value: ?[]const u8) bool {
     return value == null or std.mem.trim(u8, value.?, " \t\r\n").len == 0;
 }
 
-test "health evaluation persists metadata and audio diagnostics" {
-    const allocator = std.testing.allocator;
-    const waveform = try allocator.alloc(diagnostics.WaveformBucket, 1);
-    waveform[0] = .{ .minimum = -1, .maximum = 1 };
-    const audio: diagnostics.Result = .{
-        .allocator = allocator,
-        .integrated_lufs = -12,
-        .replay_gain_db = -6,
-        .sample_peak = 1.1,
-        .rms = 0.2,
-        .clipped_samples = 3,
-        .silent_frames = 300,
-        .leading_silence_frames = 100,
-        .trailing_silence_frames = 200,
-        .waveform = waveform,
-    };
-    defer audio.deinit();
-    var evaluation = try evaluate(allocator, .{
-        .title = "Track",
-        .album = "Album",
-        .frame_count = 1000,
-        .sample_rate = 22_050,
-        .audio = &audio,
-    });
-    defer evaluation.deinit();
-    var library = try database.LibraryDatabase.open(
-        allocator,
-        std.testing.io,
-        "file:orca-health-evaluator?mode=memory&cache=shared",
+test "any blank title, artist or album is missing metadata" {
+    try std.testing.expect(missingMetadata("Track", "Orca", "Album") == null);
+    try std.testing.expectEqual(
+        database.HealthIssueKind.missing_metadata,
+        missingMetadata(" \t", "Orca", "Album").?.kind,
     );
-    defer library.close();
-    const file_id = try library.files.create(.{ .size_bytes = 4096 });
-    try library.health_issues.replaceFile(file_id, evaluation.issues.items);
-    try std.testing.expectEqual(@as(u64, 7), try library.health_issues.count());
+    try std.testing.expect(missingMetadata("Track", "", "Album") != null);
+    try std.testing.expect(missingMetadata("Track", "Orca", "") != null);
 }
 
-test "decoder failures become health diagnostics" {
-    var evaluation = try evaluate(std.testing.allocator, .{
-        .title = "Damaged track",
-        .artist = "Orca",
-        .album = "Generated",
-        .album_artist = "Orca",
-        .track_number = 1,
-        .artwork_present = true,
-        .corrupt_details = "decoder rejected the frame checksum",
-    });
-    defer evaluation.deinit();
-    try std.testing.expectEqual(@as(usize, 1), evaluation.issues.items.len);
-    try std.testing.expectEqual(database.HealthIssueKind.corrupt_audio, evaluation.issues.items[0].kind);
-    try std.testing.expectEqual(database.HealthSeverity.error_severity, evaluation.issues.items[0].severity);
+test "an album without an album artist is an anomaly and a blank album is not" {
+    try std.testing.expect(albumArtistAnomaly("Album", null) != null);
+    try std.testing.expect(albumArtistAnomaly("Album", " ") != null);
+    try std.testing.expect(albumArtistAnomaly("Album", "Orca") == null);
+    try std.testing.expect(albumArtistAnomaly("", null) == null);
+}
+
+test "artwork is a problem only when neither the file nor its release has a cover" {
+    try std.testing.expect(artworkProblem(false, false) != null);
+    try std.testing.expect(artworkProblem(true, false) == null);
+    try std.testing.expect(artworkProblem(false, true) == null);
+}
+
+test "audio findings follow the clipping and silence thresholds" {
+    var buffer: DetailsBuffer = undefined;
+    try std.testing.expect(clipping(&buffer, 0, 0) == null);
+    try std.testing.expectEqualStrings(
+        "1 clipped run (3 samples at full scale)",
+        clipping(&buffer, 1, 3).?.details,
+    );
+    try std.testing.expectEqualStrings(
+        "2 clipped runs (7 samples at full scale)",
+        clipping(&buffer, 2, 7).?.details,
+    );
+    try std.testing.expectEqualStrings(
+        "18446744073709551615 clipped runs (18446744073709551615 samples at full scale)",
+        clipping(&buffer, std.math.maxInt(u64), std.math.maxInt(u64)).?.details,
+    );
+    try std.testing.expect(excessiveSilence(&buffer, 200, 1000) == null);
+    try std.testing.expect(excessiveSilence(&buffer, 0, 0) == null);
+    try std.testing.expectEqualStrings(
+        "30.0% of frames are silent",
+        excessiveSilence(&buffer, 300, 1000).?.details,
+    );
+    try std.testing.expect(missingAnalysis(-14) == null);
+    try std.testing.expectEqual(
+        database.HealthIssueKind.missing_analysis,
+        missingAnalysis(null).?.kind,
+    );
 }

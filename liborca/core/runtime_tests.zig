@@ -292,6 +292,7 @@ test "details carry the loudness stored for the file's recorded bytes and no oth
         .replay_gain_db = -8.9,
         .sample_peak = 0.966,
         .rms = 0.1,
+        .clipped_runs = 0,
         .clipped_samples = 0,
         .silent_frames = 0,
         .leading_silence_frames = 0,
