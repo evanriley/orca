@@ -1207,6 +1207,111 @@ orca_status orca_library_export_playlist(
     uint32_t *skipped
 );
 
+/* -------------------------------------------------------------- artwork */
+
+/* What an embedded picture says it shows. */
+typedef enum orca_artwork_kind {
+    ORCA_ARTWORK_KIND_FRONT_COVER = 0,
+    ORCA_ARTWORK_KIND_BACK_COVER = 1,
+    ORCA_ARTWORK_KIND_OTHER = 2,
+} orca_artwork_kind;
+
+/* What an artwork request asks about: a Track or a Release id. */
+typedef enum orca_artwork_subject {
+    ORCA_ARTWORK_SUBJECT_TRACK = 0,
+    ORCA_ARTWORK_SUBJECT_RELEASE = 1,
+} orca_artwork_subject;
+
+/* One cover image. `bytes` and `mime_type` are valid only for the duration of
+ * the callback that receives the view; copy what you keep. `mime_type` is
+ * resolved from the bytes, not from what the file claimed: "image/jpeg",
+ * "image/png" and so on. `kind` is an orca_artwork_kind. */
+typedef struct orca_image_view {
+    const uint8_t *bytes;
+    size_t length;
+    orca_string_view mime_type;
+    uint8_t kind;
+    uint8_t reserved[7];
+} orca_image_view;
+
+typedef void (*orca_image_callback)(void *context, const orca_image_view *image);
+
+/* One finished artwork request. `subject` is an orca_artwork_subject and
+ * `subject_id` the Track or Release id it was asked for. A subject with no
+ * readable cover arrives with `has_image` 0 and an `image` of length 0. */
+typedef struct orca_artwork_result_view {
+    uint64_t request;
+    int64_t subject_id;
+    uint8_t subject;
+    uint8_t has_image;
+    uint8_t reserved[6];
+    orca_image_view image;
+} orca_artwork_result_view;
+
+/* The image is valid only for the duration of this callback. */
+typedef void (*orca_artwork_result_callback)(
+    void *context,
+    const orca_artwork_result_view *result
+);
+
+/* Invokes the callback once with the cover embedded in the Track's file, or
+ * else the one fetched for its Release. Runs on the calling thread and reads
+ * the file there, so a UI thread uses orca_library_request_artwork instead.
+ * NOT_FOUND, without a callback, when the Track, its file or a cover is
+ * missing. */
+orca_status orca_library_track_artwork(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_image_callback callback
+);
+/* As orca_library_track_artwork, for a Release: the cover of its first Track
+ * in disc and track order that has one (at most eight files are opened), or
+ * else the one fetched for the Release. An embedded cover beats a fetched
+ * one. */
+orca_status orca_library_release_artwork(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    void *context,
+    orca_image_callback callback
+);
+/* Asks for the cover of a Track or Release (`subject`, an
+ * orca_artwork_subject, and its `id`) without waiting for it. The lookup runs
+ * on the Library's artwork thread, which is started on the first request;
+ * when it finishes, liborca calls the wake callback, and the host collects
+ * the result with orca_library_take_artwork after its next pump. `request`
+ * receives an id that the result carries. At most 64 requests per Library
+ * are outstanding, queued, in progress or finished and not yet taken
+ * together; beyond that this is BUSY, and the host asks again after taking
+ * results. INVALID_ARGUMENT for an unknown `subject`. */
+orca_status orca_library_request_artwork(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t subject,
+    int64_t id,
+    uint64_t *request
+);
+/* A request that has not started is skipped without reading a file and never
+ * arrives; one already finished still arrives from orca_library_take_artwork
+ * and should be discarded. OK for any `request`, including an unknown one;
+ * STALE_HANDLE for a closed Library. */
+orca_status orca_library_cancel_artwork(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t request
+);
+/* Invokes the callback once with the oldest finished artwork request and
+ * releases it. NOT_FOUND, without a callback, when none has finished. A host
+ * calls this until NOT_FOUND after each wake. */
+orca_status orca_library_take_artwork(
+    orca_runtime *runtime,
+    orca_handle library,
+    void *context,
+    orca_artwork_result_callback callback
+);
+
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(

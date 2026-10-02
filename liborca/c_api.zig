@@ -16,6 +16,7 @@ const control = @import("core/control.zig");
 const core = @import("core/root.zig");
 const database = @import("database/root.zig");
 const job = @import("core/job.zig");
+const metadata = @import("metadata/root.zig");
 const version = @import("version.zig");
 
 pub const Runtime = opaque {};
@@ -253,6 +254,27 @@ pub const PlaylistImport = extern struct {
 };
 
 pub const LineCallback = *const fn (?*anyopaque, StringView) callconv(.c) void;
+
+pub const ImageView = extern struct {
+    bytes: [*]const u8,
+    length: usize,
+    mime_type: StringView,
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const ImageCallback = *const fn (?*anyopaque, *const ImageView) callconv(.c) void;
+
+pub const ArtworkResultView = extern struct {
+    request: u64,
+    subject_id: i64,
+    subject: u8,
+    has_image: u8,
+    _reserved: [6]u8 = @splat(0),
+    image: ImageView,
+};
+
+pub const ArtworkResultCallback = *const fn (?*anyopaque, *const ArtworkResultView) callconv(.c) void;
 
 pub const PlayStatsView = extern struct {
     play_count: u64,
@@ -1318,6 +1340,101 @@ pub export fn orca_library_export_playlist(
     return .ok;
 }
 
+pub export fn orca_library_track_artwork(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?ImageCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackArtwork(importLibrary(library), box.io(), track_id) catch |err|
+        return box.fail(@src(), err);
+    const image = found orelse return box.reject(@src(), .not_found, "the track has no cover");
+    defer image.deinit();
+    const view = imageView(image);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_release_artwork(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    context: ?*anyopaque,
+    callback: ?ImageCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryReleaseArtwork(importLibrary(library), box.io(), release_id) catch |err|
+        return box.fail(@src(), err);
+    const image = found orelse return box.reject(@src(), .not_found, "the release has no cover");
+    defer image.deinit();
+    const view = imageView(image);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_request_artwork(
+    runtime: ?*Runtime,
+    library: Handle,
+    subject: u8,
+    id: i64,
+    request: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = request orelse return box.reject(@src(), .invalid_argument, "request is null");
+    const kind = importArtworkSubject(subject) orelse
+        return box.reject(@src(), .invalid_argument, "subject is not an orca_artwork_subject");
+    const wanted: core.runtime.ArtworkSubject = switch (kind) {
+        .track => .{ .track = id },
+        .release => .{ .release = id },
+    };
+    destination.* = box.runtime.libraryRequestArtwork(importLibrary(library), box.io(), wanted) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_cancel_artwork(runtime: ?*Runtime, library: Handle, request: u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    _ = core.runtime.libraryDatabase(&box.runtime, importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    box.runtime.libraryCancelArtwork(importLibrary(library), request);
+    return .ok;
+}
+
+pub export fn orca_library_take_artwork(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?ArtworkResultCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    _ = core.runtime.libraryDatabase(&box.runtime, importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    const result = box.runtime.libraryTakeArtwork(importLibrary(library)) orelse
+        return box.reject(@src(), .not_found, "no artwork request has finished");
+    defer if (result.image) |image| image.deinit();
+    const view: ArtworkResultView = .{
+        .request = result.request,
+        .subject_id = switch (result.subject) {
+            .track, .release => |id| id,
+        },
+        .subject = exportArtworkSubject(result.subject),
+        .has_image = @intFromBool(result.image != null),
+        .image = if (result.image) |image| imageView(image) else .{
+            .bytes = "",
+            .length = 0,
+            .mime_type = stringView(""),
+            .kind = 0,
+        },
+    };
+    visit(context, &view);
+    return .ok;
+}
+
 pub export fn orca_player_create(
     runtime: ?*Runtime,
     output: ?*Handle,
@@ -2336,6 +2453,38 @@ pub fn importPlaylistPathStyle(value: u8) ?core.runtime.PlaylistPathStyle {
     };
 }
 
+pub fn importArtworkSubject(value: u8) ?std.meta.Tag(core.runtime.ArtworkSubject) {
+    return switch (value) {
+        0 => .track,
+        1 => .release,
+        else => null,
+    };
+}
+
+pub fn exportArtworkSubject(subject: core.runtime.ArtworkSubject) u8 {
+    return switch (subject) {
+        .track => 0,
+        .release => 1,
+    };
+}
+
+pub fn exportArtworkKind(kind: metadata.ArtworkKind) u8 {
+    return switch (kind) {
+        .front_cover => 0,
+        .back_cover => 1,
+        .other => 2,
+    };
+}
+
+fn imageView(image: metadata.EmbeddedImage) ImageView {
+    return .{
+        .bytes = image.bytes.ptr,
+        .length = image.bytes.len,
+        .mime_type = stringView(image.mime_type),
+        .kind = exportArtworkKind(image.kind),
+    };
+}
+
 const invalid_track_query = "query limit must be between 1 and 512 and sort a known orca_track_sort";
 
 /// Reject a malformed query at the boundary rather than clamping it: a limit
@@ -2796,7 +2945,7 @@ fn mapError(err: anyerror) Status {
         error.AlreadyWatching => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist => .not_found,
-        error.PlaybackQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
+        error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,
@@ -3416,4 +3565,85 @@ test "a Player with no output reports a signal path with no source, no output an
 
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
     try std.testing.expectEqual(Status.stale_handle, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+}
+
+fn countImage(context: ?*anyopaque, image: *const ImageView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(image.length != 0);
+}
+
+fn captureArtworkResult(context: ?*anyopaque, result: *const ArtworkResultView) callconv(.c) void {
+    const captured: *ArtworkResultView = @ptrCast(@alignCast(context.?));
+    captured.* = result.*;
+}
+
+fn awaitArtworkResult(runtime: *Runtime, library: Handle, captured: *ArtworkResultView) !void {
+    for (0..5_000) |_| {
+        switch (orca_library_take_artwork(runtime, library, captured, captureArtworkResult)) {
+            .ok => return,
+            .not_found => try std.testing.io.sleep(.fromMilliseconds(1), .awake),
+            else => |status| return std.testing.expectEqual(Status.ok, status),
+        }
+    }
+    return error.ArtworkRequestNeverFinished;
+}
+
+test "artwork calls refuse null outputs and unknown subjects, find no cover for an unknown Track, and refuse a closed Library" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-artwork-arguments?mode=memory&cache=shared",
+        &library,
+    ));
+    var images: usize = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_artwork(runtime, library, 1, &images, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_artwork(runtime, library, 1, &images, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_track_artwork(runtime, library, 1, &images, countImage));
+    try std.testing.expectEqual(Status.not_found, orca_library_release_artwork(runtime, library, 1, &images, countImage));
+    try std.testing.expectEqual(@as(usize, 0), images);
+
+    var request: u64 = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_request_artwork(runtime, library, 2, 1, &request));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_request_artwork(runtime, library, 0, 1, null));
+    var captured: ArtworkResultView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_take_artwork(runtime, library, &captured, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_take_artwork(runtime, library, &captured, captureArtworkResult));
+    try std.testing.expectEqual(Status.ok, orca_library_cancel_artwork(runtime, library, 12345));
+
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_cancel_artwork(runtime, library, 1));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_take_artwork(runtime, library, &captured, captureArtworkResult));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_request_artwork(runtime, library, 0, 1, &request));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_track_artwork(runtime, library, 1, &images, countImage));
+}
+
+test "artwork requests past 64 outstanding are busy until a result is taken, and a coverless subject arrives without an image" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-artwork-busy?mode=memory&cache=shared",
+        &library,
+    ));
+    var first: u64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_request_artwork(runtime, library, 1, 7, &first));
+    var request: u64 = 0;
+    for (1..core.artwork.capacity) |_| {
+        try std.testing.expectEqual(Status.ok, orca_library_request_artwork(runtime, library, 0, 3, &request));
+    }
+    try std.testing.expectEqual(Status.busy, orca_library_request_artwork(runtime, library, 0, 3, &request));
+
+    var captured: ArtworkResultView = undefined;
+    try awaitArtworkResult(runtime, library, &captured);
+    try std.testing.expectEqual(first, captured.request);
+    try std.testing.expectEqual(@as(u8, 1), captured.subject);
+    try std.testing.expectEqual(@as(i64, 7), captured.subject_id);
+    try std.testing.expectEqual(@as(u8, 0), captured.has_image);
+    try std.testing.expectEqual(@as(usize, 0), captured.image.length);
+    try std.testing.expectEqual(Status.ok, orca_library_request_artwork(runtime, library, 0, 3, &request));
+    try std.testing.expectEqual(Status.busy, orca_library_request_artwork(runtime, library, 0, 3, &request));
 }

@@ -1101,6 +1101,143 @@ static int playlist_smoke(orca_runtime *runtime, orca_handle library, orca_handl
     return 0;
 }
 
+struct image_capture {
+    uint32_t count;
+    size_t length;
+    int magic_matches;
+    uint8_t kind;
+};
+
+static int image_magic_matches(const orca_image_view *image) {
+    static const uint8_t png[4] = {0x89, 'P', 'N', 'G'};
+    static const uint8_t jpeg[3] = {0xff, 0xd8, 0xff};
+    if (image->mime_type.length == 9 && memcmp(image->mime_type.pointer, "image/png", 9) == 0)
+        return image->length >= 4 && memcmp(image->bytes, png, 4) == 0;
+    if (image->mime_type.length == 10 && memcmp(image->mime_type.pointer, "image/jpeg", 10) == 0)
+        return image->length >= 3 && memcmp(image->bytes, jpeg, 3) == 0;
+    return 0;
+}
+
+static void capture_image(void *context, const orca_image_view *image) {
+    struct image_capture *capture = context;
+    capture->count += 1;
+    capture->length = image->length;
+    capture->magic_matches = image_magic_matches(image);
+    capture->kind = image->kind;
+}
+
+struct artwork_result_capture {
+    uint32_t count;
+    uint64_t request;
+    int64_t subject_id;
+    uint8_t subject;
+    uint8_t has_image;
+    int magic_matches;
+};
+
+static void capture_artwork_result(void *context, const orca_artwork_result_view *result) {
+    struct artwork_result_capture *capture = context;
+    capture->count += 1;
+    capture->request = result->request;
+    capture->subject_id = result->subject_id;
+    capture->subject = result->subject;
+    capture->has_image = result->has_image;
+    capture->magic_matches = result->has_image && image_magic_matches(&result->image);
+}
+
+static void capture_release_id(void *context, const orca_track_summary_view *summary) {
+    int64_t *release_id = context;
+    *release_id = summary->has_release_id ? summary->release_id : -1;
+}
+
+static int64_t titled_track(const struct titled_tracks *tracks, const char *title) {
+    for (uint32_t i = 0; i < tracks->count; i += 1)
+        if (strcmp(tracks->titles[i], title) == 0) return tracks->ids[i];
+    return 0;
+}
+
+static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
+    static struct titled_tracks tracks;
+    memset(&tracks, 0, sizeof tracks);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
+                                          collect_titled) == ORCA_STATUS_OK);
+    int64_t covered = titled_track(&tracks, "covered-reference");
+    int64_t coverless = titled_track(&tracks, "Opus Reference");
+    SMOKE_CHECK(covered > 0 && coverless > 0);
+
+    struct image_capture image;
+    memset(&image, 0, sizeof image);
+    SMOKE_CHECK(orca_library_track_artwork(runtime, library, covered, &image, capture_image) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(image.count == 1 && image.length > 0 && image.magic_matches);
+    SMOKE_CHECK(image.kind == ORCA_ARTWORK_KIND_FRONT_COVER);
+    memset(&image, 0, sizeof image);
+    SMOKE_CHECK(orca_library_track_artwork(runtime, library, coverless, &image, capture_image) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(image.count == 0);
+
+    int64_t covered_release = -1;
+    int64_t coverless_release = -1;
+    SMOKE_CHECK(orca_library_track_get(runtime, library, covered, &covered_release,
+                                       capture_release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_track_get(runtime, library, coverless, &coverless_release,
+                                       capture_release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(covered_release > 0 && coverless_release > 0 &&
+                covered_release != coverless_release);
+    SMOKE_CHECK(orca_library_release_artwork(runtime, library, covered_release, &image,
+                                             capture_image) == ORCA_STATUS_OK);
+    SMOKE_CHECK(image.count == 1 && image.length > 0 && image.magic_matches);
+    memset(&image, 0, sizeof image);
+    SMOKE_CHECK(orca_library_release_artwork(runtime, library, coverless_release, &image,
+                                             capture_image) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(image.count == 0);
+
+    uint64_t covered_request = 0;
+    uint64_t coverless_request = 0;
+    SMOKE_CHECK(orca_library_request_artwork(runtime, library, ORCA_ARTWORK_SUBJECT_TRACK, covered,
+                                             &covered_request) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_request_artwork(runtime, library, ORCA_ARTWORK_SUBJECT_TRACK,
+                                             coverless, &coverless_request) == ORCA_STATUS_OK);
+    SMOKE_CHECK(covered_request != coverless_request);
+    SMOKE_CHECK(orca_library_request_artwork(runtime, library, 2, covered, &covered_request) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_cancel_artwork(runtime, library, 999999) == ORCA_STATUS_OK);
+
+    struct artwork_result_capture results[2];
+    memset(results, 0, sizeof results);
+    uint32_t taken = 0;
+    long deadline = now_ms() + 5000;
+    while (taken < 2) {
+        orca_status status = orca_library_take_artwork(runtime, library, &results[taken],
+                                                       capture_artwork_result);
+        if (status == ORCA_STATUS_OK) {
+            taken += 1;
+            continue;
+        }
+        SMOKE_CHECK(status == ORCA_STATUS_NOT_FOUND);
+        SMOKE_CHECK(now_ms() < deadline);
+        SMOKE_CHECK(wait_for_runtime(runtime, deadline) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+    }
+    struct artwork_result_capture extra;
+    memset(&extra, 0, sizeof extra);
+    SMOKE_CHECK(orca_library_take_artwork(runtime, library, &extra, capture_artwork_result) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(extra.count == 0);
+
+    const struct artwork_result_capture *with_cover =
+        results[0].request == covered_request ? &results[0] : &results[1];
+    const struct artwork_result_capture *without_cover =
+        results[0].request == covered_request ? &results[1] : &results[0];
+    SMOKE_CHECK(with_cover->request == covered_request && with_cover->count == 1);
+    SMOKE_CHECK(with_cover->has_image == 1 && with_cover->magic_matches);
+    SMOKE_CHECK(with_cover->subject == ORCA_ARTWORK_SUBJECT_TRACK &&
+                with_cover->subject_id == covered);
+    SMOKE_CHECK(without_cover->request == coverless_request && without_cover->count == 1);
+    SMOKE_CHECK(without_cover->has_image == 0 && without_cover->subject_id == coverless);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -1986,6 +2123,7 @@ int main(int argc, char **argv) {
     if (queue_smoke(runtime, library, player) != 0) return 1;
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;
+    if (artwork_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

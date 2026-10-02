@@ -58,6 +58,19 @@ The boundary covers the whole engine, not a fragment of it:
   refusing an existing file with `ORCA_STATUS_INVALID_STATE` unless `replace`
   is set. `orca_player_play_playlist` plays a playlist's available entries
   from the Player's bound Library.
+- **Artwork.** `orca_library_track_artwork` and
+  `orca_library_release_artwork` hand an `orca_image_view` of the cover's
+  bytes, the media type sniffed from them and its `orca_artwork_kind`, or
+  return `ORCA_STATUS_NOT_FOUND`. A file's embedded cover beats one fetched
+  for its Release. Both read the file on the calling thread, so a UI asks
+  with `orca_library_request_artwork` instead: the Library's artwork thread
+  looks the cover up, calls the wake callback when it finishes, and the host
+  drains `orca_library_take_artwork`, one `orca_artwork_result_view` per
+  call, until `ORCA_STATUS_NOT_FOUND` after each wake. A subject with no
+  cover arrives with `has_image` 0. At most 64 requests are outstanding per
+  Library, counting finished ones not yet taken; past that a request is
+  `ORCA_STATUS_BUSY`. `orca_library_cancel_artwork` skips a request that has
+  not started; one already finished still arrives.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

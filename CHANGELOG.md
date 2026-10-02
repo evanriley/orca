@@ -172,6 +172,14 @@
   `orca_player_play_playlist`, with `orca_playlist_view`,
   `orca_playlist_entry_view`, `orca_playlist_import`, `orca_line_callback`
   and `orca_playlist_path_style`.
+- **The C ABI reads cover art.** `orca_library_track_artwork` and
+  `orca_library_release_artwork` read a cover on the calling thread and hand
+  an `orca_image_view` of its bytes, media type and `orca_artwork_kind`.
+  `orca_library_request_artwork` asks the Library's artwork thread for a
+  Track's or Release's cover by `orca_artwork_subject`, which wakes the host
+  when it finishes; `orca_library_take_artwork` collects one
+  `orca_artwork_result_view` per call, and `orca_library_cancel_artwork` skips
+  a request not yet started.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

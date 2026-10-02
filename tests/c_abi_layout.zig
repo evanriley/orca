@@ -6,6 +6,7 @@ const c_api = liborca.internal.c_api;
 const audio = liborca.internal.audio;
 const core = liborca.internal.core;
 const database = liborca.internal.database;
+const metadata = liborca.internal.metadata;
 
 const struct_pairs = .{
     .{ c_api.Handle, c.orca_handle },
@@ -23,6 +24,8 @@ const struct_pairs = .{
     .{ c_api.PlaylistView, c.orca_playlist_view },
     .{ c_api.PlaylistEntryView, c.orca_playlist_entry_view },
     .{ c_api.PlaylistImport, c.orca_playlist_import },
+    .{ c_api.ImageView, c.orca_image_view },
+    .{ c_api.ArtworkResultView, c.orca_artwork_result_view },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
@@ -145,6 +148,23 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_ARTWORK_KIND_";
+        pub const Tag = metadata.ArtworkKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportArtworkKind(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ARTWORK_SUBJECT_";
+        pub const Tag = std.meta.Tag(core.runtime.ArtworkSubject);
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportArtworkSubject(switch (tag) {
+                .track => .{ .track = 1 },
+                .release => .{ .release = 1 },
+            });
+        }
+    },
+    struct {
         pub const prefix = "ORCA_WATCH_STATE_";
         pub const Tag = core.runtime.WatchState;
         pub fn produce(tag: Tag) ?i64 {
@@ -212,6 +232,13 @@ const import_mappings = .{
         pub const Tag = core.runtime.PlaylistPathStyle;
         pub fn consume(value: u8) ?Tag {
             return c_api.importPlaylistPathStyle(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ARTWORK_SUBJECT_";
+        pub const Tag = std.meta.Tag(core.runtime.ArtworkSubject);
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importArtworkSubject(value);
         }
     },
     struct {
