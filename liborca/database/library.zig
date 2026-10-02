@@ -73,6 +73,7 @@ pub const LibraryDatabase = struct {
     feedback: repository.FeedbackRepository,
     ratings: repository.RatingRepository,
     release_loves: repository.ReleaseLoveRepository,
+    track_lyrics: repository.TrackLyricsRepository,
     playlists: repository.PlaylistRepository,
     identification_proposals: repository.IdentificationProposalRepository,
     recording_verifications: repository.RecordingVerificationRepository,
@@ -163,6 +164,7 @@ pub const LibraryDatabase = struct {
             .feedback = .{ .db = database, .write_lane = write_lane },
             .ratings = .{ .db = database, .write_lane = write_lane },
             .release_loves = .{ .db = database, .write_lane = write_lane },
+            .track_lyrics = .{ .db = database, .write_lane = write_lane },
             .playlists = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
             .recording_verifications = .{ .db = database, .write_lane = write_lane },
@@ -3148,4 +3150,40 @@ test "a playlist entry plays its recording's lowest Track id and is unavailable 
     defer playlists.deinit();
     try std.testing.expectEqual(@as(u32, 3), playlists.items[0].entries);
     try std.testing.expectEqual(@as(u32, 2), playlists.items[0].available);
+}
+
+test "a Track's lyrics row is replaced whole, is not stored for a gone Track, and goes with its Track" {
+    var library = try openFeedbackLibrary("track-lyrics");
+    defer library.close();
+    const track = try addFeedbackTrack(&library, "Northern Sky", null, null);
+    const first: [32]u8 = @splat(1);
+    const second: [32]u8 = @splat(2);
+
+    try std.testing.expect(try library.track_lyrics.get(std.testing.allocator, track) == null);
+    try std.testing.expect(try library.track_lyrics.put(track, &first, .{ .lrclib_id = 7, .synced = "[00:01.00]a", .plain = "a" }, 100));
+    {
+        const stored = (try library.track_lyrics.get(std.testing.allocator, track)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualSlices(u8, &first, &stored.query_digest);
+        try std.testing.expectEqual(@as(?i64, 7), stored.record.lrclib_id);
+        try std.testing.expectEqualStrings("[00:01.00]a", stored.record.synced.?);
+        try std.testing.expectEqualStrings("a", stored.record.plain.?);
+        try std.testing.expect(!stored.record.isMiss());
+        try std.testing.expectEqual(@as(i64, 100), stored.fetched_at);
+    }
+    try std.testing.expect(try library.track_lyrics.put(track, &second, .{}, 200));
+    {
+        const stored = (try library.track_lyrics.get(std.testing.allocator, track)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualSlices(u8, &second, &stored.query_digest);
+        try std.testing.expect(stored.record.isMiss());
+        try std.testing.expectEqual(@as(?i64, null), stored.record.lrclib_id);
+        try std.testing.expectEqual(@as(i64, 200), stored.fetched_at);
+    }
+
+    try std.testing.expect(!try library.track_lyrics.put(track + 1000, &first, .{ .instrumental = true }, 300));
+    try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM track_lyrics;"));
+    var sql: [64]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM tracks WHERE id = {d};", .{track}, 0));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM track_lyrics;"));
 }

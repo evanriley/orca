@@ -4,6 +4,7 @@ const control = @import("control.zig");
 const cover_art = @import("cover_art.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
+const lyrics_fetch = @import("lyrics_fetch.zig");
 const library_pass = @import("../library/root.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
@@ -25,30 +26,24 @@ pub const CoverArtOutcome = cover_art.Outcome;
 pub const Lyrics = metadata.lyrics.Lyrics;
 
 pub const LyricsOptions = struct {
-    /// Reserved for fetching from LRCLIB; not yet supported, so a job asked
-    /// to fetch reads only local lyrics.
+    /// Ask LRCLIB when the Track has no synced lyrics of its own and nothing
+    /// is cached for its current values.
     fetch: bool = false,
 };
 
-/// Where a lyrics job found a Track's lyrics, or why it found none. A Track
-/// that does not exist, or has no file, is `not_found`.
-pub const LyricsOutcome = enum(u8) {
-    local,
-    fetched,
-    cached,
-    cached_miss,
-    not_found,
-    no_metadata,
-    refused,
-    unavailable,
-    busy,
-    cancelled,
-    not_requested,
+pub const LyricsOutcome = lyrics_fetch.Outcome;
+
+pub const LyricsSetup = struct {
+    io: std.Io,
+    identity: OwnedIdentity,
+    hooks: MatchingHooks,
+    server: OwnedServer,
 };
 
 pub const LyricsRequest = struct {
     track_id: i64,
     options: LyricsOptions = .{},
+    setup: ?LyricsSetup = null,
 };
 
 pub const ScanRequest = struct {
@@ -708,21 +703,51 @@ pub const JobWorker = struct {
     fn runLyrics(self: *JobWorker, request: LyricsRequest) void {
         const stats = &self.stats.lyrics;
         if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
-        const found = library_pass.lyrics_lookup.trackLyrics(
-            self.allocator,
-            self.threaded.io(),
-            self.database,
-            request.track_id,
-        ) catch {
+        var fetch: lyrics_fetch.Fetch = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .library = self.database,
+        };
+        const setup = request.setup orelse return self.finishLyrics(&fetch, request.track_id);
+        var standard: network.StandardTransport = .init(self.allocator, setup.io);
+        defer standard.deinit();
+        var system_clock: network.SystemClock = .{ .io = setup.io };
+        const random_source: std.Random.IoSource = .{ .io = setup.io };
+        const wall_clock = setup.hooks.wall_clock orelse system_clock.wallClock();
+        var gateway: network.Gateway = .{
+            .transport = setup.hooks.transport orelse standard.transport(),
+            .clock = setup.hooks.clock orelse system_clock.clock(),
+            .wall_clock = wall_clock,
+            .random = setup.hooks.random orelse random_source.interface(),
+            .config = .{
+                .identity = setup.identity.view(),
+                .max_response_bytes = providers.lrclib.max_response_bytes,
+            },
+            .cancel = &self.registration.cancel,
+            .sharing = .{
+                .store = providers.shared_state.store(&self.database.provider_state),
+                .service = providers.lrclib.service,
+            },
+        };
+        defer gateway.releaseLease();
+        var archive: providers.lrclib.Lrclib = .{ .gateway = &gateway, .server = setup.server.view() };
+        fetch.lrclib = &archive;
+        fetch.wall_clock = wall_clock;
+        self.finishLyrics(&fetch, request.track_id);
+    }
+
+    fn finishLyrics(self: *JobWorker, fetch: *lyrics_fetch.Fetch, track_id: i64) void {
+        const stats = &self.stats.lyrics;
+        const result = fetch.run(track_id) catch {
             self.failed.store(true, .release);
             return;
         };
-        if (self.cancelled()) {
-            if (found) |lyrics| lyrics.deinit();
+        if (result.outcome == .cancelled or self.cancelled()) {
+            if (result.lyrics) |lyrics| lyrics.deinit();
             return stats.outcome.store(.cancelled, .release);
         }
-        stats.result = found;
-        stats.outcome.store(if (found == null) .not_found else .local, .release);
+        stats.result = result.lyrics;
+        stats.outcome.store(result.outcome, .release);
     }
 
     fn runProjection(self: *JobWorker) void {

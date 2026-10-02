@@ -1,8 +1,8 @@
 # Providers and listening history
 
 Orca talks to online services only through `network.Gateway`, and the rules
-below hold for every provider. ListenBrainz, MusicBrainz, AcoustID and the
-Cover Art Archive are connected.
+below hold for every provider. ListenBrainz, MusicBrainz, AcoustID, the
+Cover Art Archive and LRCLIB are connected.
 Other services follow the same rules; a request that breaks one is a defect,
 not a tuning choice.
 
@@ -87,8 +87,9 @@ not a tuning choice.
 - **Servers.** ListenBrainz-compatible servers are reachable with
   `Runtime.setListenBrainzServer`, a MusicBrainz mirror with
   `Runtime.setMusicBrainzServer`, another AcoustID server with
-  `Runtime.setAcoustIdServer` and another Cover Art Archive with
-  `Runtime.setCoverArtArchiveServer`. `http` is accepted only for `127.0.0.1`,
+  `Runtime.setAcoustIdServer`, another Cover Art Archive with
+  `Runtime.setCoverArtArchiveServer` and another LRCLIB server with
+  `Runtime.setLrclibServer`. `http` is accepted only for `127.0.0.1`,
   `[::1]` and `localhost`, so a token or a library's contents never cross a
   network in clear text.
 
@@ -592,3 +593,54 @@ orca-cli artwork DATABASE --release=ID --out=PATH
 
 `ORCA_COVERARTARCHIVE_URL` points `match`, `cover-art` and `orca-gtk` at
 another server.
+
+## LRCLIB
+
+`Runtime.startTrackLyrics(library, track_id, .{ .fetch = true })` asks
+[LRCLIB](https://lrclib.net) for a Track's lyrics when the Track has no
+synced lyrics of its own. The answer is kept in the Library's `track_lyrics`
+table ([database.md](database.md#track-lyrics)); media files are never
+written, and no `.lrc` file is created. Where LRCLIB's lyrics rank against
+the Track's own is in [metadata.md](metadata.md#lyrics).
+
+- **Opt-in.** Nothing is sent without `fetch`, which also needs
+  `setClientIdentity` (`error.ClientIdentityRequired`). A lyrics job without
+  `fetch` still uses an answer the Library already keeps. A frontend leaves
+  fetching off until the person turns it on.
+- **What is sent.** `GET /api/get` with `track_name`, `artist_name`,
+  `album_name` and `duration`: the Track's effective title, artist and album
+  and its length in whole seconds, percent-encoded. An empty album is left
+  out, and so is a duration that is unknown or longer than an hour. No
+  MusicBrainz ID, path, file name, token or other Library content is sent.
+  A Track without a title or an artist is not looked up (`no_metadata`).
+- **The request.** Through the gateway as the service `lrclib`: the client
+  identity's `User-Agent`, one request a second, the shared backoff and
+  block, and the service lease, as above. A lookup inside a block sends
+  nothing and reports `unavailable`.
+- **The answer.** At most 512 KiB of JSON. A record's `syncedLyrics` and
+  `plainLyrics` are parsed as LRC; `instrumental: true` is kept as an
+  instrumental with no lines. A `404`, or a record with neither text that is
+  not instrumental, is a miss. `408` and `5xx` are `unavailable`; any other
+  status, a redirect, or a body that is not a record is `refused`, and
+  nothing is stored.
+- **Reuse.** Each answer is stored with a BLAKE3 digest of the title,
+  artist, album and duration it was asked with. While the digest matches,
+  lyrics and instrumentals are reused for ever and a miss for 7 days of wall
+  time. An edit or a rescan that changes any of the four values changes the
+  digest, and the next fetch asks again.
+- **Terms.** LRCLIB grants use of its API and asks for no key. It does not
+  license the lyrics themselves: rights to the words stay with their
+  owners, and an application that shows or stores them answers for that use.
+
+`jobLyricsOutcome(job)` reports the `LyricsOutcome`. With `fetch` it is what
+the lookup came to, also when the Track's own plain lyrics are the ones
+returned: `fetched`, `cached`, `cached_miss`, `not_found`, `no_metadata`,
+`refused`, `unavailable`, `busy` or `cancelled`, and `local` only when the
+Track's own synced lyrics made a lookup needless. These outcomes do not fail
+the job.
+
+```sh
+orca-cli lyrics DATABASE TRACK_ID [--fetch]
+```
+
+`ORCA_LRCLIB_URL` points `lyrics --fetch` at another server.

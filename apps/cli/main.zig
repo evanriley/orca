@@ -32,7 +32,7 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL and ORCA_COVERARTARCHIVE_URL must be https, or http to localhost",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL and ORCA_LRCLIB_URL must be https, or http to localhost",
         error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release; --reidentify needs --track or --release and takes no --accept-min-score; --track and --release do not go together",
         error.UnknownRelease => "no release with that id",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -199,7 +199,7 @@ const commands = [_]Command{
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
     .{ .name = "covers", .usage = "covers DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = null, .run = loadCovers },
-    .{ .name = "lyrics", .usage = "lyrics DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showLyrics, .shares_usage_line = true },
+    .{ .name = "lyrics", .usage = "lyrics DATABASE TRACK_ID [--fetch]", .min_arguments = 2, .max_arguments = 3, .run = showLyrics, .shares_usage_line = true },
     .{ .name = "edit", .usage = "edit DATABASE IDS [EDITS]", .min_arguments = 2, .max_arguments = null, .run = editTracks },
     .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
     .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
@@ -308,10 +308,19 @@ const help_details =
     \\
     \\lyrics prints one Track's lyrics: a `.lrc` file beside its file with
     \\the same name, or the lyrics in the file's tags, synced before plain and
-    \\the `.lrc` first. The first line is `lyrics: source=sidecar|embedded
-    \\kind=synced|plain lines=N outcome=local`, then one line per lyric,
-    \\synced ones led by `[mm:ss.xx]`. A Track with none prints
-    \\`lyrics: outcome=not_found`.
+    \\the `.lrc` first. The first line is `lyrics: source=sidecar|embedded|lrclib
+    \\kind=synced|plain|instrumental lines=N outcome=OUTCOME`, then one line
+    \\per lyric, synced ones led by `[mm:ss.xx]`. A Track with none prints
+    \\`lyrics: outcome=OUTCOME`. Without --fetch it uses only what the
+    \\Library already keeps from LRCLIB. With --fetch, a Track without synced
+    \\lyrics of its own is looked up on LRCLIB by title, artist, album and
+    \\duration; the outcome is then what the lookup came to (fetched, cached,
+    \\cached_miss, not_found, no_metadata, refused, unavailable or busy),
+    \\also when the Track's own plain lyrics are printed. LRCLIB's answer is
+    \\kept in the Library, never in a file, and a Track it has nothing for
+    \\is not asked about again for 7 days unless its values change.
+    \\ORCA_LRCLIB_URL selects another server (https, or http to localhost
+    \\only).
     \\
     \\play-tracks plays a comma-separated list of Track ids, or with
     \\--playlist=ID the playlist's entries that have a Track, as a playback
@@ -736,6 +745,7 @@ const JobOption = enum {
     cover_art,
     reidentify,
     maintenance,
+    fetch,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -757,6 +767,7 @@ const JobOption = enum {
             .cover_art => "--cover-art",
             .reidentify => "--reidentify",
             .maintenance => "--maintenance",
+            .fetch => "--fetch",
         };
     }
 };
@@ -780,6 +791,7 @@ const JobOptions = struct {
     cover_art: bool = false,
     reidentify: bool = false,
     maintenance_ms: ?u32 = null,
+    fetch: bool = false,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
@@ -819,6 +831,7 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .cover_art => options.cover_art = true,
                     .reidentify => options.reidentify = true,
                     .maintenance => options.maintenance_ms = (liborca.MaintenanceOptions{ .enabled = true }).interval_ms,
+                    .fetch => options.fetch = true,
                 }
                 continue :next_argument;
             }
@@ -2332,6 +2345,12 @@ fn configureCoverArtArchive(allocator: std.mem.Allocator, runtime: *liborca.Runt
     }
 }
 
+fn configureLrclib(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
+    if (environ.get("ORCA_LRCLIB_URL")) |url| {
+        if (url.len > 0) try runtime.setLrclibServer(try allocator.dupe(u8, url));
+    }
+}
+
 fn printReleaseSteps(stdout: *std.Io.Writer, stats: liborca.MatchStats) !void {
     try stdout.print("accepted={d} cover_art={s}\n", .{ stats.accepted, coverArtSource(stats.cover_art) });
 }
@@ -2399,10 +2418,15 @@ fn showLyrics(context: Context) !void {
     const io = context.io;
     const stdout = context.stdout;
     const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const options = try parseJobOptions(context.arguments[2..], &.{.fetch});
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
+    if (options.fetch) {
+        try identifyOrca(&runtime);
+        try configureLrclib(allocator, &runtime, context.environ);
+    }
     const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
-    const job_handle = try runtime.startTrackLyrics(library, track_id, .{});
+    const job_handle = try runtime.startTrackLyrics(library, track_id, .{ .fetch = options.fetch });
     try awaitJob(&runtime, stdout, job_handle, null);
     const outcome = try runtime.jobLyricsOutcome(job_handle);
     const lyrics = (try runtime.jobTakeLyrics(job_handle)) orelse {

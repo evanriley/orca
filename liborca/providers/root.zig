@@ -3,6 +3,7 @@ pub const coverartarchive = @import("coverartarchive.zig");
 pub const credentials = @import("credentials.zig");
 pub const listenbrainz = @import("listenbrainz.zig");
 pub const listens = @import("listens.zig");
+pub const lrclib = @import("lrclib.zig");
 pub const model = @import("model.zig");
 pub const musicbrainz = @import("musicbrainz.zig");
 pub const scoring = @import("scoring.zig");
@@ -22,6 +23,7 @@ test {
     _ = @import("credentials.zig");
     _ = @import("listenbrainz.zig");
     _ = @import("listens.zig");
+    _ = @import("lrclib.zig");
     _ = @import("model.zig");
     _ = @import("musicbrainz.zig");
     _ = @import("scoring.zig");

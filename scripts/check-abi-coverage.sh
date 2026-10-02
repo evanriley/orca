@@ -41,6 +41,7 @@ declare -A reasons=(
     [startTrackLyrics]="next: lyrics, in progress (docs/roadmap.md, Next)"
     [jobLyricsOutcome]="next: lyrics, in progress (docs/roadmap.md, Next)"
     [jobTakeLyrics]="next: lyrics, in progress (docs/roadmap.md, Next)"
+    [setLrclibServer]="next: lyrics, in progress (docs/roadmap.md, Next)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

@@ -3,7 +3,7 @@ const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 
-pub const current_version = 30;
+pub const current_version = 31;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1061,6 +1061,18 @@ const migration_30 =
     \\);
 ;
 
+const migration_31 =
+    \\CREATE TABLE track_lyrics (
+    \\    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    \\    query_digest BLOB NOT NULL,
+    \\    lrclib_id INTEGER,
+    \\    synced TEXT,
+    \\    plain TEXT,
+    \\    instrumental INTEGER NOT NULL DEFAULT 0,
+    \\    fetched_at INTEGER NOT NULL
+    \\);
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1217,6 +1229,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 28 and target_version >= 28) try db.exec(migration_28);
     if (version < 29 and target_version >= 29) try db.exec(migration_29);
     if (version < 30 and target_version >= 30) try db.exec(migration_30);
+    if (version < 31 and target_version >= 31) try db.exec(migration_31);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2388,5 +2401,30 @@ test "upgrading from version 29 adds an empty album love table that follows its 
         \\DELETE FROM releases WHERE id = 1;
     );
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT release_id FROM release_loves;"));
+    try checkForeignKeys(db);
+}
+
+test "upgrading from version 30 adds an empty lyrics cache that follows its Track" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v30.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 30);
+    try db.exec("INSERT INTO tracks(id, title) VALUES (1, 'Pink Moon'), (2, 'Road');");
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM track_lyrics;"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO track_lyrics(track_id, query_digest, fetched_at) VALUES (9, x'00', 0);"));
+    try db.exec(
+        \\INSERT INTO track_lyrics(track_id, query_digest, synced, fetched_at) VALUES (1, x'01', '[00:01.00]a', 100);
+        \\INSERT INTO track_lyrics(track_id, query_digest, fetched_at) VALUES (2, x'02', 200);
+        \\DELETE FROM tracks WHERE id = 1;
+    );
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT track_id FROM track_lyrics;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT instrumental FROM track_lyrics;"));
     try checkForeignKeys(db);
 }

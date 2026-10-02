@@ -141,7 +141,7 @@ zig build run -- tracks DATABASE [--artist ID] [--release ID] [--loved] [--sort 
 zig build run -- track DATABASE ID
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
-zig build run -- lyrics DATABASE TRACK_ID   # .lrc sidecar or embedded; synced before plain; never stored
+zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
@@ -195,6 +195,10 @@ zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-a
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file
 zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|fetched|cached|cached-miss|not-found|no-release-id and bytes
+
+# LRCLIB -- server from ORCA_LRCLIB_URL (https, or http to localhost); caches in
+# the library, never writes a file
+zig build run -- lyrics DATABASE TRACK_ID --fetch   # local synced, LRCLIB synced, local plain, LRCLIB plain; prints outcome=
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key
 # from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing

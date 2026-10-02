@@ -169,7 +169,14 @@ pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, rel
 }
 
 pub fn startTrackLyrics(self: *OrcaRuntime, library: LibraryHandle, track_id: i64, options: LyricsOptions) !JobHandle {
-    return startJobWorker(self, library, .{ .lyrics = .{ .track_id = track_id, .options = options } });
+    try runtime.requireRunning(self);
+    const setup: ?job_worker.LyricsSetup = if (options.fetch) .{
+        .io = try runtime_listens.networkIo(self),
+        .identity = self.client_identity orelse return error.ClientIdentityRequired,
+        .hooks = self.matching_hooks,
+        .server = self.lrclib_server,
+    } else null;
+    return startJobWorker(self, library, .{ .lyrics = .{ .track_id = track_id, .options = options, .setup = setup } });
 }
 
 pub fn jobLyricsOutcome(self: *OrcaRuntime, job_handle: JobHandle) !LyricsOutcome {

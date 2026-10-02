@@ -5,6 +5,7 @@ pub const handle = @import("handle.zig");
 pub const job = @import("job.zig");
 pub const job_worker = @import("job_worker.zig");
 pub const listen_worker = @import("listen_worker.zig");
+pub const lyrics_fetch = @import("lyrics_fetch.zig");
 pub const object = @import("object.zig");
 pub const queue = @import("queue.zig");
 pub const runtime = @import("runtime.zig");
@@ -39,6 +40,7 @@ test {
     _ = @import("job.zig");
     _ = @import("job_worker.zig");
     _ = @import("listen_worker.zig");
+    _ = @import("lyrics_fetch.zig");
     _ = @import("object.zig");
     _ = @import("queue.zig");
     _ = @import("runtime.zig");

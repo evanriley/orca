@@ -100,6 +100,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, origin: Source) !?L
     return adopt(arena, content, origin);
 }
 
+pub fn instrumental(allocator: std.mem.Allocator, origin: Source) !Lyrics {
+    return adopt(try newArena(allocator), .{ .kind = .instrumental, .lines = &.{} }, origin);
+}
+
 /// The lyrics embedded in one audio file, or null when it has none Orca can
 /// read. A malformed or unreadable tag reads as none; only running out of
 /// memory is an error.

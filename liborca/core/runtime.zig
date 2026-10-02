@@ -401,6 +401,7 @@ pub const OrcaRuntime = struct {
     acoustid_server: providers.url.OwnedServer = .fixed(providers.acoustid.default_server),
     acoustid_client_key: ?job_worker.OwnedAcoustIdKey = null,
     coverartarchive_server: providers.url.OwnedServer = .fixed(providers.coverartarchive.default_server),
+    lrclib_server: providers.url.OwnedServer = .fixed(providers.lrclib.default_server),
     /// One per runtime, created with the first listen worker and deinitialized
     /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
     /// handlers and `deinit` restores what it found, so a second instance torn
@@ -881,6 +882,12 @@ pub const OrcaRuntime = struct {
     /// redirect to itself.
     pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
         return runtime_listens.setCoverArtArchiveServer(self, base_url);
+    }
+
+    /// Points lyrics fetches started afterwards at another LRCLIB server,
+    /// under the same rule as `setListenBrainzServer`.
+    pub fn setLrclibServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+        return runtime_listens.setLrclibServer(self, base_url);
     }
 
     /// Sends this Library's listens and feedback to ListenBrainz, or stops
@@ -1811,16 +1818,22 @@ pub const OrcaRuntime = struct {
     }
 
     /// Reads a Track's lyrics on a job worker: a synced `.lrc` sidecar beside
-    /// its file, else synced lyrics embedded in the file, else plain lyrics
-    /// from the sidecar, then from the file. `options.fetch` is not yet
-    /// supported and changes nothing. `jobLyricsOutcome` reports what the job
-    /// found and `jobTakeLyrics` hands the lyrics over once it has finished.
+    /// its file, else synced lyrics embedded in the file, else synced lyrics
+    /// from LRCLIB, else plain lyrics from the sidecar, then from the file,
+    /// then from LRCLIB, else LRCLIB's word that the Track is instrumental.
+    /// LRCLIB is asked only with `options.fetch`, which needs
+    /// `setClientIdentity` (`error.ClientIdentityRequired`); without it, only
+    /// an answer the Library already keeps for the Track's current title,
+    /// artist, album and duration is used. `jobLyricsOutcome` reports what
+    /// the job found, or with `fetch` what asking LRCLIB came to, and
+    /// `jobTakeLyrics` hands the lyrics over once it has finished.
     pub fn startTrackLyrics(self: *OrcaRuntime, library: LibraryHandle, track_id: i64, options: LyricsOptions) !JobHandle {
         return runtime_jobs.startTrackLyrics(self, library, track_id, options);
     }
 
     /// A lyrics job's outcome once it has finished; `not_requested` while it
-    /// runs. A Track that does not exist or has no file is `not_found`.
+    /// runs. A Track that does not exist, or has no file and no kept LRCLIB
+    /// answer, is `not_found`.
     /// Fails with `error.NotALyricsJob` for another kind of job.
     pub fn jobLyricsOutcome(self: *OrcaRuntime, job_handle: JobHandle) !LyricsOutcome {
         return runtime_jobs.jobLyricsOutcome(self, job_handle);

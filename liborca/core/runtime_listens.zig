@@ -81,6 +81,11 @@ pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: ?[]const u8) !void
     self.coverartarchive_server = try .init(base_url orelse providers.coverartarchive.default_server);
 }
 
+pub fn setLrclibServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+    try runtime.requireRunning(self);
+    self.lrclib_server = try .init(base_url orelse providers.lrclib.default_server);
+}
+
 fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
     var updated = config;
     updated.identity = self.client_identity;

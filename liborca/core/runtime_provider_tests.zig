@@ -4229,3 +4229,287 @@ test "two Libraries with maintenance run one unit at a time" {
     try std.testing.expectEqual(job.State.succeeded, (try rig.awaitUnits(other, 1)).state);
     try std.testing.expectEqual(@as(usize, 2), rig.runtime().job_workers.items.len);
 }
+
+pub const northern_sky_lyrics =
+    \\{"id":4242,"trackName":"Northern Sky","artistName":"Nick Drake","albumName":"Bryter Layter","duration":180.0,
+    \\"instrumental":false,"plainLyrics":"I never felt magic crazy as this","syncedLyrics":"[00:12.00]I never felt magic crazy as this\n[00:18.50]I never saw moons knew the meaning of the sea"}
+;
+
+pub const FakeLrclib = struct {
+    http: network.testing.ScriptedTransport = .{},
+    clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 },
+    status: u16 = 200,
+    body: []const u8 = northern_sky_lyrics,
+    retry_after_s: ?u64 = null,
+
+    pub fn hooks(self: *FakeLrclib) MatchingHooks {
+        self.http.clock = &self.clock;
+        self.http.keep_history = true;
+        self.http.responder = .{ .context = self, .respond_fn = respond };
+        return .{
+            .transport = self.http.transport(),
+            .clock = self.clock.clock(),
+            .wall_clock = self.clock.wallClock(),
+        };
+    }
+
+    pub fn deinit(self: *FakeLrclib) void {
+        self.http.deinit();
+    }
+
+    pub fn requestCount(self: *const FakeLrclib) u32 {
+        return self.http.requestCount();
+    }
+
+    fn respond(context: *anyopaque, _: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *FakeLrclib = @ptrCast(@alignCast(context));
+        return .{ .respond = .{
+            .status = self.status,
+            .body = self.body,
+            .rate_limit = if (self.retry_after_s) |seconds| .{ .retry_after = .{ .seconds = seconds } } else .{},
+        } };
+    }
+};
+
+const LyricsRun = struct {
+    outcome: runtime_module.LyricsOutcome,
+    lyrics: ?metadata.lyrics.Lyrics,
+
+    fn deinit(self: LyricsRun) void {
+        if (self.lyrics) |lyrics| lyrics.deinit();
+    }
+};
+
+fn runLyrics(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64, fetch: bool) !LyricsRun {
+    runtime.reapFinishedJobs();
+    const handle = try runtime.startTrackLyrics(library, track_id, .{ .fetch = fetch });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, handle));
+    return .{ .outcome = try runtime.jobLyricsOutcome(handle), .lyrics = try runtime.jobTakeLyrics(handle) };
+}
+
+test "fetched LRCLIB lyrics are kept, and a second job, fetching or not, uses them without asking again" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = lrclib.hooks();
+    try std.testing.expectError(error.InvalidServerUrl, runtime.setLrclibServer("http://lrclib.net"));
+    try runtime.setLrclibServer("https://lyrics.example/");
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-fetched?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.startTrackLyrics(library, track, .{ .fetch = true }));
+    try runtime.setClientIdentity(network.testing.test_identity);
+
+    const fetched = try runLyrics(&runtime, library, track, true);
+    defer fetched.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, fetched.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Source.lrclib, fetched.lyrics.?.source);
+    try std.testing.expectEqual(metadata.lyrics.Kind.synced, fetched.lyrics.?.kind);
+    try std.testing.expectEqual(@as(usize, 2), fetched.lyrics.?.lines.len);
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    try std.testing.expectEqualStrings(
+        "https://lyrics.example/api/get?track_name=Northern%20Sky&artist_name=Nick%20Drake&album_name=Bryter%20Layter&duration=180",
+        lrclib.http.lastUrl(),
+    );
+    try std.testing.expectStringStartsWith(lrclib.http.lastUserAgent(), "Orca/");
+    const stored = (try library_database.track_lyrics.get(std.testing.allocator, track)).?;
+    defer stored.deinit();
+    try std.testing.expectEqual(@as(?i64, 4242), stored.record.lrclib_id);
+    try std.testing.expectEqual(@divFloor(lrclib.clock.wallNow(), 1000), stored.fetched_at);
+
+    for ([_]bool{ true, false }) |fetch| {
+        const cached = try runLyrics(&runtime, library, track, fetch);
+        defer cached.deinit();
+        try std.testing.expectEqual(runtime_module.LyricsOutcome.cached, cached.outcome);
+        try std.testing.expectEqual(@as(usize, 2), cached.lyrics.?.lines.len);
+    }
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+}
+
+test "LRCLIB having no lyrics is not asked again for 7 days, and is asked after" {
+    var lrclib: FakeLrclib = .{ .status = 404, .body = "{\"code\":404,\"name\":\"TrackNotFound\"}" };
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-miss?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    for ([_]runtime_module.LyricsOutcome{ .not_found, .cached_miss }) |expected| {
+        const run = try runLyrics(&runtime, library, track, true);
+        defer run.deinit();
+        try std.testing.expectEqual(expected, run.outcome);
+        try std.testing.expect(run.lyrics == null);
+        try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    }
+    const miss = (try library_database.track_lyrics.get(std.testing.allocator, track)).?;
+    defer miss.deinit();
+    try std.testing.expect(miss.record.isMiss());
+    const offline = try runLyrics(&runtime, library, track, false);
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.not_found, offline.outcome);
+
+    lrclib.clock.advance(7 * std.time.ms_per_day - 1000);
+    const early = try runLyrics(&runtime, library, track, true);
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.cached_miss, early.outcome);
+
+    lrclib.clock.advance(1000);
+    lrclib.status = 200;
+    lrclib.body = northern_sky_lyrics;
+    const later = try runLyrics(&runtime, library, track, true);
+    defer later.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, later.outcome);
+    try std.testing.expectEqual(@as(u32, 2), lrclib.requestCount());
+}
+
+test "an LRCLIB record without lyrics is not found unless it is instrumental, which gives no lines" {
+    var lrclib: FakeLrclib = .{ .body = "{\"id\":1,\"instrumental\":false,\"plainLyrics\":null,\"syncedLyrics\":null}" };
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-instrumental?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const empty = try addMatchTrack(library_database, "Introduction", "Nick Drake", null);
+    const instrumental = try addMatchTrack(library_database, "Bryter Layter", "Nick Drake", null);
+
+    const nothing = try runLyrics(&runtime, library, empty, true);
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.not_found, nothing.outcome);
+    try std.testing.expect(nothing.lyrics == null);
+
+    lrclib.body = "{\"id\":2,\"instrumental\":true,\"plainLyrics\":null,\"syncedLyrics\":null}";
+    const found = try runLyrics(&runtime, library, instrumental, true);
+    defer found.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, found.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Kind.instrumental, found.lyrics.?.kind);
+    try std.testing.expectEqual(@as(usize, 0), found.lyrics.?.lines.len);
+    const again = try runLyrics(&runtime, library, instrumental, false);
+    defer again.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.cached, again.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Kind.instrumental, again.lyrics.?.kind);
+}
+
+test "a lyrics fetch told to wait by LRCLIB is unavailable, and one inside the wait asks nothing" {
+    var lrclib: FakeLrclib = .{ .status = 429, .body = "", .retry_after_s = 120 };
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-limited?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const track = try addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+
+    for (0..2) |_| {
+        const run = try runLyrics(&runtime, library, track, true);
+        try std.testing.expectEqual(runtime_module.LyricsOutcome.unavailable, run.outcome);
+        try std.testing.expect(run.lyrics == null);
+        try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    }
+    try std.testing.expect(try library_database.track_lyrics.get(std.testing.allocator, track) == null);
+}
+
+test "an edit to a Track's title asks LRCLIB again, and its old answer is not used meanwhile" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    const library = try runtime_tests.scannedTempFolder(&runtime, &temporary, "file:orca-lyrics-edited?mode=memory&cache=shared");
+    const ids = try runtime_tests.allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const track = ids[0];
+    (try runLyrics(&runtime, library, track, true)).deinit();
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+
+    const edited = try runtime.libraryEditTracks(library, &.{track}, &.{.{ .field = .title, .value = "Northern Sky (Take 2)" }});
+    defer edited.deinit();
+    try std.testing.expectEqualSlices(i64, &.{track}, edited.ids);
+    const unfetched = try runLyrics(&runtime, library, track, false);
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.not_found, unfetched.outcome);
+    try std.testing.expect(unfetched.lyrics == null);
+
+    const refetched = try runLyrics(&runtime, library, track, true);
+    defer refetched.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, refetched.outcome);
+    try std.testing.expectEqual(@as(u32, 2), lrclib.requestCount());
+    try std.testing.expect(std.mem.indexOf(u8, lrclib.http.lastUrl(), "track_name=Northern%20Sky%20%28Take%202%29&") != null);
+}
+
+test "a Track without a title or an artist asks LRCLIB nothing" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-lyrics-unnamed?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const no_artist = try addMatchTrack(library_database, "Northern Sky", " ", null);
+    const no_title = try addMatchTrack(library_database, "", "Nick Drake", null);
+
+    for ([_]i64{ no_artist, no_title }) |track| {
+        const run = try runLyrics(&runtime, library, track, true);
+        try std.testing.expectEqual(runtime_module.LyricsOutcome.no_metadata, run.outcome);
+        try std.testing.expect(run.lyrics == null);
+    }
+    try std.testing.expectEqual(@as(u32, 0), lrclib.requestCount());
+}
+
+test "a Track's own synced lyrics ask LRCLIB nothing, and its own plain lyrics give way only to LRCLIB's synced ones" {
+    var lrclib: FakeLrclib = .{};
+    defer lrclib.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = lrclib.hooks();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/lyrics-synced.flac", "a.flac");
+    try runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/lyrics-plain.m4a", "b.m4a");
+    const library = try runtime_tests.scannedTempFolder(&runtime, &temporary, "file:orca-lyrics-local?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const synced_track = try database.columns.scalar(library_database.database,
+        \\SELECT tracks.id FROM tracks JOIN locations ON locations.file_id = tracks.preferred_file_id
+        \\WHERE locations.uri LIKE '%/a.flac';
+    );
+    const plain_track = try database.columns.scalar(library_database.database,
+        \\SELECT tracks.id FROM tracks JOIN locations ON locations.file_id = tracks.preferred_file_id
+        \\WHERE locations.uri LIKE '%/b.m4a';
+    );
+
+    const own_synced = try runLyrics(&runtime, library, synced_track, true);
+    defer own_synced.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.local, own_synced.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Source.embedded, own_synced.lyrics.?.source);
+    try std.testing.expectEqual(@as(u32, 0), lrclib.requestCount());
+
+    lrclib.body = "{\"id\":5,\"instrumental\":false,\"plainLyrics\":\"Words from LRCLIB\",\"syncedLyrics\":null}";
+    const own_plain = try runLyrics(&runtime, library, plain_track, true);
+    defer own_plain.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.fetched, own_plain.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Source.embedded, own_plain.lyrics.?.source);
+    try std.testing.expectEqual(@as(u32, 1), lrclib.requestCount());
+    const unfetched = try runLyrics(&runtime, library, plain_track, false);
+    defer unfetched.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.local, unfetched.outcome);
+
+    const kept = (try library_database.track_lyrics.get(std.testing.allocator, plain_track)).?;
+    kept.deinit();
+    try std.testing.expect(try library_database.track_lyrics.put(plain_track, &kept.query_digest, .{
+        .synced = "[00:03.00]Synced from LRCLIB",
+    }, 0));
+    const cached_synced = try runLyrics(&runtime, library, plain_track, false);
+    defer cached_synced.deinit();
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.cached, cached_synced.outcome);
+    try std.testing.expectEqual(metadata.lyrics.Source.lrclib, cached_synced.lyrics.?.source);
+    try std.testing.expectEqual(metadata.lyrics.Kind.synced, cached_synced.lyrics.?.kind);
+}

@@ -586,6 +586,23 @@ Track is loved when its Recording's `score` is `1`, so a clear still waiting
 to be sent (`score` `0`) is not, and the sort orders by `feedback.updated_at`,
 most recent first, with Tracks that are not loved last in either direction.
 
+## Track lyrics
+
+`track_lyrics` (version 31) keeps what LRCLIB answered for a Track, one row
+per Track: `track_id` is its primary key and references `tracks(id)` with
+`ON DELETE CASCADE`. `query_digest` is the BLAKE3 digest of the title,
+artist, album and duration the Track was looked up with, `lrclib_id` the
+record's id, `synced` and `plain` its texts as LRCLIB sent them, and
+`instrumental` 1 for an instrumental. A row with neither text that is not
+instrumental records a miss. `fetched_at` is Unix seconds.
+
+A row stands only while its digest matches the Track's current values: an
+edit or a rescan that changes any of them leaves the row in place but
+unused, and the next fetch replaces it. A Track's id survives its edits, so
+no row is handed over. `TrackLyricsRepository.put` replaces the row in one
+write-lane transaction and stores nothing for a Track that no longer
+exists. See [providers.md](providers.md#lrclib).
+
 ## Concurrency
 
 - The primary connection uses WAL and `synchronous=NORMAL`.

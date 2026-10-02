@@ -261,10 +261,12 @@ Reachable as `Runtime.libraryTrackArtwork` and
 ## Lyrics
 
 A Track's lyrics are read on demand from its file and from a sidecar beside
-it. They are never scanned, never stored in the Library and never written to
-a file. `metadata/lyrics.zig` holds the model, `metadata/lrc.zig` the one
-parser every text source goes through, and `library/lyrics_lookup.zig` the
-sidecar and the choice between sources.
+it, and, when a lyrics job is asked to fetch, from LRCLIB. They are never
+scanned and never written to a file; only LRCLIB's answers are kept in the
+Library ([providers.md](providers.md#lrclib)). `metadata/lyrics.zig` holds
+the model, `metadata/lrc.zig` the one parser every text source goes through,
+`library/lyrics_lookup.zig` the sidecar and the choice between local
+sources, and `core/lyrics_fetch.zig` the choice between those and LRCLIB.
 
 ### Sources
 
@@ -287,8 +289,14 @@ lyrics. A sidecar named with another case, such as `Song.LRC` for
 
 1. A synced sidecar.
 2. Synced lyrics in the file.
-3. A plain sidecar.
-4. Plain lyrics in the file.
+3. Synced lyrics from LRCLIB.
+4. A plain sidecar.
+5. Plain lyrics in the file.
+6. Plain lyrics from LRCLIB.
+7. An instrumental from LRCLIB, with no lines.
+
+LRCLIB's lyrics are the ones fetched or kept for the Track's current title,
+artist, album and duration. A job that does not fetch still uses kept ones.
 
 ### LRC rules
 
@@ -311,12 +319,14 @@ only running out of memory is an error.
 
 ### Reaching it
 
-`Runtime.startTrackLyrics` reads on a job worker. Once the job finishes,
-`Runtime.jobLyricsOutcome` says whether lyrics were found (`local`) or not
-(`not_found`), and `Runtime.jobTakeLyrics` moves the `Lyrics` to the caller;
-lyrics nobody takes are freed with the job. `Lyrics.lineAt(position_ms)` is
-the synced line being heard. `orca-cli lyrics DATABASE TRACK_ID` prints them,
-and `orca-cli play-tracks --lyrics` prints each line as playback reaches it.
+`Runtime.startTrackLyrics` reads, and with `fetch` asks LRCLIB, on a job
+worker. Once the job finishes, `Runtime.jobLyricsOutcome` says where lyrics
+were found or why none were (see
+[providers.md](providers.md#lrclib)), and `Runtime.jobTakeLyrics` moves the
+`Lyrics` to the caller; lyrics nobody takes are freed with the job.
+`Lyrics.lineAt(position_ms)` is the synced line being heard.
+`orca-cli lyrics DATABASE TRACK_ID [--fetch]` prints them, and
+`orca-cli play-tracks --lyrics` prints each line as playback reaches it.
 
 ## File mutation
 
