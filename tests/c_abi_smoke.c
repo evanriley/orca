@@ -1371,6 +1371,75 @@ static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+struct lyrics_capture {
+    uint32_t count;
+    uint8_t source;
+    uint8_t kind;
+    size_t line_count;
+    int64_t first_start_ms;
+    int first_text_matches;
+};
+
+static void capture_lyrics(void *context, const orca_lyrics_view *lyrics) {
+    static const char first_synced[] = "One second in";
+    struct lyrics_capture *capture = context;
+    capture->count += 1;
+    capture->source = lyrics->source;
+    capture->kind = lyrics->kind;
+    capture->line_count = lyrics->line_count;
+    if (lyrics->line_count == 0) return;
+    capture->first_start_ms = lyrics->lines[0].start_ms;
+    capture->first_text_matches =
+        lyrics->lines[0].text.length == sizeof first_synced - 1 &&
+        memcmp(lyrics->lines[0].text.pointer, first_synced, sizeof first_synced - 1) == 0;
+}
+
+static int read_track_lyrics(orca_runtime *runtime, orca_handle library, int64_t track_id,
+                             struct lyrics_capture *capture) {
+    orca_handle job;
+    uint8_t state = ORCA_JOB_RUNNING;
+    uint8_t outcome = ORCA_LYRICS_OUTCOME_NOT_REQUESTED;
+    SMOKE_CHECK(orca_library_start_lyrics(runtime, library, track_id, 0, &job) == ORCA_STATUS_OK);
+    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    SMOKE_CHECK(orca_job_lyrics_outcome(runtime, job, &outcome) == ORCA_STATUS_OK);
+    SMOKE_CHECK(outcome == ORCA_LYRICS_OUTCOME_LOCAL);
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_job_lyrics(runtime, job, capture, capture_lyrics) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->count == 1);
+    struct lyrics_capture again;
+    memset(&again, 0, sizeof again);
+    SMOKE_CHECK(orca_job_lyrics(runtime, job, &again, capture_lyrics) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(again.count == 0);
+    return 0;
+}
+
+static int lyrics_smoke(orca_runtime *runtime, orca_handle library) {
+    static struct titled_tracks tracks;
+    memset(&tracks, 0, sizeof tracks);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
+                                          collect_titled) == ORCA_STATUS_OK);
+    int64_t synced = titled_track(&tracks, "chromaprint-test");
+    int64_t plain = titled_track(&tracks, "Plain M4A");
+    SMOKE_CHECK(synced > 0 && plain > 0);
+
+    struct lyrics_capture lyrics;
+    SMOKE_CHECK(read_track_lyrics(runtime, library, synced, &lyrics) == 0);
+    SMOKE_CHECK(lyrics.source == ORCA_LYRICS_SOURCE_SIDECAR);
+    SMOKE_CHECK(lyrics.kind == ORCA_LYRICS_KIND_SYNCED);
+    SMOKE_CHECK(lyrics.line_count == 4);
+    SMOKE_CHECK(lyrics.first_start_ms == 1000 && lyrics.first_text_matches);
+
+    SMOKE_CHECK(read_track_lyrics(runtime, library, plain, &lyrics) == 0);
+    SMOKE_CHECK(lyrics.source == ORCA_LYRICS_SOURCE_EMBEDDED);
+    SMOKE_CHECK(lyrics.kind == ORCA_LYRICS_KIND_PLAIN);
+    SMOKE_CHECK(lyrics.line_count == 2 && lyrics.first_start_ms == -1);
+
+    orca_handle job;
+    SMOKE_CHECK(orca_library_start_lyrics(runtime, library, synced, 2, &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -3079,6 +3148,7 @@ int main(int argc, char **argv) {
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;
     if (artwork_smoke(runtime, library) != 0) return 1;
+    if (lyrics_smoke(runtime, library) != 0) return 1;
     if (coverless_release_smoke(runtime) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;

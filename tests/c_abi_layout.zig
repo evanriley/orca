@@ -26,6 +26,8 @@ const struct_pairs = .{
     .{ c_api.PlaylistImport, c.orca_playlist_import },
     .{ c_api.ImageView, c.orca_image_view },
     .{ c_api.ArtworkResultView, c.orca_artwork_result_view },
+    .{ c_api.LyricsLineView, c.orca_lyrics_line },
+    .{ c_api.LyricsView, c.orca_lyrics_view },
     .{ c_api.TrackEditView, c.orca_track_edit },
     .{ c_api.FieldValueView, c.orca_field_value_view },
     .{ c_api.TagWriteDigest, c.orca_tag_write_digest },
@@ -100,6 +102,27 @@ const export_mappings = .{
         pub const Tag = core.runtime.CoverArtOutcome;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportCoverArtOutcome(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_LYRICS_OUTCOME_";
+        pub const Tag = core.runtime.LyricsOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportLyricsOutcome(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_LYRICS_SOURCE_";
+        pub const Tag = metadata.lyrics.Source;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportLyricsSource(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_LYRICS_KIND_";
+        pub const Tag = metadata.lyrics.Kind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportLyricsKind(tag);
         }
     },
     struct {
@@ -434,6 +457,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_SIGNAL_MAX_REASONS",
     "ORCA_TAG_WRITE_DIGEST_BYTES",
     "ORCA_CREDENTIAL_MAX_BYTES",
+    "ORCA_LYRICS_FETCH",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -661,7 +685,7 @@ test "every orca.h constant the C API accepts imports as the Zig value of the sa
 }
 
 test "every orca.h enum constant is checked against liborca" {
-    @setEvalBranchQuota(1_000_000);
+    @setEvalBranchQuota(2_000_000);
     var unchecked: usize = 0;
     inline for (@typeInfo(c).@"struct".decls) |decl| {
         if (comptime !std.mem.startsWith(u8, decl.name, "ORCA_")) continue;
@@ -686,6 +710,10 @@ test "the equalizer and signal path limits orca.h declares are liborca's" {
 test "the tag-write digest orca.h declares is as long as liborca's" {
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @sizeOf(metadata.mutation.Digest));
     try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @typeInfo(@FieldType(c_api.TagWriteDigest, "bytes")).array.len);
+}
+
+test "the lyrics fetch flag orca.h declares is liborca's" {
+    try std.testing.expectEqual(@as(u8, c.ORCA_LYRICS_FETCH), c_api.lyrics_fetch_flag);
 }
 
 test "the credential limit and names orca.h declares are liborca's" {

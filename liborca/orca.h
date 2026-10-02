@@ -142,6 +142,8 @@ typedef enum orca_job_kind {
     ORCA_JOB_KIND_ACOUSTID_SUBMISSION = 7,
     /* Writing an approved tag-write plan to files. */
     ORCA_JOB_KIND_MUTATION = 8,
+    /* Reading a Track's lyrics, and fetching them from LRCLIB. */
+    ORCA_JOB_KIND_LYRICS = 9,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
@@ -915,6 +917,7 @@ typedef enum orca_provider_service {
     ORCA_PROVIDER_SERVICE_MUSICBRAINZ = 1,
     ORCA_PROVIDER_SERVICE_ACOUSTID = 2,
     ORCA_PROVIDER_SERVICE_COVER_ART_ARCHIVE = 3,
+    ORCA_PROVIDER_SERVICE_LRCLIB = 4,
 } orca_provider_service;
 
 /*
@@ -1690,6 +1693,125 @@ orca_status orca_library_take_artwork(
     orca_handle library,
     void *context,
     orca_artwork_result_callback callback
+);
+
+/* --------------------------------------------------------------- lyrics */
+
+/* Pass to orca_library_start_lyrics to ask LRCLIB. */
+#define ORCA_LYRICS_FETCH 1
+
+/* Where a lyrics job found a Track's lyrics, or why it found none. LOCAL: the
+ * Track's sidecar or file. FETCHED: LRCLIB answered now. CACHED: an answer
+ * LRCLIB gave earlier for the same title, artist, album and duration is kept.
+ * CACHED_MISS: LRCLIB had none for them less than 7 days ago, so it was not
+ * asked. NOT_FOUND: no lyrics anywhere asked, or no such Track. NO_METADATA:
+ * the Track has no title or no artist to ask LRCLIB with. REFUSED: LRCLIB's
+ * answer was a redirect, a 4xx other than 404, or a body that is not a record
+ * of at most 512 KiB. UNAVAILABLE: LRCLIB could not be reached or is backing
+ * off. BUSY: another Orca process holds LRCLIB. NOT_REQUESTED: the job has
+ * not finished. With ORCA_LYRICS_FETCH the outcome is what asking LRCLIB came
+ * to, even when the Track's own plain lyrics are the ones returned; LOCAL
+ * then means its own synced lyrics made asking needless. */
+typedef enum orca_lyrics_outcome {
+    ORCA_LYRICS_OUTCOME_LOCAL = 0,
+    ORCA_LYRICS_OUTCOME_FETCHED = 1,
+    ORCA_LYRICS_OUTCOME_CACHED = 2,
+    ORCA_LYRICS_OUTCOME_CACHED_MISS = 3,
+    ORCA_LYRICS_OUTCOME_NOT_FOUND = 4,
+    ORCA_LYRICS_OUTCOME_NO_METADATA = 5,
+    ORCA_LYRICS_OUTCOME_REFUSED = 6,
+    ORCA_LYRICS_OUTCOME_UNAVAILABLE = 7,
+    ORCA_LYRICS_OUTCOME_BUSY = 8,
+    ORCA_LYRICS_OUTCOME_CANCELLED = 9,
+    ORCA_LYRICS_OUTCOME_NOT_REQUESTED = 10,
+} orca_lyrics_outcome;
+
+/* SIDECAR: a `.lrc` file beside the Track's file with its base name.
+ * EMBEDDED: the file's tags (ID3v2 SYLT or USLT, Vorbis comment LYRICS or
+ * UNSYNCEDLYRICS, MP4 ©lyr). LRCLIB: an answer from LRCLIB. */
+typedef enum orca_lyrics_source {
+    ORCA_LYRICS_SOURCE_SIDECAR = 0,
+    ORCA_LYRICS_SOURCE_EMBEDDED = 1,
+    ORCA_LYRICS_SOURCE_LRCLIB = 2,
+} orca_lyrics_source;
+
+/* SYNCED lines carry start times; PLAIN lines do not. INSTRUMENTAL is
+ * LRCLIB's word that the Track has no words, with no lines. */
+typedef enum orca_lyrics_kind {
+    ORCA_LYRICS_KIND_SYNCED = 0,
+    ORCA_LYRICS_KIND_PLAIN = 1,
+    ORCA_LYRICS_KIND_INSTRUMENTAL = 2,
+} orca_lyrics_kind;
+
+/* One line. `start_ms` is where it starts in the Track, or -1 for plain
+ * lyrics. Synced lines come in start order. */
+typedef struct orca_lyrics_line {
+    int64_t start_ms;
+    orca_string_view text;
+} orca_lyrics_line;
+
+/* A Track's lyrics. `source` is an orca_lyrics_source and `kind` an
+ * orca_lyrics_kind. `language` is a lower-case ISO 639-2 code when the
+ * source names one, else empty. `lines` holds `line_count` lines, at most
+ * 4096. Every string and the `lines` array are valid only for the duration of
+ * the callback that receives the view; copy what you keep. */
+typedef struct orca_lyrics_view {
+    uint8_t source;
+    uint8_t kind;
+    uint8_t reserved[6];
+    orca_string_view language;
+    const orca_lyrics_line *lines;
+    size_t line_count;
+} orca_lyrics_view;
+
+typedef void (*orca_lyrics_callback)(void *context, const orca_lyrics_view *lyrics);
+
+/*
+ * Starts reading a Track's lyrics as an ORCA_JOB_KIND_LYRICS job and returns
+ * immediately: a synced `.lrc` sidecar beside its file, else synced lyrics in
+ * the file, else synced lyrics from LRCLIB, else plain lyrics from the
+ * sidecar, the file, then LRCLIB, else LRCLIB's word that the Track is
+ * instrumental. Nothing is written to a file.
+ *
+ * LRCLIB is asked only with ORCA_LYRICS_FETCH in `flags`, which a host leaves
+ * off until the person turns it on, and only with the Track's title, artist,
+ * album and duration. Without it, only an answer the Library already keeps
+ * for those values is used. LRCLIB grants use of its API but not of the
+ * lyrics: rights to the words stay with their owners, and the host answers
+ * for showing or keeping them.
+ *
+ * INVALID_ARGUMENT for an unknown bit in `flags`. INVALID_STATE with
+ * ORCA_LYRICS_FETCH and no client identity (orca_runtime_set_client_identity).
+ * A Track that does not exist is not an error: its job finishes with
+ * ORCA_LYRICS_OUTCOME_NOT_FOUND.
+ */
+orca_status orca_library_start_lyrics(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    uint8_t flags,
+    orca_handle *job
+);
+
+/* Writes the lyrics job's orca_lyrics_outcome to `outcome`;
+ * ORCA_LYRICS_OUTCOME_NOT_REQUESTED until it finishes. INVALID_ARGUMENT for a
+ * job of another kind, STALE_HANDLE for an unknown job. */
+orca_status orca_job_lyrics_outcome(
+    orca_runtime *runtime,
+    orca_handle job,
+    uint8_t *outcome
+);
+
+/* Invokes the callback once with the lyrics a finished lyrics job found, and
+ * releases them: the job hands its lyrics over once, so a second call is
+ * NOT_FOUND. NOT_FOUND, without a callback, also while the job runs and when
+ * it found none. INVALID_ARGUMENT for a job of another kind, STALE_HANDLE for
+ * an unknown job. */
+orca_status orca_job_lyrics(
+    orca_runtime *runtime,
+    orca_handle job,
+    void *context,
+    orca_lyrics_callback callback
 );
 
 /* ------------------------------------------------- tag edits and writes */

@@ -281,6 +281,24 @@ pub const ArtworkResultView = extern struct {
 
 pub const ArtworkResultCallback = *const fn (?*anyopaque, *const ArtworkResultView) callconv(.c) void;
 
+pub const LyricsLineView = extern struct {
+    start_ms: i64,
+    text: StringView,
+};
+
+pub const LyricsView = extern struct {
+    source: u8,
+    kind: u8,
+    _reserved: [6]u8 = @splat(0),
+    language: StringView,
+    lines: [*]const LyricsLineView,
+    line_count: usize,
+};
+
+pub const LyricsCallback = *const fn (?*anyopaque, *const LyricsView) callconv(.c) void;
+
+pub const lyrics_fetch_flag: u8 = 1;
+
 pub const TrackEditView = extern struct {
     field: u8,
     has_value: u8,
@@ -1900,6 +1918,60 @@ pub export fn orca_library_take_artwork(
     return .ok;
 }
 
+pub export fn orca_library_start_lyrics(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    flags: u8,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    if (flags & ~lyrics_fetch_flag != 0) return box.reject(@src(), .invalid_argument, "flags holds an unknown bit");
+    const started = box.runtime.startTrackLyrics(importLibrary(library), track_id, .{
+        .fetch = flags & lyrics_fetch_flag != 0,
+    }) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_lyrics_outcome(runtime: ?*Runtime, job_handle: Handle, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const outcome = box.runtime.jobLyricsOutcome(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = exportLyricsOutcome(outcome);
+    return .ok;
+}
+
+pub export fn orca_job_lyrics(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    context: ?*anyopaque,
+    callback: ?LyricsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const taken = box.runtime.jobTakeLyrics(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    const lyrics = taken orelse return box.reject(@src(), .not_found, "the job holds no lyrics");
+    defer lyrics.deinit();
+    const lines = box.runtime.allocator.alloc(LyricsLineView, lyrics.lines.len) catch |err|
+        return box.fail(@src(), err);
+    defer box.runtime.allocator.free(lines);
+    for (lines, lyrics.lines) |*line, source_line| line.* = .{
+        .start_ms = if (source_line.start_ms) |start_ms| start_ms else -1,
+        .text = stringView(source_line.text),
+    };
+    const view: LyricsView = .{
+        .source = exportLyricsSource(lyrics.source),
+        .kind = exportLyricsKind(lyrics.kind),
+        .language = if (lyrics.language) |*code| stringView(code) else stringView(""),
+        .lines = lines.ptr,
+        .line_count = lines.len,
+    };
+    visit(context, &view);
+    return .ok;
+}
+
 pub export fn orca_library_edit_tracks(
     runtime: ?*Runtime,
     library: Handle,
@@ -2200,7 +2272,7 @@ pub export fn orca_runtime_pump_timeout(runtime: ?*Runtime, timeout_ms: ?*i64) c
 
 pub const credential_max_bytes = 1024;
 
-pub const ProviderService = enum { listenbrainz, musicbrainz, acoustid, cover_art_archive };
+pub const ProviderService = enum { listenbrainz, musicbrainz, acoustid, cover_art_archive, lrclib };
 
 pub fn importProviderService(value: u8) ?ProviderService {
     return switch (value) {
@@ -2208,6 +2280,7 @@ pub fn importProviderService(value: u8) ?ProviderService {
         1 => .musicbrainz,
         2 => .acoustid,
         3 => .cover_art_archive,
+        4 => .lrclib,
         else => null,
     };
 }
@@ -2297,6 +2370,7 @@ pub export fn orca_runtime_set_provider_server(
         .musicbrainz => box.runtime.setMusicBrainzServer(server),
         .acoustid => box.runtime.setAcoustIdServer(server),
         .cover_art_archive => box.runtime.setCoverArtArchiveServer(server),
+        .lrclib => box.runtime.setLrclibServer(server),
     };
     set catch |err| return box.fail(@src(), err);
     return .ok;
@@ -2839,6 +2913,38 @@ pub fn exportCoverArtOutcome(outcome: core.runtime.CoverArtOutcome) u8 {
         .unavailable => 8,
         .busy => 9,
         .cancelled => 10,
+    };
+}
+
+pub fn exportLyricsOutcome(outcome: core.runtime.LyricsOutcome) u8 {
+    return switch (outcome) {
+        .local => 0,
+        .fetched => 1,
+        .cached => 2,
+        .cached_miss => 3,
+        .not_found => 4,
+        .no_metadata => 5,
+        .refused => 6,
+        .unavailable => 7,
+        .busy => 8,
+        .cancelled => 9,
+        .not_requested => 10,
+    };
+}
+
+pub fn exportLyricsSource(source: metadata.lyrics.Source) u8 {
+    return switch (source) {
+        .sidecar => 0,
+        .embedded => 1,
+        .lrclib => 2,
+    };
+}
+
+pub fn exportLyricsKind(kind: metadata.lyrics.Kind) u8 {
+    return switch (kind) {
+        .synced => 0,
+        .plain => 1,
+        .instrumental => 2,
     };
 }
 
@@ -4429,7 +4535,8 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .metadata_lookup => 6,
         .acoustid_submission => 7,
         .mutation => 8,
-        .artwork, .conversion, .ripping, .lyrics, .dummy => 255,
+        .lyrics => 9,
+        .artwork, .conversion, .ripping, .dummy => 255,
     };
 }
 
@@ -4570,6 +4677,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidMaintenanceOptions,
         error.PageOutOfRange,
         error.NotATagWriteJob,
+        error.NotALyricsJob,
         => .invalid_argument,
         else => .internal,
     };
@@ -5284,6 +5392,132 @@ test "artwork calls refuse null outputs and unknown subjects, find no cover for 
     try std.testing.expectEqual(Status.stale_handle, orca_library_track_artwork(runtime, library, 1, &images, countImage));
 }
 
+const CapturedLyrics = struct {
+    calls: usize = 0,
+    source: u8 = 255,
+    kind: u8 = 255,
+    language: [3]u8 = @splat(0),
+    language_length: usize = 0,
+    line_count: usize = 0,
+    first_start_ms: i64 = 0,
+    last_start_ms: i64 = 0,
+    first_text: [64]u8 = @splat(0),
+    first_text_length: usize = 0,
+};
+
+fn captureLyrics(context: ?*anyopaque, view: *const LyricsView) callconv(.c) void {
+    const captured: *CapturedLyrics = @ptrCast(@alignCast(context.?));
+    captured.calls += 1;
+    captured.source = view.source;
+    captured.kind = view.kind;
+    captured.language_length = @min(view.language.length, captured.language.len);
+    @memcpy(captured.language[0..captured.language_length], view.language.pointer[0..captured.language_length]);
+    captured.line_count = view.line_count;
+    if (view.line_count == 0) return;
+    const lines = view.lines[0..view.line_count];
+    captured.first_start_ms = lines[0].start_ms;
+    captured.last_start_ms = lines[lines.len - 1].start_ms;
+    captured.first_text_length = @min(lines[0].text.length, captured.first_text.len);
+    @memcpy(captured.first_text[0..captured.first_text_length], lines[0].text.pointer[0..captured.first_text_length]);
+}
+
+fn finishedLyricsJob(runtime: *Runtime, fixture: []const u8, audio_name: []const u8, sidecar: ?[]const u8, name: [:0]const u8) !Handle {
+    const box = runtimeBox(runtime).?;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try core.runtime_tests.copyFixtureInto(temporary.dir, fixture, audio_name);
+    if (sidecar) |path| try core.runtime_tests.copyFixtureInto(temporary.dir, path, "a.lrc");
+    const scanned = try core.runtime_tests.scannedTempFolder(&box.runtime, &temporary, name);
+    const track_ids = try core.runtime_tests.allTrackIds(&box.runtime, scanned);
+    defer std.testing.allocator.free(track_ids);
+    try std.testing.expectEqual(@as(usize, 1), track_ids.len);
+    var lyrics_job: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_lyrics(runtime, exportLibraryHandle(scanned), track_ids[0], 0, &lyrics_job));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, importJob(lyrics_job)));
+    return lyrics_job;
+}
+
+test "a lyrics job hands its synced lines over once through the C ABI, and plain lines start at -1" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+
+    const synced = try finishedLyricsJob(runtime, "fixtures/audio/chromaprint-test.mp3", "a.mp3", "fixtures/audio/chromaprint-test.lrc", "file:orca-c-api-lyrics-sidecar?mode=memory&cache=shared");
+    var outcome: u8 = 255;
+    try std.testing.expectEqual(Status.ok, orca_job_lyrics_outcome(runtime, synced, &outcome));
+    try std.testing.expectEqual(exportLyricsOutcome(.local), outcome);
+    var captured: CapturedLyrics = .{};
+    try std.testing.expectEqual(Status.ok, orca_job_lyrics(runtime, synced, &captured, captureLyrics));
+    try std.testing.expectEqual(@as(usize, 1), captured.calls);
+    try std.testing.expectEqual(exportLyricsSource(.sidecar), captured.source);
+    try std.testing.expectEqual(exportLyricsKind(.synced), captured.kind);
+    try std.testing.expectEqual(@as(usize, 0), captured.language_length);
+    try std.testing.expectEqual(@as(usize, 4), captured.line_count);
+    try std.testing.expectEqual(@as(i64, 1000), captured.first_start_ms);
+    try std.testing.expectEqual(@as(i64, 8000), captured.last_start_ms);
+    try std.testing.expectEqualStrings("One second in", captured.first_text[0..captured.first_text_length]);
+    captured = .{};
+    try std.testing.expectEqual(Status.not_found, orca_job_lyrics(runtime, synced, &captured, captureLyrics));
+    try std.testing.expectEqual(@as(usize, 0), captured.calls);
+
+    const plain = try finishedLyricsJob(runtime, "fixtures/audio/lyrics-plain.m4a", "a.m4a", null, "file:orca-c-api-lyrics-plain?mode=memory&cache=shared");
+    try std.testing.expectEqual(Status.ok, orca_job_lyrics(runtime, plain, &captured, captureLyrics));
+    try std.testing.expectEqual(exportLyricsSource(.embedded), captured.source);
+    try std.testing.expectEqual(exportLyricsKind(.plain), captured.kind);
+    try std.testing.expectEqual(@as(usize, 2), captured.line_count);
+    try std.testing.expectEqual(@as(i64, -1), captured.first_start_ms);
+    try std.testing.expectEqual(@as(i64, -1), captured.last_start_ms);
+
+    const tagged = try finishedLyricsJob(runtime, "fixtures/audio/lyrics-sylt.mp3", "a.mp3", null, "file:orca-c-api-lyrics-sylt?mode=memory&cache=shared");
+    captured = .{};
+    try std.testing.expectEqual(Status.ok, orca_job_lyrics(runtime, tagged, &captured, captureLyrics));
+    try std.testing.expectEqual(exportLyricsKind(.synced), captured.kind);
+    try std.testing.expectEqualStrings("eng", captured.language[0..captured.language_length]);
+}
+
+test "lyrics calls refuse null outputs, unknown flags, fetching without an identity, stale jobs and jobs of another kind" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-lyrics-arguments?mode=memory&cache=shared", &library));
+    var lyrics_job: Handle = undefined;
+    var outcome: u8 = 255;
+    var captured: CapturedLyrics = .{};
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_lyrics(null, library, 1, 0, &lyrics_job));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics_outcome(null, library, &outcome));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics(null, library, &captured, captureLyrics));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_lyrics(runtime, library, 1, 0, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_lyrics(runtime, library, 1, 2, &lyrics_job));
+    try std.testing.expectEqualStrings("orca_library_start_lyrics: flags holds an unknown bit", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_lyrics(runtime, library, 1, lyrics_fetch_flag, &lyrics_job));
+    try std.testing.expectEqualStrings("orca_library_start_lyrics: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(runtime)));
+
+    const stale: Handle = .{ .index = 7, .generation = 3 };
+    try std.testing.expectEqual(Status.stale_handle, orca_job_lyrics_outcome(runtime, stale, &outcome));
+    try std.testing.expectEqual(Status.stale_handle, orca_job_lyrics(runtime, stale, &captured, captureLyrics));
+
+    try std.testing.expectEqual(Status.ok, orca_library_start_lyrics(runtime, library, 1_000_000, 0, &lyrics_job));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics_outcome(runtime, lyrics_job, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics(runtime, lyrics_job, &captured, null));
+    const box = runtimeBox(runtime).?;
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, importJob(lyrics_job)));
+    try std.testing.expectEqual(Status.ok, orca_job_lyrics_outcome(runtime, lyrics_job, &outcome));
+    try std.testing.expectEqual(exportLyricsOutcome(.not_found), outcome);
+    try std.testing.expectEqual(Status.not_found, orca_job_lyrics(runtime, lyrics_job, &captured, captureLyrics));
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(runtime, lyrics_job, &snapshot));
+    try std.testing.expectEqual(@as(u8, 9), snapshot.kind);
+
+    var projection: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_projection(runtime, library, &projection));
+    _ = try core.runtime_tests.awaitJob(&box.runtime, importJob(projection));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics_outcome(runtime, projection, &outcome));
+    try std.testing.expectEqualStrings("orca_job_lyrics_outcome: NotALyricsJob", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_lyrics(runtime, projection, &captured, captureLyrics));
+    try std.testing.expectEqual(@as(usize, 0), captured.calls);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
 test "artwork requests past 64 outstanding are busy until a result is taken, and a coverless subject arrives without an image" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
@@ -5732,7 +5966,7 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
     var long: [providers.url.max_server_bytes + 1:0]u8 = @splat('a');
     @memcpy(long[0.."https://".len], "https://");
     try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 1, &long));
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 4, "https://example.org"));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 5, "https://example.org"));
     try std.testing.expectEqualStrings(
         "orca_runtime_set_provider_server: unknown provider service",
         std.mem.span(orca_runtime_last_error(runtime)),
@@ -5745,11 +5979,15 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
     try std.testing.expectEqualStrings("http://[::1]:9/acoustid", box.runtime.acoustid_server.view());
     try std.testing.expectEqualStrings("http://localhost:9", box.runtime.coverartarchive_server.view());
 
-    for (0..4) |service| try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, @intCast(service), null));
+    try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 4, "http://127.0.0.1:9/lrclib"));
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/lrclib", box.runtime.lrclib_server.view());
+
+    for (0..5) |service| try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, @intCast(service), null));
     try std.testing.expectEqualStrings(providers.listenbrainz.default_server, box.runtime.listenbrainz_server.view());
     try std.testing.expectEqualStrings(providers.musicbrainz.default_server, box.runtime.musicbrainz_server.view());
     try std.testing.expectEqualStrings(providers.acoustid.default_server, box.runtime.acoustid_server.view());
     try std.testing.expectEqualStrings(providers.coverartarchive.default_server, box.runtime.coverartarchive_server.view());
+    try std.testing.expectEqualStrings(providers.lrclib.default_server, box.runtime.lrclib_server.view());
 }
 
 test "the client identity and AcoustID key are copied, and invalid ones are refused" {

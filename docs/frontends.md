@@ -82,6 +82,15 @@ The boundary covers the whole engine, not a fragment of it:
   Library, counting finished ones not yet taken; past that a request is
   `ORCA_STATUS_BUSY`. `orca_library_cancel_artwork` skips a request that has
   not started; one already finished still arrives.
+- **Lyrics.** `orca_library_start_lyrics` starts an `ORCA_JOB_KIND_LYRICS`
+  Job for one Track: a synced sidecar, then synced lyrics in the file, then
+  plain lyrics from each. `ORCA_LYRICS_FETCH` also asks LRCLIB for a Track
+  without synced lyrics of its own and needs a client identity; without it
+  the Job still uses answers kept in the Library. Once the Job finishes,
+  `orca_job_lyrics_outcome` reports an `orca_lyrics_outcome` and
+  `orca_job_lyrics` hands an `orca_lyrics_view` of the lines, each with its
+  start in milliseconds or -1 when plain. The lyrics are taken once; a
+  second call, or a Job that found none, is `ORCA_STATUS_NOT_FOUND`.
 - **Tag edits and writes.** `orca_library_edit_tracks` sets or clears Orca's
   own values for up to 64 `orca_metadata_field`s of up to 512 Tracks, locked
   as the user's, and returns the ids of the Tracks the edited files back
@@ -154,7 +163,7 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.
 - **Providers and credentials.** `orca_runtime_set_client_identity` names the
-  host to MusicBrainz, AcoustID and ListenBrainz.
+  host to MusicBrainz, AcoustID, ListenBrainz and LRCLIB.
   `orca_runtime_set_provider_server` points one `orca_provider_service` at
   another server: `https`, or `http` to `127.0.0.1`, `[::1]` or `localhost`
   only, copied, and `NULL` restores the public one.

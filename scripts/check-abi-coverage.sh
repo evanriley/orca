@@ -38,10 +38,6 @@ declare -A reasons=(
     [playerSeekToTail]="test and CLI aid for checking transitions; not for hosts"
     [libraryAnalyzeFile]="later: one-file analysis on the caller's thread (docs/roadmap.md, Later)"
     [libraryTrackFingerprint]="later: a Track's fingerprint (docs/roadmap.md, Later)"
-    [startTrackLyrics]="next: lyrics, in progress (docs/roadmap.md, Next)"
-    [jobLyricsOutcome]="next: lyrics, in progress (docs/roadmap.md, Next)"
-    [jobTakeLyrics]="next: lyrics, in progress (docs/roadmap.md, Next)"
-    [setLrclibServer]="next: lyrics, in progress (docs/roadmap.md, Next)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

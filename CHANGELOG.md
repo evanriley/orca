@@ -11,7 +11,7 @@
   order. `Runtime.jobLyricsOutcome` and `Runtime.jobTakeLyrics` return the
   result, and `Lyrics.lineAt` gives the synced line at a playback position.
   `orca-cli lyrics DATABASE TRACK_ID` prints them, and `orca-cli play-tracks
-  --lyrics` prints each synced line as it is heard. Not yet in the C ABI.
+  --lyrics` prints each synced line as it is heard.
 - **Lyrics from LRCLIB.** `Runtime.startTrackLyrics` with `fetch` asks
   LRCLIB for a Track without synced lyrics of its own, sending only its
   title, artist, album and duration, and ranks the answer after local synced
@@ -20,7 +20,11 @@
   is asked again after 7 days. A job without `fetch` still uses kept
   answers. `Runtime.setLrclibServer` points it at another server, and
   `orca-cli lyrics DATABASE TRACK_ID --fetch` fetches, with `ORCA_LRCLIB_URL`.
-  Not yet in the C ABI.
+- **Lyrics in the C ABI.** The C ABI's `orca_library_start_lyrics` starts an
+  `ORCA_JOB_KIND_LYRICS` Job, fetching from LRCLIB with `ORCA_LYRICS_FETCH`;
+  `orca_job_lyrics_outcome` reports where the lyrics came from and
+  `orca_job_lyrics` hands them over once as an `orca_lyrics_view`.
+  `ORCA_PROVIDER_SERVICE_LRCLIB` points LRCLIB at another server.
 
 ### Changed
 
