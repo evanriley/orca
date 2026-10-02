@@ -256,13 +256,25 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+1. **Green CI, and tag writes that say why they cannot run.** CI's
+   `headless-audio.sh zig build test` step fails since 0.8.0 at
+   `tests/c_abi_smoke.c:1317`. Its coverless Track, `Opus Reference`, is
+   backed by both `tagged-reference.opus` and `covered-reference.opus`, and
+   which one it plays from follows scan order: on btrfs the coverless file,
+   on tmpfs and CI the covered one. No Release in `fixtures/audio` is
+   reliably coverless either, so the smoke needs a single-file coverless
+   Track and a coverless Release of its own. Separately, a tag write into
+   a folder Orca cannot create files in is planned as writable, fails at its
+   staged copy, and is reported only as "Writing tags failed"; the plan
+   should skip such files with a reason, and a failed write should say what
+   failed. Released as 0.8.1.
+2. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-2. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+3. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-3. **An optional fixed output rate with a band-limited resampler**, for
+4. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.

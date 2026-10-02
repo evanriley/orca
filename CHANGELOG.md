@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- **The C ABI smoke passes whatever order a file system lists the
+  fixtures in.** Its coverless Track, `Opus Reference`, is also backed by
+  `covered-reference.opus`, so on tmpfs and CI it read that copy's cover. It
+  now uses `WAV Reference`, and checks a coverless Release in a Library of
+  its own.
+
 ## 0.8.0 - 2026-10-02
 
 Ships Library schema version 30. Close every Orca process before upgrading.

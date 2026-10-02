@@ -1303,7 +1303,7 @@ static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &tracks,
                                           collect_titled) == ORCA_STATUS_OK);
     int64_t covered = titled_track(&tracks, "covered-reference");
-    int64_t coverless = titled_track(&tracks, "Opus Reference");
+    int64_t coverless = titled_track(&tracks, "WAV Reference");
     SMOKE_CHECK(covered > 0 && coverless > 0);
 
     struct image_capture image;
@@ -1318,20 +1318,12 @@ static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(image.count == 0);
 
     int64_t covered_release = -1;
-    int64_t coverless_release = -1;
     SMOKE_CHECK(orca_library_track_get(runtime, library, covered, &covered_release,
                                        capture_release_id) == ORCA_STATUS_OK);
-    SMOKE_CHECK(orca_library_track_get(runtime, library, coverless, &coverless_release,
-                                       capture_release_id) == ORCA_STATUS_OK);
-    SMOKE_CHECK(covered_release > 0 && coverless_release > 0 &&
-                covered_release != coverless_release);
+    SMOKE_CHECK(covered_release > 0);
     SMOKE_CHECK(orca_library_release_artwork(runtime, library, covered_release, &image,
                                              capture_image) == ORCA_STATUS_OK);
     SMOKE_CHECK(image.count == 1 && image.length > 0 && image.magic_matches);
-    memset(&image, 0, sizeof image);
-    SMOKE_CHECK(orca_library_release_artwork(runtime, library, coverless_release, &image,
-                                             capture_image) == ORCA_STATUS_NOT_FOUND);
-    SMOKE_CHECK(image.count == 0);
 
     uint64_t covered_request = 0;
     uint64_t coverless_request = 0;
@@ -1700,6 +1692,63 @@ static int remove_tree(const char *path) {
     closedir(directory);
     if (rmdir(path) != 0) result = -1;
     return result;
+}
+
+static int coverless_release_steps(orca_runtime *runtime, const char *root,
+                                   orca_handle *library, int *library_open) {
+    char music[1024];
+    char song[1024];
+    SMOKE_CHECK(snprintf(music, sizeof music, "%s/music", root) < (int)sizeof music);
+    SMOKE_CHECK(snprintf(song, sizeof song, "%s/song.wav", music) < (int)sizeof song);
+    SMOKE_CHECK(mkdir(music, 0700) == 0);
+    SMOKE_CHECK(copy_file("fixtures/audio/tagged-reference.wav", song) == 0);
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-coverless?mode=memory&cache=shared",
+                                  library) == ORCA_STATUS_OK);
+    *library_open = 1;
+    int64_t root_id = 0;
+    SMOKE_CHECK(orca_library_add_root(runtime, *library, music, &root_id) == ORCA_STATUS_OK);
+    orca_handle scan_job;
+    SMOKE_CHECK(orca_library_start_scan(runtime, *library, root_id, 0, &scan_job) ==
+                ORCA_STATUS_OK);
+    uint8_t scan_state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, scan_job, &scan_state, 0, 60000) == 1);
+    SMOKE_CHECK(scan_state == ORCA_JOB_SUCCEEDED);
+
+    static struct titled_tracks tracks;
+    memset(&tracks, 0, sizeof tracks);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, *library, 0, 0, 512, 0, &tracks,
+                                          collect_titled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(tracks.count == 1);
+    int64_t release_id = -1;
+    SMOKE_CHECK(orca_library_track_get(runtime, *library, tracks.ids[0], &release_id,
+                                       capture_release_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(release_id > 0);
+    struct image_capture image;
+    memset(&image, 0, sizeof image);
+    SMOKE_CHECK(orca_library_release_artwork(runtime, *library, release_id, &image,
+                                             capture_image) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(image.count == 0);
+    return 0;
+}
+
+static int coverless_release_smoke(orca_runtime *runtime) {
+    char relative[] = ".zig-cache/tmp/orca-c-smoke-coverless-XXXXXX";
+    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(mkdtemp(relative) != 0);
+    char root[1024];
+    int failed = getcwd(root, sizeof root - sizeof relative - 1) == 0;
+    if (!failed) {
+        strcat(root, "/");
+        strcat(root, relative);
+    }
+    orca_handle library;
+    int library_open = 0;
+    if (!failed && coverless_release_steps(runtime, root, &library, &library_open) != 0) failed = 1;
+    if (library_open && orca_library_close(runtime, library) != ORCA_STATUS_OK) failed = 1;
+    if (drain_events(runtime) != 0) failed = 1;
+    if (remove_tree(relative) != 0) failed = 1;
+    SMOKE_CHECK(failed == 0);
+    return 0;
 }
 
 static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle *library,
@@ -3030,6 +3079,7 @@ int main(int argc, char **argv) {
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;
     if (artwork_smoke(runtime, library) != 0) return 1;
+    if (coverless_release_smoke(runtime) != 0) return 1;
     if (health_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;
     if (provider_smoke(runtime, library) != 0) return 1;
