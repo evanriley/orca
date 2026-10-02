@@ -40,6 +40,12 @@ The boundary covers the whole engine, not a fragment of it:
   read from the database alone. `orca_library_track_play_stats`,
   `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
   plain reads.
+- **Love and ratings.** `orca_library_set_feedback` loves, hates or clears
+  feedback on Tracks' recordings, kept locally and queued for ListenBrainz;
+  `orca_library_track_feedback` reads it. `orca_library_set_rating` stores a
+  rating of 1 to 100 (N stars as N * 20) or clears it with 0, and
+  `orca_library_set_release_love` loves whole Releases, never sent anywhere.
+  Each edit takes at most 512 ids and returns an `orca_change_count`.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

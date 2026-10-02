@@ -404,6 +404,14 @@ typedef struct orca_play_stats {
     uint8_t reserved[7];
 } orca_play_stats;
 
+/* What a bulk change to Tracks or Releases did. `updated` counts the ids whose
+ * stored value changed; `skipped` counts ids that name nothing in the
+ * Library. An id that already had the requested value is neither. */
+typedef struct orca_change_count {
+    uint32_t updated;
+    uint32_t skipped;
+} orca_change_count;
+
 typedef struct orca_health_issue_view {
     uint8_t kind;
     uint8_t severity;
@@ -928,6 +936,63 @@ orca_status orca_library_listens_recorded(
     orca_runtime *runtime,
     orca_handle library,
     uint64_t *output
+);
+/* Sets, or with ORCA_FEEDBACK_NONE clears, the feedback on the recordings of
+ * `track_ids`: at most 512 ids; INVALID_ARGUMENT for more, for a null `ids`
+ * with a nonzero `count`, and for a `feedback` that is not an orca_feedback.
+ * Zero ids succeed with zero counts. The feedback is kept in the Library and
+ * queued for ListenBrainz, which is sent when listens are submitted; a clear
+ * is queued too, but only where an earlier love or hate had already been
+ * sent. A Track whose recording has no MusicBrainz id keeps the feedback
+ * locally and queues nothing. `skipped` counts ids that name no Track;
+ * `updated` counts Tracks whose feedback changed, so clearing feedback that
+ * was never set updates nothing. */
+orca_status orca_library_set_feedback(
+    orca_runtime *runtime,
+    orca_handle library,
+    const int64_t *track_ids,
+    size_t count,
+    uint8_t feedback,
+    orca_change_count *output
+);
+/* The Track's feedback, as an orca_feedback. A Track with none, or an unknown
+ * id, reports ORCA_FEEDBACK_NONE. */
+orca_status orca_library_track_feedback(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    uint8_t *feedback
+);
+/* Rates the recordings of `track_ids`: `rating` 1..100 sets it, 0 clears it,
+ * anything above 100 is INVALID_ARGUMENT. At most 512 ids; INVALID_ARGUMENT
+ * for more or for a null `ids` with a nonzero `count`. Zero ids succeed with
+ * zero counts. Ratings are kept in the Library; no file is written and
+ * nothing is sent. `skipped` counts ids that name no Track; `updated` counts
+ * Tracks that were rated, or that had a rating to clear.
+ * A host showing whole stars stores N stars as N * 20 (orca-cli rate
+ * --stars) and shows a rating of r as r / 20 rounded to the nearest star,
+ * between 1 and 5. */
+orca_status orca_library_set_rating(
+    orca_runtime *runtime,
+    orca_handle library,
+    const int64_t *track_ids,
+    size_t count,
+    uint8_t rating,
+    orca_change_count *output
+);
+/* Loves (`loved` 1) or clears (`loved` 0) whole Releases; any other value is
+ * INVALID_ARGUMENT. At most 512 ids; INVALID_ARGUMENT for more or for a null
+ * `ids` with a nonzero `count`. Zero ids succeed with zero counts. Album love
+ * is kept in the Library only and is never sent to ListenBrainz. `skipped`
+ * counts ids that name no Release; `updated` counts Releases whose love
+ * changed. */
+orca_status orca_library_set_release_love(
+    orca_runtime *runtime,
+    orca_handle library,
+    const int64_t *release_ids,
+    size_t count,
+    uint8_t loved,
+    orca_change_count *output
 );
 /* Files that still owe the default loudness and fingerprint measurement:
  * what orca_library_start_analysis would measure. */

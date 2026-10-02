@@ -30,6 +30,16 @@
 #include <time.h>
 #include <unistd.h>
 
+#define SMOKE_FAIL()                                                              \
+    do {                                                                          \
+        fprintf(stderr, "c-abi-smoke: check failed at %s:%d\n", __FILE__, __LINE__); \
+        return 1;                                                                 \
+    } while (0)
+#define SMOKE_CHECK(condition)        \
+    do {                              \
+        if (!(condition)) SMOKE_FAIL(); \
+    } while (0)
+
 /* Which output this test opens.
  *
  * Device 0 is the server default, which on a developer's machine is their
@@ -410,6 +420,121 @@ static int await_library_changed(orca_runtime *runtime, orca_handle library, lon
         if (now_ms() >= deadline) return 0;
         if (wait_for_runtime(runtime, deadline) < 0) return -1;
     }
+}
+
+struct edit_capture {
+    uint32_t count;
+    uint8_t feedback;
+    uint8_t has_rating;
+    uint8_t rating;
+    uint8_t loved;
+};
+
+static void capture_edit_track(void *context, const orca_track_summary_view *summary) {
+    struct edit_capture *capture = context;
+    capture->count += 1;
+    capture->feedback = summary->track.feedback;
+    capture->has_rating = summary->track.has_rating;
+    capture->rating = summary->track.rating;
+}
+
+static void capture_edit_release(void *context, const orca_release_view *release) {
+    struct edit_capture *capture = context;
+    capture->count += 1;
+    capture->loved = release->loved;
+}
+
+static int track_edit_state(orca_runtime *runtime, orca_handle library, int64_t track_id,
+                            struct edit_capture *state) {
+    memset(state, 0, sizeof *state);
+    SMOKE_CHECK(orca_library_track_get(runtime, library, track_id, state,
+                                       capture_edit_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(state->count == 1);
+    return 0;
+}
+
+/* Feedback, ratings and album love through the same boundary a host uses,
+ * ending with the Library as it started so later checks still see no loved
+ * Track or Release. */
+static int library_edits_smoke(orca_runtime *runtime, orca_handle library, int64_t track_id,
+                               int64_t release_id) {
+    const int64_t tracks[2] = {track_id, 999999999};
+    orca_change_count change;
+    struct edit_capture state;
+    uint8_t feedback = 0xff;
+
+    memset(&change, 0xff, sizeof change);
+    SMOKE_CHECK(orca_library_set_feedback(runtime, library, tracks, 2, ORCA_FEEDBACK_LOVED,
+                                          &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 1);
+    SMOKE_CHECK(track_edit_state(runtime, library, track_id, &state) == 0);
+    SMOKE_CHECK(state.feedback == ORCA_FEEDBACK_LOVED);
+    SMOKE_CHECK(orca_library_track_feedback(runtime, library, track_id, &feedback) ==
+                    ORCA_STATUS_OK &&
+                feedback == ORCA_FEEDBACK_LOVED);
+
+    SMOKE_CHECK(orca_library_set_feedback(runtime, library, tracks, 1, ORCA_FEEDBACK_HATED,
+                                          &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 0);
+    SMOKE_CHECK(orca_library_track_feedback(runtime, library, track_id, &feedback) ==
+                    ORCA_STATUS_OK &&
+                feedback == ORCA_FEEDBACK_HATED);
+    SMOKE_CHECK(orca_library_set_feedback(runtime, library, tracks, 1, ORCA_FEEDBACK_NONE,
+                                          &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1);
+    SMOKE_CHECK(orca_library_track_feedback(runtime, library, track_id, &feedback) ==
+                    ORCA_STATUS_OK &&
+                feedback == ORCA_FEEDBACK_NONE);
+    SMOKE_CHECK(orca_library_set_feedback(runtime, library, tracks, 1, 9, &change) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_feedback(runtime, library, 0, 0, ORCA_FEEDBACK_LOVED,
+                                          &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 0 && change.skipped == 0);
+
+    SMOKE_CHECK(orca_library_set_rating(runtime, library, tracks, 2, 80, &change) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 1);
+    SMOKE_CHECK(track_edit_state(runtime, library, track_id, &state) == 0);
+    SMOKE_CHECK(state.has_rating == 1 && state.rating == 80);
+    SMOKE_CHECK(orca_library_set_rating(runtime, library, tracks, 1, 101, &change) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_rating(runtime, library, tracks, 1, 0, &change) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1);
+    SMOKE_CHECK(track_edit_state(runtime, library, track_id, &state) == 0);
+    SMOKE_CHECK(state.has_rating == 0);
+
+    const int64_t releases[2] = {release_id, 999999999};
+    SMOKE_CHECK(orca_library_set_release_love(runtime, library, releases, 2, 1, &change) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 1);
+    memset(&state, 0, sizeof state);
+    SMOKE_CHECK(orca_library_release_get(runtime, library, release_id, &state,
+                                         capture_edit_release) == ORCA_STATUS_OK);
+    SMOKE_CHECK(state.count == 1 && state.loved == 1);
+    orca_release_query query;
+    memset(&query, 0, sizeof query);
+    query.album_artist_id = -1;
+    query.loved_only = 1;
+    query.limit = 512;
+    struct edit_capture listed;
+    memset(&listed, 0, sizeof listed);
+    uint64_t matching = 0;
+    SMOKE_CHECK(orca_library_browse_releases(runtime, library, &query, &listed,
+                                             capture_edit_release) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.loved == 1);
+    SMOKE_CHECK(orca_library_release_count_matching(runtime, library, &query, &matching) ==
+                    ORCA_STATUS_OK &&
+                matching == 1);
+    SMOKE_CHECK(orca_library_set_release_love(runtime, library, releases, 1, 2, &change) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_release_love(runtime, library, releases, 1, 0, &change) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1);
+    SMOKE_CHECK(orca_library_release_count_matching(runtime, library, &query, &matching) ==
+                    ORCA_STATUS_OK &&
+                matching == 0);
+    return 0;
 }
 
 /* Watches a root in a temporary directory, adds an album to it, and waits
@@ -1067,6 +1192,9 @@ int main(int argc, char **argv) {
             ORCA_STATUS_OK ||
         track_matches != 0)
         return 251;
+
+    if (library_edits_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0)
+        return 1;
 
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;

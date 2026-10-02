@@ -217,6 +217,11 @@ pub const TrackDetailsView = extern struct {
 
 pub const TrackDetailsCallback = *const fn (?*anyopaque, *const TrackDetailsView) callconv(.c) void;
 
+pub const ChangeCount = extern struct {
+    updated: u32,
+    skipped: u32,
+};
+
 pub const PlayStatsView = extern struct {
     play_count: u64,
     last_played_at: i64,
@@ -913,6 +918,77 @@ pub export fn orca_library_listens_recorded(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     destination.* = box.runtime.libraryListensRecorded(importLibrary(library)) catch |err|
         return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_set_feedback(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_ids: ?[*]const i64,
+    count: usize,
+    feedback: u8,
+    output: ?*ChangeCount,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const value = importFeedback(feedback) orelse
+        return box.reject(@src(), .invalid_argument, "feedback is not an orca_feedback");
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const change = box.runtime.librarySetFeedback(importLibrary(library), list, value) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .updated = change.updated, .skipped = change.skipped };
+    return .ok;
+}
+
+pub export fn orca_library_track_feedback(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    feedback: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = feedback orelse return box.reject(@src(), .invalid_argument, "feedback is null");
+    destination.* = exportFeedback(box.runtime.libraryTrackFeedback(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err));
+    return .ok;
+}
+
+pub export fn orca_library_set_rating(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_ids: ?[*]const i64,
+    count: usize,
+    rating: u8,
+    output: ?*ChangeCount,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    if (rating > database.repository.max_rating) return box.reject(@src(), .invalid_argument, "rating must be 0 to clear, or 1 to 100");
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const change = box.runtime.librarySetRating(importLibrary(library), list, if (rating == 0) null else rating) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .updated = change.updated, .skipped = change.skipped };
+    return .ok;
+}
+
+pub export fn orca_library_set_release_love(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_ids: ?[*]const i64,
+    count: usize,
+    loved: u8,
+    output: ?*ChangeCount,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    if (loved > 1) return box.reject(@src(), .invalid_argument, "loved must be 0 or 1");
+    const list = editIdSlice(release_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const change = box.runtime.librarySetReleaseLove(importLibrary(library), list, loved == 1) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .updated = change.updated, .skipped = change.skipped };
     return .ok;
 }
 
@@ -1952,6 +2028,24 @@ fn trackIdSlice(ids: ?[*]const i64, count: usize) ?[]const i64 {
     return pointer[0..count];
 }
 
+const invalid_edit_ids = "ids is null or count exceeds 512";
+
+fn editIdSlice(ids: ?[*]const i64, count: usize) ?[]const i64 {
+    if (count == 0) return &.{};
+    const pointer = ids orelse return null;
+    if (count > max_page) return null;
+    return pointer[0..count];
+}
+
+fn importFeedback(value: u8) ?database.Feedback {
+    return switch (value) {
+        0 => .none,
+        1 => .loved,
+        2 => .hated,
+        else => null,
+    };
+}
+
 fn exportJobHandle(handle: core.JobHandle) Handle {
     return .{ .index = handle.index, .generation = handle.generation };
 }
@@ -2440,4 +2534,41 @@ fn countHealthIssue(context: ?*anyopaque, issue: *const HealthIssueView) callcon
     const count: *usize = @ptrCast(@alignCast(context.?));
     count.* += 1;
     std.debug.assert(issue.path.length != 0);
+}
+
+test "feedback, rating and release love edits refuse bad arguments and leave the Library untouched" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-edits?mode=memory&cache=shared",
+        &library,
+    ));
+    const ids = [_]i64{1};
+    var change: ChangeCount = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_feedback(runtime, library, &ids, 1, 3, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_feedback(runtime, library, null, 1, 1, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_feedback(runtime, library, &ids, 1, 1, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_rating(runtime, library, &ids, 1, 101, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_rating(runtime, library, null, 1, 80, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_rating(runtime, library, &ids, 1, 80, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, &ids, 1, 2, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, null, 1, 1, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_release_love(runtime, library, &ids, 1, 1, null));
+    const too_many = [_]i64{1} ** (max_page + 1);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_rating(runtime, library, &too_many, too_many.len, 80, &change));
+    var feedback: u8 = 9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_feedback(runtime, library, 1, null));
+    try std.testing.expectEqual(Status.ok, orca_library_track_feedback(runtime, library, 1, &feedback));
+    try std.testing.expectEqual(@as(u8, 0), feedback);
+
+    change = .{ .updated = 7, .skipped = 7 };
+    try std.testing.expectEqual(Status.ok, orca_library_set_rating(runtime, library, null, 0, 80, &change));
+    try std.testing.expectEqual(ChangeCount{ .updated = 0, .skipped = 0 }, change);
+    try std.testing.expectEqual(Status.ok, orca_library_set_rating(runtime, library, &ids, 1, 80, &change));
+    try std.testing.expectEqual(ChangeCount{ .updated = 0, .skipped = 1 }, change);
+    try std.testing.expectEqual(Status.ok, orca_library_set_release_love(runtime, library, &ids, 1, 1, &change));
+    try std.testing.expectEqual(ChangeCount{ .updated = 0, .skipped = 1 }, change);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }

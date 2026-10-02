@@ -140,6 +140,12 @@
   `orca_library_unanalyzed_count` the play counts, listens recorded and files
   still to analyse. `orca_job_kind` names matching, AcoustID submission
   and tag-write jobs.
+- **The C ABI loves, hates and rates Tracks and loves albums.**
+  `orca_library_set_feedback` and `orca_library_track_feedback` set and read
+  an `orca_feedback`, `orca_library_set_rating` rates Tracks 1 to 100 or
+  clears with 0, and `orca_library_set_release_love` loves or clears whole
+  Releases. Each edit reports an `orca_change_count` of updated and skipped
+  ids.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

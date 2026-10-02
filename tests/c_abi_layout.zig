@@ -19,6 +19,7 @@ const struct_pairs = .{
     .{ c_api.TrackSummaryView, c.orca_track_summary_view },
     .{ c_api.TrackDetailsView, c.orca_track_details_view },
     .{ c_api.PlayStatsView, c.orca_play_stats },
+    .{ c_api.ChangeCount, c.orca_change_count },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
