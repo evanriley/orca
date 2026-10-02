@@ -163,6 +163,15 @@
   `orca_signal_path_view` of the source and output `orca_pcm_format`s, codec,
   ReplayGain, equalizer, crossfeed, volume, device rate and the
   `orca_signal_reason`s the path is not bit-perfect.
+- **The C ABI manages, imports, exports and plays playlists.**
+  `orca_library_query_playlists`, `orca_library_create_playlist`,
+  `orca_library_rename_playlist`, `orca_library_delete_playlist`,
+  `orca_library_query_playlist_entries`, `orca_library_playlist_insert`,
+  `orca_library_playlist_remove`, `orca_library_playlist_move`,
+  `orca_library_import_playlist`, `orca_library_export_playlist` and
+  `orca_player_play_playlist`, with `orca_playlist_view`,
+  `orca_playlist_entry_view`, `orca_playlist_import`, `orca_line_callback`
+  and `orca_playlist_path_style`.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

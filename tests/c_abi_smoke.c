@@ -800,6 +800,307 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
     return 0;
 }
 
+struct playlist_capture {
+    uint32_t count;
+    int64_t id;
+    uint32_t entries;
+    uint32_t available;
+    int64_t created_at;
+    char name[64];
+};
+
+static void capture_playlist(void *context, const orca_playlist_view *playlist) {
+    struct playlist_capture *capture = context;
+    capture->count += 1;
+    capture->id = playlist->id;
+    capture->entries = playlist->entries;
+    capture->available = playlist->available;
+    capture->created_at = playlist->created_at;
+    size_t length = playlist->name.length;
+    if (length >= sizeof capture->name) length = sizeof capture->name - 1;
+    memcpy(capture->name, playlist->name.pointer, length);
+    capture->name[length] = 0;
+}
+
+struct entry_capture {
+    uint32_t count;
+    uint32_t positions[8];
+    uint8_t has_track[8];
+    int64_t track_ids[8];
+    char titles[8][128];
+};
+
+static void capture_playlist_entry(void *context, const orca_playlist_entry_view *entry) {
+    struct entry_capture *capture = context;
+    if (capture->count < 8) {
+        uint32_t i = capture->count;
+        capture->positions[i] = entry->position;
+        capture->has_track[i] = entry->has_track;
+        capture->track_ids[i] = entry->track.id;
+        size_t length = entry->track.title.length;
+        if (length >= sizeof capture->titles[0]) length = sizeof capture->titles[0] - 1;
+        memcpy(capture->titles[i], entry->track.title.pointer, length);
+        capture->titles[i][length] = 0;
+    }
+    capture->count += 1;
+}
+
+struct line_capture {
+    uint32_t count;
+    char line[256];
+};
+
+static void capture_line(void *context, orca_string_view line) {
+    struct line_capture *capture = context;
+    capture->count += 1;
+    size_t length = line.length;
+    if (length >= sizeof capture->line) length = sizeof capture->line - 1;
+    memcpy(capture->line, line.pointer, length);
+    capture->line[length] = 0;
+}
+
+static int playlist_titles_are(orca_runtime *runtime, orca_handle library, int64_t playlist_id,
+                               const char *const *expected, uint32_t count,
+                               struct entry_capture *entries) {
+    memset(entries, 0, sizeof *entries);
+    SMOKE_CHECK(orca_library_query_playlist_entries(runtime, library, playlist_id, 512, 0,
+                                                    entries, capture_playlist_entry) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(entries->count == count);
+    for (uint32_t i = 0; i < count; i += 1) {
+        SMOKE_CHECK(entries->positions[i] == i && entries->has_track[i] == 1);
+        SMOKE_CHECK(strcmp(entries->titles[i], expected[i]) == 0);
+    }
+    return 0;
+}
+
+static int write_text_file(const char *path, const char *text) {
+    FILE *file = fopen(path, "w");
+    if (file == 0) return -1;
+    size_t length = strlen(text);
+    int failed = fwrite(text, 1, length, file) != length;
+    if (fclose(file) != 0) failed = 1;
+    return failed ? -1 : 0;
+}
+
+static int read_text_file(const char *path, char *buffer, size_t capacity) {
+    FILE *file = fopen(path, "r");
+    if (file == 0) return -1;
+    size_t length = fread(buffer, 1, capacity - 1, file);
+    fclose(file);
+    buffer[length] = 0;
+    return 0;
+}
+
+static int playlist_files_smoke(orca_runtime *runtime, orca_handle library, int64_t playlist_id,
+                                const char *directory, uint32_t available) {
+    char exported[128];
+    char bogus[128];
+    char empty[128];
+    snprintf(exported, sizeof exported, "%s/Smoke.m3u8", directory);
+    snprintf(bogus, sizeof bogus, "%s/bogus.m3u", directory);
+    snprintf(empty, sizeof empty, "%s/empty.m3u", directory);
+
+    uint32_t written = 0;
+    uint32_t skipped = 9;
+    SMOKE_CHECK(orca_library_export_playlist(runtime, library, playlist_id, exported,
+                                             strlen(exported), ORCA_PLAYLIST_PATH_ABSOLUTE, 0,
+                                             &written, &skipped) == ORCA_STATUS_OK);
+    SMOKE_CHECK(written == available && skipped == 0);
+    char contents[8192];
+    SMOKE_CHECK(read_text_file(exported, contents, sizeof contents) == 0);
+    SMOKE_CHECK(strncmp(contents, "#EXTM3U", 7) == 0);
+    SMOKE_CHECK(strstr(contents, "fixtures/audio/") != 0);
+    SMOKE_CHECK(orca_library_export_playlist(runtime, library, playlist_id, exported,
+                                             strlen(exported), ORCA_PLAYLIST_PATH_ABSOLUTE, 0,
+                                             &written, &skipped) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_library_export_playlist(runtime, library, playlist_id, exported,
+                                             strlen(exported), ORCA_PLAYLIST_PATH_ABSOLUTE, 1,
+                                             &written, &skipped) == ORCA_STATUS_OK);
+    SMOKE_CHECK(written == available);
+
+    orca_playlist_import imported;
+    struct line_capture lines;
+    memset(&imported, 0, sizeof imported);
+    memset(&lines, 0, sizeof lines);
+    SMOKE_CHECK(orca_library_import_playlist(runtime, library, exported, strlen(exported),
+                                             "Smoke import", 12, &imported, &lines,
+                                             capture_line) == ORCA_STATUS_OK);
+    SMOKE_CHECK(imported.playlist_id > 0 && imported.playlist_id != playlist_id);
+    SMOKE_CHECK(imported.matched_by_path == written && imported.matched_by_info == 0);
+    SMOKE_CHECK(imported.unmatched == 0 && lines.count == 0);
+    struct playlist_capture listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists(runtime, library, 1, 0, &listed, capture_playlist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.id == imported.playlist_id);
+    SMOKE_CHECK(strcmp(listed.name, "Smoke import") == 0 && listed.entries == written);
+
+    const char *missing_line = "/nonexistent/orca-c-smoke/missing.flac";
+    char m3u[256];
+    snprintf(m3u, sizeof m3u, "#EXTM3U\n%s\n", missing_line);
+    SMOKE_CHECK(write_text_file(bogus, m3u) == 0);
+    orca_playlist_import unmatched;
+    memset(&unmatched, 0, sizeof unmatched);
+    memset(&lines, 0, sizeof lines);
+    SMOKE_CHECK(orca_library_import_playlist(runtime, library, bogus, strlen(bogus), 0, 0,
+                                             &unmatched, &lines, capture_line) == ORCA_STATUS_OK);
+    SMOKE_CHECK(unmatched.unmatched == 1 && unmatched.matched_by_path == 0);
+    SMOKE_CHECK(lines.count == 1 && strcmp(lines.line, missing_line) == 0);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists(runtime, library, 1, 0, &listed, capture_playlist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.id == unmatched.playlist_id && strcmp(listed.name, "bogus") == 0);
+    SMOKE_CHECK(listed.entries == 0);
+
+    SMOKE_CHECK(write_text_file(empty, "#EXTM3U\n") == 0);
+    SMOKE_CHECK(orca_library_import_playlist(runtime, library, empty, strlen(empty), 0, 0,
+                                             &unmatched, 0, 0) == ORCA_STATUS_INVALID_STATE);
+
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, imported.playlist_id) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, unmatched.playlist_id) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(unlink(exported) == 0 && unlink(bogus) == 0 && unlink(empty) == 0);
+    return 0;
+}
+
+static int playlist_play_smoke(orca_runtime *runtime, orca_handle player, int64_t playlist_id,
+                               int64_t first_track_id) {
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ONE) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_playlist(runtime, player, playlist_id, 0) == ORCA_STATUS_OK);
+    orca_player_status status;
+    struct now_playing_capture playing;
+    int reflected = 0;
+    long deadline = now_ms() + 3000;
+    while (!reflected && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(orca_player_status_get(runtime, player, &status) == ORCA_STATUS_OK);
+        memset(&playing, 0, sizeof playing);
+        SMOKE_CHECK(orca_player_now_playing(runtime, player, &playing, capture_now_playing) ==
+                    ORCA_STATUS_OK);
+        reflected = status.queue_index == 0 && status.queue_length == 4 &&
+                    playing.count == 1 && playing.track_id == first_track_id;
+    }
+    SMOKE_CHECK(reflected);
+    SMOKE_CHECK(orca_player_play_playlist(runtime, player, playlist_id, 4) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_stop(runtime, player) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    return 0;
+}
+
+struct titled_tracks {
+    uint32_t count;
+    int64_t ids[64];
+    char titles[64][128];
+};
+
+static void collect_titled(void *context, const orca_track_view *track) {
+    struct titled_tracks *capture = context;
+    if (!track->has_file || capture->count >= 64) return;
+    size_t length = track->title.length;
+    if (length >= sizeof capture->titles[0]) length = sizeof capture->titles[0] - 1;
+    memcpy(capture->titles[capture->count], track->title.pointer, length);
+    capture->titles[capture->count][length] = 0;
+    capture->ids[capture->count] = track->id;
+    capture->count += 1;
+}
+
+static int playlist_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    static struct titled_tracks playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_titled) == ORCA_STATUS_OK);
+    int64_t picked[4];
+    const char *titles[4];
+    uint32_t distinct = 0;
+    for (uint32_t i = 0; i < playable.count && distinct < 4; i += 1) {
+        int seen = 0;
+        for (uint32_t j = 0; j < distinct; j += 1)
+            if (strcmp(titles[j], playable.titles[i]) == 0) seen = 1;
+        if (seen || playable.titles[i][0] == 0) continue;
+        picked[distinct] = playable.ids[i];
+        titles[distinct] = playable.titles[i];
+        distinct += 1;
+    }
+    SMOKE_CHECK(distinct == 4);
+
+    int64_t playlist_id = 0;
+    SMOKE_CHECK(orca_library_create_playlist(runtime, library, "Smoke", 5, &playlist_id) ==
+                ORCA_STATUS_OK);
+    struct playlist_capture listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists(runtime, library, 512, 0, &listed, capture_playlist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.id == playlist_id && listed.entries == 0);
+    SMOKE_CHECK(strcmp(listed.name, "Smoke") == 0 && listed.created_at > 1600000000);
+    SMOKE_CHECK(orca_library_create_playlist(runtime, library, "Smoke", 5, &playlist_id) ==
+                ORCA_STATUS_INVALID_STATE);
+
+    orca_change_count change;
+    SMOKE_CHECK(orca_library_playlist_insert(runtime, library, playlist_id, &picked[1], 3, -1,
+                                             &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 3 && change.skipped == 0);
+    int64_t with_unknown[2] = {picked[0], 999999999};
+    SMOKE_CHECK(orca_library_playlist_insert(runtime, library, playlist_id, with_unknown, 2, 0,
+                                             &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 1);
+    struct entry_capture entries;
+    const char *inserted[4] = {titles[0], titles[1], titles[2], titles[3]};
+    SMOKE_CHECK(playlist_titles_are(runtime, library, playlist_id, inserted, 4, &entries) == 0);
+    int64_t first_track_id = entries.track_ids[0];
+
+    SMOKE_CHECK(orca_library_playlist_move(runtime, library, playlist_id, 0, 3) == ORCA_STATUS_OK);
+    const char *moved[4] = {titles[1], titles[2], titles[3], titles[0]};
+    SMOKE_CHECK(playlist_titles_are(runtime, library, playlist_id, moved, 4, &entries) == 0);
+    SMOKE_CHECK(orca_library_playlist_move(runtime, library, playlist_id, 3, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(playlist_titles_are(runtime, library, playlist_id, inserted, 4, &entries) == 0);
+    SMOKE_CHECK(orca_library_playlist_move(runtime, library, playlist_id, 0, 4) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_library_playlist_insert(runtime, library, playlist_id, &picked[0], 1, 4,
+                                             &change) == ORCA_STATUS_OK);
+    uint32_t removed = 0;
+    uint32_t last[2] = {4, 4};
+    SMOKE_CHECK(orca_library_playlist_remove(runtime, library, playlist_id, last, 2, &removed) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(removed == 1);
+    SMOKE_CHECK(playlist_titles_are(runtime, library, playlist_id, inserted, 4, &entries) == 0);
+
+    SMOKE_CHECK(orca_library_rename_playlist(runtime, library, playlist_id, " Smoke renamed ", 15) ==
+                ORCA_STATUS_OK);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists(runtime, library, 512, 0, &listed, capture_playlist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && strcmp(listed.name, "Smoke renamed") == 0);
+    SMOKE_CHECK(listed.entries == 4 && listed.available == 4);
+
+    char directory[] = ".zig-cache/tmp/orca-c-smoke-playlist-XXXXXX";
+    SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
+    SMOKE_CHECK(mkdtemp(directory) != 0);
+    int files_failed = playlist_files_smoke(runtime, library, playlist_id, directory, 4);
+    rmdir(directory);
+    SMOKE_CHECK(files_failed == 0);
+
+    SMOKE_CHECK(playlist_play_smoke(runtime, player, playlist_id, first_track_id) == 0);
+
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, playlist_id) == ORCA_STATUS_OK);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists(runtime, library, 512, 0, &listed, capture_playlist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 0);
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, playlist_id) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_query_playlist_entries(runtime, library, playlist_id, 8, 0, &entries,
+                                                    capture_playlist_entry) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_player_play_playlist(runtime, player, playlist_id, 0) ==
+                ORCA_STATUS_NOT_FOUND);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -983,7 +1284,10 @@ int main(int argc, char **argv) {
         return 16;
 
     int64_t root_id = 0;
-    if (orca_library_add_root(runtime, library, "fixtures/audio", &root_id) != ORCA_STATUS_OK)
+    char fixtures[4096];
+    if (getcwd(fixtures, sizeof fixtures - 16) == 0) return 17;
+    strcat(fixtures, "/fixtures/audio");
+    if (orca_library_add_root(runtime, library, fixtures, &root_id) != ORCA_STATUS_OK)
         return 17;
     if (root_id <= 0) return 18;
     uint32_t roots = 0;
@@ -1681,6 +1985,7 @@ int main(int argc, char **argv) {
 
     if (queue_smoke(runtime, library, player) != 0) return 1;
     if (dsp_smoke(runtime, library, player) != 0) return 1;
+    if (playlist_smoke(runtime, library, player) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

@@ -20,6 +20,9 @@ const struct_pairs = .{
     .{ c_api.TrackDetailsView, c.orca_track_details_view },
     .{ c_api.PlayStatsView, c.orca_play_stats },
     .{ c_api.ChangeCount, c.orca_change_count },
+    .{ c_api.PlaylistView, c.orca_playlist_view },
+    .{ c_api.PlaylistEntryView, c.orca_playlist_entry_view },
+    .{ c_api.PlaylistImport, c.orca_playlist_import },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
@@ -202,6 +205,13 @@ const import_mappings = .{
         pub const Tag = c_api.TrackSortKey;
         pub fn consume(value: u8) ?Tag {
             return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PLAYLIST_PATH_";
+        pub const Tag = core.runtime.PlaylistPathStyle;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importPlaylistPathStyle(value);
         }
     },
     struct {

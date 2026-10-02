@@ -46,6 +46,18 @@ The boundary covers the whole engine, not a fragment of it:
   rating of 1 to 100 (N stars as N * 20) or clears it with 0, and
   `orca_library_set_release_love` loves whole Releases, never sent anywhere.
   Each edit takes at most 512 ids and returns an `orca_change_count`.
+- **Playlists.** `orca_library_query_playlists` pages playlists by name
+  with entry counts, duration and unix-second timestamps;
+  `orca_library_create_playlist`, `orca_library_rename_playlist` and
+  `orca_library_delete_playlist` manage them. `orca_library_query_playlist_entries`
+  lists entries as recording ids with the Track each resolves to, if any.
+  `orca_library_playlist_insert`, `orca_library_playlist_remove` and
+  `orca_library_playlist_move` edit the order. `orca_library_import_playlist`
+  reads an M3U or M3U8 file, reporting unmatched lines through a callback, and
+  `orca_library_export_playlist` writes one with absolute or relative paths,
+  refusing an existing file with `ORCA_STATUS_INVALID_STATE` unless `replace`
+  is set. `orca_player_play_playlist` plays a playlist's available entries
+  from the Player's bound Library.
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

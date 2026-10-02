@@ -222,6 +222,38 @@ pub const ChangeCount = extern struct {
     skipped: u32,
 };
 
+pub const PlaylistView = extern struct {
+    id: i64,
+    duration_ms: i64,
+    created_at: i64,
+    updated_at: i64,
+    entries: u32,
+    available: u32,
+    name: StringView,
+};
+
+pub const PlaylistCallback = *const fn (?*anyopaque, *const PlaylistView) callconv(.c) void;
+
+pub const PlaylistEntryView = extern struct {
+    recording_id: i64,
+    position: u32,
+    has_track: u8,
+    _reserved: [3]u8 = @splat(0),
+    track: TrackView,
+};
+
+pub const PlaylistEntryCallback = *const fn (?*anyopaque, *const PlaylistEntryView) callconv(.c) void;
+
+pub const PlaylistImport = extern struct {
+    playlist_id: i64,
+    matched_by_path: u32,
+    matched_by_info: u32,
+    unmatched: u32,
+    _reserved: u32 = 0,
+};
+
+pub const LineCallback = *const fn (?*anyopaque, StringView) callconv(.c) void;
+
 pub const PlayStatsView = extern struct {
     play_count: u64,
     last_played_at: i64,
@@ -1057,6 +1089,235 @@ pub export fn orca_library_unanalyzed_count(
     return .ok;
 }
 
+pub export fn orca_library_query_playlists(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?PlaylistCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryPlaylists(importLibrary(library), limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: PlaylistView = .{
+            .id = item.id,
+            .duration_ms = item.duration_ms,
+            .created_at = item.created_at,
+            .updated_at = item.updated_at,
+            .entries = item.entries,
+            .available = item.available,
+            .name = stringView(item.name),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_create_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    playlist_id: ?*i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = playlist_id orelse return box.reject(@src(), .invalid_argument, "playlist_id is null");
+    const text = stringInput(name, name_length) orelse
+        return box.reject(@src(), .invalid_argument, "name is null and name_length is not zero");
+    destination.* = box.runtime.libraryCreatePlaylist(importLibrary(library), text) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_rename_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    name: ?[*]const u8,
+    name_length: usize,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const text = stringInput(name, name_length) orelse
+        return box.reject(@src(), .invalid_argument, "name is null and name_length is not zero");
+    box.runtime.libraryRenamePlaylist(importLibrary(library), playlist_id, text) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_delete_playlist(runtime: ?*Runtime, library: Handle, playlist_id: i64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryDeletePlaylist(importLibrary(library), playlist_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_playlist_entries(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?PlaylistEntryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryPlaylistEntries(importLibrary(library), playlist_id, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: PlaylistEntryView = .{
+            .recording_id = item.recording_id,
+            .position = item.position,
+            .has_track = @intFromBool(item.track != null),
+            .track = if (item.track) |track| trackView(track) else std.mem.zeroes(TrackView),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_playlist_insert(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    track_ids: ?[*]const i64,
+    count: usize,
+    at: i64,
+    output: ?*ChangeCount,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const position: ?u32 = if (at < 0)
+        null
+    else
+        std.math.cast(u32, at) orelse return box.reject(@src(), .invalid_argument, "at is past the end of the playlist");
+    const insertion = box.runtime.libraryPlaylistInsert(importLibrary(library), playlist_id, list, position) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .updated = insertion.added, .skipped = insertion.skipped };
+    return .ok;
+}
+
+pub export fn orca_library_playlist_remove(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    positions: ?[*]const u32,
+    count: usize,
+    removed: ?*u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = removed orelse return box.reject(@src(), .invalid_argument, "removed is null");
+    const list: []const u32 = if (count == 0)
+        &.{}
+    else if (positions) |pointer|
+        if (count > max_page)
+            return box.reject(@src(), .invalid_argument, "count exceeds 512")
+        else
+            pointer[0..count]
+    else
+        return box.reject(@src(), .invalid_argument, "positions is null and count is not zero");
+    destination.* = box.runtime.libraryPlaylistRemove(importLibrary(library), playlist_id, list) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_playlist_move(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    from: u32,
+    to: u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryPlaylistMove(importLibrary(library), playlist_id, from, to) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_import_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    path: ?[*]const u8,
+    path_length: usize,
+    name: ?[*]const u8,
+    name_length: usize,
+    output: ?*PlaylistImport,
+    context: ?*anyopaque,
+    unmatched: ?LineCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const file_path = stringInput(path, path_length) orelse
+        return box.reject(@src(), .invalid_argument, "path is null and path_length is not zero");
+    if (file_path.len == 0) return box.reject(@src(), .invalid_argument, "path is empty");
+    const playlist_name: ?[]const u8 = if (name == null and name_length == 0)
+        null
+    else
+        stringInput(name, name_length) orelse
+            return box.reject(@src(), .invalid_argument, "name is null and name_length is not zero");
+    const imported = box.runtime.libraryImportPlaylist(importLibrary(library), box.io(), file_path, playlist_name) catch |err|
+        return if (err == error.FileNotFound)
+            box.reject(@src(), .not_found, "the playlist file does not exist")
+        else
+            box.fail(@src(), err);
+    defer imported.deinit();
+    destination.* = .{
+        .playlist_id = imported.playlist_id,
+        .matched_by_path = imported.matched_by_path,
+        .matched_by_info = imported.matched_by_info,
+        .unmatched = imported.unmatched,
+    };
+    if (unmatched) |visit| {
+        for (imported.unmatched_lines) |line| visit(context, stringView(line));
+    }
+    return .ok;
+}
+
+pub export fn orca_library_export_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    path: ?[*]const u8,
+    path_length: usize,
+    path_style: u8,
+    replace: u8,
+    written: ?*u32,
+    skipped: ?*u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const written_destination = written orelse return box.reject(@src(), .invalid_argument, "written is null");
+    const skipped_destination = skipped orelse return box.reject(@src(), .invalid_argument, "skipped is null");
+    const file_path = stringInput(path, path_length) orelse
+        return box.reject(@src(), .invalid_argument, "path is null and path_length is not zero");
+    if (file_path.len == 0) return box.reject(@src(), .invalid_argument, "path is empty");
+    const paths = importPlaylistPathStyle(path_style) orelse
+        return box.reject(@src(), .invalid_argument, "path_style is not an orca_playlist_path_style");
+    if (replace > 1) return box.reject(@src(), .invalid_argument, "replace must be 0 or 1");
+    const exported = box.runtime.libraryExportPlaylist(
+        importLibrary(library),
+        box.io(),
+        playlist_id,
+        file_path,
+        .{ .paths = paths, .replace = replace == 1 },
+    ) catch |err| return switch (err) {
+        error.FileNotFound => box.reject(@src(), .not_found, "the folder to export into does not exist"),
+        error.PathAlreadyExists => box.reject(@src(), .invalid_state, "the file exists; pass replace to overwrite it"),
+        else => box.fail(@src(), err),
+    };
+    written_destination.* = exported.written;
+    skipped_destination.* = exported.skipped;
+    return .ok;
+}
+
 pub export fn orca_player_create(
     runtime: ?*Runtime,
     output: ?*Handle,
@@ -1515,6 +1776,21 @@ pub export fn orca_player_enqueue_tracks(
     const list = trackIdSlice(ids, count) orelse
         return box.reject(@src(), .invalid_argument, "ids is null or count exceeds the queue capacity");
     box.runtime.playerEnqueueTracksBound(player_handle, library, list) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_play_playlist(
+    runtime: ?*Runtime,
+    player: Handle,
+    playlist_id: i64,
+    start: u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    box.runtime.playerPlayPlaylist(player_handle, library, box.io(), playlist_id, start) catch |err|
         return box.fail(@src(), err);
     return .ok;
 }
@@ -2047,6 +2323,19 @@ fn optionalId(value: i64) ?i64 {
     return if (value < 0) null else value;
 }
 
+fn stringInput(pointer: ?[*]const u8, length: usize) ?[]const u8 {
+    if (pointer) |text| return text[0..length];
+    return if (length == 0) "" else null;
+}
+
+pub fn importPlaylistPathStyle(value: u8) ?core.runtime.PlaylistPathStyle {
+    return switch (value) {
+        0 => .absolute,
+        1 => .relative,
+        else => null,
+    };
+}
+
 const invalid_track_query = "query limit must be between 1 and 512 and sort a known orca_track_sort";
 
 /// Reject a malformed query at the boundary rather than clamping it: a limit
@@ -2505,7 +2794,8 @@ fn mapError(err: anyerror) Status {
         error.WorkersRunning,
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
-        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot => .not_found,
+        error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
+        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist => .not_found,
         error.PlaybackQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
@@ -2518,6 +2808,8 @@ fn mapError(err: anyerror) Status {
         error.InvalidWatchOptions,
         error.InvalidReconcileDirectory,
         error.PositionOutOfRange,
+        error.InvalidPlaylistName,
+        error.PlaylistTooLarge,
         error.EqualizerGainOutOfRange,
         error.EqualizerPreampOutOfRange,
         error.CrossfeedAmountOutOfRange,
@@ -2901,6 +3193,112 @@ test "queue edits refuse a Player without a Library, null ids and positions past
     try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, null));
     try std.testing.expectEqual(Status.ok, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, countTrack));
     try std.testing.expectEqual(@as(usize, 0), visited);
+}
+
+fn countPlaylist(context: ?*anyopaque, playlist: *const PlaylistView) callconv(.c) void {
+    _ = playlist;
+    const visited: *usize = @ptrCast(@alignCast(context.?));
+    visited.* += 1;
+}
+
+fn countPlaylistEntry(context: ?*anyopaque, entry: *const PlaylistEntryView) callconv(.c) void {
+    _ = entry;
+    const visited: *usize = @ptrCast(@alignCast(context.?));
+    visited.* += 1;
+}
+
+test "playlist edits refuse bad arguments, blank or taken names and unknown playlists" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-playlists?mode=memory&cache=shared", &library));
+    var id: i64 = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_playlist(runtime, library, null, 3, &id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_playlist(runtime, library, "Mix", 3, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_playlist(runtime, library, "   ", 3, &id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_playlist(runtime, library, null, 0, &id));
+    try std.testing.expectEqual(Status.ok, orca_library_create_playlist(runtime, library, "Mix", 3, &id));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_create_playlist(runtime, library, " Mix ", 5, &id));
+    try std.testing.expectEqualStrings(
+        "orca_library_create_playlist: PlaylistNameTaken",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists(runtime, library, 0, 0, &visited, countPlaylist));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists(runtime, library, max_page + 1, 0, &visited, countPlaylist));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists(runtime, library, 8, 0, &visited, null));
+    try std.testing.expectEqual(Status.ok, orca_library_query_playlists(runtime, library, 8, 0, &visited, countPlaylist));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlist_entries(runtime, library, id, 0, 0, &visited, countPlaylistEntry));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlist_entries(runtime, library, id, 8, 0, &visited, null));
+
+    const unknown: i64 = id + 1000;
+    const ids = [_]i64{12345};
+    const positions = [_]u32{0};
+    var change: ChangeCount = undefined;
+    var removed: u32 = 9;
+    var written: u32 = 0;
+    var skipped: u32 = 0;
+    try std.testing.expectEqual(Status.not_found, orca_library_rename_playlist(runtime, library, unknown, "Other", 5));
+    try std.testing.expectEqual(Status.not_found, orca_library_delete_playlist(runtime, library, unknown));
+    try std.testing.expectEqual(Status.not_found, orca_library_query_playlist_entries(runtime, library, unknown, 8, 0, &visited, countPlaylistEntry));
+    try std.testing.expectEqual(Status.not_found, orca_library_playlist_insert(runtime, library, unknown, &ids, 1, -1, &change));
+    try std.testing.expectEqual(Status.not_found, orca_library_playlist_remove(runtime, library, unknown, &positions, 1, &removed));
+    try std.testing.expectEqual(Status.not_found, orca_library_playlist_move(runtime, library, unknown, 0, 0));
+    try std.testing.expectEqual(Status.not_found, orca_library_export_playlist(runtime, library, unknown, "unused.m3u", 10, 0, 0, &written, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_rename_playlist(runtime, library, id, "", 0));
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, null, 1, -1, &change));
+    const too_many = [_]i64{1} ** (max_page + 1);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &too_many, too_many.len, -1, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &ids, 1, -1, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &ids, 1, 1, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_insert(runtime, library, id, &ids, 1, std.math.maxInt(u32) + 1, &change));
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_insert(runtime, library, id, &ids, 1, -1, &change));
+    try std.testing.expectEqual(ChangeCount{ .updated = 0, .skipped = 1 }, change);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, null, 1, &removed));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &positions, 1, null));
+    const too_many_positions = [_]u32{0} ** (max_page + 1);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &too_many_positions, too_many_positions.len, &removed));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_remove(runtime, library, id, &positions, 1, &removed));
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_remove(runtime, library, id, null, 0, &removed));
+    try std.testing.expectEqual(@as(u32, 0), removed);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_move(runtime, library, id, 0, 0));
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, "unused.m3u", 10, 2, 0, &written, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, "unused.m3u", 10, 0, 2, &written, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, null, 10, 0, 0, &written, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, "", 0, 0, 0, &written, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, "unused.m3u", 10, 0, 0, null, &skipped));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_export_playlist(runtime, library, id, "unused.m3u", 10, 0, 0, &written, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_export_playlist(runtime, library, id, "/nonexistent/orca-c-api/out.m3u", 31, 0, 0, &written, &skipped));
+
+    var imported: PlaylistImport = undefined;
+    const missing = "/nonexistent/orca-c-api/missing.m3u";
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_import_playlist(runtime, library, missing, missing.len, null, 0, null, null, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_import_playlist(runtime, library, "", 0, null, 0, &imported, null, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_import_playlist(runtime, library, missing, missing.len, null, 2, &imported, null, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_import_playlist(runtime, library, missing, missing.len, null, 0, &imported, null, null));
+
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.invalid_state, orca_player_play_playlist(runtime, player, id, 0));
+    try std.testing.expectEqual(Status.ok, orca_player_set_library(runtime, player, library));
+    try std.testing.expectEqual(Status.not_found, orca_player_play_playlist(runtime, player, unknown, 0));
+    try std.testing.expectEqual(Status.invalid_state, orca_player_play_playlist(runtime, player, id, 0));
+    try std.testing.expectEqualStrings(
+        "orca_player_play_playlist: PlaylistEmpty",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+
+    try std.testing.expectEqual(Status.ok, orca_library_delete_playlist(runtime, library, id));
+    visited = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_query_playlists(runtime, library, 8, 0, &visited, countPlaylist));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
 test "queue stats are all zero before a Player has played, and a destroyed Player has none" {

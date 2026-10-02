@@ -1021,6 +1021,192 @@ orca_status orca_library_unanalyzed_count(
     uint64_t *output
 );
 
+/* ------------------------------------------------------------ playlists */
+
+/* A playlist is a name and an ordered list of entries, kept in the Library.
+ * Each entry names a recording; one recording may appear several times.
+ * Positions run from 0 to `entries` - 1 without gaps. A playlist holds at
+ * most 10,000 entries. */
+typedef struct orca_playlist_view {
+    int64_t id;
+    /* Sum of the lengths of the available entries. */
+    int64_t duration_ms;
+    /* Unix seconds. `updated_at` moves on a rename and on any entry edit. */
+    int64_t created_at;
+    int64_t updated_at;
+    uint32_t entries;
+    /* Entries whose recording still has a Track; only these play or export. */
+    uint32_t available;
+    orca_string_view name;
+} orca_playlist_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_playlist_callback)(void *context, const orca_playlist_view *playlist);
+
+/* One entry. It plays the Track of its recording with the lowest id; when the
+ * recording has no Track left, `has_track` is 0 and `track` is zeroed. */
+typedef struct orca_playlist_entry_view {
+    int64_t recording_id;
+    uint32_t position;
+    uint8_t has_track;
+    uint8_t reserved[3];
+    orca_track_view track;
+} orca_playlist_entry_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_playlist_entry_callback)(
+    void *context,
+    const orca_playlist_entry_view *entry
+);
+
+/* What orca_library_import_playlist created. */
+typedef struct orca_playlist_import {
+    int64_t playlist_id;
+    /* Entries matched by their path to a location the Library knows. */
+    uint32_t matched_by_path;
+    /* Entries matched by their #EXTINF artist, title and length. */
+    uint32_t matched_by_info;
+    /* Entries that matched nothing and were left out. */
+    uint32_t unmatched;
+    uint32_t reserved;
+} orca_playlist_import;
+
+/* `line` is valid only for the duration of this callback. */
+typedef void (*orca_line_callback)(void *context, orca_string_view line);
+
+/* How orca_library_export_playlist writes each path. */
+typedef enum orca_playlist_path_style {
+    ORCA_PLAYLIST_PATH_ABSOLUTE = 0,
+    /* Relative to the folder of the exported file. */
+    ORCA_PLAYLIST_PATH_RELATIVE = 1,
+} orca_playlist_path_style;
+
+/* Playlists ordered by name. `limit` must be between 1 and 512. */
+orca_status orca_library_query_playlists(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_playlist_callback callback
+);
+/* `name` is `name_length` bytes, not NUL-terminated, and may be NULL only when
+ * `name_length` is 0. Names are trimmed of whitespace; an empty name is
+ * INVALID_ARGUMENT, and one another playlist already has is INVALID_STATE. */
+orca_status orca_library_create_playlist(
+    orca_runtime *runtime,
+    orca_handle library,
+    const char *name,
+    size_t name_length,
+    int64_t *playlist_id
+);
+/* Names as for orca_library_create_playlist. NOT_FOUND for an unknown id. */
+orca_status orca_library_rename_playlist(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    const char *name,
+    size_t name_length
+);
+/* Deletes the playlist and its entries; no Track or file is touched.
+ * NOT_FOUND for an unknown id. */
+orca_status orca_library_delete_playlist(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id
+);
+/* Entries in position order. `limit` must be between 1 and 512. NOT_FOUND for
+ * an unknown playlist. */
+orca_status orca_library_query_playlist_entries(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_playlist_entry_callback callback
+);
+/* Adds the recordings of `track_ids`, in order, before position `at`, or at
+ * the end when `at` is negative; `at` past the end is INVALID_ARGUMENT. At
+ * most 512 ids; INVALID_ARGUMENT for more or for a null `track_ids` with a
+ * nonzero `count`. In `output`, `updated` counts the entries added and
+ * `skipped` the ids that name no Track or a Track with no recording. An
+ * insert that would take the playlist past 10,000 entries is INVALID_STATE
+ * and adds nothing. NOT_FOUND for an unknown playlist. */
+orca_status orca_library_playlist_insert(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    const int64_t *track_ids,
+    size_t count,
+    int64_t at,
+    orca_change_count *output
+);
+/* Removes the entries at `positions` (repeats count once) and renumbers the
+ * rest. At most 512 positions; INVALID_ARGUMENT for more, for a null
+ * `positions` with a nonzero `count`, and for a position past the end, which
+ * removes nothing. `removed` receives the number of entries removed. */
+orca_status orca_library_playlist_remove(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    const uint32_t *positions,
+    size_t count,
+    uint32_t *removed
+);
+/* Moves the entry at `from` to `to`, shifting those between. INVALID_ARGUMENT
+ * when either is past the end; NOT_FOUND for an unknown playlist. */
+orca_status orca_library_playlist_move(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    uint32_t from,
+    uint32_t to
+);
+/* Creates a playlist from the M3U or M3U8 file at `path` (`path_length` bytes,
+ * not NUL-terminated; relative to the working directory unless absolute).
+ * Each entry is matched by path to a location the Library knows, then by its
+ * #EXTINF artist, title and length; nothing is scanned, so a path the Library
+ * has not seen is unmatched. The playlist is named `name` (`name_length`
+ * bytes), or after the file without its extension when `name` is NULL and
+ * `name_length` is 0; a taken name gets " (2)", " (3)" and so on.
+ * `unmatched`, when not NULL, is called with each of the first 50 unmatched
+ * lines after `output` is written. NOT_FOUND when the file does not exist;
+ * INVALID_STATE for a file with no entry; INVALID_ARGUMENT for an empty
+ * `path`, an empty `name`, or a file over 4 MiB or 10,000 entries, which
+ * creates nothing. */
+orca_status orca_library_import_playlist(
+    orca_runtime *runtime,
+    orca_handle library,
+    const char *path,
+    size_t path_length,
+    const char *name,
+    size_t name_length,
+    orca_playlist_import *output,
+    void *context,
+    orca_line_callback unmatched
+);
+/* Writes the playlist's available entries to `path` (`path_length` bytes, not
+ * NUL-terminated) as extended M3U in UTF-8, with each entry's length, artist,
+ * title and the path of the location playback would open. `path_style` is an
+ * orca_playlist_path_style. The file is written beside the target, synced and
+ * renamed over it, so a reader sees the old file or the new one. An existing
+ * file is INVALID_STATE unless `replace` is 1; `replace` above 1 is
+ * INVALID_ARGUMENT. NOT_FOUND when the folder does not exist or the playlist
+ * is unknown. `written` counts the entries written; `skipped` counts entries
+ * with no Track and paths containing a line break. */
+orca_status orca_library_export_playlist(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t playlist_id,
+    const char *path,
+    size_t path_length,
+    uint8_t path_style,
+    uint8_t replace,
+    uint32_t *written,
+    uint32_t *skipped
+);
+
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(
@@ -1315,6 +1501,18 @@ orca_status orca_player_enqueue_tracks(
     orca_handle player,
     const int64_t *ids,
     size_t count
+);
+/* Replaces the queue with the playlist's available entries, from the Library
+ * the Player is bound to, and starts at `start`, which counts available
+ * entries only. Synchronous, like orca_player_play_tracks. INVALID_STATE for
+ * a Player with no Library and for a playlist with no available entry, which
+ * leaves the queue as it was; NOT_FOUND for an unknown playlist;
+ * INVALID_ARGUMENT for a `start` past the last available entry. */
+orca_status orca_player_play_playlist(
+    orca_runtime *runtime,
+    orca_handle player,
+    int64_t playlist_id,
+    uint32_t start
 );
 /* A user skip is a hard switch: prepared audio is discarded rather than
  * drained. `moved` receives 0 at the end of a queue that is not repeating. */
