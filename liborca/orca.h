@@ -426,6 +426,114 @@ typedef void (*orca_health_issue_callback)(
     const orca_health_issue_view *issue
 );
 
+/* What kind of problem a health issue reports. */
+typedef enum orca_health_issue_kind {
+    /* A Track lacks a title, artist or album. */
+    ORCA_HEALTH_ISSUE_KIND_MISSING_METADATA = 0,
+    /* A Track has no track number. */
+    ORCA_HEALTH_ISSUE_KIND_MISSING_TRACK_NUMBER = 1,
+    /* The album artist differs between the Tracks of one album. */
+    ORCA_HEALTH_ISSUE_KIND_ALBUM_ARTIST_ANOMALY = 2,
+    /* The cover is missing or unusable. */
+    ORCA_HEALTH_ISSUE_KIND_ARTWORK_PROBLEM = 3,
+    /* The file has not been measured for loudness yet. */
+    ORCA_HEALTH_ISSUE_KIND_MISSING_ANALYSIS = 4,
+    /* The audio clips. */
+    ORCA_HEALTH_ISSUE_KIND_CLIPPING = 5,
+    /* The audio holds a long stretch of silence. */
+    ORCA_HEALTH_ISSUE_KIND_EXCESSIVE_SILENCE = 6,
+    /* A measured property is implausible for the file. */
+    ORCA_HEALTH_ISSUE_KIND_TECHNICAL_ANOMALY = 7,
+    /* The audio would not decode all the way through. */
+    ORCA_HEALTH_ISSUE_KIND_CORRUPT_AUDIO = 8,
+    /* Another file holds the same audio. */
+    ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE = 9,
+    /* Another file probably holds the same recording. */
+    ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE = 10,
+    /* The file could not be opened or would not decode, found without
+     * reading all of its audio. */
+    ORCA_HEALTH_ISSUE_KIND_UNREADABLE_FILE = 11,
+    /* A verification proposed another recording ID for the file. */
+    ORCA_HEALTH_ISSUE_KIND_RECORDING_MISMATCH = 12,
+} orca_health_issue_kind;
+
+typedef enum orca_health_severity {
+    ORCA_HEALTH_SEVERITY_INFORMATION = 0,
+    ORCA_HEALTH_SEVERITY_WARNING = 1,
+    ORCA_HEALTH_SEVERITY_ERROR = 2,
+} orca_health_severity;
+
+/* What a host offers to resolve an issue. */
+typedef enum orca_health_action {
+    /* Match the Track against MusicBrainz, or edit its tags. */
+    ORCA_HEALTH_ACTION_MATCH_OR_EDIT = 0,
+    /* Fetch the Release's cover from the Cover Art Archive. */
+    ORCA_HEALTH_ACTION_FETCH_COVER_ART = 1,
+    /* Show the two files of a duplicate side by side. */
+    ORCA_HEALTH_ACTION_COMPARE_DUPLICATE = 2,
+    /* Review the proposed correction. */
+    ORCA_HEALTH_ACTION_REVIEW_CORRECTION = 3,
+    /* Show the file in the platform's file manager. */
+    ORCA_HEALTH_ACTION_REVEAL_FILE = 4,
+} orca_health_action;
+
+/* One health issue with what a host needs to act on it. `track_id` is the
+ * lowest-numbered Track the file backs and `release_id` that Track's
+ * Release; `related_file_id` is the other file of a duplicate. Each id is 0
+ * when its `has_*` flag is 0. `kind`, `severity` and `action` are
+ * orca_health_issue_kind, orca_health_severity and orca_health_action. `path`
+ * is empty when the file has no location on any known volume. */
+typedef struct orca_health_item_view {
+    int64_t file_id;
+    int64_t track_id;
+    int64_t release_id;
+    int64_t related_file_id;
+    uint8_t kind;
+    uint8_t severity;
+    uint8_t action;
+    uint8_t has_track_id;
+    uint8_t has_release_id;
+    uint8_t has_related_file_id;
+    uint8_t reserved[2];
+    orca_string_view path;
+    orca_string_view details;
+} orca_health_item_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_health_item_callback)(
+    void *context,
+    const orca_health_item_view *item
+);
+
+/* One file as a host shows it beside an issue. A value whose `has_*` flag is 0
+ * is 0. `missing` is 1 when no location of the file is present, and then
+ * `has_path` is 0 and `path` is empty. `codec` is a short identifier such as
+ * "flac", empty when the file was never probed. */
+typedef struct orca_health_file_view {
+    int64_t file_id;
+    int64_t size_bytes;
+    int64_t duration_ms;
+    uint32_t sample_rate;
+    uint32_t bit_depth;
+    uint32_t channels;
+    uint8_t missing;
+    uint8_t has_path;
+    uint8_t has_size_bytes;
+    uint8_t has_duration_ms;
+    uint8_t has_sample_rate;
+    uint8_t has_bit_depth;
+    uint8_t has_channels;
+    uint8_t reserved[5];
+    orca_string_view path;
+    orca_string_view codec;
+} orca_health_file_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_health_file_callback)(
+    void *context,
+    const orca_health_file_view *file
+);
+
 typedef struct orca_root_view {
     int64_t id;
     int64_t volume_id;
@@ -809,6 +917,48 @@ orca_status orca_library_query_health_issues(
     uint32_t offset,
     void *context,
     orca_health_issue_callback callback
+);
+/* The same page, in the same order, as orca_library_query_health_issues, with
+ * the ids and the action a host needs to resolve or dismiss each issue. It
+ * supersedes orca_library_query_health_issues for hosts that act on issues.
+ * Dismissed issues are not listed. `limit` is 1..512, else
+ * ORCA_STATUS_INVALID_ARGUMENT. */
+orca_status orca_library_query_health_items(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_health_item_callback callback
+);
+/* Hides one issue of a file, an orca_health_issue_kind, until the file's bytes
+ * change. Dismissing an issue the file does not have still hides it should it
+ * appear. An unknown `kind` is ORCA_STATUS_INVALID_ARGUMENT and a `file_id`
+ * naming no file ORCA_STATUS_NOT_FOUND. */
+orca_status orca_library_dismiss_health_issue(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t file_id,
+    uint8_t kind
+);
+/* Shows a dismissed issue again. Restoring an issue that was not dismissed,
+ * or of a file that does not exist, changes nothing and returns
+ * ORCA_STATUS_OK. An unknown `kind` is ORCA_STATUS_INVALID_ARGUMENT. */
+orca_status orca_library_restore_health_issue(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t file_id,
+    uint8_t kind
+);
+/* Calls `callback` once with the file behind an issue as the Library last saw
+ * it. ORCA_STATUS_NOT_FOUND, with the callback not called, when no file has
+ * `file_id`. Reads the database alone, never the file. */
+orca_status orca_library_health_file(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t file_id,
+    void *context,
+    orca_health_file_callback callback
 );
 
 

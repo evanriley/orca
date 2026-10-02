@@ -180,6 +180,14 @@
   when it finishes; `orca_library_take_artwork` collects one
   `orca_artwork_result_view` per call, and `orca_library_cancel_artwork` skips
   a request not yet started.
+- **The C ABI acts on health issues.** `orca_library_query_health_items`
+  pages the same issues as `orca_library_query_health_issues`, which stays,
+  as `orca_health_item_view`s that add the file, Track, Release and related
+  file ids, the `orca_health_severity` and the `orca_health_action` that
+  resolves each. `orca_library_dismiss_health_issue` hides an issue until its
+  file's bytes change, `orca_library_restore_health_issue` shows it again, and
+  `orca_library_health_file` describes the file behind an issue as an
+  `orca_health_file_view`. `orca_health_issue_kind` names the kinds.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

@@ -1156,6 +1156,146 @@ static int64_t titled_track(const struct titled_tracks *tracks, const char *titl
     return 0;
 }
 
+struct health_capture {
+    uint32_t count;
+    uint32_t consistent;
+    int64_t first_file_id;
+    uint8_t first_kind;
+    uint8_t first_action;
+    int64_t watch_file_id;
+    uint8_t watch_kind;
+    uint32_t listed;
+};
+
+static int health_action_fits(const orca_health_item_view *item) {
+    switch (item->kind) {
+    case ORCA_HEALTH_ISSUE_KIND_MISSING_METADATA:
+    case ORCA_HEALTH_ISSUE_KIND_MISSING_TRACK_NUMBER:
+    case ORCA_HEALTH_ISSUE_KIND_ALBUM_ARTIST_ANOMALY:
+        return item->action == ORCA_HEALTH_ACTION_MATCH_OR_EDIT;
+    case ORCA_HEALTH_ISSUE_KIND_ARTWORK_PROBLEM:
+        return item->action == ORCA_HEALTH_ACTION_MATCH_OR_EDIT ||
+               item->action == ORCA_HEALTH_ACTION_FETCH_COVER_ART;
+    case ORCA_HEALTH_ISSUE_KIND_EXACT_DUPLICATE:
+    case ORCA_HEALTH_ISSUE_KIND_LIKELY_DUPLICATE:
+        return item->action == ORCA_HEALTH_ACTION_COMPARE_DUPLICATE;
+    case ORCA_HEALTH_ISSUE_KIND_RECORDING_MISMATCH:
+        return item->action == ORCA_HEALTH_ACTION_REVIEW_CORRECTION;
+    default:
+        return item->action == ORCA_HEALTH_ACTION_REVEAL_FILE;
+    }
+}
+
+static void collect_health_item(void *context, const orca_health_item_view *item) {
+    struct health_capture *capture = context;
+    if (capture->count == 0) {
+        capture->first_file_id = item->file_id;
+        capture->first_kind = item->kind;
+        capture->first_action = item->action;
+    }
+    if (item->file_id > 0 && item->severity <= ORCA_HEALTH_SEVERITY_ERROR &&
+        health_action_fits(item) && item->has_track_id == (item->track_id > 0) &&
+        item->has_related_file_id == (item->related_file_id > 0))
+        capture->consistent += 1;
+    if (item->file_id == capture->watch_file_id && item->kind == capture->watch_kind)
+        capture->listed += 1;
+    capture->count += 1;
+}
+
+struct health_file_capture {
+    uint32_t count;
+    orca_health_file_view view;
+    char codec[16];
+    char path[512];
+};
+
+static void capture_health_file(void *context, const orca_health_file_view *file) {
+    struct health_file_capture *capture = context;
+    capture->count += 1;
+    capture->view = *file;
+    size_t codec = file->codec.length < sizeof capture->codec - 1 ? file->codec.length
+                                                                  : sizeof capture->codec - 1;
+    memcpy(capture->codec, file->codec.pointer, codec);
+    capture->codec[codec] = 0;
+    size_t path = file->path.length < sizeof capture->path - 1 ? file->path.length
+                                                               : sizeof capture->path - 1;
+    memcpy(capture->path, file->path.pointer, path);
+    capture->path[path] = 0;
+}
+
+static int health_items_collect(orca_runtime *runtime, orca_handle library,
+                                struct health_capture *capture, int64_t watch_file_id,
+                                uint8_t watch_kind) {
+    memset(capture, 0, sizeof *capture);
+    capture->watch_file_id = watch_file_id;
+    capture->watch_kind = watch_kind;
+    SMOKE_CHECK(orca_library_query_health_items(runtime, library, 512, 0, capture,
+                                                collect_health_item) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int health_smoke(orca_runtime *runtime, orca_handle library) {
+    uint64_t total = 0;
+    SMOKE_CHECK(orca_library_health_issue_count(runtime, library, &total) == ORCA_STATUS_OK);
+    SMOKE_CHECK(total > 0 && total <= 512);
+
+    struct health_capture items;
+    SMOKE_CHECK(health_items_collect(runtime, library, &items, 0, 0) == 0);
+    SMOKE_CHECK(items.count == total);
+    SMOKE_CHECK(items.consistent == items.count);
+    int64_t file_id = items.first_file_id;
+    uint8_t kind = items.first_kind;
+    SMOKE_CHECK(file_id > 0);
+
+    SMOKE_CHECK(orca_library_query_health_items(runtime, library, 0, 0, &items,
+                                                collect_health_item) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_health_items(runtime, library, 513, 0, &items,
+                                                collect_health_item) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_health_items(runtime, library, 1, 0, &items, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_library_dismiss_health_issue(runtime, library, file_id, 200) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, file_id, 200) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_dismiss_health_issue(runtime, library, 999999, kind) ==
+                ORCA_STATUS_NOT_FOUND);
+
+    SMOKE_CHECK(orca_library_dismiss_health_issue(runtime, library, file_id, kind) ==
+                ORCA_STATUS_OK);
+    uint64_t after = 0;
+    SMOKE_CHECK(orca_library_health_issue_count(runtime, library, &after) == ORCA_STATUS_OK);
+    SMOKE_CHECK(after == total - 1);
+    SMOKE_CHECK(health_items_collect(runtime, library, &items, file_id, kind) == 0);
+    SMOKE_CHECK(items.count == total - 1 && items.listed == 0);
+
+    SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, file_id, kind) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_health_issue_count(runtime, library, &after) == ORCA_STATUS_OK);
+    SMOKE_CHECK(after == total);
+    SMOKE_CHECK(health_items_collect(runtime, library, &items, file_id, kind) == 0);
+    SMOKE_CHECK(items.count == total && items.listed == 1);
+
+    struct health_file_capture file;
+    memset(&file, 0, sizeof file);
+    SMOKE_CHECK(orca_library_health_file(runtime, library, file_id, &file,
+                                         capture_health_file) == ORCA_STATUS_OK);
+    SMOKE_CHECK(file.count == 1 && file.view.file_id == file_id);
+    SMOKE_CHECK(file.view.has_path == 1 && file.view.missing == 0 && file.path[0] != 0);
+    SMOKE_CHECK(file.codec[0] != 0);
+    SMOKE_CHECK(file.view.has_size_bytes == 1 && file.view.size_bytes > 0);
+
+    memset(&file, 0, sizeof file);
+    SMOKE_CHECK(orca_library_health_file(runtime, library, 999999, &file,
+                                         capture_health_file) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(file.count == 0);
+    SMOKE_CHECK(orca_library_health_file(runtime, library, file_id, &file, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    return 0;
+}
+
 static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     static struct titled_tracks tracks;
     memset(&tracks, 0, sizeof tracks);
@@ -2124,6 +2264,7 @@ int main(int argc, char **argv) {
     if (dsp_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;
     if (artwork_smoke(runtime, library) != 0) return 1;
+    if (health_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

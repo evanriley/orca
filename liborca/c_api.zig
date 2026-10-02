@@ -293,6 +293,45 @@ pub const HealthIssueView = extern struct {
 
 pub const HealthIssueCallback = *const fn (?*anyopaque, *const HealthIssueView) callconv(.c) void;
 
+pub const HealthItemView = extern struct {
+    file_id: i64,
+    track_id: i64,
+    release_id: i64,
+    related_file_id: i64,
+    kind: u8,
+    severity: u8,
+    action: u8,
+    has_track_id: u8,
+    has_release_id: u8,
+    has_related_file_id: u8,
+    _reserved: [2]u8 = @splat(0),
+    path: StringView,
+    details: StringView,
+};
+
+pub const HealthItemCallback = *const fn (?*anyopaque, *const HealthItemView) callconv(.c) void;
+
+pub const HealthFileView = extern struct {
+    file_id: i64,
+    size_bytes: i64,
+    duration_ms: i64,
+    sample_rate: u32,
+    bit_depth: u32,
+    channels: u32,
+    missing: u8,
+    has_path: u8,
+    has_size_bytes: u8,
+    has_duration_ms: u8,
+    has_sample_rate: u8,
+    has_bit_depth: u8,
+    has_channels: u8,
+    _reserved: [5]u8 = @splat(0),
+    path: StringView,
+    codec: StringView,
+};
+
+pub const HealthFileCallback = *const fn (?*anyopaque, *const HealthFileView) callconv(.c) void;
+
 pub const RootView = extern struct {
     id: i64,
     volume_id: i64,
@@ -728,6 +767,105 @@ pub export fn orca_library_query_health_issues(
         };
         visit(context, &view);
     }
+    return .ok;
+}
+
+pub export fn orca_library_query_health_items(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?HealthItemCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryHealthIssuePage(
+        importLibrary(library),
+        limit,
+        offset,
+    ) catch |err| return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: HealthItemView = .{
+            .file_id = item.file_id,
+            .track_id = item.track_id orelse 0,
+            .release_id = item.release_id orelse 0,
+            .related_file_id = item.related_file_id orelse 0,
+            .kind = exportHealthIssueKind(item.kind),
+            .severity = exportHealthSeverity(item.severity),
+            .action = exportHealthAction(item.action),
+            .has_track_id = @intFromBool(item.track_id != null),
+            .has_release_id = @intFromBool(item.release_id != null),
+            .has_related_file_id = @intFromBool(item.related_file_id != null),
+            .path = stringView(item.path),
+            .details = stringView(item.details),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_dismiss_health_issue(
+    runtime: ?*Runtime,
+    library: Handle,
+    file_id: i64,
+    kind: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const issue_kind = importHealthIssueKind(kind) orelse
+        return box.reject(@src(), .invalid_argument, "kind is not an orca_health_issue_kind");
+    box.runtime.libraryDismissHealthIssue(importLibrary(library), file_id, issue_kind) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_restore_health_issue(
+    runtime: ?*Runtime,
+    library: Handle,
+    file_id: i64,
+    kind: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const issue_kind = importHealthIssueKind(kind) orelse
+        return box.reject(@src(), .invalid_argument, "kind is not an orca_health_issue_kind");
+    box.runtime.libraryRestoreHealthIssue(importLibrary(library), file_id, issue_kind) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_health_file(
+    runtime: ?*Runtime,
+    library: Handle,
+    file_id: i64,
+    context: ?*anyopaque,
+    callback: ?HealthFileCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryHealthFile(importLibrary(library), box.runtime.allocator, file_id) catch |err|
+        return box.fail(@src(), err);
+    const file = found orelse return box.reject(@src(), .not_found, "no such file");
+    defer file.deinit();
+    const view: HealthFileView = .{
+        .file_id = file.file_id,
+        .size_bytes = file.size_bytes orelse 0,
+        .duration_ms = file.duration_ms orelse 0,
+        .sample_rate = file.sample_rate orelse 0,
+        .bit_depth = file.bit_depth orelse 0,
+        .channels = file.channels orelse 0,
+        .missing = @intFromBool(file.missing),
+        .has_path = @intFromBool(file.path != null),
+        .has_size_bytes = @intFromBool(file.size_bytes != null),
+        .has_duration_ms = @intFromBool(file.duration_ms != null),
+        .has_sample_rate = @intFromBool(file.sample_rate != null),
+        .has_bit_depth = @intFromBool(file.bit_depth != null),
+        .has_channels = @intFromBool(file.channels != null),
+        .path = stringView(file.path orelse ""),
+        .codec = stringView(file.codec),
+    };
+    visit(context, &view);
     return .ok;
 }
 
@@ -2690,6 +2828,61 @@ fn editIdSlice(ids: ?[*]const i64, count: usize) ?[]const i64 {
     return pointer[0..count];
 }
 
+pub fn exportHealthIssueKind(kind: database.HealthIssueKind) u8 {
+    return switch (kind) {
+        .missing_metadata => 0,
+        .missing_track_number => 1,
+        .album_artist_anomaly => 2,
+        .artwork_problem => 3,
+        .missing_analysis => 4,
+        .clipping => 5,
+        .excessive_silence => 6,
+        .technical_anomaly => 7,
+        .corrupt_audio => 8,
+        .exact_duplicate => 9,
+        .likely_duplicate => 10,
+        .unreadable_file => 11,
+        .recording_mismatch => 12,
+    };
+}
+
+pub fn importHealthIssueKind(value: u8) ?database.HealthIssueKind {
+    return switch (value) {
+        0 => .missing_metadata,
+        1 => .missing_track_number,
+        2 => .album_artist_anomaly,
+        3 => .artwork_problem,
+        4 => .missing_analysis,
+        5 => .clipping,
+        6 => .excessive_silence,
+        7 => .technical_anomaly,
+        8 => .corrupt_audio,
+        9 => .exact_duplicate,
+        10 => .likely_duplicate,
+        11 => .unreadable_file,
+        12 => .recording_mismatch,
+        else => null,
+    };
+}
+
+pub fn exportHealthSeverity(severity: database.HealthSeverity) u8 {
+    return switch (severity) {
+        .information => 0,
+        .warning => 1,
+        .error_severity => 2,
+    };
+}
+
+pub fn exportHealthAction(action: database.HealthAction) u8 {
+    return switch (action) {
+        .match_or_edit => 0,
+        .fetch_cover_art => 1,
+        .compare_duplicate => 2,
+        .review_correction => 3,
+        .reveal_file => 4,
+    };
+}
+
 fn importFeedback(value: u8) ?database.Feedback {
     return switch (value) {
         0 => .none,
@@ -2944,7 +3137,7 @@ fn mapError(err: anyerror) Status {
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
-        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist => .not_found,
+        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
@@ -3210,6 +3403,50 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
+test "health actions refuse an unknown kind, a missing file and a null callback, and change nothing" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-health-actions?mode=memory&cache=shared",
+        &library,
+    ));
+    const box = runtimeBox(runtime).?;
+    const library_database = try core.runtime.databaseOf(&box.runtime, importLibrary(library));
+    const file_id = try library_database.files.create(.{ .size_bytes = 1024 });
+    try library_database.health_issues.replaceFile(file_id, &.{.{
+        .kind = .clipping,
+        .severity = .warning,
+        .details = "clipped",
+    }});
+    const clipping: u8 = exportHealthIssueKind(.clipping);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_dismiss_health_issue(runtime, library, file_id, 200));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_restore_health_issue(runtime, library, file_id, 13));
+    try std.testing.expectEqual(Status.not_found, orca_library_dismiss_health_issue(runtime, library, file_id + 100, clipping));
+    try std.testing.expectEqual(Status.ok, orca_library_restore_health_issue(runtime, library, file_id + 100, clipping));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_health_items(runtime, library, 1, 0, null, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_health_items(runtime, library, 0, 0, null, countHealthItem));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_health_items(runtime, library, 513, 0, null, countHealthItem));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_health_file(runtime, library, file_id, null, null));
+
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.not_found, orca_library_health_file(runtime, library, file_id + 100, &visited, countHealthFile));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    try std.testing.expectEqual(Status.ok, orca_library_health_file(runtime, library, file_id, &visited, countHealthFile));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+
+    visited = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_dismiss_health_issue(runtime, library, file_id, clipping));
+    try std.testing.expectEqual(Status.ok, orca_library_query_health_items(runtime, library, 10, 0, &visited, countHealthItem));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    try std.testing.expectEqual(Status.ok, orca_library_restore_health_issue(runtime, library, file_id, clipping));
+    try std.testing.expectEqual(Status.ok, orca_library_query_health_items(runtime, library, 10, 0, &visited, countHealthItem));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
 test "a Track the Library does not hold is not found, and its callback never runs" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
@@ -3266,6 +3503,18 @@ fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {
     const count: *usize = @ptrCast(@alignCast(context.?));
     count.* += 1;
     std.debug.assert(track.title.length != 0);
+}
+
+fn countHealthItem(context: ?*anyopaque, item: *const HealthItemView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(item.file_id > 0);
+}
+
+fn countHealthFile(context: ?*anyopaque, file: *const HealthFileView) callconv(.c) void {
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+    std.debug.assert(file.file_id > 0);
 }
 
 fn countHealthIssue(context: ?*anyopaque, issue: *const HealthIssueView) callconv(.c) void {

@@ -28,6 +28,16 @@ The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root
   add/remove/query.
+- **Health.** `orca_library_query_health_items` pages the issues in the order
+  of `orca_library_query_health_issues`, which stays for hosts that only
+  list them, with each issue's file, Track, Release and related file ids and
+  its `orca_health_action`. `orca_library_dismiss_health_issue` hides an
+  issue until its file's bytes change, `orca_library_restore_health_issue`
+  shows it again, and `orca_library_health_file` fills an
+  `orca_health_file_view` for a Compare or Reveal dialog, or returns
+  `ORCA_STATUS_NOT_FOUND`. Dismissing a file that does not exist is
+  `ORCA_STATUS_NOT_FOUND`; restoring an issue that was not dismissed is
+  `ORCA_STATUS_OK`.
 - **Browsing.** `orca_library_browse_artists`, `orca_library_browse_releases`
   and `orca_library_browse_tracks` take a query struct: an artist name filter,
   a release sort including `ORCA_RELEASE_SORT_LOVED`, track sorts by rating

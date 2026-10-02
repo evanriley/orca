@@ -27,6 +27,8 @@ const struct_pairs = .{
     .{ c_api.ImageView, c.orca_image_view },
     .{ c_api.ArtworkResultView, c.orca_artwork_result_view },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
+    .{ c_api.HealthItemView, c.orca_health_item_view },
+    .{ c_api.HealthFileView, c.orca_health_file_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
     .{ c_api.QueueEntryView, c.orca_queue_entry_view },
@@ -165,6 +167,28 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_HEALTH_ISSUE_KIND_";
+        pub const Tag = database.HealthIssueKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportHealthIssueKind(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_HEALTH_SEVERITY_";
+        pub const fallback = "ORCA_HEALTH_SEVERITY_ERROR";
+        pub const Tag = database.HealthSeverity;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportHealthSeverity(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_HEALTH_ACTION_";
+        pub const Tag = database.HealthAction;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportHealthAction(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_WATCH_STATE_";
         pub const Tag = core.runtime.WatchState;
         pub fn produce(tag: Tag) ?i64 {
@@ -239,6 +263,13 @@ const import_mappings = .{
         pub const Tag = std.meta.Tag(core.runtime.ArtworkSubject);
         pub fn consume(value: u8) ?Tag {
             return c_api.importArtworkSubject(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_HEALTH_ISSUE_KIND_";
+        pub const Tag = database.HealthIssueKind;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importHealthIssueKind(value);
         }
     },
     struct {
