@@ -2,8 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- **Tag-write plans skip a file whose folder Orca cannot create files in.**
+  `TagWriteSkipReason.folder_not_writable` (C
+  `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE`, 3) leaves such a file out of the
+  plan, since the write needs the folder for its staged copy. `orca-cli
+  write-tags` prints it as a skip, and `orca-gtk` counts skipped files by
+  reason and says when every file's folder is the problem.
+- **A failed tag write says which file it stopped at and why.**
+  `Runtime.jobTagWriteFailure` returns a `TagWriteFailure` (file ID, action
+  index, `TagWriteFailureReason`: `permission_denied`,
+  `read_only_file_system`, `no_space`, `changed_since_plan` or `other`), and
+  the C ABI's `orca_job_tag_write_failure` fills an `orca_tag_write_failure`.
+  `orca-cli write-tags` prints a `failed` line with the file's path, and
+  `orca-gtk`'s toast names the reason.
+
 ### Fixed
 
+- **The mutation journal keeps the error a failed tag write recorded.**
+  Recovery rolled a `failed` operation back with the error `recovered`,
+  overwriting the real one, such as `AccessDenied`, the moment the write
+  failed.
+- **A failed tag write reports why.** The tag-write Job dropped the
+  executor's error, so every failure read "Writing tags failed" with no cause.
 - **The C ABI smoke passes whatever order a file system lists the
   fixtures in.** Its coverless Track, `Opus Reference`, is also backed by
   `covered-reference.opus`, so on tmpfs and CI it read that copy's cover. It

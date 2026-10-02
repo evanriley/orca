@@ -85,6 +85,11 @@ fn tagWriteRefusal(
     location: database.repository.PresentLocation,
 ) !?TagWriteSkipReason {
     if (!(metadata.executor.canWriteTags(io, location.uri) catch return .missing)) return .format_not_writable;
+    std.Io.Dir.cwd().access(io, std.Io.Dir.path.dirname(location.uri) orelse ".", .{ .write = true, .execute = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return .folder_not_writable,
+        error.FileNotFound => return .missing,
+        else => return err,
+    };
     var local = storage.LocalFileSource.open(io, location.uri) catch return .missing;
     const observed = local.readable().identity();
     local.close();
@@ -262,6 +267,7 @@ pub fn planTagWrite(
 
     var actions: std.ArrayList(metadata.mutation.Action) = .empty;
     var locations: std.ArrayList(database.repository.PresentLocation) = .empty;
+    var planned_file_ids: std.ArrayList(i64) = .empty;
     var files: std.ArrayList(TagWriteFile) = .empty;
     var skipped: std.ArrayList(TagWriteSkip) = .empty;
     var conflicts: std.ArrayList(TagWriteConflict) = .empty;
@@ -312,6 +318,7 @@ pub fn planTagWrite(
             .changes = changes.items,
         } });
         try locations.append(scratch, location);
+        try planned_file_ids.append(scratch, file_id);
         try files.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .changes = shown.items });
     }
     preview.skipped = skipped.items;
@@ -336,6 +343,7 @@ pub fn planTagWrite(
         .library = library,
         .plan = try metadata.mutation.Plan.init(self.allocator, plan_id, actions.items),
         .locations = &.{},
+        .file_ids = &.{},
     };
     errdefer {
         pending.plan.deinit();
@@ -347,6 +355,7 @@ pub fn planTagWrite(
         held.uri = try pending.arena.allocator().dupe(u8, location.uri);
     }
     pending.locations = held_locations;
+    pending.file_ids = try pending.arena.allocator().dupe(i64, planned_file_ids.items);
 
     preview.files = files.items;
     preview.plan_id = plan_id;

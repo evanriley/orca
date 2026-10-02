@@ -70,6 +70,7 @@ pub const Executor = struct {
     /// Set once an injected fault has fired, or once a journal row this
     /// executor owns was changed by someone else, so no compensation runs.
     crashed: bool = false,
+    failed_action_index: ?u32 = null,
 
     /// Execute every action as one logical group. A tag write builds a hidden
     /// stage beside the file, keeps a verified copy of the original in the
@@ -80,6 +81,7 @@ pub const Executor = struct {
     /// a crash: as long as one action has not committed, startup recovery can
     /// find the group and unwind the ones that did.
     pub fn executePlan(self: *Executor, plan: *mutation.Plan, group_id: u64) !void {
+        self.failed_action_index = null;
         if (group_id == 0) return error.InvalidMutationGroup;
         var writes_tags = false;
         for (plan.actions) |action| switch (action) {
@@ -171,6 +173,7 @@ pub const Executor = struct {
 
         for (plan.actions, 0..) |action, action_index| switch (action) {
             .write_tags => |write| {
+                self.failed_action_index = @intCast(action_index);
                 const operation = prepared.items[action_index].id;
                 const stage_path = prepared.items[action_index].stage_path.?;
                 const backup_path = prepared.items[action_index].backup_path.?;
@@ -235,6 +238,7 @@ pub const Executor = struct {
                 );
             },
             .move => |move| {
+                self.failed_action_index = @intCast(action_index);
                 const operation = prepared.items[action_index].id;
                 const current = try file_mutation.identity(self.io, move.source_path);
                 if (!current.eql(move.expected) and
@@ -272,6 +276,7 @@ pub const Executor = struct {
                 );
             },
         };
+        self.failed_action_index = null;
         try plan.finish(true);
     }
 
@@ -711,12 +716,10 @@ pub const Executor = struct {
                 .rolled_back,
                 "recovered",
             ),
-            .failed => try self.transition(
-                operation_id,
-                .failed,
-                .rolled_back,
-                "recovered",
-            ),
+            .failed => self.journal.rollBackFailed(operation_id) catch |err| {
+                self.stopIfStale(err);
+                return err;
+            },
             .undoing => try self.transition(
                 operation_id,
                 .undoing,
@@ -1616,6 +1619,20 @@ const WriteFixture = struct {
         return file_mutation.identity(std.testing.io, self.second);
     }
 
+    fn journaledError(self: *WriteFixture, operation_id: i64) ![]u8 {
+        var statement = try self.library.database.prepare("SELECT error FROM mutation_operations WHERE id=?1;");
+        defer statement.deinit();
+        try statement.bindInt64(1, operation_id);
+        if (try statement.step() != .row) return error.MutationOperationNotFound;
+        return std.testing.allocator.dupe(u8, statement.columnText(0));
+    }
+
+    fn expectJournaledError(self: *WriteFixture, operation_id: i64, expected: []const u8) !void {
+        const recorded = try self.journaledError(operation_id);
+        defer std.testing.allocator.free(recorded);
+        try std.testing.expectEqualStrings(expected, recorded);
+    }
+
     fn expectMusicFolderUntouched(self: *WriteFixture) !void {
         var iterator = self.music.dir.iterate();
         var count: usize = 0;
@@ -1934,4 +1951,36 @@ test "an executor stops without compensating when its journal row was changed by
     try std.testing.expectEqual(database.MutationState.committed, try fixture.library.mutation_journal.state(1));
     try expectTitle(fixture.source, "After write");
     try std.testing.expect(fixture.second_original.eql(try fixture.currentSecond()));
+}
+
+test "recovery keeps the error a failed write recorded" {
+    if (@import("builtin").os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var fixture = try WriteFixture.init(null);
+    defer fixture.deinit();
+    try fixture.music.parent_dir.setFilePermissions(std.testing.io, &fixture.music.sub_path, .fromMode(0o555), .{});
+    defer fixture.music.parent_dir.setFilePermissions(std.testing.io, &fixture.music.sub_path, .default_dir, .{}) catch {};
+    const actions = [_]mutation.Action{.{ .write_tags = .{
+        .path = fixture.source,
+        .expected = fixture.original,
+        .changes = &.{.{ .field = .title, .before = "Before write", .after = "After write" }},
+    } }};
+    var plan = try mutation.Plan.init(std.testing.allocator, 7, &actions);
+    defer plan.deinit();
+    try plan.approve(plan.approval());
+    var lock = try fixture.acquireLock();
+    defer lock.release(std.testing.io);
+    var executor = fixture.executorWith(&lock);
+
+    try std.testing.expectError(error.AccessDenied, executor.executePlan(&plan, 7));
+    try std.testing.expectEqual(@as(?u32, 0), executor.failed_action_index);
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectJournaledError(1, "AccessDenied");
+    try std.testing.expect(fixture.original.eql(try fixture.current()));
+    try fixture.expectMusicFolderUntouched();
+
+    try fixture.library.database.exec("UPDATE mutation_operations SET state = 4 WHERE id = 1;");
+    try std.testing.expectEqual(database.MutationState.failed, try fixture.library.mutation_journal.state(1));
+    try fixture.library.recoverPendingMutations(std.testing.io, &lock);
+    try std.testing.expectEqual(database.MutationState.rolled_back, try fixture.library.mutation_journal.state(1));
+    try fixture.expectJournaledError(1, "AccessDenied");
 }

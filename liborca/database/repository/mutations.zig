@@ -156,6 +156,24 @@ pub const MutationJournalRepository = struct {
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
 
+    pub fn rollBackFailed(self: *MutationJournalRepository, operation_id: i64) !void {
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.beginDurable();
+        defer self.endDurable();
+        var statement = try self.db.prepare(
+            \\UPDATE mutation_operations
+            \\SET state=?1, updated_at=unixepoch()
+            \\WHERE id=?2 AND state=?3;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, @intFromEnum(MutationState.rolled_back));
+        try statement.bindInt64(2, operation_id);
+        try statement.bindInt64(3, @intFromEnum(MutationState.failed));
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (self.db.changes() != 1) return error.StaleMutationOperation;
+    }
+
     pub fn state(self: *const MutationJournalRepository, operation_id: i64) !MutationState {
         var statement = try self.db.prepare(
             "SELECT state FROM mutation_operations WHERE id=?1;",

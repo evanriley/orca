@@ -227,6 +227,9 @@ pub const TagWriteSkipReason = enum {
     /// The bytes changed after the last scan; the scan must see them first, or
     /// the plan would be computed against tags the file no longer has.
     changed_since_scan,
+    /// Orca cannot create files in the file's folder, which a write needs for
+    /// its staged copy.
+    folder_not_writable,
 };
 
 /// What `pruneTagWriteBackups` deleted: how many backups, and their bytes.
@@ -300,6 +303,8 @@ pub const AcoustIdSubmittablePage = database.AcoustIdSubmittablePage;
 pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
 
 pub const SubmissionStats = job_worker.SubmissionStats;
+pub const TagWriteFailure = job_worker.TagWriteFailure;
+pub const TagWriteFailureReason = job_worker.TagWriteFailureReason;
 pub const ScanStats = job_worker.ScanStats;
 pub const MatchStats = job_worker.MatchStats;
 pub const MatchingHooks = job_worker.MatchingHooks;
@@ -1853,6 +1858,14 @@ pub const OrcaRuntime = struct {
     /// The root a reconcile job walks, or null for a job of another kind.
     pub fn jobReconcileRoot(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
         return runtime_jobs.jobReconcileRoot(self, job_handle);
+    }
+
+    /// Which file a failed tag write stopped at and why, once the job has
+    /// finished; null while it runs, after it succeeded, or when it failed
+    /// before reaching a file. `error.NotATagWriteJob` for a job of another
+    /// kind.
+    pub fn jobTagWriteFailure(self: *OrcaRuntime, job_handle: JobHandle) !?TagWriteFailure {
+        return runtime_jobs.jobTagWriteFailure(self, job_handle);
     }
 
     /// Watches the Library's roots and reconciles what changes under them,

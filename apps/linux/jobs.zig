@@ -510,6 +510,7 @@ fn finished(
     stats: ?liborca.ScanStats,
     match_stats: ?liborca.MatchStats,
     submission_stats: ?liborca.SubmissionStats,
+    tag_write_failure: ?liborca.TagWriteFailure,
 ) void {
     if (task == .matching) return matchingFinished(self, state_value, match_stats);
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
@@ -519,7 +520,7 @@ fn finished(
         .scan => "The scan failed",
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
-        .tag_write => "Writing tags failed; the files were left as they were",
+        .tag_write => tagWriteFailedText(tag_write_failure),
         .matching, .submission => unreachable,
     });
     switch (task) {
@@ -557,6 +558,17 @@ fn finished(
     }
 }
 
+fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
+    const known = failure orelse return "Writing tags failed; the files were left as they were";
+    return switch (known.reason) {
+        .permission_denied => "Writing tags failed: Orca has no permission to create files there. The files were left as they were.",
+        .read_only_file_system => "Writing tags failed: the drive is read-only. The files were left as they were.",
+        .no_space => "Writing tags failed: the drive is full. The files were left as they were.",
+        .changed_since_plan => "Writing tags failed: a file changed after the write was planned. The files were left as they were.",
+        .other => "Writing tags failed; the files were left as they were",
+    };
+}
+
 pub fn tick(self: *App) void {
     const task = self.task orelse return;
     const job = self.task_job orelse return;
@@ -578,6 +590,7 @@ pub fn tick(self: *App) void {
     };
     const match_stats: ?liborca.MatchStats = if (task == .matching) self.runtime.jobMatchStats(job) catch null else null;
     const submission_stats: ?liborca.SubmissionStats = if (task == .submission) self.runtime.jobSubmissionStats(job) catch null else null;
+    const tag_write_failure: ?liborca.TagWriteFailure = if (task == .tag_write and snapshot.state == .failed) self.runtime.jobTagWriteFailure(job) catch null else null;
     if (submission_stats) |value| writeSubmissionDetail(self, snapshot, value);
     if (stats) |value| {
         writeDetail(self, task, snapshot, value);
@@ -598,7 +611,7 @@ pub fn tick(self: *App) void {
     self.task_job = null;
     self.shown_matched = 0;
     showScanning(self, false);
-    finished(self, task, snapshot.state, stats, match_stats, submission_stats);
+    finished(self, task, snapshot.state, stats, match_stats, submission_stats, tag_write_failure);
     switch (task) {
         .analysis, .duplicates, .matching => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),

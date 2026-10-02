@@ -308,6 +308,9 @@ Small defects that are not yet scheduled:
 - A `technical_anomaly` Health issue for a displaced track position is
   never cleared once the position is fixed; only dismissing it hides it.
 - `orca-cli` exits 0 after printing usage for a wrong argument count.
+- A tag write that fails before it reaches a file, such as when its
+  backup directory already exists, records no `TagWriteFailure`, so
+  `orca-cli` and `orca-gtk` fall back to a message without a reason.
 
 - An output opened for a device id PipeWire does not know, such as a stale
   one, falls back to the default sink instead of failing, so it can play on

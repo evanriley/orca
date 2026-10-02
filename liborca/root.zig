@@ -96,6 +96,8 @@ pub const TagWriteChange = runtime.TagWriteChange;
 pub const TagWriteConflict = runtime.TagWriteConflict;
 pub const TagWriteSkip = runtime.TagWriteSkip;
 pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
+pub const TagWriteFailure = runtime.TagWriteFailure;
+pub const TagWriteFailureReason = runtime.TagWriteFailureReason;
 pub const TagWriteDigest = internal.metadata.mutation.Digest;
 pub const PruneSummary = runtime.PruneSummary;
 

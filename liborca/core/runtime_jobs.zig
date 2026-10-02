@@ -23,6 +23,7 @@ const ReconcileRequest = runtime.ReconcileRequest;
 const ScanRequest = runtime.ScanRequest;
 const ScanStats = runtime.ScanStats;
 const SubmissionStats = runtime.SubmissionStats;
+const TagWriteFailure = runtime.TagWriteFailure;
 
 /// How many finished job records keep their scanner counters queryable. A
 /// bounded tail: a host reads the stats of the scan that just ended, not of
@@ -448,6 +449,16 @@ pub fn jobReconcileRoot(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
         if (!worker.job.eql(job_handle)) continue;
         const pending = worker.pendingReconcile() orelse return null;
         return pending.request.root_id;
+    }
+    return error.StaleHandle;
+}
+
+pub fn jobTagWriteFailure(self: *OrcaRuntime, job_handle: JobHandle) !?TagWriteFailure {
+    if (queuedHostJob(self, job_handle)) return error.NotATagWriteJob;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        if (worker.kind() != .mutation) return error.NotATagWriteJob;
+        return worker.tagWriteFailure();
     }
     return error.StaleHandle;
 }

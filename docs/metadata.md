@@ -395,8 +395,10 @@ state. Both passes run only under the [journal lock](#the-journal-lock).
 Recovery drives every group with a `planned`, `staged`, `failed` or `undoing`
 operation to terminal states. It first marks the group's `committed`
 operations `undoing`, in one transaction, so a crash during recovery leaves
-the group discoverable, then unwinds it in reverse action order. A tag write
-being written or being undone is decided by identity alone:
+the group discoverable, then unwinds it in reverse action order. A `failed`
+operation becomes `rolled_back` and keeps the error its write journaled;
+an operation rolled back from any other state records `recovered`. A tag
+write being written or being undone is decided by identity alone:
 
 | Found | Action | Result |
 | --- | --- | --- |
@@ -464,6 +466,10 @@ files it left out and why, and the plan's ID and digest:
   stream behind a leading ID3v2 tag.
 - `changed_since_scan`: the file's identity no longer matches the last scan,
   so the plan would describe tags the file no longer has. Rescan first.
+- `folder_not_writable`: Orca cannot create files in the file's folder, which
+  the write needs for its staged copy. The file's own permissions do not
+  matter, since the staged copy replaces it by a rename. C value
+  `ORCA_TAG_WRITE_SKIP_FOLDER_NOT_WRITABLE` (3).
 
 The runtime holds at most eight plans awaiting approval.
 `Runtime.startTagWrite` approves one by its ID and digest and executes it as a
@@ -479,6 +485,19 @@ re-observes them; for a group already undone, such as one whose interrupted
 undo recovery finished, it re-observes them and returns
 `error.MutationGroupAlreadyUndone`. Orca's values survive both directions: after a write the
 library still holds the locked edit, and after an undo it still shows it.
+
+A write that fails rolls its group back as recovery does and ends the Job
+`failed`. `Runtime.jobTagWriteFailure(job)` then returns a `TagWriteFailure`:
+the file it stopped at, that file's index in the plan's actions, and a
+`TagWriteFailureReason` (`permission_denied`, `read_only_file_system`,
+`no_space`, `changed_since_plan` when the file's identity no longer matched
+the plan, or `other`). It returns null while the Job runs, after it
+succeeded, or when it failed before reaching a file, such as in recovery, and
+`error.NotATagWriteJob` for a Job of another kind. The C ABI's
+`orca_job_tag_write_failure` fills an `orca_tag_write_failure` and returns
+`ORCA_STATUS_NOT_FOUND` for null and `ORCA_STATUS_INVALID_ARGUMENT` for a Job
+of another kind. `orca-cli write-tags` prints it as
+`failed<TAB>FILE_ID<TAB>REASON<TAB>PATH` before exiting with an error.
 A plan writes one present location of each file. A file held at several
 paths is byte-identical copies, so writing one copy splits it off into a file
 of its own that carries Orca's values, and the copies left behind keep the

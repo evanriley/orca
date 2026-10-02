@@ -21,6 +21,7 @@ const JobHandle = runtime_module.JobHandle;
 const LibraryHandle = runtime_module.LibraryHandle;
 const OrcaRuntime = runtime_module.OrcaRuntime;
 const State = runtime_module.State;
+const TagWriteFailureReason = runtime_module.TagWriteFailureReason;
 const TagWriteSkipReason = runtime_module.TagWriteSkipReason;
 const TrackDetails = runtime_module.TrackDetails;
 const WorkHandle = runtime_module.WorkHandle;
@@ -1658,6 +1659,10 @@ pub fn scannedTempLibrary(runtime: *OrcaRuntime, temporary: *std.testing.TmpDir,
     try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.mp3", "a.mp3");
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
     try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference-aac.m4a", "c.m4a");
+    return scannedTempFolder(runtime, temporary, name);
+}
+
+pub fn scannedTempFolder(runtime: *OrcaRuntime, temporary: *std.testing.TmpDir, name: [:0]const u8) !LibraryHandle {
     const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
     defer std.testing.allocator.free(root);
     const library = try runtime.openLibrary(std.testing.io, name);
@@ -1674,8 +1679,19 @@ pub fn allTrackIds(runtime: *OrcaRuntime, library: LibraryHandle) ![]i64 {
     return ids;
 }
 
-fn tempDatabasePath(data: *std.testing.TmpDir) ![:0]u8 {
+pub fn tempDatabasePath(data: *std.testing.TmpDir) ![:0]u8 {
     return std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}/library.db", .{data.sub_path}, 0);
+}
+
+fn expectJournaledError(library_database: *database.LibraryDatabase, group_id: u64, action_index: u32, expected: []const u8) !void {
+    var statement = try library_database.database.prepare(
+        "SELECT error FROM mutation_operations WHERE group_id=?1 AND action_index=?2;",
+    );
+    defer statement.deinit();
+    try statement.bindInt64(1, @intCast(group_id));
+    try statement.bindInt64(2, action_index);
+    if (try statement.step() != .row) return error.MutationOperationNotFound;
+    try std.testing.expectEqualStrings(expected, statement.columnText(0));
 }
 
 fn rescan(runtime: *OrcaRuntime, library: LibraryHandle) !void {
@@ -2168,6 +2184,97 @@ test "a file changed since its scan is left out of a tag write" {
     for (preview.skipped) |skip| changed = changed or skip.reason == .changed_since_scan;
     try std.testing.expect(changed);
     // Left pending on purpose: shutdown must free it.
+}
+
+test "a file in a folder Orca cannot create files in is skipped before writing" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    try temporary.dir.createDirPath(std.testing.io, "locked");
+    try temporary.dir.createDirPath(std.testing.io, "open");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "locked/b.flac");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/covered-reference.mp3", "open/a.mp3");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempFolder(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "locked/b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    try temporary.dir.setFilePermissions(std.testing.io, "locked", .fromMode(0o555), .{});
+    defer temporary.dir.setFilePermissions(std.testing.io, "locked", .default_dir, .{}) catch {};
+
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 1), preview.files.len);
+    try std.testing.expect(std.mem.endsWith(u8, preview.files[0].path, "open/a.mp3"));
+    try std.testing.expectEqual(@as(usize, 1), preview.skipped.len);
+    try std.testing.expectEqual(TagWriteSkipReason.folder_not_writable, preview.skipped[0].reason);
+    try std.testing.expect(std.mem.endsWith(u8, preview.skipped[0].path, "locked/b.flac"));
+
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    const library_database = try libraryDatabase(&runtime, library);
+    try std.testing.expectEqual(@as(i64, 1), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations;"));
+    try std.testing.expectEqual(@as(i64, 0), try database.columns.scalar(library_database.database, "SELECT count(*) FROM mutation_operations WHERE source_path LIKE '%/locked/%';"));
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "locked/b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    var locked = try temporary.dir.openDir(std.testing.io, "locked", .{ .iterate = true });
+    defer locked.close(std.testing.io);
+    var entries = locked.iterate();
+    try std.testing.expectEqualStrings("b.flac", (try entries.next(std.testing.io)).?.name);
+    try std.testing.expect(try entries.next(std.testing.io) == null);
+}
+
+test "a failed tag write reports its file and reason" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .title, .value = "Written Title" }});
+    defer edited.deinit();
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    const original = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(original);
+    try temporary.parent_dir.setFilePermissions(std.testing.io, &temporary.sub_path, .fromMode(0o555), .{});
+    defer temporary.parent_dir.setFilePermissions(std.testing.io, &temporary.sub_path, .default_dir, .{}) catch {};
+
+    const job_handle = try runtime.startTagWrite(library, preview.plan_id, preview.digest);
+    try std.testing.expectEqual(job.State.failed, try awaitJob(&runtime, job_handle));
+    const failure = (try runtime.jobTagWriteFailure(job_handle)).?;
+    try std.testing.expectEqual(preview.files[0].file_id, failure.file_id);
+    try std.testing.expectEqual(@as(u32, 0), failure.action_index);
+    try std.testing.expectEqual(TagWriteFailureReason.permission_denied, failure.reason);
+
+    const library_database = try libraryDatabase(&runtime, library);
+    try expectJournaledError(library_database, preview.plan_id, 0, "AccessDenied");
+    _ = try runtime.pruneTagWriteBackups(library, std.testing.io, 0);
+    try expectJournaledError(library_database, preview.plan_id, 0, "AccessDenied");
+    const after = try temporary.dir.readFileAlloc(std.testing.io, "b.flac", std.testing.allocator, .limited(1 << 22));
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, original, after);
+    try expectOnlyFixtureFiles(temporary.dir);
+
+    const scan = try runtime.startLibraryScan(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, scan));
+    try std.testing.expectError(error.NotATagWriteJob, runtime.jobTagWriteFailure(scan));
 }
 
 test "writing tags to one copy of a shared file splits that copy off and marks the written value on the file that holds it" {

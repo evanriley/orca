@@ -34,6 +34,7 @@ const struct_pairs = .{
     .{ c_api.TagWriteConflictView, c.orca_tag_write_conflict_view },
     .{ c_api.TagWriteSkipView, c.orca_tag_write_skip_view },
     .{ c_api.TagWritePlanView, c.orca_tag_write_plan_view },
+    .{ c_api.TagWriteFailureView, c.orca_tag_write_failure },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.HealthItemView, c.orca_health_item_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
@@ -250,6 +251,13 @@ const export_mappings = .{
         pub const Tag = core.runtime.TagWriteSkipReason;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportTagWriteSkipReason(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TAG_WRITE_FAILURE_";
+        pub const Tag = core.runtime.TagWriteFailureReason;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportTagWriteFailureReason(tag);
         }
     },
     struct {

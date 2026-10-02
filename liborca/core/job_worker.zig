@@ -136,6 +136,39 @@ pub const SubmissionStats = struct {
     outcome: SubmissionOutcome = .completed,
 };
 
+/// The file a failed tag write stopped at, and why.
+pub const TagWriteFailure = struct {
+    file_id: i64,
+    /// The plan's action for the file, in the order the plan lists its files.
+    action_index: u32,
+    reason: TagWriteFailureReason,
+};
+
+pub const TagWriteFailureReason = enum {
+    /// Orca may not create or replace files in the file's folder or in the
+    /// Library's backup directory.
+    permission_denied,
+    /// The file, or the Library's backup directory, is on a read-only file
+    /// system.
+    read_only_file_system,
+    /// The disk had no room for the staged copy or the backup.
+    no_space,
+    /// The file changed after the plan was made, so the plan no longer
+    /// describes it.
+    changed_since_plan,
+    other,
+};
+
+fn tagWriteFailureReason(err: anyerror) TagWriteFailureReason {
+    return switch (err) {
+        error.AccessDenied, error.PermissionDenied => .permission_denied,
+        error.ReadOnlyFileSystem => .read_only_file_system,
+        error.NoSpaceLeft => .no_space,
+        error.FileIdentityChanged => .changed_since_plan,
+        else => .other,
+    };
+}
+
 pub const MatchingHooks = struct {
     transport: ?network.client.Transport = null,
     /// AcoustID's transport; `transport` when null.
@@ -221,6 +254,8 @@ pub const PendingTagWrite = struct {
     plan: metadata.mutation.Plan,
     /// Index-aligned with `plan.actions`, allocated in `arena`.
     locations: []database.repository.PresentLocation,
+    /// Index-aligned with `plan.actions`, allocated in `arena`.
+    file_ids: []i64,
     /// Taken by `startTagWrite` and released once the plan has executed.
     journal_lock: ?metadata.JournalLock = null,
 
@@ -582,6 +617,8 @@ pub const JobWorker = struct {
     volume_changed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
+    /// Written by the worker just before it finishes; read only after.
+    tag_write_failure: ?TagWriteFailure = null,
     /// Raised after `finish`, which is safe only because the control lane
     /// joins the thread, not merely waits for `finish`, before it frees this
     /// struct or the runtime.
@@ -1265,7 +1302,15 @@ pub const JobWorker = struct {
                 .journal_lock = lock,
                 .backup_directory = self.database.backup_directory,
             };
-            break :written if (executor.executePlan(&pending.plan, pending.plan.id)) true else |_| false;
+            executor.executePlan(&pending.plan, pending.plan.id) catch |err| {
+                if (executor.failed_action_index) |index| self.tag_write_failure = .{
+                    .file_id = pending.file_ids[index],
+                    .action_index = index,
+                    .reason = tagWriteFailureReason(err),
+                };
+                break :written false;
+            };
+            break :written true;
         };
         if (written) {
             _ = stats.changed.fetchAdd(pending.plan.actions.len, .acq_rel);
@@ -1341,6 +1386,11 @@ pub const JobWorker = struct {
             .scan, .duplicates, .matching => .{},
         };
         return .{ .files_examined = self.progress.load(.acquire) };
+    }
+
+    pub fn tagWriteFailure(self: *const JobWorker) ?TagWriteFailure {
+        if (self.retired or self.registration.isFinished()) return self.tag_write_failure;
+        return null;
     }
 
     pub fn wasCancelled(self: *const JobWorker) bool {

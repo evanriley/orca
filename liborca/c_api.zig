@@ -337,6 +337,13 @@ pub const TagWriteSkipView = extern struct {
     path: StringView,
 };
 
+pub const TagWriteFailureView = extern struct {
+    file_id: i64,
+    action_index: u32,
+    reason: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
 pub const TagWritePlanView = extern struct {
     plan_id: u64,
     digest: TagWriteDigest,
@@ -1990,6 +1997,23 @@ pub export fn orca_library_start_tag_write(
     const started = box.runtime.startTagWrite(importLibrary(library), plan_id, approval.bytes) catch |err|
         return box.fail(@src(), err);
     destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_tag_write_failure(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*TagWriteFailureView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const found = box.runtime.jobTagWriteFailure(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    const failure = found orelse return box.reject(@src(), .not_found, "the job recorded no failure");
+    destination.* = .{
+        .file_id = failure.file_id,
+        .action_index = failure.action_index,
+        .reason = exportTagWriteFailureReason(failure.reason),
+    };
     return .ok;
 }
 
@@ -4107,6 +4131,17 @@ pub fn exportTagWriteSkipReason(reason: core.runtime.TagWriteSkipReason) u8 {
         .missing => 0,
         .format_not_writable => 1,
         .changed_since_scan => 2,
+        .folder_not_writable => 3,
+    };
+}
+
+pub fn exportTagWriteFailureReason(reason: core.runtime.TagWriteFailureReason) u8 {
+    return switch (reason) {
+        .permission_denied => 0,
+        .read_only_file_system => 1,
+        .no_space => 2,
+        .changed_since_plan => 3,
+        .other => 4,
     };
 }
 
@@ -4534,6 +4569,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidMinimumConfidence,
         error.InvalidMaintenanceOptions,
         error.PageOutOfRange,
+        error.NotATagWriteJob,
         => .invalid_argument,
         else => .internal,
     };
@@ -5419,6 +5455,62 @@ test "an edit is held locked as the user's, and a Library with no database file 
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
+test "a folder Orca cannot create files in is skipped, and a write that failed there reports its file and reason" {
+    if (builtin.os.tag != .linux or std.os.linux.geteuid() == 0) return error.SkipZigTest;
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try core.runtime_tests.tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    try core.runtime_tests.copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    const scanned = try core.runtime_tests.scannedTempFolder(&box.runtime, &temporary, database_path);
+    const library = exportLibraryHandle(scanned);
+    const track_ids = try core.runtime_tests.allTrackIds(&box.runtime, scanned);
+    defer std.testing.allocator.free(track_ids);
+    const title = "C ABI Title";
+    const edited = try box.runtime.libraryEditTracks(scanned, track_ids, &.{.{ .field = .title, .value = title }});
+    defer edited.deinit();
+
+    var held: CapturedPlan = .{ .title = title };
+    try std.testing.expectEqual(Status.ok, orca_library_plan_tag_write(runtime, library, edited.ids.ptr, edited.ids.len, &held, capturePlan));
+    try std.testing.expectEqual(@as(usize, 1), held.file_count);
+    try temporary.parent_dir.setFilePermissions(std.testing.io, &temporary.sub_path, .fromMode(0o555), .{});
+    defer temporary.parent_dir.setFilePermissions(std.testing.io, &temporary.sub_path, .default_dir, .{}) catch {};
+
+    var skipped: CapturedPlan = .{ .title = title };
+    try std.testing.expectEqual(Status.ok, orca_library_plan_tag_write(runtime, library, edited.ids.ptr, edited.ids.len, &skipped, capturePlan));
+    try std.testing.expectEqual(@as(u64, 0), skipped.plan_id);
+    try std.testing.expectEqual(@as(usize, 1), skipped.skip_count);
+    try std.testing.expectEqual(@as(u8, 3), skipped.skip_reason);
+
+    var failed: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_tag_write(runtime, library, held.plan_id, &held.digest, &failed));
+    try std.testing.expectEqual(job.State.failed, try core.runtime_tests.awaitJob(&box.runtime, importJob(failed)));
+    var failure: TagWriteFailureView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_tag_write_failure(runtime, failed, &failure));
+    try std.testing.expectEqual(held.first_file_id, failure.file_id);
+    try std.testing.expectEqual(@as(u32, 0), failure.action_index);
+    try std.testing.expectEqual(@as(u8, 0), failure.reason);
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_tag_write_failure(runtime, failed, null));
+
+    try temporary.parent_dir.setFilePermissions(std.testing.io, &temporary.sub_path, .default_dir, .{});
+    var writable: CapturedPlan = .{ .title = title };
+    try std.testing.expectEqual(Status.ok, orca_library_plan_tag_write(runtime, library, edited.ids.ptr, edited.ids.len, &writable, capturePlan));
+    var written: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_tag_write(runtime, library, writable.plan_id, &writable.digest, &written));
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, importJob(written)));
+    try std.testing.expectEqual(Status.not_found, orca_job_tag_write_failure(runtime, written, &failure));
+
+    const scan = try box.runtime.startLibraryScan(scanned, .{});
+    try std.testing.expectEqual(job.State.succeeded, try core.runtime_tests.awaitJob(&box.runtime, scan));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_tag_write_failure(runtime, exportJobHandle(scan), &failure));
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
 const CapturedIds = struct {
     ids: [8]i64 = @splat(0),
     count: usize = 0,
@@ -5473,6 +5565,7 @@ const CapturedPlan = struct {
     skip_count: usize = 0,
     skip_reason: u8 = 255,
     conflict_count: usize = 0,
+    first_file_id: i64 = 0,
 };
 
 fn capturePlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c) void {
@@ -5483,6 +5576,7 @@ fn capturePlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c)
     captured.file_count = plan.file_count;
     captured.skip_count = plan.skip_count;
     captured.conflict_count = plan.conflict_count;
+    if (plan.file_count != 0) captured.first_file_id = plan.files[0].file_id;
     for (plan.files[0..plan.file_count]) |file| {
         for (file.changes[0..file.change_count]) |change| {
             if (change.field == exportMetadataField(.title) and

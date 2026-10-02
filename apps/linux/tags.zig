@@ -290,6 +290,20 @@ fn appendLine(list: *gtk.Widget, text: [:0]const u8, css_class: [*:0]const u8) v
     gtk.gtk_box_append(gtk.cast(gtk.Box, list), label);
 }
 
+fn allSkippedFor(skipped: []const liborca.TagWriteSkip, reason: liborca.TagWriteSkipReason) bool {
+    for (skipped) |skip| if (skip.reason != reason) return false;
+    return true;
+}
+
+fn skipClause(reason: liborca.TagWriteSkipReason, count: usize) []const u8 {
+    return switch (reason) {
+        .missing => "missing",
+        .format_not_writable => "not a format Orca writes yet",
+        .changed_since_scan => "changed since the last scan",
+        .folder_not_writable => if (count == 1) "Orca can't create files in its folder" else "Orca can't create files in their folders",
+    };
+}
+
 fn basename(path: []const u8) []const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
     return path[slash + 1 ..];
@@ -315,6 +329,8 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
     if (plan.files.len == 0) {
         return self.toast(if (plan.conflicts.len != 0)
             "The files' own tags disagree with Orca's matches; edit a field to lock your choice"
+        else if (plan.skipped.len != 0 and allSkippedFor(plan.skipped, .folder_not_writable))
+            "Orca can't create files in those folders; check their permissions"
         else if (plan.skipped.len != 0)
             "Those files can't be written yet"
         else
@@ -368,15 +384,22 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
         if (plan.conflicts.len > 6)
             appendLine(list, strings.format(&buffer, "and {d} more", .{plan.conflicts.len - 6}), "dim-label");
     }
-    if (plan.skipped.len != 0) {
-        const skipped = gtk.gtk_label_new(strings.format(&buffer, "{d} {s} skipped: not a format Orca writes yet, missing, or changed since the last scan.", .{
-            plan.skipped.len,
-            if (plan.skipped.len == 1) "file is" else "files are",
+    var skip_counts: std.EnumArray(liborca.TagWriteSkipReason, usize) = .initFill(0);
+    for (plan.skipped) |skip| skip_counts.getPtr(skip.reason).* += 1;
+    var first_skip = true;
+    for (std.enums.values(liborca.TagWriteSkipReason)) |reason| {
+        const count = skip_counts.get(reason);
+        if (count == 0) continue;
+        const skipped = gtk.gtk_label_new(strings.format(&buffer, "{d} {s} skipped: {s}.", .{
+            count,
+            if (count == 1) "file is" else "files are",
+            skipClause(reason, count),
         }).ptr);
         gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, skipped), gtk.true_);
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, skipped), 0.0);
         gtk.gtk_widget_add_css_class(skipped, "warning");
-        gtk.gtk_widget_set_margin_top(skipped, 6);
+        if (first_skip) gtk.gtk_widget_set_margin_top(skipped, 6);
+        first_skip = false;
         gtk.gtk_box_append(gtk.cast(gtk.Box, list), skipped);
     }
     const scroller = gtk.gtk_scrolled_window_new();

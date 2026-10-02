@@ -278,7 +278,8 @@ const help_details =
     \\--approve it prints the plan and its digest and writes nothing; run it
     \\again with --approve=DIGEST to write exactly that plan. A digest from a
     \\plan that no longer matches the library is refused. It prints the group
-    \\to pass to undo-tags, which restores the files' previous bytes.
+    \\to pass to undo-tags, which restores the files' previous bytes. A write
+    \\that fails is rolled back and prints the file it stopped at and why.
     \\
     \\Each write keeps the files' previous bytes in DATABASE.orca-backups until
     \\they are undone or pruned. prune-backups deletes the backups of every
@@ -1613,7 +1614,13 @@ fn writeTags(context: Context) !void {
         return;
     };
     const job_handle = try runtime.startTagWrite(library, plan.plan_id, digest);
-    try awaitJob(&runtime, stdout, job_handle, null);
+    awaitJob(&runtime, stdout, job_handle, null) catch |err| {
+        if (err == error.JobFailed) if (try runtime.jobTagWriteFailure(job_handle)) |failure| {
+            try stdout.print("failed\t{d}\t{t}\t{s}\n", .{ failure.file_id, failure.reason, plan.files[failure.action_index].path });
+            try stdout.flush();
+        };
+        return err;
+    };
     const stats = try runtime.jobScanStats(job_handle);
     try stdout.print("wrote {d} files as group {d}\n", .{ stats.changed, plan.plan_id });
 }
