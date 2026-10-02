@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-10-02
+
+Ships Library schema version 30. Close every Orca process before upgrading.
+
 ### Added
 
 - **Tag writes store the release, release-group, release-track and
