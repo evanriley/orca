@@ -190,7 +190,17 @@ Health.
 - Library-wide analysis on a pool of threads, taking each file's AcoustID
   fingerprint in the same decode, and indexed duplicate detection, as
   cancellable jobs.
-- Library health issues.
+- Library health issues, each naming the action that resolves it (match or
+  edit tags, fetch cover art, compare duplicates, review a correction, reveal
+  the file); a dismissed issue stays hidden until its file's bytes change.
+  Reachable through `orca-cli health`, `health-dismiss` and `health-restore`,
+  and the Health page in `orca-gtk`. Clipping counts runs of at least three
+  samples at full scale.
+- Idle maintenance: while no Player plays and no other Job runs, one bounded
+  unit at a time verifies an album's recording IDs against AcoustID, within
+  the provider rate limits and leases; findings land in Health. Off until
+  enabled, through `orca-cli watch --maintenance[=MS]` or Preferences >
+  Library in `orca-gtk`. See [control-plane.md](control-plane.md#idle-maintenance).
 
 ### Clients
 
@@ -203,6 +213,7 @@ Health.
   menus, tag editing with write-back and undo (Write Tags to Files on track and
   album menus), Preferences, a Health page, a player bar with cover art and an
   output menu, job progress, a welcome page, toasts, a shortcuts dialog, MPRIS,
+  Health actions and dismissals, an idle maintenance switch,
   ListenBrainz submission with play counts in the details panel, love and
   dislike, star ratings, playlists with M3U import and export, MusicBrainz
   and AcoustID match review, and AcoustID submission.
@@ -230,31 +241,22 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **Actionable Health.** Each issue offers the action that resolves it
-   through the existing approved paths: review a verify proposal and preview
-   the tag write, match or edit missing tags, compare duplicates, analyse,
-   fetch cover art, reveal the file. A dismissed issue stays hidden until its
-   file changes.
-2. **Idle maintenance.** A low-priority Job that runs while the player is
-   idle and no other Job is active: one bounded unit at a time, such as
-   verifying one album every few minutes, within the provider rate limits and
-   leases. Off until enabled. liborca owns scheduling and the idle test, so
-   `orca-cli watch` can run it headless; findings land in Health.
-3. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
+1. **Love for albums.** Love on a Release, kept in the Library (ListenBrainz
    feedback takes recordings only), and a Loved page in `orca-gtk` listing
    loved albums and songs.
-4. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
+2. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
    tag writes, library edits and undo, queue insertion, moves and removal,
    artwork, DSP and the signal path, track details, matching, AcoustID
    submission, verification and corrections, love and hate, ratings,
-   playlists, and scrobbling.
-5. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+   playlists, scrobbling, Health actions and dismissals, and idle
+   maintenance.
+3. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-6. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+4. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-7. **An optional fixed output rate with a band-limited resampler**, for
+5. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -284,6 +286,10 @@ To release:
 ## Known issues
 
 Small defects that are not yet scheduled:
+
+- A `technical_anomaly` Health issue for a displaced track position is
+  never cleared once the position is fixed; only dismissing it hides it.
+- `orca-cli` exits 0 after printing usage for a wrong argument count.
 
 - An output opened for a device id PipeWire does not know, such as a stale
   one, falls back to the default sink instead of failing, so it can play on
