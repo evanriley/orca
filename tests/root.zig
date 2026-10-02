@@ -843,5 +843,6 @@ test "the queue reports the rows a host displays, in the order it will play them
 }
 
 test {
+    _ = @import("c_abi_layout.zig");
     _ = @import("library_locks.zig");
 }

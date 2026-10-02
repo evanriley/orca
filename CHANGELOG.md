@@ -126,6 +126,13 @@
   Remove Love from All Songs and Remove Dislike from All Songs. A Loved
   sidebar page switches between loved albums and loved songs, most recently
   loved first.
+- **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
+  translates the header and compares every `orca_*` struct and union with its
+  `c_api.zig` counterpart: size, alignment, field count, and each field's
+  offset, size and integer, float or pointer kind. Every enum constant is
+  compared with the value the C API produces or accepts under the same name,
+  and an extern type or constant on either side that no check covers fails
+  the test.
 
 ### Changed
 
@@ -174,6 +181,8 @@
 
 ### Fixed
 
+- **A command that failed internally reports `ORCA_FAILURE_INTERNAL`.** The
+  C ABI sent 10, which no `orca_failure` constant names, instead of 255.
 - **Health raises missing tags, album-artist, artwork, clipping, silence and
   loudness issues.** Nothing raised `missing_metadata`, `album_artist_anomaly`,
   `artwork_problem`, `clipping`, `excessive_silence` or `missing_analysis`.

@@ -154,6 +154,13 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = liborca_module });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    const orca_header_translate = b.addTranslateC(.{
+        .root_source_file = b.path("liborca/orca.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const integration_options = b.addOptions();
     integration_options.addOptionPath("orca_cli", cli.getEmittedBin());
     const integration_tests = b.addTest(.{
@@ -164,6 +171,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "liborca", .module = liborca_module },
                 .{ .name = "integration_options", .module = integration_options.createModule() },
+                .{ .name = "orca_h", .module = orca_header_translate.createModule() },
             },
         }),
     });

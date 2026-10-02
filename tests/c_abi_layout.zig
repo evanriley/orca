@@ -1,0 +1,410 @@
+const std = @import("std");
+const liborca = @import("liborca");
+const c = @import("orca_h");
+
+const c_api = liborca.internal.c_api;
+const audio = liborca.internal.audio;
+const core = liborca.internal.core;
+
+const struct_pairs = .{
+    .{ c_api.Handle, c.orca_handle },
+    .{ c_api.StringView, c.orca_string_view },
+    .{ c_api.TrackView, c.orca_track_view },
+    .{ c_api.TrackQueryView, c.orca_track_query },
+    .{ c_api.ArtistView, c.orca_artist_view },
+    .{ c_api.ReleaseView, c.orca_release_view },
+    .{ c_api.HealthIssueView, c.orca_health_issue_view },
+    .{ c_api.RootView, c.orca_root_view },
+    .{ c_api.DeviceView, c.orca_device_view },
+    .{ c_api.QueueEntryView, c.orca_queue_entry_view },
+    .{ c_api.NowPlayingView, c.orca_now_playing_view },
+    .{ c_api.PlayerStatus, c.orca_player_status },
+    .{ c_api.ZoneStatus, c.orca_zone_status },
+    .{ c_api.JobSnapshot, c.orca_job_snapshot },
+    .{ c_api.ScanStats, c.orca_scan_stats },
+    .{ c_api.ScanOptions, c.orca_scan_options },
+    .{ c_api.AnalysisOptions, c.orca_analysis_options },
+    .{ c_api.DuplicateScanOptions, c.orca_duplicate_scan_options },
+    .{ c_api.BackfillOptions, c.orca_backfill_options },
+    .{ c_api.CommandCompletedEvent, c.orca_command_completed_event },
+    .{ c_api.JobProgressEvent, c.orca_job_progress_event },
+    .{ c_api.JobFinishedEvent, c.orca_job_finished_event },
+    .{ c_api.PlayerPositionEvent, c.orca_player_position_event },
+    .{ c_api.LibraryChangedEvent, c.orca_library_changed_event },
+    .{ c_api.EventPayload, c.orca_event_payload },
+    .{ c_api.WatchOptions, c.orca_watch_options },
+    .{ c_api.WatchStatus, c.orca_watch_status },
+    .{ c_api.Event, c.orca_event },
+};
+
+const export_mappings = .{
+    struct {
+        pub const prefix = "ORCA_STATUS_";
+        pub const Tag = c_api.Status;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TRACK_SORT_";
+        pub const Tag = c_api.TrackSortKey;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_EVENT_";
+        pub const Tag = c_api.EventKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TRANSPORT_";
+        pub const Tag = audio.player.TransportState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_REPEAT_";
+        pub const Tag = audio.playback_queue.RepeatMode;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_OUTPUT_";
+        pub const Tag = audio.zone.OutputState;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_REPLAY_GAIN_";
+        pub const Tag = audio.processing.ReplayGainMode;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_JOB_";
+        pub const Tag = core.job.State;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_JOB_KIND_";
+        pub const fallback = "ORCA_JOB_KIND_OTHER";
+        pub const Tag = core.job.Kind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportJobKind(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_WATCH_STATE_";
+        pub const Tag = core.runtime.WatchState;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportWatchState(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_OUTCOME_";
+        pub const Tag = std.meta.Tag(core.control.Outcome);
+        pub fn produce(tag: Tag) ?i64 {
+            const event = c_api.exportCompletion(.{ .request_id = 1, .outcome = sampleOutcome(tag) });
+            if (event.kind != @intFromEnum(c_api.EventKind.command_completed)) return null;
+            return event.payload.command_completed.outcome;
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_FAILURE_";
+        pub const Tag = core.control.Failure;
+        pub fn produce(tag: Tag) ?i64 {
+            const event = c_api.exportCompletion(.{ .request_id = 1, .outcome = .{ .failed = tag } });
+            return event.payload.command_completed.failure;
+        }
+    },
+};
+
+const import_mappings = .{
+    struct {
+        pub const prefix = "ORCA_REPLAY_GAIN_";
+        pub const Tag = audio.processing.ReplayGainMode;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReplayGainMode(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RENDER_POLICY_";
+        pub const Tag = std.meta.Tag(audio.zone.RenderPolicy);
+        pub fn consume(value: u8) ?Tag {
+            const policy = c_api.importRenderPolicy(value) orelse return null;
+            return std.meta.activeTag(policy);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_REPEAT_";
+        pub const Tag = audio.playback_queue.RepeatMode;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TRACK_SORT_";
+        pub const Tag = c_api.TrackSortKey;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+};
+
+const non_enum_constants = [_][]const u8{
+    "ORCA_ABI_VERSION",
+    "ORCA_PUMP_NO_TIMEOUT",
+};
+
+fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
+    return switch (tag) {
+        .library_created => .{ .library_created = .{ .index = 1, .generation = 1 } },
+        .player_created => .{ .player_created = .{ .index = 1, .generation = 1 } },
+        .zone_created => .{ .zone_created = .{ .index = 1, .generation = 1 } },
+        .job_started => .{ .job_started = .{ .index = 1, .generation = 1 } },
+        .job_cancellation_requested => .{ .job_cancellation_requested = .{ .index = 1, .generation = 1 } },
+        .job_finished => .{ .job_finished = .{ .job = .{ .index = 1, .generation = 1 }, .state = .succeeded } },
+        .track_playing => .{ .track_playing = .{ .index = 1, .generation = 1 } },
+        .failed => .{ .failed = .internal },
+    };
+}
+
+fn constantName(comptime prefix: []const u8, comptime tag_name: []const u8) []const u8 {
+    comptime {
+        var upper: [tag_name.len]u8 = undefined;
+        for (tag_name, 0..) |character, index| upper[index] = std.ascii.toUpper(character);
+        const final = upper;
+        return prefix ++ &final;
+    }
+}
+
+const FieldLayout = struct {
+    name: [:0]const u8,
+    offset: usize,
+    Type: type,
+};
+
+fn fieldLayouts(comptime T: type) []const FieldLayout {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| layoutsOf(T, info.fields),
+        .@"union" => |info| layoutsOf(T, info.fields),
+        else => @compileError(@typeName(T) ++ " is neither a struct nor a union"),
+    };
+}
+
+fn layoutsOf(comptime T: type, comptime fields: anytype) []const FieldLayout {
+    comptime {
+        var layouts: [fields.len]FieldLayout = undefined;
+        for (fields, 0..) |field, index| layouts[index] = .{
+            .name = field.name,
+            .offset = if (@typeInfo(T) == .@"union") 0 else @offsetOf(T, field.name),
+            .Type = field.type,
+        };
+        const final = layouts;
+        return &final;
+    }
+}
+
+fn isExternContainer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| info.layout == .@"extern",
+        .@"union" => |info| info.layout == .@"extern",
+        else => false,
+    };
+}
+
+fn sameKind(comptime A: type, comptime B: type) bool {
+    const a = @typeInfo(A);
+    const b = @typeInfo(B);
+    return switch (a) {
+        .int => |int| b == .int and b.int.signedness == int.signedness and b.int.bits == int.bits,
+        .float => |float| b == .float and b.float.bits == float.bits,
+        .pointer => b == .pointer,
+        .array => |array| b == .array and b.array.len == array.len and sameKind(array.child, b.array.child),
+        .@"struct", .@"union" => std.meta.activeTag(a) == std.meta.activeTag(b) and @sizeOf(A) == @sizeOf(B),
+        else => false,
+    };
+}
+
+fn countLayoutMismatches(comptime Zig: type, comptime C: type) usize {
+    const zig_name = @typeName(Zig);
+    const c_name = @typeName(C);
+    var mismatches: usize = 0;
+    if (@sizeOf(Zig) != @sizeOf(C)) {
+        std.debug.print("{s}: size {d}, {s}: size {d}\n", .{ zig_name, @sizeOf(Zig), c_name, @sizeOf(C) });
+        mismatches += 1;
+    }
+    if (@alignOf(Zig) != @alignOf(C)) {
+        std.debug.print("{s}: align {d}, {s}: align {d}\n", .{ zig_name, @alignOf(Zig), c_name, @alignOf(C) });
+        mismatches += 1;
+    }
+    if (@typeInfo(Zig) == .@"union" and @typeInfo(C) != .@"union") {
+        std.debug.print("{s} is a union, {s} is not\n", .{ zig_name, c_name });
+        return mismatches + 1;
+    }
+    const zig_fields = comptime fieldLayouts(Zig);
+    const c_fields = comptime fieldLayouts(C);
+    if (zig_fields.len != c_fields.len) {
+        std.debug.print("{s}: {d} fields, {s}: {d} fields\n", .{ zig_name, zig_fields.len, c_name, c_fields.len });
+        return mismatches + 1;
+    }
+    inline for (zig_fields, c_fields) |zig_field, c_field| {
+        if (zig_field.offset != c_field.offset or @sizeOf(zig_field.Type) != @sizeOf(c_field.Type)) {
+            std.debug.print("{s}.{s}: offset {d} size {d}, {s}.{s}: offset {d} size {d}\n", .{
+                zig_name, zig_field.name, zig_field.offset, @sizeOf(zig_field.Type),
+                c_name,   c_field.name,   c_field.offset,   @sizeOf(c_field.Type),
+            });
+            mismatches += 1;
+        } else if (!sameKind(zig_field.Type, c_field.Type)) {
+            std.debug.print("{s}.{s}: {s}, {s}.{s}: {s}\n", .{
+                zig_name, zig_field.name, @typeName(zig_field.Type),
+                c_name,   c_field.name,   @typeName(c_field.Type),
+            });
+            mismatches += 1;
+        }
+    }
+    return mismatches;
+}
+
+fn isPaired(comptime T: type, comptime side: usize) bool {
+    inline for (struct_pairs) |pair| {
+        if (pair[side] == T) return true;
+    }
+    return false;
+}
+
+fn isIntegerConstant(comptime name: []const u8) bool {
+    return switch (@typeInfo(@TypeOf(@field(c, name)))) {
+        .int, .comptime_int => true,
+        else => false,
+    };
+}
+
+fn isMappedConstant(comptime name: []const u8) bool {
+    inline for (non_enum_constants) |constant| {
+        if (comptime std.mem.eql(u8, constant, name)) return true;
+    }
+    inline for (export_mappings) |mapping| {
+        if (@hasDecl(mapping, "fallback") and comptime std.mem.eql(u8, mapping.fallback, name)) return true;
+        inline for (@typeInfo(mapping.Tag).@"enum".fields) |field| {
+            if (comptime std.mem.eql(u8, constantName(mapping.prefix, field.name), name)) return true;
+        }
+    }
+    inline for (import_mappings) |mapping| {
+        if (comptime std.mem.startsWith(u8, name, mapping.prefix)) return true;
+    }
+    return false;
+}
+
+test "every C ABI struct has the layout orca.h declares" {
+    var mismatches: usize = 0;
+    inline for (struct_pairs) |pair| mismatches += countLayoutMismatches(pair[0], pair[1]);
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "every public extern type in c_api.zig is paired with an orca.h type" {
+    var unpaired: usize = 0;
+    inline for (@typeInfo(c_api).@"struct".decls) |decl| {
+        const value = @field(c_api, decl.name);
+        if (@TypeOf(value) == type and isExternContainer(value) and !isPaired(value, 0)) {
+            std.debug.print("c_api.{s} has no orca.h counterpart in struct_pairs\n", .{decl.name});
+            unpaired += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), unpaired);
+}
+
+test "every orca.h struct and union is paired with a c_api.zig type" {
+    @setEvalBranchQuota(100_000);
+    var unpaired: usize = 0;
+    inline for (@typeInfo(c).@"struct".decls) |decl| {
+        if (comptime !std.mem.startsWith(u8, decl.name, "orca_")) continue;
+        const value = @field(c, decl.name);
+        if (@TypeOf(value) == type and isExternContainer(value) and !isPaired(value, 1)) {
+            std.debug.print("{s} has no c_api.zig counterpart in struct_pairs\n", .{decl.name});
+            unpaired += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), unpaired);
+}
+
+test "every value the C API produces equals the orca.h constant of the same name" {
+    @setEvalBranchQuota(100_000);
+    var mismatches: usize = 0;
+    inline for (export_mappings) |mapping| {
+        inline for (@typeInfo(mapping.Tag).@"enum".fields) |field| {
+            const name = comptime constantName(mapping.prefix, field.name);
+            const expected_name = if (@hasDecl(c, name))
+                name
+            else if (@hasDecl(mapping, "fallback"))
+                mapping.fallback
+            else
+                @compileError(name ++ " is not declared in orca.h");
+            const expected: i64 = @field(c, expected_name);
+            if (mapping.produce(@field(mapping.Tag, field.name))) |actual| {
+                if (actual != expected) {
+                    std.debug.print("{s}.{s} produces {d}, orca.h {s} = {d}\n", .{
+                        @typeName(mapping.Tag), field.name, actual, expected_name, expected,
+                    });
+                    mismatches += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "every orca.h constant the C API accepts imports as the Zig value of the same name" {
+    @setEvalBranchQuota(100_000);
+    var mismatches: usize = 0;
+    inline for (import_mappings) |mapping| {
+        inline for (@typeInfo(c).@"struct".decls) |decl| {
+            if (comptime !std.mem.startsWith(u8, decl.name, mapping.prefix)) continue;
+            const tag_name = comptime blk: {
+                var lower: [decl.name.len - mapping.prefix.len]u8 = undefined;
+                for (decl.name[mapping.prefix.len..], 0..) |character, index| lower[index] = std.ascii.toLower(character);
+                const final = lower;
+                break :blk &final;
+            };
+            const value: u8 = @field(c, decl.name);
+            const imported = mapping.consume(value);
+            const expected = std.meta.stringToEnum(mapping.Tag, tag_name);
+            if (expected == null or imported != expected) {
+                std.debug.print("{s} = {d} imports as {?t}, expected {s}.{s}\n", .{
+                    decl.name, value, imported, @typeName(mapping.Tag), tag_name,
+                });
+                mismatches += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "every orca.h enum constant is checked against liborca" {
+    @setEvalBranchQuota(1_000_000);
+    var unchecked: usize = 0;
+    inline for (@typeInfo(c).@"struct".decls) |decl| {
+        if (comptime !std.mem.startsWith(u8, decl.name, "ORCA_")) continue;
+        if (comptime !isIntegerConstant(decl.name)) continue;
+        if (comptime !isMappedConstant(decl.name)) {
+            std.debug.print("{s} is not checked by any mapping in c_abi_layout.zig\n", .{decl.name});
+            unchecked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), unchecked);
+}
+
+test "a finished job is reported as a job_finished event carrying its state" {
+    const event = c_api.exportCompletion(.{ .request_id = 1, .outcome = sampleOutcome(.job_finished) });
+    try std.testing.expectEqual(@as(u8, c.ORCA_EVENT_JOB_FINISHED), event.kind);
+    try std.testing.expectEqual(@as(u8, c.ORCA_JOB_SUCCEEDED), event.payload.job_finished.state);
+}

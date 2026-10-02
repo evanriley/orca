@@ -1203,11 +1203,8 @@ pub export fn orca_player_set_replay_gain_mode(
     mode: u8,
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
-    const resolved: audio.processing.ReplayGainMode = switch (mode) {
-        0 => .off,
-        1 => .track,
-        else => return box.reject(@src(), .invalid_argument, "mode must be 0 or 1"),
-    };
+    const resolved = importReplayGainMode(mode) orelse
+        return box.reject(@src(), .invalid_argument, "mode must be 0 or 1");
     box.runtime.playerSetReplayGainMode(importPlayer(player), resolved) catch |err|
         return box.fail(@src(), err);
     return .ok;
@@ -1395,11 +1392,8 @@ pub export fn orca_zone_open_output(
     latency_frames: u32,
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
-    const render_policy: audio.zone.RenderPolicy = switch (policy) {
-        0 => .robust,
-        1 => .interactive,
-        else => return box.reject(@src(), .invalid_argument, "policy must be 0 or 1"),
-    };
+    const render_policy = importRenderPolicy(policy) orelse
+        return box.reject(@src(), .invalid_argument, "policy must be 0 or 1");
     box.runtime.zoneOpenOutput(
         importZone(zone),
         device_id,
@@ -1583,7 +1577,23 @@ fn importZone(handle: Handle) core.ZoneHandle {
     return .{ .index = handle.index, .generation = handle.generation };
 }
 
-fn exportWatchState(state: core.runtime.WatchState) u8 {
+pub fn importReplayGainMode(mode: u8) ?audio.processing.ReplayGainMode {
+    return switch (mode) {
+        0 => .off,
+        1 => .track,
+        else => null,
+    };
+}
+
+pub fn importRenderPolicy(policy: u8) ?audio.zone.RenderPolicy {
+    return switch (policy) {
+        0 => .robust,
+        1 => .interactive,
+        else => null,
+    };
+}
+
+pub fn exportWatchState(state: core.runtime.WatchState) u8 {
     return switch (state) {
         .off => 0,
         .watching => 1,
@@ -1592,7 +1602,23 @@ fn exportWatchState(state: core.runtime.WatchState) u8 {
     };
 }
 
-fn exportJobKind(kind: job.Kind) u8 {
+fn exportFailure(failure: control.Failure) u8 {
+    return switch (failure) {
+        .runtime_not_running => 0,
+        .stale_handle => 1,
+        .out_of_memory => 2,
+        .invalid_transition => 3,
+        .player_not_bound => 4,
+        .track_has_no_file => 5,
+        .track_file_missing => 6,
+        .codec_unavailable => 7,
+        .queue_full => 8,
+        .not_playable => 9,
+        .internal => 255,
+    };
+}
+
+pub fn exportJobKind(kind: job.Kind) u8 {
     return switch (kind) {
         .scan => 0,
         .projection => 1,
@@ -1607,7 +1633,7 @@ fn exportJobKind(kind: job.Kind) u8 {
 /// One lossless completion, flattened into the POD union. The handle field is
 /// zeroed for outcomes that name no object, so a host never reads a handle that
 /// means nothing.
-fn exportCompletion(event: control.Event) Event {
+pub fn exportCompletion(event: control.Event) Event {
     var completed: CommandCompletedEvent = .{
         .request_id = event.request_id,
         .outcome = 255,
@@ -1648,7 +1674,7 @@ fn exportCompletion(event: control.Event) Event {
         },
         .failed => |failure| {
             completed.outcome = 255;
-            completed.failure = @intFromEnum(failure);
+            completed.failure = exportFailure(failure);
         },
     }
     return .{
