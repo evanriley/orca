@@ -214,6 +214,10 @@ The boundary covers the whole engine, not a fragment of it:
   names the root a reconcile job walks. See
   [control-plane.md](control-plane.md#idle-maintenance).
 
+`scripts/check-abi-coverage.sh`, which `zig build test` runs, fails when a
+public `Runtime` method has no C ABI path and no stated reason for having
+none. Its list of reasons is the record of what the C ABI leaves out.
+
 `orca_player_play` is refused unless the Player has a loaded source or a
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while
 nothing renders is a defect, not a state.

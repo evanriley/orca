@@ -222,6 +222,13 @@ pub fn build(b: *std.Build) void {
         abi_exports_step.dependOn(&check_exports.step);
         test_step.dependOn(&check_exports.step);
     }
+    const check_abi_coverage = b.addSystemCommand(&.{"bash"});
+    check_abi_coverage.addFileArg(b.path("scripts/check-abi-coverage.sh"));
+    check_abi_coverage.addFileArg(b.path("liborca/core/runtime.zig"));
+    check_abi_coverage.addFileArg(b.path("liborca/c_api.zig"));
+    const abi_coverage_step = b.step("abi-coverage", "Check every Runtime method has a C ABI path or a stated reason it has none");
+    abi_coverage_step.dependOn(&check_abi_coverage.step);
+    test_step.dependOn(&check_abi_coverage.step);
 
     const fuzz_tests = b.addTest(.{
         .root_module = liborca_module,

@@ -256,6 +256,11 @@
   compared with the value the C API produces or accepts under the same name,
   and an extern type or constant on either side that no check covers fails
   the test.
+- **`zig build test` checks that the C ABI reaches the Zig API.**
+  `scripts/check-abi-coverage.sh` (`zig build abi-coverage`) fails when a
+  public `Runtime` method is neither called from `liborca/c_api.zig` nor
+  listed with the reason it is not, and when a listed method is gone or
+  has come to be called.
 
 ### Changed
 

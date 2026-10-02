@@ -21,8 +21,10 @@ versioned by `ORCA_ABI_VERSION`, `orca_version`, an installed `orca.pc`,
 exports limited to the functions `orca.h` declares, a last-error message for C
 callers, a stability statement in `orca.h` and [api.md](api.md), a provider
 identity the host must supply, and a wake callback with a pump timeout, which
-`orca-gtk` sleeps on instead of polling. The next milestone is actionable
-Health.
+`orca-gtk` sleeps on instead of polling. The C ABI reaches everything
+`orca-gtk` uses, and `scripts/check-abi-coverage.sh` names, for each
+`Runtime` method it does not reach, the reason. The next milestone is more
+identification sources.
 
 ## Works today
 
@@ -223,7 +225,15 @@ Health.
   and AcoustID match review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
   with `liborca.so.0` exporting exactly its functions and `orca.pc` for
-  pkg-config.
+  pkg-config: browsing, search and track details, playback with queue edits,
+  the equalizer, crossfeed and the signal path, artwork and cover fetches,
+  library edits, tag writes, undo and backup pruning, love and hate, ratings
+  and album love, playlists with M3U import and export, Health actions,
+  MusicBrainz and AcoustID matching, verification and corrections, AcoustID
+  submission, ListenBrainz scrobbling, idle maintenance, provider servers
+  and a credential callback for the host's secure storage.
+  `tests/c_abi_layout.zig` checks every struct and enum value against the
+  Zig side.
 
 ### Builds
 
@@ -245,19 +255,13 @@ entry point and a client before it counts as working.
 
 In priority order. Each step leaves `orca-gtk` usable every day.
 
-1. **The C ABI's catch-up.** It exports about half of the Zig API: it lacks
-   tag writes, library edits and undo, queue insertion, moves and removal,
-   artwork, DSP and the signal path, track details, matching, AcoustID
-   submission, verification and corrections, love and hate, ratings,
-   playlists, scrobbling, Health actions and dismissals, and idle
-   maintenance.
-2. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
+1. **More identification sources.** ListenBrainz's `/1/metadata/lookup`
    would match what MusicBrainz and AcoustID miss, 50 songs per request, but
    needs the user's token and must share the listen worker's gateway.
-3. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
+2. **Tag writers for the remaining formats.** FLAC, MP3 and ADTS are
    written; M4A, Ogg, WAV, AIFF and FLAC with a leading ID3 tag are reported
    as not writable.
-4. **An optional fixed output rate with a band-limited resampler**, for
+3. **An optional fixed output rate with a band-limited resampler**, for
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
@@ -376,6 +380,19 @@ Small defects that are not yet scheduled:
   command; `scripts/headless-audio.sh true` fails the same way.
   WirePlumber's log shows only skipped optional components. Not yet
   examined; whether CI is affected is unknown.
+- `playerQueueTracks` and `orca_player_query_queue_tracks` skip a queue
+  entry whose Track was removed from the Library, contrary to the comment in
+  `core/runtime_status.zig` that it keeps its place, so a page's row `n` is
+  then not queue position `offset + n`.
+- A root path is stored as given: neither `orca-cli add-root` nor
+  `orca_library_add_root` makes it absolute or refuses a relative one, and
+  an absolute playlist export from a relative root writes lines that do not
+  resolve.
+- A credential store that is unavailable, or a credential too large for the
+  C ABI's buffer, stops the listen worker with an error, while AcoustID
+  lookups take it as no key (they fall back to the application key) and a
+  submission as no user key (`needs_user_key`). Whether AcoustID should fail
+  instead is undecided.
 
 ## Deferred formats
 
@@ -417,6 +434,15 @@ are sniffed or not recognized until then:
   keeps extending from a seed track, album or artist, scored in `liborca` from
   local data only — shared artist, tags, genre and era, play history and
   feedback — optionally boosted by cached ListenBrainz similar-artist data.
+- The C ABI for what only the Zig API offers, each named with its reason in
+  `scripts/check-abi-coverage.sh`: a host-supplied audio output
+  (`setOutputFactory`), Zone policy and render strategy (`setZonePolicy`,
+  `zoneRenderStrategy`), playing a file outside a Library
+  (`playerLoadFile`), drain detection (`playerDrained`), one-file analysis
+  on the caller's thread (`libraryAnalyzeFile`) and a Track's fingerprint
+  (`libraryTrackFingerprint`). The command lane (`submit`,
+  `processNextCommand`) stays behind `orca_runtime_pump` and the
+  request-correlated functions that use it.
 - A terminal client built on the Zig API.
 - Conversion and encoding.
 - Synchronized multi-zone playback with drift correction.
