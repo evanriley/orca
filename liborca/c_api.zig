@@ -651,6 +651,171 @@ pub const Event = extern struct {
     payload: EventPayload,
 };
 
+pub const MatchOptions = extern struct {
+    batch_size: u32,
+    limit: u32,
+    track_id: i64,
+    release_id: i64,
+    accept_minimum_confidence: f32,
+    mode: u8,
+    has_limit: u8,
+    has_track_id: u8,
+    has_release_id: u8,
+    skip_fingerprints: u8,
+    has_accept_minimum_confidence: u8,
+    cover_art: u8,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const MatchStatsView = extern struct {
+    tracks_examined: u64,
+    matched: u64,
+    unmatched: u64,
+    insufficient_evidence: u64,
+    refused: u64,
+    proposals_stored: u64,
+    confirmed: u64,
+    verified: u64,
+    agreed: u64,
+    disagreed: u64,
+    unconfirmed: u64,
+    skipped: u64,
+    correction_groups: u64,
+    requests: u64,
+    cache_hits: u64,
+    fingerprinted: u64,
+    fingerprint_cache_hits: u64,
+    fingerprint_failures: u64,
+    acoustid_requests: u64,
+    acoustid_cache_hits: u64,
+    acoustid_refused: u64,
+    accepted: u64,
+    acoustid: u8,
+    busy: u8,
+    cover_art: u8,
+    cancelled: u8,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const MatchProposalView = extern struct {
+    id: i64,
+    duration_ms: u64,
+    provider: StringView,
+    recording_mbid: StringView,
+    title: StringView,
+    artist: StringView,
+    album: StringView,
+    release_mbid: StringView,
+    track_title: StringView,
+    track_artist: StringView,
+    release_title: StringView,
+    release_artist: StringView,
+    release_date: StringView,
+    release_group_mbid: StringView,
+    release_track_mbid: StringView,
+    corrects: StringView,
+    confidence: f32,
+    acoustid_score: f32,
+    track_number: u32,
+    disc_number: u32,
+    musicbrainz_score: u8,
+    has_track_number: u8,
+    has_disc_number: u8,
+    has_release_mbid: u8,
+    has_duration_ms: u8,
+    has_musicbrainz_score: u8,
+    has_acoustid_score: u8,
+    has_track_title: u8,
+    has_track_artist: u8,
+    has_release_title: u8,
+    has_release_artist: u8,
+    has_release_date: u8,
+    has_release_group_mbid: u8,
+    has_release_track_mbid: u8,
+    has_corrects: u8,
+    _reserved: [1]u8 = @splat(0),
+};
+
+pub const MatchProposalCallback = *const fn (?*anyopaque, *const MatchProposalView) callconv(.c) void;
+
+pub const MatchAcceptanceView = extern struct {
+    file_id: i64,
+    values_written: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const ConfidentAcceptanceView = extern struct {
+    accepted: u64,
+    values_written: u64,
+};
+
+pub const MatchReviewView = extern struct {
+    track_id: i64,
+    duration_ms: i64,
+    proposal_count: u32,
+    has_duration_ms: u8,
+    _reserved: [3]u8 = @splat(0),
+    title: StringView,
+    artist: StringView,
+    album: StringView,
+    best: MatchProposalView,
+};
+
+pub const MatchReviewCallback = *const fn (?*anyopaque, *const MatchReviewView) callconv(.c) void;
+
+pub const HeardRecordingView = extern struct {
+    mbid: StringView,
+    score: f32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const TrackVerificationView = extern struct {
+    verified_at: i64,
+    recording_mbid: StringView,
+    heard: [*]const HeardRecordingView,
+    heard_count: usize,
+    outcome: u8,
+    stale: u8,
+    dismissed: u8,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const TrackVerificationCallback = *const fn (?*anyopaque, *const TrackVerificationView) callconv(.c) void;
+
+pub const CorrectionMemberView = extern struct {
+    proposal_id: i64,
+    track_id: i64,
+    file_id: i64,
+    track_number: i64,
+    disc_number: i64,
+    title: StringView,
+    proposed_title: StringView,
+    recording_mbid: StringView,
+    corrects: StringView,
+    proposed_track_number: u32,
+    proposed_disc_number: u32,
+    has_track_id: u8,
+    has_track_number: u8,
+    has_disc_number: u8,
+    has_proposed_track_number: u8,
+    has_proposed_disc_number: u8,
+    has_corrects: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const CorrectionGroupView = extern struct {
+    group_id: i64,
+    release_id: i64,
+    has_release_id: u8,
+    _reserved: [7]u8 = @splat(0),
+    album: StringView,
+    album_artist: StringView,
+    members: [*]const CorrectionMemberView,
+    member_count: usize,
+};
+
+pub const CorrectionGroupCallback = *const fn (?*anyopaque, *const CorrectionGroupView) callconv(.c) void;
+
 /// A foreign frontend cannot hand Orca a `std.Io`, so the boundary owns one.
 /// It is the synchronous, allocation-free implementation: liborca performs no
 /// async I/O, and a host's event loop must never be co-opted by the ABI.
@@ -2060,6 +2225,406 @@ pub export fn orca_library_scrobbler_credentials_changed(runtime: ?*Runtime, lib
     const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.libraryScrobblerCredentialsChanged(importLibrary(library)) catch |err| return box.fail(@src(), err);
     return .ok;
+}
+
+pub export fn orca_library_start_match(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const MatchOptions,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    var request: core.runtime.MatchRequest = .{};
+    if (options) |value| {
+        if (value.batch_size != 0) request.batch_size = value.batch_size;
+        request.mode = importMatchMode(value.mode) orelse
+            return box.reject(@src(), .invalid_argument, "mode is not an orca_match_mode");
+        if (value.has_limit != 0) request.limit = value.limit;
+        if (value.has_track_id != 0) request.track_id = value.track_id;
+        if (value.has_release_id != 0) request.release_id = value.release_id;
+        request.fingerprints = value.skip_fingerprints == 0;
+        if (value.has_accept_minimum_confidence != 0) request.accept_minimum_confidence = value.accept_minimum_confidence;
+        request.cover_art = value.cover_art != 0;
+    }
+    const started = box.runtime.startLibraryMatching(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_library_start_cover_art_fetch(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const started = box.runtime.startReleaseCoverArtFetch(importLibrary(library), release_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_match_stats(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    output: ?*MatchStatsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.jobMatchStats(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = .{
+        .tracks_examined = stats.tracks_examined,
+        .matched = stats.matched,
+        .unmatched = stats.unmatched,
+        .insufficient_evidence = stats.insufficient_evidence,
+        .refused = stats.refused,
+        .proposals_stored = stats.proposals_stored,
+        .confirmed = stats.confirmed,
+        .verified = stats.verified,
+        .agreed = stats.agreed,
+        .disagreed = stats.disagreed,
+        .unconfirmed = stats.unconfirmed,
+        .skipped = stats.skipped,
+        .correction_groups = stats.correction_groups,
+        .requests = stats.requests,
+        .cache_hits = stats.cache_hits,
+        .fingerprinted = stats.fingerprinted,
+        .fingerprint_cache_hits = stats.fingerprint_cache_hits,
+        .fingerprint_failures = stats.fingerprint_failures,
+        .acoustid_requests = stats.acoustid_requests,
+        .acoustid_cache_hits = stats.acoustid_cache_hits,
+        .acoustid_refused = stats.acoustid_refused,
+        .accepted = stats.accepted,
+        .acoustid = exportAcoustIdUse(stats.acoustid),
+        .busy = exportBusyService(stats.busy),
+        .cover_art = exportCoverArtOutcome(stats.cover_art),
+        .cancelled = @intFromBool(stats.cancelled),
+    };
+    return .ok;
+}
+
+pub export fn orca_library_query_match_proposals(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?MatchProposalCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const page = box.runtime.libraryMatchProposals(importLibrary(library), track_id, max_page) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |*proposal| {
+        const view = matchProposalView(proposal);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_accept_match(
+    runtime: ?*Runtime,
+    library: Handle,
+    proposal_id: i64,
+    output: ?*MatchAcceptanceView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const acceptance = box.runtime.libraryAcceptMatch(importLibrary(library), proposal_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .file_id = acceptance.file_id, .values_written = acceptance.values_written };
+    return .ok;
+}
+
+pub export fn orca_library_dismiss_match(runtime: ?*Runtime, library: Handle, proposal_id: i64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryDismissMatch(importLibrary(library), proposal_id) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_match_review(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?MatchReviewCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const page = box.runtime.libraryMatchReviewPage(importLibrary(library), limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |*item| {
+        const view: MatchReviewView = .{
+            .track_id = item.track_id,
+            .duration_ms = item.duration_ms orelse 0,
+            .proposal_count = item.proposal_count,
+            .has_duration_ms = @intFromBool(item.duration_ms != null),
+            .title = stringView(item.title),
+            .artist = stringView(item.artist),
+            .album = stringView(item.album),
+            .best = matchProposalView(&item.best),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_match_review_count(runtime: ?*Runtime, library: Handle, output: ?*u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryMatchReviewCount(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_unidentified_count(runtime: ?*Runtime, library: Handle, output: ?*u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryUnidentifiedCount(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_confident_match_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    minimum_confidence: f32,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryConfidentMatchCount(importLibrary(library), minimum_confidence) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_accept_confident_matches(
+    runtime: ?*Runtime,
+    library: Handle,
+    minimum_confidence: f32,
+    output: ?*ConfidentAcceptanceView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const acceptance = box.runtime.libraryAcceptConfidentMatches(importLibrary(library), minimum_confidence) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .accepted = acceptance.accepted, .values_written = acceptance.values_written };
+    return .ok;
+}
+
+pub export fn orca_library_apply_matched_release(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    values_written: ?*u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = values_written orelse return box.reject(@src(), .invalid_argument, "values_written is null");
+    destination.* = box.runtime.libraryApplyMatchedRelease(importLibrary(library), release_id) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_track_verification(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?TrackVerificationCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackVerification(importLibrary(library), box.runtime.allocator, track_id) catch |err|
+        return box.fail(@src(), err);
+    const verification = found orelse return box.reject(@src(), .not_found, "the Track was never verified");
+    defer verification.deinit();
+    var heard: [database.repository.max_heard]HeardRecordingView = undefined;
+    const heard_count = @min(verification.heard.len, heard.len);
+    for (heard[0..heard_count], verification.heard[0..heard_count]) |*view, recording| view.* = .{
+        .mbid = stringView(recording.mbid),
+        .score = recording.score,
+    };
+    const view: TrackVerificationView = .{
+        .verified_at = verification.verified_at,
+        .recording_mbid = stringView(verification.recording_mbid),
+        .heard = &heard,
+        .heard_count = heard_count,
+        .outcome = exportVerificationOutcome(verification.outcome),
+        .stale = @intFromBool(verification.stale),
+        .dismissed = @intFromBool(verification.dismissed),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_query_correction_groups(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?CorrectionGroupCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const page = box.runtime.libraryCorrectionGroups(importLibrary(library), box.runtime.allocator, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(box.runtime.allocator);
+    defer scratch.deinit();
+    for (page.items) |group| {
+        _ = scratch.reset(.retain_capacity);
+        const members = scratch.allocator().alloc(CorrectionMemberView, group.proposals.len) catch |err|
+            return box.fail(@src(), err);
+        for (members, group.proposals) |*view, member| view.* = .{
+            .proposal_id = member.proposal_id,
+            .track_id = member.track_id orelse 0,
+            .file_id = member.file_id,
+            .track_number = member.track_number orelse 0,
+            .disc_number = member.disc_number orelse 0,
+            .title = stringView(member.title),
+            .proposed_title = stringView(member.proposed_title),
+            .recording_mbid = stringView(member.recording_mbid),
+            .corrects = stringView(member.corrects orelse ""),
+            .proposed_track_number = member.proposed_track_number orelse 0,
+            .proposed_disc_number = member.proposed_disc_number orelse 0,
+            .has_track_id = @intFromBool(member.track_id != null),
+            .has_track_number = @intFromBool(member.track_number != null),
+            .has_disc_number = @intFromBool(member.disc_number != null),
+            .has_proposed_track_number = @intFromBool(member.proposed_track_number != null),
+            .has_proposed_disc_number = @intFromBool(member.proposed_disc_number != null),
+            .has_corrects = @intFromBool(member.corrects != null),
+        };
+        const view: CorrectionGroupView = .{
+            .group_id = group.group_id,
+            .release_id = group.release_id orelse 0,
+            .has_release_id = @intFromBool(group.release_id != null),
+            .album = stringView(group.album),
+            .album_artist = stringView(group.album_artist),
+            .members = members.ptr,
+            .member_count = members.len,
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_accept_correction_group(
+    runtime: ?*Runtime,
+    library: Handle,
+    group_id: i64,
+    output: ?*ConfidentAcceptanceView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const acceptance = box.runtime.libraryAcceptCorrectionGroup(importLibrary(library), group_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .accepted = acceptance.accepted, .values_written = acceptance.values_written };
+    return .ok;
+}
+
+pub export fn orca_library_dismiss_correction_group(runtime: ?*Runtime, library: Handle, group_id: i64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.libraryDismissCorrectionGroup(importLibrary(library), group_id) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+fn matchProposalView(proposal: *const core.runtime.MatchProposal) MatchProposalView {
+    return .{
+        .id = proposal.id,
+        .duration_ms = proposal.duration_ms orelse 0,
+        .provider = stringView(proposal.provider),
+        .recording_mbid = stringView(proposal.recording_mbid),
+        .title = stringView(proposal.title),
+        .artist = stringView(proposal.artist),
+        .album = stringView(proposal.album),
+        .release_mbid = stringView(proposal.release_mbid orelse ""),
+        .track_title = stringView(proposal.track_title orelse ""),
+        .track_artist = stringView(proposal.track_artist orelse ""),
+        .release_title = stringView(proposal.release_title orelse ""),
+        .release_artist = stringView(proposal.release_artist orelse ""),
+        .release_date = stringView(proposal.release_date orelse ""),
+        .release_group_mbid = stringView(proposal.release_group_mbid orelse ""),
+        .release_track_mbid = stringView(proposal.release_track_mbid orelse ""),
+        .corrects = stringView(proposal.corrects orelse ""),
+        .confidence = proposal.confidence,
+        .acoustid_score = proposal.acoustid_score orelse 0,
+        .track_number = proposal.track_number orelse 0,
+        .disc_number = proposal.disc_number orelse 0,
+        .musicbrainz_score = proposal.musicbrainz_score orelse 0,
+        .has_track_number = @intFromBool(proposal.track_number != null),
+        .has_disc_number = @intFromBool(proposal.disc_number != null),
+        .has_release_mbid = @intFromBool(proposal.release_mbid != null),
+        .has_duration_ms = @intFromBool(proposal.duration_ms != null),
+        .has_musicbrainz_score = @intFromBool(proposal.musicbrainz_score != null),
+        .has_acoustid_score = @intFromBool(proposal.acoustid_score != null),
+        .has_track_title = @intFromBool(proposal.track_title != null),
+        .has_track_artist = @intFromBool(proposal.track_artist != null),
+        .has_release_title = @intFromBool(proposal.release_title != null),
+        .has_release_artist = @intFromBool(proposal.release_artist != null),
+        .has_release_date = @intFromBool(proposal.release_date != null),
+        .has_release_group_mbid = @intFromBool(proposal.release_group_mbid != null),
+        .has_release_track_mbid = @intFromBool(proposal.release_track_mbid != null),
+        .has_corrects = @intFromBool(proposal.corrects != null),
+    };
+}
+
+pub fn importMatchMode(value: u8) ?core.runtime.MatchMode {
+    return switch (value) {
+        0 => .search,
+        1 => .reidentify,
+        2 => .verify,
+        else => null,
+    };
+}
+
+pub fn exportAcoustIdUse(use: core.runtime.AcoustIdUse) u8 {
+    return switch (use) {
+        .searched => 0,
+        .off => 1,
+        .no_client_key => 2,
+        .invalid_client_key => 3,
+    };
+}
+
+pub fn exportBusyService(service: core.runtime.BusyService) u8 {
+    return switch (service) {
+        .none => 0,
+        .musicbrainz => 1,
+        .acoustid => 2,
+    };
+}
+
+pub fn exportCoverArtOutcome(outcome: core.runtime.CoverArtOutcome) u8 {
+    return switch (outcome) {
+        .not_requested => 0,
+        .embedded => 1,
+        .fetched => 2,
+        .cached => 3,
+        .cached_miss => 4,
+        .not_found => 5,
+        .no_release_id => 6,
+        .refused => 7,
+        .unavailable => 8,
+        .busy => 9,
+        .cancelled => 10,
+    };
+}
+
+pub fn exportVerificationOutcome(outcome: core.runtime.VerificationOutcome) u8 {
+    return switch (outcome) {
+        .agrees => 0,
+        .disagrees => 1,
+        .unconfirmed => 2,
+        .no_fingerprint => 3,
+    };
 }
 
 pub export fn orca_library_add_root(
@@ -3586,6 +4151,9 @@ fn mapError(err: anyerror) Status {
         error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.TooManyPendingTagWrites, error.TagWriteInProgress => .busy,
+        error.MatchingAlreadyRunning, error.AcoustIdBusy => .busy,
+        error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
+        error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup => .not_found,
         error.MutationGroupAlreadyUndone => .already_done,
         error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
@@ -3613,6 +4181,9 @@ fn mapError(err: anyerror) Status {
         error.InvalidServerUrl,
         error.InvalidAcoustIdKey,
         error.InvalidNetworkConfiguration,
+        error.InvalidMatchRequest,
+        error.InvalidMinimumConfidence,
+        error.PageOutOfRange,
         => .invalid_argument,
         else => .internal,
     };
@@ -4832,4 +5403,592 @@ test "the credential callback answers a listen worker on its own thread, cannot 
     var settle: core.runtime_tests.TestDeadline = .init(20);
     while (settle.tick()) {}
     try std.testing.expectEqual(@as(u32, 0), keyring.late_calls.load(.acquire));
+}
+
+const provider_tests = core.runtime_provider_tests;
+
+const MatchingRig = struct {
+    musicbrainz: provider_tests.FakeMusicBrainz = .{},
+    acoustid: provider_tests.FakeAcoustId = .{},
+    cover: provider_tests.FakeCoverArt = .{},
+    temporary: std.testing.TmpDir,
+    runtime: *Runtime,
+    library: Handle = undefined,
+    library_database: *database.LibraryDatabase = undefined,
+
+    fn init(self: *MatchingRig, uri: [*:0]const u8, acoustid_key: ?[*:0]const u8) !void {
+        const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+        self.* = .{ .temporary = std.testing.tmpDir(.{}), .runtime = runtime };
+        errdefer self.deinit();
+        const box = runtimeBox(runtime).?;
+        try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Host", "1.0", "https://host.invalid"));
+        try std.testing.expectEqual(Status.ok, orca_runtime_set_acoustid_client_key(runtime, acoustid_key));
+        box.runtime.matching_hooks = self.musicbrainz.hooks();
+        box.runtime.matching_hooks.acoustid_transport = self.acoustid.transport();
+        self.cover.attach(&box.runtime.matching_hooks);
+        try std.testing.expectEqual(Status.ok, orca_library_open(runtime, uri, &self.library));
+        self.library_database = try core.runtime.libraryDatabase(&box.runtime, importLibrary(self.library));
+    }
+
+    fn deinit(self: *MatchingRig) void {
+        orca_runtime_destroy(self.runtime);
+        self.cover.deinit();
+        self.temporary.cleanup();
+    }
+
+    fn finish(self: *MatchingRig, job_handle: Handle) !job.State {
+        return core.runtime_tests.awaitJob(&runtimeBox(self.runtime).?.runtime, importJob(job_handle));
+    }
+
+    fn addTone(self: *MatchingRig, name: []const u8, frequency: f32, title: []const u8, recording_mbid: []const u8, release_id: i64) !i64 {
+        try provider_tests.writeToneWave(self.temporary.dir, name, frequency);
+        const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ self.temporary.sub_path, name });
+        defer std.testing.allocator.free(path);
+        const binding = try self.library_database.resolveOrCreateFile(std.testing.io, path, .{ .stable_key = "test:c-verify" });
+        try self.library_database.observed_tags.upsert(.{ .file_id = binding.file_id, .values = .{
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .musicbrainz_recording_id = recording_mbid,
+        } });
+        try self.library_database.tracks.upsertTracks(&.{.{
+            .release_id = release_id,
+            .title = title,
+            .artist = "Nick Drake",
+            .album = "Bryter Layter",
+            .duration_ms = 15_000,
+            .preferred_file_id = binding.file_id,
+        }});
+        return provider_tests.trackOfFile(self.library_database, binding.file_id);
+    }
+
+    fn lastError(self: *MatchingRig) []const u8 {
+        return std.mem.span(orca_runtime_last_error(self.runtime));
+    }
+};
+
+const CapturedText = struct {
+    bytes: [64]u8 = undefined,
+    length: usize = 0,
+
+    fn set(self: *CapturedText, view: StringView) void {
+        self.length = @min(view.length, self.bytes.len);
+        @memcpy(self.bytes[0..self.length], view.pointer[0..self.length]);
+    }
+
+    fn text(self: *const CapturedText) []const u8 {
+        return self.bytes[0..self.length];
+    }
+};
+
+const CapturedProposal = struct {
+    count: usize = 0,
+    id: i64 = 0,
+    provider: CapturedText = .{},
+    recording_mbid: CapturedText = .{},
+    release_title: CapturedText = .{},
+    has_release_mbid: u8 = 0,
+    has_corrects: u8 = 0,
+    confidence: f32 = 0,
+};
+
+fn captureProposal(context: ?*anyopaque, proposal: *const MatchProposalView) callconv(.c) void {
+    const captured: *CapturedProposal = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    if (captured.count != 1) return;
+    captured.id = proposal.id;
+    captured.provider.set(proposal.provider);
+    captured.recording_mbid.set(proposal.recording_mbid);
+    captured.release_title.set(proposal.release_title);
+    captured.has_release_mbid = proposal.has_release_mbid;
+    captured.has_corrects = proposal.has_corrects;
+    captured.confidence = proposal.confidence;
+}
+
+const CapturedReview = struct {
+    count: usize = 0,
+    track_ids: [2]i64 = @splat(0),
+    proposal_counts: [2]u32 = @splat(0),
+    titles: [2]CapturedText = @splat(.{}),
+    best_recordings: [2]CapturedText = @splat(.{}),
+};
+
+fn captureReview(context: ?*anyopaque, item: *const MatchReviewView) callconv(.c) void {
+    const captured: *CapturedReview = @ptrCast(@alignCast(context.?));
+    defer captured.count += 1;
+    if (captured.count >= captured.track_ids.len) return;
+    captured.track_ids[captured.count] = item.track_id;
+    captured.proposal_counts[captured.count] = item.proposal_count;
+    captured.titles[captured.count].set(item.title);
+    captured.best_recordings[captured.count].set(item.best.recording_mbid);
+}
+
+const CapturedRecording = struct {
+    count: usize = 0,
+    recording_mbid: CapturedText = .{},
+    source: u8 = 0,
+};
+
+fn captureRecording(context: ?*anyopaque, details: *const TrackDetailsView) callconv(.c) void {
+    const captured: *CapturedRecording = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.recording_mbid.set(details.musicbrainz_recording_id);
+    captured.source = details.musicbrainz_recording_id_source;
+}
+
+const CapturedVerification = struct {
+    count: usize = 0,
+    outcome: u8 = 255,
+    recording_mbid: CapturedText = .{},
+    heard_count: usize = 0,
+    strongest: CapturedText = .{},
+    strongest_score: f32 = 0,
+    stale: u8 = 255,
+};
+
+fn captureVerification(context: ?*anyopaque, verification: *const TrackVerificationView) callconv(.c) void {
+    const captured: *CapturedVerification = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.outcome = verification.outcome;
+    captured.recording_mbid.set(verification.recording_mbid);
+    captured.heard_count = verification.heard_count;
+    if (verification.heard_count != 0) {
+        captured.strongest.set(verification.heard[0].mbid);
+        captured.strongest_score = verification.heard[0].score;
+    }
+    captured.stale = verification.stale;
+}
+
+const CapturedGroup = struct {
+    count: usize = 0,
+    group_id: i64 = 0,
+    release_id: i64 = 0,
+    has_release_id: u8 = 0,
+    album: CapturedText = .{},
+    member_count: usize = 0,
+    first_proposal_id: i64 = 0,
+    members_with_corrects: usize = 0,
+    members_with_track: usize = 0,
+};
+
+fn captureGroup(context: ?*anyopaque, group: *const CorrectionGroupView) callconv(.c) void {
+    const captured: *CapturedGroup = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.group_id = group.group_id;
+    captured.release_id = group.release_id;
+    captured.has_release_id = group.has_release_id;
+    captured.album.set(group.album);
+    captured.member_count = group.member_count;
+    captured.members_with_corrects = 0;
+    captured.members_with_track = 0;
+    for (group.members[0..group.member_count]) |member| {
+        captured.members_with_corrects += member.has_corrects;
+        captured.members_with_track += member.has_track_id;
+    }
+    if (group.member_count != 0) captured.first_proposal_id = group.members[0].proposal_id;
+}
+
+const CapturedImage = struct {
+    count: usize = 0,
+    bytes: [64]u8 = undefined,
+    length: usize = 0,
+};
+
+fn captureImage(context: ?*anyopaque, image: *const ImageView) callconv(.c) void {
+    const captured: *CapturedImage = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.length = @min(image.length, captured.bytes.len);
+    @memcpy(captured.bytes[0..captured.length], image.bytes[0..captured.length]);
+}
+
+const nick_drake_answers = [_]std.meta.Elem(@FieldType(provider_tests.FakeMusicBrainz, "answers")){
+    .{ .title = "Northern%20Sky", .body = provider_tests.northern_sky_answer },
+    .{ .title = "Pink%20Moon", .body = provider_tests.pink_moon_answer },
+};
+
+test "a match started through the C ABI stores proposals that review lists, accept applies and dismiss discards" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-match-review?mode=memory&cache=shared", null);
+    defer rig.deinit();
+    rig.musicbrainz.answers = &nick_drake_answers;
+    const northern_sky = try provider_tests.addMatchTrack(rig.library_database, "Northern Sky", "Nick Drake", null);
+    const pink_moon = try provider_tests.addMatchTrack(rig.library_database, "Pink Moon", "Nick Drake", null);
+    var count: u64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_unidentified_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 2), count);
+
+    var matching: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, null, &matching));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(matching));
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(rig.runtime, matching, &snapshot));
+    try std.testing.expectEqual(exportJobKind(.metadata_lookup), snapshot.kind);
+    var stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, matching, &stats));
+    try std.testing.expectEqual(@as(u64, 2), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 2), stats.matched);
+    try std.testing.expectEqual(@as(u64, 2), stats.proposals_stored);
+    try std.testing.expect(stats.requests >= 2);
+    try std.testing.expectEqual(exportAcoustIdUse(.no_client_key), stats.acoustid);
+    try std.testing.expectEqual(exportCoverArtOutcome(.not_requested), stats.cover_art);
+    try std.testing.expectEqual(@as(u8, 0), stats.cancelled);
+    try std.testing.expectEqual(Status.ok, orca_library_unidentified_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+
+    try std.testing.expectEqual(Status.ok, orca_library_match_review_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 2), count);
+    var review: CapturedReview = .{};
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_match_review(rig.runtime, rig.library, 0, 0, &review, captureReview));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_match_review(rig.runtime, rig.library, 513, 0, &review, captureReview));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_match_review(rig.runtime, rig.library, 10, 0, null, null));
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_review(rig.runtime, rig.library, 10, 0, &review, captureReview));
+    try std.testing.expectEqual(@as(usize, 2), review.count);
+    for (review.track_ids, review.titles, review.best_recordings, review.proposal_counts) |track_id, title, best, proposal_count| {
+        try std.testing.expectEqual(@as(u32, 1), proposal_count);
+        if (track_id == northern_sky) {
+            try std.testing.expectEqualStrings("Northern Sky", title.text());
+            try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, best.text());
+        } else {
+            try std.testing.expectEqual(pink_moon, track_id);
+            try std.testing.expectEqualStrings(provider_tests.pink_moon_mbid, best.text());
+        }
+    }
+
+    var proposal: CapturedProposal = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, northern_sky, &proposal, captureProposal));
+    try std.testing.expectEqual(@as(usize, 1), proposal.count);
+    try std.testing.expectEqualStrings("musicbrainz", proposal.provider.text());
+    try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, proposal.recording_mbid.text());
+    try std.testing.expectEqualStrings("Bryter Layter", proposal.release_title.text());
+    try std.testing.expectEqual(@as(u8, 1), proposal.has_release_mbid);
+    try std.testing.expectEqual(@as(u8, 0), proposal.has_corrects);
+
+    var acceptance: MatchAcceptanceView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_accept_match(rig.runtime, rig.library, proposal.id, null));
+    try std.testing.expectEqual(Status.ok, orca_library_accept_match(rig.runtime, rig.library, proposal.id, &acceptance));
+    try std.testing.expect(acceptance.values_written > 0);
+    try std.testing.expectEqual(Status.invalid_state, orca_library_accept_match(rig.runtime, rig.library, proposal.id, &acceptance));
+    try std.testing.expectEqualStrings("orca_library_accept_match: StaleIdentificationProposal", rig.lastError());
+    try std.testing.expectEqual(Status.not_found, orca_library_accept_match(rig.runtime, rig.library, 1_000_000, &acceptance));
+    try std.testing.expectEqualStrings("orca_library_accept_match: UnknownIdentificationProposal", rig.lastError());
+    var recording: CapturedRecording = .{};
+    const accepted_track = try provider_tests.trackOfFile(rig.library_database, acceptance.file_id);
+    try std.testing.expectEqual(Status.ok, orca_library_track_details(rig.runtime, rig.library, accepted_track, &recording, captureRecording));
+    try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, recording.recording_mbid.text());
+    try std.testing.expectEqual(@intFromEnum(IdSource.match), recording.source);
+
+    proposal = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, pink_moon, &proposal, captureProposal));
+    try std.testing.expectEqual(@as(usize, 1), proposal.count);
+    try std.testing.expectEqual(Status.ok, orca_library_dismiss_match(rig.runtime, rig.library, proposal.id));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_dismiss_match(rig.runtime, rig.library, proposal.id));
+    try std.testing.expectEqual(Status.not_found, orca_library_dismiss_match(rig.runtime, rig.library, 1_000_000));
+    try std.testing.expectEqual(Status.ok, orca_library_match_review_count(rig.runtime, rig.library, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    proposal = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, pink_moon, &proposal, captureProposal));
+    try std.testing.expectEqual(@as(usize, 0), proposal.count);
+
+    var verification: CapturedVerification = .{};
+    try std.testing.expectEqual(Status.not_found, orca_library_track_verification(rig.runtime, rig.library, pink_moon, &verification, captureVerification));
+    try std.testing.expectEqual(@as(usize, 0), verification.count);
+}
+
+test "a scoped match through the C ABI follows its options, and confident acceptance and apply-release take what it found" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-match-confident?mode=memory&cache=shared", null);
+    defer rig.deinit();
+    rig.musicbrainz.answers = &nick_drake_answers;
+    const northern_sky = try provider_tests.addMatchTrack(rig.library_database, "Northern Sky", "Nick Drake", null);
+    _ = try provider_tests.addMatchTrack(rig.library_database, "Pink Moon", "Nick Drake", null);
+
+    const options: MatchOptions = .{
+        .batch_size = 0,
+        .limit = 0,
+        .track_id = northern_sky,
+        .release_id = 0,
+        .accept_minimum_confidence = 0,
+        .mode = 0,
+        .has_limit = 0,
+        .has_track_id = 1,
+        .has_release_id = 0,
+        .skip_fingerprints = 1,
+        .has_accept_minimum_confidence = 0,
+        .cover_art = 0,
+    };
+    var matching: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(matching));
+    var stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, matching, &stats));
+    try std.testing.expectEqual(@as(u64, 1), stats.tracks_examined);
+    try std.testing.expectEqual(@as(u64, 1), stats.proposals_stored);
+    try std.testing.expectEqual(exportAcoustIdUse(.off), stats.acoustid);
+
+    var count: u64 = 0;
+    for ([_]f32{ 0, -0.5, 1.5, std.math.nan(f32) }) |invalid| {
+        try std.testing.expectEqual(Status.invalid_argument, orca_library_confident_match_count(rig.runtime, rig.library, invalid, &count));
+        try std.testing.expectEqualStrings("orca_library_confident_match_count: InvalidMinimumConfidence", rig.lastError());
+    }
+    var acceptance: ConfidentAcceptanceView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_accept_confident_matches(rig.runtime, rig.library, 2, &acceptance));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_accept_confident_matches(rig.runtime, rig.library, 0.5, null));
+    try std.testing.expectEqual(Status.ok, orca_library_confident_match_count(rig.runtime, rig.library, 0.01, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
+    try std.testing.expectEqual(Status.ok, orca_library_accept_confident_matches(rig.runtime, rig.library, 0.01, &acceptance));
+    try std.testing.expectEqual(@as(u64, 1), acceptance.accepted);
+    try std.testing.expect(acceptance.values_written > 0);
+    try std.testing.expectEqual(Status.ok, orca_library_confident_match_count(rig.runtime, rig.library, 0.01, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+
+    const release = try provider_tests.addRelease(rig.library_database, "Bryter Layter", provider_tests.bryter_layter_mbid);
+    var values_written: u32 = std.math.maxInt(u32);
+    try std.testing.expectEqual(Status.ok, orca_library_apply_matched_release(rig.runtime, rig.library, release, &values_written));
+    try std.testing.expectEqual(@as(u32, 0), values_written);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_apply_matched_release(rig.runtime, rig.library, release, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_apply_matched_release(rig.runtime, rig.library, 1_000_000, &values_written));
+    try std.testing.expectEqualStrings("orca_library_apply_matched_release: UnknownRelease", rig.lastError());
+}
+
+test "a match through the C ABI refuses bad options and a second job, and a job that is not a match has empty match stats" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-match-refusals?mode=memory&cache=shared", null);
+    defer rig.deinit();
+    rig.musicbrainz.hang_from = 0;
+    _ = try provider_tests.addMatchTrack(rig.library_database, "Northern Sky", "Nick Drake", null);
+    const album = try provider_tests.addRelease(rig.library_database, "Bryter Layter", provider_tests.bryter_layter_mbid);
+    var matching: Handle = undefined;
+    const zero: MatchOptions = .{
+        .batch_size = 0,
+        .limit = 0,
+        .track_id = 0,
+        .release_id = 0,
+        .accept_minimum_confidence = 0,
+        .mode = 0,
+        .has_limit = 0,
+        .has_track_id = 0,
+        .has_release_id = 0,
+        .skip_fingerprints = 0,
+        .has_accept_minimum_confidence = 0,
+        .cover_art = 0,
+    };
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, null, null));
+    var options = zero;
+    options.mode = 3;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    options = zero;
+    options.has_track_id = 1;
+    options.has_release_id = 1;
+    options.release_id = album;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqualStrings("orca_library_start_match: InvalidMatchRequest", rig.lastError());
+    options = zero;
+    options.mode = 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    options = zero;
+    options.cover_art = 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    options = zero;
+    options.has_release_id = 1;
+    options.release_id = album;
+    options.has_accept_minimum_confidence = 1;
+    options.accept_minimum_confidence = 1.5;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqualStrings("orca_library_start_match: InvalidMinimumConfidence", rig.lastError());
+    options = zero;
+    options.mode = 2;
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqualStrings("orca_library_start_match: AcoustIdRequired", rig.lastError());
+    options = zero;
+    options.has_release_id = 1;
+    options.release_id = 1_000_000;
+    try std.testing.expectEqual(Status.not_found, orca_library_start_match(rig.runtime, rig.library, &options, &matching));
+    try std.testing.expectEqualStrings("orca_library_start_match: UnknownRelease", rig.lastError());
+    try std.testing.expectEqual(Status.not_found, orca_library_start_cover_art_fetch(rig.runtime, rig.library, 1_000_000, &matching));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_cover_art_fetch(rig.runtime, rig.library, album, null));
+
+    var stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.stale_handle, orca_job_match_stats(rig.runtime, .{ .index = 7, .generation = 3 }, &stats));
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, null, &matching));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_match_stats(rig.runtime, matching, null));
+    var second: Handle = undefined;
+    try std.testing.expectEqual(Status.busy, orca_library_start_match(rig.runtime, rig.library, null, &second));
+    try std.testing.expectEqualStrings("orca_library_start_match: MatchingAlreadyRunning", rig.lastError());
+    try std.testing.expectEqual(Status.busy, orca_library_start_cover_art_fetch(rig.runtime, rig.library, album, &second));
+    try std.testing.expectEqual(Status.ok, orca_job_cancel(rig.runtime, matching));
+    try std.testing.expectEqual(job.State.cancelled, try rig.finish(matching));
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, matching, &stats));
+    try std.testing.expectEqual(@as(u8, 1), stats.cancelled);
+
+    var scan: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_projection(rig.runtime, rig.library, &scan));
+    _ = try rig.finish(scan);
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, scan, &stats));
+    try std.testing.expectEqual(@as(u64, 0), stats.tracks_examined);
+    try std.testing.expectEqual(exportAcoustIdUse(.off), stats.acoustid);
+
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var anonymous: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-match-anonymous?mode=memory&cache=shared", &anonymous));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_match(runtime, anonymous, null, &matching));
+    try std.testing.expectEqualStrings("orca_library_start_match: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_cover_art_fetch(runtime, anonymous, 1, &matching));
+}
+
+test "a verification through the C ABI forms an album group of corrections that is listed with its members and accepted only whole" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-verify-accept?mode=memory&cache=shared", "test-client");
+    defer rig.deinit();
+    const album = try provider_tests.addRelease(rig.library_database, "Bryter Layter", provider_tests.bryter_layter_mbid);
+    const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", provider_tests.pink_moon_mbid, album);
+    _ = try rig.addTone("pink.wav", 420, "Northern Sky", provider_tests.northern_sky_mbid, album);
+    rig.acoustid.lookup_body = provider_tests.acoustIdAnswer(
+        provider_tests.heardBy("0", provider_tests.heardResult("0.97", provider_tests.northern_sky_heard)) ++ "," ++
+            provider_tests.heardBy("1", provider_tests.heardResult("0.96", provider_tests.pink_moon_heard)),
+    );
+
+    var verification: CapturedVerification = .{};
+    try std.testing.expectEqual(Status.not_found, orca_library_track_verification(rig.runtime, rig.library, sounds_northern, &verification, captureVerification));
+    var options: MatchOptions = .{
+        .batch_size = 0,
+        .limit = 0,
+        .track_id = 0,
+        .release_id = album,
+        .accept_minimum_confidence = 0,
+        .mode = 2,
+        .has_limit = 0,
+        .has_track_id = 0,
+        .has_release_id = 1,
+        .skip_fingerprints = 0,
+        .has_accept_minimum_confidence = 0,
+        .cover_art = 0,
+    };
+    var verifying: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &verifying));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(verifying));
+    var stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, verifying, &stats));
+    try std.testing.expectEqual(@as(u64, 2), stats.verified);
+    try std.testing.expectEqual(@as(u64, 2), stats.disagreed);
+    try std.testing.expectEqual(@as(u64, 1), stats.correction_groups);
+    try std.testing.expectEqual(exportAcoustIdUse(.searched), stats.acoustid);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_verification(rig.runtime, rig.library, sounds_northern, null, null));
+    try std.testing.expectEqual(Status.ok, orca_library_track_verification(rig.runtime, rig.library, sounds_northern, &verification, captureVerification));
+    try std.testing.expectEqual(@as(usize, 1), verification.count);
+    try std.testing.expectEqual(exportVerificationOutcome(.disagrees), verification.outcome);
+    try std.testing.expectEqualStrings(provider_tests.pink_moon_mbid, verification.recording_mbid.text());
+    try std.testing.expectEqual(@as(usize, 1), verification.heard_count);
+    try std.testing.expectEqualStrings(provider_tests.northern_sky_mbid, verification.strongest.text());
+    try std.testing.expectApproxEqAbs(@as(f32, 0.97), verification.strongest_score, 0.001);
+    try std.testing.expectEqual(@as(u8, 0), verification.stale);
+
+    var group: CapturedGroup = .{};
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_correction_groups(rig.runtime, rig.library, 0, 0, &group, captureGroup));
+    try std.testing.expectEqual(Status.ok, orca_library_query_correction_groups(rig.runtime, rig.library, 10, 0, &group, captureGroup));
+    try std.testing.expectEqual(@as(usize, 1), group.count);
+    try std.testing.expectEqual(@as(usize, 2), group.member_count);
+    try std.testing.expectEqual(@as(usize, 2), group.members_with_corrects);
+    try std.testing.expectEqual(@as(usize, 2), group.members_with_track);
+    try std.testing.expectEqual(@as(u8, 1), group.has_release_id);
+    try std.testing.expectEqual(album, group.release_id);
+    try std.testing.expectEqualStrings("Bryter Layter", group.album.text());
+    var proposal: CapturedProposal = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_match_proposals(rig.runtime, rig.library, sounds_northern, &proposal, captureProposal));
+    try std.testing.expectEqual(@as(u8, 1), proposal.has_corrects);
+
+    var single: MatchAcceptanceView = undefined;
+    try std.testing.expectEqual(Status.invalid_state, orca_library_accept_match(rig.runtime, rig.library, group.first_proposal_id, &single));
+    try std.testing.expectEqualStrings("orca_library_accept_match: ProposalInGroup", rig.lastError());
+    var acceptance: ConfidentAcceptanceView = undefined;
+    try std.testing.expectEqual(Status.not_found, orca_library_accept_correction_group(rig.runtime, rig.library, 1_000_000, &acceptance));
+    try std.testing.expectEqualStrings("orca_library_accept_correction_group: UnknownCorrectionGroup", rig.lastError());
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_accept_correction_group(rig.runtime, rig.library, group.group_id, null));
+    try std.testing.expectEqual(Status.ok, orca_library_accept_correction_group(rig.runtime, rig.library, group.group_id, &acceptance));
+    try std.testing.expectEqual(@as(u64, 2), acceptance.accepted);
+    try std.testing.expect(acceptance.values_written > 0);
+    try std.testing.expectEqual(Status.invalid_state, orca_library_accept_correction_group(rig.runtime, rig.library, group.group_id, &acceptance));
+    try std.testing.expectEqualStrings("orca_library_accept_correction_group: StaleCorrectionGroup", rig.lastError());
+    try std.testing.expectEqual(Status.invalid_state, orca_library_dismiss_correction_group(rig.runtime, rig.library, group.group_id));
+    group = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_correction_groups(rig.runtime, rig.library, 10, 0, &group, captureGroup));
+    try std.testing.expectEqual(@as(usize, 0), group.count);
+
+    options.has_release_id = 0;
+    options.has_accept_minimum_confidence = 1;
+    options.accept_minimum_confidence = 0.9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_match(rig.runtime, rig.library, &options, &verifying));
+}
+
+test "an album group of corrections dismissed through the C ABI leaves every member's recording ID as it was" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-verify-dismiss?mode=memory&cache=shared", "test-client");
+    defer rig.deinit();
+    const album = try provider_tests.addRelease(rig.library_database, "Bryter Layter", provider_tests.bryter_layter_mbid);
+    const sounds_northern = try rig.addTone("northern.wav", 300, "Pink Moon", provider_tests.pink_moon_mbid, album);
+    _ = try rig.addTone("pink.wav", 420, "Northern Sky", provider_tests.northern_sky_mbid, album);
+    rig.acoustid.lookup_body = provider_tests.acoustIdAnswer(
+        provider_tests.heardBy("0", provider_tests.heardResult("0.97", provider_tests.northern_sky_heard)) ++ "," ++
+            provider_tests.heardBy("1", provider_tests.heardResult("0.96", provider_tests.pink_moon_heard)),
+    );
+    const options: MatchOptions = .{
+        .batch_size = 0,
+        .limit = 0,
+        .track_id = 0,
+        .release_id = album,
+        .accept_minimum_confidence = 0,
+        .mode = 2,
+        .has_limit = 0,
+        .has_track_id = 0,
+        .has_release_id = 1,
+        .skip_fingerprints = 0,
+        .has_accept_minimum_confidence = 0,
+        .cover_art = 0,
+    };
+    var verifying: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &verifying));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(verifying));
+    var group: CapturedGroup = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_correction_groups(rig.runtime, rig.library, 10, 0, &group, captureGroup));
+    try std.testing.expectEqual(@as(usize, 1), group.count);
+
+    try std.testing.expectEqual(Status.not_found, orca_library_dismiss_correction_group(rig.runtime, rig.library, 1_000_000));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_dismiss_match(rig.runtime, rig.library, group.first_proposal_id));
+    try std.testing.expectEqual(Status.ok, orca_library_dismiss_correction_group(rig.runtime, rig.library, group.group_id));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_dismiss_correction_group(rig.runtime, rig.library, group.group_id));
+    group = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_correction_groups(rig.runtime, rig.library, 10, 0, &group, captureGroup));
+    try std.testing.expectEqual(@as(usize, 0), group.count);
+    var recording: CapturedRecording = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_track_details(rig.runtime, rig.library, sounds_northern, &recording, captureRecording));
+    try std.testing.expectEqualStrings(provider_tests.pink_moon_mbid, recording.recording_mbid.text());
+    try std.testing.expectEqual(@intFromEnum(IdSource.tag), recording.source);
+}
+
+test "a cover fetched through the C ABI is a metadata lookup whose stats say fetched, and the Release's artwork then returns it" {
+    var rig: MatchingRig = undefined;
+    try rig.init("file:orca-c-api-cover-fetch?mode=memory&cache=shared", null);
+    defer rig.deinit();
+    const album = try provider_tests.addRelease(rig.library_database, "Bryter Layter", provider_tests.bryter_layter_mbid);
+    _ = try provider_tests.addAlbumTrack(rig.library_database, album, "Northern Sky");
+    var image: CapturedImage = .{};
+    try std.testing.expectEqual(Status.not_found, orca_library_release_artwork(rig.runtime, rig.library, album, &image, captureImage));
+
+    var fetching: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_cover_art_fetch(rig.runtime, rig.library, album, &fetching));
+    var snapshot: JobSnapshot = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_snapshot_get(rig.runtime, fetching, &snapshot));
+    try std.testing.expectEqual(exportJobKind(.metadata_lookup), snapshot.kind);
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(fetching));
+    var stats: MatchStatsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, fetching, &stats));
+    try std.testing.expectEqual(exportCoverArtOutcome(.fetched), stats.cover_art);
+    try std.testing.expectEqual(@as(u64, 0), stats.requests);
+    try std.testing.expectEqual(@as(u32, 1), rig.cover.requestCount());
+
+    try std.testing.expectEqual(Status.ok, orca_library_release_artwork(rig.runtime, rig.library, album, &image, captureImage));
+    try std.testing.expectEqual(@as(usize, 1), image.count);
+    try std.testing.expectEqualStrings(provider_tests.jpeg_cover, image.bytes[0..image.length]);
 }

@@ -164,6 +164,26 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_scrobbler_credentials_changed` has a Library's listen worker
   read and validate a changed ListenBrainz token; see
   [Credentials](#credentials).
+- **Matching, verification and corrections.** `orca_library_start_match`
+  starts an `ORCA_JOB_KIND_METADATA_LOOKUP` job from an `orca_match_options`
+  (NULL searches the whole library with fingerprints): an
+  `orca_match_mode` of search, re-identify one Track or Release, or verify
+  recording IDs against AcoustID, optionally accepting matches above a
+  confidence and fetching the Release's cover.
+  `orca_library_start_cover_art_fetch` fetches one Release's cover as the same
+  kind of job, and `orca_job_match_stats` reads either job's
+  `orca_match_stats`. A second match while one runs is `ORCA_STATUS_BUSY`.
+  `orca_library_query_match_review` pages the Tracks with proposals, best
+  first, and `orca_library_query_match_proposals` lists one Track's;
+  `orca_library_accept_match` and `orca_library_dismiss_match` act on one,
+  `orca_library_confident_match_count` and
+  `orca_library_accept_confident_matches` on every file's best above a
+  confidence in (0, 1], and `orca_library_apply_matched_release` applies a
+  Release whose Tracks came to agree. `orca_library_track_verification` hands
+  a Track's last verification with the recordings AcoustID heard, and
+  `orca_library_query_correction_groups` pages album groups of corrections
+  with their members, accepted or dismissed only whole. Acceptance writes the
+  library, never a file.
 
 `orca_player_play` is refused unless the Player has a loaded source or a
 non-empty queue *and* an attached Zone: a transport that reports PLAYING while

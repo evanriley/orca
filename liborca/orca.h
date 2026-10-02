@@ -1951,6 +1951,454 @@ orca_status orca_library_start_reconcile(
     orca_handle *job
 );
 
+/* ------------------------------------------------------------- matching */
+
+/* What a matching job does with the Tracks in scope. SEARCH looks up those
+ * with no recording ID that a provider in scope has not answered for;
+ * REIDENTIFY looks up every one again, confirming the recording it is
+ * identified as rather than proposing it; VERIFY checks each file's recording
+ * ID against what AcoustID hears in its fingerprint and searches nothing. */
+typedef enum orca_match_mode {
+    ORCA_MATCH_MODE_SEARCH = 0,
+    ORCA_MATCH_MODE_REIDENTIFY = 1,
+    ORCA_MATCH_MODE_VERIFY = 2,
+} orca_match_mode;
+
+/* Whether AcoustID took part in a matching job, and why not. OFF: the job
+ * was asked for no fingerprints. INVALID_CLIENT_KEY: AcoustID refused the
+ * application key and the job went on without it. */
+typedef enum orca_acoustid_use {
+    ORCA_ACOUSTID_USE_SEARCHED = 0,
+    ORCA_ACOUSTID_USE_OFF = 1,
+    ORCA_ACOUSTID_USE_NO_CLIENT_KEY = 2,
+    ORCA_ACOUSTID_USE_INVALID_CLIENT_KEY = 3,
+} orca_acoustid_use;
+
+/* The service another Orca process was talking to when the job needed it. */
+typedef enum orca_busy_service {
+    ORCA_BUSY_SERVICE_NONE = 0,
+    ORCA_BUSY_SERVICE_MUSICBRAINZ = 1,
+    ORCA_BUSY_SERVICE_ACOUSTID = 2,
+} orca_busy_service;
+
+/* What a job did about a Release's front cover. EMBEDDED: a file of the
+ * Release carries one, so nothing was fetched. CACHED: a cover fetched
+ * earlier for the same release ID is kept. CACHED_MISS: the Cover Art Archive
+ * had none less than 30 days ago, so it was not asked. NOT_FOUND: it has none.
+ * NO_RELEASE_ID: neither a tag nor an accepted match gives the Release a
+ * MusicBrainz release ID. REFUSED: the archive's answer was a redirect off
+ * the archive, another 4xx, or a body that is not a JPEG or PNG of at most
+ * 4 MiB. BUSY: another Orca process holds the archive. */
+typedef enum orca_cover_art_outcome {
+    ORCA_COVER_ART_OUTCOME_NOT_REQUESTED = 0,
+    ORCA_COVER_ART_OUTCOME_EMBEDDED = 1,
+    ORCA_COVER_ART_OUTCOME_FETCHED = 2,
+    ORCA_COVER_ART_OUTCOME_CACHED = 3,
+    ORCA_COVER_ART_OUTCOME_CACHED_MISS = 4,
+    ORCA_COVER_ART_OUTCOME_NOT_FOUND = 5,
+    ORCA_COVER_ART_OUTCOME_NO_RELEASE_ID = 6,
+    ORCA_COVER_ART_OUTCOME_REFUSED = 7,
+    ORCA_COVER_ART_OUTCOME_UNAVAILABLE = 8,
+    ORCA_COVER_ART_OUTCOME_BUSY = 9,
+    ORCA_COVER_ART_OUTCOME_CANCELLED = 10,
+} orca_cover_art_outcome;
+
+/* How a file's recording ID compared with what AcoustID heard in its
+ * fingerprint. */
+typedef enum orca_verification_outcome {
+    ORCA_VERIFICATION_OUTCOME_AGREES = 0,
+    ORCA_VERIFICATION_OUTCOME_DISAGREES = 1,
+    ORCA_VERIFICATION_OUTCOME_UNCONFIRMED = 2,
+    ORCA_VERIFICATION_OUTCOME_NO_FINGERPRINT = 3,
+} orca_verification_outcome;
+
+/*
+ * Options for orca_library_start_match. A zero field keeps its default, so a
+ * zero-initialised struct is a whole-library search with fingerprints.
+ *
+ * `batch_size`: Tracks per committed batch, 0 for 64. `limit`, with
+ * `has_limit`: examine at most this many Tracks. `mode` is an
+ * orca_match_mode. `track_id` (with `has_track_id`) or `release_id` (with
+ * `has_release_id`) narrows the job to one Track or one Release's Tracks;
+ * not both. `skip_fingerprints` set: no fingerprint and no AcoustID lookup.
+ * With `release_id` only: `accept_minimum_confidence` (with
+ * `has_accept_minimum_confidence`, greater than 0 and at most 1) then accepts
+ * the Release's matches orca_library_accept_confident_matches would accept at
+ * that confidence, and `cover_art` then fetches its front cover as
+ * orca_library_start_cover_art_fetch does.
+ */
+typedef struct orca_match_options {
+    uint32_t batch_size;
+    uint32_t limit;
+    int64_t track_id;
+    int64_t release_id;
+    float accept_minimum_confidence;
+    uint8_t mode;
+    uint8_t has_limit;
+    uint8_t has_track_id;
+    uint8_t has_release_id;
+    uint8_t skip_fingerprints;
+    uint8_t has_accept_minimum_confidence;
+    uint8_t cover_art;
+    uint8_t reserved[5];
+} orca_match_options;
+
+/*
+ * Starts a MusicBrainz and AcoustID matching job, of kind
+ * ORCA_JOB_KIND_METADATA_LOOKUP, and returns immediately. `options` may be
+ * NULL for a whole-library search with fingerprints. The job stores
+ * reviewable proposals in the Library; it writes no file and accepts nothing
+ * unless `accept_minimum_confidence` asks it to. Fingerprints and AcoustID
+ * need the AcoustID application key or a credential callback; without them
+ * the job searches MusicBrainz alone. Requests go out at most one a second
+ * per service. Its counts are read with orca_job_match_stats.
+ *
+ * While an idle-maintenance unit runs, returns OK with a job that stays
+ * ORCA_JOB_QUEUED: the unit is cancelled, and the job starts from a later
+ * orca_runtime_pump once it has stopped. INVALID_STATE without a
+ * client identity (orca_runtime_set_client_identity), and for VERIFY without
+ * AcoustID. INVALID_ARGUMENT for an unknown mode, both `track_id` and
+ * `release_id`, REIDENTIFY without either or with
+ * `accept_minimum_confidence`, `accept_minimum_confidence` or `cover_art`
+ * without `release_id` or with VERIFY, or a confidence outside (0, 1].
+ * NOT_FOUND for an unknown Release. BUSY while another matching job of the
+ * runtime runs or is queued, or an AcoustID submission runs.
+ */
+orca_status orca_library_start_match(
+    orca_runtime *runtime,
+    orca_handle library,
+    const orca_match_options *options,
+    orca_handle *job
+);
+
+/*
+ * Starts fetching the Release's front cover from the Cover Art Archive and
+ * returns immediately. The job's kind is ORCA_JOB_KIND_METADATA_LOOKUP, and
+ * `cover_art` in its orca_match_stats says what it did. A fetched cover is
+ * stored in the Library, never in a file, and orca_library_release_artwork
+ * returns it. Statuses as orca_library_start_match: INVALID_STATE without a
+ * client identity, NOT_FOUND for an unknown Release, BUSY while a matching
+ * job runs or is queued, and OK with a queued job while an idle-maintenance
+ * unit stops.
+ */
+orca_status orca_library_start_cover_art_fetch(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    orca_handle *job
+);
+
+/*
+ * What a matching job or cover fetch did so far. `requests` and `cache_hits`
+ * are MusicBrainz's. `confirmed` counts Tracks a REIDENTIFY found again as
+ * the recording they are identified as; `verified` the files a VERIFY stored
+ * an outcome for, split into `agreed`, `disagreed` and `unconfirmed`;
+ * `skipped` the files it passed over for having no quick hash.
+ * `correction_groups` counts album groups of corrections it formed, and
+ * `accepted` the matches it accepted. `acoustid` is an orca_acoustid_use,
+ * `busy` an orca_busy_service and `cover_art` an orca_cover_art_outcome.
+ */
+typedef struct orca_match_stats {
+    uint64_t tracks_examined;
+    uint64_t matched;
+    uint64_t unmatched;
+    uint64_t insufficient_evidence;
+    uint64_t refused;
+    uint64_t proposals_stored;
+    uint64_t confirmed;
+    uint64_t verified;
+    uint64_t agreed;
+    uint64_t disagreed;
+    uint64_t unconfirmed;
+    uint64_t skipped;
+    uint64_t correction_groups;
+    uint64_t requests;
+    uint64_t cache_hits;
+    uint64_t fingerprinted;
+    uint64_t fingerprint_cache_hits;
+    uint64_t fingerprint_failures;
+    uint64_t acoustid_requests;
+    uint64_t acoustid_cache_hits;
+    uint64_t acoustid_refused;
+    uint64_t accepted;
+    uint8_t acoustid;
+    uint8_t busy;
+    uint8_t cover_art;
+    uint8_t cancelled;
+    uint8_t reserved[4];
+} orca_match_stats;
+
+/* All zero, with `acoustid` OFF, for a queued job or a job of another kind.
+ * STALE_HANDLE for an unknown job. */
+orca_status orca_job_match_stats(
+    orca_runtime *runtime,
+    orca_handle job,
+    orca_match_stats *output
+);
+
+/*
+ * A pending proposal of a recording for a file. `confidence` is 0 to 1;
+ * `provider` is "musicbrainz" or "acoustid". `title`, `artist` and `album`
+ * are what accepting would give the Track; the `track_*` and `release_*`
+ * fields are the proposed release's own, each with its `has_*` flag.
+ * `musicbrainz_score` is 0 to 100 and `acoustid_score` 0 to 1. `corrects`,
+ * with `has_corrects`, is the recording ID in effect that accepting would
+ * replace; a proposal without it is not a correction. Every string view is
+ * valid only for the duration of the callback.
+ */
+typedef struct orca_match_proposal_view {
+    int64_t id;
+    uint64_t duration_ms;
+    orca_string_view provider;
+    orca_string_view recording_mbid;
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view album;
+    orca_string_view release_mbid;
+    orca_string_view track_title;
+    orca_string_view track_artist;
+    orca_string_view release_title;
+    orca_string_view release_artist;
+    orca_string_view release_date;
+    orca_string_view release_group_mbid;
+    orca_string_view release_track_mbid;
+    orca_string_view corrects;
+    float confidence;
+    float acoustid_score;
+    uint32_t track_number;
+    uint32_t disc_number;
+    uint8_t musicbrainz_score;
+    uint8_t has_track_number;
+    uint8_t has_disc_number;
+    uint8_t has_release_mbid;
+    uint8_t has_duration_ms;
+    uint8_t has_musicbrainz_score;
+    uint8_t has_acoustid_score;
+    uint8_t has_track_title;
+    uint8_t has_track_artist;
+    uint8_t has_release_title;
+    uint8_t has_release_artist;
+    uint8_t has_release_date;
+    uint8_t has_release_group_mbid;
+    uint8_t has_release_track_mbid;
+    uint8_t has_corrects;
+    uint8_t reserved[1];
+} orca_match_proposal_view;
+
+typedef void (*orca_match_proposal_callback)(void *context, const orca_match_proposal_view *proposal);
+
+/* Invokes the callback once per pending proposal for the Track's file, best
+ * first, at most 512. An unknown Track has none. */
+orca_status orca_library_query_match_proposals(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_match_proposal_callback callback
+);
+
+/* `values_written` counts every value stored, on any file, the Release's
+ * other files included. */
+typedef struct orca_match_acceptance {
+    int64_t file_id;
+    uint32_t values_written;
+    uint8_t reserved[4];
+} orca_match_acceptance;
+
+/* `values_written` counts every value stored, on any file. */
+typedef struct orca_confident_acceptance {
+    uint64_t accepted;
+    uint64_t values_written;
+} orca_confident_acceptance;
+
+/*
+ * Accepts the proposal: its recording ID, title and artist, and its
+ * release's values once every Track of the Release names it, become Orca's
+ * values for the file, and the file is reprojected. A correction's recording
+ * ID is stored locked. Only the Library changes; no file is written, and a
+ * locked value of the user's is kept. NOT_FOUND for an unknown proposal;
+ * INVALID_STATE for one already accepted or dismissed, or one that belongs to
+ * an album group of corrections (orca_library_accept_correction_group).
+ */
+orca_status orca_library_accept_match(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t proposal_id,
+    orca_match_acceptance *output
+);
+/* Dismisses the proposal. Statuses as orca_library_accept_match. */
+orca_status orca_library_dismiss_match(orca_runtime *runtime, orca_handle library, int64_t proposal_id);
+
+/* A Track with pending proposals: its own tags beside its best proposal, and
+ * how many it has. Valid only for the duration of the callback. */
+typedef struct orca_match_review_view {
+    int64_t track_id;
+    int64_t duration_ms;
+    uint32_t proposal_count;
+    uint8_t has_duration_ms;
+    uint8_t reserved[3];
+    orca_string_view title;
+    orca_string_view artist;
+    orca_string_view album;
+    orca_match_proposal_view best;
+} orca_match_review_view;
+
+typedef void (*orca_match_review_callback)(void *context, const orca_match_review_view *item);
+
+/* Invokes the callback for a page of Tracks with pending proposals, by
+ * artist, album and position. `limit` is 1 to 512, else INVALID_ARGUMENT. */
+orca_status orca_library_query_match_review(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_match_review_callback callback
+);
+/* How many Tracks orca_library_query_match_review lists. */
+orca_status orca_library_match_review_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
+/* Tracks a matching job with fingerprints would search: no recording ID,
+ * and not yet answered for by MusicBrainz, or by AcoustID when a key is
+ * set. */
+orca_status orca_library_unidentified_count(orca_runtime *runtime, orca_handle library, uint64_t *count);
+/* How many matches orca_library_accept_confident_matches would accept now
+ * at `minimum_confidence`: per file, the best proposal at least that
+ * confident that its fingerprint backs, or else its most confident one when
+ * that reaches `minimum_confidence` and shows a higher percent than every
+ * other; never a correction. `minimum_confidence` is greater than 0 and at
+ * most 1; 0, a negative value, more than 1 or NaN is INVALID_ARGUMENT. */
+orca_status orca_library_confident_match_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    float minimum_confidence,
+    uint64_t *count
+);
+/* Accepts the matches orca_library_confident_match_count counts, as
+ * orca_library_accept_match does, in the Library only. The files it changed
+ * are not returned: requery what the host shows. */
+orca_status orca_library_accept_confident_matches(
+    orca_runtime *runtime,
+    orca_handle library,
+    float minimum_confidence,
+    orca_confident_acceptance *output
+);
+/* Stores what the MusicBrainz release a Release's accepted matches agree on
+ * says, when every Track names it, and reprojects: for a Release that came
+ * to agree without an accept, after an edit moved a stray file out or a
+ * rescan. `values_written` receives how many values were stored, 0 when the
+ * Tracks do not agree. NOT_FOUND for an unknown Release; reprojecting can
+ * give the Release a new id. */
+orca_status orca_library_apply_matched_release(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t release_id,
+    uint32_t *values_written
+);
+
+/* A recording AcoustID heard in a fingerprint, with its score from 0 to 1. */
+typedef struct orca_heard_recording_view {
+    orca_string_view mbid;
+    float score;
+    uint8_t reserved[4];
+} orca_heard_recording_view;
+
+/*
+ * A Track's file's last verification. `outcome` is an
+ * orca_verification_outcome, `verified_at` Unix seconds, `recording_mbid` the
+ * recording ID in effect when it was verified, and `heard` the recordings
+ * AcoustID heard, strongest first, at most 8. `stale` is set when the file's
+ * bytes or its recording ID changed since; `dismissed` when the strongest
+ * recording heard has a dismissed proposal on the file. Everything is valid
+ * only for the duration of the callback.
+ */
+typedef struct orca_track_verification_view {
+    int64_t verified_at;
+    orca_string_view recording_mbid;
+    const orca_heard_recording_view *heard;
+    size_t heard_count;
+    uint8_t outcome;
+    uint8_t stale;
+    uint8_t dismissed;
+    uint8_t reserved[5];
+} orca_track_verification_view;
+
+typedef void (*orca_track_verification_callback)(void *context, const orca_track_verification_view *verification);
+
+/* Invokes the callback once with the Track's verification. NOT_FOUND,
+ * without a callback, when the Track was never verified or does not exist. */
+orca_status orca_library_track_verification(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_track_verification_callback callback
+);
+
+/* A pending correction of an album group beside its file's Track as it is.
+ * `track_id` (with `has_track_id`) is the lowest-numbered Track that plays
+ * the file. `corrects` is the recording ID accepting replaces. */
+typedef struct orca_correction_member_view {
+    int64_t proposal_id;
+    int64_t track_id;
+    int64_t file_id;
+    int64_t track_number;
+    int64_t disc_number;
+    orca_string_view title;
+    orca_string_view proposed_title;
+    orca_string_view recording_mbid;
+    orca_string_view corrects;
+    uint32_t proposed_track_number;
+    uint32_t proposed_disc_number;
+    uint8_t has_track_id;
+    uint8_t has_track_number;
+    uint8_t has_disc_number;
+    uint8_t has_proposed_track_number;
+    uint8_t has_proposed_disc_number;
+    uint8_t has_corrects;
+    uint8_t reserved[2];
+} orca_correction_member_view;
+
+/* Corrections a verification proposed for one Release's files, accepted or
+ * dismissed only together. `release_id` is the Release of the first member's
+ * Track. `members` holds at most 512 and, like every string view, is valid
+ * only for the duration of the callback. */
+typedef struct orca_correction_group_view {
+    int64_t group_id;
+    int64_t release_id;
+    uint8_t has_release_id;
+    uint8_t reserved[7];
+    orca_string_view album;
+    orca_string_view album_artist;
+    const orca_correction_member_view *members;
+    size_t member_count;
+} orca_correction_group_view;
+
+typedef void (*orca_correction_group_callback)(void *context, const orca_correction_group_view *group);
+
+/* Invokes the callback for a page of pending album groups of corrections.
+ * `limit` is 1 to 512, else INVALID_ARGUMENT. */
+orca_status orca_library_query_correction_groups(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_correction_group_callback callback
+);
+/* Accepts every pending correction of the group in one transaction, each
+ * recording ID stored locked, and reprojects the files; only the Library
+ * changes. NOT_FOUND for an unknown group; INVALID_STATE for one already
+ * accepted or dismissed. */
+orca_status orca_library_accept_correction_group(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t group_id,
+    orca_confident_acceptance *output
+);
+/* Dismisses every pending correction of the group. Statuses as
+ * orca_library_accept_correction_group. */
+orca_status orca_library_dismiss_correction_group(orca_runtime *runtime, orca_handle library, int64_t group_id);
+
 /* ------------------------------------------------------------- watching */
 
 typedef enum orca_watch_state {

@@ -62,9 +62,47 @@ const struct_pairs = .{
     .{ c_api.WatchOptions, c.orca_watch_options },
     .{ c_api.WatchStatus, c.orca_watch_status },
     .{ c_api.Event, c.orca_event },
+    .{ c_api.MatchOptions, c.orca_match_options },
+    .{ c_api.MatchStatsView, c.orca_match_stats },
+    .{ c_api.MatchProposalView, c.orca_match_proposal_view },
+    .{ c_api.MatchAcceptanceView, c.orca_match_acceptance },
+    .{ c_api.ConfidentAcceptanceView, c.orca_confident_acceptance },
+    .{ c_api.MatchReviewView, c.orca_match_review_view },
+    .{ c_api.HeardRecordingView, c.orca_heard_recording_view },
+    .{ c_api.TrackVerificationView, c.orca_track_verification_view },
+    .{ c_api.CorrectionMemberView, c.orca_correction_member_view },
+    .{ c_api.CorrectionGroupView, c.orca_correction_group_view },
 };
 
 const export_mappings = .{
+    struct {
+        pub const prefix = "ORCA_ACOUSTID_USE_";
+        pub const Tag = core.runtime.AcoustIdUse;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportAcoustIdUse(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_BUSY_SERVICE_";
+        pub const Tag = core.runtime.BusyService;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportBusyService(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_COVER_ART_OUTCOME_";
+        pub const Tag = core.runtime.CoverArtOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportCoverArtOutcome(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_VERIFICATION_OUTCOME_";
+        pub const Tag = core.runtime.VerificationOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportVerificationOutcome(tag);
+        }
+    },
     struct {
         pub const prefix = "ORCA_STATUS_";
         pub const Tag = c_api.Status;
@@ -313,6 +351,13 @@ const import_mappings = .{
         pub const Tag = database.ReleaseSort;
         pub fn consume(value: u8) ?Tag {
             return c_api.importReleaseSort(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_MATCH_MODE_";
+        pub const Tag = core.runtime.MatchMode;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importMatchMode(value);
         }
     },
     struct {

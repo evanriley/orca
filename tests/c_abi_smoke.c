@@ -1963,6 +1963,115 @@ static int provider_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+struct match_smoke_count {
+    int calls;
+};
+
+static void count_match_proposal(void *context, const orca_match_proposal_view *proposal) {
+    (void)proposal;
+    ((struct match_smoke_count *)context)->calls += 1;
+}
+
+static void count_match_review(void *context, const orca_match_review_view *item) {
+    (void)item;
+    ((struct match_smoke_count *)context)->calls += 1;
+}
+
+static void count_track_verification(void *context, const orca_track_verification_view *verification) {
+    (void)verification;
+    ((struct match_smoke_count *)context)->calls += 1;
+}
+
+static void count_correction_group(void *context, const orca_correction_group_view *group) {
+    (void)group;
+    ((struct match_smoke_count *)context)->calls += 1;
+}
+
+static int matching_option_steps(orca_runtime *runtime, int64_t release_id) {
+    orca_handle library;
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-matching?mode=memory&cache=shared", &library) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_OK);
+    orca_handle job;
+    orca_match_options options;
+    memset(&options, 0, sizeof options);
+    options.has_track_id = 1;
+    options.has_release_id = 1;
+    options.release_id = release_id;
+    SMOKE_CHECK(orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_start_match: InvalidMatchRequest") == 0);
+    memset(&options, 0, sizeof options);
+    options.mode = 3;
+    SMOKE_CHECK(orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_INVALID_ARGUMENT);
+    options.mode = ORCA_MATCH_MODE_REIDENTIFY;
+    SMOKE_CHECK(orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_INVALID_ARGUMENT);
+    options.mode = ORCA_MATCH_MODE_VERIFY;
+    SMOKE_CHECK(orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_start_match: AcoustIdRequired") == 0);
+    memset(&options, 0, sizeof options);
+    options.has_release_id = 1;
+    options.release_id = 999999999;
+    SMOKE_CHECK(orca_library_start_match(runtime, library, &options, &job) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_start_cover_art_fetch(runtime, library, 999999999, &job) == ORCA_STATUS_NOT_FOUND);
+    return 0;
+}
+
+static int matching_smoke(orca_runtime *runtime, orca_handle library, int64_t track_id, int64_t release_id) {
+    orca_handle job;
+    memset(&job, 0, sizeof job);
+    SMOKE_CHECK(orca_library_start_match(runtime, library, 0, &job) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_start_match: ClientIdentityRequired") == 0);
+    SMOKE_CHECK(orca_library_start_cover_art_fetch(runtime, library, release_id, &job) ==
+                ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_job_match_stats(runtime, job, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    uint64_t count = 0;
+    SMOKE_CHECK(orca_library_unidentified_count(runtime, library, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count > 0);
+    count = 1;
+    SMOKE_CHECK(orca_library_match_review_count(runtime, library, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 0);
+    count = 1;
+    SMOKE_CHECK(orca_library_confident_match_count(runtime, library, 0.9f, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 0);
+    SMOKE_CHECK(orca_library_confident_match_count(runtime, library, 1.5f, &count) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    orca_confident_acceptance confident;
+    SMOKE_CHECK(orca_library_accept_confident_matches(runtime, library, 0.9f, &confident) == ORCA_STATUS_OK);
+    SMOKE_CHECK(confident.accepted == 0 && confident.values_written == 0);
+
+    struct match_smoke_count calls = {0};
+    SMOKE_CHECK(orca_library_query_match_review(runtime, library, 0, 0, &calls, count_match_review) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_match_review(runtime, library, 512, 0, &calls, count_match_review) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_query_match_proposals(runtime, library, track_id, &calls, count_match_proposal) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_query_correction_groups(runtime, library, 512, 0, &calls, count_correction_group) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_track_verification(runtime, library, track_id, &calls, count_track_verification) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(calls.calls == 0);
+
+    orca_match_acceptance acceptance;
+    SMOKE_CHECK(orca_library_accept_match(runtime, library, 999999999, &acceptance) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_dismiss_match(runtime, library, 999999999) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_accept_correction_group(runtime, library, 999999999, &confident) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_dismiss_correction_group(runtime, library, 999999999) == ORCA_STATUS_NOT_FOUND);
+    uint32_t values_written = 1;
+    SMOKE_CHECK(orca_library_apply_matched_release(runtime, library, release_id, &values_written) == ORCA_STATUS_OK);
+    SMOKE_CHECK(values_written == 0);
+
+    orca_runtime *fresh = orca_runtime_create();
+    SMOKE_CHECK(fresh != 0);
+    int failed = matching_option_steps(fresh, release_id) != 0;
+    orca_runtime_destroy(fresh);
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -2716,6 +2825,7 @@ int main(int argc, char **argv) {
     if (health_smoke(runtime, library) != 0) return 1;
     if (tag_write_smoke(runtime, library) != 0) return 1;
     if (provider_smoke(runtime, library) != 0) return 1;
+    if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

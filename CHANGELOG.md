@@ -209,6 +209,24 @@
   truncates and zeroes after use; `orca_credential_result` tells absence from
   an unavailable store. `orca_library_scrobbler_credentials_changed` has the
   listen worker read and validate a changed ListenBrainz token.
+- **The C ABI matches, verifies and corrects.** `orca_library_start_match`
+  takes an `orca_match_options` with an `orca_match_mode` and
+  `orca_library_start_cover_art_fetch` fetches a Release's cover, both as
+  `ORCA_JOB_KIND_METADATA_LOOKUP` jobs whose `orca_match_stats`
+  `orca_job_match_stats` reads, with the `orca_acoustid_use`,
+  `orca_busy_service` and `orca_cover_art_outcome`.
+  `orca_library_query_match_review`, `orca_library_match_review_count`,
+  `orca_library_unidentified_count`, `orca_library_query_match_proposals`,
+  `orca_library_accept_match`, `orca_library_dismiss_match`,
+  `orca_library_confident_match_count`,
+  `orca_library_accept_confident_matches` and
+  `orca_library_apply_matched_release` review and accept proposals;
+  `orca_library_track_verification` hands an
+  `orca_track_verification_view` with its `orca_verification_outcome`, and
+  `orca_library_query_correction_groups`,
+  `orca_library_accept_correction_group` and
+  `orca_library_dismiss_correction_group` act on album groups of
+  corrections.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

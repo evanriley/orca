@@ -943,8 +943,8 @@ test "Now Playing is never sent unless the option and scrobbling are both on" {
     try std.testing.expectEqual(@as(u32, 0), rig.listenbrainz.requestCount());
 }
 
-const northern_sky_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
-const pink_moon_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
+pub const northern_sky_mbid = "0b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091";
+pub const pink_moon_mbid = "1d2e3f40-5162-4738-8a9b-0c1d2e3f4a5b";
 
 fn recordingEntry(comptime mbid: []const u8, comptime title: []const u8) []const u8 {
     return "{\"id\":\"" ++ mbid ++ "\",\"score\":100,\"title\":\"" ++ title ++
@@ -957,8 +957,8 @@ fn recordingAnswer(comptime mbid: []const u8, comptime title: []const u8) []cons
     return "{\"recordings\":[" ++ recordingEntry(mbid, title) ++ "]}";
 }
 
-const northern_sky_answer = recordingAnswer(northern_sky_mbid, "Northern Sky");
-const pink_moon_answer = recordingAnswer(pink_moon_mbid, "Pink Moon");
+pub const northern_sky_answer = recordingAnswer(northern_sky_mbid, "Northern Sky");
+pub const pink_moon_answer = recordingAnswer(pink_moon_mbid, "Pink Moon");
 
 const nick_drake_mbid = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
 const bryter_layter_group_mbid = "4b5c6d7e-8f90-4a1b-8c2d-3e4f5a6b7c8d";
@@ -980,7 +980,7 @@ const bryter_layter_release = "{\"id\":\"" ++ bryter_layter_mbid ++ "\",\"title\
 
 /// Every call arrives on the job's thread; a test reads the request count
 /// while the job runs and the rest only once it is reaped.
-const FakeMusicBrainz = struct {
+pub const FakeMusicBrainz = struct {
     transport: network.testing.ScriptedTransport = .{},
     clock: network.testing.TestClock = .{ .wall_offset_ms = wall_base_ms },
     answers: []const Answer = &.{},
@@ -994,7 +994,7 @@ const FakeMusicBrainz = struct {
     const Answer = struct { title: []const u8, body: []const u8 };
     const wall_base_ms: i64 = 1_800_000_000_000;
 
-    fn hooks(self: *FakeMusicBrainz) MatchingHooks {
+    pub fn hooks(self: *FakeMusicBrainz) MatchingHooks {
         self.transport.clock = &self.clock;
         self.transport.responder = .{ .context = self, .respond_fn = respond };
         return .{
@@ -1004,7 +1004,7 @@ const FakeMusicBrainz = struct {
         };
     }
 
-    fn requestCount(self: *const FakeMusicBrainz) u32 {
+    pub fn requestCount(self: *const FakeMusicBrainz) u32 {
         return self.transport.requestCount();
     }
 
@@ -1030,7 +1030,7 @@ const FakeMusicBrainz = struct {
     }
 };
 
-fn addMatchTrack(library_database: *database.LibraryDatabase, title: []const u8, artist: []const u8, mbid: ?[]const u8) !i64 {
+pub fn addMatchTrack(library_database: *database.LibraryDatabase, title: []const u8, artist: []const u8, mbid: ?[]const u8) !i64 {
     const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
     try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
         .title = title,
@@ -1831,7 +1831,7 @@ test "re-identifying a Release searches its identified files and points their pr
 
 /// Answers AcoustID lookups and submissions on the job's thread; a test reads
 /// what it recorded once the job is reaped.
-const FakeAcoustId = struct {
+pub const FakeAcoustId = struct {
     http: network.testing.ScriptedTransport = .{},
     /// Lookups from this one on hang until the job is cancelled.
     hang_lookups_from: ?u32 = null,
@@ -1845,7 +1845,7 @@ const FakeAcoustId = struct {
     lookups: std.atomic.Value(u32) = .init(0),
     submissions: std.atomic.Value(u32) = .init(0),
 
-    fn transport(self: *FakeAcoustId) network.client.Transport {
+    pub fn transport(self: *FakeAcoustId) network.client.Transport {
         self.http.responder = .{ .context = self, .respond_fn = respond };
         return self.http.transport();
     }
@@ -1884,7 +1884,7 @@ const AcoustIdUserKey = struct {
 };
 
 /// Fifteen seconds of a mono tone at 11025 Hz, long enough to fingerprint.
-fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
+pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     const rate = 11_025;
     const frames = 15 * rate;
     var bytes: [44 + frames * 2]u8 = undefined;
@@ -2155,28 +2155,28 @@ test "a submission sends a chosen recording ID once, fails without marking anyth
     try std.testing.expectEqual(@as(u32, 2), acoustid.submissions.load(.acquire));
 }
 
-const bryter_layter_mbid = "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b";
-const jpeg_cover = "\xff\xd8\xff\xe0\x00\x10JFIF cover";
+pub const bryter_layter_mbid = "2e3f4a5b-6c7d-4e8f-9a0b-1c2d3e4f5a6b";
+pub const jpeg_cover = "\xff\xd8\xff\xe0\x00\x10JFIF cover";
 
 /// The Cover Art Archive, answering every request alike on the job's thread.
-const FakeCoverArt = struct {
+pub const FakeCoverArt = struct {
     http: network.testing.ScriptedTransport = .{},
     status: u16 = 200,
     body: []const u8 = jpeg_cover,
     /// Redirects answered, in order, before the image.
     locations: []const []const u8 = &.{},
 
-    fn attach(self: *FakeCoverArt, hooks: *MatchingHooks) void {
+    pub fn attach(self: *FakeCoverArt, hooks: *MatchingHooks) void {
         self.http.keep_history = true;
         self.http.responder = .{ .context = self, .respond_fn = respond };
         hooks.cover_art_transport = self.http.transport();
     }
 
-    fn deinit(self: *FakeCoverArt) void {
+    pub fn deinit(self: *FakeCoverArt) void {
         self.http.deinit();
     }
 
-    fn requestCount(self: *const FakeCoverArt) u32 {
+    pub fn requestCount(self: *const FakeCoverArt) u32 {
         return self.http.requestCount();
     }
 
@@ -2188,11 +2188,11 @@ const FakeCoverArt = struct {
     }
 };
 
-fn addRelease(library_database: *database.LibraryDatabase, title: []const u8, mbid: ?[]const u8) !i64 {
+pub fn addRelease(library_database: *database.LibraryDatabase, title: []const u8, mbid: ?[]const u8) !i64 {
     return library_database.releases.upsert(.{ .release_key = title, .title = title, .musicbrainz_release_id = mbid });
 }
 
-fn addAlbumTrack(library_database: *database.LibraryDatabase, release_id: i64, title: []const u8) !i64 {
+pub fn addAlbumTrack(library_database: *database.LibraryDatabase, release_id: i64, title: []const u8) !i64 {
     const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
     try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{ .title = title } });
     try library_database.tracks.upsertTracks(&.{.{
@@ -2308,7 +2308,7 @@ fn releaseOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64
     return statement.columnInt64(0);
 }
 
-fn trackOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64 {
+pub fn trackOfFile(library_database: *database.LibraryDatabase, file_id: i64) !i64 {
     const ids = try library_database.tracks.idsForFile(std.testing.allocator, file_id);
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqual(@as(usize, 1), ids.len);
@@ -2888,20 +2888,20 @@ fn heardRecording(comptime mbid: []const u8, comptime title: []const u8) []const
         "\",\"duration\":15,\"artists\":[{\"id\":\"a1\",\"name\":\"Nick Drake\"}]}";
 }
 
-fn heardResult(comptime score: []const u8, comptime recordings: []const u8) []const u8 {
+pub fn heardResult(comptime score: []const u8, comptime recordings: []const u8) []const u8 {
     return "{\"id\":\"t" ++ score ++ "\",\"score\":" ++ score ++ ",\"recordings\":[" ++ recordings ++ "]}";
 }
 
-fn heardBy(comptime index: []const u8, comptime results: []const u8) []const u8 {
+pub fn heardBy(comptime index: []const u8, comptime results: []const u8) []const u8 {
     return "{\"index\":" ++ index ++ ",\"results\":[" ++ results ++ "]}";
 }
 
-fn acoustIdAnswer(comptime entries: []const u8) []const u8 {
+pub fn acoustIdAnswer(comptime entries: []const u8) []const u8 {
     return "{\"status\":\"ok\",\"fingerprints\":[" ++ entries ++ "]}";
 }
 
-const northern_sky_heard = heardRecording(northern_sky_mbid, "Northern Sky");
-const pink_moon_heard = heardRecording(pink_moon_mbid, "Pink Moon");
+pub const northern_sky_heard = heardRecording(northern_sky_mbid, "Northern Sky");
+pub const pink_moon_heard = heardRecording(pink_moon_mbid, "Pink Moon");
 const hazey_jane_heard = heardRecording(feedback_mbid, "Hazey Jane I");
 
 /// A runtime whose MusicBrainz and AcoustID are fakes, with an AcoustID key,
