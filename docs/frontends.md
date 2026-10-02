@@ -164,6 +164,13 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_scrobbler_credentials_changed` has a Library's listen worker
   read and validate a changed ListenBrainz token; see
   [Credentials](#credentials).
+- **Scrobbling.** `orca_library_set_scrobbling` sends a Library's listens and
+  feedback to ListenBrainz, or stops: `offline` keeps them queued without a
+  request and `now_playing` announces the playing track. At most one Library
+  per runtime scrobbles; enabling a second is `ORCA_STATUS_INVALID_STATE`.
+  `orca_library_scrobbler_status` hands an `orca_scrobbler_status_view` of the
+  `orca_scrobbler_state`, user name, last error and queue counts, cheap enough
+  to read each tick. See [Listening from a host](#listening-from-a-host).
 - **Matching, verification and corrections.** `orca_library_start_match`
   starts an `ORCA_JOB_KIND_METADATA_LOOKUP` job from an `orca_match_options`
   (NULL searches the whole library with fingerprints): an
@@ -689,9 +696,12 @@ The identity and the server are copied. The store's context is borrowed and
 must outlive the runtime. The setters may be called at any time
 and reach each listen worker on its next pass; a host that sets them before
 binding a Player to a Library avoids a first pass with the defaults. Listens are sampled inside
-`processNextCommand`, so a host pumps it as it already does. The C ABI sets the
-store, the identity and the server ([Credentials](#credentials)) but does not
-turn scrobbling on yet. [providers.md](providers.md) describes what a listen is
+`processNextCommand`, so a host pumps it as it already does. The C ABI covers the
+same steps: the credential callback ([Credentials](#credentials)),
+`orca_runtime_set_client_identity`, `orca_runtime_set_provider_server`,
+`orca_library_set_scrobbling`, `orca_library_scrobbler_credentials_changed`,
+`orca_library_scrobbler_status`, `orca_library_set_feedback` and
+`orca_library_set_release_love`. [providers.md](providers.md) describes what a listen is
 and what is sent.
 
 ## macOS SwiftUI

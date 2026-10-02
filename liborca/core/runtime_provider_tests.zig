@@ -31,7 +31,7 @@ const ScrobblerState = runtime_module.ScrobblerState;
 const SubmissionOutcome = runtime_module.SubmissionOutcome;
 const libraryDatabase = runtime_module.libraryDatabase;
 
-fn sampleClock(clock: *network.testing.TestClock) listen_worker.SampleClock {
+pub fn sampleClock(clock: *network.testing.TestClock) listen_worker.SampleClock {
     return .{ .context = clock, .now_fn = sampleNow };
 }
 

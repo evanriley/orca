@@ -235,6 +235,12 @@
   and `orca_library_query_acoustid_submittable` pages them by file id as
   `orca_acoustid_submittable_view`s. A submission beside a matching job is
   `ORCA_STATUS_BUSY`.
+- **The C ABI scrobbles to ListenBrainz.** `orca_library_set_scrobbling`
+  turns sending a Library's listens and feedback on or off, offline or with
+  Now Playing; a second Library while one scrobbles is
+  `ORCA_STATUS_INVALID_STATE`. `orca_library_scrobbler_status` hands an
+  `orca_scrobbler_status_view` of the `orca_scrobbler_state`, user name, last
+  error, retry and block times and queue counts.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

@@ -1021,6 +1021,96 @@ orca_status orca_runtime_set_credential_callback(
  */
 orca_status orca_library_scrobbler_credentials_changed(orca_runtime *runtime, orca_handle library);
 
+/*
+ * Sends this Library's listens and feedback to ListenBrainz, or stops sending
+ * them. Listens are recorded in the Library either way; one recorded while
+ * scrobbling is off is never sent later. `offline` keeps listens queued
+ * without making any request, and `now_playing` also announces the playing
+ * track. Each flag is 0 or 1; anything else is ORCA_STATUS_INVALID_ARGUMENT.
+ *
+ * At most one Library per runtime scrobbles: enabling a second one returns
+ * ORCA_STATUS_INVALID_STATE ("ScrobblingEnabledElsewhere") until the first is
+ * disabled or closed. Enabling also needs orca_runtime_set_client_identity
+ * first ("ClientIdentityRequired", INVALID_STATE), and a Library whose
+ * database the runtime has already closed is INVALID_STATE. Enabling starts
+ * the Library's listen worker; the token comes from the credential callback
+ * (ORCA_CREDENTIAL_SERVICE_LISTENBRAINZ / ORCA_CREDENTIAL_ACCOUNT_USER_TOKEN)
+ * and the server from orca_runtime_set_provider_server.
+ */
+orca_status orca_library_set_scrobbling(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t enabled,
+    uint8_t offline,
+    uint8_t now_playing
+);
+
+typedef enum orca_scrobbler_state {
+    /* Scrobbling is off for this Library. */
+    ORCA_SCROBBLER_STATE_DISABLED = 0,
+    ORCA_SCROBBLER_STATE_IDLE = 1,
+    /* The credential callback has no ListenBrainz token. */
+    ORCA_SCROBBLER_STATE_NEEDS_TOKEN = 2,
+    ORCA_SCROBBLER_STATE_VALIDATING = 3,
+    /* ListenBrainz refused the token; see last_error. */
+    ORCA_SCROBBLER_STATE_INVALID_TOKEN = 4,
+    ORCA_SCROBBLER_STATE_SUBMITTING = 5,
+    /* A request failed; the next is at next_attempt_at. */
+    ORCA_SCROBBLER_STATE_BACKING_OFF = 6,
+    /* ListenBrainz asked Orca to wait; see blocked_until. */
+    ORCA_SCROBBLER_STATE_RATE_LIMITED = 7,
+    /* Listens are waiting while scrobbling is offline. */
+    ORCA_SCROBBLER_STATE_OFFLINE = 8,
+    /* Another Orca process sharing the database holds ListenBrainz. */
+    ORCA_SCROBBLER_STATE_BUSY = 9,
+} orca_scrobbler_state;
+
+typedef struct orca_scrobbler_status_view {
+    /* Unix seconds; valid when has_next_attempt_at is 1. */
+    int64_t next_attempt_at;
+    /* When ListenBrainz accepts requests again, in Unix seconds, while this
+     * Library records it refusing them; valid when has_blocked_until is 1. */
+    int64_t blocked_until;
+    /* Queued listens not yet delivered or rejected. */
+    uint64_t pending;
+    uint64_t feedback_pending;
+    uint64_t delivered_total;
+    /* Listens recorded since the Library was opened. */
+    uint64_t recorded_total;
+    /* Listens heard since the Library was opened and not recorded. */
+    uint64_t dropped;
+    uint8_t enabled;
+    /* An orca_scrobbler_state. */
+    uint8_t state;
+    uint8_t has_next_attempt_at;
+    uint8_t has_blocked_until;
+    uint8_t reserved[4];
+    /* The ListenBrainz user the token belongs to; empty until validated. */
+    orca_string_view user_name;
+    /* Why the last request or token lookup failed; empty when none did. */
+    orca_string_view last_error;
+} orca_scrobbler_status_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_scrobbler_status_callback)(
+    void *context,
+    const orca_scrobbler_status_view *status
+);
+
+/*
+ * Invokes the callback once with the scrobbler's last published state. A
+ * Library whose listen worker is not running reports the queue counts from
+ * its database, reading it at most once a second, and starts nothing, so a
+ * host may call this on each tick. A NULL callback is
+ * ORCA_STATUS_INVALID_ARGUMENT.
+ */
+orca_status orca_library_scrobbler_status(
+    orca_runtime *runtime,
+    orca_handle library,
+    void *context,
+    orca_scrobbler_status_callback callback
+);
+
 /* -------------------------------------------------------------- library */
 
 orca_status orca_library_open(

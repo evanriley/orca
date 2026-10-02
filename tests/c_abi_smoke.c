@@ -2106,6 +2106,93 @@ static int acoustid_submission_smoke(orca_runtime *runtime, orca_handle library)
     return 0;
 }
 
+struct scrobbler_capture {
+    int calls;
+    orca_scrobbler_status_view view;
+    size_t user_name_length;
+    size_t last_error_length;
+};
+
+static void capture_scrobbler_status(void *context, const orca_scrobbler_status_view *status) {
+    struct scrobbler_capture *capture = context;
+    capture->calls += 1;
+    capture->view = *status;
+    capture->user_name_length = status->user_name.length;
+    capture->last_error_length = status->last_error.length;
+}
+
+static int read_scrobbler(orca_runtime *runtime, orca_handle library, struct scrobbler_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_library_scrobbler_status(runtime, library, capture, capture_scrobbler_status) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->calls == 1);
+    return 0;
+}
+
+static int scrobbling_library_steps(orca_runtime *runtime) {
+    orca_handle first;
+    orca_handle second;
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-scrobble-first?mode=memory&cache=shared", &first) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_open(runtime, "file:orca-c-smoke-scrobble-second?mode=memory&cache=shared", &second) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, first, 1, 1, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, second, 1, 1, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_set_scrobbling: ScrobblingEnabledElsewhere") ==
+                0);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, first, 0, 0, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, second, 1, 1, 0) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int scrobbling_smoke(orca_runtime *runtime, orca_handle library) {
+    struct scrobbler_capture capture;
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 1, 1, 0) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_library_set_scrobbling: ClientIdentityRequired") == 0);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 2, 1, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 1, 2, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 1, 1, 2) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_scrobbler_status(runtime, library, 0, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    uint64_t recorded = 0;
+    SMOKE_CHECK(orca_library_listens_recorded(runtime, library, &recorded) == ORCA_STATUS_OK);
+    if (read_scrobbler(runtime, library, &capture) != 0) return 1;
+    SMOKE_CHECK(capture.view.enabled == 0 && capture.view.state == ORCA_SCROBBLER_STATE_DISABLED);
+    SMOKE_CHECK(capture.view.recorded_total == recorded);
+    SMOKE_CHECK(capture.view.pending == 0 && capture.view.delivered_total == 0);
+
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 1, 1, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_scrobbler_credentials_changed(runtime, library) == ORCA_STATUS_OK);
+    if (read_scrobbler(runtime, library, &capture) != 0) return 1;
+    SMOKE_CHECK(capture.view.enabled == 1);
+    SMOKE_CHECK(capture.view.state == ORCA_SCROBBLER_STATE_IDLE || capture.view.state == ORCA_SCROBBLER_STATE_OFFLINE);
+    SMOKE_CHECK(capture.view.pending == 0 && capture.view.delivered_total == 0);
+    SMOKE_CHECK(capture.view.recorded_total == recorded && capture.view.dropped == 0);
+    SMOKE_CHECK(capture.user_name_length == 0 && capture.last_error_length == 0);
+
+    orca_handle stale = library;
+    stale.generation += 1;
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, stale, 1, 1, 0) == ORCA_STATUS_STALE_HANDLE);
+    SMOKE_CHECK(orca_library_scrobbler_status(runtime, stale, &capture, capture_scrobbler_status) ==
+                ORCA_STATUS_STALE_HANDLE);
+
+    SMOKE_CHECK(orca_library_set_scrobbling(runtime, library, 0, 0, 0) == ORCA_STATUS_OK);
+    if (read_scrobbler(runtime, library, &capture) != 0) return 1;
+    SMOKE_CHECK(capture.view.enabled == 0 && capture.view.state == ORCA_SCROBBLER_STATE_DISABLED);
+    SMOKE_CHECK(capture.view.delivered_total == 0 && capture.last_error_length == 0);
+
+    orca_runtime *fresh = orca_runtime_create();
+    SMOKE_CHECK(fresh != 0);
+    int failed = scrobbling_library_steps(fresh) != 0;
+    orca_runtime_destroy(fresh);
+    SMOKE_CHECK(failed == 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -2861,6 +2948,7 @@ int main(int argc, char **argv) {
     if (provider_smoke(runtime, library) != 0) return 1;
     if (matching_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0) return 1;
     if (acoustid_submission_smoke(runtime, library) != 0) return 1;
+    if (scrobbling_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

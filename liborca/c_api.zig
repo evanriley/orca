@@ -856,6 +856,25 @@ pub const CorrectionGroupView = extern struct {
 
 pub const CorrectionGroupCallback = *const fn (?*anyopaque, *const CorrectionGroupView) callconv(.c) void;
 
+pub const ScrobblerStatusView = extern struct {
+    next_attempt_at: i64,
+    blocked_until: i64,
+    pending: u64,
+    feedback_pending: u64,
+    delivered_total: u64,
+    recorded_total: u64,
+    dropped: u64,
+    enabled: u8,
+    state: u8,
+    has_next_attempt_at: u8,
+    has_blocked_until: u8,
+    _reserved: [4]u8 = @splat(0),
+    user_name: StringView,
+    last_error: StringView,
+};
+
+pub const ScrobblerStatusCallback = *const fn (?*anyopaque, *const ScrobblerStatusView) callconv(.c) void;
+
 /// A foreign frontend cannot hand Orca a `std.Io`, so the boundary owns one.
 /// It is the synchronous, allocation-free implementation: liborca performs no
 /// async I/O, and a host's event loop must never be co-opted by the ABI.
@@ -2264,6 +2283,66 @@ pub export fn orca_runtime_set_credential_callback(
 pub export fn orca_library_scrobbler_credentials_changed(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.libraryScrobblerCredentialsChanged(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_set_scrobbling(
+    runtime: ?*Runtime,
+    library: Handle,
+    enabled: u8,
+    offline: u8,
+    now_playing: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    if (enabled > 1) return box.reject(@src(), .invalid_argument, "enabled must be 0 or 1");
+    if (offline > 1) return box.reject(@src(), .invalid_argument, "offline must be 0 or 1");
+    if (now_playing > 1) return box.reject(@src(), .invalid_argument, "now_playing must be 0 or 1");
+    box.runtime.librarySetScrobbling(importLibrary(library), enabled == 1, offline == 1, now_playing == 1) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub fn exportScrobblerState(state: core.runtime.ScrobblerState) u8 {
+    return switch (state) {
+        .disabled => 0,
+        .idle => 1,
+        .needs_token => 2,
+        .validating => 3,
+        .invalid_token => 4,
+        .submitting => 5,
+        .backing_off => 6,
+        .rate_limited => 7,
+        .offline => 8,
+        .busy => 9,
+    };
+}
+
+pub export fn orca_library_scrobbler_status(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?ScrobblerStatusCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const deliver = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const status = box.runtime.libraryScrobblerStatus(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    const view: ScrobblerStatusView = .{
+        .next_attempt_at = status.next_attempt_at orelse 0,
+        .blocked_until = status.blocked_until orelse 0,
+        .pending = status.pending,
+        .feedback_pending = status.feedback_pending,
+        .delivered_total = status.delivered_total,
+        .recorded_total = status.recorded_total,
+        .dropped = status.dropped,
+        .enabled = @intFromBool(status.enabled),
+        .state = exportScrobblerState(status.state),
+        .has_next_attempt_at = @intFromBool(status.next_attempt_at != null),
+        .has_blocked_until = @intFromBool(status.blocked_until != null),
+        .user_name = stringView(status.user_name.slice()),
+        .last_error = stringView(status.last_error.slice()),
+    };
+    deliver(context, &view);
     return .ok;
 }
 
@@ -4283,6 +4362,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidJobTransition,
         error.JobAlreadyFinished,
         error.WorkersRunning,
+        error.ScrobblingEnabledElsewhere,
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
@@ -6321,4 +6401,200 @@ test "a submission refuses to start beside a running match or without a client i
     try std.testing.expectEqual(Status.ok, orca_library_open(unnamed, "file:orca-c-api-submission-unnamed?mode=memory&cache=shared", &unnamed_library));
     try std.testing.expectEqual(Status.invalid_state, orca_library_start_acoustid_submission(unnamed, unnamed_library, &submitting));
     try std.testing.expectEqualStrings("orca_library_start_acoustid_submission: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(unnamed)));
+}
+
+const CapturedScrobblerStatus = struct {
+    calls: usize = 0,
+    view: ScrobblerStatusView = std.mem.zeroes(ScrobblerStatusView),
+    user_name: CapturedText = .{},
+    last_error: CapturedText = .{},
+};
+
+fn captureScrobblerStatus(context: ?*anyopaque, status: *const ScrobblerStatusView) callconv(.c) void {
+    const captured: *CapturedScrobblerStatus = @ptrCast(@alignCast(context.?));
+    captured.calls += 1;
+    captured.view = status.*;
+    captured.user_name.set(status.user_name);
+    captured.last_error.set(status.last_error);
+}
+
+const ScrobbleRig = struct {
+    transport: network.testing.ScriptedTransport = .{
+        .otherwise = .{ .respond = .{ .body = "{\"valid\":true,\"user_name\":\"listener\"}" } },
+    },
+    clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 },
+    sample_clock: network.testing.TestClock = .{ .wall_offset_ms = 1_700_000_000_000 },
+    keyring: FakeKeyring = .{},
+    runtime: *Runtime,
+    library: Handle = undefined,
+    track_id: i64 = 0,
+
+    fn init(self: *ScrobbleRig, uri: [*:0]const u8) !void {
+        const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+        self.* = .{ .runtime = runtime };
+        errdefer self.deinit();
+        const box = runtimeBox(runtime).?;
+        try std.testing.expectEqual(Status.ok, orca_runtime_set_credential_callback(runtime, FakeKeyring.lookup, &self.keyring));
+        try std.testing.expectEqual(Status.ok, orca_runtime_set_client_identity(runtime, "Host", "1.0", "https://host.invalid"));
+        try std.testing.expectEqual(Status.ok, orca_runtime_set_provider_server(runtime, 0, "http://127.0.0.1:8080"));
+        box.runtime.listen_hooks = .{
+            .transport = self.transport.transport(),
+            .clock = self.clock.clock(),
+            .wall_clock = self.clock.wallClock(),
+            .sample_clock = provider_tests.sampleClock(&self.sample_clock),
+            .poll_ms = 5,
+        };
+        try std.testing.expectEqual(Status.ok, orca_library_open(runtime, uri, &self.library));
+        const library_database = try core.runtime.libraryDatabase(&box.runtime, importLibrary(self.library));
+        self.track_id = try provider_tests.addMatchTrack(library_database, "Northern Sky", "Nick Drake", null);
+    }
+
+    fn deinit(self: *ScrobbleRig) void {
+        orca_runtime_destroy(self.runtime);
+        self.transport.deinit();
+    }
+
+    fn status(self: *ScrobbleRig) !CapturedScrobblerStatus {
+        var captured: CapturedScrobblerStatus = .{};
+        try std.testing.expectEqual(Status.ok, orca_library_scrobbler_status(self.runtime, self.library, &captured, captureScrobblerStatus));
+        try std.testing.expectEqual(@as(usize, 1), captured.calls);
+        return captured;
+    }
+
+    fn hearListen(self: *ScrobbleRig) !void {
+        const box = runtimeBox(self.runtime).?;
+        var player: Handle = undefined;
+        try std.testing.expectEqual(Status.ok, orca_player_create(self.runtime, &player));
+        try std.testing.expectEqual(Status.ok, orca_player_set_library(self.runtime, player, self.library));
+        const object_value = try box.runtime.players.get(importPlayer(player));
+        try object_value.queue.replace(&.{.{ .library = importLibrary(self.library), .track_id = self.track_id }}, 0);
+        object_value.player.published_sample_rate.store(1000, .release);
+        object_value.player.published_frame_count.store(180_000, .release);
+        object_value.player.audible_entry_serial.store(7, .release);
+        object_value.player.position_frames.store(0, .release);
+        object_value.player.state.store(.playing, .release);
+        var elapsed: u64 = 0;
+        while (elapsed < 100_000) : (elapsed += 100) {
+            self.sample_clock.advance(100);
+            _ = object_value.player.position_frames.fetchAdd(100, .acq_rel);
+            _ = box.runtime.processNextCommand();
+        }
+        var deadline: core.runtime_tests.TestDeadline = .init(5_000);
+        while ((try self.status()).view.recorded_total < 1) {
+            if (!deadline.tick()) return error.ListenNotRecorded;
+        }
+    }
+
+    fn awaitStatus(self: *ScrobbleRig, comptime reached: fn (*const CapturedScrobblerStatus) bool) !CapturedScrobblerStatus {
+        var deadline: core.runtime_tests.TestDeadline = .init(5_000);
+        while (true) {
+            const captured = try self.status();
+            if (reached(&captured)) return captured;
+            if (!deadline.tick()) return error.ScrobblerNeverReachedState;
+        }
+    }
+
+    fn lastError(self: *ScrobbleRig) []const u8 {
+        return std.mem.span(orca_runtime_last_error(self.runtime));
+    }
+};
+
+fn deliveredWithUser(captured: *const CapturedScrobblerStatus) bool {
+    return captured.view.delivered_total == 1 and std.mem.eql(u8, captured.user_name.text(), "listener");
+}
+
+fn heldOffline(captured: *const CapturedScrobblerStatus) bool {
+    return captured.view.pending == 1 and captured.view.state == exportScrobblerState(.offline);
+}
+
+fn deliveredOnce(captured: *const CapturedScrobblerStatus) bool {
+    return captured.view.delivered_total == 1 and captured.view.pending == 0;
+}
+
+test "scrobbling turned on through the C ABI validates the host's token and delivers a heard listen to ListenBrainz" {
+    var rig: ScrobbleRig = undefined;
+    try rig.init("file:orca-c-api-scrobbled?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    var before = try rig.status();
+    try std.testing.expectEqual(@as(u8, 0), before.view.enabled);
+    try std.testing.expectEqual(exportScrobblerState(.disabled), before.view.state);
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 0, 0));
+    try std.testing.expectEqual(Status.ok, orca_library_scrobbler_credentials_changed(rig.runtime, rig.library));
+    try rig.hearListen();
+
+    const delivered = try rig.awaitStatus(deliveredWithUser);
+    try std.testing.expectEqual(@as(u8, 1), delivered.view.enabled);
+    try std.testing.expectEqual(@as(u64, 0), delivered.view.pending);
+    try std.testing.expectEqual(@as(u64, 1), delivered.view.recorded_total);
+    try std.testing.expectEqual(@as(u64, 0), delivered.view.dropped);
+    try std.testing.expectEqual(@as(u8, 0), delivered.view.has_blocked_until);
+    try std.testing.expectEqualStrings("", delivered.last_error.text());
+    try std.testing.expectEqualStrings("Token host-secret", rig.transport.lastAuthorization());
+    try std.testing.expect(std.mem.endsWith(u8, rig.transport.lastUrl(), "/1/submit-listens"));
+    try std.testing.expectEqualStrings("org.listenbrainz", rig.keyring.serviceName());
+    try std.testing.expectEqualStrings("user-token", rig.keyring.accountName());
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 0, 0, 0));
+    before = try rig.status();
+    try std.testing.expectEqual(@as(u8, 0), before.view.enabled);
+    try std.testing.expectEqual(exportScrobblerState(.disabled), before.view.state);
+    try std.testing.expectEqual(@as(u64, 1), before.view.delivered_total);
+}
+
+test "offline scrobbling keeps a heard listen pending without any request, and going online sends it" {
+    var rig: ScrobbleRig = undefined;
+    try rig.init("file:orca-c-api-scrobbled-offline?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 1, 1));
+    try std.testing.expectEqual(Status.ok, orca_library_scrobbler_credentials_changed(rig.runtime, rig.library));
+    try rig.hearListen();
+
+    const held = try rig.awaitStatus(heldOffline);
+    try std.testing.expectEqual(@as(u8, 1), held.view.enabled);
+    try std.testing.expectEqual(@as(u64, 0), held.view.delivered_total);
+    try std.testing.expectEqualStrings("", held.user_name.text());
+    try std.testing.expectEqual(@as(u32, 0), rig.transport.requestCount());
+
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 0, 0));
+    _ = try rig.awaitStatus(deliveredOnce);
+    try std.testing.expect(rig.transport.requestCount() >= 1);
+}
+
+test "scrobbling refuses flags other than 0 or 1, a host that has not named itself, a second Library and a null callback" {
+    var rig: ScrobbleRig = undefined;
+    try rig.init("file:orca-c-api-scrobble-refusals?mode=memory&cache=shared");
+    defer rig.deinit();
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_scrobbling(rig.runtime, rig.library, 2, 0, 0));
+    try std.testing.expectEqualStrings("orca_library_set_scrobbling: enabled must be 0 or 1", rig.lastError());
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 2, 0));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 0, 255));
+    try std.testing.expectEqual(@as(u8, 0), (try rig.status()).view.enabled);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_scrobbler_status(rig.runtime, rig.library, null, null));
+
+    var second: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(rig.runtime, "file:orca-c-api-scrobble-second?mode=memory&cache=shared", &second));
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 1, 1, 0));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_set_scrobbling(rig.runtime, second, 1, 1, 0));
+    try std.testing.expectEqualStrings("orca_library_set_scrobbling: ScrobblingEnabledElsewhere", rig.lastError());
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, second, 0, 0, 0));
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, rig.library, 0, 0, 0));
+    try std.testing.expectEqual(Status.ok, orca_library_set_scrobbling(rig.runtime, second, 1, 1, 0));
+
+    const stale: Handle = .{ .index = rig.library.index, .generation = rig.library.generation + 1 };
+    try std.testing.expectEqual(Status.stale_handle, orca_library_set_scrobbling(rig.runtime, stale, 1, 0, 0));
+    var captured: CapturedScrobblerStatus = .{};
+    try std.testing.expectEqual(Status.stale_handle, orca_library_scrobbler_status(rig.runtime, stale, &captured, captureScrobblerStatus));
+    try std.testing.expectEqual(@as(usize, 0), captured.calls);
+    try std.testing.expectEqual(@as(u32, 0), rig.transport.requestCount());
+
+    const unnamed = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(unnamed);
+    var unnamed_library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(unnamed, "file:orca-c-api-scrobble-unnamed?mode=memory&cache=shared", &unnamed_library));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_set_scrobbling(unnamed, unnamed_library, 1, 1, 0));
+    try std.testing.expectEqualStrings("orca_library_set_scrobbling: ClientIdentityRequired", std.mem.span(orca_runtime_last_error(unnamed)));
 }

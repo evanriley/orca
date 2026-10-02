@@ -74,6 +74,7 @@ const struct_pairs = .{
     .{ c_api.TrackVerificationView, c.orca_track_verification_view },
     .{ c_api.CorrectionMemberView, c.orca_correction_member_view },
     .{ c_api.CorrectionGroupView, c.orca_correction_group_view },
+    .{ c_api.ScrobblerStatusView, c.orca_scrobbler_status_view },
 };
 
 const export_mappings = .{
@@ -96,6 +97,13 @@ const export_mappings = .{
         pub const Tag = core.runtime.CoverArtOutcome;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportCoverArtOutcome(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_SCROBBLER_STATE_";
+        pub const Tag = core.runtime.ScrobblerState;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportScrobblerState(tag);
         }
     },
     struct {
