@@ -361,8 +361,16 @@ Where watching is unsupported the switch is not shown. Its subtitle shows
 `libraryWatchStatus`, refreshed on each tick while Preferences is open: how
 many folders are watched and how many are unavailable, and, when the watch
 limit was reached, that `fs.inotify.max_user_watches` must be raised (on
-NixOS through `boot.kernel.sysctl`). The tick rereads every library view once
-for each drain that brought a `Telemetry.library_changed` for the open
+NixOS through `boot.kernel.sysctl`). **Idle maintenance**, off by default
+and saved as `[maintenance] enabled`, calls `libraryMaintenance` with the
+default five-minute interval, enabled only while Match by audio fingerprint is
+on (the switch is insensitive otherwise). Its subtitle shows
+`libraryMaintenanceStatus`: the minutes to the next unit and the units run, or
+why it is blocked, kept current by a wake at least every 15 seconds while
+Preferences is open. Each tick reads that status once, and when `units_run`
+has grown it reloads Health and Matches without a toast. A job started from
+the frontend while a unit runs is queued and shows as starting until the unit
+stops. The tick rereads every library view once for each drain that brought a `Telemetry.library_changed` for the open
 library. Automatic reconciles never take the status card, which follows only
 jobs this frontend started, and a Rescan or other job started from the
 frontend pre-empts a running one. Scans, measurement, duplicate finding, tag writes,

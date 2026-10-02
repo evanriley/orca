@@ -15,6 +15,7 @@ const secret = @import("secret.zig");
 const transport = @import("transport.zig");
 const matches = @import("matches.zig");
 const watching = @import("watching.zig");
+const maintenance = @import("maintenance.zig");
 
 const App = app.App;
 
@@ -154,6 +155,39 @@ fn showWatchStatus(self: *App) void {
     adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), text.ptr);
 }
 
+fn maintenanceSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    if (enabled == self.idle_maintenance) return;
+    self.idle_maintenance = enabled;
+    maintenance.apply(self) catch {
+        self.idle_maintenance = !enabled;
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), if (self.idle_maintenance) gtk.true_ else gtk.false_);
+        dialogToast(self, if (enabled) "Could not turn on idle maintenance" else "Could not turn off idle maintenance");
+        return;
+    };
+    settings.save(self);
+    showMaintenanceStatus(self);
+    self.requestTick();
+}
+
+fn maintenanceStatusText(buffer: []u8, self: *App) [:0]const u8 {
+    if (!self.match_fingerprints) return "Needs Match by audio fingerprint";
+    const status = maintenance.status(self) orelse return "";
+    return maintenance.statusText(buffer, status);
+}
+
+fn showMaintenanceStatus(self: *App) void {
+    const row = self.maintenance_row orelse return;
+    gtk.gtk_widget_set_sensitive(row, if (self.match_fingerprints) gtk.true_ else gtk.false_);
+    var buffer: [128]u8 = undefined;
+    const text = maintenanceStatusText(&buffer, self);
+    if (std.mem.eql(u8, text, self.maintenance_status_text[0..self.maintenance_status_len])) return;
+    @memcpy(self.maintenance_status_text[0..text.len], text);
+    self.maintenance_status_len = text.len;
+    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), text.ptr);
+}
+
 fn measureClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     closeDialog(self);
@@ -202,6 +236,9 @@ fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
     self.match_fingerprints = enabled;
     settings.save(self);
     matches.reload(self);
+    maintenance.apply(self) catch dialogToast(self, "Could not change idle maintenance");
+    showMaintenanceStatus(self);
+    self.requestTick();
 }
 
 const acoustid_key_url = "https://acoustid.org/api-key";
@@ -286,7 +323,7 @@ fn libraryPage(self: *App) *gtk.Widget {
     }
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, folders));
 
-    const maintenance = group("Maintenance", null);
+    const maintenance_group = group("Maintenance", null);
     const unmeasured = self.runtime.libraryUnanalyzedCount(library) catch 0;
     const measure_text: [:0]const u8 = if (unmeasured == 0)
         "Every file is measured. ReplayGain and duplicate finding use these measurements."
@@ -296,7 +333,7 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, measure), 3);
     const measure_button = suffixButton(measure, "Measure", null, gtk.callback(measureClicked), self);
     if (unmeasured == 0) gtk.gtk_widget_set_sensitive(measure_button, gtk.false_);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), measure);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), measure);
     const available_threads = liborca.analysisAvailableThreads();
     const shown_threads = @min(self.analysis_threads orelse liborca.analysisDefaultThreads(), available_threads);
     const threads = adw.adw_spin_row_new_with_range(1, @floatFromInt(available_threads), 1);
@@ -306,11 +343,20 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threads), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threads), @floatFromInt(shown_threads));
     _ = gtk.signalConnect(threads, "notify::value", gtk.callback(analysisThreadsChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), threads);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), threads);
     const duplicates = actionRow("Find Duplicates", "Compares measured audio, so files that are the same recording show up in Health.");
     adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, duplicates), 3);
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), duplicates);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), duplicates);
+    const idle = adw.adw_switch_row_new();
+    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, idle), "Idle maintenance");
+    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, idle), 3);
+    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, idle), if (self.idle_maintenance) gtk.true_ else gtk.false_);
+    _ = gtk.signalConnect(idle, "notify::active", gtk.callback(maintenanceSwitched), self);
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), idle);
+    self.maintenance_row = idle;
+    self.maintenance_status_len = 0;
+    showMaintenanceStatus(self);
     const range = settings.threshold_range;
     const threshold = adw.adw_spin_row_new_with_range(@floatFromInt(range[0]), @floatFromInt(range[1]), 1);
     adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threshold), "Accept confident matches at");
@@ -319,8 +365,8 @@ fn libraryPage(self: *App) *gtk.Widget {
     adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
     adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));
     _ = gtk.signalConnect(threshold, "notify::value", gtk.callback(thresholdChanged), self);
-    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance), threshold);
-    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, maintenance));
+    adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, maintenance_group), threshold);
+    adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, maintenance_group));
     adw.adw_preferences_page_add(gtk.cast(adw.PreferencesPage, page), gtk.cast(adw.PreferencesGroup, acoustIdGroup(self)));
     return page;
 }
@@ -985,6 +1031,7 @@ pub fn tick(self: *App) void {
     if (self.preferences_dialog == null) return;
     showListeningStatus(self);
     showWatchStatus(self);
+    showMaintenanceStatus(self);
 }
 
 fn listeningPage(self: *App) *gtk.Widget {
@@ -1045,6 +1092,7 @@ fn dialogClosed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.listening_controls = .{};
     self.acoustid_controls = .{};
     self.watch_row = null;
+    self.maintenance_row = null;
     if (self.equalizer_apply_timer != 0) applyEqualizer(self, equalizerIsOn(self));
 }
 

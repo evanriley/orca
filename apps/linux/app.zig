@@ -242,6 +242,7 @@ pub const App = struct {
     health_title: ?*adw.WindowTitle = null,
     health_count: ?*gtk.Label = null,
     health_banner: ?*adw.Banner = null,
+    health_issues_shown: u64 = 0,
 
     matches_list: ?*gtk.ListBox = null,
     matches_corrections: ?*gtk.ListBox = null,
@@ -273,6 +274,11 @@ pub const App = struct {
     watch_row: ?*gtk.Widget = null,
     watch_status_text: [320]u8 = undefined,
     watch_status_len: usize = 0,
+    idle_maintenance: bool = false,
+    maintenance_row: ?*gtk.Widget = null,
+    maintenance_status_text: [128]u8 = undefined,
+    maintenance_status_len: usize = 0,
+    maintenance_units_seen: u64 = 0,
 
     scrobbling: bool = false,
     announce_now_playing: bool = false,

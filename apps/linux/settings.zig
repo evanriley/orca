@@ -4,8 +4,8 @@
 //! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
-//! the music folders are watched, and how many files Measure Loudness decodes
-//! at once. Nothing about the library does, and never the ListenBrainz token
+//! the music folders are watched, whether idle maintenance runs, and how many
+//! files Measure Loudness decodes at once. Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
@@ -154,6 +154,10 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.watch_folders = isEnabled(std.mem.span(value));
     }
+    if (getString(keys, "maintenance", "enabled")) |value| {
+        defer gtk.g_free(value);
+        self.idle_maintenance = isEnabled(std.mem.span(value));
+    }
     if (getString(keys, "library", "analysis_threads")) |value| {
         defer gtk.g_free(value);
         self.analysis_threads = parseThreads(std.mem.span(value));
@@ -191,6 +195,7 @@ pub fn save(self: *App) void {
         var threads_buffer: [8]u8 = undefined;
         gtk.g_key_file_set_string(keys, "library", "analysis_threads", strings.format(&threads_buffer, "{d}", .{threads}).ptr);
     }
+    gtk.g_key_file_set_string(keys, "maintenance", "enabled", if (self.idle_maintenance) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.details_visible) "true" else "false");
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {

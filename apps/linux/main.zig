@@ -34,6 +34,7 @@ const tags = @import("tags.zig");
 const art = @import("art.zig");
 const secret = @import("secret.zig");
 const watching = @import("watching.zig");
+const maintenance = @import("maintenance.zig");
 const playlists = @import("playlists.zig");
 
 const stylesheet = @embedFile("style.css");
@@ -83,6 +84,7 @@ fn tick(self: *App) void {
     transport.tick(self);
     queue.tick(self);
     jobs.tick(self);
+    maintenance.tick(self);
     preferences.tick(self);
     details.tick(self);
     armTimeout(self);
@@ -93,7 +95,10 @@ fn armTimeout(self: *App) void {
         _ = gtk.g_source_remove(self.timeout_source);
         self.timeout_source = 0;
     }
-    const timeout_ms = self.runtime.nextPumpTimeoutMs() orelse return;
+    var next_ms = self.runtime.nextPumpTimeoutMs();
+    if (self.maintenance_row != null and self.idle_maintenance)
+        next_ms = @min(next_ms orelse maintenance.refresh_ms, maintenance.refresh_ms);
+    const timeout_ms = next_ms orelse return;
     const interval = std.math.cast(c_uint, timeout_ms) orelse std.math.maxInt(c_uint);
     self.timeout_source = gtk.g_timeout_add(interval, timeoutFired, self);
 }
@@ -488,6 +493,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     settings.load(&self);
     _ = watching.apply(&self);
+    maintenance.apply(&self) catch {};
 
     const application: *gtk.Application = @ptrCast(adw.adw_application_new(
         application_id,

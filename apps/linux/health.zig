@@ -410,6 +410,7 @@ pub fn reload(self: *App) void {
     gtk.gtk_list_box_remove_all(list);
     const library = self.library orelse return;
     const total = self.runtime.libraryHealthIssueCount(library) catch 0;
+    self.health_issues_shown = total;
     if (self.health_count) |label| {
         var count_buffer: [16]u8 = undefined;
         const text: [:0]const u8 = if (total == 0) "" else strings.printZ(&count_buffer, "{d}", .{total}) catch "";

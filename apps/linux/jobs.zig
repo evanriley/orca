@@ -569,6 +569,7 @@ pub fn tick(self: *App) void {
         health.updateBanner(self);
         return;
     };
+    if (snapshot.state == .queued) return;
     const stats: ?liborca.ScanStats = switch (task) {
         .matching, .submission => null,
         else => self.runtime.jobScanStats(job) catch null,

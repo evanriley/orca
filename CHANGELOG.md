@@ -104,6 +104,14 @@
   starts once the unit has finished; scans, tag writes and root removal
   never wait for a unit. `orca-cli watch --maintenance[=MS]` runs it
   headless and prints a `maintenance:` line per unit.
+- **`orca-gtk` turns on idle maintenance in Preferences.** An Idle
+  maintenance switch under Library > Maintenance, off by default and saved in
+  `settings.ini`, needs Match by audio fingerprint; its subtitle says when the
+  next album is checked, how many were, or that AcoustID is unavailable or
+  busy. Health and Matches reload when a unit finishes, without a toast.
+
+### Changed
+
 - **Library schema version 29.** Adds `health_dismissals` and
   `library_health_issues.related_file_id` with its index.
 - **Breaking: `orca-cli health` prints the file id and the action.** Each
