@@ -24,6 +24,7 @@ const struct_pairs = .{
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },
     .{ c_api.QueueEntryView, c.orca_queue_entry_view },
+    .{ c_api.QueueStats, c.orca_queue_stats },
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
     .{ c_api.PlayerStatus, c.orca_player_status },
     .{ c_api.ZoneStatus, c.orca_zone_status },

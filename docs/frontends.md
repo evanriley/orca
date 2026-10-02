@@ -81,6 +81,14 @@ The boundary covers the whole engine, not a fragment of it:
   track, queue position and volume in one lock-free read. Position comes from
   the packed epoch+frames atomic the render callback writes; now-playing reports
   the audible entry, never the decode cursor.
+- **Queue edits.** `orca_player_queue_jump` plays an entry now,
+  `orca_player_queue_insert_next` queues Tracks after the current entry (or
+  after the one the engine has already lined up), and
+  `orca_player_queue_remove` removes an entry other than those two, which it
+  refuses with `ORCA_STATUS_INVALID_STATE`. `orca_player_query_queue_tracks`
+  lists the queue as track views in playback order, and
+  `orca_player_queue_stats` reads the engine's counters, stopping it to do
+  so, for diagnostics rather than UI polling.
 - **Devices and Zones.** Enumeration, Zone create/attach/open/close/status, and
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.

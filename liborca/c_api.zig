@@ -265,6 +265,14 @@ pub const QueueEntryView = extern struct {
 
 pub const QueueEntryCallback = *const fn (?*anyopaque, *const QueueEntryView) callconv(.c) void;
 
+pub const QueueStats = extern struct {
+    entries_started: u64,
+    gapless_transitions: u64,
+    format_switch_transitions: u64,
+    open_failures: u64,
+    decode_errors: u64,
+};
+
 pub const NowPlayingView = extern struct {
     track_id: i64,
     duration_ms: i64,
@@ -1686,6 +1694,89 @@ pub export fn orca_player_query_queue(
     return .ok;
 }
 
+pub export fn orca_player_query_queue_tracks(
+    runtime: ?*Runtime,
+    player: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?TrackCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.playerQueueTracks(
+        importPlayer(player),
+        box.runtime.allocator,
+        offset,
+        limit,
+    ) catch |err| return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = trackView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_player_queue_jump(
+    runtime: ?*Runtime,
+    player: Handle,
+    position: u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerQueueJump(importPlayer(player), position) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_queue_insert_next(
+    runtime: ?*Runtime,
+    player: Handle,
+    ids: ?[*]const i64,
+    count: usize,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    const list = trackIdSlice(ids, count) orelse
+        return box.reject(@src(), .invalid_argument, "ids is null or count exceeds the queue capacity");
+    box.runtime.playerQueueInsertNext(player_handle, library, list) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_queue_remove(
+    runtime: ?*Runtime,
+    player: Handle,
+    position: u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerQueueRemove(importPlayer(player), position) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_queue_stats(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*QueueStats,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.playerQueueStats(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .entries_started = stats.entries_started,
+        .gapless_transitions = stats.gapless_transitions,
+        .format_switch_transitions = stats.format_switch_transitions,
+        .open_failures = stats.open_failures,
+        .decode_errors = stats.decode_errors,
+    };
+    return .ok;
+}
+
 pub export fn orca_enumerate_output_devices(
     runtime: ?*Runtime,
     context: ?*anyopaque,
@@ -2205,6 +2296,7 @@ fn mapError(err: anyerror) Status {
         error.PlayerHasNoOutput,
         error.PlayerHasNoLibrary,
         error.PlayerBoundToAnotherLibrary,
+        error.QueueEntryInUse,
         error.LibraryHasNoDatabase,
         error.ZoneOwnedByEngine,
         error.InvalidJobTransition,
@@ -2224,6 +2316,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidLibraryRoot,
         error.InvalidWatchOptions,
         error.InvalidReconcileDirectory,
+        error.PositionOutOfRange,
         => .invalid_argument,
         else => .internal,
     };
@@ -2571,4 +2664,62 @@ test "feedback, rating and release love edits refuse bad arguments and leave the
     try std.testing.expectEqual(Status.ok, orca_library_set_release_love(runtime, library, &ids, 1, 1, &change));
     try std.testing.expectEqual(ChangeCount{ .updated = 0, .skipped = 1 }, change);
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+test "queue edits refuse a Player without a Library, null ids and positions past the end" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    const ids = [_]i64{1};
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.invalid_state, orca_player_queue_insert_next(runtime, player, &ids, 1));
+    try std.testing.expectEqual(Status.invalid_state, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, countTrack));
+
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-queue-edits?mode=memory&cache=shared", &library));
+    try std.testing.expectEqual(Status.ok, orca_player_set_library(runtime, player, library));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_queue_insert_next(runtime, player, null, 1));
+    try std.testing.expectEqual(
+        Status.invalid_argument,
+        orca_player_queue_insert_next(runtime, player, &ids, audio.playback_queue.capacity + 1),
+    );
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_queue_jump(runtime, player, 0));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_play_tracks(runtime, player, &ids, 1, 1));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_queue_remove(runtime, player, 0));
+    try std.testing.expectEqualStrings(
+        "orca_player_queue_remove: PositionOutOfRange",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, 0, 0, &visited, countTrack));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, max_page + 1, 0, &visited, countTrack));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, null));
+    try std.testing.expectEqual(Status.ok, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, countTrack));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+}
+
+test "queue stats are all zero before a Player has played, and a destroyed Player has none" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_queue_stats(runtime, player, null));
+    var stats: QueueStats = .{
+        .entries_started = 7,
+        .gapless_transitions = 7,
+        .format_switch_transitions = 7,
+        .open_failures = 7,
+        .decode_errors = 7,
+    };
+    try std.testing.expectEqual(Status.ok, orca_player_queue_stats(runtime, player, &stats));
+    try std.testing.expectEqual(QueueStats{
+        .entries_started = 0,
+        .gapless_transitions = 0,
+        .format_switch_transitions = 0,
+        .open_failures = 0,
+        .decode_errors = 0,
+    }, stats);
+    try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
+    try std.testing.expectEqual(Status.stale_handle, orca_player_queue_stats(runtime, player, &stats));
 }

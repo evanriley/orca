@@ -537,6 +537,137 @@ static int library_edits_smoke(orca_runtime *runtime, orca_handle library, int64
     return 0;
 }
 
+struct queued_tracks {
+    uint32_t count;
+    int64_t ids[8];
+    char titles[8][128];
+};
+
+static void capture_queued_track(void *context, const orca_track_view *track) {
+    struct queued_tracks *capture = context;
+    if (capture->count < 8) {
+        size_t length = track->title.length;
+        if (length >= sizeof capture->titles[0]) length = sizeof capture->titles[0] - 1;
+        memcpy(capture->titles[capture->count], track->title.pointer, length);
+        capture->titles[capture->count][length] = 0;
+        capture->ids[capture->count] = track->id;
+        capture->count += 1;
+    }
+}
+
+static void collect_playable(void *context, const orca_track_view *track) {
+    if (track->has_file) capture_queued_track(context, track);
+}
+
+struct queue_order {
+    uint32_t count;
+    uint32_t current_position;
+    int64_t ids[8];
+};
+
+static void capture_queue_order(void *context, const orca_queue_entry_view *entry) {
+    struct queue_order *capture = context;
+    if (entry->is_current) capture->current_position = entry->position;
+    if (capture->count < 8) capture->ids[capture->count] = entry->track_id;
+    capture->count += 1;
+}
+
+static int queue_order_is(orca_runtime *runtime, orca_handle player, const int64_t *expected,
+                          uint32_t count, uint32_t current) {
+    struct queue_order order;
+    memset(&order, 0, sizeof order);
+    order.current_position = 9999;
+    SMOKE_CHECK(orca_player_query_queue(runtime, player, 512, 0, &order, capture_queue_order) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(order.count == count && order.current_position == current);
+    for (uint32_t i = 0; i < count; i += 1) SMOKE_CHECK(order.ids[i] == expected[i]);
+    return 0;
+}
+
+static const char *title_of(const struct queued_tracks *library_tracks, int64_t id) {
+    for (uint32_t i = 0; i < library_tracks->count; i += 1)
+        if (library_tracks->ids[i] == id) return library_tracks->titles[i];
+    return "";
+}
+
+static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    struct queued_tracks playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_playable) == ORCA_STATUS_OK);
+    SMOKE_CHECK(playable.count >= 4);
+    int64_t *ids = playable.ids;
+
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ONE) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_tracks(runtime, player, ids, 3, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_stop(runtime, player) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_player_queue_insert_next(runtime, player, 0, 1) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_queue_insert_next(runtime, player, &ids[3], 1) == ORCA_STATUS_OK);
+    int64_t inserted[4] = {ids[0], ids[3], ids[1], ids[2]};
+    SMOKE_CHECK(queue_order_is(runtime, player, inserted, 4, 0) == 0);
+
+    struct queued_tracks listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 512, 0, &listed,
+                                               capture_queued_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 4);
+    for (uint32_t i = 0; i < 4; i += 1) {
+        SMOKE_CHECK(listed.ids[i] == inserted[i]);
+        SMOKE_CHECK(listed.titles[i][0] != 0);
+        SMOKE_CHECK(strcmp(listed.titles[i], title_of(&playable, inserted[i])) == 0);
+    }
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 1, 1, &listed,
+                                               capture_queued_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.ids[0] == ids[3]);
+    SMOKE_CHECK(orca_player_query_queue_tracks(runtime, player, 0, 0, &listed,
+                                               capture_queued_track) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_player_queue_remove(runtime, player, 2) == ORCA_STATUS_OK);
+    int64_t removed[3] = {ids[0], ids[3], ids[2]};
+    SMOKE_CHECK(queue_order_is(runtime, player, removed, 3, 0) == 0);
+    SMOKE_CHECK(orca_player_queue_remove(runtime, player, 3) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_queue_jump(runtime, player, 3) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_player_queue_jump(runtime, player, 1) == ORCA_STATUS_OK);
+    orca_player_status status;
+    struct now_playing_capture playing;
+    int reflected = 0;
+    long deadline = now_ms() + 3000;
+    while (!reflected && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(orca_player_status_get(runtime, player, &status) == ORCA_STATUS_OK);
+        memset(&playing, 0, sizeof playing);
+        SMOKE_CHECK(orca_player_now_playing(runtime, player, &playing, capture_now_playing) ==
+                    ORCA_STATUS_OK);
+        reflected = status.queue_index == 1 && status.track_id == ids[3] &&
+                    status.transport == ORCA_TRANSPORT_PLAYING && playing.count == 1 &&
+                    playing.track_id == ids[3];
+    }
+    SMOKE_CHECK(reflected);
+    SMOKE_CHECK(orca_player_queue_remove(runtime, player, 1) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(queue_order_is(runtime, player, removed, 3, 1) == 0);
+
+    orca_queue_stats stats;
+    memset(&stats, 0, sizeof stats);
+    deadline = now_ms() + 3000;
+    while (stats.entries_started == 0 && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(orca_player_queue_stats(runtime, player, &stats) == ORCA_STATUS_OK);
+    }
+    SMOKE_CHECK(stats.entries_started >= 1);
+    SMOKE_CHECK(stats.open_failures == 0 && stats.decode_errors == 0);
+    SMOKE_CHECK(orca_player_queue_stats(runtime, player, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -1415,6 +1546,8 @@ int main(int argc, char **argv) {
         if (past_end) return 95;
         if (!advanced) return 96;
     }
+
+    if (queue_smoke(runtime, library, player) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

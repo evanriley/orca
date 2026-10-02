@@ -146,6 +146,14 @@
   clears with 0, and `orca_library_set_release_love` loves or clears whole
   Releases. Each edit reports an `orca_change_count` of updated and skipped
   ids.
+- **The C ABI edits the queue.** `orca_player_queue_jump` plays the entry
+  at a position, `orca_player_queue_insert_next` queues Tracks to play next,
+  and `orca_player_queue_remove` removes an entry, refusing the one playing
+  and the one lined up after it with `ORCA_STATUS_INVALID_STATE`.
+  `orca_player_query_queue_tracks` pages the queue as track views in
+  playback order, and `orca_player_queue_stats` returns an
+  `orca_queue_stats` of the engine's entry, transition, open-failure and
+  decode-error counts.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's
@@ -201,6 +209,8 @@
 
 ### Fixed
 
+- **`orca_player_play_tracks` refuses a `start` past the end with
+  `ORCA_STATUS_INVALID_ARGUMENT`.** It returned `ORCA_STATUS_INTERNAL`.
 - **A command that failed internally reports `ORCA_FAILURE_INTERNAL`.** The
   C ABI sent 10, which no `orca_failure` constant names, instead of 255.
 - **Health raises missing tags, album-artist, artwork, clipping, silence and

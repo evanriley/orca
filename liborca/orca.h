@@ -459,6 +459,25 @@ typedef void (*orca_queue_entry_callback)(
     const orca_queue_entry_view *entry
 );
 
+/* Counters the Player's engine has kept since it started. */
+typedef struct orca_queue_stats {
+    /* Entries the engine started by itself: an advance from the entry before,
+     * or a start at the cursor of a Player that had nothing loaded. An entry
+     * loaded by play, a jump or a skip is not counted. */
+    uint64_t entries_started;
+    /* Advances that followed the entry before without a gap. */
+    uint64_t gapless_transitions;
+    /* Advances that waited for the outputs to drain and reopen in the next
+     * entry's format. */
+    uint64_t format_switch_transitions;
+    /* Entries the engine could not open and stepped past. */
+    uint64_t open_failures;
+    /* Entries whose decoder failed part-way. The entry is ended and the queue
+     * moves on rather than stalling; a nonzero count is a real problem worth
+     * surfacing. */
+    uint64_t decode_errors;
+} orca_queue_stats;
+
 /* The audible entry, resolved against the Library the Player is bound to. */
 typedef struct orca_now_playing_view {
     int64_t track_id;
@@ -1380,6 +1399,57 @@ orca_status orca_player_query_queue(
     uint32_t offset,
     void *context,
     orca_queue_entry_callback callback
+);
+/* The queue's Tracks as track views, read from the Library the Player is
+ * bound to, in playback order starting at position `offset`. `limit` must be
+ * between 1 and 512. An entry whose Track has since left the Library is
+ * skipped, so the views after it no longer line up with queue positions;
+ * orca_player_query_queue gives every position. ORCA_STATUS_INVALID_STATE
+ * when the Player has no Library. Strings are valid only for the callback. */
+orca_status orca_player_query_queue_tracks(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_track_callback callback
+);
+/* Plays the entry at playback position `position` now: a hard switch, like a
+ * skip. ORCA_STATUS_INVALID_ARGUMENT when `position` is not below the queue
+ * length. */
+orca_status orca_player_queue_jump(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint32_t position
+);
+/* Queues `ids` to play after the current entry without interrupting it. If
+ * the engine has already lined up the entry after the current one -- it does
+ * so a few seconds before the current one ends -- they follow that entry
+ * instead. An empty queue is filled as orca_player_enqueue_tracks fills it.
+ * ORCA_STATUS_INVALID_STATE when the Player has no Library. */
+orca_status orca_player_queue_insert_next(
+    orca_runtime *runtime,
+    orca_handle player,
+    const int64_t *ids,
+    size_t count
+);
+/* Removes the entry at playback position `position`.
+ * ORCA_STATUS_INVALID_STATE for the entry playing and for one the engine has
+ * already lined up after it; skip past them first.
+ * ORCA_STATUS_INVALID_ARGUMENT when `position` is not below the queue
+ * length. */
+orca_status orca_player_queue_remove(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint32_t position
+);
+/* Reads the engine's counters, stopping the engine while it does: call it
+ * after a run or for diagnostics, never in a UI poll loop. All zero before
+ * the Player has played anything. */
+orca_status orca_player_queue_stats(
+    orca_runtime *runtime,
+    orca_handle player,
+    orca_queue_stats *output
 );
 
 /* -------------------------------------------------------- devices, zones */
