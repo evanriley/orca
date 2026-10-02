@@ -78,6 +78,25 @@ a track numbered `B6`.
 1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
 Chromaprint is MIT-licensed. The fingerprint parity test compares Orca's
 fingerprint of the MP3 with the reference.
+`audio/chromaprint-test.lrc` is a synced sidecar for it, with lines at 1, 3,
+5.5 and 8 seconds.
+
+`audio/lyrics-synced.flac` is `audio/generated-reference.flac` retagged with
+synced LRC in a `LYRICS` comment:
+
+```sh
+printf '[ar:Orca Fixtures]\n[ti:Synced FLAC]\n[00:01.00]First line of the FLAC\n[00:02.50]Second line of the FLAC\n' > lyrics-synced.lrc
+metaflac --remove-all-tags --set-tag=TITLE="Synced FLAC" \
+  --set-tag=ARTIST="Orca Fixtures" --set-tag=ALBUM=Lyrics \
+  --set-tag=TRACKNUMBER=1 --set-tag-from-file=LYRICS=lyrics-synced.lrc \
+  lyrics-synced.flac
+```
+
+`audio/lyrics-sylt.mp3` is `audio/tagged-reference.mp3` with its ID3v2 tag
+replaced by mutagen: a `USLT` frame holding one unsynced line, and a `SYLT`
+frame (UTF-8, `eng`, millisecond timestamps, lyrics) with lines at 1 and
+2.5 seconds. `audio/lyrics-plain.m4a` is `audio/tagged-reference-aac.m4a`
+with its tags replaced by mutagen and two plain lines in `©lyr`.
 
 `playlists/relative.m3u8` is a UTF-8 extended M3U with relative paths, a
 percent-encoded `file://` URI, an `http://` stream and `#EXTINF` lines.

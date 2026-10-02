@@ -131,6 +131,11 @@ defer page.deinit();
   on the Library's artwork loader, at most 64 outstanding, and
   `libraryTakeArtwork` collects finished ones. `libraryCancelArtwork` skips a
   request that has not started.
+- Lyrics are read on a job: `startTrackLyrics` starts one for a Track,
+  `jobLyricsOutcome` reports `local` or `not_found` once it finishes, and
+  `jobTakeLyrics` moves the `Lyrics` to the caller once. `Lyrics.lineAt`
+  gives the synced line at a playback position. See
+  [metadata.md](metadata.md#lyrics).
 - Playback is recorded as local listening history. `processNextCommand`
   samples every Player bound to a Library at most every 100 ms; a play heard
   for half its length or four minutes (tracks of 30 s or more) is recorded on

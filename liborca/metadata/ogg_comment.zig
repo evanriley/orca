@@ -6,6 +6,7 @@
 //! spellings and canonical mapping stay in one place.
 
 const std = @import("std");
+const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
 const source = @import("../storage/source.zig");
 const vorbis_comment = @import("vorbis_comment.zig");
@@ -59,6 +60,18 @@ pub fn readPicture(allocator: std.mem.Allocator, readable: source.ReadableSource
     const bytes = try allocator.dupe(u8, picture.view.data);
     errdefer allocator.free(bytes);
     return try model.adoptImage(allocator, bytes, picture.view.kind);
+}
+
+/// The lyrics in the stream's comment header, as
+/// `vorbis_comment.lyricsFromComments` finds them.
+pub fn readLyrics(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?lyrics.Content {
+    const comment = try readComment(allocator, readable) orelse return null;
+    defer allocator.free(comment.packet);
+    return vorbis_comment.lyricsFromComments(output, comment.payload);
 }
 
 const Comment = struct {

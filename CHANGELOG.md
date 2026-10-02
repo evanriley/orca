@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Lyrics from a Track's file and a `.lrc` sidecar.** `Runtime.startTrackLyrics`
+  reads them on a job worker: a synced sidecar, then synced lyrics in the
+  file (ID3v2 `SYLT` or `USLT`, Vorbis comment `LYRICS` or
+  `UNSYNCEDLYRICS`, MP4 `©lyr`), then plain lyrics from each in the same
+  order. `Runtime.jobLyricsOutcome` and `Runtime.jobTakeLyrics` return the
+  result, and `Lyrics.lineAt` gives the synced line at a playback position.
+  `orca-cli lyrics DATABASE TRACK_ID` prints them, and `orca-cli play-tracks
+  --lyrics` prints each synced line as it is heard. Not yet in the C ABI.
+
 ## 0.8.1 - 2026-10-02
 
 Ships Library schema version 30, unchanged from 0.8.0.

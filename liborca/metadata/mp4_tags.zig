@@ -6,6 +6,8 @@
 const std = @import("std");
 const model = @import("model.zig");
 const id3v1 = @import("id3v1.zig");
+const lrc = @import("lrc.zig");
+const lyrics = @import("lyrics.zig");
 const source = @import("../storage/source.zig");
 const bmff = @import("../storage/iso_bmff.zig");
 
@@ -73,6 +75,22 @@ pub fn readPicture(allocator: std.mem.Allocator, readable: source.ReadableSource
     const bytes = try allocator.dupe(u8, value.bytes);
     errdefer allocator.free(bytes);
     return try model.adoptImage(allocator, bytes, .front_cover);
+}
+
+/// The lyrics in the `©lyr` item, parsed as LRC. Lines are allocated
+/// from `output`.
+pub fn readLyrics(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?lyrics.Content {
+    const movie = try bmff.readMovie(allocator, readable);
+    defer allocator.free(movie);
+    const items = try itemList(movie) orelse return null;
+    const item = try bmff.Iterator.find(items, "\xa9lyr") orelse return null;
+    const value = try firstValue(item.body) orelse return null;
+    if (value.kind != .utf8) return null;
+    return lrc.parse(output, value.bytes);
 }
 
 fn itemList(movie: []const u8) !?[]const u8 {

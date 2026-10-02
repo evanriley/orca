@@ -1,5 +1,7 @@
 const std = @import("std");
 const id3v1 = @import("id3v1.zig");
+const lrc = @import("lrc.zig");
+const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
 const mutation = @import("mutation.zig");
 const source = @import("../storage/source.zig");
@@ -66,6 +68,90 @@ pub fn readPicture(
     const bytes = try allocator.dupe(u8, picture.data);
     errdefer allocator.free(bytes);
     return try model.adoptImage(allocator, bytes, picture.kind);
+}
+
+/// The lyrics in a tag: a `SYLT` frame of lyrics timed in milliseconds,
+/// else the first `USLT` frame with text. Lines are allocated from `output`;
+/// `allocator` holds the tag while it is read. A frame that does not parse is
+/// passed over, and a tag that stops parsing keeps what came before.
+pub fn readLyrics(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?lyrics.Content {
+    const tag = try loadTag(allocator, readable) orelse return null;
+    defer tag.deinit();
+
+    var frames: FrameIterator = .{ .body = tag.span, .major = tag.major };
+    var unsynchronised: ?lyrics.Content = null;
+    while (frames.next() catch null) |frame| {
+        if (std.mem.eql(u8, &frame.identifier, "SYLT")) {
+            if (try decodeSynchronisedLyrics(output, frame.data)) |content| return content;
+        } else if (unsynchronised == null and std.mem.eql(u8, &frame.identifier, "USLT")) {
+            unsynchronised = try decodeUnsynchronisedLyrics(allocator, output, frame.data);
+        }
+    }
+    return unsynchronised;
+}
+
+/// `SYLT`: encoding(1), language(3), timestamp format(1), content type(1),
+/// descriptor, then entries of terminated text and a 32-bit start. Only
+/// lyrics (content type 1) timed in milliseconds (format 2) are used.
+fn decodeSynchronisedLyrics(output: std.mem.Allocator, data: []const u8) !?lyrics.Content {
+    if (data.len < 6 or data.len > lyrics.max_text_bytes) return null;
+    const encoding = data[0];
+    if (encoding > 3 or data[4] != 2 or data[5] != 1) return null;
+    const width: usize = if (isWideEncoding(encoding)) 2 else 1;
+    var rest = data[6..];
+    rest = rest[(terminatorLength(encoding, rest) orelse return null)..];
+
+    var lines: std.ArrayList(lyrics.Line) = .empty;
+    var any_text = false;
+    while (rest.len > 0) {
+        const consumed = terminatorLength(encoding, rest) orelse return null;
+        if (consumed < width or consumed + 4 > rest.len) return null;
+        var text = decodeText(output, encoding, rest[0 .. consumed - width]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
+        if (std.mem.startsWith(u8, text, "\n")) text = text[1..];
+        if (text.len > 0) any_text = true;
+        if (lines.items.len == lyrics.max_lines) return null;
+        try lines.append(output, .{
+            .start_ms = std.mem.readInt(u32, rest[consumed..][0..4], .big),
+            .text = text,
+        });
+        rest = rest[consumed + 4 ..];
+    }
+    if (!any_text) return null;
+    const owned = try lines.toOwnedSlice(output);
+    lyrics.sortLines(owned);
+    return .{ .kind = .synced, .language = lyrics.languageCode(data[1..4].*), .lines = owned };
+}
+
+/// `USLT`: encoding(1), language(3), descriptor, then the text, which may be
+/// LRC. Null when the text is empty or does not decode.
+fn decodeUnsynchronisedLyrics(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    data: []const u8,
+) !?lyrics.Content {
+    if (data.len < 4 or data.len > 2 * lyrics.max_text_bytes) return null;
+    const encoding = data[0];
+    if (encoding > 3) return null;
+    var rest = data[4..];
+    rest = rest[(terminatorLength(encoding, rest) orelse return null)..];
+    const width: usize = if (isWideEncoding(encoding)) 2 else 1;
+    while (rest.len >= width and std.mem.allEqual(u8, rest[rest.len - width ..], 0))
+        rest = rest[0 .. rest.len - width];
+    const text = decodeText(allocator, encoding, rest) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer allocator.free(text);
+    var content = try lrc.parse(output, text) orelse return null;
+    content.language = lyrics.languageCode(data[1..4].*);
+    return content;
 }
 
 /// A tag read into memory, unsynchronized and past its extended header.
@@ -1847,4 +1933,81 @@ test "release ids given to a trailer-only stream keep every trailer value in the
     try expectTrailerValues(after, "Song", "1999");
     try expectReleaseIds(after, first_release_ids);
     try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+}
+
+fn readLyricsFrom(arena: *std.heap.ArenaAllocator, frames: []const []const u8) !?lyrics.Content {
+    const allocator = arena.allocator();
+    const body = try std.mem.concat(allocator, u8, frames);
+    const tag = try buildTag(allocator, 4, 0, body);
+    var memory = source.MemorySource{ .bytes = tag };
+    return readLyrics(std.testing.allocator, allocator, memory.readable());
+}
+
+test "a SYLT frame of millisecond lyrics is synced and wins over USLT" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const unsynced = try buildFrame(allocator, "USLT", 4, "\x03engDesc\x00Plain words");
+    const synced = try buildFrame(allocator, "SYLT", 4, "\x03eng\x02\x01\x00" ++
+        "\nSecond\x00\x00\x00\x07\xd0" ++ "First\x00\x00\x00\x03\xe8");
+    const content = (try readLyricsFrom(&arena, &.{ unsynced, synced })).?;
+    try std.testing.expectEqual(lyrics.Kind.synced, content.kind);
+    try std.testing.expectEqualStrings("eng", &content.language.?);
+    try std.testing.expectEqual(@as(usize, 2), content.lines.len);
+    try std.testing.expectEqual(@as(?u32, 1000), content.lines[0].start_ms);
+    try std.testing.expectEqualStrings("First", content.lines[0].text);
+    try std.testing.expectEqualStrings("Second", content.lines[1].text);
+}
+
+test "a SYLT frame timed in MPEG frames is passed over for USLT" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const frames = try buildFrame(allocator, "SYLT", 4, "\x03eng\x01\x01\x00Line\x00\x00\x00\x00\x10");
+    const unsynced = try buildFrame(allocator, "USLT", 4, "\x03XXX\x00Plain words");
+    const content = (try readLyricsFrom(&arena, &.{ frames, unsynced })).?;
+    try std.testing.expectEqual(lyrics.Kind.plain, content.kind);
+    try std.testing.expectEqual(@as(?[3]u8, null), content.language);
+    try std.testing.expectEqualStrings("Plain words", content.lines[0].text);
+}
+
+test "a SYLT frame of another content type is passed over" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const chords = try buildFrame(allocator, "SYLT", 4, "\x03eng\x02\x05\x00Am\x00\x00\x00\x00\x10");
+    try std.testing.expect(try readLyricsFrom(&arena, &.{chords}) == null);
+}
+
+test "a UTF-16 USLT with a byte order mark decodes, LRC included" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const frame = try buildFrame(allocator, "USLT", 3, "\x01deu\xff\xfe\x00\x00" ++
+        "\xff\xfe[\x000\x000\x00:\x000\x002\x00]\x00G\x00r\x00\xfc\x00\xdf\x00e\x00\x00\x00");
+    const content = (try readLyricsFrom(&arena, &.{frame})).?;
+    try std.testing.expectEqual(lyrics.Kind.synced, content.kind);
+    try std.testing.expectEqualStrings("deu", &content.language.?);
+    try std.testing.expectEqual(@as(?u32, 2000), content.lines[0].start_ms);
+    try std.testing.expectEqualStrings("Grüße", content.lines[0].text);
+}
+
+test "an empty USLT is ignored and the first USLT with text wins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const empty = try buildFrame(allocator, "USLT", 4, "\x03eng\x00");
+    const blank = try buildFrame(allocator, "USLT", 4, "\x03eng\x00\n\n");
+    const first = try buildFrame(allocator, "USLT", 4, "\x03eng\x00First text");
+    const second = try buildFrame(allocator, "USLT", 4, "\x03eng\x00Second text");
+    const content = (try readLyricsFrom(&arena, &.{ empty, blank, first, second })).?;
+    try std.testing.expectEqualStrings("First text", content.lines[0].text);
+}
+
+test "a truncated SYLT reads as no lyrics without failing the tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const broken = try buildFrame(allocator, "SYLT", 4, "\x03eng\x02\x01\x00Line\x00\x00\x00");
+    try std.testing.expect(try readLyricsFrom(&arena, &.{broken}) == null);
 }

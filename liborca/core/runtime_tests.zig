@@ -1636,6 +1636,52 @@ test "a library edit regroups a track without touching its file, and clearing it
     try std.testing.expectEqual(@as(u64, 1), try library_database.artists.count());
 }
 
+test "a lyrics job hands its Track's lyrics over once, and a Track without a file has none" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "b.lrc", .data = "[00:01.00]One\n[00:02.00]Two\n" });
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-runtime-lyrics?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+
+    const found = try runtime.startTrackLyrics(library, ids[0], .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, found));
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.local, try runtime.jobLyricsOutcome(found));
+    const lyrics = (try runtime.jobTakeLyrics(found)).?;
+    defer lyrics.deinit();
+    try std.testing.expectEqual(@as(usize, 2), lyrics.lines.len);
+    try std.testing.expectEqual(@as(?usize, 1), lyrics.lineAt(2500));
+    try std.testing.expect(try runtime.jobTakeLyrics(found) == null);
+
+    const missing = try runtime.startTrackLyrics(library, ids[0] + 1000, .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, missing));
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.not_found, try runtime.jobLyricsOutcome(missing));
+    try std.testing.expect(try runtime.jobTakeLyrics(missing) == null);
+
+    var roots = try runtime.libraryRootPage(library, 1, 0);
+    defer roots.deinit();
+    const scan = try runtime.startLibraryScan(library, .{ .root_id = roots.items[0].id });
+    _ = try awaitJob(&runtime, scan);
+    try std.testing.expectError(error.NotALyricsJob, runtime.jobLyricsOutcome(scan));
+}
+
+test "lyrics a host never takes are freed with their job" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try copyFixtureInto(temporary.dir, "fixtures/audio/lyrics-synced.flac", "b.flac");
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-runtime-lyrics-untaken?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const handle = try runtime.startTrackLyrics(library, ids[0], .{});
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, handle));
+    try std.testing.expectEqual(runtime_module.LyricsOutcome.local, try runtime.jobLyricsOutcome(handle));
+}
+
 pub fn copyFixtureInto(dir: std.Io.Dir, fixture: []const u8, name: []const u8) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture, std.testing.allocator, .limited(1 << 22));
     defer std.testing.allocator.free(bytes);

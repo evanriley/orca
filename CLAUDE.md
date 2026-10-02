@@ -141,6 +141,7 @@ zig build run -- tracks DATABASE [--artist ID] [--release ID] [--loved] [--sort 
 zig build run -- track DATABASE ID
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
+zig build run -- lyrics DATABASE TRACK_ID   # .lrc sidecar or embedded; synced before plain; never stored
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
@@ -165,6 +166,7 @@ zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start
     [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
     [--eq=PRESET|G1,...,G10[:PREAMP]] [--crossfeed=0..1]   # prints a `signal:` line
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
+    [--lyrics]   # prints a `lyric at=` line as each synced line is heard
     # records listens in the play history; never sends them
 
 # listening history and ListenBrainz -- token from ORCA_LISTENBRAINZ_TOKEN,

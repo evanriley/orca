@@ -4,6 +4,8 @@ pub const id3v2 = @import("id3v2.zig");
 pub const file_mutation = @import("file_mutation.zig");
 pub const executor = @import("executor.zig");
 pub const journal_lock = @import("journal_lock.zig");
+pub const lrc = @import("lrc.zig");
+pub const lyrics = @import("lyrics.zig");
 pub const model = @import("model.zig");
 pub const mp4_tags = @import("mp4_tags.zig");
 pub const mutation = @import("mutation.zig");
@@ -35,6 +37,8 @@ test {
     _ = @import("file_mutation.zig");
     _ = @import("executor.zig");
     _ = @import("journal_lock.zig");
+    _ = @import("lrc.zig");
+    _ = @import("lyrics.zig");
     _ = @import("model.zig");
     _ = @import("mp4_tags.zig");
     _ = @import("mutation.zig");

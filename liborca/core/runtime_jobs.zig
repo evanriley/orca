@@ -16,6 +16,9 @@ const DuplicateScanRequest = runtime.DuplicateScanRequest;
 const JobHandle = runtime.JobHandle;
 const JobWorker = job_worker.JobWorker;
 const LibraryHandle = runtime.LibraryHandle;
+const Lyrics = runtime.Lyrics;
+const LyricsOptions = runtime.LyricsOptions;
+const LyricsOutcome = runtime.LyricsOutcome;
 const MatchRequest = runtime.MatchRequest;
 const MatchStats = runtime.MatchStats;
 const OrcaRuntime = runtime.OrcaRuntime;
@@ -163,6 +166,28 @@ pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, rel
     if (maintenanceUnitRunning(self)) |unit| return queueHostJob(self, library, job_request, unit);
     if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
     return startJobWorker(self, library, job_request);
+}
+
+pub fn startTrackLyrics(self: *OrcaRuntime, library: LibraryHandle, track_id: i64, options: LyricsOptions) !JobHandle {
+    return startJobWorker(self, library, .{ .lyrics = .{ .track_id = track_id, .options = options } });
+}
+
+pub fn jobLyricsOutcome(self: *OrcaRuntime, job_handle: JobHandle) !LyricsOutcome {
+    return (try lyricsWorker(self, job_handle)).lyricsOutcome();
+}
+
+pub fn jobTakeLyrics(self: *OrcaRuntime, job_handle: JobHandle) !?Lyrics {
+    return (try lyricsWorker(self, job_handle)).takeLyrics();
+}
+
+fn lyricsWorker(self: *OrcaRuntime, job_handle: JobHandle) !*JobWorker {
+    if (queuedHostJob(self, job_handle)) return error.NotALyricsJob;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        if (worker.kind() != .lyrics) return error.NotALyricsJob;
+        return worker;
+    }
+    return error.StaleHandle;
 }
 
 fn requireRelease(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !void {
@@ -379,7 +404,7 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
         else
             try library_database.recording_verifications.verifiableCount(matching.setup.scope, matching.limit),
         .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
-        .scan, .reconcile, .projection => null,
+        .scan, .reconcile, .projection, .lyrics => null,
     };
 }
 
@@ -587,6 +612,10 @@ pub fn freeAllJobWorkers(self: *OrcaRuntime) void {
 fn destroyJobWorker(self: *OrcaRuntime, worker: *JobWorker) void {
     if (worker.tagWrite()) |pending| pending.destroy(self.control_threaded.io());
     if (worker.pendingReconcile()) |pending| pending.destroy();
+    switch (worker.stats) {
+        .lyrics => |stats| if (stats.result) |lyrics| lyrics.deinit(),
+        else => {},
+    }
     self.allocator.destroy(worker);
 }
 

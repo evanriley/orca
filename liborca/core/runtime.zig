@@ -295,6 +295,9 @@ pub const MatchRequest = struct {
 };
 
 pub const CoverArtOutcome = job_worker.CoverArtOutcome;
+pub const Lyrics = job_worker.Lyrics;
+pub const LyricsOptions = job_worker.LyricsOptions;
+pub const LyricsOutcome = job_worker.LyricsOutcome;
 
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
@@ -1805,6 +1808,28 @@ pub const OrcaRuntime = struct {
     /// `startLibraryMatching` beside a maintenance unit.
     pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !JobHandle {
         return runtime_jobs.startReleaseCoverArtFetch(self, library, release_id);
+    }
+
+    /// Reads a Track's lyrics on a job worker: a synced `.lrc` sidecar beside
+    /// its file, else synced lyrics embedded in the file, else plain lyrics
+    /// from the sidecar, then from the file. `options.fetch` is not yet
+    /// supported and changes nothing. `jobLyricsOutcome` reports what the job
+    /// found and `jobTakeLyrics` hands the lyrics over once it has finished.
+    pub fn startTrackLyrics(self: *OrcaRuntime, library: LibraryHandle, track_id: i64, options: LyricsOptions) !JobHandle {
+        return runtime_jobs.startTrackLyrics(self, library, track_id, options);
+    }
+
+    /// A lyrics job's outcome once it has finished; `not_requested` while it
+    /// runs. A Track that does not exist or has no file is `not_found`.
+    /// Fails with `error.NotALyricsJob` for another kind of job.
+    pub fn jobLyricsOutcome(self: *OrcaRuntime, job_handle: JobHandle) !LyricsOutcome {
+        return runtime_jobs.jobLyricsOutcome(self, job_handle);
+    }
+
+    /// The lyrics a finished lyrics job found. Ownership moves to the caller,
+    /// who frees them with `deinit`; a second call returns null.
+    pub fn jobTakeLyrics(self: *OrcaRuntime, job_handle: JobHandle) !?Lyrics {
+        return runtime_jobs.jobTakeLyrics(self, job_handle);
     }
 
     /// Fingerprints every file whose recording ID came from an accepted match

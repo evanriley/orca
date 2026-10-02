@@ -1,4 +1,6 @@
 const std = @import("std");
+const lrc = @import("lrc.zig");
+const lyrics = @import("lyrics.zig");
 const model = @import("model.zig");
 const mutation = @import("mutation.zig");
 const source = @import("../storage/source.zig");
@@ -82,6 +84,38 @@ pub fn readPicture(
     if (try readExact(readable, picture.data_offset, bytes) != bytes.len)
         return error.TruncatedArtwork;
     return try model.adoptImage(allocator, bytes, picture.kind);
+}
+
+/// The lyrics in a FLAC stream's comment block, as `lyricsFromComments`
+/// finds them. Lines are allocated from `output`.
+pub fn readLyrics(
+    allocator: std.mem.Allocator,
+    output: std.mem.Allocator,
+    readable: source.ReadableSource,
+) !?lyrics.Content {
+    var blocks = (try BlockIterator.init(readable)) orelse return null;
+    while (try blocks.next()) |block| {
+        if (block.block_type != 4) continue;
+        const payload = try allocator.alloc(u8, block.length);
+        defer allocator.free(payload);
+        if (try readExact(readable, block.offset, payload) != block.length)
+            return error.TruncatedFlacStream;
+        return lyricsFromComments(output, payload);
+    }
+    return null;
+}
+
+/// The first `LYRICS` comment with text, else the first `UNSYNCEDLYRICS`
+/// one, parsed as LRC. Keys match in any case.
+pub fn lyricsFromComments(output: std.mem.Allocator, payload: []const u8) !?lyrics.Content {
+    for ([_][]const u8{ "LYRICS", "UNSYNCEDLYRICS" }) |key| {
+        var entries = try Entries.init(payload);
+        while (try entries.next()) |entry| {
+            if (!std.ascii.eqlIgnoreCase(entry.key, key)) continue;
+            if (try lrc.parse(output, entry.value)) |content| return content;
+        }
+    }
+    return null;
 }
 
 /// The `KEY=value` entries of a bare Vorbis comment payload, in order.
@@ -1021,4 +1055,30 @@ test "every release-level MusicBrainz id is written under Picard's Vorbis key an
         "MUSICBRAINZ_RELEASETRACKID=" ++ release_track_id,
         "MUSICBRAINZ_ALBUMARTISTID=" ++ album_artist_id,
     }) |entry| try std.testing.expect(std.mem.indexOf(u8, created, entry) != null);
+}
+
+test "LYRICS outranks UNSYNCEDLYRICS in any key case and an empty one is passed over" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const comments = try buildComments(allocator, &.{
+        "unsyncedlyrics=Plain text",
+        "Lyrics=",
+        "lyrics=[00:01.50]Timed",
+    });
+    const stream = try buildFlac(allocator, &.{.{ .block_type = 4, .payload = comments }});
+    var memory = source.MemorySource{ .bytes = stream };
+    const content = (try readLyrics(std.testing.allocator, allocator, memory.readable())).?;
+    try std.testing.expectEqual(lyrics.Kind.synced, content.kind);
+    try std.testing.expectEqual(@as(?u32, 1500), content.lines[0].start_ms);
+}
+
+test "UNSYNCEDLYRICS is read when no LYRICS comment has text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const comments = try buildComments(allocator, &.{ "TITLE=Song", "UNSYNCEDLYRICS=Plain text" });
+    const content = (try lyricsFromComments(allocator, comments)).?;
+    try std.testing.expectEqual(lyrics.Kind.plain, content.kind);
+    try std.testing.expectEqualStrings("Plain text", content.lines[0].text);
 }

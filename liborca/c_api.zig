@@ -4429,7 +4429,7 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .metadata_lookup => 6,
         .acoustid_submission => 7,
         .mutation => 8,
-        .artwork, .conversion, .ripping, .dummy => 255,
+        .artwork, .conversion, .ripping, .lyrics, .dummy => 255,
     };
 }
 

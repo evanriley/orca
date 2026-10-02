@@ -22,6 +22,34 @@ pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
 pub const SubmissionOutcome = library_pass.acoustid_submission.Outcome;
 pub const CoverArtOutcome = cover_art.Outcome;
+pub const Lyrics = metadata.lyrics.Lyrics;
+
+pub const LyricsOptions = struct {
+    /// Reserved for fetching from LRCLIB; not yet supported, so a job asked
+    /// to fetch reads only local lyrics.
+    fetch: bool = false,
+};
+
+/// Where a lyrics job found a Track's lyrics, or why it found none. A Track
+/// that does not exist, or has no file, is `not_found`.
+pub const LyricsOutcome = enum(u8) {
+    local,
+    fetched,
+    cached,
+    cached_miss,
+    not_found,
+    no_metadata,
+    refused,
+    unavailable,
+    busy,
+    cancelled,
+    not_requested,
+};
+
+pub const LyricsRequest = struct {
+    track_id: i64,
+    options: LyricsOptions = .{},
+};
 
 pub const ScanRequest = struct {
     /// Which registered root to walk. Null walks every enabled root.
@@ -319,6 +347,7 @@ pub const Request = union(enum) {
     mutation: *PendingTagWrite,
     metadata_lookup: MatchingRequest,
     acoustid_submission: SubmissionSetup,
+    lyrics: LyricsRequest,
 
     pub fn kind(self: Request) job.Kind {
         return switch (self) {
@@ -331,6 +360,7 @@ pub const Request = union(enum) {
             .mutation => .mutation,
             .metadata_lookup => .metadata_lookup,
             .acoustid_submission => .acoustid_submission,
+            .lyrics => .lyrics,
         };
     }
 
@@ -342,7 +372,7 @@ pub const Request = union(enum) {
             .analysis => |request| request.batch_size,
             .duplicate_scan => |request| request.batch_size,
             .metadata_lookup => |request| request.batch_size,
-            .projection, .mutation, .acoustid_submission => null,
+            .projection, .mutation, .acoustid_submission, .lyrics => null,
         };
     }
 };
@@ -566,11 +596,19 @@ const LiveSubmissionStats = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
 };
 
+const LiveLyricsStats = struct {
+    outcome: std.atomic.Value(LyricsOutcome) = .init(.not_requested),
+    /// Written by the worker just before it finishes; read only after, and
+    /// owned by whoever takes it.
+    result: ?Lyrics = null,
+};
+
 pub const Stats = union(enum) {
     scan: LiveScanStats,
     duplicates: LiveDuplicateStats,
     matching: LiveMatchStats,
     submission: LiveSubmissionStats,
+    lyrics: LiveLyricsStats,
 
     pub fn init(request: Request) Stats {
         return switch (request) {
@@ -578,6 +616,7 @@ pub const Stats = union(enum) {
             .duplicate_scan => .{ .duplicates = .{} },
             .metadata_lookup => .{ .matching = .{} },
             .acoustid_submission => .{ .submission = .{} },
+            .lyrics => .{ .lyrics = .{} },
         };
     }
 };
@@ -640,6 +679,7 @@ pub const JobWorker = struct {
             .mutation => |pending| self.runTagWrite(pending),
             .metadata_lookup => |request| self.runMatching(request),
             .acoustid_submission => |setup| self.runSubmission(setup),
+            .lyrics => |request| self.runLyrics(request),
         }
     }
 
@@ -663,6 +703,26 @@ pub const JobWorker = struct {
 
     fn cancelled(self: *const JobWorker) bool {
         return self.token.isCancelled() or self.registration.cancellationRequested();
+    }
+
+    fn runLyrics(self: *JobWorker, request: LyricsRequest) void {
+        const stats = &self.stats.lyrics;
+        if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
+        const found = library_pass.lyrics_lookup.trackLyrics(
+            self.allocator,
+            self.threaded.io(),
+            self.database,
+            request.track_id,
+        ) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        if (self.cancelled()) {
+            if (found) |lyrics| lyrics.deinit();
+            return stats.outcome.store(.cancelled, .release);
+        }
+        stats.result = found;
+        stats.outcome.store(if (found == null) .not_found else .local, .release);
     }
 
     fn runProjection(self: *JobWorker) void {
@@ -1357,6 +1417,7 @@ pub const JobWorker = struct {
             .submission => self.submissionStats().files_examined,
             .scan => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
             .duplicates => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
+            .lyrics => 0,
         };
     }
 
@@ -1368,7 +1429,7 @@ pub const JobWorker = struct {
                 break :stats read;
             },
             .duplicates => |*stats| stats.read(self.progress.load(.acquire)).scanStats(),
-            .matching => .{},
+            .matching, .lyrics => .{},
             .submission => |*stats| .{ .cancelled = stats.cancelled.load(.acquire) },
         };
     }
@@ -1376,16 +1437,40 @@ pub const JobWorker = struct {
     pub fn matchStats(self: *const JobWorker) MatchStats {
         return switch (self.stats) {
             .matching => |*stats| stats.read(),
-            .scan, .duplicates, .submission => .{},
+            .scan, .duplicates, .submission, .lyrics => .{},
         };
     }
 
     pub fn submissionStats(self: *const JobWorker) SubmissionStats {
         if (self.retired or self.registration.isFinished()) return switch (self.stats) {
             .submission => |*stats| stats.result,
-            .scan, .duplicates, .matching => .{},
+            .scan, .duplicates, .matching, .lyrics => .{},
         };
         return .{ .files_examined = self.progress.load(.acquire) };
+    }
+
+    /// `not_requested` while the job runs and for a job that is not a lyrics
+    /// job.
+    pub fn lyricsOutcome(self: *const JobWorker) LyricsOutcome {
+        if (!self.retired and !self.registration.isFinished()) return .not_requested;
+        return switch (self.stats) {
+            .lyrics => |*stats| stats.outcome.load(.acquire),
+            .scan, .duplicates, .matching, .submission => .not_requested,
+        };
+    }
+
+    /// The lyrics a finished lyrics job found, once: ownership moves to the
+    /// caller.
+    pub fn takeLyrics(self: *JobWorker) ?Lyrics {
+        if (!self.retired and !self.registration.isFinished()) return null;
+        return switch (self.stats) {
+            .lyrics => |*stats| taken: {
+                const lyrics = stats.result;
+                stats.result = null;
+                break :taken lyrics;
+            },
+            .scan, .duplicates, .matching, .submission => null,
+        };
     }
 
     pub fn tagWriteFailure(self: *const JobWorker) ?TagWriteFailure {
@@ -1399,6 +1484,7 @@ pub const JobWorker = struct {
             .duplicates => |*stats| stats.cancelled.load(.acquire),
             .matching => |*stats| stats.cancelled.load(.acquire),
             .submission => |*stats| stats.cancelled.load(.acquire),
+            .lyrics => |*stats| stats.outcome.load(.acquire) == .cancelled,
         };
     }
 };

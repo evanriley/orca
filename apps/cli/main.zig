@@ -199,6 +199,7 @@ const commands = [_]Command{
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
     .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
     .{ .name = "covers", .usage = "covers DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = null, .run = loadCovers },
+    .{ .name = "lyrics", .usage = "lyrics DATABASE TRACK_ID", .min_arguments = 2, .max_arguments = 2, .run = showLyrics, .shares_usage_line = true },
     .{ .name = "edit", .usage = "edit DATABASE IDS [EDITS]", .min_arguments = 2, .max_arguments = null, .run = editTracks },
     .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
     .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
@@ -305,6 +306,13 @@ const help_details =
     \\format, size, path, stored loudness, whether the file carries a cover,
     \\the rating, and the file's last verification. It opens no file.
     \\
+    \\lyrics prints one Track's lyrics: a `.lrc` file beside its file with
+    \\the same name, or the lyrics in the file's tags, synced before plain and
+    \\the `.lrc` first. The first line is `lyrics: source=sidecar|embedded
+    \\kind=synced|plain lines=N outcome=local`, then one line per lyric,
+    \\synced ones led by `[mm:ss.xx]`. A Track with none prints
+    \\`lyrics: outcome=not_found`.
+    \\
     \\play-tracks plays a comma-separated list of Track ids, or with
     \\--playlist=ID the playlist's entries that have a Track, as a playback
     \\queue. Options:
@@ -325,6 +333,8 @@ const help_details =
     \\  --skip-after=MS    issue next MS after each entry becomes audible
     \\  --previous-after=MS  issue previous once, MS after playback starts
     \\  --limit=MS         stop after MS of wall clock
+    \\  --lyrics           read each audible Track's lyrics as lyrics does, and
+    \\                     print a `lyric` line as each synced line is reached
     \\
     \\play-tracks prints one `signal:` line once playback is a second in: the
     \\source, each stage that changes the samples, the output stream, and
@@ -1121,11 +1131,16 @@ const PlayTracksOptions = struct {
     previous_after_ms: ?u64 = null,
     limit_ms: u64 = 10 * 60 * 1000,
     playlist_id: ?i64 = null,
+    lyrics: bool = false,
 };
 
 fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     if (std.mem.eql(u8, argument, "--shuffle")) {
         options.shuffle = true;
+        return;
+    }
+    if (std.mem.eql(u8, argument, "--lyrics")) {
+        options.lyrics = true;
         return;
     }
     const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
@@ -1297,8 +1312,11 @@ fn playTracks(context: Context) !void {
     // Nonzero is the proof that now-playing is derived from rendered audio
     // rather than from the decode cursor.
     var decode_lead_polls: u64 = 0;
+    var lyrics: LyricsFollower = .{ .runtime = &runtime, .library = library };
+    defer lyrics.deinit();
     while (elapsed_ms < options.limit_ms) {
         _ = runtime.processNextCommand();
+        if (options.lyrics) try lyrics.poll(stdout, player, elapsed_ms);
         const snapshot = try runtime.playerQueueSnapshot(player);
         if (snapshot.decode_position != snapshot.cursor) decode_lead_polls += 1;
         if (last_cursor == null or last_cursor.? != snapshot.cursor) {
@@ -1395,6 +1413,74 @@ fn playTracks(context: Context) !void {
         },
     );
 }
+
+/// play-tracks --lyrics: resolves the audible Track's lyrics on a job, so the
+/// playback loop never waits on a file, and prints each synced line reached.
+const LyricsFollower = struct {
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    track_id: ?i64 = null,
+    entry_serial: u32 = 0,
+    job: ?liborca.JobHandle = null,
+    lyrics: ?liborca.Lyrics = null,
+    line: ?usize = null,
+
+    fn deinit(self: *LyricsFollower) void {
+        if (self.lyrics) |owned| owned.deinit();
+        self.lyrics = null;
+    }
+
+    fn poll(self: *LyricsFollower, stdout: *std.Io.Writer, player: liborca.PlayerHandle, elapsed_ms: u64) !void {
+        self.runtime.reapFinishedJobs();
+        while (self.runtime.pollEvent()) |_| {}
+        const status = try self.runtime.playerStatus(player);
+        if (status.entry_serial != self.entry_serial) {
+            self.entry_serial = status.entry_serial;
+            self.line = null;
+            if (status.track_id != self.track_id) try self.follow(status.track_id);
+        }
+        if (self.job) |job_handle| {
+            const snapshot = try self.runtime.jobSnapshotSynced(job_handle);
+            switch (snapshot.state) {
+                .succeeded, .failed, .cancelled => {
+                    self.job = null;
+                    self.lyrics = try self.runtime.jobTakeLyrics(job_handle);
+                    const outcome = try self.runtime.jobLyricsOutcome(job_handle);
+                    try stdout.print("lyrics at={d}ms track={?d} outcome={s}", .{ elapsed_ms, self.track_id, @tagName(outcome) });
+                    if (self.lyrics) |found| try stdout.print(" source={s} kind={s} lines={d}", .{
+                        @tagName(found.source),
+                        @tagName(found.kind),
+                        found.lines.len,
+                    });
+                    try stdout.writeAll("\n");
+                    try stdout.flush();
+                },
+                else => {},
+            }
+        }
+        const found = self.lyrics orelse return;
+        const line = found.lineAt(status.position_ms);
+        if (line == self.line) return;
+        self.line = line;
+        const index = line orelse return;
+        try stdout.print("lyric at={d}ms track={?d} line={d} text={s}\n", .{
+            elapsed_ms,
+            self.track_id,
+            index,
+            found.lines[index].text,
+        });
+        try stdout.flush();
+    }
+
+    fn follow(self: *LyricsFollower, track_id: ?i64) !void {
+        self.deinit();
+        if (self.job) |stale| self.runtime.cancelJob(stale) catch {};
+        self.job = null;
+        self.track_id = track_id;
+        const id = track_id orelse return;
+        self.job = try self.runtime.startTrackLyrics(self.library, id, .{});
+    }
+};
 
 const BrowseOptions = struct {
     artist_id: ?i64 = null,
@@ -2304,6 +2390,38 @@ fn fetchCoverArt(context: Context) !void {
     if (failed) {
         try stdout.flush();
         return coverArtError(outcome) orelse error.JobFailed;
+    }
+}
+
+/// `orca-cli lyrics DATABASE TRACK_ID`: the Track's lyrics, read on a job.
+fn showLyrics(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const track_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startTrackLyrics(library, track_id, .{});
+    try awaitJob(&runtime, stdout, job_handle, null);
+    const outcome = try runtime.jobLyricsOutcome(job_handle);
+    const lyrics = (try runtime.jobTakeLyrics(job_handle)) orelse {
+        try stdout.print("lyrics: outcome={s}\n", .{@tagName(outcome)});
+        return;
+    };
+    defer lyrics.deinit();
+    try stdout.print("lyrics: source={s} kind={s} lines={d} outcome={s}\n", .{
+        @tagName(lyrics.source),
+        @tagName(lyrics.kind),
+        lyrics.lines.len,
+        @tagName(outcome),
+    });
+    for (lyrics.lines) |line| {
+        if (line.start_ms) |start| {
+            const centiseconds: u64 = start / 10;
+            try stdout.print("[{d:0>2}:{d:0>2}.{d:0>2}] ", .{ centiseconds / 6000, centiseconds / 100 % 60, centiseconds % 100 });
+        }
+        try stdout.print("{s}\n", .{line.text});
     }
 }
 

@@ -156,6 +156,14 @@ pub const AcoustIdUse = runtime.AcoustIdUse;
 pub const BusyService = runtime.BusyService;
 pub const CoverArtOutcome = runtime.CoverArtOutcome;
 
+// Lyrics: read from a Track's sidecar or file on a job worker.
+pub const Lyrics = runtime.Lyrics;
+pub const LyricsLine = internal.metadata.lyrics.Line;
+pub const LyricsSource = internal.metadata.lyrics.Source;
+pub const LyricsKind = internal.metadata.lyrics.Kind;
+pub const LyricsOutcome = runtime.LyricsOutcome;
+pub const LyricsOptions = runtime.LyricsOptions;
+
 // AcoustID: fingerprints, and submissions of recording IDs a person chose.
 pub const TrackFingerprint = runtime.TrackFingerprint;
 pub const SubmissionStats = runtime.SubmissionStats;

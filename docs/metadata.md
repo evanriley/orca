@@ -258,6 +258,66 @@ Reachable as `Runtime.libraryTrackArtwork` and
 `Runtime.libraryReleaseArtwork`, and from `orca-cli artwork DATABASE
 (--track=ID | --release=ID) [--out=PATH]`.
 
+## Lyrics
+
+A Track's lyrics are read on demand from its file and from a sidecar beside
+it. They are never scanned, never stored in the Library and never written to
+a file. `metadata/lyrics.zig` holds the model, `metadata/lrc.zig` the one
+parser every text source goes through, and `library/lyrics_lookup.zig` the
+sidecar and the choice between sources.
+
+### Sources
+
+| Source | Where |
+| --- | --- |
+| Sidecar | the file's path with its extension replaced by `.lrc`, case kept |
+| ID3v2 (MP3, ADTS, FLAC behind ID3) | `SYLT`, else the first non-empty `USLT` |
+| Vorbis comment (FLAC, Ogg Vorbis, Opus) | `LYRICS`, else `UNSYNCEDLYRICS` |
+| MP4 | `©lyr` |
+
+`SYLT` is read only with millisecond timestamps (format 2) and content type
+lyrics (1); its own times are used, and one leading newline per entry is
+dropped. `USLT`, comments and `©lyr` are parsed as LRC. ID3v2 text in any of
+its four encodings is read, and the frame's language becomes
+`Lyrics.language`, with `XXX` read as none. WAV and AIFF are not read for
+lyrics. A sidecar named with another case, such as `Song.LRC` for
+`Song.flac`, is not found on a case-sensitive filesystem.
+
+### Choice order
+
+1. A synced sidecar.
+2. Synced lyrics in the file.
+3. A plain sidecar.
+4. Plain lyrics in the file.
+
+### LRC rules
+
+- A line starts with one or more `[m:ss]`, `[mm:ss.f]`, `[mm:ss.ff]` or
+  `[mm:ss.fff]` stamps; each stamp makes one line with the same text. A stamp
+  with 60 or more seconds drops its line.
+- `<mm:ss.xx>` word stamps are removed from the text.
+- `[offset:N]` shifts every line to `start - N` milliseconds, clamped at 0: a
+  positive offset makes lines show earlier.
+- Other `[key:value]` ID tags and lines starting with `#` are skipped.
+- A UTF-8 byte order mark and CRLF line ends are accepted.
+- Text with any stamped line is synced, and its unstamped rows are dropped;
+  otherwise every row is a plain line. Text with only tags is no lyrics.
+
+### Bounds
+
+A source over 512 KiB, with more than 4096 lines, or whose text is not UTF-8
+is treated as having no lyrics. A malformed or unreadable tag reads as none;
+only running out of memory is an error.
+
+### Reaching it
+
+`Runtime.startTrackLyrics` reads on a job worker. Once the job finishes,
+`Runtime.jobLyricsOutcome` says whether lyrics were found (`local`) or not
+(`not_found`), and `Runtime.jobTakeLyrics` moves the `Lyrics` to the caller;
+lyrics nobody takes are freed with the job. `Lyrics.lineAt(position_ms)` is
+the synced line being heard. `orca-cli lyrics DATABASE TRACK_ID` prints them,
+and `orca-cli play-tracks --lyrics` prints each line as playback reaches it.
+
 ## File mutation
 
 File writes and moves only execute from an explicitly approved immutable

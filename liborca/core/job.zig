@@ -25,6 +25,8 @@ pub const Kind = enum {
     acoustid_submission,
     artwork,
     mutation,
+    /// Reading one Track's lyrics.
+    lyrics,
     dummy,
 };
 

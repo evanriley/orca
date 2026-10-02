@@ -20,12 +20,14 @@ const id3v2_fixtures = [_][]const u8{
     "id3-prefixed-reference.flac",
     "id3-footer-prefixed-reference.flac",
     "id3-covered-reference.flac",
+    "lyrics-sylt.mp3",
 };
 const mp4_fixtures = [_][]const u8{
     "tagged-reference-alac.m4a",
     "tagged-reference-aac.m4a",
     "chirp-reference-aac.m4a",
     "covered-reference.m4a",
+    "lyrics-plain.m4a",
 };
 const vorbis_comment_fixtures = [_][]const u8{
     "tagged-reference.flac",
@@ -33,6 +35,7 @@ const vorbis_comment_fixtures = [_][]const u8{
     "covered-alternate-reference.flac",
     "generated-reference.flac",
     "midside-reference.flac",
+    "lyrics-synced.flac",
     "tagged-reference.ogg",
     "covered-reference.ogg",
     "tagged-reference.opus",
@@ -61,7 +64,8 @@ const mp3_stream_fixtures = [_][]const u8{
 const scanner_fixtures = id3v2_fixtures ++ mp4_fixtures ++ vorbis_comment_fixtures ++ wav_fixtures ++
     aiff_fixtures ++ adts_fixtures ++ mp3_stream_fixtures;
 const playlist_fixtures = [_][]const u8{ "relative.m3u8", "latin1.m3u", "bom.m3u8" };
-const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner" };
+const lrc_fixtures = [_][]const u8{"chromaprint-test.lrc"};
+const all_targets = [_][]const u8{ "id3v2", "mp4", "vorbis-comment", "wav", "aiff", "adts", "mp3-stream", "scanner", "lrc" };
 const audio_fixture_dir = "fixtures/audio";
 
 test "fuzz: ID3v2 tags parse or fail cleanly" {
@@ -98,6 +102,10 @@ test "fuzz: the scanner's detect, probe and artwork path parses or fails cleanly
 
 test "fuzz: M3U playlists parse and resolve or fail cleanly" {
     try fuzzTarget(exerciseM3u, "fixtures/playlists", &playlist_fixtures, &.{"m3u"});
+}
+
+test "fuzz: LRC lyrics parse or fail cleanly" {
+    try fuzzTarget(exerciseLrc, audio_fixture_dir, &lrc_fixtures, &.{"lrc"});
 }
 
 const Exercise = fn (allocator: std.mem.Allocator, input: []const u8) void;
@@ -226,6 +234,7 @@ fn exerciseId3v2(allocator: std.mem.Allocator, input: []const u8) void {
     ignore(metadata.id3v2.read(arena.allocator(), readable));
     ignore(metadata.id3v2.readPicture(arena.allocator(), readable));
     ignore(metadata.id3v2.prefixLength(readable));
+    ignore(metadata.id3v2.readLyrics(allocator, arena.allocator(), readable));
 }
 
 fn exerciseMp4(allocator: std.mem.Allocator, input: []const u8) void {
@@ -242,6 +251,7 @@ fn exerciseMp4(allocator: std.mem.Allocator, input: []const u8) void {
     defer arena.deinit();
     ignore(metadata.mp4_tags.read(arena.allocator(), readable));
     ignore(metadata.mp4_tags.readPicture(arena.allocator(), readable));
+    ignore(metadata.mp4_tags.readLyrics(allocator, arena.allocator(), readable));
 }
 
 fn walkBoxes(bytes: []const u8, depth: usize) void {
@@ -260,6 +270,9 @@ fn exerciseVorbisComment(allocator: std.mem.Allocator, input: []const u8) void {
     ignore(metadata.vorbis_comment.readPicture(arena.allocator(), readable));
     ignore(metadata.ogg_comment.read(arena.allocator(), readable));
     ignore(metadata.ogg_comment.readPicture(arena.allocator(), readable));
+    ignore(metadata.vorbis_comment.readLyrics(allocator, arena.allocator(), readable));
+    ignore(metadata.ogg_comment.readLyrics(allocator, arena.allocator(), readable));
+    ignore(metadata.vorbis_comment.lyricsFromComments(arena.allocator(), input));
 }
 
 fn exerciseWav(allocator: std.mem.Allocator, input: []const u8) void {
@@ -317,6 +330,16 @@ fn exerciseScanner(allocator: std.mem.Allocator, input: []const u8) void {
     defer arena.deinit();
     var payload: storage.OffsetSource = .{ .inner = readable, .offset = detection.payload_offset };
     ignore(metadata.artwork.readDetected(arena.allocator(), detection.format, payload.readable()));
+    if (metadata.lyrics.readDetected(allocator, detection.format, payload.readable())) |found| {
+        if (found) |lyrics| lyrics.deinit();
+    } else |_| {}
+}
+
+fn exerciseLrc(allocator: std.mem.Allocator, input: []const u8) void {
+    const lyrics = (metadata.lyrics.parse(allocator, input, .sidecar) catch return) orelse return;
+    defer lyrics.deinit();
+    _ = lyrics.lineAt(0);
+    _ = lyrics.lineAt(std.math.maxInt(u32));
 }
 
 fn exerciseM3u(allocator: std.mem.Allocator, input: []const u8) void {
