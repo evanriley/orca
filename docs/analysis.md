@@ -465,6 +465,19 @@ The issue row itself is untouched: its owning pass still records and clears
 it. `libraryRestoreHealthIssue` (`orca-cli health-restore`) drops the
 dismissal. A dismissal goes with its file.
 
+### By kind
+
+`Runtime.libraryHealthSummary` (`orca-cli health --summary`) returns a
+`HealthSummary`: one `HealthKindSummary` per kind with at least one issue
+that is not dismissed, holding its count and the highest severity among
+those issues, highest severity first and then in kind order. The counts sum
+to `libraryHealthIssueCount`, and an empty Library has an empty summary.
+`libraryHealthIssuePageOfKind` (`orca-cli health --kind=KIND`) pages the
+issues of one kind in the order of `libraryHealthIssuePage`. Both leave out
+dismissed issues as the page and count do, and both reach the kind through
+`library_health_by_kind`: the page searches it for one kind, and the summary
+scans it once, as the count does.
+
 ### Actions
 
 `HealthIssue` names the lowest Track id the file backs (`track_id`), that

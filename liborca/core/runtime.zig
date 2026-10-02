@@ -1159,6 +1159,27 @@ pub const OrcaRuntime = struct {
         );
     }
 
+    /// The page of `libraryHealthIssuePage` holding only issues of `kind`.
+    pub fn libraryHealthIssuePageOfKind(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        kind: database.HealthIssueKind,
+        limit: u32,
+        offset: u32,
+    ) !database.HealthIssuePage {
+        return (try libraryDatabase(self, library)).health_issues.pageOfKind(
+            self.allocator,
+            kind,
+            limit,
+            offset,
+        );
+    }
+
+    /// Each kind with a visible issue: how many, and the highest severity.
+    pub fn libraryHealthSummary(self: *OrcaRuntime, library: LibraryHandle) !database.HealthSummary {
+        return (try libraryDatabase(self, library)).health_issues.summary();
+    }
+
     /// Hides one issue of a file until the file's bytes change.
     pub fn libraryDismissHealthIssue(
         self: *OrcaRuntime,

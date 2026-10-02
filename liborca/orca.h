@@ -519,6 +519,21 @@ typedef void (*orca_health_item_callback)(
     const orca_health_item_view *item
 );
 
+/* The visible issues of one kind: how many there are, and the highest
+ * severity among them. `kind` and `severity` are orca_health_issue_kind and
+ * orca_health_severity. */
+typedef struct orca_health_kind_summary_view {
+    uint64_t count;
+    uint8_t kind;
+    uint8_t severity;
+    uint8_t reserved[6];
+} orca_health_kind_summary_view;
+
+typedef void (*orca_health_kind_summary_callback)(
+    void *context,
+    const orca_health_kind_summary_view *summary
+);
+
 /* One file as a host shows it beside an issue. A value whose `has_*` flag is 0
  * is 0. `missing` is 1 when no location of the file is present, and then
  * `has_path` is 0 and `path` is empty. `codec` is a short identifier such as
@@ -1163,6 +1178,28 @@ orca_status orca_library_query_health_items(
     uint32_t offset,
     void *context,
     orca_health_item_callback callback
+);
+/* The page of orca_library_query_health_items holding only issues of `kind`,
+ * an orca_health_issue_kind, in the same order. An unknown `kind` is
+ * ORCA_STATUS_INVALID_ARGUMENT, and so is a `limit` outside 1..512. */
+orca_status orca_library_query_health_items_of_kind(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t kind,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_health_item_callback callback
+);
+/* Calls `callback` once for each kind with at least one issue that is not
+ * dismissed, highest severity first, then in orca_health_issue_kind order.
+ * An empty Library calls it never. Its counts sum to
+ * orca_library_health_issue_count. */
+orca_status orca_library_health_summary(
+    orca_runtime *runtime,
+    orca_handle library,
+    void *context,
+    orca_health_kind_summary_callback callback
 );
 /* Hides one issue of a file, an orca_health_issue_kind, until the file's bytes
  * change. Dismissing an issue the file does not have still hides it should it

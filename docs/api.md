@@ -124,6 +124,10 @@ defer page.deinit();
   `playerQueueInsertNext` queues Tracks after the current one, and
   `playerQueueRemove` removes an entry. The entry playing, and one the engine
   has already lined up after it, are refused with `error.QueueEntryInUse`.
+- Health can be shown grouped by kind: `libraryHealthSummary` returns a
+  `HealthSummary` of `HealthKindSummary`s, each kind's count and highest
+  severity, and `libraryHealthIssuePageOfKind` pages one kind's issues. See
+  [analysis.md](analysis.md#by-kind).
 - `TrackSummary` carries `release_id` and `artist_id`, so a host can link a
   Track to its Release and Artist without a second query.
 - Cover art is read either on the caller's thread (`libraryTrackArtwork`,

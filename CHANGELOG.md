@@ -32,6 +32,12 @@
   instrumental Track says so. Preferences > Listening > Fetch lyrics from
   LRCLIB, off by default, also asks LRCLIB; `ORCA_LRCLIB_URL` points it at
   another server.
+- **Library Health by kind.** `Runtime.libraryHealthSummary` returns each
+  kind with an issue that is not dismissed, its count and its highest
+  severity, and `Runtime.libraryHealthIssuePageOfKind` pages one kind's
+  issues. The C ABI has them as `orca_library_health_summary` and
+  `orca_library_query_health_items_of_kind`, and `orca-cli health` takes
+  `--summary` and `--kind=KIND`.
 
 ### Changed
 

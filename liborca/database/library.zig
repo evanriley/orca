@@ -558,6 +558,119 @@ test "a dismissed health issue stays hidden until its file's bytes change, and s
     try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM health_dismissals;"));
 }
 
+fn addKindFixture(library: *LibraryDatabase) ![3]i64 {
+    const first = try addHealthFile(library, "music/first.flac", null);
+    const second = try addHealthFile(library, "music/second.flac", null);
+    const third = try addHealthFile(library, "music/third.flac", null);
+    try library.health_issues.replaceFile(first, &.{
+        .{ .kind = .clipping, .severity = .warning },
+        .{ .kind = .missing_track_number, .severity = .information },
+    });
+    try library.health_issues.replaceFile(second, &.{
+        .{ .kind = .clipping, .severity = .information },
+        .{ .kind = .corrupt_audio, .severity = .error_severity },
+    });
+    try library.health_issues.replaceFile(third, &.{
+        .{ .kind = .clipping, .severity = .warning },
+        .{ .kind = .missing_track_number, .severity = .information },
+    });
+    return .{ first, second, third };
+}
+
+fn expectSummary(library: *LibraryDatabase, expected: []const repository.HealthKindSummary) !void {
+    const summary = try library.health_issues.summary();
+    try std.testing.expectEqualSlices(repository.HealthKindSummary, expected, summary.items());
+}
+
+test "the health summary counts each kind's visible issues and names the highest severity among them" {
+    var library = try openHealthLibrary("summary");
+    defer library.close();
+    _ = try addKindFixture(&library);
+
+    try expectSummary(&library, &.{
+        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1 },
+        .{ .kind = .clipping, .severity = .warning, .count = 3 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+    });
+    var total: u64 = 0;
+    for ((try library.health_issues.summary()).items()) |entry| total += entry.count;
+    try std.testing.expectEqual(try library.health_issues.count(), total);
+}
+
+test "an empty library has an empty health summary" {
+    var library = try openHealthLibrary("summary-empty");
+    defer library.close();
+    try expectSummary(&library, &.{});
+}
+
+test "a dismissed health issue leaves the summary and its kind's page, and returns to both once restored" {
+    var library = try openHealthLibrary("summary-dismiss");
+    defer library.close();
+    const files = try addKindFixture(&library);
+
+    try library.health_issues.dismiss(files[1], .corrupt_audio);
+    try library.health_issues.dismiss(files[0], .clipping);
+    try expectSummary(&library, &.{
+        .{ .kind = .clipping, .severity = .warning, .count = 2 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+    });
+    var dismissed = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 0);
+    defer dismissed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), dismissed.items.len);
+    try std.testing.expectEqual(files[2], dismissed.items[0].file_id);
+    try std.testing.expectEqual(files[1], dismissed.items[1].file_id);
+    var corrupt = try library.health_issues.pageOfKind(std.testing.allocator, .corrupt_audio, 10, 0);
+    defer corrupt.deinit();
+    try std.testing.expectEqual(@as(usize, 0), corrupt.items.len);
+
+    try library.health_issues.restore(files[1], .corrupt_audio);
+    try library.health_issues.restore(files[0], .clipping);
+    try expectSummary(&library, &.{
+        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1 },
+        .{ .kind = .clipping, .severity = .warning, .count = 3 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+    });
+    var restored = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 0);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 3), restored.items.len);
+}
+
+test "a page of one health kind holds only that kind, in the order of the full page, within its limit and offset" {
+    var library = try openHealthLibrary("kind-page");
+    defer library.close();
+    const files = try addKindFixture(&library);
+
+    var full = try library.health_issues.page(std.testing.allocator, 10, 0);
+    defer full.deinit();
+    var expected: std.ArrayList(i64) = .empty;
+    defer expected.deinit(std.testing.allocator);
+    for (full.items) |issue| if (issue.kind == .clipping) try expected.append(std.testing.allocator, issue.file_id);
+    try std.testing.expectEqualSlices(i64, &.{ files[0], files[2], files[1] }, expected.items);
+
+    var all = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 0);
+    defer all.deinit();
+    try std.testing.expectEqual(expected.items.len, all.items.len);
+    for (expected.items, all.items) |file_id, issue| {
+        try std.testing.expectEqual(file_id, issue.file_id);
+        try std.testing.expectEqual(repository.HealthIssueKind.clipping, issue.kind);
+    }
+
+    var middle = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 1, 1);
+    defer middle.deinit();
+    try std.testing.expectEqual(@as(usize, 1), middle.items.len);
+    try std.testing.expectEqual(files[2], middle.items[0].file_id);
+    try std.testing.expectEqual(repository.HealthSeverity.warning, middle.items[0].severity);
+
+    var tail = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 2, 2);
+    defer tail.deinit();
+    try std.testing.expectEqual(@as(usize, 1), tail.items.len);
+    try std.testing.expectEqual(files[1], tail.items[0].file_id);
+
+    var past = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 3);
+    defer past.deinit();
+    try std.testing.expectEqual(@as(usize, 0), past.items.len);
+}
+
 test "each health issue names the lowest Track its file backs, that Track's Release, and the action that resolves it" {
     var library = try openHealthLibrary("targets");
     defer library.close();
@@ -656,13 +769,15 @@ test "artwork issues on one Release share its fetch action whether the release I
     }
 }
 
-test "listing and counting health issues reach dismissals and Tracks through indexes" {
+test "listing, counting and summarising health issues reach kinds, dismissals and Tracks through indexes" {
     var library = try openHealthLibrary("plans");
     defer library.close();
     const health = @import("repository/health.zig");
     const plans = [_][]u8{
         try queryPlan(&library, health.health_page_sql),
         try queryPlan(&library, health.health_count_sql),
+        try queryPlan(&library, health.health_page_of_kind_sql),
+        try queryPlan(&library, health.health_summary_sql),
     };
     defer for (plans) |plan| std.testing.allocator.free(plan);
     for (plans) |plan| {
@@ -672,6 +787,8 @@ test "listing and counting health issues reach dismissals and Tracks through ind
     }
     try std.testing.expect(std.mem.indexOf(u8, plans[0], "tracks_by_preferred_file") != null);
     try std.testing.expect(std.mem.indexOf(u8, plans[0], "tracks_by_recording") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[2], "SEARCH library_health_issues USING INDEX library_health_by_kind (kind=?)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN library_health_issues USING COVERING INDEX library_health_by_kind") != null);
 }
 
 test "the file behind a health issue reports its properties and its best location, or that every location is missing" {

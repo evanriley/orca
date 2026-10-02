@@ -73,6 +73,7 @@ fn describe(err: anyerror) []const u8 {
         error.PageOutOfRange => "at most 512 ids at a time, and --limit must be 1 to 512",
         error.TracksAndPlaylist => "give either IDS or --playlist=ID, not both",
         error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping or exact_duplicate",
+        error.SummaryWithPage => "--summary lists every kind at once; give it no --kind or OFFSET",
         error.UnknownFile => "no file with that id",
         else => @errorName(err),
     };
@@ -145,7 +146,7 @@ const commands = [_]Command{
     .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
     .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
     .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
-    .{ .name = "health", .usage = "health DATABASE [OFFSET]", .min_arguments = 1, .max_arguments = 2, .run = listHealthIssues },
+    .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
     .{ .name = "health-dismiss", .usage = "health-dismiss DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = dismissHealthIssue },
@@ -499,7 +500,9 @@ const help_details =
     \\
     \\health prints one issue per line: file id, severity, kind, the action
     \\that resolves it (match_or_edit, fetch_cover_art, compare_duplicate,
-    \\review_correction or reveal_file), path and details. health-dismiss
+    \\review_correction or reveal_file), path and details. --kind=KIND lists
+    \\only issues of that kind, in the same order. --summary prints one line
+    \\per kind with an issue: kind, highest severity and count. health-dismiss
     \\hides an issue of a file until the file's bytes change; health-restore
     \\shows it again. KIND is the kind health prints.
     \\
@@ -946,11 +949,37 @@ fn analyzeFile(context: Context) !void {
 
 fn listHealthIssues(context: Context) !void {
     const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
-    const offset = if (context.arguments.len == 2) try std.fmt.parseInt(u32, context.arguments[1], 10) else 0;
+    var summary = false;
+    var kind: ?liborca.HealthIssueKind = null;
+    var offset: ?u32 = null;
+    for (context.arguments[1..]) |argument| {
+        if (std.mem.eql(u8, argument, "--summary")) {
+            summary = true;
+        } else if (std.mem.startsWith(u8, argument, "--kind=")) {
+            kind = std.meta.stringToEnum(liborca.HealthIssueKind, argument["--kind=".len..]) orelse
+                return error.UnknownHealthKind;
+        } else if (std.mem.startsWith(u8, argument, "--")) {
+            return error.UnknownOption;
+        } else {
+            offset = try std.fmt.parseInt(u32, argument, 10);
+        }
+    }
+    if (summary and (kind != null or offset != null)) return error.SummaryWithPage;
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try runtime.openLibrary(context.io, database_path);
-    var page = try runtime.libraryHealthIssuePage(library_handle, 256, offset);
+    if (summary) {
+        const kinds = try runtime.libraryHealthSummary(library_handle);
+        for (kinds.items()) |entry| try context.stdout.print(
+            "{s}\t{s}\t{d}\n",
+            .{ @tagName(entry.kind), @tagName(entry.severity), entry.count },
+        );
+        return;
+    }
+    var page = if (kind) |only|
+        try runtime.libraryHealthIssuePageOfKind(library_handle, only, 256, offset orelse 0)
+    else
+        try runtime.libraryHealthIssuePage(library_handle, 256, offset orelse 0);
     defer page.deinit();
     for (page.items) |issue| try context.stdout.print(
         "{d}\t{s}\t{s}\t{s}\t{s}\t{s}\n",

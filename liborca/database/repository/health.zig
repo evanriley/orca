@@ -176,7 +176,7 @@ pub const visible_issues_sql =
     \\      AND health_dismissals.quick_hash IS files.quick_hash)
 ;
 
-pub const health_page_sql =
+const health_page_select_sql =
     \\SELECT library_health_issues.file_id, kind, severity, details,
     \\       COALESCE((
     \\           SELECT uri FROM locations
@@ -188,11 +188,43 @@ pub const health_page_sql =
     \\        WHERE tracks.preferred_file_id = library_health_issues.file_id
     \\           OR tracks.recording_id = files.recording_id)
     \\
-++ visible_issues_sql ++ "\n" ++
+;
+
+pub const health_page_sql = health_page_select_sql ++ visible_issues_sql ++ "\n" ++
     \\ORDER BY severity DESC, kind, library_health_issues.file_id LIMIT ?1 OFFSET ?2;
 ;
 
+pub const health_page_of_kind_sql = health_page_select_sql ++ visible_issues_sql ++ "\n" ++
+    \\  AND library_health_issues.kind = ?3
+    \\ORDER BY severity DESC, library_health_issues.file_id LIMIT ?1 OFFSET ?2;
+;
+
 pub const health_count_sql = "SELECT count(*) " ++ visible_issues_sql ++ ";";
+
+pub const health_summary_sql = "SELECT library_health_issues.kind, max(severity), count(*) " ++
+    visible_issues_sql ++ "\n" ++
+    \\GROUP BY library_health_issues.kind
+    \\ORDER BY max(severity) DESC, library_health_issues.kind;
+;
+
+/// The visible issues of one kind.
+pub const HealthKindSummary = struct {
+    kind: HealthIssueKind,
+    /// The highest severity among them.
+    severity: HealthSeverity,
+    count: u64,
+};
+
+/// One entry per kind with at least one visible issue, highest severity
+/// first, then in kind order.
+pub const HealthSummary = struct {
+    buffer: [std.meta.fields(HealthIssueKind).len]HealthKindSummary = undefined,
+    len: usize = 0,
+
+    pub fn items(self: *const HealthSummary) []const HealthKindSummary {
+        return self.buffer[0..self.len];
+    }
+};
 
 pub const HealthIssueRepository = struct {
     db: sqlite.Database,
@@ -310,6 +342,30 @@ pub const HealthIssueRepository = struct {
         defer statement.deinit();
         try statement.bindInt64(1, limit);
         try statement.bindInt64(2, offset);
+        return self.collectPage(allocator, statement);
+    }
+
+    /// The page of `page` holding only issues of `kind`, in the same order.
+    pub fn pageOfKind(
+        self: *const HealthIssueRepository,
+        allocator: std.mem.Allocator,
+        kind: HealthIssueKind,
+        limit: u32,
+        offset: u32,
+    ) !HealthIssuePage {
+        var statement = try self.db.prepare(health_page_of_kind_sql);
+        defer statement.deinit();
+        try statement.bindInt64(1, limit);
+        try statement.bindInt64(2, offset);
+        try statement.bindInt64(3, @intFromEnum(kind));
+        return self.collectPage(allocator, statement);
+    }
+
+    fn collectPage(
+        self: *const HealthIssueRepository,
+        allocator: std.mem.Allocator,
+        statement: sqlite.Statement,
+    ) !HealthIssuePage {
         var release_of = try self.db.prepare("SELECT release_id FROM tracks WHERE id = ?1;");
         defer release_of.deinit();
         const artwork: ReleaseArtworkRepository = .{ .db = self.db, .write_lane = self.write_lane };
@@ -362,6 +418,22 @@ pub const HealthIssueRepository = struct {
         defer statement.deinit();
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
+    }
+
+    pub fn summary(self: *const HealthIssueRepository) !HealthSummary {
+        var statement = try self.db.prepare(health_summary_sql);
+        defer statement.deinit();
+        var result: HealthSummary = .{};
+        while (try statement.step() == .row) {
+            const kind = std.enums.fromInt(HealthIssueKind, statement.columnInt64(0)) orelse
+                return error.InvalidStoredHealthIssue;
+            const severity = std.enums.fromInt(HealthSeverity, statement.columnInt64(1)) orelse
+                return error.InvalidStoredHealthSeverity;
+            std.debug.assert(result.len < result.buffer.len);
+            result.buffer[result.len] = .{ .kind = kind, .severity = severity, .count = @intCast(statement.columnInt64(2)) };
+            result.len += 1;
+        }
+        return result;
     }
 
     /// The file behind an issue, or null when it does not exist.

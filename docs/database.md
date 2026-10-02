@@ -486,7 +486,9 @@ Unix seconds. The health page and count leave out an issue whose dismissal
 adds `library_health_issues.related_file_id`, the other file of a duplicate,
 set to null when that file is deleted, with the partial index
 `library_health_by_related` the delete uses. See
-[analysis.md](analysis.md#dismissals).
+[analysis.md](analysis.md#dismissals). `library_health_by_kind ON (kind,
+severity, file_id)` serves the per-kind page and summary; see
+[analysis.md](analysis.md#by-kind).
 
 `recording_verifications` (version 28) holds each file's latest
 [verification](providers.md#verification), keyed on `files.id` and going

@@ -1235,6 +1235,88 @@ static int health_items_collect(orca_runtime *runtime, orca_handle library,
     return 0;
 }
 
+struct health_summary_capture {
+    uint32_t kinds;
+    uint64_t total;
+    uint64_t watch_count;
+    uint8_t watch_kind;
+    uint32_t ordered;
+    uint8_t previous_severity;
+};
+
+static void collect_health_summary(void *context, const orca_health_kind_summary_view *summary) {
+    struct health_summary_capture *capture = context;
+    if (capture->kinds == 0 || summary->severity <= capture->previous_severity)
+        capture->ordered += 1;
+    capture->previous_severity = summary->severity;
+    if (summary->kind == capture->watch_kind) capture->watch_count = summary->count;
+    capture->total += summary->count;
+    capture->kinds += 1;
+}
+
+static int health_summary_collect(orca_runtime *runtime, orca_handle library,
+                                  struct health_summary_capture *capture, uint8_t watch_kind) {
+    memset(capture, 0, sizeof *capture);
+    capture->watch_kind = watch_kind;
+    SMOKE_CHECK(orca_library_health_summary(runtime, library, capture,
+                                            collect_health_summary) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->ordered == capture->kinds);
+    return 0;
+}
+
+static int health_kind_collect(orca_runtime *runtime, orca_handle library,
+                               struct health_capture *capture, uint8_t kind,
+                               int64_t watch_file_id) {
+    memset(capture, 0, sizeof *capture);
+    capture->watch_file_id = watch_file_id;
+    capture->watch_kind = kind;
+    SMOKE_CHECK(orca_library_query_health_items_of_kind(runtime, library, kind, 512, 0, capture,
+                                                        collect_health_item) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static int health_kind_smoke(orca_runtime *runtime, orca_handle library, uint64_t total,
+                             int64_t file_id, uint8_t kind) {
+    struct health_summary_capture summary;
+    SMOKE_CHECK(health_summary_collect(runtime, library, &summary, kind) == 0);
+    SMOKE_CHECK(summary.total == total && summary.kinds > 0 && summary.watch_count > 0);
+    uint64_t of_kind = summary.watch_count;
+
+    struct health_capture items;
+    SMOKE_CHECK(health_kind_collect(runtime, library, &items, kind, file_id) == 0);
+    SMOKE_CHECK(items.count == of_kind && items.consistent == items.count);
+    SMOKE_CHECK(items.listed == 1 && items.first_kind == kind);
+
+    SMOKE_CHECK(orca_library_query_health_items_of_kind(runtime, library, 200, 1, 0, &items,
+                                                        collect_health_item) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_health_items_of_kind(runtime, library, kind, 0, 0, &items,
+                                                        collect_health_item) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_health_items_of_kind(runtime, library, kind, 513, 0, &items,
+                                                        collect_health_item) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_health_items_of_kind(runtime, library, kind, 1, 0, &items,
+                                                        0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_health_summary(runtime, library, &summary, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_library_dismiss_health_issue(runtime, library, file_id, kind) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(health_summary_collect(runtime, library, &summary, kind) == 0);
+    SMOKE_CHECK(summary.total == total - 1 && summary.watch_count == of_kind - 1);
+    SMOKE_CHECK(health_kind_collect(runtime, library, &items, kind, file_id) == 0);
+    SMOKE_CHECK(items.count == of_kind - 1 && items.listed == 0);
+
+    SMOKE_CHECK(orca_library_restore_health_issue(runtime, library, file_id, kind) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(health_summary_collect(runtime, library, &summary, kind) == 0);
+    SMOKE_CHECK(summary.total == total && summary.watch_count == of_kind);
+    SMOKE_CHECK(health_kind_collect(runtime, library, &items, kind, file_id) == 0);
+    SMOKE_CHECK(items.count == of_kind && items.listed == 1);
+    return 0;
+}
+
 static int health_smoke(orca_runtime *runtime, orca_handle library) {
     uint64_t total = 0;
     SMOKE_CHECK(orca_library_health_issue_count(runtime, library, &total) == ORCA_STATUS_OK);
@@ -1278,6 +1360,8 @@ static int health_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(after == total);
     SMOKE_CHECK(health_items_collect(runtime, library, &items, file_id, kind) == 0);
     SMOKE_CHECK(items.count == total && items.listed == 1);
+
+    SMOKE_CHECK(health_kind_smoke(runtime, library, total, file_id, kind) == 0);
 
     struct health_file_capture file;
     memset(&file, 0, sizeof file);
@@ -2435,6 +2519,9 @@ int main(int argc, char **argv) {
         ORCA_STATUS_OK)
         return 13;
     if (issues != 0) return 14;
+    struct health_summary_capture empty_summary;
+    if (health_summary_collect(runtime, library, &empty_summary, 0) != 0) return 14;
+    if (empty_summary.kinds != 0) return 14;
 
     /* Bounds are part of the contract, not a suggestion. */
     if (orca_library_query_tracks(runtime, library, 0, 0, 0, 0, 0, capture_track) !=

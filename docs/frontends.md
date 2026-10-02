@@ -38,7 +38,10 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_health_file_view` for a Compare or Reveal dialog, or returns
   `ORCA_STATUS_NOT_FOUND`. Dismissing a file that does not exist is
   `ORCA_STATUS_NOT_FOUND`; restoring an issue that was not dismissed is
-  `ORCA_STATUS_OK`.
+  `ORCA_STATUS_OK`. `orca_library_health_summary` calls back once per kind
+  with an issue, with an `orca_health_kind_summary_view` of its count and
+  highest severity, and `orca_library_query_health_items_of_kind` pages one
+  kind's items in the same order; neither lists dismissed issues.
 - **Browsing.** `orca_library_browse_artists`, `orca_library_browse_releases`
   and `orca_library_browse_tracks` take a query struct: an artist name filter,
   a release sort including `ORCA_RELEASE_SORT_LOVED`, track sorts by rating

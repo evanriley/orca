@@ -128,6 +128,8 @@ zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or onl
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
+zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
+zig build run -- health DATABASE --summary   # kind, highest severity, count per kind with an issue
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO

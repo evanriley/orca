@@ -39,6 +39,7 @@ const struct_pairs = .{
     .{ c_api.TagWriteFailureView, c.orca_tag_write_failure },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.HealthItemView, c.orca_health_item_view },
+    .{ c_api.HealthKindSummaryView, c.orca_health_kind_summary_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
     .{ c_api.RootView, c.orca_root_view },
     .{ c_api.DeviceView, c.orca_device_view },

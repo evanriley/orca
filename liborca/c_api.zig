@@ -410,6 +410,15 @@ pub const HealthItemView = extern struct {
 
 pub const HealthItemCallback = *const fn (?*anyopaque, *const HealthItemView) callconv(.c) void;
 
+pub const HealthKindSummaryView = extern struct {
+    count: u64,
+    kind: u8,
+    severity: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const HealthKindSummaryCallback = *const fn (?*anyopaque, *const HealthKindSummaryView) callconv(.c) void;
+
 pub const HealthFileView = extern struct {
     file_id: i64,
     size_bytes: i64,
@@ -1133,19 +1142,72 @@ pub export fn orca_library_query_health_items(
     ) catch |err| return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view: HealthItemView = .{
-            .file_id = item.file_id,
-            .track_id = item.track_id orelse 0,
-            .release_id = item.release_id orelse 0,
-            .related_file_id = item.related_file_id orelse 0,
-            .kind = exportHealthIssueKind(item.kind),
-            .severity = exportHealthSeverity(item.severity),
-            .action = exportHealthAction(item.action),
-            .has_track_id = @intFromBool(item.track_id != null),
-            .has_release_id = @intFromBool(item.release_id != null),
-            .has_related_file_id = @intFromBool(item.related_file_id != null),
-            .path = stringView(item.path),
-            .details = stringView(item.details),
+        const view = healthItemView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_query_health_items_of_kind(
+    runtime: ?*Runtime,
+    library: Handle,
+    kind: u8,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?HealthItemCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const issue_kind = importHealthIssueKind(kind) orelse
+        return box.reject(@src(), .invalid_argument, "kind is not an orca_health_issue_kind");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryHealthIssuePageOfKind(
+        importLibrary(library),
+        issue_kind,
+        limit,
+        offset,
+    ) catch |err| return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = healthItemView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+fn healthItemView(item: database.HealthIssue) HealthItemView {
+    return .{
+        .file_id = item.file_id,
+        .track_id = item.track_id orelse 0,
+        .release_id = item.release_id orelse 0,
+        .related_file_id = item.related_file_id orelse 0,
+        .kind = exportHealthIssueKind(item.kind),
+        .severity = exportHealthSeverity(item.severity),
+        .action = exportHealthAction(item.action),
+        .has_track_id = @intFromBool(item.track_id != null),
+        .has_release_id = @intFromBool(item.release_id != null),
+        .has_related_file_id = @intFromBool(item.related_file_id != null),
+        .path = stringView(item.path),
+        .details = stringView(item.details),
+    };
+}
+
+pub export fn orca_library_health_summary(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?HealthKindSummaryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const summary = box.runtime.libraryHealthSummary(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    for (summary.items()) |entry| {
+        const view: HealthKindSummaryView = .{
+            .count = entry.count,
+            .kind = exportHealthIssueKind(entry.kind),
+            .severity = exportHealthSeverity(entry.severity),
         };
         visit(context, &view);
     }
