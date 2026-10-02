@@ -381,6 +381,7 @@ fn buildPane(
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindRow), null);
     const list = gtk.gtk_list_view_new(gtk.cast(gtk.SelectionModel, selection), factory);
     gtk.gtk_widget_add_css_class(list, "navigation-sidebar");
+    gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, list), gtk.LIST_TAB_ITEM);
 
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);

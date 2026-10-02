@@ -93,6 +93,10 @@
   large title, Play and Shuffle for every loved song and the loved song and
   album counts, then Loved Songs and Loved Albums tabs; Loved Songs uses the
   Songs table and shows the selected song in the inspector.
+- **`orca-gtk`'s lists are one Tab stop each.** In the Songs table and the
+  Albums, Artists, Playlists and Queue lists, Tab visits the focused row's
+  buttons and then moves on, instead of through every row; the arrow keys
+  move between rows.
 - **`orca-gtk`'s playlists have an overview and follow the new design.**
   The sidebar lists a single Playlists page instead of each playlist and
   the New Playlist… and Import Playlist… entries. It is a grid of cards,

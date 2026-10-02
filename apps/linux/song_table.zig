@@ -451,6 +451,7 @@ pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
     gtk.gtk_widget_add_css_class(view, "track-list");
     gtk.gtk_column_view_set_show_column_separators(table.view.?, gtk.false_);
     gtk.gtk_column_view_set_reorderable(table.view.?, gtk.true_);
+    gtk.gtk_column_view_set_tab_behavior(table.view.?, gtk.LIST_TAB_ITEM);
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), table);
     _ = gtk.signalConnect(table.selection.?, "selection-changed", gtk.callback(details.selectionChanged), self);
 

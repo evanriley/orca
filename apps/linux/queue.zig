@@ -190,6 +190,7 @@ pub fn build(self: *App) *gtk.Widget {
         factory,
     );
     gtk.gtk_widget_add_css_class(list, "queue-list");
+    gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, list), gtk.LIST_TAB_ITEM);
     gtk.gtk_list_view_set_single_click_activate(gtk.cast(gtk.ListView, list), gtk.true_);
     _ = gtk.signalConnect(list, "activate", gtk.callback(rowActivated), self);
     const scroller = gtk.gtk_scrolled_window_new();

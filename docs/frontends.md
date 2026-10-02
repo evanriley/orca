@@ -778,7 +778,9 @@ the playing one, and the Loved inspector the selected loved song, otherwise
 the playing one; an album page's inspector shows its selected track, otherwise
 the playing track when it belongs to the album. On an album page a click or
 the arrow keys select a row, one per page, and double-click or Enter plays
-from it. The track inspector is filled from `Runtime.libraryTrackDetails` when
+from it. The Songs table and the Albums, Artists, Playlists and Queue lists
+each take one Tab stop: Tab visits the focused row's buttons and then leaves
+the list, and the arrow keys move between rows. The track inspector is filled from `Runtime.libraryTrackDetails` when
 the shown track changes and when the library changes. It opens with the title,
 artist and album, then flat sections, each hidden when it has nothing to
 show: Audio (codec, format, bitrate, duration), Loudness (integrated

@@ -702,6 +702,7 @@ fn buildOverview(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(grid, "playlist-grid");
     gtk.gtk_grid_view_set_max_columns(gtk.cast(gtk.GridView, grid), 16);
     gtk.gtk_grid_view_set_min_columns(gtk.cast(gtk.GridView, grid), 1);
+    gtk.gtk_grid_view_set_tab_behavior(gtk.cast(gtk.GridView, grid), gtk.LIST_TAB_ITEM);
     gtk.gtk_grid_view_set_single_click_activate(gtk.cast(gtk.GridView, grid), gtk.true_);
     _ = gtk.signalConnect(grid, "activate", gtk.callback(cardActivated), self);
     const scroller = gtk.gtk_scrolled_window_new();

@@ -179,6 +179,7 @@ pub const POLICY_NEVER: c_int = 2;
 
 pub const SELECTION_NONE: c_int = 0;
 pub const SELECTION_SINGLE: c_int = 1;
+pub const LIST_TAB_ITEM: c_int = 1;
 pub const STACK_TRANSITION_CROSSFADE: c_int = 1;
 pub const REVEALER_TRANSITION_SLIDE_UP: c_int = 4;
 pub const STYLE_PROVIDER_PRIORITY_APPLICATION: c_uint = 600;
@@ -604,6 +605,7 @@ pub extern fn gtk_stack_get_visible_child_name(stack: *Stack) ?[*:0]const u8;
 pub extern fn gtk_grid_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 pub extern fn gtk_grid_view_set_max_columns(view: *GridView, columns: c_uint) void;
 pub extern fn gtk_grid_view_set_min_columns(view: *GridView, columns: c_uint) void;
+pub extern fn gtk_grid_view_set_tab_behavior(view: *GridView, behavior: c_int) void;
 pub extern fn gtk_grid_view_set_single_click_activate(view: *GridView, single: gboolean) void;
 pub extern fn gtk_overlay_new() *Widget;
 pub extern fn gtk_overlay_set_child(overlay: *Overlay, child: ?*Widget) void;
@@ -840,6 +842,7 @@ pub extern fn gtk_bitset_iter_init_first(
 pub extern fn gtk_bitset_iter_next(iter: *BitsetIter, value: *c_uint) gboolean;
 
 pub extern fn gtk_column_view_new(model: ?*SelectionModel) *Widget;
+pub extern fn gtk_column_view_set_tab_behavior(view: *ColumnView, behavior: c_int) void;
 pub extern fn gtk_column_view_append_column(view: *ColumnView, column: *ColumnViewColumn) void;
 pub extern fn gtk_column_view_get_sorter(view: *ColumnView) ?*Sorter;
 pub extern fn gtk_column_view_set_show_column_separators(view: *ColumnView, show: gboolean) void;
@@ -873,6 +876,7 @@ pub extern fn gtk_list_item_get_child(item: *ListItem) ?*Widget;
 pub extern fn gtk_list_item_get_item(item: *ListItem) ?*anyopaque;
 pub extern fn gtk_list_item_get_position(item: *ListItem) c_uint;
 pub extern fn gtk_list_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
+pub extern fn gtk_list_view_set_tab_behavior(view: *ListView, behavior: c_int) void;
 
 /// A NULL `sort_func` makes every element compare equal, which is what a column
 /// needs to be clickable without a sort model behind it.
