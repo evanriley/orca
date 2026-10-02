@@ -81,6 +81,23 @@ The boundary covers the whole engine, not a fragment of it:
   Library, counting finished ones not yet taken; past that a request is
   `ORCA_STATUS_BUSY`. `orca_library_cancel_artwork` skips a request that has
   not started; one already finished still arrives.
+- **Tag edits and writes.** `orca_library_edit_tracks` sets or clears Orca's
+  own values for up to 64 `orca_metadata_field`s of up to 512 Tracks, locked
+  as the user's, and returns the ids of the Tracks the edited files back
+  afterwards; `orca_library_query_track_edits` reads them back with their
+  `orca_provenance`. Neither writes a file. `orca_library_plan_tag_write`
+  reads the files and shows an `orca_tag_write_plan_view` of each change,
+  conflict and skipped file, with an approval digest; plan id 0 means nothing
+  to write. `orca_library_start_tag_write` writes a held plan only with that
+  digest, as an `ORCA_JOB_KIND_MUTATION` job that cannot be cancelled and
+  keeps a journaled backup of every original;
+  `orca_library_discard_tag_write` drops a plan. `orca_library_undo_tag_write`
+  restores the originals, or returns `ORCA_STATUS_ALREADY_DONE`,
+  `ORCA_STATUS_NEEDS_RECONCILIATION` or, once
+  `orca_library_prune_tag_write_backups` has deleted the backups,
+  `ORCA_STATUS_GONE`. A Library with no database file has nowhere to keep
+  backups and refuses writes with `ORCA_STATUS_INVALID_STATE`. See
+  [metadata.md](metadata.md).
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

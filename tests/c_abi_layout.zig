@@ -26,6 +26,14 @@ const struct_pairs = .{
     .{ c_api.PlaylistImport, c.orca_playlist_import },
     .{ c_api.ImageView, c.orca_image_view },
     .{ c_api.ArtworkResultView, c.orca_artwork_result_view },
+    .{ c_api.TrackEditView, c.orca_track_edit },
+    .{ c_api.FieldValueView, c.orca_field_value_view },
+    .{ c_api.TagWriteDigest, c.orca_tag_write_digest },
+    .{ c_api.TagWriteChangeView, c.orca_tag_write_change_view },
+    .{ c_api.TagWriteFileView, c.orca_tag_write_file_view },
+    .{ c_api.TagWriteConflictView, c.orca_tag_write_conflict_view },
+    .{ c_api.TagWriteSkipView, c.orca_tag_write_skip_view },
+    .{ c_api.TagWritePlanView, c.orca_tag_write_plan_view },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.HealthItemView, c.orca_health_item_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
@@ -167,6 +175,27 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_METADATA_FIELD_";
+        pub const Tag = metadata.Field;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportMetadataField(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PROVENANCE_";
+        pub const Tag = metadata.Provenance;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportProvenance(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TAG_WRITE_SKIP_";
+        pub const Tag = core.runtime.TagWriteSkipReason;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportTagWriteSkipReason(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_HEALTH_ISSUE_KIND_";
         pub const Tag = database.HealthIssueKind;
         pub fn produce(tag: Tag) ?i64 {
@@ -273,6 +302,13 @@ const import_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_METADATA_FIELD_";
+        pub const Tag = metadata.Field;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importMetadataField(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_RELEASE_SORT_";
         pub const Tag = database.ReleaseSort;
         pub fn consume(value: u8) ?Tag {
@@ -289,6 +325,7 @@ const non_enum_constants = [_][]const u8{
     "ORCA_EQUALIZER_MIN_PREAMP_DB",
     "ORCA_EQUALIZER_MAX_PREAMP_DB",
     "ORCA_SIGNAL_MAX_REASONS",
+    "ORCA_TAG_WRITE_DIGEST_BYTES",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -536,6 +573,11 @@ test "the equalizer and signal path limits orca.h declares are liborca's" {
     try std.testing.expectEqual(audio.dsp.max_preamp_db, @as(f32, c.ORCA_EQUALIZER_MAX_PREAMP_DB));
     try std.testing.expect(audio.dsp.SignalPath.max_reasons <= c.ORCA_SIGNAL_MAX_REASONS);
     try std.testing.expectEqual(@as(usize, c.ORCA_SIGNAL_MAX_REASONS), @typeInfo(@FieldType(c_api.SignalPathView, "reasons")).array.len);
+}
+
+test "the tag-write digest orca.h declares is as long as liborca's" {
+    try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @sizeOf(metadata.mutation.Digest));
+    try std.testing.expectEqual(@as(usize, c.ORCA_TAG_WRITE_DIGEST_BYTES), @typeInfo(@FieldType(c_api.TagWriteDigest, "bytes")).array.len);
 }
 
 test "a finished job is reported as a job_finished event carrying its state" {

@@ -188,6 +188,17 @@
   file's bytes change, `orca_library_restore_health_issue` shows it again, and
   `orca_library_health_file` describes the file behind an issue as an
   `orca_health_file_view`. `orca_health_issue_kind` names the kinds.
+- **The C ABI edits and writes tags.** `orca_library_edit_tracks` sets or
+  clears Orca's locked values for Tracks' files and
+  `orca_library_query_track_edits` reads them. `orca_library_plan_tag_write`
+  shows an `orca_tag_write_plan_view` with an approval digest,
+  `orca_library_start_tag_write` writes the plan with that digest as an
+  `ORCA_JOB_KIND_MUTATION` job, and `orca_library_discard_tag_write` drops it.
+  `orca_library_undo_tag_write` restores the originals from their backups and
+  `orca_library_prune_tag_write_backups` deletes them. New statuses
+  `ORCA_STATUS_ALREADY_DONE`, `ORCA_STATUS_NEEDS_RECONCILIATION` and
+  `ORCA_STATUS_GONE` report an undo already done, one a person must decide,
+  and one whose backups were pruned.
 - **`zig build test` checks `orca.h` against liborca.** `tests/c_abi_layout.zig`
   translates the header and compares every `orca_*` struct and union with its
   `c_api.zig` counterpart: size, alignment, field count, and each field's

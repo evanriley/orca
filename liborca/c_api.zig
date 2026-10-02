@@ -32,6 +32,9 @@ pub const Status = enum(c_int) {
     busy = 7,
     unsupported = 8,
     wrong_thread = 9,
+    already_done = 10,
+    needs_reconciliation = 11,
+    gone = 12,
     internal = 255,
 };
 
@@ -275,6 +278,75 @@ pub const ArtworkResultView = extern struct {
 };
 
 pub const ArtworkResultCallback = *const fn (?*anyopaque, *const ArtworkResultView) callconv(.c) void;
+
+pub const TrackEditView = extern struct {
+    field: u8,
+    has_value: u8,
+    _reserved: [6]u8 = @splat(0),
+    value: StringInput,
+};
+
+pub const IdCallback = *const fn (?*anyopaque, [*]const i64, usize) callconv(.c) void;
+
+pub const FieldValueView = extern struct {
+    field: u8,
+    provenance: u8,
+    locked: u8,
+    _reserved: [5]u8 = @splat(0),
+    text: StringView,
+};
+
+pub const FieldValueCallback = *const fn (?*anyopaque, *const FieldValueView) callconv(.c) void;
+
+pub const TagWriteDigest = extern struct {
+    bytes: [@sizeOf(metadata.mutation.Digest)]u8,
+};
+
+pub const TagWriteChangeView = extern struct {
+    field: u8,
+    provenance: u8,
+    has_before: u8,
+    _reserved: [5]u8 = @splat(0),
+    before: StringView,
+    after: StringView,
+};
+
+pub const TagWriteFileView = extern struct {
+    file_id: i64,
+    path: StringView,
+    changes: [*]const TagWriteChangeView,
+    change_count: usize,
+};
+
+pub const TagWriteConflictView = extern struct {
+    file_id: i64,
+    field: u8,
+    provenance: u8,
+    _reserved: [6]u8 = @splat(0),
+    path: StringView,
+    file_value: StringView,
+    orca_value: StringView,
+};
+
+pub const TagWriteSkipView = extern struct {
+    file_id: i64,
+    reason: u8,
+    _reserved: [7]u8 = @splat(0),
+    path: StringView,
+};
+
+pub const TagWritePlanView = extern struct {
+    plan_id: u64,
+    digest: TagWriteDigest,
+    files: [*]const TagWriteFileView,
+    file_count: usize,
+    conflicts: [*]const TagWriteConflictView,
+    conflict_count: usize,
+    skipped: [*]const TagWriteSkipView,
+    skip_count: usize,
+};
+
+pub const TagWritePlanCallback = *const fn (?*anyopaque, *const TagWritePlanView) callconv(.c) void;
 
 pub const PlayStatsView = extern struct {
     play_count: u64,
@@ -1573,6 +1645,185 @@ pub export fn orca_library_take_artwork(
     return .ok;
 }
 
+pub export fn orca_library_edit_tracks(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_ids: ?[*]const i64,
+    count: usize,
+    edits: ?[*]const TrackEditView,
+    edit_count: usize,
+    context: ?*anyopaque,
+    callback: ?IdCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    if (edit_count > max_track_edits) return box.reject(@src(), .invalid_argument, "edit_count exceeds 64");
+    var imported: [max_track_edits]core.runtime.TrackEdit = undefined;
+    if (edit_count != 0) {
+        const given = edits orelse
+            return box.reject(@src(), .invalid_argument, "edits is null and edit_count is not zero");
+        for (imported[0..edit_count], given[0..edit_count]) |*edit, view| {
+            const field = importMetadataField(view.field) orelse
+                return box.reject(@src(), .invalid_argument, "field is not an orca_metadata_field");
+            edit.* = .{
+                .field = field,
+                .value = if (view.has_value == 0) null else stringInput(view.value.pointer, view.value.length) orelse
+                    return box.reject(@src(), .invalid_argument, "value is null and its length is not zero"),
+            };
+        }
+    }
+    const edited = box.runtime.libraryEditTracks(importLibrary(library), list, imported[0..edit_count]) catch |err|
+        return box.fail(@src(), err);
+    defer edited.deinit();
+    if (callback) |visit| visit(context, edited.ids.ptr, edited.ids.len);
+    return .ok;
+}
+
+pub export fn orca_library_query_track_edits(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?FieldValueCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var page = box.runtime.libraryTrackEdits(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: FieldValueView = .{
+            .field = exportMetadataField(item.field),
+            .provenance = exportProvenance(item.provenance),
+            .locked = @intFromBool(item.locked),
+            .text = stringView(item.text),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_plan_tag_write(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_ids: ?[*]const i64,
+    count: usize,
+    context: ?*anyopaque,
+    callback: ?TagWritePlanCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const plan = box.runtime.planTagWrite(importLibrary(library), box.io(), list) catch |err|
+        return box.fail(@src(), err);
+    defer plan.deinit();
+    var scratch: std.heap.ArenaAllocator = .init(box.runtime.allocator);
+    defer scratch.deinit();
+    const view = tagWritePlanView(scratch.allocator(), &plan) catch |err| {
+        if (plan.plan_id != 0) box.runtime.discardTagWrite(importLibrary(library), plan.plan_id) catch {};
+        return box.fail(@src(), err);
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_start_tag_write(
+    runtime: ?*Runtime,
+    library: Handle,
+    plan_id: u64,
+    digest: ?*const TagWriteDigest,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const approval = digest orelse return box.reject(@src(), .invalid_argument, "digest is null");
+    const started = box.runtime.startTagWrite(importLibrary(library), plan_id, approval.bytes) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_library_discard_tag_write(runtime: ?*Runtime, library: Handle, plan_id: u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.discardTagWrite(importLibrary(library), plan_id) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_undo_tag_write(runtime: ?*Runtime, library: Handle, group_id: u64) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.undoTagWrite(importLibrary(library), box.io(), group_id) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_prune_tag_write_backups(
+    runtime: ?*Runtime,
+    library: Handle,
+    older_than_s: u64,
+    backups: ?*u64,
+    bytes: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const backup_count = backups orelse return box.reject(@src(), .invalid_argument, "backups is null");
+    const byte_count = bytes orelse return box.reject(@src(), .invalid_argument, "bytes is null");
+    const pruned = box.runtime.pruneTagWriteBackups(importLibrary(library), box.io(), older_than_s) catch |err|
+        return box.fail(@src(), err);
+    backup_count.* = pruned.backups;
+    byte_count.* = pruned.bytes;
+    return .ok;
+}
+
+fn tagWritePlanView(allocator: std.mem.Allocator, plan: *const core.runtime.TagWritePlan) !TagWritePlanView {
+    var change_total: usize = 0;
+    for (plan.files) |file| change_total += file.changes.len;
+    const changes = try allocator.alloc(TagWriteChangeView, change_total);
+    const files = try allocator.alloc(TagWriteFileView, plan.files.len);
+    var next: usize = 0;
+    for (files, plan.files) |*file_view, file| {
+        const owned = changes[next..][0..file.changes.len];
+        next += file.changes.len;
+        for (owned, file.changes) |*change_view, change| change_view.* = .{
+            .field = exportMetadataField(change.field),
+            .provenance = exportProvenance(change.provenance),
+            .has_before = @intFromBool(change.before != null),
+            .before = stringView(change.before orelse ""),
+            .after = stringView(change.after orelse ""),
+        };
+        file_view.* = .{
+            .file_id = file.file_id,
+            .path = stringView(file.path),
+            .changes = owned.ptr,
+            .change_count = owned.len,
+        };
+    }
+    const conflicts = try allocator.alloc(TagWriteConflictView, plan.conflicts.len);
+    for (conflicts, plan.conflicts) |*conflict_view, conflict| conflict_view.* = .{
+        .file_id = conflict.file_id,
+        .field = exportMetadataField(conflict.field),
+        .provenance = exportProvenance(conflict.provenance),
+        .path = stringView(conflict.path),
+        .file_value = stringView(conflict.file_value),
+        .orca_value = stringView(conflict.orca_value),
+    };
+    const skipped = try allocator.alloc(TagWriteSkipView, plan.skipped.len);
+    for (skipped, plan.skipped) |*skip_view, skip| skip_view.* = .{
+        .file_id = skip.file_id,
+        .reason = exportTagWriteSkipReason(skip.reason),
+        .path = stringView(skip.path),
+    };
+    return .{
+        .plan_id = plan.plan_id,
+        .digest = .{ .bytes = plan.digest },
+        .files = files.ptr,
+        .file_count = files.len,
+        .conflicts = conflicts.ptr,
+        .conflict_count = conflicts.len,
+        .skipped = skipped.ptr,
+        .skip_count = skipped.len,
+    };
+}
+
 pub export fn orca_player_create(
     runtime: ?*Runtime,
     output: ?*Handle,
@@ -2828,6 +3079,63 @@ fn editIdSlice(ids: ?[*]const i64, count: usize) ?[]const i64 {
     return pointer[0..count];
 }
 
+const max_track_edits = 64;
+
+pub fn exportMetadataField(field: metadata.Field) u8 {
+    return switch (field) {
+        .title => 0,
+        .artist => 1,
+        .album => 2,
+        .track_number => 3,
+        .album_artist => 4,
+        .disc_number => 5,
+        .date => 6,
+        .compilation => 7,
+        .musicbrainz_recording_id => 8,
+        .musicbrainz_release_id => 9,
+        .musicbrainz_release_group_id => 10,
+        .musicbrainz_release_track_id => 11,
+        .musicbrainz_album_artist_id => 12,
+    };
+}
+
+pub fn importMetadataField(value: u8) ?metadata.Field {
+    return switch (value) {
+        0 => .title,
+        1 => .artist,
+        2 => .album,
+        3 => .track_number,
+        4 => .album_artist,
+        5 => .disc_number,
+        6 => .date,
+        7 => .compilation,
+        8 => .musicbrainz_recording_id,
+        9 => .musicbrainz_release_id,
+        10 => .musicbrainz_release_group_id,
+        11 => .musicbrainz_release_track_id,
+        12 => .musicbrainz_album_artist_id,
+        else => null,
+    };
+}
+
+pub fn exportProvenance(provenance: metadata.Provenance) u8 {
+    return switch (provenance) {
+        .observed_file => 0,
+        .user => 1,
+        .provider => 2,
+        .inference => 3,
+        .analysis => 4,
+    };
+}
+
+pub fn exportTagWriteSkipReason(reason: core.runtime.TagWriteSkipReason) u8 {
+    return switch (reason) {
+        .missing => 0,
+        .format_not_writable => 1,
+        .changed_since_scan => 2,
+    };
+}
+
 pub fn exportHealthIssueKind(kind: database.HealthIssueKind) u8 {
     return switch (kind) {
         .missing_metadata => 0,
@@ -3137,8 +3445,14 @@ fn mapError(err: anyerror) Status {
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
+        error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
+        error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
+        error.TooManyPendingTagWrites, error.TagWriteInProgress => .busy,
+        error.MutationGroupAlreadyUndone => .already_done,
+        error.MutationNeedsReconciliation => .needs_reconciliation,
+        error.TagWriteBackupPruned => .gone,
         error.CodecUnavailable,
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,
@@ -3155,6 +3469,11 @@ fn mapError(err: anyerror) Status {
         error.EqualizerGainOutOfRange,
         error.EqualizerPreampOutOfRange,
         error.CrossfeedAmountOutOfRange,
+        error.InvalidTrackSelection,
+        error.NoTrackEdits,
+        error.InvalidEditValue,
+        error.InvalidMutationGroup,
+        error.MutationApprovalMismatch,
         => .invalid_argument,
         else => .internal,
     };
@@ -3895,4 +4214,229 @@ test "artwork requests past 64 outstanding are busy until a result is taken, and
     try std.testing.expectEqual(@as(usize, 0), captured.image.length);
     try std.testing.expectEqual(Status.ok, orca_library_request_artwork(runtime, library, 0, 3, &request));
     try std.testing.expectEqual(Status.busy, orca_library_request_artwork(runtime, library, 0, 3, &request));
+}
+
+test "an undone, unreconciled or pruned tag write and a write still running each report their own status" {
+    try std.testing.expectEqual(Status.already_done, mapError(error.MutationGroupAlreadyUndone));
+    try std.testing.expectEqual(Status.needs_reconciliation, mapError(error.MutationNeedsReconciliation));
+    try std.testing.expectEqual(Status.gone, mapError(error.TagWriteBackupPruned));
+    try std.testing.expectEqual(Status.busy, mapError(error.TagWriteInProgress));
+    try std.testing.expectEqual(Status.busy, mapError(error.TooManyPendingTagWrites));
+    try std.testing.expectEqual(Status.not_found, mapError(error.MutationGroupNotFound));
+    try std.testing.expectEqual(Status.invalid_state, mapError(error.MutationGroupNotCommitted));
+    try std.testing.expectEqual(Status.invalid_state, mapError(error.TagTargetUnavailable));
+    try std.testing.expectEqual(Status.invalid_argument, mapError(error.MutationApprovalMismatch));
+}
+
+test "tag edits and writes refuse bad arguments, unknown Tracks and plans, and a Library with no database file" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-tag-arguments?mode=memory&cache=shared",
+        &library,
+    ));
+    const ids = [_]i64{1};
+    const title = "Edited";
+    const edit: TrackEditView = .{
+        .field = exportMetadataField(.title),
+        .has_value = 1,
+        .value = .{ .pointer = title.ptr, .length = title.len },
+    };
+    var unknown_field = edit;
+    unknown_field.field = 13;
+    var null_value = edit;
+    null_value.value = .{ .pointer = null, .length = 3 };
+    const zero = "0";
+    var bad_track_number = edit;
+    bad_track_number.field = exportMetadataField(.track_number);
+    bad_track_number.value = .{ .pointer = zero.ptr, .length = zero.len };
+    const too_many_edits = [_]TrackEditView{edit} ** (max_track_edits + 1);
+    const too_many_ids = [_]i64{1} ** (max_page + 1);
+    var calls: usize = 0;
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, null, 1, &.{edit}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &too_many_ids, too_many_ids.len, &.{edit}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, &.{edit}, 0, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, &too_many_edits, too_many_edits.len, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, null, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, &.{unknown_field}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, &.{null_value}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_edit_tracks(runtime, library, &ids, 1, &.{bad_track_number}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.not_found, orca_library_edit_tracks(runtime, library, &ids, 1, &.{edit}, 1, &calls, countIds));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_track_edits(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_query_track_edits(runtime, library, 1, &calls, countFieldValue));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_plan_tag_write(runtime, library, &ids, 1, &calls, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_plan_tag_write(runtime, library, &ids, 0, &calls, countPlan));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_plan_tag_write(runtime, library, null, 1, &calls, countPlan));
+    try std.testing.expectEqual(Status.not_found, orca_library_plan_tag_write(runtime, library, &ids, 1, &calls, countPlan));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+
+    const digest: TagWriteDigest = .{ .bytes = @splat(0) };
+    var started: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_tag_write(runtime, library, 1, null, &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_tag_write(runtime, library, 1, &digest, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_start_tag_write(runtime, library, 1, &digest, &started));
+    try std.testing.expectEqual(Status.not_found, orca_library_discard_tag_write(runtime, library, 1));
+
+    var backups: u64 = 7;
+    var bytes: u64 = 7;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_prune_tag_write_backups(runtime, library, 0, null, &bytes));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_prune_tag_write_backups(runtime, library, 0, &backups, null));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_prune_tag_write_backups(runtime, library, 0, &backups, &bytes));
+    try std.testing.expectEqual(@as(u64, 7), backups);
+    try std.testing.expectEqual(Status.invalid_state, orca_library_undo_tag_write(runtime, library, 1));
+
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_edit_tracks(runtime, library, &ids, 1, &.{edit}, 1, &calls, countIds));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_query_track_edits(runtime, library, 1, &calls, countFieldValue));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_plan_tag_write(runtime, library, &ids, 1, &calls, countPlan));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_undo_tag_write(runtime, library, 1));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_prune_tag_write_backups(runtime, library, 0, &backups, &bytes));
+}
+
+test "an edit is held locked as the user's, and a Library with no database file keeps the plan it shows but refuses to write it" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    const box = runtimeBox(runtime).?;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const scanned = try core.runtime_tests.scannedTempLibrary(
+        &box.runtime,
+        &temporary,
+        "file:orca-c-api-tag-plan?mode=memory&cache=shared",
+    );
+    const library = exportLibraryHandle(scanned);
+    const track_ids = try core.runtime_tests.allTrackIds(&box.runtime, scanned);
+    defer std.testing.allocator.free(track_ids);
+    try std.testing.expectEqual(@as(usize, 3), track_ids.len);
+
+    const title = "C ABI Title";
+    const edit: TrackEditView = .{
+        .field = exportMetadataField(.title),
+        .has_value = 1,
+        .value = .{ .pointer = title.ptr, .length = title.len },
+    };
+    var edited: CapturedIds = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_edit_tracks(runtime, library, track_ids.ptr, track_ids.len, &.{edit}, 1, &edited, captureIds));
+    try std.testing.expectEqual(@as(usize, 3), edited.count);
+
+    var value: CapturedFieldValue = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_track_edits(runtime, library, edited.ids[0], &value, captureFieldValue));
+    try std.testing.expectEqual(@as(usize, 1), value.count);
+    try std.testing.expectEqual(exportMetadataField(.title), value.field);
+    try std.testing.expectEqual(exportProvenance(.user), value.provenance);
+    try std.testing.expectEqual(@as(u8, 1), value.locked);
+    try std.testing.expectEqualStrings(title, value.text[0..value.text_length]);
+
+    var plan: CapturedPlan = .{ .title = title };
+    try std.testing.expectEqual(Status.ok, orca_library_plan_tag_write(runtime, library, &edited.ids, edited.count, &plan, capturePlan));
+    try std.testing.expectEqual(@as(usize, 1), plan.calls);
+    try std.testing.expect(plan.plan_id != 0);
+    try std.testing.expectEqual(@as(usize, 2), plan.file_count);
+    try std.testing.expectEqual(@as(usize, 2), plan.title_changes);
+    try std.testing.expectEqual(@as(usize, 1), plan.skip_count);
+    try std.testing.expectEqual(exportTagWriteSkipReason(.format_not_writable), plan.skip_reason);
+    try std.testing.expectEqual(@as(usize, 0), plan.conflict_count);
+
+    var started: Handle = undefined;
+    try std.testing.expectEqual(Status.invalid_state, orca_library_start_tag_write(runtime, library, plan.plan_id, &plan.digest, &started));
+    try std.testing.expectEqual(Status.ok, orca_library_discard_tag_write(runtime, library, plan.plan_id));
+    try std.testing.expectEqual(Status.not_found, orca_library_discard_tag_write(runtime, library, plan.plan_id));
+
+    const clear: TrackEditView = .{ .field = exportMetadataField(.title), .has_value = 0, .value = .{ .pointer = null, .length = 0 } };
+    try std.testing.expectEqual(Status.ok, orca_library_edit_tracks(runtime, library, &edited.ids, edited.count, &.{clear}, 1, null, null));
+    value = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_track_edits(runtime, library, edited.ids[0], &value, captureFieldValue));
+    try std.testing.expectEqual(@as(usize, 0), value.count);
+    plan = .{ .title = title };
+    try std.testing.expectEqual(Status.ok, orca_library_plan_tag_write(runtime, library, &edited.ids, edited.count, &plan, capturePlan));
+    try std.testing.expectEqual(@as(u64, 0), plan.plan_id);
+    try std.testing.expectEqual(@as(usize, 0), plan.file_count);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+const CapturedIds = struct {
+    ids: [8]i64 = @splat(0),
+    count: usize = 0,
+};
+
+fn captureIds(context: ?*anyopaque, ids: [*]const i64, count: usize) callconv(.c) void {
+    const captured: *CapturedIds = @ptrCast(@alignCast(context.?));
+    const kept = @min(count, captured.ids.len);
+    @memcpy(captured.ids[0..kept], ids[0..kept]);
+    captured.count = count;
+}
+
+fn countIds(context: ?*anyopaque, ids: [*]const i64, count: usize) callconv(.c) void {
+    _ = ids;
+    _ = count;
+    const calls: *usize = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
+}
+
+const CapturedFieldValue = struct {
+    count: usize = 0,
+    field: u8 = 0,
+    provenance: u8 = 0,
+    locked: u8 = 0,
+    text: [64]u8 = @splat(0),
+    text_length: usize = 0,
+};
+
+fn captureFieldValue(context: ?*anyopaque, value: *const FieldValueView) callconv(.c) void {
+    const captured: *CapturedFieldValue = @ptrCast(@alignCast(context.?));
+    captured.count += 1;
+    captured.field = value.field;
+    captured.provenance = value.provenance;
+    captured.locked = value.locked;
+    captured.text_length = @min(value.text.length, captured.text.len);
+    @memcpy(captured.text[0..captured.text_length], value.text.pointer[0..captured.text_length]);
+}
+
+fn countFieldValue(context: ?*anyopaque, value: *const FieldValueView) callconv(.c) void {
+    _ = value;
+    const calls: *usize = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
+}
+
+const CapturedPlan = struct {
+    title: []const u8,
+    calls: usize = 0,
+    plan_id: u64 = 0,
+    digest: TagWriteDigest = .{ .bytes = @splat(0) },
+    file_count: usize = 0,
+    title_changes: usize = 0,
+    skip_count: usize = 0,
+    skip_reason: u8 = 255,
+    conflict_count: usize = 0,
+};
+
+fn capturePlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c) void {
+    const captured: *CapturedPlan = @ptrCast(@alignCast(context.?));
+    captured.calls += 1;
+    captured.plan_id = plan.plan_id;
+    captured.digest = plan.digest;
+    captured.file_count = plan.file_count;
+    captured.skip_count = plan.skip_count;
+    captured.conflict_count = plan.conflict_count;
+    for (plan.files[0..plan.file_count]) |file| {
+        for (file.changes[0..file.change_count]) |change| {
+            if (change.field == exportMetadataField(.title) and
+                change.provenance == exportProvenance(.user) and
+                change.has_before == 1 and
+                std.mem.eql(u8, change.after.pointer[0..change.after.length], captured.title))
+                captured.title_changes += 1;
+        }
+    }
+    if (plan.skip_count != 0) captured.skip_reason = plan.skipped[0].reason;
+}
+
+fn countPlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c) void {
+    _ = plan;
+    const calls: *usize = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
 }

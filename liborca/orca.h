@@ -73,6 +73,17 @@ typedef enum orca_status {
     ORCA_STATUS_UNSUPPORTED = 8,
     /* Debug builds only: called from a thread other than the owning one. */
     ORCA_STATUS_WRONG_THREAD = 9,
+    /* What the call asks for was already done, such as undoing a tag write
+     * that was already undone. Anything the call does regardless, like
+     * re-reading the files, has been done. */
+    ORCA_STATUS_ALREADY_DONE = 10,
+    /* A file changed after Orca wrote it, or its backup is missing or no
+     * longer the original. Orca kept every file as it found it and needs a
+     * person to decide; it never claims a rollback it could not do. */
+    ORCA_STATUS_NEEDS_RECONCILIATION = 11,
+    /* What the call needs was deliberately deleted, such as the backups of a
+     * tag write that was pruned and can no longer be undone. */
+    ORCA_STATUS_GONE = 12,
     ORCA_STATUS_INTERNAL = 255,
 } orca_status;
 
@@ -1460,6 +1471,281 @@ orca_status orca_library_take_artwork(
     orca_handle library,
     void *context,
     orca_artwork_result_callback callback
+);
+
+/* ------------------------------------------------- tag edits and writes */
+
+/* A field Orca can keep its own value for, apart from what the file says. */
+typedef enum orca_metadata_field {
+    ORCA_METADATA_FIELD_TITLE = 0,
+    ORCA_METADATA_FIELD_ARTIST = 1,
+    ORCA_METADATA_FIELD_ALBUM = 2,
+    ORCA_METADATA_FIELD_TRACK_NUMBER = 3,
+    ORCA_METADATA_FIELD_ALBUM_ARTIST = 4,
+    ORCA_METADATA_FIELD_DISC_NUMBER = 5,
+    ORCA_METADATA_FIELD_DATE = 6,
+    ORCA_METADATA_FIELD_COMPILATION = 7,
+    ORCA_METADATA_FIELD_MUSICBRAINZ_RECORDING_ID = 8,
+    ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_ID = 9,
+    ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_GROUP_ID = 10,
+    ORCA_METADATA_FIELD_MUSICBRAINZ_RELEASE_TRACK_ID = 11,
+    ORCA_METADATA_FIELD_MUSICBRAINZ_ALBUM_ARTIST_ID = 12,
+} orca_metadata_field;
+
+/* Where one of Orca's values came from. */
+typedef enum orca_provenance {
+    ORCA_PROVENANCE_OBSERVED_FILE = 0,
+    /* An edit, from orca_library_edit_tracks. */
+    ORCA_PROVENANCE_USER = 1,
+    /* An accepted MusicBrainz or AcoustID match. */
+    ORCA_PROVENANCE_PROVIDER = 2,
+    ORCA_PROVENANCE_INFERENCE = 3,
+    ORCA_PROVENANCE_ANALYSIS = 4,
+} orca_provenance;
+
+/* One change of orca_library_edit_tracks. `field` is an orca_metadata_field.
+ * With `has_value` set, `value` becomes Orca's value for the field, locked so
+ * that an accepted match does not replace it; with `has_value` 0, Orca's value
+ * is removed and the file's own tag applies again. A value is UTF-8 of 1 to
+ * 4096 bytes; a track or disc number is a decimal from 1 to 9999, a
+ * compilation "0" or "1", and a MusicBrainz id a lowercase UUID. */
+typedef struct orca_track_edit {
+    uint8_t field;
+    uint8_t has_value;
+    uint8_t reserved[6];
+    orca_string_view value;
+} orca_track_edit;
+
+/* `ids` is valid only for the duration of this callback. */
+typedef void (*orca_id_callback)(void *context, const int64_t *ids, size_t count);
+
+/* Sets or clears Orca's own values for the files behind 1 to 512 Tracks
+ * (`ids`, `count`) and reprojects them. `edits` holds 1 to 64 changes. Only
+ * the Library changes: no file is written until a tag write of them is
+ * approved. An edit can move a Track to another Release or position, which
+ * gives it a new id, so `callback`, unless NULL, is invoked once with the ids
+ * of the Tracks the edited files back afterwards. INVALID_ARGUMENT for a bad
+ * id list, an unknown field or an invalid value, and NOT_FOUND for a Track
+ * with no file; both change nothing. */
+orca_status orca_library_edit_tracks(
+    orca_runtime *runtime,
+    orca_handle library,
+    const int64_t *ids,
+    size_t count,
+    const orca_track_edit *edits,
+    size_t edit_count,
+    void *context,
+    orca_id_callback callback
+);
+
+/* One of Orca's values for a file. `field` is an orca_metadata_field and
+ * `provenance` an orca_provenance. `locked` is set for a value no match may
+ * replace, such as an edit. */
+typedef struct orca_field_value_view {
+    uint8_t field;
+    uint8_t provenance;
+    uint8_t locked;
+    uint8_t reserved[5];
+    orca_string_view text;
+} orca_field_value_view;
+
+/* The text is valid only for the duration of this callback. */
+typedef void (*orca_field_value_callback)(void *context, const orca_field_value_view *value);
+
+/* Invokes the callback once for each value Orca holds for the Track's first
+ * file, edits and accepted matches alike, and not at all when it holds none.
+ * These are Orca's values, not what the file says. NOT_FOUND for a Track with
+ * no file. */
+orca_status orca_library_query_track_edits(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_field_value_callback callback
+);
+
+#define ORCA_TAG_WRITE_DIGEST_BYTES 32
+
+/* A plan's approval digest: a BLAKE3 hash of the plan id and, for each file,
+ * its path, its identity when planned, and every field's value before and
+ * after. A write starts only with the digest of the plan a person was shown,
+ * so it writes exactly what was approved. */
+typedef struct orca_tag_write_digest {
+    uint8_t bytes[ORCA_TAG_WRITE_DIGEST_BYTES];
+} orca_tag_write_digest;
+
+/* One field a plan changes in one file. `field` is an orca_metadata_field and
+ * `provenance` the orca_provenance of Orca's value: USER for an edit,
+ * PROVIDER for an accepted match. `before` is what the file's tag says now,
+ * when `has_before` is set, and `after` what the write puts there. */
+typedef struct orca_tag_write_change_view {
+    uint8_t field;
+    uint8_t provenance;
+    uint8_t has_before;
+    uint8_t reserved[5];
+    orca_string_view before;
+    orca_string_view after;
+} orca_tag_write_change_view;
+
+/* A file the plan writes, at `path`, with its `change_count` changes. */
+typedef struct orca_tag_write_file_view {
+    int64_t file_id;
+    orca_string_view path;
+    const orca_tag_write_change_view *changes;
+    size_t change_count;
+} orca_tag_write_file_view;
+
+/* A value of Orca's that the plan does not write, because the file's own tag
+ * says something else (`file_value`) and Orca's value (`orca_value`) is not
+ * locked. Editing the field to Orca's value locks it, and the next plan
+ * writes it. */
+typedef struct orca_tag_write_conflict_view {
+    int64_t file_id;
+    uint8_t field;
+    uint8_t provenance;
+    uint8_t reserved[6];
+    orca_string_view path;
+    orca_string_view file_value;
+    orca_string_view orca_value;
+} orca_tag_write_conflict_view;
+
+/* Why a plan leaves a file out. */
+typedef enum orca_tag_write_skip_reason {
+    /* No location of the file is present to write to. */
+    ORCA_TAG_WRITE_SKIP_MISSING = 0,
+    /* Orca has no tag writer for the file's format. FLAC, MP3 and ADTS are
+     * written; M4A, Ogg, WAV and AIFF are not. */
+    ORCA_TAG_WRITE_SKIP_FORMAT_NOT_WRITABLE = 1,
+    /* The file's bytes changed after the last scan, so the plan would describe
+     * tags the file no longer has. Scan it first. */
+    ORCA_TAG_WRITE_SKIP_CHANGED_SINCE_SCAN = 2,
+} orca_tag_write_skip_reason;
+
+/* A file the plan leaves out. `reason` is an orca_tag_write_skip_reason;
+ * `path` is empty when the file has no present location. */
+typedef struct orca_tag_write_skip_view {
+    int64_t file_id;
+    uint8_t reason;
+    uint8_t reserved[7];
+    orca_string_view path;
+} orca_tag_write_skip_view;
+
+/* A tag-write plan for a person to approve. Every array and string in it is
+ * valid only for the duration of the callback. `plan_id` 0 means there is
+ * nothing to write and nothing is held; any other plan is held until it is
+ * started or discarded, or its Library is closed. */
+typedef struct orca_tag_write_plan_view {
+    uint64_t plan_id;
+    orca_tag_write_digest digest;
+    const orca_tag_write_file_view *files;
+    size_t file_count;
+    const orca_tag_write_conflict_view *conflicts;
+    size_t conflict_count;
+    const orca_tag_write_skip_view *skipped;
+    size_t skip_count;
+} orca_tag_write_plan_view;
+
+typedef void (*orca_tag_write_plan_callback)(
+    void *context,
+    const orca_tag_write_plan_view *plan
+);
+
+/* Plans writing Orca's values into the tags of the files behind 1 to 512
+ * Tracks and invokes the callback once with the plan. Nothing is written.
+ * Planning reads each file on the calling thread. The runtime holds at most
+ * eight plans; BUSY means one must be started or discarded first. Closing the
+ * Library or destroying the runtime discards the plans it holds. NOT_FOUND
+ * for a Track with no file. */
+orca_status orca_library_plan_tag_write(
+    orca_runtime *runtime,
+    orca_handle library,
+    const int64_t *ids,
+    size_t count,
+    void *context,
+    orca_tag_write_plan_callback callback
+);
+/*
+ * Approves held plan `plan_id` with the digest its view carried and starts
+ * writing it as an ORCA_JOB_KIND_MUTATION job.
+ *
+ * At every point of a write, either a file's original bytes are in place or
+ * a durable, verified copy of them is. Each step is journaled in the Library
+ * before the filesystem changes: the complete replacement is staged beside
+ * the file and fsynced, the original is copied to a backup under
+ * `<database>.orca-backups`, fsynced and verified, and only then is the
+ * replacement renamed over the file. A write interrupted by a crash is rolled
+ * back as a whole when the Library is next opened, or, for a file that matches
+ * neither its original nor the write, recorded as needing reconciliation with
+ * every file kept. The backup stays until the write is undone or pruned.
+ *
+ * The job cannot be cancelled: orca_job_cancel does not stop it, and closing
+ * the Library or destroying the runtime waits for it. It SUCCEEDS when every
+ * file was written. It FAILS when the write did not complete, or an earlier
+ * interrupted write could not be recovered first; what it had written is then
+ * rolled back as recovery does. Either way the files are read again and
+ * reprojected afterwards. Its
+ * orca_scan_stats has `files_seen` the files planned, `changed` those
+ * written, and `errors` nonzero when it failed or a file could not be read
+ * again afterwards. The plan id is the group orca_library_undo_tag_write
+ * takes.
+ *
+ * INVALID_ARGUMENT for a NULL `digest` or `job`, or a digest that is not the
+ * plan's; the plan stays held and unwritten. NOT_FOUND for a plan that is not
+ * held. INVALID_STATE for a Library with no database file, which has nowhere
+ * to keep backups. BUSY while another write, undo or prune, in this process
+ * or another, holds the Library's mutation journal; the plan stays held.
+ */
+orca_status orca_library_start_tag_write(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t plan_id,
+    const orca_tag_write_digest *digest,
+    orca_handle *job
+);
+/* Drops a held plan without writing anything. NOT_FOUND for a plan that is
+ * not held. */
+orca_status orca_library_discard_tag_write(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t plan_id
+);
+/*
+ * Restores the files of tag write `group_id`, its plan id, from their
+ * backups to their bytes before the write, on the calling thread, deletes
+ * the backups, and reads the files again. Orca's values are kept, so the
+ * Library still shows the edits and a later plan would write them again.
+ *
+ * OK when the files are restored. ALREADY_DONE when the write was already
+ * undone; the files are read again all the same. NEEDS_RECONCILIATION when a
+ * file changed since the write, or its backup is missing or no longer the
+ * original: no such file is overwritten, and the write is recorded as needing
+ * a person's decision. GONE when the write's backups were pruned; nothing
+ * changes. BUSY while that write is still running, or while another write,
+ * undo or prune holds the Library's mutation journal. INVALID_ARGUMENT for
+ * group 0, NOT_FOUND for a group that was never written, and INVALID_STATE
+ * for a write that never committed, a Library with no database file, or an
+ * interrupted write whose folder is not there, most likely an unmounted
+ * drive; recovery resumes once it is back.
+ */
+orca_status orca_library_undo_tag_write(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t group_id
+);
+/* Deletes the backups of every tag write whose files all committed at least
+ * `older_than_s` seconds ago; 0 prunes every committed write. This forfeits
+ * undo: orca_library_undo_tag_write returns GONE for a pruned write. Writes
+ * needing reconciliation keep their backups, an undone write has none left,
+ * and nothing is ever pruned automatically. `backups` and `bytes` receive how
+ * many backups were deleted and their total size. BUSY while the Library's
+ * mutation journal is held; INVALID_STATE for a Library with no database
+ * file, or while an interrupted write's folder is not there. */
+orca_status orca_library_prune_tag_write_backups(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t older_than_s,
+    uint64_t *backups,
+    uint64_t *bytes
 );
 
 /* Registering a root is an explicit user action: it is the one path allowed to
