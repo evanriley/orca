@@ -107,10 +107,10 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     menu.onSecondaryClick(tile, rowMenu, self);
 }
 
-pub fn showFace(self: *App, cover: *gtk.Widget, artist_id: i64, size: art.Size) void {
-    if (art.showArtist(self, cover, artist_id, size)) return;
-    if (firstRelease(self, artist_id)) |release| return art.show(self, cover, art.Key.release(release, size));
-    art.clear(self, cover);
+fn showFace(self: *App, cover: *gtk.Widget, artist: *BrowseObject, size: art.Size) void {
+    const id = artist.id() orelse return art.clear(self, cover);
+    const face = artist.artist();
+    art.showArtist(self, cover, id, if (face.has_photo) .stored else .absent, face.cover_release_id, size);
 }
 
 fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -125,8 +125,7 @@ fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), if (artist.name().len != 0) artist.name().ptr else "Unknown Artist");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, detail), artist.detail().ptr);
     art.setInitials(cover, artist.name());
-    const id = artist.id() orelse return art.clear(self, cover);
-    showFace(self, cover, id, .tile);
+    showFace(self, cover, artist, .tile);
 }
 
 fn unbindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -176,8 +175,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), if (artist.name().len != 0) artist.name().ptr else "Unknown Artist");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, detail), artist.detail().ptr);
     art.setInitials(thumb, artist.name());
-    const id = artist.id() orelse return art.clear(self, thumb);
-    showFace(self, thumb, id, .thumb);
+    showFace(self, thumb, artist, .thumb);
 }
 
 /// Everything a menu needs to act on an Artist: their playable tracks, album
@@ -208,7 +206,7 @@ fn rowMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) ca
     if (setArtistContext(self, id)) menu.popup(self, row, x, y);
 }
 
-fn firstRelease(self: *App, artist_id: i64) ?i64 {
+pub fn firstRelease(self: *App, artist_id: i64) ?i64 {
     return artistRelease(self, artist_id, .artist);
 }
 
@@ -285,7 +283,10 @@ fn loadNextPage(self: *App) void {
             artist.track_count,
             if (artist.track_count == 1) "track" else "tracks",
         }) catch "";
-        const row = browse_model.new(artist.id, artist.name, detail) orelse continue;
+        const row = browse_model.newArtist(artist.id, artist.name, detail, .{
+            .has_photo = artist.has_photo,
+            .cover_release_id = artist.cover_release_id,
+        }) orelse continue;
         additions.append(self.allocator, row) catch {
             gtk.g_object_unref(row);
             break;
@@ -1142,10 +1143,7 @@ fn relatedTile(page: *ArtistPage, related: liborca.RelatedArtist, position: usiz
     art.setInitials(cover, related.name);
     var shows_related_photo = false;
     if (related.library_artist_id) |id| {
-        if (!art.showArtist(self, cover, id, .thumb)) {
-            art.clear(self, cover);
-            if (related.has_photo) shows_related_photo = art.showRelated(self, cover, related.mbid, .thumb);
-        }
+        art.showArtist(self, cover, id, if (related.has_photo) .stored else .absent, null, .thumb);
     } else if (related.has_photo) {
         shows_related_photo = art.showRelated(self, cover, related.mbid, .thumb);
     }
@@ -1325,9 +1323,7 @@ fn showGenres(page: *ArtistPage) void {
 fn showPhoto(page: *ArtistPage) void {
     const self = page.self;
     const photo = page.photo orelse return;
-    if (art.showArtist(self, photo, page.artist_id, .tile)) return;
-    if (mostPlayedRelease(self, page.artist_id)) |release| return art.show(self, photo, art.Key.release(release, .tile));
-    art.clear(self, photo);
+    art.showArtist(self, photo, page.artist_id, .unknown, mostPlayedRelease(self, page.artist_id), .tile);
 }
 
 fn showInfo(page: *ArtistPage) bool {

@@ -27,6 +27,12 @@ pub const Fields = struct {
     detail: [:0]u8 = &empty,
     caption: [:0]u8 = &empty,
     release: Release = .{},
+    artist: Artist = .{},
+};
+
+pub const Artist = struct {
+    has_photo: bool = false,
+    cover_release_id: ?i64 = null,
 };
 
 /// What an Albums list row or tile shows beyond its name, artist and year.
@@ -66,6 +72,10 @@ pub const BrowseObject = extern struct {
 
     pub fn release(self: *BrowseObject) *const Release {
         return &self.fields().release;
+    }
+
+    pub fn artist(self: *BrowseObject) *const Artist {
+        return &self.fields().artist;
     }
 };
 
@@ -137,6 +147,12 @@ pub fn newWithCaption(id: ?i64, name: []const u8, detail: []const u8, caption: [
     values.name = dupe(name);
     values.detail = dupe(detail);
     values.caption = dupe(caption);
+    return self;
+}
+
+pub fn newArtist(id: i64, name: []const u8, detail: []const u8, artist: Artist) ?*BrowseObject {
+    const self = new(id, name, detail) orelse return null;
+    self.fields().artist = artist;
     return self;
 }
 

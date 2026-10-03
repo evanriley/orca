@@ -609,6 +609,11 @@
 
 ### Fixed
 
+- **Artist photos appear everywhere once fetched.** The Artists grid and
+  list, search results, genre pages and Loved show an Artist's photo as
+  soon as it is fetched instead of an album cover until restart. Artist
+  photos load off the GTK thread, and grid tiles no longer query the
+  library for a fallback cover.
 - **Space pauses in orca-gtk wherever focus is.** A focused button, row or
   tile no longer takes Space to activate itself; it toggles playback
   unless focus is in a text field, a dialog or a popover.

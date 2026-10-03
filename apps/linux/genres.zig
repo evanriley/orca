@@ -741,7 +741,7 @@ fn artistRow(self: *App, artist: liborca.ArtistSummary, position: usize) *gtk.Wi
     const thumb = art.newCover(self, art.initialsPlaceholder(), artist_pixels);
     gtk.gtk_widget_add_css_class(thumb, "artist-thumb");
     art.setInitials(thumb, artist.name);
-    artists.showFace(self, thumb, artist.id, .thumb);
+    art.showArtist(self, thumb, artist.id, if (artist.has_photo) .stored else .absent, artist.cover_release_id, .thumb);
     const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_hexpand(labels, gtk.true_);

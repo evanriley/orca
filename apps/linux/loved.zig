@@ -197,7 +197,7 @@ fn loadNextArtists(self: *App) void {
             artist.track_count,
             if (artist.track_count == 1) "song" else "songs",
         }) catch "";
-        const row = browse_model.new(artist.id, artist.name, detail) orelse continue;
+        const row = browse_model.newArtist(artist.id, artist.name, detail, .{ .has_photo = artist.has_photo }) orelse continue;
         additions.append(self.allocator, row) catch {
             gtk.g_object_unref(row);
             break;
@@ -445,7 +445,8 @@ fn bindArtist(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c)
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, tilePart(tile, "orca-name") orelse return), name.ptr);
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, tilePart(tile, "orca-detail") orelse return), artist.detail().ptr);
     art.setInitials(photo, name);
-    if (artist.id()) |id| art.show(self, photo, art.Key.artist(id, .tile)) else art.clear(self, photo);
+    const id = artist.id() orelse return art.clear(self, photo);
+    art.showArtist(self, photo, id, if (artist.artist().has_photo) .stored else .absent, null, .tile);
 }
 
 fn unbindArtist(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

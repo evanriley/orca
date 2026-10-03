@@ -615,7 +615,7 @@ fn thumbFor(self: *App, entity: Entity) *gtk.Widget {
             gtk.gtk_widget_add_css_class(cover, "palette-thumb");
             gtk.gtk_widget_add_css_class(cover, "palette-portrait");
             art.setInitials(cover, entity.title);
-            artists.showFace(self, cover, entity.id, .thumb);
+            art.showArtist(self, cover, entity.id, .unknown, artists.firstRelease(self, entity.id), .thumb);
             return cover;
         },
     }

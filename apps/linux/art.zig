@@ -66,7 +66,8 @@ pub const Key = struct {
         return switch (self.kind) {
             .track => .{ .track = self.id },
             .release => .{ .release = self.id },
-            .artist, .related => null,
+            .artist => .{ .artist = self.id },
+            .related => null,
         };
     }
 };
@@ -158,7 +159,11 @@ const Entry = struct {
 const Binding = struct {
     stack: *gtk.Stack,
     key: Key,
+    fallback: ?Key = null,
+    request_key: bool = true,
 };
+
+pub const ArtistPhoto = enum { stored, absent, unknown };
 
 /// Covers kept decoded. A grid screen is a few dozen, and a tile texture is
 /// about 640 KB, so this is a few hundred MB at worst and a few screens of
@@ -294,8 +299,7 @@ pub fn show(self: *App, stack_widget: *gtk.Widget, key: Key) void {
     forget(self, stack_widget);
     const cache = &self.art;
     if (cache.entries.getPtr(key)) |entry| {
-        cache.clock += 1;
-        entry.used = cache.clock;
+        touch(cache, entry);
         paint(stack, entry.texture);
         return;
     }
@@ -318,6 +322,9 @@ pub fn forget(self: *App, stack_widget: *gtk.Widget) void {
         }
         _ = cache.bindings.swapRemove(index);
         if (!isWanted(cache, binding.key)) abandon(self, binding.key);
+        if (binding.fallback) |fallback| {
+            if (!isWanted(cache, fallback)) abandon(self, fallback);
+        }
     }
 }
 
@@ -329,25 +336,59 @@ pub fn clear(self: *App, stack_widget: *gtk.Widget) void {
 /// Drops a Release's cached covers and asks again for each one a widget
 /// shows, so a cover fetched since replaces the placeholder.
 pub fn refreshRelease(self: *App, release_id: i64) void {
-    const cache = &self.art;
-    inline for (comptime std.enums.values(Size)) |size| {
-        const key = Key.release(release_id, size);
-        if (cache.entries.fetchRemove(key)) |removed| {
-            if (removed.value.texture) |texture| gtk.g_object_unref(texture);
-        }
-        if (cache.pending.fetchRemove(key)) |pending| {
-            _ = cache.requests.remove(pending.value);
-            if (self.library) |library| self.runtime.libraryCancelArtwork(library, pending.value);
-        }
-        if (isWanted(cache, key)) want(self, key);
-    }
+    inline for (comptime std.enums.values(Size)) |size| refresh(self, Key.release(release_id, size));
 }
 
-pub fn showArtist(self: *App, stack_widget: *gtk.Widget, artist_id: i64, size: Size) bool {
-    const key = Key.artist(artist_id, size);
-    show(self, stack_widget, key);
-    const entry = self.art.entries.get(key) orelse return true;
-    return entry.texture != null;
+pub fn refreshArtist(self: *App, artist_id: i64) void {
+    inline for (comptime std.enums.values(Size)) |size| refresh(self, Key.artist(artist_id, size));
+}
+
+fn refresh(self: *App, key: Key) void {
+    const cache = &self.art;
+    if (cache.entries.fetchRemove(key)) |removed| {
+        if (removed.value.texture) |texture| gtk.g_object_unref(texture);
+    }
+    if (cache.pending.fetchRemove(key)) |pending| {
+        _ = cache.requests.remove(pending.value);
+        if (self.library) |library| self.runtime.libraryCancelArtwork(library, pending.value);
+    }
+    if (isWanted(cache, key)) want(self, key);
+}
+
+pub fn showArtist(self: *App, stack_widget: *gtk.Widget, artist_id: i64, photo: ArtistPhoto, fallback_release: ?i64, size: Size) void {
+    forget(self, stack_widget);
+    const cache = &self.art;
+    const binding: Binding = .{
+        .stack = gtk.cast(gtk.Stack, stack_widget),
+        .key = Key.artist(artist_id, size),
+        .fallback = if (fallback_release) |release_id| Key.release(release_id, size) else null,
+        .request_key = photo != .absent,
+    };
+    cache.bindings.append(self.allocator, binding) catch return paint(binding.stack, null);
+    paintBinding(self, binding);
+}
+
+fn paintBinding(self: *App, binding: Binding) void {
+    const cache = &self.art;
+    if (cache.entries.getPtr(binding.key)) |entry| {
+        touch(cache, entry);
+        if (entry.texture) |texture| return paint(binding.stack, texture);
+    } else if (binding.request_key) {
+        paint(binding.stack, null);
+        return want(self, binding.key);
+    }
+    const fallback = binding.fallback orelse return paint(binding.stack, null);
+    if (cache.entries.getPtr(fallback)) |entry| {
+        touch(cache, entry);
+        return paint(binding.stack, entry.texture);
+    }
+    paint(binding.stack, null);
+    want(self, fallback);
+}
+
+fn touch(cache: *Cache, entry: *Entry) void {
+    cache.clock += 1;
+    entry.used = cache.clock;
 }
 
 pub fn showRelated(self: *App, stack_widget: *gtk.Widget, mbid: []const u8, size: Size) bool {
@@ -357,20 +398,10 @@ pub fn showRelated(self: *App, stack_widget: *gtk.Widget, mbid: []const u8, size
     return entry.texture != null;
 }
 
-pub fn refreshArtist(self: *App, artist_id: i64) void {
-    const cache = &self.art;
-    inline for (comptime std.enums.values(Size)) |size| {
-        const key = Key.artist(artist_id, size);
-        if (cache.entries.fetchRemove(key)) |removed| {
-            if (removed.value.texture) |texture| gtk.g_object_unref(texture);
-        }
-        if (isWanted(cache, key)) want(self, key);
-    }
-}
-
 fn isWanted(cache: *const Cache, key: Key) bool {
     for (cache.bindings.items) |binding| {
         if (std.meta.eql(binding.key, key)) return true;
+        if (binding.fallback) |fallback| if (std.meta.eql(fallback, key)) return true;
     }
     return false;
 }
@@ -380,7 +411,7 @@ fn want(self: *App, key: Key) void {
     if (cache.pending.contains(key) or cache.decoding.contains(key)) return;
     for (cache.backlog.items) |queued| if (std.meta.eql(queued, key)) return;
     const library = self.library orelse return;
-    const subject = key.subject() orelse return wantPhoto(self, library, key);
+    const subject = key.subject() orelse return wantRelatedPhoto(self, library, key);
     const request = self.runtime.libraryRequestArtwork(library, self.io, subject) catch {
         cache.backlog.append(self.allocator, key) catch {};
         return;
@@ -389,13 +420,10 @@ fn want(self: *App, key: Key) void {
     cache.requests.put(self.allocator, request, key) catch {};
 }
 
-fn wantPhoto(self: *App, library: liborca.LibraryHandle, key: Key) void {
+fn wantRelatedPhoto(self: *App, library: liborca.LibraryHandle, key: Key) void {
     const cache = &self.art;
     for (cache.waiting.items) |job| if (std.meta.eql(job.key, key)) return;
-    const photo = switch (key.kind) {
-        .related => self.runtime.libraryRelatedArtistPhoto(library, std.mem.sliceTo(&key.mbid, 0)) catch null,
-        else => self.runtime.libraryArtistPhoto(library, key.id) catch null,
-    };
+    const photo = self.runtime.libraryRelatedArtistPhoto(library, std.mem.sliceTo(&key.mbid, 0)) catch null;
     const image = photo orelse return remember(self, key, null);
     cache.waiting.append(self.allocator, .{ .key = key, .image = image }) catch return image.deinit();
     startDecodes(self);
@@ -425,7 +453,8 @@ fn remember(self: *App, key: Key, texture: ?*gtk.GdkTexture) void {
         return;
     };
     for (cache.bindings.items) |binding| {
-        if (std.meta.eql(binding.key, key)) paint(binding.stack, texture);
+        const fallback_matches = if (binding.fallback) |fallback| std.meta.eql(fallback, key) else false;
+        if (std.meta.eql(binding.key, key) or fallback_matches) paintBinding(self, binding);
     }
 }
 
