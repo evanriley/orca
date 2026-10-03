@@ -609,6 +609,9 @@
 
 ### Fixed
 
+- **No Show Album or Show Artist for the page already open.** The context
+  menu leaves out Show Album on an album's own page and Show Artist on an
+  artist's own page.
 - **Context menu crash.** Choosing Show Artist, Show Album or another
   context-menu item that rebuilt the page no longer crashes orca-gtk: the
   closed menu was freed with the page before it was detached.

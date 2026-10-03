@@ -467,6 +467,10 @@ pub fn syncInspector(self: *App) void {
     details.setSource(self, pushed orelse sectionSource(self, self.current_page));
 }
 
+pub fn shows(self: *App, pushed: Pushed) bool {
+    return std.meta.eql(currentVisit(self).pushed, pushed);
+}
+
 fn currentVisit(self: *App) Visit {
     const pushed = pushedPage(self, self.current_page);
     return .{ .page = self.current_page, .pushed = if (pushed) |page| pushedOf(self, page) else null };

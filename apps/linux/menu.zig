@@ -19,6 +19,7 @@ const jobs = @import("jobs.zig");
 const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
 const albums = @import("albums.zig");
+const window = @import("window.zig");
 
 const App = app.App;
 
@@ -131,10 +132,14 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
         },
     }
     const navigation = gtk.g_menu_new();
-    if (context.kind != .album and context.release_id != null)
-        gtk.g_menu_append(navigation, "Show Album", "app.ctx-show-album");
-    if (context.artist_id != null)
-        gtk.g_menu_append(navigation, "Show Artist", "app.ctx-show-artist");
+    if (context.kind != .album) if (context.release_id) |release_id| {
+        if (!window.shows(self, .{ .album = release_id }))
+            gtk.g_menu_append(navigation, "Show Album", "app.ctx-show-album");
+    };
+    if (context.artist_id) |artist_id| {
+        if (!window.shows(self, .{ .artist = artist_id }))
+            gtk.g_menu_append(navigation, "Show Artist", "app.ctx-show-artist");
+    }
     const menu = gtk.g_menu_new();
     if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, playback)) != 0)
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
