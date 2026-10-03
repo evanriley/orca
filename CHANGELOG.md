@@ -609,6 +609,8 @@
 
 ### Fixed
 
+- **Lyrics layout warnings.** Resizing the lyrics view no longer logs
+  GtkListBox allocation warnings.
 - **No Show Album or Show Artist for the page already open.** The context
   menu leaves out Show Album on an album's own page and Show Artist on an
   artist's own page.

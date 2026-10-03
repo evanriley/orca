@@ -58,6 +58,7 @@ pub const View = struct {
     line: ?usize = null,
     generation: u64 = 0,
     margin: c_int = 0,
+    margin_idle: c_uint = 0,
 
     /// Builds the view in place: its signals keep `view`'s address.
     pub fn init(view: *View, self: *App) void {
@@ -104,6 +105,8 @@ pub const View = struct {
     }
 
     pub fn deinit(view: *View) void {
+        if (view.margin_idle != 0) _ = gtk.g_source_remove(view.margin_idle);
+        view.margin_idle = 0;
         view.labels.deinit(view.self.allocator);
     }
 };
@@ -317,13 +320,26 @@ fn boolean(value: bool) gtk.gboolean {
 
 fn adjustmentChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const view: *View = @ptrCast(@alignCast(data.?));
-    const half: c_int = @intFromFloat(gtk.gtk_adjustment_get_page_size(gtk.cast(gtk.Adjustment, adjustment)) / 2);
+    const half = halfPage(gtk.cast(gtk.Adjustment, adjustment));
+    if (half != view.margin and view.margin_idle == 0) view.margin_idle = gtk.g_idle_add(applyMargins, view);
+    centre(view);
+}
+
+fn halfPage(adjustment: *gtk.Adjustment) c_int {
+    return @intFromFloat(gtk.gtk_adjustment_get_page_size(adjustment) / 2);
+}
+
+fn applyMargins(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const view: *View = @ptrCast(@alignCast(data.?));
+    view.margin_idle = 0;
+    const half = halfPage(gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, view.scroller)));
     if (half != view.margin) {
         view.margin = half;
         gtk.gtk_widget_set_margin_top(view.list, half);
         gtk.gtk_widget_set_margin_bottom(view.list, half);
     }
     centre(view);
+    return gtk.SOURCE_REMOVE;
 }
 
 fn syncedLyrics(self: *const App) ?liborca.Lyrics {
