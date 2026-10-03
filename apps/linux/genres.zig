@@ -683,13 +683,19 @@ fn albumTile(self: *App, release: liborca.ReleaseSummary) *gtk.Widget {
     gtk.gtk_widget_add_css_class(cover, "album-cover");
     art.setInitials(cover, release.title);
     art.show(self, cover, art.Key.release(release.id, .tile));
+    const playing = albums.playingBadge();
+    const frame = gtk.gtk_overlay_new();
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), cover);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
+    gtk.g_object_set_data(tile, "orca-playing", playing);
+    albums.showPlaying(tile, self.playing().matches(.release, release.id));
     var buffer: [512]u8 = undefined;
     const title = cardLabel(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
     const artist = cardLabel(strings.terminated(&buffer, release.album_artist).ptr, "tile-artist");
     const date = release.release_date orelse "";
     const year = cardLabel(strings.terminated(&buffer, date[0..@min(date.len, 4)]).ptr, "tile-year");
     gtk.gtk_widget_add_css_class(year, "numeric");
-    for ([_]*gtk.Widget{ cover, title, artist, year }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
+    for ([_]*gtk.Widget{ frame, title, artist, year }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
     return tile;
 }
 
@@ -757,6 +763,7 @@ fn artistRow(self: *App, artist: liborca.ArtistSummary, position: usize) *gtk.Wi
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), rank(position));
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), thumb);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
+    albums.showPlaying(box, self.playing().matches(.artist, artist.id));
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     return row;
 }
@@ -924,6 +931,21 @@ pub fn markPlaying(self: *App, track_id: ?i64) void {
             gtk.gtk_widget_add_css_class(row, "now-playing")
         else
             gtk.gtk_widget_remove_css_class(row, "now-playing");
+    }
+    const playing = self.playing();
+    const genres = &self.genres;
+    if (genres.album_grid) |grid| markChildren(gtk.cast(gtk.Widget, grid), genres.release_ids[0..genres.release_count], playing, .release);
+    if (genres.artist_list) |list| markChildren(gtk.cast(gtk.Widget, list), genres.artist_ids[0..genres.artist_count], playing, .artist);
+}
+
+fn markChildren(container: *gtk.Widget, ids: []const i64, playing: app.Playing, kind: app.PlayingKind) void {
+    var index: usize = 0;
+    var child = gtk.gtk_widget_get_first_child(container);
+    while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
+        if (index >= ids.len) return;
+        const content = gtk.gtk_widget_get_first_child(cell) orelse continue;
+        albums.showPlaying(content, playing.matches(kind, ids[index]));
+        index += 1;
     }
 }
 

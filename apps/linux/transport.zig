@@ -17,6 +17,8 @@ const nowplaying = @import("nowplaying.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const genres = @import("genres.zig");
+const folders = @import("folders.zig");
+const palette = @import("palette.zig");
 const menu = @import("menu.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
@@ -851,6 +853,8 @@ pub fn tick(self: *App) void {
         albums.markPlaying(self, status.track_id);
         artists.markPlaying(self, status.track_id);
         genres.markPlaying(self, status.track_id);
+        folders.markPlaying(self, status.track_id);
+        palette.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
         details.trackChanged(self);
         lyrics.trackChanged(self);

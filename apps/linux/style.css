@@ -1054,6 +1054,33 @@ list.album-tracks > row:hover {
   font-weight: 600;
 }
 
+.folder-row.now-playing,
+.genre-artist.now-playing {
+  background-color: color-mix(in srgb, var(--orca-accent) 8%, transparent);
+}
+
+.album-tile.now-playing .tile-title,
+.genre-album.now-playing .tile-title,
+.artist-tile.now-playing .artist-tile-name,
+.album-list-row.now-playing .album-list-title,
+.artist-row.now-playing .artist-name,
+.genre-artist.now-playing .genre-row-title,
+.folder-row.now-playing .folder-row-name,
+.palette-row.now-playing .palette-title {
+  color: var(--orca-accent-text);
+  font-weight: 600;
+}
+
+.playing-badge {
+  min-width: 22px;
+  min-height: 22px;
+  margin: 6px;
+  border-radius: 9999px;
+  background-color: var(--orca-accent);
+  color: var(--orca-accent-on);
+  -gtk-icon-size: 12px;
+}
+
 button.row-more {
   min-width: 24px;
   min-height: 24px;

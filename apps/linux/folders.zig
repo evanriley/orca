@@ -3,6 +3,7 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const app = @import("app.zig");
+const albums = @import("albums.zig");
 const art = @import("art.zig");
 const browse_model = @import("browse_model.zig");
 const menu = @import("menu.zig");
@@ -636,6 +637,34 @@ fn bindFile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
         if (usable) gtk.gtk_widget_remove_css_class(more, "unused") else gtk.gtk_widget_add_css_class(more, "unused");
     }
     gtk.gtk_widget_set_tooltip_text(box, object.name().ptr);
+    albums.showPlaying(box, sameTrack(self.shown_track_id, entry.track_id));
+}
+
+pub fn markPlaying(self: *App, track_id: ?i64) void {
+    const folders = &self.folders;
+    if (folders.files_view) |view| {
+        var child = gtk.gtk_widget_get_first_child(view);
+        while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
+            const box = gtk.gtk_widget_get_first_child(cell) orelse continue;
+            const position = markedPosition(box) orelse continue;
+            if (position >= folders.entries.items.len) continue;
+            albums.showPlaying(box, sameTrack(track_id, folders.entries.items[position].track_id));
+        }
+    }
+    if (folders.library_list) |list| {
+        var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, list));
+        while (child) |row| : (child = gtk.gtk_widget_get_next_sibling(row)) {
+            const position = markedPosition(row) orelse continue;
+            if (position >= folders.library_tracks.items.len) continue;
+            albums.showPlaying(row, sameTrack(track_id, folders.library_tracks.items[position].id));
+        }
+    }
+}
+
+fn sameTrack(playing: ?i64, track_id: ?i64) bool {
+    const a = playing orelse return false;
+    const b = track_id orelse return false;
+    return a == b;
 }
 
 fn markedPosition(widget: *gtk.Widget) ?usize {
@@ -914,6 +943,7 @@ fn libraryRow(self: *App, summary: liborca.TrackSummary, position: usize, starts
     gtk.gtk_list_box_row_set_child(gtk.cast(gtk.ListBoxRow, row), box);
     menu.onSecondaryClick(row, libraryRowMenu, self);
     if (!summary.has_playable_file) gtk.gtk_widget_set_sensitive(row, gtk.false_);
+    albums.showPlaying(row, sameTrack(self.shown_track_id, summary.id));
     return row;
 }
 

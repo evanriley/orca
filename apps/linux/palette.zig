@@ -531,16 +531,16 @@ fn heading(self: *App, label_text: [*:0]const u8) void {
     gtk.gtk_box_append(list, label);
 }
 
-fn addRow(self: *App, choice: Choice, thumb: ?*gtk.Widget, title: []const u8, subtitle: []const u8, shortcut: ?[:0]const u8) void {
+fn addRow(self: *App, choice: Choice, thumb: ?*gtk.Widget, title: []const u8, subtitle: []const u8, shortcut: ?[:0]const u8) ?*gtk.Widget {
     const palette = &self.palette;
-    const list = palette.list orelse return;
-    palette.choices.append(self.allocator, choice) catch return;
+    const list = palette.list orelse return null;
+    palette.choices.append(self.allocator, choice) catch return null;
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
     palette.rows.append(self.allocator, row) catch {
         _ = palette.choices.pop();
         _ = gtk.g_object_ref_sink(row);
         gtk.g_object_unref(row);
-        return;
+        return null;
     };
     gtk.gtk_widget_add_css_class(row, "palette-row");
     if (thumb) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, row), widget);
@@ -574,15 +574,36 @@ fn addRow(self: *App, choice: Choice, thumb: ?*gtk.Widget, title: []const u8, su
     _ = gtk.signalConnect(click, "released", gtk.callback(rowClicked), self);
     gtk.gtk_widget_add_controller(row, click);
     gtk.gtk_box_append(list, row);
+    return row;
 }
 
 fn addEntity(self: *App, entity: Entity) void {
-    addRow(self, .{ .entity = entity }, thumbFor(self, entity), entity.title, entity.subtitle, null);
+    const row = addRow(self, .{ .entity = entity }, thumbFor(self, entity), entity.title, entity.subtitle, null) orelse return;
+    albums.showPlaying(row, entityPlaying(self.playing(), entity));
+}
+
+fn entityPlaying(playing: app.Playing, entity: Entity) bool {
+    return switch (entity.kind) {
+        .track => playing.matches(.track, entity.id),
+        .release => playing.matches(.release, entity.id),
+        .artist => playing.matches(.artist, entity.id),
+        .playlist, .genre => false,
+    };
+}
+
+pub fn markPlaying(self: *App, _: ?i64) void {
+    const palette = &self.palette;
+    if (palette.popover == null) return;
+    const playing = self.playing();
+    for (palette.choices.items, palette.rows.items) |choice, row| switch (choice) {
+        .entity => |entity| albums.showPlaying(row, entityPlaying(playing, entity)),
+        .command => {},
+    };
 }
 
 fn addCommand(self: *App, index: usize) void {
     const command = commands[index];
-    addRow(self, .{ .command = index }, null, command.name, "", command.shortcut);
+    _ = addRow(self, .{ .command = index }, null, command.name, "", command.shortcut);
 }
 
 fn thumbFor(self: *App, entity: Entity) *gtk.Widget {

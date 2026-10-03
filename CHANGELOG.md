@@ -4,6 +4,11 @@
 
 ### Added
 
+- **The playing track, album and artist marked everywhere.** Folders,
+  the search palette, album and artist grids and lists, Loved albums,
+  artist pages and genre pages show the playing track, its album and its
+  artist in the accent colour, with a play badge on album and artist
+  tiles, and the marks follow the next track.
 - **The Release a Match Album leaves an album on.**
   `Runtime.jobMatchRelease` and `orca_job_match_release` name the Release a
   finished Match Album's files are on, so a frontend can follow an album

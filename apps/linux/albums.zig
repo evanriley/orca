@@ -177,6 +177,8 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     gtk.gtk_widget_set_valign(badge, gtk.ALIGN_END);
     gtk.gtk_widget_add_css_class(badge, "cover-badge");
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), badge);
+    const playing = playingBadge();
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
 
     const title = tileLabel(null, "tile-title");
     const artist = tileLabel(null, "tile-artist");
@@ -202,7 +204,59 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     gtk.g_object_set_data(tile, "orca-artist", artist);
     gtk.g_object_set_data(tile, "orca-year", year);
     gtk.g_object_set_data(tile, "orca-explicit", badge);
+    gtk.g_object_set_data(tile, "orca-playing", playing);
     menu.onSecondaryClick(tile, tileMenu, self);
+}
+
+pub fn playingBadge() *gtk.Widget {
+    const badge = gtk.gtk_image_new_from_icon_name("media-playback-start-symbolic");
+    gtk.gtk_widget_add_css_class(badge, "playing-badge");
+    gtk.gtk_widget_set_halign(badge, gtk.ALIGN_END);
+    gtk.gtk_widget_set_valign(badge, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(badge, "Playing");
+    gtk.gtk_widget_set_visible(badge, gtk.false_);
+    return badge;
+}
+
+pub fn showPlaying(widget: *gtk.Widget, playing: bool) void {
+    if (playing)
+        gtk.gtk_widget_add_css_class(widget, "now-playing")
+    else
+        gtk.gtk_widget_remove_css_class(widget, "now-playing");
+    const badge = gtk.g_object_get_data(widget, "orca-playing") orelse return;
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, badge), @intFromBool(playing));
+}
+
+pub fn watchView(self: *App, view: *gtk.Widget, kind: app.PlayingKind) void {
+    for (&self.marked_views) |*slot| {
+        if (slot.* != null) continue;
+        slot.* = .{ .view = view, .kind = kind };
+        _ = gtk.signalConnect(view, "destroy", gtk.callback(watchedViewDestroyed), self);
+        return;
+    }
+}
+
+fn watchedViewDestroyed(view: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    for (&self.marked_views) |*slot| {
+        const marked = slot.* orelse continue;
+        if (@as(*anyopaque, @ptrCast(marked.view)) == view) slot.* = null;
+    }
+}
+
+fn markViews(self: *App) void {
+    const playing = self.playing();
+    for (self.marked_views) |slot| {
+        const marked = slot orelse continue;
+        var child = gtk.gtk_widget_get_first_child(marked.view);
+        while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
+            const tile = gtk.gtk_widget_get_first_child(cell) orelse continue;
+            const item = gtk.g_object_get_data(tile, "orca-list-item") orelse continue;
+            const object = gtk.gtk_list_item_get_item(gtk.cast(gtk.ListItem, item)) orelse continue;
+            const row: *BrowseObject = @ptrCast(@alignCast(object));
+            showPlaying(tile, playing.matches(marked.kind, row.id()));
+        }
+    }
 }
 
 fn explicitBadge() *gtk.Widget {
@@ -290,6 +344,7 @@ fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, year), row.caption().ptr);
     if (tilePart(tile, "orca-explicit")) |badge| gtk.gtk_widget_set_visible(badge, @intFromBool(row.release().explicit));
     art.setInitials(cover, row.name());
+    showPlaying(tile, self.playing().matches(.release, row.id()));
     const id = row.id() orelse return;
     art.show(self, cover, art.Key.release(id, .tile));
 }
@@ -378,6 +433,7 @@ fn bindListRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c
         gtk.gtk_label_set_text(gtk.cast(gtk.Label, minutes), strings.format(&buffer, "{d} min", .{minutesOf(release.duration_ms)}).ptr);
     if (tilePart(widget, "orca-format")) |format| gtk.gtk_label_set_text(gtk.cast(gtk.Label, format), release.format.ptr);
     if (tilePart(widget, "orca-heart")) |heart| feedback.showRowButton(heart, if (release.loved) .loved else .none);
+    showPlaying(widget, self.playing().matches(.release, row.id()));
     const cover = tilePart(widget, "orca-cover") orelse return;
     art.setInitials(cover, row.name());
     const id = row.id() orelse return;
@@ -799,6 +855,7 @@ pub fn newGrid(self: *App, store: *gtk.ListStore, activated: gtk.GCallback) *gtk
     gtk.gtk_grid_view_set_tab_behavior(gtk.cast(gtk.GridView, grid), gtk.LIST_TAB_ITEM);
     gtk.gtk_grid_view_set_single_click_activate(gtk.cast(gtk.GridView, grid), gtk.true_);
     _ = gtk.signalConnect(grid, "activate", activated, self);
+    watchView(self, grid, .release);
     return grid;
 }
 
@@ -872,6 +929,7 @@ fn newList(self: *App, store: *gtk.ListStore) *gtk.Widget {
     gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, list), gtk.LIST_TAB_ITEM);
     gtk.gtk_list_view_set_single_click_activate(gtk.cast(gtk.ListView, list), gtk.true_);
     _ = gtk.signalConnect(list, "activate", gtk.callback(tileActivated), self);
+    watchView(self, list, .release);
     return list;
 }
 
@@ -1140,6 +1198,7 @@ fn albumHeartClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
     for (self.open_album_pages[0..self.open_album_page_count]) |page| markRows(page, track_id);
+    markViews(self);
 }
 
 fn heroMenu(gesture: ?*anyopaque, _: c_int, x: f64, y: f64, data: ?*anyopaque) callconv(.c) void {

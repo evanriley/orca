@@ -95,12 +95,17 @@ fn setupTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     gtk.gtk_widget_set_size_request(tile, self.artist_tile_pixels, -1);
     const cover = art.newCover(self, art.initialsPlaceholder(), self.artist_tile_pixels);
     gtk.gtk_widget_add_css_class(cover, "artist-photo");
+    const playing = albums.playingBadge();
+    const frame = gtk.gtk_overlay_new();
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), cover);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
     const name = centredLabel("artist-tile-name");
     const detail = centredLabel("artist-tile-meta");
     gtk.gtk_widget_add_css_class(detail, "numeric");
-    for ([_]*gtk.Widget{ cover, name, detail }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
+    for ([_]*gtk.Widget{ frame, name, detail }) |piece| gtk.gtk_box_append(gtk.cast(gtk.Box, tile), piece);
     gtk.gtk_list_item_set_child(gtk.cast(gtk.ListItem, item), tile);
     gtk.g_object_set_data(tile, "orca-list-item", item);
+    gtk.g_object_set_data(tile, "orca-playing", playing);
     gtk.g_object_set_data(tile, "orca-cover", cover);
     gtk.g_object_set_data(tile, "orca-name", name);
     gtk.g_object_set_data(tile, "orca-detail", detail);
@@ -125,6 +130,7 @@ fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), if (artist.name().len != 0) artist.name().ptr else "Unknown Artist");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, detail), artist.detail().ptr);
     art.setInitials(cover, artist.name());
+    albums.showPlaying(tile, self.playing().matches(.artist, artist.id()));
     showFace(self, cover, artist, .tile);
 }
 
@@ -175,6 +181,7 @@ fn bindRow(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, name), if (artist.name().len != 0) artist.name().ptr else "Unknown Artist");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, detail), artist.detail().ptr);
     art.setInitials(thumb, artist.name());
+    albums.showPlaying(row, self.playing().matches(.artist, artist.id()));
     showFace(self, thumb, artist, .thumb);
 }
 
@@ -431,6 +438,7 @@ fn newGrid(self: *App, store: *gtk.ListStore) *gtk.Widget {
     gtk.gtk_grid_view_set_tab_behavior(gtk.cast(gtk.GridView, grid), gtk.LIST_TAB_ITEM);
     gtk.gtk_grid_view_set_single_click_activate(gtk.cast(gtk.GridView, grid), gtk.true_);
     _ = gtk.signalConnect(grid, "activate", gtk.callback(activated), self);
+    albums.watchView(self, grid, .artist);
     return grid;
 }
 
@@ -444,6 +452,7 @@ fn newList(self: *App, store: *gtk.ListStore) *gtk.Widget {
     gtk.gtk_list_view_set_tab_behavior(gtk.cast(gtk.ListView, list), gtk.LIST_TAB_ITEM);
     gtk.gtk_list_view_set_single_click_activate(gtk.cast(gtk.ListView, list), gtk.true_);
     _ = gtk.signalConnect(list, "activate", gtk.callback(activated), self);
+    albums.watchView(self, list, .artist);
     return list;
 }
 
@@ -621,6 +630,8 @@ pub const ArtistPage = struct {
     related_section: ?*gtk.Widget = null,
     related_flow: ?*gtk.Widget = null,
     love_button: ?*gtk.Widget = null,
+    album_flows: [std.meta.fields(albums.ArtistScope).len]*gtk.Widget = undefined,
+    album_flow_count: usize = 0,
 };
 
 fn pageData(data: ?*anyopaque) *ArtistPage {
@@ -707,6 +718,7 @@ pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_mo
 }
 
 pub fn markPlaying(self: *App, track_id: ?i64) void {
+    const playing = self.playing();
     for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
         for (page.songs[0..page.song_count]) |song| {
             const row = song.row orelse continue;
@@ -714,6 +726,15 @@ pub fn markPlaying(self: *App, track_id: ?i64) void {
                 gtk.gtk_widget_add_css_class(row, "now-playing")
             else
                 gtk.gtk_widget_remove_css_class(row, "now-playing");
+        }
+        for (page.album_flows[0..page.album_flow_count]) |flow| {
+            var child = gtk.gtk_widget_get_first_child(flow);
+            while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
+                const tile = gtk.gtk_widget_get_first_child(cell) orelse continue;
+                const index = marked(tile) orelse continue;
+                if (index >= page.releases.len) continue;
+                albums.showPlaying(tile, playing.matches(.release, page.releases[index]));
+            }
         }
     }
 }
@@ -852,6 +873,10 @@ fn albumTile(page: *ArtistPage, release: liborca.ReleaseSummary, position: usize
     gtk.gtk_widget_add_css_class(frame, "album-cover-frame");
     gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, frame), cover);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), play_button);
+    const playing = albums.playingBadge();
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), playing);
+    gtk.g_object_set_data(tile, "orca-playing", playing);
+    albums.showPlaying(tile, self.playing().matches(.release, release.id));
 
     var buffer: [512]u8 = undefined;
     const title = tileLabel(strings.terminated(&buffer, if (release.title.len != 0) release.title else "Untitled").ptr, "tile-title");
@@ -1119,6 +1144,10 @@ fn albumsSection(page: *ArtistPage, row: *const ReleaseRow) *gtk.Widget {
     gtk.gtk_widget_add_css_class(flow, "artist-albums");
     _ = gtk.signalConnect(flow, "child-activated", gtk.callback(albumActivated), page);
     for (row.releases.items, row.first_position..) |release, position| gtk.gtk_flow_box_append(flow_box, albumTile(page, release, position));
+    if (page.album_flow_count < page.album_flows.len) {
+        page.album_flows[page.album_flow_count] = flow;
+        page.album_flow_count += 1;
+    }
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), flow);
     return box;
 }

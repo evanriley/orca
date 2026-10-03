@@ -43,6 +43,35 @@ pub const open_artist_page_limit = 8;
 
 pub const Sidebar = enum { hidden, details, lyrics, signal_path };
 
+pub const PlayingKind = enum { track, release, artist };
+
+pub const Playing = struct {
+    track_id: ?i64 = null,
+    release_id: ?i64 = null,
+    artist_id: ?i64 = null,
+    album_artist_id: ?i64 = null,
+
+    pub fn matches(playing: Playing, kind: PlayingKind, id: ?i64) bool {
+        const wanted = id orelse return false;
+        return switch (kind) {
+            .track => same(playing.track_id, wanted),
+            .release => same(playing.release_id, wanted),
+            .artist => same(playing.artist_id, wanted) or same(playing.album_artist_id, wanted),
+        };
+    }
+
+    fn same(known: ?i64, wanted: i64) bool {
+        return if (known) |id| id == wanted else false;
+    }
+};
+
+pub const MarkedView = struct {
+    view: *gtk.Widget,
+    kind: PlayingKind,
+};
+
+const marked_view_limit = 8;
+
 /// Which shelf of the library the track list is showing, and in what order.
 ///
 /// This is a *request* the engine answers, not a description of the rows on
@@ -474,6 +503,8 @@ pub const App = struct {
     /// What the now-playing labels currently show, so the resolve query only
     /// runs when the audible entry actually changes.
     shown_track_id: ?i64 = null,
+    shown_playing: Playing = .{},
+    marked_views: [marked_view_limit]?MarkedView = @splat(null),
     shown_recording_id: ?i64 = null,
     shown_feedback: liborca.Feedback = .none,
     shown_transport: liborca.TransportState = .stopped,
@@ -491,6 +522,30 @@ pub const App = struct {
 
     pub fn waker(self: *App) liborca.HostWaker {
         return .{ .context = &self.wake_fd, .wake_fn = writeWake };
+    }
+
+    pub fn playing(self: *App) Playing {
+        const track_id = self.shown_track_id;
+        const known = self.shown_playing.track_id;
+        if (track_id == null and known == null) return self.shown_playing;
+        if (track_id != null and known != null and track_id.? == known.?) return self.shown_playing;
+        self.shown_playing = self.resolvePlaying(track_id);
+        return self.shown_playing;
+    }
+
+    fn resolvePlaying(self: *App, track_id: ?i64) Playing {
+        const id = track_id orelse return .{};
+        var result: Playing = .{ .track_id = id };
+        const library = self.library orelse return result;
+        const summary = (self.runtime.libraryTrackSummary(library, id) catch null) orelse return result;
+        defer summary.deinit(self.allocator);
+        result.release_id = summary.release_id;
+        result.artist_id = summary.artist_id;
+        const release_id = summary.release_id orelse return result;
+        const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return result;
+        defer release.deinit(self.allocator);
+        result.album_artist_id = release.album_artist_id;
+        return result;
     }
 
     pub fn toast(self: *App, message: [:0]const u8) void {

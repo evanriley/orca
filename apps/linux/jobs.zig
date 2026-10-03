@@ -67,6 +67,7 @@ fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u
 
 /// Everything shown from the library, rebuilt after its contents changed.
 pub fn reloadLibraryViews(self: *App) void {
+    self.shown_playing = .{};
     browse.reload(self);
     self.reload();
     albums.reload(self);
