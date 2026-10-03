@@ -3798,6 +3798,20 @@ orca_status orca_job_match_stats(
     orca_match_stats *output
 );
 
+/* The Release that holds most of a finished Match Album's files, with
+ * `has_release_id` 1: the files of the album's Tracks when the job started,
+ * so a host can follow an album that accepting a release ID moved to a new
+ * Release id. The same id when the album kept its key. `has_release_id` 0
+ * and `release_id` 0 while the job runs or is queued, for a job that is not
+ * a release-scoped search or re-identify, and when no Release holds the
+ * files. STALE_HANDLE for an unknown job. */
+orca_status orca_job_match_release(
+    orca_runtime *runtime,
+    orca_handle job,
+    int64_t *release_id,
+    uint8_t *has_release_id
+);
+
 /*
  * A pending proposal of a recording for a file. `confidence` is 0 to 1;
  * `provider` is "musicbrainz" or "acoustid". `title`, `artist` and `album`

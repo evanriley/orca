@@ -4,6 +4,11 @@
 
 ### Added
 
+- **The Release a Match Album leaves an album on.**
+  `Runtime.jobMatchRelease` and `orca_job_match_release` name the Release a
+  finished Match Album's files are on, so a frontend can follow an album
+  whose accepted release ID gave it a new id. `orca-cli match --release`
+  prints it as `release=`.
 - **Artist photos in listings.** `ArtistSummary` adds `has_photo`, true
   when the Library stores the Artist's photo, and `cover_release_id`, the
   Artist's first own Release in shelf order or else the first they appear

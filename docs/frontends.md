@@ -301,7 +301,9 @@ The boundary covers the whole engine, not a fragment of it:
   confidence and fetching the Release's cover.
   `orca_library_start_cover_art_fetch` fetches one Release's cover as the same
   kind of job, and `orca_job_match_stats` reads either job's
-  `orca_match_stats`. A second match while one runs is `ORCA_STATUS_BUSY`.
+  `orca_match_stats`. `orca_job_match_release` names the Release a finished
+  release-scoped match left the album's files on, which is a new id when an
+  accept changed the album's key. A second match while one runs is `ORCA_STATUS_BUSY`.
   `orca_library_query_match_review` pages the Tracks with proposals, best
   first, and `orca_library_query_match_proposals` lists one Track's;
   `orca_library_accept_match` and `orca_library_dismiss_match` act on one,

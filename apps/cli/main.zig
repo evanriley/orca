@@ -613,7 +613,8 @@ const help_details =
     \\match listing it at it. With
     \\--accept-min-score=SCORE it then accepts the Release's matches as
     \\accept-matches would, and with --cover-art it then fetches the Release's
-    \\cover as cover-art does. It prints accepted= and cover_art=.
+    \\cover as cover-art does. It prints accepted=, cover_art= and release=,
+    \\the Release the album's files are on afterwards.
     \\
     \\verify checks the recording ID of every identified Track's file against
     \\what AcoustID hears in its fingerprint, a Release at a time, and needs
@@ -3090,6 +3091,7 @@ fn matchLibrary(context: Context) !void {
     const stats = try runtime.jobMatchStats(job_handle);
     try printMatchStats(stdout, request.mode, stats);
     if (release_steps) try printReleaseSteps(stdout, stats);
+    if (try runtime.jobMatchRelease(job_handle)) |release_id| try stdout.print("release={d}\n", .{release_id});
     if (stats.cover_art == .no_release_id) try stdout.writeAll(no_release_id_hint);
 }
 

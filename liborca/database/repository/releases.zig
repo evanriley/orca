@@ -536,6 +536,55 @@ pub const ReleaseRepository = struct {
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
+
+    /// The play files of the Release's Tracks, of its first `max_page`
+    /// Tracks by id that have one.
+    pub fn playFileIds(self: *const ReleaseRepository, buffer: *[max_page]i64, release_id: i64) ![]i64 {
+        var statement = try self.db.prepare(
+            "SELECT file_id FROM (SELECT " ++ track_play_file ++ " AS file_id, tracks.id AS track_id\n" ++
+                "    FROM tracks WHERE tracks.release_id = ?1)\n" ++
+                "WHERE file_id IS NOT NULL ORDER BY track_id LIMIT ?2;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        try statement.bindInt64(2, buffer.len);
+        var found: usize = 0;
+        while (try statement.step() == .row) : (found += 1) buffer[found] = statement.columnInt64(0);
+        return buffer[0..found];
+    }
+
+    /// The Release whose Tracks hold most of the files, by their preferred
+    /// file or their recording, each file counted once per Release; the
+    /// lowest id on a tie, and null when no Release holds any of them.
+    pub fn holdingMost(self: *const ReleaseRepository, allocator: std.mem.Allocator, file_ids: []const i64) !?i64 {
+        var holding = try self.db.prepare(
+            \\SELECT DISTINCT release_id FROM tracks WHERE release_id IS NOT NULL
+            \\  AND (preferred_file_id = ?1 OR recording_id = (SELECT recording_id FROM files WHERE id = ?1));
+        );
+        defer holding.deinit();
+        const Held = struct { release_id: i64, files: u32 };
+        var held: std.ArrayList(Held) = .empty;
+        defer held.deinit(allocator);
+        for (file_ids) |file_id| {
+            try holding.bindInt64(1, file_id);
+            while (try holding.step() == .row) {
+                const release_id = holding.columnInt64(0);
+                for (held.items) |*release| {
+                    if (release.release_id == release_id) {
+                        release.files += 1;
+                        break;
+                    }
+                } else try held.append(allocator, .{ .release_id = release_id, .files = 1 });
+            }
+            try holding.reset();
+        }
+        var most: ?Held = null;
+        for (held.items) |release| {
+            if (most == null or release.files > most.?.files or
+                (release.files == most.?.files and release.release_id < most.?.release_id)) most = release;
+        }
+        return if (most) |release| release.release_id else null;
+    }
 };
 
 fn openFormatLibrary(comptime name: []const u8) !@import("../library.zig").LibraryDatabase {
@@ -770,4 +819,18 @@ test "an artist's own releases leave out those they only appear on, and the flag
     try expectReleaseIds(&library, .{ .album_artist_id = 2, .own_releases_only = true, .sort = .recently_added }, &.{ 6, 3 });
     try expectReleaseWindow(&library, .{ .album_artist_id = 1, .own_releases_only = true, .sort = .recently_added, .limit = 1, .offset = 1 }, 1);
     try std.testing.expectEqual(try library.releases.countMatching(.{}), try library.releases.countMatching(.{ .own_releases_only = true }));
+}
+
+test "the release holding most of a set of files is the one whose tracks play most of them, the lowest id on a tie" {
+    var library = try openFormatLibrary("holding");
+    defer library.close();
+    var buffer: [max_page]i64 = undefined;
+    try std.testing.expectEqualSlices(i64, &.{ 5, 9 }, try library.releases.playFileIds(&buffer, 3));
+    try std.testing.expectEqualSlices(i64, &.{}, try library.releases.playFileIds(&buffer, 5));
+
+    try std.testing.expectEqual(@as(?i64, 3), try library.releases.holdingMost(std.testing.allocator, &.{ 5, 9 }));
+    try std.testing.expectEqual(@as(?i64, 6), try library.releases.holdingMost(std.testing.allocator, &.{ 1, 7, 8 }));
+    try std.testing.expectEqual(@as(?i64, 1), try library.releases.holdingMost(std.testing.allocator, &.{ 3, 1 }));
+    try std.testing.expectEqual(@as(?i64, null), try library.releases.holdingMost(std.testing.allocator, &.{1_000}));
+    try std.testing.expectEqual(@as(?i64, null), try library.releases.holdingMost(std.testing.allocator, &.{}));
 }

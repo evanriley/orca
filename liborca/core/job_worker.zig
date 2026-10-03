@@ -614,6 +614,9 @@ const LiveMatchStats = struct {
     cover_art: std.atomic.Value(CoverArtOutcome) = .init(.not_requested),
     /// A running matching pass's counters.
     progress: library_pass.matching.Progress = .{},
+    /// The Release a Match Album's files are on once it is done. Written by
+    /// the worker just before it finishes; read only after.
+    album_release_id: ?i64 = null,
 
     fn read(self: *const LiveMatchStats) MatchStats {
         const progress = &self.progress;
@@ -1107,6 +1110,16 @@ pub const JobWorker = struct {
             .random = setup.hooks.random orelse random_source.interface(),
             .shared_state = providers.shared_state.store(&self.database.provider_state),
         };
+        const album_id: ?i64 = switch (setup.scope) {
+            .release => |id| if (request.lookups and setup.mode != .verify) id else null,
+            .library, .track => null,
+        };
+        var album_files_buffer: [database.repository.max_page]i64 = undefined;
+        const album_files: []const i64 = if (album_id) |id|
+            self.database.releases.playFileIds(&album_files_buffer, id) catch &.{}
+        else
+            &.{};
+        defer if (album_id != null) self.recordAlbumRelease(album_files);
         if (request.lookups and !self.runLookups(request, services)) return;
         if (setup.mode == .verify) return;
         const release_id = switch (setup.scope) {
@@ -1124,6 +1137,10 @@ pub const JobWorker = struct {
             }
         }
         self.reproject(written.items);
+    }
+
+    fn recordAlbumRelease(self: *JobWorker, album_files: []const i64) void {
+        self.stats.matching.album_release_id = self.database.releases.holdingMost(self.allocator, album_files) catch null;
     }
 
     /// Match Album after its lookups: accepts the confident matches when
@@ -1679,6 +1696,15 @@ pub const JobWorker = struct {
         return switch (self.stats) {
             .matching => |*stats| stats.read(),
             .scan, .duplicates, .submission, .lyrics, .artist_info => .{},
+        };
+    }
+
+    /// Null while the job runs and for a job that is not a Match Album.
+    pub fn matchRelease(self: *const JobWorker) ?i64 {
+        if (!self.retired and !self.registration.isFinished()) return null;
+        return switch (self.stats) {
+            .matching => |*stats| stats.album_release_id,
+            .scan, .duplicates, .submission, .lyrics, .artist_info => null,
         };
     }
 

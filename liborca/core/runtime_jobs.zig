@@ -582,6 +582,15 @@ pub fn jobMatchStats(self: *OrcaRuntime, job_handle: JobHandle) !MatchStats {
     return error.StaleHandle;
 }
 
+pub fn jobMatchRelease(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
+    if (queuedHostJob(self, job_handle)) return null;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        return worker.matchRelease();
+    }
+    return error.StaleHandle;
+}
+
 fn syncJobProgress(self: *OrcaRuntime) void {
     for (self.job_workers.items) |worker| {
         if (worker.retired) continue;

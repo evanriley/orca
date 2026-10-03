@@ -4071,6 +4071,21 @@ pub export fn orca_job_match_stats(
     return .ok;
 }
 
+pub export fn orca_job_match_release(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    release_id: ?*i64,
+    has_release_id: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const release_destination = release_id orelse return box.reject(@src(), .invalid_argument, "release_id is null");
+    const has_destination = has_release_id orelse return box.reject(@src(), .invalid_argument, "has_release_id is null");
+    const release = box.runtime.jobMatchRelease(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    release_destination.* = release orelse 0;
+    has_destination.* = @intFromBool(release != null);
+    return .ok;
+}
+
 pub export fn orca_library_start_acoustid_submission(
     runtime: ?*Runtime,
     library: Handle,
@@ -9148,7 +9163,7 @@ test "a scoped match through the C ABI follows its options, and confident accept
     try std.testing.expectEqualStrings("orca_library_apply_matched_release: UnknownRelease", rig.lastError());
 }
 
-test "a match through the C ABI refuses bad options and a second job, and a job that is not a match has empty match stats" {
+test "a match through the C ABI refuses bad options and a second job, a job that is not a match has empty match stats, and only a finished Match Album names its Release" {
     var rig: MatchingRig = undefined;
     try rig.init("file:orca-c-api-match-refusals?mode=memory&cache=shared", null);
     defer rig.deinit();
@@ -9225,6 +9240,28 @@ test "a match through the C ABI refuses bad options and a second job, and a job 
     try std.testing.expectEqual(Status.ok, orca_job_match_stats(rig.runtime, scan, &stats));
     try std.testing.expectEqual(@as(u64, 0), stats.tracks_examined);
     try std.testing.expectEqual(exportAcoustIdUse(.off), stats.acoustid);
+
+    var release_id: i64 = -1;
+    var has_release_id: u8 = 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_match_release(rig.runtime, matching, null, &has_release_id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_match_release(rig.runtime, matching, &release_id, null));
+    try std.testing.expectEqual(Status.stale_handle, orca_job_match_release(rig.runtime, .{ .index = 7, .generation = 3 }, &release_id, &has_release_id));
+    try std.testing.expectEqual(Status.ok, orca_job_match_release(rig.runtime, matching, &release_id, &has_release_id));
+    try std.testing.expectEqual(@as(u8, 0), has_release_id);
+    try std.testing.expectEqual(@as(i64, 0), release_id);
+    try std.testing.expectEqual(Status.ok, orca_job_match_release(rig.runtime, scan, &release_id, &has_release_id));
+    try std.testing.expectEqual(@as(u8, 0), has_release_id);
+    rig.musicbrainz.hang_from = null;
+    _ = try provider_tests.addAlbumTrack(rig.library_database, album, "Pink Moon");
+    options = zero;
+    options.has_release_id = 1;
+    options.release_id = album;
+    var album_match: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_match(rig.runtime, rig.library, &options, &album_match));
+    try std.testing.expectEqual(job.State.succeeded, try rig.finish(album_match));
+    try std.testing.expectEqual(Status.ok, orca_job_match_release(rig.runtime, album_match, &release_id, &has_release_id));
+    try std.testing.expectEqual(@as(u8, 1), has_release_id);
+    try std.testing.expectEqual(album, release_id);
 
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);

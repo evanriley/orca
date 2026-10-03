@@ -3100,6 +3100,94 @@ test "Match Album breaks a tie between editions for the Official one with the al
     try expectOrcaValue(library_database, pink_moon, .musicbrainz_release_id, bryter_layter_mbid);
 }
 
+test "a Match Album whose accept adds a release ID reports the Release its files moved to, and the old Release no longer resolves" {
+    var fake: FakeMusicBrainz = .{};
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-moved?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    const pink_moon = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+    const editions = [_][]const u8{bryter_layter_mbid};
+    for ([_]struct { file: i64, recording: []const u8, title: []const u8 }{
+        .{ .file = northern_sky, .recording = northern_sky_mbid, .title = "Northern Sky" },
+        .{ .file = pink_moon, .recording = pink_moon_mbid, .title = "Pink Moon" },
+    }) |found| {
+        const evidence = [_]database.ProposalEvidence{.{
+            .recording_mbid = found.recording,
+            .found_by = .{ .musicbrainz = true },
+            .payload = .{
+                .title = found.title,
+                .artist = "Nick Drake",
+                .release_mbid = bryter_layter_mbid,
+                .release_mbids = &editions,
+                .mb_score = 100,
+                .musicbrainz_confidence = 0.95,
+            },
+        }};
+        _ = try library_database.identification_proposals.recordSearch(std.testing.allocator, found.file, .{ .musicbrainz = true }, &evidence);
+    }
+
+    const job_handle = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, job_handle));
+    try std.testing.expectEqual(@as(u64, 2), (try runtime.jobMatchStats(job_handle)).accepted);
+    const moved_to = try releaseOfFile(library_database, northern_sky);
+    try std.testing.expect(moved_to != album);
+    try std.testing.expectEqual(@as(?i64, moved_to), try runtime.jobMatchRelease(job_handle));
+    try std.testing.expect((try runtime.libraryRelease(library, album)) == null);
+    const release = (try runtime.libraryRelease(library, moved_to)).?;
+    defer release.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Bryter Layter", release.title);
+}
+
+test "a Match Album that changes no key reports the Release it started on, and a job that is not a finished Match Album reports none" {
+    var fake: FakeMusicBrainz = .{ .hang_from = 0 };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-match-album-kept?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const northern_sky = try observeFile(library_database, "/music/drake/01.flac", "Northern Sky", "Nick Drake");
+    _ = try observeFile(library_database, "/music/drake/02.flac", "Pink Moon", "Nick Drake");
+    try projectAll(library_database);
+    const album = try releaseOfFile(library_database, northern_sky);
+
+    const hanging = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+    try fake.awaitRequests(1);
+    try std.testing.expectEqual(@as(?i64, null), try runtime.jobMatchRelease(hanging));
+    try runtime.cancelJob(hanging);
+    try std.testing.expectEqual(job.State.cancelled, try runtime_tests.awaitJob(&runtime, hanging));
+    try std.testing.expectEqual(@as(?i64, album), try runtime.jobMatchRelease(hanging));
+    fake.hang_from = null;
+
+    runtime.reapFinishedJobs();
+    const unchanged = try runtime.startLibraryMatching(library, .{ .release_id = album, .accept_minimum_confidence = 0.9 });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, unchanged));
+    try std.testing.expectEqual(@as(u64, 0), (try runtime.jobMatchStats(unchanged)).accepted);
+    try std.testing.expectEqual(@as(?i64, album), try runtime.jobMatchRelease(unchanged));
+    try std.testing.expectEqual(album, try releaseOfFile(library_database, northern_sky));
+
+    runtime.reapFinishedJobs();
+    const whole_library = try runtime.startLibraryMatching(library, .{});
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, whole_library));
+    try std.testing.expectEqual(@as(?i64, null), try runtime.jobMatchRelease(whole_library));
+    runtime.reapFinishedJobs();
+    const one_track = try runtime.startLibraryMatching(library, .{ .track_id = try trackOfFile(library_database, northern_sky) });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, one_track));
+    try std.testing.expectEqual(@as(?i64, null), try runtime.jobMatchRelease(one_track));
+    runtime.reapFinishedJobs();
+    const projection = try runtime.startLibraryProjection(library);
+    _ = try runtime_tests.awaitJob(&runtime, projection);
+    try std.testing.expectEqual(@as(?i64, null), try runtime.jobMatchRelease(projection));
+    try std.testing.expectError(error.StaleHandle, runtime.jobMatchRelease(.{ .index = 999, .generation = 7 }));
+}
+
 test "accepting one file of a two-file Release stores its title and artist only, and accepting the other stores the release's values on both" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();

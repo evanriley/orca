@@ -214,7 +214,7 @@ zig build run -- accept-match DATABASE PROPOSAL_ID   # recording ID, title, arti
 zig build run -- dismiss-match DATABASE PROPOSAL_ID
 zig build run -- accept-matches DATABASE --min-score=0.9   # each file's best match that confident
 zig build run -- apply-release DATABASE RELEASE_ID   # the album's values once every Track names one release
-zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album
+zig build run -- match DATABASE --release=ID [--accept-min-score=0.9] [--cover-art]   # Match Album; release= is the album's Release afterwards
 
 # Cover Art Archive -- server from ORCA_COVERARTARCHIVE_URL (https, or http to
 # localhost); stores the cover in the library, never in a file

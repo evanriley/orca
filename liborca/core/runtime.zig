@@ -2390,6 +2390,16 @@ pub const OrcaRuntime = struct {
         return runtime_jobs.jobMatchStats(self, job_handle);
     }
 
+    /// The Release that holds most of a finished Match Album's files: the
+    /// files of the album's Tracks when the job started, so a host can follow
+    /// an album that accepting a release ID moved to a new Release id. The
+    /// same id when the album kept its key. Null while the job runs, for a
+    /// job that is not a release-scoped search or re-identify, and when no
+    /// Release holds the files.
+    pub fn jobMatchRelease(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
+        return runtime_jobs.jobMatchRelease(self, job_handle);
+    }
+
     /// Control lane. Joins every worker whose thread has finished, records the
     /// job's terminal state and publishes one lossless `job_finished` event per
     /// job. Called from the runtime pump.

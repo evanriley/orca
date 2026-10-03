@@ -454,7 +454,12 @@ defer page.deinit();
   release_id)` stores a Release's album values once its Tracks agree on one
   MusicBrainz release and returns how many it stored. Accepts reproject, so
   Track and Release ids can change; see
-  [metadata.md](metadata.md#accepting-a-match).
+  [metadata.md](metadata.md#accepting-a-match). Once a job started with
+  `MatchRequest.release_id` that searches or re-identifies has finished,
+  `jobMatchRelease(job)` returns the Release that holds most of the files
+  the album's Tracks had when it started, so a host can follow the album to
+  its new id; it is the same id when the album kept its key, and null while
+  the job runs, for any other job, and when no Release holds the files.
   `setMusicBrainzServer` and `setAcoustIdServer` select other servers under
   the same rules as `setListenBrainzServer`, from the next job.
   `setAcoustIdClientKey(key)` copies the AcoustID application key, or clears
