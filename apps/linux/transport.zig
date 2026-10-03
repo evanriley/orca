@@ -777,6 +777,8 @@ pub fn tick(self: *App) void {
 
     const duration_changed = status.duration_ms != self.last_seen_duration_ms;
     self.last_seen_duration_ms = status.duration_ms;
+    const track_changed = !optionalEql(status.track_id, self.shown_track_id);
+    const transport_changed = status.transport != self.shown_transport;
     for (&self.transport_controls.values) |*controls| showTransport(self, controls, status, duration_changed);
     if (status.repeat != self.repeat_mode) {
         self.repeat_mode = status.repeat;
@@ -792,8 +794,11 @@ pub fn tick(self: *App) void {
             else
                 1.0;
             self.suppress_widget_writeback = true;
-            gtk.gtk_adjustment_set_upper(adjustment, duration);
-            gtk.gtk_adjustment_set_value(adjustment, @floatFromInt(status.position_ms));
+            if (duration_changed or gtk.gtk_adjustment_get_upper(adjustment) != duration)
+                gtk.gtk_adjustment_set_upper(adjustment, duration);
+            if (duration_changed or track_changed or transport_changed or
+                seekPositionVisiblyMoved(self, adjustment, status))
+                gtk.gtk_adjustment_set_value(adjustment, @floatFromInt(status.position_ms));
             self.suppress_widget_writeback = false;
         }
     }
@@ -807,7 +812,6 @@ pub fn tick(self: *App) void {
         }
     }
 
-    const track_changed = !optionalEql(status.track_id, self.shown_track_id);
     if (track_changed) {
         self.shown_track_id = status.track_id;
         self.shown_recording_id = null;
@@ -854,10 +858,31 @@ pub fn tick(self: *App) void {
         refreshSignalPath(self);
     }
     refreshSignalPathWhenOutputStarts(self);
-    if (track_changed or status.transport != self.shown_transport) {
+    if (track_changed or transport_changed) {
         self.shown_transport = status.transport;
         self.mpris.notify();
     }
+}
+
+fn seekPositionVisiblyMoved(self: *App, adjustment: *gtk.Adjustment, status: liborca.PlayerStatus) bool {
+    const shown_value = gtk.gtk_adjustment_get_value(adjustment);
+    const shown_ms: u64 = if (shown_value > 0) @intFromFloat(shown_value) else 0;
+    if (status.position_ms < shown_ms) return true;
+    if (status.position_ms / std.time.ms_per_s != shown_ms / std.time.ms_per_s) return true;
+    const width = widestSeekScaleWidth(self);
+    if (width == 0) return false;
+    return (status.position_ms - shown_ms) * width >= status.duration_ms;
+}
+
+fn widestSeekScaleWidth(self: *App) u64 {
+    var widest: u64 = 0;
+    for (&self.transport_controls.values) |*controls| {
+        const scale = controls.scale orelse continue;
+        if (gtk.gtk_widget_get_mapped(scale) == 0) continue;
+        const width = gtk.gtk_widget_get_width(scale);
+        if (width > 0) widest = @max(widest, @as(u64, @intCast(width)));
+    }
+    return widest;
 }
 
 fn showTransport(
@@ -866,13 +891,16 @@ fn showTransport(
     status: liborca.PlayerStatus,
     duration_changed: bool,
 ) void {
-    if (controls.play) |play| gtk.gtk_button_set_icon_name(
-        gtk.cast(gtk.Button, play),
-        if (status.transport == .playing)
+    if (controls.play) |play| {
+        const button = gtk.cast(gtk.Button, play);
+        const icon: [:0]const u8 = if (status.transport == .playing)
             "media-playback-pause-symbolic"
         else
-            "media-playback-start-symbolic",
-    );
+            "media-playback-start-symbolic";
+        const shown = std.mem.span(gtk.gtk_button_get_icon_name(button) orelse "");
+        if (!std.mem.eql(u8, shown, icon))
+            gtk.gtk_button_set_icon_name(button, icon.ptr);
+    }
     if (controls.next) |button|
         gtk.gtk_widget_set_sensitive(button, boolean(status.queue_length > 0));
     if (controls.previous) |button|

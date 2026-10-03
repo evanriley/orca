@@ -614,6 +614,10 @@
 
 ### Fixed
 
+- **Less redrawing while playing.** The seek slider moves only when its
+  knob would move a pixel or the time shown changes, and the play button
+  keeps its icon instead of resetting it every tick, so the window draws
+  about 4 frames a second during playback instead of 10.
 - **Fetching a cover or matching an album keeps your place.** The album
   page stays open and the Albums list keeps its scroll position; the
   fetched cover replaces the placeholder everywhere it shows, including

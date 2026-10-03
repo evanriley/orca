@@ -794,6 +794,7 @@ pub extern fn gtk_header_bar_set_title_widget(bar: *HeaderBar, title_widget: ?*W
 pub extern fn gtk_button_new_with_label(label: [*:0]const u8) *Widget;
 pub extern fn gtk_button_set_label(button: *Button, label: [*:0]const u8) void;
 pub extern fn gtk_button_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;
+pub extern fn gtk_button_get_icon_name(button: *Button) ?[*:0]const u8;
 pub extern fn gtk_button_set_icon_name(button: *Button, icon_name: [*:0]const u8) void;
 pub extern fn gtk_toggle_button_new() *Widget;
 pub extern fn gtk_toggle_button_get_active(button: *ToggleButton) gboolean;
