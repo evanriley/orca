@@ -220,8 +220,14 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
 
 fn unparentLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const popover = gtk.cast(gtk.Widget, data.?);
+    defer gtk.g_object_unref(popover);
     if (gtk.gtk_widget_get_parent(popover) != null) gtk.gtk_widget_unparent(popover);
     return gtk.SOURCE_REMOVE;
+}
+
+fn unparentWithParent(_: ?*anyopaque, popover: ?*anyopaque) callconv(.c) void {
+    const widget = gtk.cast(gtk.Widget, popover.?);
+    if (gtk.gtk_widget_get_parent(widget) != null) gtk.gtk_widget_unparent(widget);
 }
 
 var unsized_popover: ?*gtk.Popover = null;
@@ -240,7 +246,7 @@ fn presentUnsized(_: ?*anyopaque) callconv(.c) gtk.gboolean {
 
 fn closed(popover: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
     if (unsized_popover == gtk.cast(gtk.Popover, popover.?)) unsized_popover = null;
-    _ = gtk.g_idle_add(unparentLater, popover);
+    _ = gtk.g_idle_add(unparentLater, gtk.g_object_ref(popover));
 }
 
 /// Pops up the menu for `self.context` at `x`, `y` in `widget`.
@@ -253,6 +259,7 @@ pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
 pub fn popupModel(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, x: f64, y: f64) void {
     const popover = gtk.gtk_popover_menu_new_from_model(menu_model);
     gtk.gtk_widget_set_parent(popover, widget);
+    _ = gtk.g_signal_connect_object(widget, "destroy", gtk.callback(unparentWithParent), popover, 0);
     gtk.gtk_popover_set_has_arrow(gtk.cast(gtk.Popover, popover), gtk.false_);
     const point: gtk.Rectangle = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .width = 1, .height = 1 };
     gtk.gtk_popover_set_pointing_to(gtk.cast(gtk.Popover, popover), &point);

@@ -609,6 +609,9 @@
 
 ### Fixed
 
+- **Context menu crash.** Choosing Show Artist, Show Album or another
+  context-menu item that rebuilt the page no longer crashes orca-gtk: the
+  closed menu was freed with the page before it was detached.
 - **Artist photos appear everywhere once fetched.** The Artists grid and
   list, search results, genre pages and Loved show an Artist's photo as
   soon as it is fetched instead of an album cover until restart. Artist
