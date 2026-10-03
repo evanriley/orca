@@ -705,11 +705,9 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), switcher);
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), views);
 
-    const view = details.besideContent(self, column, .{ .selection = self.loved.songs.selection.? }).widget;
-
     const navigation = adw.adw_navigation_view_new();
     self.loved.navigation = gtk.cast(adw.NavigationView, navigation);
-    const root = adw.adw_navigation_page_new(view, "Loved");
+    const root = adw.adw_navigation_page_new(column, "Loved");
     adw.adw_navigation_page_set_tag(root, navigation_tag);
     adw.adw_navigation_view_add(self.loved.navigation.?, root);
     return navigation;

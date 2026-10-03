@@ -425,6 +425,32 @@ pub fn visibleContent(self: *App) ?*gtk.Widget {
     return gtk.gtk_stack_get_child_by_name(pages, self.current_page.name());
 }
 
+fn sectionSource(self: *App, page: Page) details.Source {
+    return switch (page) {
+        .tracks => .{ .selection = self.songs.selection orelse return .playing },
+        .loved => .{ .selection = self.loved.songs.selection orelse return .playing },
+        .genres => .{ .ids = self.genres.song_ids[0..] },
+        else => .playing,
+    };
+}
+
+fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
+    return switch (pushedOf(self, page) orelse return null) {
+        .album => albums.inspectorSource(self, page),
+        .artist => artists.inspectorSource(self, page),
+        .playlist => |id| .{ .playlist = .{
+            .selection = self.playlists.songs.selection orelse return null,
+            .playlist_id = id,
+        } },
+    };
+}
+
+/// Points the inspector at the Tracks of the page showing.
+pub fn syncInspector(self: *App) void {
+    const pushed = if (pushedPage(self, self.current_page)) |page| pushedSource(self, page) else null;
+    details.setSource(self, pushed orelse sectionSource(self, self.current_page));
+}
+
 fn currentVisit(self: *App) Visit {
     const pushed = pushedPage(self, self.current_page);
     return .{ .page = self.current_page, .pushed = if (pushed) |page| pushedOf(self, page) else null };
@@ -575,6 +601,7 @@ fn sectionChanged(navigation: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) ca
     if (@as(?*anyopaque, showing) != navigation) return;
     clearSearch(self);
     settleFocus(self);
+    syncInspector(self);
     navigated(self);
 }
 
@@ -657,6 +684,7 @@ fn switchTo(self: *App, page: Page) void {
         queue.tick(self);
     }
     settleFocus(self);
+    syncInspector(self);
     navigated(self);
 }
 
@@ -916,7 +944,7 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     title.add(song_filters.build(self));
     title.add(view_switch);
 
-    return details.besideContent(self, page_ui.withTitle(title, body), .{ .selection = self.songs.selection.? }).widget;
+    return page_ui.withTitle(title, body);
 }
 
 /// Below this width the sidebar folds away behind a back button and the
@@ -1086,9 +1114,17 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, preferences.build(self), Page.settings.name());
 
     watchSections(self);
+    const inspected = adw.adw_overlay_split_view_new();
+    const inspected_view = gtk.cast(adw.OverlaySplitView, inspected);
+    adw.adw_overlay_split_view_set_sidebar_position(inspected_view, gtk.PACK_END);
+    adw.adw_overlay_split_view_set_pin_sidebar(inspected_view, gtk.true_);
+    adw.adw_overlay_split_view_set_enable_show_gesture(inspected_view, gtk.false_);
+    gtk.gtk_widget_set_hexpand(pages, gtk.true_);
+    adw.adw_overlay_split_view_set_content(inspected_view, pages);
+    details.build(self, inspected_view);
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), inspected);
     const content = adw.adw_navigation_page_new(framed, Page.albums.title());
     self.content_page = content;
     const sidebar = adw.adw_navigation_page_new(buildSidebar(self), "Orca");
@@ -1114,5 +1150,6 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     adaptWhenNarrow(self, window, split);
     record(self);
     page_ui.refresh(self);
+    syncInspector(self);
     return window;
 }

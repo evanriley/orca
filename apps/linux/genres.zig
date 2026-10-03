@@ -97,7 +97,6 @@ pub const State = struct {
     song_ids: [song_limit]i64 = @splat(0),
     song_count: usize = 0,
     song_sort: liborca.TrackSort = .play_count,
-    details: ?*details.Panel = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.idle != 0) _ = gtk.g_source_remove(self.idle);
@@ -895,7 +894,7 @@ fn songSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c
     const self = state(data);
     const position = rowPosition(row orelse return) orelse return;
     if (position >= self.genres.song_count) return;
-    if (self.genres.details) |panel| details.choose(panel, self.genres.song_ids[position]);
+    details.choose(self, self.genres.song_ids[0..], self.genres.song_ids[position]);
 }
 
 fn songActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1050,9 +1049,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, title.meta), "numeric");
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, title.meta), "genres-tagline");
 
-    const placed = details.besideContent(self, page_ui.withTitle(title, body), .{ .ids = self.genres.song_ids[0..] });
-    self.genres.details = placed.panel;
-    const view = placed.widget;
+    const view = page_ui.withTitle(title, body);
 
     const navigation = adw.adw_navigation_view_new();
     self.genres.navigation = gtk.cast(adw.NavigationView, navigation);

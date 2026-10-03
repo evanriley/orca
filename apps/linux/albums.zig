@@ -973,7 +973,6 @@ pub const AlbumPage = struct {
     loved: bool,
     love_button: ?*gtk.Widget = null,
     hero: ?*gtk.Widget = null,
-    details: ?*details.Panel = null,
     meta: ?*gtk.Widget = null,
     about: ?*gtk.Widget = null,
     description: ?*gtk.Widget = null,
@@ -994,12 +993,23 @@ fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const allocator = page.self.allocator;
     unregisterPage(page);
+    details.forgetIds(page.self, page.ids);
     page.disc_lists.deinit(allocator);
     allocator.free(page.ids);
     allocator.free(page.songs);
     allocator.free(page.artists);
     allocator.free(page.rows);
     allocator.destroy(page);
+}
+
+/// What the inspector follows while `pushed`, an album page, shows.
+pub fn inspectorSource(self: *App, pushed: *adw.NavigationPage) ?details.Source {
+    const child = adw.adw_navigation_page_get_child(pushed) orelse return null;
+    for (self.open_album_pages[0..self.open_album_page_count]) |page| {
+        if (page.scroller != child) continue;
+        return .{ .album = .{ .ids = page.ids, .release_id = page.release_id } };
+    }
+    return null;
 }
 
 fn registerPage(page: *AlbumPage) void {
@@ -1153,7 +1163,7 @@ fn trackSelected(box: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv
     }
     const position = rowPosition(gtk.cast(gtk.Widget, selected)) orelse return;
     if (position >= page.ids.len) return;
-    if (page.details) |panel| details.choose(panel, page.ids[position]);
+    details.choose(page.self, page.ids, page.ids[position]);
 }
 
 fn trackActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1794,10 +1804,7 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     registerPage(page);
 
     const title_text = strings.printZ(&buffer, "{s}", .{if (release.title.len != 0) release.title else "Album"}) catch "Album";
-    const beside = details.besideContent(self, scroller, .{ .ids = page.ids });
-    page.details = beside.panel;
-    if (beside.panel) |panel| details.showAlbum(panel, release_id);
-    const pushed = adw.adw_navigation_page_new(beside.widget, title_text.ptr);
+    const pushed = adw.adw_navigation_page_new(scroller, title_text.ptr);
     window.markPushed(pushed, .{ .album = release_id });
     adw.adw_navigation_view_push(navigation, pushed);
     _ = gtk.gtk_widget_grab_focus(play);

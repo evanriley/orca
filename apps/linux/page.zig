@@ -1,6 +1,6 @@
 //! What every content page shares: the window's one top bar — Back and
-//! Forward, the trail to the page showing, the library search and the showing
-//! page's panel toggles — and the title block that opens the content with the
+//! Forward, the trail to the page showing, the library search and the
+//! inspector's toggles — and the title block that opens the content with the
 //! page's name and its count.
 
 const gtk = @import("gtk.zig");
@@ -20,10 +20,8 @@ pub const Bar = struct {
     current: ?*gtk.Label = null,
     search: ?*gtk.Stack = null,
     entry: ?*gtk.Widget = null,
-    panels: ?*gtk.Stack = null,
+    panels: ?*gtk.Box = null,
 };
-
-const no_panel = "none";
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -114,11 +112,9 @@ fn buildSearch(self: *App) *gtk.Widget {
 }
 
 fn buildPanelSlot(self: *App) *gtk.Widget {
-    const slot = gtk.gtk_stack_new();
-    gtk.gtk_stack_set_hhomogeneous(gtk.cast(gtk.Stack, slot), gtk.true_);
+    const slot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_set_valign(slot, gtk.ALIGN_CENTER);
-    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, slot), gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0), no_panel);
-    self.top_bar.panels = gtk.cast(gtk.Stack, slot);
+    self.top_bar.panels = gtk.cast(gtk.Box, slot);
     return slot;
 }
 
@@ -143,24 +139,11 @@ pub fn addTrail(self: *App, page: window.Page, crumbs: *gtk.Widget) void {
     _ = gtk.gtk_stack_add_named(trail, crumbs, page.name());
 }
 
-pub fn adoptPanelControls(self: *App, controls: *gtk.Widget, owner: *gtk.Widget) void {
-    const slot = self.top_bar.panels orelse return;
-    _ = gtk.gtk_stack_add_child(slot, controls);
-    _ = gtk.signalConnect(owner, "destroy", gtk.callback(ownerDestroyed), gtk.g_object_ref(controls));
-}
-
-fn ownerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const controls = gtk.cast(gtk.Widget, data.?);
-    defer gtk.g_object_unref(controls);
-    if (gtk.gtk_widget_get_parent(controls)) |slot| gtk.gtk_stack_remove(gtk.cast(gtk.Stack, slot), controls);
-}
-
 pub fn refresh(self: *App) void {
     const bar = &self.top_bar;
     if (bar.back) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoBack(self)));
     if (bar.forward) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoForward(self)));
     showTrail(self);
-    showPanelControls(self);
 }
 
 fn showTrail(self: *App) void {
@@ -188,20 +171,6 @@ fn showTrail(self: *App) void {
     }
     if (bar.separator) |separator| gtk.gtk_widget_set_visible(separator, @intFromBool(parent != null));
     if (bar.current) |label| gtk.gtk_label_set_text(label, current);
-}
-
-fn showPanelControls(self: *App) void {
-    const slot = self.top_bar.panels orelse return;
-    const content = window.visibleContent(self);
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        const shown = content orelse break;
-        if (panel.split != shown and gtk.gtk_widget_is_ancestor(panel.split, shown) == 0) continue;
-        const controls = gtk.gtk_widget_get_parent(panel.toggles) orelse continue;
-        if (gtk.gtk_widget_get_parent(controls) != gtk.cast(gtk.Widget, slot)) continue;
-        return gtk.gtk_stack_set_visible_child(slot, controls);
-    }
-    gtk.gtk_stack_set_visible_child_name(slot, no_panel);
 }
 
 fn showSearch(self: *App) void {

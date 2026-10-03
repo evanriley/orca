@@ -150,7 +150,7 @@ pub fn shutdown(self: *App) void {
 pub fn sync(self: *App) void {
     const state = &self.lyrics;
     if (state.closed) return;
-    if ((anyViewMapped(self) or quoteMapped(self)) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
+    if ((mappedView(self) != null or quoteMapped(self)) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
         resolve(self, self.shown_track_id);
         redraw(self);
     }
@@ -211,22 +211,12 @@ fn finishJob(self: *App) void {
 fn redraw(self: *App) void {
     self.lyrics.generation +%= 1;
     drawQuote(self);
-    forEachMappedView(self, render);
+    if (mappedView(self)) |view| render(view);
 }
 
-fn forEachMappedView(self: *App, action: *const fn (*View) void) void {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        if (gtk.gtk_widget_get_mapped(panel.lyrics.root) != 0) action(&panel.lyrics);
-    }
-}
-
-fn anyViewMapped(self: *App) bool {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        if (gtk.gtk_widget_get_mapped(panel.lyrics.root) != 0) return true;
-    }
-    return false;
+fn mappedView(self: *App) ?*View {
+    const panel = self.inspector orelse return null;
+    return if (gtk.gtk_widget_get_mapped(panel.lyrics.root) != 0) &panel.lyrics else null;
 }
 
 fn mappedChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -344,7 +334,7 @@ fn syncedLyrics(self: *const App) ?liborca.Lyrics {
 fn step(self: *App) bool {
     const lyrics = syncedLyrics(self) orelse return false;
     const quote_mapped = quoteMapped(self);
-    if (!quote_mapped and !anyViewMapped(self)) return false;
+    if (!quote_mapped and mappedView(self) == null) return false;
     const status = self.runtime.playerStatus(self.player) catch return false;
     if (!optionalEql(status.track_id, self.lyrics.track_id)) {
         hideQuote(self);
@@ -352,11 +342,8 @@ fn step(self: *App) bool {
     }
     const line = lyrics.lineAt(status.position_ms);
     if (quote_mapped) showQuote(self, lyrics, line);
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        const view = &panel.lyrics;
-        if (gtk.gtk_widget_get_mapped(view.root) == 0 or view.generation != self.lyrics.generation) continue;
-        highlight(view, line);
+    if (mappedView(self)) |view| {
+        if (view.generation == self.lyrics.generation) highlight(view, line);
     }
     return status.transport == .playing;
 }

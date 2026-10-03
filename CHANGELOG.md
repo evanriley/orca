@@ -387,6 +387,12 @@
 
 ### Changed
 
+- **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
+  panel is one window-wide sidebar, 420 px in every mode, on every page,
+  so opening it, changing its mode or changing page never moves the
+  content. Pages without a selection of their own show the playing
+  Track, and the signal path is read once at startup instead of once per
+  page.
 - **One top bar in orca-gtk.** The window has a single header on every
   page: Back and Forward over a 32-entry history (also Alt+Left/Right and
   mouse buttons 8/9), a breadcrumb the showing page fills, one library

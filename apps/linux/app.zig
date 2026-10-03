@@ -294,13 +294,13 @@ pub const App = struct {
     browse_toggle: ?*gtk.Widget = null,
     list_toggle: ?*gtk.Widget = null,
 
-    /// What the details panels show, restored from settings.
+    /// What the inspector shows, restored from settings.
     sidebar_page: Sidebar = .hidden,
-    /// Set while the window is below the breakpoint that lays the panels over
-    /// the content.
+    /// Set while the window is below the breakpoint that lays the inspector
+    /// over the content.
     window_narrow: bool = false,
     inspector_overlaid: bool = false,
-    details_panels: [details.panel_limit]?*details.Panel = @splat(null),
+    inspector: ?*details.Panel = null,
     header_compact: bool = false,
     inspector_crowded: bool = false,
     lyrics: lyrics.State = .{},

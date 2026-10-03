@@ -661,9 +661,6 @@ pub extern fn gtk_stack_set_visible_child_name(stack: *Stack, name: [*:0]const u
 pub extern fn gtk_stack_set_transition_type(stack: *Stack, transition: c_int) void;
 pub extern fn gtk_stack_get_child_by_name(stack: *Stack, name: [*:0]const u8) ?*Widget;
 pub extern fn gtk_stack_get_visible_child_name(stack: *Stack) ?[*:0]const u8;
-pub extern fn gtk_stack_add_child(stack: *Stack, child: *Widget) ?*anyopaque;
-pub extern fn gtk_stack_remove(stack: *Stack, child: *Widget) void;
-pub extern fn gtk_stack_set_visible_child(stack: *Stack, child: *Widget) void;
 pub extern fn gtk_grid_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 pub extern fn gtk_grid_view_set_max_columns(view: *GridView, columns: c_uint) void;
 pub extern fn gtk_grid_view_set_min_columns(view: *GridView, columns: c_uint) void;

@@ -1,12 +1,12 @@
-//! The inspector: a panel beside the Songs list and beside an album's tracks
-//! that shows one Track's details, the playing Track's lyrics, or the playing
-//! audio's signal path.
+//! The inspector: the window's one panel at the end of every page that shows
+//! one Track's details, the playing Track's lyrics, or the playing audio's
+//! signal path.
 //!
 //! liborca answers `libraryTrackDetails` and `playerSignalPath`; this only
-//! words the answers. The panels share one mode, kept on the `App`: hidden,
-//! details, lyrics or signal path. Each panel queries details only when the
-//! Track it shows changes, and is handed the signal path whenever
-//! `transport.refreshSignalPath` reads it.
+//! words the answers. Its mode is kept on the `App`: hidden, details, lyrics
+//! or signal path. The window tells it which page's Tracks to follow with
+//! `setSource`. It queries details only when the Track it shows changes, and
+//! is handed the signal path whenever `transport.refreshSignalPath` reads it.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -21,29 +21,56 @@ const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
 const transport = @import("transport.zig");
-const page_ui = @import("page.zig");
+const window = @import("window.zig");
 const nowplaying = @import("nowplaying.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 
 const App = app.App;
 
-const details_width: f64 = 370;
-const signal_path_width: f64 = 420;
+const inspector_width: f64 = 420;
 const key_width = 98;
 const separator = " · ";
 const minus = "−";
 
-pub const panel_limit = app.open_album_page_limit + app.open_artist_page_limit + 5;
 const proposal_slots = 3;
 
-/// Where a panel finds the Track it shows when nobody has chosen one.
+/// Where the inspector finds the Track it shows when nobody has chosen one.
 pub const Source = union(enum) {
     selection: *gtk.SelectionModel,
-    /// An album page: the row last chosen, else the playing Track if it is one
-    /// of these.
+    /// A playlist's selected row, else the playlist itself.
+    playlist: PlaylistSource,
+    /// The row last chosen, else the playing Track if it is one of these.
     ids: []const i64,
+    /// As `ids`, else the album itself.
+    album: AlbumSource,
+    /// As `ids`, else the artist itself.
+    artist: ArtistSource,
     playing,
+
+    fn trackIds(source: Source) ?[]const i64 {
+        return switch (source) {
+            .ids => |values| values,
+            .album => |album| album.ids,
+            .artist => |artist| artist.ids,
+            .selection, .playlist, .playing => null,
+        };
+    }
+};
+
+pub const PlaylistSource = struct {
+    selection: *gtk.SelectionModel,
+    playlist_id: i64,
+};
+
+pub const AlbumSource = struct {
+    ids: []const i64,
+    release_id: i64,
+};
+
+pub const ArtistSource = struct {
+    ids: []const i64,
+    artist_id: i64,
 };
 
 const Row = struct {
@@ -76,7 +103,9 @@ const StageView = struct {
 
 pub const Panel = struct {
     self: *App,
-    source: Source,
+    source: Source = .playing,
+    /// The mode last laid out, so the signal path is read only on opening it.
+    laid_out: app.Sidebar = .hidden,
     split: *gtk.Widget,
     root: *gtk.Widget,
     toggles: *gtk.Widget,
@@ -146,15 +175,11 @@ pub const Panel = struct {
     stale: bool = false,
     chosen: ?i64 = null,
     path: ?[:0]u8 = null,
-    /// The album page's Release, shown while no Track is.
-    album_release: ?i64 = null,
     artist_view: Artist,
-    artist_id: ?i64 = null,
     /// Shows the Artist even while one of the page's Tracks plays, until a
     /// Track is chosen.
     artist_pinned: bool = false,
     playlist_view: PlaylistView,
-    playlist_id: ?i64 = null,
 };
 
 const PlaylistView = struct {
@@ -287,13 +312,10 @@ pub fn showSidebar(self: *App, sidebar: app.Sidebar) void {
 }
 
 pub fn revealSignalPath(self: *App) bool {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        if (gtk.gtk_widget_get_mapped(panel.split) == 0) continue;
-        showSidebar(self, .signal_path);
-        return true;
-    }
-    return false;
+    const panel = self.inspector orelse return false;
+    if (gtk.gtk_widget_get_mapped(panel.split) == 0) return false;
+    showSidebar(self, .signal_path);
+    return true;
 }
 
 fn pageName(mode: app.Sidebar) [*:0]const u8 {
@@ -306,24 +328,22 @@ fn pageName(mode: app.Sidebar) [*:0]const u8 {
 
 pub fn applyVisibility(self: *App) void {
     const mode = shownMode(self);
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
+    var opened_signal_path = false;
+    if (self.inspector) |panel| {
+        opened_signal_path = mode == .signal_path and panel.laid_out != .signal_path;
+        panel.laid_out = mode;
         showMode(panel, mode);
         update(panel);
     }
     nowplaying.placePanel(self);
     lyrics.sync(self);
-    if (mode == .signal_path) transport.refreshSignalPath(self);
+    if (opened_signal_path) transport.refreshSignalPath(self);
 }
 
 fn showMode(panel: *Panel, mode: app.Sidebar) void {
     const split = gtk.cast(adw.OverlaySplitView, panel.split);
     if (mode != .hidden) gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), pageName(mode));
-    const overlaid = overlays(panel.self);
-    const width = if (mode == .signal_path) signal_path_width else details_width;
-    adw.adw_overlay_split_view_set_min_sidebar_width(split, width);
-    adw.adw_overlay_split_view_set_max_sidebar_width(split, width);
-    adw.adw_overlay_split_view_set_collapsed(split, boolean(overlaid));
+    adw.adw_overlay_split_view_set_collapsed(split, boolean(overlays(panel.self)));
     adw.adw_overlay_split_view_set_show_sidebar(split, boolean(mode != .hidden));
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.details_toggle), boolean(mode == .details));
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.lyrics_toggle), boolean(mode == .lyrics));
@@ -356,13 +376,11 @@ fn sidebarShownChanged(split: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) ca
     if (!shown and shownMode(panel.self) != .hidden) showSidebar(panel.self, .hidden);
 }
 
-/// The library changed under the panels: what they show may no longer be true.
+/// The library changed under the inspector: what it shows may no longer be true.
 pub fn invalidate(self: *App) void {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        panel.stale = true;
-        update(panel);
-    }
+    const panel = self.inspector orelse return;
+    panel.stale = true;
+    update(panel);
 }
 
 pub fn tick(self: *App) void {
@@ -375,20 +393,52 @@ pub fn tick(self: *App) void {
 
 /// The playing Track changed.
 pub fn trackChanged(self: *App) void {
-    for (self.details_panels) |maybe| update(maybe orelse continue);
+    update(self.inspector orelse return);
 }
 
-pub fn selectionChanged(model: ?*anyopaque, _: c_uint, _: c_uint, data: ?*anyopaque) callconv(.c) void {
-    for (state(data).details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        switch (panel.source) {
-            .selection => |selection| if (@as(?*anyopaque, selection) == model) update(panel),
-            .ids, .playing => {},
-        }
+/// Follows `source` from now on; a Track chosen in the previous one is
+/// forgotten.
+pub fn setSource(self: *App, source: Source) void {
+    const panel = self.inspector orelse return;
+    if (std.meta.eql(panel.source, source)) return;
+    panel.source = source;
+    panel.chosen = null;
+    panel.artist_pinned = false;
+    panel.stale = true;
+    update(panel);
+}
+
+/// Called as a page whose Tracks are `ids` is freed, so the inspector never
+/// holds them after.
+pub fn forgetIds(self: *App, ids: []const i64) void {
+    const panel = self.inspector orelse return;
+    const followed = panel.source.trackIds() orelse return;
+    if (followed.ptr != ids.ptr) return;
+    panel.source = .playing;
+    panel.chosen = null;
+    panel.stale = true;
+    if (gtk.gtk_widget_get_mapped(panel.split) != 0) {
+        window.syncInspector(self);
+        update(panel);
     }
 }
 
-pub fn choose(panel: *Panel, track_id: i64) void {
+pub fn selectionChanged(model: ?*anyopaque, _: c_uint, _: c_uint, data: ?*anyopaque) callconv(.c) void {
+    const panel = state(data).inspector orelse return;
+    const selection: *gtk.SelectionModel = switch (panel.source) {
+        .selection => |selection| selection,
+        .playlist => |playlist| playlist.selection,
+        .ids, .album, .artist, .playing => return,
+    };
+    if (@as(?*anyopaque, selection) == model) update(panel);
+}
+
+/// Shows `track_id`, chosen in the page whose Tracks are `ids`, while the
+/// inspector follows that page.
+pub fn choose(self: *App, ids: []const i64, track_id: i64) void {
+    const panel = self.inspector orelse return;
+    const followed = panel.source.trackIds() orelse return;
+    if (followed.ptr != ids.ptr) return;
     panel.chosen = track_id;
     panel.artist_pinned = false;
     update(panel);
@@ -397,16 +447,13 @@ pub fn choose(panel: *Panel, track_id: i64) void {
 fn wantedTrack(panel: *Panel) ?i64 {
     const self = panel.self;
     switch (panel.source) {
-        .selection => |selection| {
-            const selected = song_table.firstSelected(selection);
-            if (panel.playlist_id != null) return selected;
-            return selected orelse self.shown_track_id;
-        },
-        .ids => |ids| {
+        .selection => |selection| return song_table.firstSelected(selection) orelse self.shown_track_id,
+        .playlist => |playlist| return song_table.firstSelected(playlist.selection),
+        .ids, .album, .artist => {
             if (panel.chosen) |chosen| return chosen;
             if (panel.artist_pinned) return null;
             const playing = self.shown_track_id orelse return null;
-            for (ids) |id| if (id == playing) return playing;
+            for (panel.source.trackIds().?) |id| if (id == playing) return playing;
             return null;
         },
         .playing => return self.shown_track_id,
@@ -444,22 +491,26 @@ fn showPlaceholder(panel: *Panel) void {
 }
 
 fn showAlbumOrPlaceholder(panel: *Panel) void {
-    if (panel.playlist_id != null) {
-        if (!populatePlaylist(panel)) return showPlaceholder(panel);
-        showOnly(panel, panel.playlist_view.content);
-    } else if (panel.artist_id != null) {
-        if (!populateArtist(panel)) return showPlaceholder(panel);
-        showOnly(panel, panel.artist_view.content);
-    } else {
-        if (!populateAlbum(panel)) return showPlaceholder(panel);
-        showOnly(panel, panel.album_view.content);
+    switch (panel.source) {
+        .playlist => |playlist| {
+            if (!populatePlaylist(panel, playlist.playlist_id)) return showPlaceholder(panel);
+            showOnly(panel, panel.playlist_view.content);
+        },
+        .artist => |artist| {
+            if (!populateArtist(panel, artist.artist_id)) return showPlaceholder(panel);
+            showOnly(panel, panel.artist_view.content);
+        },
+        .album => |album| {
+            if (!populateAlbum(panel, album.release_id)) return showPlaceholder(panel);
+            showOnly(panel, panel.album_view.content);
+        },
+        .selection, .ids, .playing => return showPlaceholder(panel),
     }
     setPath(panel, null);
 }
 
-fn populateAlbum(panel: *Panel) bool {
+fn populateAlbum(panel: *Panel, release_id: i64) bool {
     const self = panel.self;
-    const release_id = panel.album_release orelse return false;
     const library = self.library orelse return false;
     const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return false;
     defer release.deinit(self.allocator);
@@ -510,22 +561,19 @@ fn albumGenres(panel: *Panel, release_id: i64, buffer: []u8) ?[:0]const u8 {
     return finish(buffer, &writer);
 }
 
-/// Shows `release_id` while the panel shows no Track.
-pub fn showAlbum(panel: *Panel, release_id: i64) void {
-    panel.album_release = release_id;
+/// Redraws the inspector if it shows `playlist_id`, which may have changed.
+pub fn playlistChanged(self: *App, playlist_id: i64) void {
+    const panel = self.inspector orelse return;
+    switch (panel.source) {
+        .playlist => |playlist| if (playlist.playlist_id != playlist_id) return,
+        else => return,
+    }
     panel.stale = true;
     update(panel);
 }
 
-pub fn showPlaylist(panel: *Panel, playlist_id: i64) void {
-    panel.playlist_id = playlist_id;
-    panel.stale = true;
-    update(panel);
-}
-
-fn populatePlaylist(panel: *Panel) bool {
+fn populatePlaylist(panel: *Panel, playlist_id: i64) bool {
     const self = panel.self;
-    const playlist_id = panel.playlist_id orelse return false;
     const library = self.library orelse return false;
     const summary = self.runtime.libraryPlaylist(library, playlist_id) catch return false;
     defer summary.deinit(self.runtime.allocator);
@@ -582,19 +630,20 @@ fn dateText(buffer: []u8, unix_seconds: i64) ?[:0]const u8 {
     return strings.terminated(buffer, std.mem.span(text));
 }
 
-/// Redraws the panels showing `release_id` now that its info is stored.
+/// Redraws the inspector if it shows `release_id`, now that its info is stored.
 pub fn albumInfoChanged(self: *App, release_id: i64) void {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        if (panel.album_release != release_id or panel.shown != null) continue;
-        panel.stale = true;
-        update(panel);
+    const panel = self.inspector orelse return;
+    switch (panel.source) {
+        .album => |album| if (album.release_id != release_id) return,
+        else => return,
     }
+    if (panel.shown != null) return;
+    panel.stale = true;
+    update(panel);
 }
 
-fn populateArtist(panel: *Panel) bool {
+fn populateArtist(panel: *Panel, artist_id: i64) bool {
     const self = panel.self;
-    const artist_id = panel.artist_id orelse return false;
     const library = self.library orelse return false;
     const artist = (self.runtime.libraryArtist(library, artist_id) catch null) orelse return false;
     defer artist.deinit(self.allocator);
@@ -688,39 +737,41 @@ fn newExternalLink(uri: [*:0]const u8, name: [*:0]const u8) *gtk.Widget {
     return link;
 }
 
-pub fn showArtist(panel: *Panel, artist_id: i64) void {
-    panel.artist_id = artist_id;
-    panel.stale = true;
-    update(panel);
+fn followedArtist(panel: *const Panel) ?i64 {
+    return switch (panel.source) {
+        .artist => |artist| artist.artist_id,
+        else => null,
+    };
 }
 
-pub fn revealArtist(panel: *Panel) void {
+/// Opens the inspector on `artist_id` while it follows that artist's page.
+pub fn revealArtist(self: *App, artist_id: i64) void {
+    const panel = self.inspector orelse return;
+    if (followedArtist(panel) != artist_id) return;
     panel.chosen = null;
     panel.artist_pinned = true;
     panel.stale = true;
-    showSidebar(panel.self, .details);
+    showSidebar(self, .details);
     update(panel);
 }
 
 pub fn artistInfoChanged(self: *App, artist_id: i64) void {
-    for (self.details_panels) |maybe| {
-        const panel = maybe orelse continue;
-        if (panel.artist_id != artist_id or panel.shown != null) continue;
-        panel.stale = true;
-        update(panel);
-    }
+    const panel = self.inspector orelse return;
+    if (followedArtist(panel) != artist_id or panel.shown != null) return;
+    panel.stale = true;
+    update(panel);
 }
 
 fn fetchArtistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
-    const artist_id = panel.artist_id orelse return;
+    const artist_id = followedArtist(panel) orelse return;
     artists.requestInfo(panel.self, artist_id, true);
     gtk.gtk_widget_set_sensitive(panel.artist_view.fetch, boolean(!artists.infoPending(panel.self, artist_id)));
 }
 
-/// Draws `path`, as `transport.refreshSignalPath` read it, in every panel;
+/// Draws `path`, as `transport.refreshSignalPath` read it, in the inspector;
 /// null when it could not be read. `playerSignalPath` pauses the engine
-/// briefly, so the panels never read it themselves.
+/// briefly, so the inspector never reads it itself.
 pub fn showSignalPath(self: *App, path: ?liborca.SignalPath) void {
     if (shownMode(self) != .signal_path) return;
     const context: signal_path.Context = .{
@@ -729,7 +780,7 @@ pub fn showSignalPath(self: *App, path: ?liborca.SignalPath) void {
         .device = transport.deviceName(self),
         .replay_gain_mode = self.runtime.playerReplayGainMode(self.player) catch .off,
     };
-    for (self.details_panels) |maybe| drawSignalPath(maybe orelse continue, path, context);
+    drawSignalPath(self.inspector orelse return, path, context);
 }
 
 fn labelText(label: ?*gtk.Label) []const u8 {
@@ -1531,9 +1582,7 @@ fn scrolled(child: *gtk.Widget) *gtk.Widget {
 fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     const self = panel.self;
-    for (&self.details_panels) |*slot| {
-        if (slot.* == panel) slot.* = null;
-    }
+    if (self.inspector == panel) self.inspector = null;
     setPath(panel, null);
     panel.lyrics.deinit();
     self.allocator.destroy(panel);
@@ -1711,11 +1760,10 @@ fn newArtistView() Artist {
     };
 }
 
-fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
-    const slot = for (&self.details_panels) |*candidate| {
-        if (candidate.* == null) break candidate;
-    } else return null;
-    const panel = self.allocator.create(Panel) catch return null;
+/// Makes `split`'s sidebar the inspector and puts its mode toggles in the top
+/// bar.
+pub fn build(self: *App, split: *adw.OverlaySplitView) void {
+    const panel = self.allocator.create(Panel) catch return;
 
     const details_toggle = modeToggle("sidebar-show-right-symbolic", "Inspector", gtk.callback(detailsToggled), self);
     const lyrics_toggle = modeToggle("media-view-subtitles-symbolic", "Lyrics", gtk.callback(lyricsToggled), self);
@@ -1932,19 +1980,13 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     gtk.gtk_widget_set_vexpand(root, gtk.true_);
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(body), "details");
 
-    const split = adw.adw_overlay_split_view_new();
-    const split_view = gtk.cast(adw.OverlaySplitView, split);
-    adw.adw_overlay_split_view_set_sidebar_position(split_view, gtk.PACK_END);
-    adw.adw_overlay_split_view_set_pin_sidebar(split_view, gtk.true_);
-    adw.adw_overlay_split_view_set_enable_show_gesture(split_view, gtk.false_);
-    gtk.gtk_widget_set_hexpand(page_content, gtk.true_);
-    adw.adw_overlay_split_view_set_content(split_view, page_content);
-    adw.adw_overlay_split_view_set_sidebar(split_view, root);
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, inspector_width);
+    adw.adw_overlay_split_view_set_max_sidebar_width(split, inspector_width);
+    adw.adw_overlay_split_view_set_sidebar(split, root);
 
     panel.* = .{
         .self = self,
-        .source = source,
-        .split = split,
+        .split = gtk.cast(gtk.Widget, split),
         .root = root,
         .toggles = toggles,
         .overflow = overflow,
@@ -2026,27 +2068,12 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(signal_body), "signal_path");
     _ = gtk.signalConnect(root, "destroy", gtk.callback(destroyed), panel);
     _ = gtk.signalConnect(split, "notify::show-sidebar", gtk.callback(sidebarShownChanged), panel);
-    slot.* = panel;
+    self.inspector = panel;
 
-    const mode = shownMode(self);
-    showMode(panel, mode);
-    update(panel);
-    if (mode == .signal_path) transport.refreshSignalPath(self);
-    return panel;
-}
-pub const Placed = struct {
-    widget: *gtk.Widget,
-    panel: ?*Panel,
-};
-
-/// `content` with an inspector at its end, and the inspector's mode toggles in
-/// the top bar while it shows. Without a free panel slot, `content` alone.
-pub fn besideContent(self: *App, content: *gtk.Widget, source: Source) Placed {
-    const panel = newPanel(self, source, content) orelse return .{ .widget = content, .panel = null };
-    gtk.gtk_widget_set_valign(panel.toggles, gtk.ALIGN_CENTER);
-    const controls = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, controls), panel.toggles);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, controls), panel.overflow);
-    page_ui.adoptPanelControls(self, controls, panel.split);
-    return .{ .widget = panel.split, .panel = panel };
+    gtk.gtk_widget_set_valign(toggles, gtk.ALIGN_CENTER);
+    if (self.top_bar.panels) |controls| {
+        gtk.gtk_box_append(controls, toggles);
+        gtk.gtk_box_append(controls, overflow);
+    }
+    applyVisibility(self);
 }

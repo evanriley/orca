@@ -148,7 +148,6 @@ pub const State = struct {
     shuffle_button: ?*gtk.Widget = null,
     love_button: ?*gtk.Widget = null,
     rules_button: ?*gtk.Widget = null,
-    details: ?*details.Panel = null,
     /// The last import's unmatched lines, for its toast's Details.
     unmatched: std.ArrayList([:0]u8) = .empty,
     unmatched_total: u32 = 0,
@@ -1051,7 +1050,8 @@ pub fn reloadPage(self: *App, keep_scroll: bool) void {
         const button = maybe orelse continue;
         gtk.gtk_widget_set_sensitive(button, if (available != 0) gtk.true_ else gtk.false_);
     }
-    if (self.playlists.details) |panel| details.showPlaylist(panel, playlist_id);
+    window.syncInspector(self);
+    details.playlistChanged(self, playlist_id);
 }
 
 pub fn repaint(self: *App, changed: *const feedback.Recordings, change: track_model.Change) void {
@@ -1618,9 +1618,7 @@ fn buildPlaylistPage(self: *App) *adw.NavigationPage {
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
 
-    const placed = details.besideContent(self, layers, .{ .selection = self.playlists.songs.selection.? });
-    self.playlists.details = placed.panel;
-    const page = adw.adw_navigation_page_new(placed.widget, "Playlist");
+    const page = adw.adw_navigation_page_new(layers, "Playlist");
     adw.adw_navigation_page_set_tag(page, page_tag);
     return page;
 }

@@ -597,7 +597,7 @@ pub const ArtistPage = struct {
     hero: ?*gtk.Widget = null,
     stats: ?*gtk.Widget = null,
     sections: ?*gtk.Widget = null,
-    details: ?*details.Panel = null,
+    scroller: ?*gtk.Widget = null,
     photo: ?*gtk.Widget = null,
     genres: ?*gtk.Widget = null,
     biography: ?*gtk.Widget = null,
@@ -618,10 +618,21 @@ fn pageDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
     const allocator = page.self.allocator;
     unregisterPage(page);
+    details.forgetIds(page.self, page.song_ids[0..]);
     allocator.free(page.name);
     allocator.free(page.tracks);
     allocator.free(page.releases);
     allocator.destroy(page);
+}
+
+/// What the inspector follows while `pushed`, an artist page, shows.
+pub fn inspectorSource(self: *App, pushed: *adw.NavigationPage) ?details.Source {
+    const child = adw.adw_navigation_page_get_child(pushed) orelse return null;
+    for (self.open_artist_pages[0..self.open_artist_page_count]) |page| {
+        if (page.scroller != child) continue;
+        return .{ .artist = .{ .ids = page.song_ids[0..], .artist_id = page.artist_id } };
+    }
+    return null;
 }
 
 fn registerPage(page: *ArtistPage) void {
@@ -738,8 +749,7 @@ fn heroMoreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn biographyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const page = pageData(data);
-    const panel = page.details orelse return;
-    details.revealArtist(panel);
+    details.revealArtist(page.self, page.artist_id);
 }
 
 fn seeAllClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -898,7 +908,7 @@ fn songSelected(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c
     const page = pageData(data);
     const position = rowPosition(gtk.cast(gtk.Widget, selected)) orelse return;
     if (position >= page.song_count) return;
-    if (page.details) |panel| details.choose(panel, page.song_ids[position]);
+    details.choose(page.self, page.song_ids[0..], page.song_ids[position]);
 }
 
 fn songActivated(_: ?*anyopaque, row: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1592,13 +1602,11 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), layers);
     _ = gtk.signalConnect(scroller, "destroy", gtk.callback(pageDestroyed), page);
+    page.scroller = scroller;
     registerPage(page);
     markPlaying(self, self.shown_track_id);
 
-    const beside = details.besideContent(self, scroller, .{ .ids = page.song_ids[0..page.song_count] });
-    page.details = beside.panel;
-    if (beside.panel) |panel| details.showArtist(panel, artist_id);
-    const pushed = adw.adw_navigation_page_new(beside.widget, page.name.ptr);
+    const pushed = adw.adw_navigation_page_new(scroller, page.name.ptr);
     window.markPushed(pushed, .{ .artist = artist_id });
     adw.adw_navigation_view_push(navigation, pushed);
     _ = gtk.gtk_widget_grab_focus(play_button);

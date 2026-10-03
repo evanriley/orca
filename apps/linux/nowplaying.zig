@@ -99,10 +99,9 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), content);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), content, gtk.true_);
 
-    const view = inspector.besideContent(self, layers, .playing).widget;
-    gtk.gtk_widget_add_css_class(view, "now-playing-page");
+    gtk.gtk_widget_add_css_class(layers, "now-playing-page");
     placePanel(self);
-    return view;
+    return layers;
 }
 
 fn buildCentre(self: *App) *gtk.Widget {
