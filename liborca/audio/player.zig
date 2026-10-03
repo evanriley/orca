@@ -43,10 +43,10 @@ const EntryInfo = struct {
     serial: u32 = 0,
     sample_rate: u32 = 0,
     frame_count: u64 = 0,
-    /// The entry's own loudness correction, so a host can report what the
+    /// The entry's own loudness corrections, so a host can report what the
     /// audio it is hearing is being multiplied by. The correction is applied
     /// by the session that decodes the entry, not from here.
-    replay_gain: f32 = 1,
+    replay_gain: processing.EntryReplayGain = .{},
     source_format: ?pcm.Format = null,
     source_declared: bool = false,
     codec: []const u8 = "",
@@ -90,15 +90,16 @@ pub const Player = struct {
     /// which case the decode cursor is the only answer available.
     audible_entry_serial: std.atomic.Value(u32) = .init(0),
     drained: std.atomic.Value(bool) = .init(false),
-    /// Loudness correction of the entry being *heard*, republished alongside
-    /// its timeline shape. Reporting only: the correction is applied by the
-    /// session that decodes the entry, so this is what a host may display
-    /// rather than what any lane multiplies by.
-    published_replay_gain: std.atomic.Value(f32) = .init(1),
-    /// Whether entries are decoded with their own loudness correction. An
-    /// atomic because the decode lane reads it on every canonical block, which
-    /// is what makes turning correction off take effect as the already-decoded
-    /// render-ahead drains rather than at the next track.
+    /// Loudness corrections of the entry being *heard*, packed by
+    /// `EntryReplayGain.pack` and republished alongside its timeline shape.
+    /// Reporting only: the correction is applied by the session that decodes
+    /// the entry, so this is what a host may display rather than what any lane
+    /// multiplies by.
+    published_replay_gain: std.atomic.Value(u64) = .init(0),
+    /// Which correction entries are decoded with. An atomic because the decode
+    /// lane reads it on every canonical block, which is what makes a change
+    /// take effect as the already-decoded render-ahead drains rather than at
+    /// the next track.
     replay_gain_mode: std.atomic.Value(processing.ReplayGainMode) = .init(.track),
     /// Timeline shape per entry serial. Plain state, written by whichever lane
     /// owns `sources` — the control lane under `quiesce`, or the engine thread.
@@ -128,13 +129,21 @@ pub const Player = struct {
     /// are discarded there rather than being chased down and removed.
     pub fn replaceSource(self: *Player, source: source_session.SourceSession) void {
         self.releaseSources();
-        self.pending_seek = null;
+        _ = self.stageSource(source);
+        self.adoptLoadedEntryAsAudible();
+    }
+
+    /// `replaceSource` for a Player whose sources are already released, minus
+    /// the adoption: the audible serial reads 0 until `adoptLoadedEntryAsAudible`,
+    /// so a caller can record the returned serial before a host can read it.
+    pub fn stageSource(self: *Player, source: source_session.SourceSession) u32 {
+        std.debug.assert(self.sources == null);
         self.sources = source_session.SourceQueue.init(source);
         self.sources.?.rebaseSerials(self.serial_counter);
-        self.adoptLoadedEntryAsAudible();
         self.resetTimeline();
         self.publishSourceInfo();
         _ = self.epoch.fetchAdd(1, .acq_rel);
+        return self.sources.?.current_entry_serial;
     }
 
     /// A hard load retires every prepared block through the epoch bump, so the
@@ -143,7 +152,7 @@ pub const Player = struct {
     /// callback republishes only when the audible entry changes — so without
     /// this the audible cursor would be pinned to a retired entry until the next
     /// transition.
-    fn adoptLoadedEntryAsAudible(self: *Player) void {
+    pub fn adoptLoadedEntryAsAudible(self: *Player) void {
         self.audible_entry_serial.store(self.sources.?.current_entry_serial, .release);
     }
 
@@ -177,22 +186,28 @@ pub const Player = struct {
         const audible = self.audibleEntryInfo();
         self.published_sample_rate.store(audible.sample_rate, .release);
         self.published_frame_count.store(audible.frame_count, .release);
-        self.published_replay_gain.store(audible.replay_gain, .release);
+        self.published_replay_gain.store(audible.replay_gain.pack(), .release);
     }
 
-    /// Whether the decode lane is applying corrections at all.
-    pub fn replayGainEnabled(self: *const Player) bool {
-        return self.replay_gain_mode.load(.acquire) == .track;
+    pub fn replayGainMode(self: *const Player) processing.ReplayGainMode {
+        return self.replay_gain_mode.load(.acquire);
     }
 
-    /// The correction in force on the audio currently audible: the audible
-    /// entry's own figure, or exactly 1 when correction is off.
+    pub fn audibleReplayGain(self: *const Player) processing.EntryReplayGain {
+        return .unpack(self.published_replay_gain.load(.acquire));
+    }
+
+    /// The correction in force on the audio currently audible and where it
+    /// came from: exactly 1 and `none` when correction is off.
     ///
-    /// Gated at read rather than at publication so a mode change is reflected
-    /// here as promptly as it is reflected in the audio.
+    /// Resolved at read rather than at publication so a mode change is
+    /// reflected here as promptly as it is reflected in the audio.
+    pub fn appliedReplayGain(self: *const Player) processing.EntryReplayGain.Applied {
+        return self.audibleReplayGain().applied(self.replayGainMode());
+    }
+
     pub fn effectiveReplayGain(self: *const Player) f32 {
-        if (!self.replayGainEnabled()) return 1;
-        return self.published_replay_gain.load(.acquire);
+        return self.appliedReplayGain().multiplier;
     }
 
     /// Engine thread. Adopts the entry serial the render callback published, so
@@ -280,7 +295,7 @@ pub const Player = struct {
                 pipe,
                 pool,
                 self.epoch.load(.acquire),
-                self.replayGainEnabled(),
+                self.replayGainMode(),
             );
         }
         return error.PlayerHasNoSource;
@@ -289,7 +304,7 @@ pub const Player = struct {
     /// Producer/control-lane decode used by multi-Zone fanout. Decoder and
     /// source I/O never run on an output callback.
     pub fn decodeFrames(self: *Player, samples: []f32) !usize {
-        if (self.sources) |*sources| return sources.readFrames(samples, self.replayGainEnabled());
+        if (self.sources) |*sources| return sources.readFrames(samples, self.replayGainMode());
         return error.PlayerHasNoSource;
     }
 

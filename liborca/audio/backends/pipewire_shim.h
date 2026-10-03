@@ -15,11 +15,23 @@ enum orca_pw_output_state {
     ORCA_PW_OUTPUT_LOST = 2,
 };
 
+enum orca_pw_device_kind {
+    ORCA_PW_DEVICE_UNKNOWN = 0,
+    ORCA_PW_DEVICE_USB = 1,
+    ORCA_PW_DEVICE_PCI = 2,
+    ORCA_PW_DEVICE_BLUETOOTH = 3,
+    ORCA_PW_DEVICE_HDMI = 4,
+    ORCA_PW_DEVICE_VIRTUAL = 5,
+};
+
 struct orca_pw_device {
     uint64_t id;
     uint16_t name_len;
     char name[256];
+    uint8_t kind;
 };
+
+struct spa_dict;
 
 struct orca_pw_timing {
     uint64_t sample_time;
@@ -36,6 +48,7 @@ void orca_pw_initialize(void);
 void orca_pw_deinitialize(void);
 int orca_pw_discover(struct orca_pw_device *devices, uint32_t capacity,
                      uint32_t *count);
+uint8_t orca_pw_properties_kind(const struct spa_dict *props);
 struct orca_pw_output *orca_pw_output_create(uint64_t device_id,
                                               uint32_t sample_rate,
                                               uint32_t channels,

@@ -7,6 +7,8 @@ const max_page = columns.max_page;
 const presentText = columns.presentText;
 const by_artist = @import("tracks.zig").by_artist;
 const by_release_artist = @import("tracks.zig").by_release_artist;
+const byAppearingArtist = @import("releases.zig").byAppearingArtist;
+const artistsOfGenre = @import("genres.zig").artistsOfGenre;
 const WriteLane = @import("write_lane.zig").WriteLane;
 
 /// The projection's artist input. Identity is `key` — the normalized name —
@@ -33,11 +35,26 @@ pub const ArtistSummary = struct {
     sort_name: []u8,
     release_count: u32,
     track_count: u32,
+    loved: bool = false,
 
     pub fn deinit(self: ArtistSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.sort_name);
     }
+};
+
+/// What an Artist page sums over the whole Artist, not a page of it.
+pub const ArtistTotals = struct {
+    /// The Releases filed under the Artist as album artist, as
+    /// `ReleaseQuery.own_releases_only` lists them. Unlike
+    /// `ArtistSummary.release_count`, it leaves out `appearance_count`.
+    release_count: u32,
+    /// As `ArtistSummary.track_count`.
+    track_count: u32,
+    /// Summed over those Tracks; a Track with no known duration adds 0.
+    duration_ms: u64,
+    /// The Releases `ReleaseQuery.appearing_artist_id` lists for the Artist.
+    appearance_count: u32,
 };
 
 pub const ArtistPage = struct {
@@ -126,23 +143,20 @@ pub const ArtistRepository = struct {
         if (query.limit == 0 or query.limit > max_page) return error.PageOutOfRange;
         var folded: [text_key.key_buffer_size]u8 = undefined;
         const needle = text_key.normalizeInto(&folded, query.filter);
-        var statement = if (needle.len == 0)
-            try self.db.prepare(artist_columns ++
-                \\FROM artists
-                \\ORDER BY artists.sort_name, artists.id
-                \\LIMIT ?1 OFFSET ?2;
-            )
-        else
-            try self.db.prepare(artist_columns ++
-                \\FROM artists
-                \\WHERE instr(artists.key, ?3) > 0
-                \\ORDER BY artists.sort_name, artists.id
-                \\LIMIT ?1 OFFSET ?2;
-            );
+        var statement = switch (query.sort) {
+            inline else => |sort| switch (needle.len != 0) {
+                inline else => |by_needle| switch (query.genre_id != null) {
+                    inline else => |by_genre| switch (query.loved_only) {
+                        inline else => |by_loved| try self.db.prepare(comptime artistQueryText(sort, by_needle, by_genre, by_loved)),
+                    },
+                },
+            },
+        };
         defer statement.deinit();
         try statement.bindInt64(1, query.limit);
         try statement.bindInt64(2, query.offset);
         if (needle.len != 0) try statement.bindText(3, needle);
+        if (query.genre_id) |genre_id| try statement.bindInt64(4, genre_id);
         return collectArtistPage(allocator, statement);
     }
 
@@ -150,12 +164,16 @@ pub const ArtistRepository = struct {
     pub fn countMatching(self: *const ArtistRepository, query: ArtistQuery) !u64 {
         var folded: [text_key.key_buffer_size]u8 = undefined;
         const needle = text_key.normalizeInto(&folded, query.filter);
-        if (needle.len == 0) return self.count();
+        if (needle.len == 0 and query.genre_id == null and !query.loved_only) return self.count();
         var statement = try self.db.prepare(
-            "SELECT count(*) FROM artists WHERE instr(artists.key, ?1) > 0;",
+            "SELECT count(*) FROM artists WHERE (?3 = '' OR instr(artists.key, ?3) > 0)\n" ++
+                "  AND (?4 IS NULL OR " ++ comptime artistsOfGenre("?4") ++ ")\n" ++
+                "  AND (?5 = 0 OR EXISTS (SELECT 1 FROM artist_loves WHERE artist_loves.artist_id = artists.id));",
         );
         defer statement.deinit();
-        try statement.bindText(1, needle);
+        try statement.bindText(3, needle);
+        try statement.bindOptionalInt64(4, query.genre_id);
+        try statement.bindInt64(5, @intFromBool(query.loved_only));
         if (try statement.step() != .row) return error.SqlFailed;
         return @intCast(statement.columnInt64(0));
     }
@@ -165,8 +183,8 @@ pub const ArtistRepository = struct {
         allocator: std.mem.Allocator,
         artist_id: i64,
     ) !?ArtistSummary {
-        var statement = try self.db.prepare(artist_columns ++
-            \\FROM artists WHERE artists.id = ?1;
+        var statement = try self.db.prepare(artist_columns ++ artist_from ++
+            \\WHERE artists.id = ?1;
         );
         defer statement.deinit();
         try statement.bindInt64(1, artist_id);
@@ -179,6 +197,28 @@ pub const ArtistRepository = struct {
         for (found.items[1..]) |extra| extra.deinit(allocator);
         allocator.free(found.items);
         return first;
+    }
+
+    /// The Artist's totals in one query, or null for an unknown Artist.
+    pub fn totals(self: *const ArtistRepository, artist_id: i64) !?ArtistTotals {
+        var statement = try self.db.prepare(
+            "SELECT (SELECT count(*) FROM releases WHERE releases.album_artist_id = ?3),\n" ++
+                "       artist_tracks.track_count, artist_tracks.duration_ms,\n" ++
+                "       (SELECT count(*) FROM releases WHERE " ++ comptime byAppearingArtist("?3") ++ ")\n" ++
+                "FROM artists, (SELECT count(*) AS track_count,\n" ++
+                "    COALESCE(sum(tracks.duration_ms), 0) AS duration_ms\n" ++
+                "    FROM tracks WHERE " ++ by_artist ++ ") AS artist_tracks\n" ++
+                "WHERE artists.id = ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(3, artist_id);
+        if (try statement.step() != .row) return null;
+        return .{
+            .release_count = @intCast(statement.columnInt64(0)),
+            .track_count = @intCast(statement.columnInt64(1)),
+            .duration_ms = @intCast(statement.columnInt64(2)),
+            .appearance_count = @intCast(statement.columnInt64(3)),
+        };
     }
 
     pub fn count(self: *const ArtistRepository) !u64 {
@@ -196,7 +236,28 @@ pub const ArtistRepository = struct {
 const artist_columns =
     "SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),\n" ++
     "       (SELECT count(*) FROM releases WHERE " ++ artistOwns(by_release_artist) ++ "),\n" ++
-    "       (SELECT count(*) FROM tracks WHERE " ++ artistOwns(by_artist) ++ ")\n";
+    "       (SELECT count(*) FROM tracks WHERE " ++ artistOwns(by_artist) ++ "),\n" ++
+    "       artist_loves.artist_id IS NOT NULL\n";
+
+const artist_from = "FROM artists LEFT JOIN artist_loves ON artist_loves.artist_id = artists.id\n";
+
+/// The newest Release of `by_release_artist`, as two lookups because its OR
+/// would read every Release for each Artist: `releases_by_artist` for those
+/// filed under them, `tracks_artist` for those they appear on.
+const newest_release = "max(COALESCE((SELECT max(releases.id) FROM releases WHERE releases.album_artist_id = artists.id), 0),\n" ++
+    "    COALESCE((SELECT max(tracks.release_id) FROM tracks WHERE tracks.artist_id = artists.id), 0))";
+
+fn artistQueryText(comptime sort: ArtistSort, comptime by_needle: bool, comptime by_genre: bool, comptime by_loved: bool) [:0]const u8 {
+    var terms: []const []const u8 = &.{};
+    if (by_needle) terms = terms ++ .{"instr(artists.key, ?3) > 0"};
+    if (by_genre) terms = terms ++ .{artistsOfGenre("?4")};
+    if (by_loved) terms = terms ++ .{"artist_loves.artist_id IS NOT NULL"};
+    var where: []const u8 = "";
+    for (terms, 0..) |term, index| where = where ++ (if (index == 0) "WHERE " else " AND ") ++ term;
+    if (where.len != 0) where = where ++ "\n";
+    return artist_columns ++ artist_from ++ where ++ "ORDER BY " ++ comptime sort.terms() ++
+        "\nLIMIT ?1 OFFSET ?2;";
+}
 
 /// Rewrites one of the shared artist predicates from its bound-parameter form
 /// to the correlated form the artist listing needs, so the count beside a
@@ -230,6 +291,7 @@ fn collectArtistPage(allocator: std.mem.Allocator, statement: sqlite.Statement) 
             .sort_name = sort_name,
             .release_count = @intCast(statement.columnInt64(3)),
             .track_count = @intCast(statement.columnInt64(4)),
+            .loved = statement.columnInt64(5) != 0,
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
@@ -240,6 +302,85 @@ pub const ArtistQuery = struct {
     /// Free text. Folded the way `artists.key` was folded before matching, so
     /// a search is spelling-insensitive in the same way identity is.
     filter: []const u8 = "",
+    /// Only the Artists owning a Track that carries this genre: credited on
+    /// it, or album artist of its Release.
+    genre_id: ?i64 = null,
+    /// Only the Artists the user loved.
+    loved_only: bool = false,
+    sort: ArtistSort = .name,
     limit: u32 = max_page,
     offset: u32 = 0,
 };
+
+/// The orders an Artist listing comes in. Each ends in `artists.id`.
+pub const ArtistSort = enum {
+    name,
+    /// Most Tracks first, counting every Track the Artist owns, not only
+    /// those of a genre filter.
+    track_count,
+    /// Most recently loved first, then the Artists not loved.
+    recently_loved,
+    /// The Artist whose newest Release, in `ReleaseSort.recently_added`'s
+    /// order, was added most recently first; Artists with no Release last.
+    recently_added,
+
+    fn terms(comptime self: ArtistSort) []const u8 {
+        return switch (self) {
+            .name => "artists.sort_name, artists.id",
+            .track_count => "5 DESC, artists.sort_name, artists.id",
+            .recently_loved => "artist_loves.loved_at IS NULL, artist_loves.loved_at DESC, artists.id",
+            .recently_added => newest_release ++ " DESC, artists.id DESC",
+        };
+    }
+};
+
+fn openArtistLibrary(comptime name: []const u8) !@import("../library.zig").LibraryDatabase {
+    var library = try @import("../library.zig").LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-artist-" ++ name ++ "?mode=memory&cache=shared",
+    );
+    errdefer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name) VALUES
+        \\    (1, 'Host', 'host'), (2, 'Other', 'other'), (3, 'Guest', 'guest'), (4, 'Silent', 'silent');
+        \\INSERT INTO releases(id, title, release_key, album_artist_id) VALUES
+        \\    (1, 'Own', 'r1', 1), (2, 'Theirs', 'r2', 2), (3, 'Later', 'r3', 1), (4, 'Unfiled', 'r4', NULL);
+        \\INSERT INTO tracks(id, release_id, title, duration_ms, artist_id) VALUES
+        \\    (1, 1, 'One', 1000, 1), (2, 1, 'Two', NULL, 1), (3, 2, 'Feature', 500, 1),
+        \\    (4, 2, 'Their own', 700, 2), (5, 3, 'Later', NULL, 3), (6, 4, 'Loose', 250, 1);
+    );
+    return library;
+}
+
+test "artist totals count only the artist's own releases, sum every track their listing holds with a null duration as zero, and count their appearances" {
+    var library = try openArtistLibrary("totals");
+    defer library.close();
+    const host = (try library.artists.totals(1)).?;
+    try std.testing.expectEqual(ArtistTotals{ .release_count = 2, .track_count = 5, .duration_ms = 1750, .appearance_count = 2 }, host);
+    try std.testing.expectEqual(@as(u64, host.track_count), try library.tracks.countMatching(.{ .artist_id = 1 }));
+    try std.testing.expectEqual(@as(u64, host.release_count), try library.releases.countMatching(.{ .album_artist_id = 1, .own_releases_only = true }));
+    try std.testing.expectEqual(@as(u64, host.release_count + host.appearance_count), try library.releases.countMatching(.{ .album_artist_id = 1 }));
+    const other = (try library.artists.totals(2)).?;
+    try std.testing.expectEqual(ArtistTotals{ .release_count = 1, .track_count = 2, .duration_ms = 1200, .appearance_count = 0 }, other);
+    try std.testing.expectEqual(@as(u64, 1), try library.releases.countMatching(.{ .album_artist_id = 2, .own_releases_only = true }));
+    try std.testing.expectEqual(@as(u64, 4), try library.releases.countMatching(.{ .own_releases_only = true }));
+    const silent = (try library.artists.totals(4)).?;
+    try std.testing.expectEqual(ArtistTotals{ .release_count = 0, .track_count = 0, .duration_ms = 0, .appearance_count = 0 }, silent);
+    try std.testing.expectEqual(@as(?ArtistTotals, null), try library.artists.totals(99));
+}
+
+test "artists sort by their newest release, filed under them or appeared on, newest first, then by id, with none last" {
+    var library = try openArtistLibrary("recently-added");
+    defer library.close();
+    var listed = try library.artists.page(std.testing.allocator, .{ .sort = .recently_added });
+    defer listed.deinit();
+    var ids: [4]i64 = undefined;
+    for (listed.items, 0..) |item, index| ids[index] = item.id;
+    try std.testing.expectEqualSlices(i64, &.{ 1, 3, 2, 4 }, ids[0..listed.items.len]);
+    var window = try library.artists.page(std.testing.allocator, .{ .sort = .recently_added, .limit = 2, .offset = 1 });
+    defer window.deinit();
+    try std.testing.expectEqual(@as(usize, 2), window.items.len);
+    try std.testing.expectEqual(@as(i64, 3), window.items[0].id);
+    try std.testing.expectEqual(@as(i64, 2), window.items[1].id);
+}

@@ -9,6 +9,7 @@ pub const matching = @import("matching.zig");
 pub const projection = @import("projection.zig");
 pub const property_backfill = @import("property_backfill.zig");
 pub const scanner = @import("scanner.zig");
+pub const smart_playlist = @import("smart_playlist.zig");
 pub const tag_reader = @import("tag_reader.zig");
 pub const volume_check = @import("volume_check.zig");
 pub const watch = @import("watch.zig");
@@ -36,6 +37,7 @@ test {
     _ = @import("projection.zig");
     _ = @import("property_backfill.zig");
     _ = @import("scanner.zig");
+    _ = @import("smart_playlist.zig");
     _ = @import("tag_reader.zig");
     _ = @import("volume_check.zig");
     _ = @import("watch.zig");

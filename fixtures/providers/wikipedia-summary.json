@@ -1,0 +1,28 @@
+{
+ "type": "standard",
+ "title": "Aminé (rapper)",
+ "displaytitle": "<span class=\"mw-page-title-main\">Aminé (rapper)</span>",
+ "wikibase_item": "Q27830860",
+ "titles": {
+  "canonical": "Aminé_(rapper)",
+  "normalized": "Aminé (rapper)",
+  "display": "Aminé (rapper)"
+ },
+ "pageid": 51072512,
+ "lang": "en",
+ "dir": "ltr",
+ "revision": "1200000000",
+ "timestamp": "2026-09-01T00:00:00Z",
+ "description": "American rapper (born 1994)",
+ "content_urls": {
+  "desktop": {
+   "page": "https://en.wikipedia.org/wiki/Amin%C3%A9_(rapper)",
+   "revisions": "https://en.wikipedia.org/wiki/Amin%C3%A9_(rapper)?action=history"
+  },
+  "mobile": {
+   "page": "https://en.m.wikipedia.org/wiki/Amin%C3%A9_(rapper)"
+  }
+ },
+ "extract": "Adam Aminé Daniel, known mononymously as Aminé, is an American rapper, singer and songwriter from Portland, Oregon. He rose to prominence with his 2016 single \"Caroline\".",
+ "extract_html": "<p><b>Adam Aminé Daniel</b>, known mononymously as <b>Aminé</b>, is an American rapper.</p>"
+}

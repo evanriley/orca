@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("backend.zig");
 const codec_id = @import("../codec/decoder.zig").codec_id;
 const equalizer = @import("equalizer.zig");
 const kernels = @import("kernels.zig");
@@ -64,13 +65,146 @@ pub const Equalizer = struct {
     }
 };
 
+pub const max_parametric_filters = 16;
+pub const min_filter_frequency_hz: f32 = 20;
+pub const max_filter_frequency_hz: f32 = 20_000;
+pub const max_filter_gain_db: f32 = 24;
+pub const min_filter_q: f32 = 0.1;
+pub const max_filter_q: f32 = 20;
+pub const min_shelf_q: f32 = 0.3;
+pub const max_shelf_q: f32 = 2;
+pub const min_parametric_preamp_db: f32 = -24;
+pub const max_parametric_preamp_db: f32 = 6;
+
+pub const FilterKind = enum(u8) { peak, low_shelf, high_shelf, low_pass, high_pass, notch };
+
+/// One biquad of a parametric equalizer. `gain_db` applies to the peak and
+/// shelves only; the pass and notch filters ignore it.
+pub const Filter = struct {
+    kind: FilterKind,
+    frequency_hz: f32,
+    gain_db: f32 = 0,
+    q: f32 = 0.707,
+    enabled: bool = true,
+
+    pub fn usesGain(self: Filter) bool {
+        return switch (self.kind) {
+            .peak, .low_shelf, .high_shelf => true,
+            .low_pass, .high_pass, .notch => false,
+        };
+    }
+
+    pub fn validate(self: Filter) !void {
+        if (!std.math.isFinite(self.frequency_hz) or
+            self.frequency_hz < min_filter_frequency_hz or self.frequency_hz > max_filter_frequency_hz)
+            return error.FilterFrequencyOutOfRange;
+        if (!std.math.isFinite(self.gain_db) or @abs(self.gain_db) > max_filter_gain_db)
+            return error.FilterGainOutOfRange;
+        const shelf = self.kind == .low_shelf or self.kind == .high_shelf;
+        const min_q = if (shelf) min_shelf_q else min_filter_q;
+        const max_q = if (shelf) max_shelf_q else max_filter_q;
+        if (!std.math.isFinite(self.q) or self.q < min_q or self.q > max_q)
+            return error.FilterQOutOfRange;
+    }
+
+    fn changesSamples(self: Filter) bool {
+        return self.enabled and (!self.usesGain() or self.gain_db != 0);
+    }
+
+    fn band(self: Filter) equalizer.Band {
+        return .{ .frequency_hz = self.frequency_hz, .gain_db = self.gain_db, .q = self.q };
+    }
+
+    fn coefficients(self: Filter, sample_rate: u32) equalizer.Coefficients {
+        return switch (self.kind) {
+            .peak => equalizer.peakingCoefficients(sample_rate, self.band()),
+            .low_shelf => equalizer.lowShelfCoefficients(sample_rate, self.band()),
+            .high_shelf => equalizer.highShelfCoefficients(sample_rate, self.band()),
+            .low_pass => equalizer.lowPassCoefficients(sample_rate, self.band()),
+            .high_pass => equalizer.highPassCoefficients(sample_rate, self.band()),
+            .notch => equalizer.notchCoefficients(sample_rate, self.band()),
+        };
+    }
+};
+
+/// Up to sixteen filters in order, and a preamp. Exclusive with `Equalizer`:
+/// a Player runs one or the other.
+///
+/// The limits hold at every sample rate. A filter at or above 0.45 of the
+/// rate of the audio playing is left out of the cascade and of `response`,
+/// as the ten-band equalizer leaves out bands at or above Nyquist.
+pub const ParametricEqualizer = struct {
+    filters: [max_parametric_filters]Filter = undefined,
+    count: u8 = 0,
+    preamp_db: f32 = 0,
+
+    pub fn filterList(self: *const ParametricEqualizer) []const Filter {
+        return self.filters[0..self.count];
+    }
+
+    pub fn validate(self: ParametricEqualizer) !void {
+        if (self.count > max_parametric_filters) return error.TooManyFilters;
+        if (!std.math.isFinite(self.preamp_db) or
+            self.preamp_db < min_parametric_preamp_db or self.preamp_db > max_parametric_preamp_db)
+            return error.ParametricPreampOutOfRange;
+        for (self.filterList()) |filter| try filter.validate();
+    }
+
+    /// Whether no sample changes: a zero preamp, and every enabled filter a
+    /// peak or shelf at zero gain.
+    pub fn isIdentity(self: ParametricEqualizer) bool {
+        if (self.preamp_db != 0) return false;
+        for (self.filterList()) |filter| {
+            if (filter.changesSamples()) return false;
+        }
+        return true;
+    }
+
+    /// Minus the largest boost of an enabled peak or shelf, or zero when none
+    /// boosts.
+    pub fn suggestedPreamp(self: ParametricEqualizer) f32 {
+        var largest: f32 = 0;
+        for (self.filterList()) |filter| {
+            if (filter.enabled and filter.usesGain()) largest = @max(largest, filter.gain_db);
+        }
+        return if (largest > 0) -largest else 0;
+    }
+
+    /// The gain in decibels at each of `frequencies`, preamp included, as the
+    /// cascade built at `sample_rate` would apply it. `out` is as long as
+    /// `frequencies`. Pure: it computes, and touches no Player.
+    pub fn response(
+        self: ParametricEqualizer,
+        sample_rate: u32,
+        frequencies: []const f32,
+        out: []f32,
+    ) void {
+        var designs: [max_parametric_filters]equalizer.Coefficients = undefined;
+        var design_count: usize = 0;
+        for (self.filterList()) |filter| {
+            if (!filter.enabled or !equalizer.frequencyInRange(sample_rate, filter.frequency_hz)) continue;
+            designs[design_count] = filter.coefficients(sample_rate);
+            design_count += 1;
+        }
+        for (frequencies, out) |frequency_hz, *gain_db| {
+            var total: f64 = self.preamp_db;
+            for (designs[0..design_count]) |design|
+                total += design.magnitudeDb(sample_rate, frequency_hz);
+            gain_db.* = @floatCast(total);
+        }
+    }
+};
+
 pub fn validateCrossfeed(amount: f32) !void {
     if (!std.math.isFinite(amount) or amount < 0 or amount > 1)
         return error.CrossfeedAmountOutOfRange;
 }
 
 pub const Settings = struct {
+    /// Null whenever `parametric` is set.
     equalizer: ?Equalizer = null,
+    /// Null whenever `equalizer` is set.
+    parametric: ?ParametricEqualizer = null,
     /// Amount in [0, 1].
     crossfeed: ?f32 = null,
 };
@@ -84,8 +218,10 @@ pub const PlayerDsp = struct {
     generation: u64 = 0,
 
     filter: Cascade = .{ .sample_rate = 0 },
+    slot_sources: [max_slots]u8 = @splat(0),
+    slot_kinds: [max_slots]FilterKind = @splat(.peak),
     preamp_linear: f32 = 1,
-    equalizer_active: bool = false,
+    active_equalizer: ActiveEqualizer = .none,
     crossfeed: nodes.StereoCrossfeed = .{ .amount = 0 },
     crossfeed_active: bool = false,
     prepared: bool = false,
@@ -94,7 +230,9 @@ pub const PlayerDsp = struct {
     prepared_channels: u16 = 0,
     prepared_epoch: u32 = 0,
 
-    const Cascade = equalizer.ParametricEq(band_count, zone_runtime.max_channels);
+    const max_slots = @max(band_count, max_parametric_filters);
+    const Cascade = equalizer.ParametricEq(max_slots, zone_runtime.max_channels);
+    const ActiveEqualizer = enum { none, ten_band, parametric };
 
     pub fn init(gain: *processing.Gain) PlayerDsp {
         return .{ .gain = gain };
@@ -102,10 +240,21 @@ pub const PlayerDsp = struct {
 
     /// Control lane. The engine reads `settings` without synchronization, so
     /// the caller must have quiesced it; a torn read would apply half of one
-    /// equalizer and half of another.
+    /// equalizer and half of another. Turning it on turns the parametric
+    /// equalizer off.
     pub fn setEqualizer(self: *PlayerDsp, value: ?Equalizer) !void {
         if (value) |candidate| try candidate.validate();
         self.settings.equalizer = value;
+        if (value != null) self.settings.parametric = null;
+        self.generation += 1;
+    }
+
+    /// Control lane, under the same quiesce requirement as `setEqualizer`.
+    /// Turning it on turns the ten-band equalizer off.
+    pub fn setParametricEqualizer(self: *PlayerDsp, value: ?ParametricEqualizer) !void {
+        if (value) |candidate| try candidate.validate();
+        self.settings.parametric = value;
+        if (value != null) self.settings.equalizer = null;
         self.generation += 1;
     }
 
@@ -118,7 +267,12 @@ pub const PlayerDsp = struct {
 
     /// Engine thread, before it processes a pass. Rebuilds coefficients when
     /// the settings or the sample rate changed, and clears filter history when
-    /// the transport epoch or channel count changed.
+    /// the transport epoch or channel count changed. A rebuild clears a
+    /// filter's history when the filter is new or of another kind, or the
+    /// other equalizer was in use. History follows the filter, by its index in
+    /// the setting, not its slot in the cascade: turning another filter off or
+    /// on, or a change of gain, frequency or Q alone, keeps it, so neither
+    /// clicks.
     pub fn prepare(self: *PlayerDsp, sample_rate: u32, channels: u16, epoch: u32) void {
         if (!self.prepared or self.prepared_generation != self.generation or
             self.prepared_sample_rate != sample_rate)
@@ -146,28 +300,71 @@ pub const PlayerDsp = struct {
     }
 
     fn rebuild(self: *PlayerDsp, sample_rate: u32) void {
-        const was_active = self.equalizer_active;
+        const previous_equalizer = self.active_equalizer;
+        const previous_count = self.filter.band_count;
+        var sources: [max_slots]u8 = undefined;
+        var kinds: [max_slots]FilterKind = undefined;
         self.filter.sample_rate = sample_rate;
         self.filter.band_count = 0;
         self.preamp_linear = 1;
-        self.equalizer_active = false;
+        self.active_equalizer = .none;
         if (self.settings.equalizer) |setting| {
             if (setting.isActive()) {
                 const nyquist_hz = @as(f64, @floatFromInt(sample_rate)) / 2;
-                for (band_frequencies_hz, setting.gains_db) |frequency_hz, gain_db| {
+                for (band_frequencies_hz, setting.gains_db, 0..) |frequency_hz, gain_db, index| {
                     if (gain_db == 0 or frequency_hz >= nyquist_hz) continue;
                     self.filter.appendPeaking(.{
                         .frequency_hz = frequency_hz,
                         .gain_db = gain_db,
                         .q = band_q,
                     }) catch unreachable;
+                    sources[self.filter.band_count - 1] = @intCast(index);
+                    kinds[self.filter.band_count - 1] = .peak;
                 }
                 if (setting.preamp_db != 0)
                     self.preamp_linear = std.math.pow(f32, 10, setting.preamp_db / 20);
-                self.equalizer_active = true;
+                self.active_equalizer = .ten_band;
             }
         }
-        if (self.equalizer_active and !was_active) self.filter.processor().reset();
+        if (self.settings.parametric) |setting| {
+            if (!setting.isIdentity()) {
+                for (setting.filterList(), 0..) |filter, index| {
+                    if (!filter.changesSamples()) continue;
+                    const band = filter.band();
+                    const appended = switch (filter.kind) {
+                        .peak => self.filter.appendPeak(band),
+                        .low_shelf => self.filter.appendLowShelf(band),
+                        .high_shelf => self.filter.appendHighShelf(band),
+                        .low_pass => self.filter.appendLowPass(band),
+                        .high_pass => self.filter.appendHighPass(band),
+                        .notch => self.filter.appendNotch(band),
+                    };
+                    appended catch continue;
+                    sources[self.filter.band_count - 1] = @intCast(index);
+                    kinds[self.filter.band_count - 1] = filter.kind;
+                }
+                if (setting.preamp_db != 0)
+                    self.preamp_linear = std.math.pow(f32, 10, setting.preamp_db / 20);
+                self.active_equalizer = .parametric;
+            }
+        }
+        const count = self.filter.band_count;
+        const saved = self.filter.states;
+        var previous_slot: usize = 0;
+        for (sources[0..count], kinds[0..count], 0..) |source, kind, slot| {
+            while (previous_slot < previous_count and self.slot_sources[previous_slot] < source)
+                previous_slot += 1;
+            const kept = self.active_equalizer == previous_equalizer and
+                previous_slot < previous_count and
+                self.slot_sources[previous_slot] == source and
+                self.slot_kinds[previous_slot] == kind;
+            if (kept)
+                self.filter.states[slot] = saved[previous_slot]
+            else
+                self.filter.resetBand(slot);
+        }
+        @memcpy(self.slot_sources[0..count], sources[0..count]);
+        @memcpy(self.slot_kinds[0..count], kinds[0..count]);
         const amount = self.settings.crossfeed orelse 0;
         self.crossfeed.amount = amount;
         self.crossfeed_active = amount > 0;
@@ -175,7 +372,7 @@ pub const PlayerDsp = struct {
 
     fn process(context: *anyopaque, samples: []f32, frames: u32, channels: u16) void {
         const self: *PlayerDsp = @ptrCast(@alignCast(context));
-        if (self.equalizer_active) {
+        if (self.active_equalizer != .none) {
             if (self.preamp_linear != 1)
                 kernels.gain(samples[0 .. @as(usize, frames) * channels], self.preamp_linear);
             if (self.filter.band_count > 0)
@@ -203,7 +400,13 @@ pub const SignalPath = struct {
     codec: ?[]const u8 = null,
     /// The correction applied to the audible entry, or null when it is 1.
     replay_gain_db: ?f32 = null,
+    /// Which of the audible entry's corrections `replay_gain_db` is.
+    replay_gain_source: processing.ReplayGainSource = .none,
+    /// The audible entry's own track correction in dB when its album
+    /// correction replaced it; null otherwise.
+    replay_gain_track_db: ?f32 = null,
     equalizer: ?Equalizer = null,
+    parametric: ?ParametricEqualizer = null,
     crossfeed: ?f32 = null,
     volume: f32 = 1,
     /// What the output stream was opened with; null while no output is open.
@@ -212,6 +415,12 @@ pub const SignalPath = struct {
     /// null while unknown. It differs from `output.sample_rate` when the
     /// backend resamples.
     device_rate: ?u32 = null,
+    /// Frames the output device asks for per period, as the backend last
+    /// reported it; null while unknown.
+    device_quantum_frames: ?u32 = null,
+    /// How the output device is attached. Unknown while no output is open,
+    /// when the platform does not say, and for the server's default device.
+    output_kind: backend.DeviceKind = .unknown,
     /// False as soon as any reason applies. With no source or no output the
     /// format conversions cannot be judged, so only sample processing counts.
     bit_perfect_eligible: bool = true,
@@ -228,16 +437,21 @@ pub const SignalPath = struct {
 
     /// `replay_gain` is the linear correction; a value of exactly 1 is no
     /// correction and, like a volume of exactly 1, is not sample processing.
+    /// `replay_gain_track` is the entry's own linear track correction.
     pub fn describe(inputs: struct {
         source: ?pcm.Format,
         source_declared: bool,
         codec: ?[]const u8,
         replay_gain: f32,
+        replay_gain_source: processing.ReplayGainSource = .none,
+        replay_gain_track: ?f32 = null,
         equalizer: ?Equalizer,
+        parametric: ?ParametricEqualizer = null,
         crossfeed: ?f32,
         volume: f32,
         output: ?pcm.Format,
         device_rate: ?u32,
+        device_quantum_frames: ?u32 = null,
     }) SignalPath {
         var result: SignalPath = .{
             .source = inputs.source,
@@ -247,16 +461,26 @@ pub const SignalPath = struct {
                 null
             else
                 20 * std.math.log10(inputs.replay_gain),
+            .replay_gain_source = inputs.replay_gain_source,
+            .replay_gain_track_db = if (inputs.replay_gain_source == .album)
+                if (inputs.replay_gain_track) |track| 20 * std.math.log10(track) else null
+            else
+                null,
             .equalizer = inputs.equalizer,
+            .parametric = inputs.parametric,
             .crossfeed = inputs.crossfeed,
             .volume = inputs.volume,
             .output = inputs.output,
             .device_rate = inputs.device_rate,
+            .device_quantum_frames = inputs.device_quantum_frames,
         };
         const stereo = if (inputs.output) |output| output.channels == 2 else true;
         const equalizer_changes = if (inputs.equalizer) |setting| setting.isActive() else false;
+        const parametric_changes = if (inputs.parametric) |setting| !setting.isIdentity() else false;
         const crossfeed_changes = stereo and (inputs.crossfeed orelse 0) > 0;
-        if (equalizer_changes or crossfeed_changes or inputs.volume != 1 or inputs.replay_gain != 1) {
+        if (equalizer_changes or parametric_changes or crossfeed_changes or
+            inputs.volume != 1 or inputs.replay_gain != 1)
+        {
             result.reasons[0] = .sample_processing;
             result.reason_count = 1;
         }
@@ -774,4 +998,358 @@ test "replay gain is reported in decibels" {
         .device_rate = null,
     });
     try std.testing.expectApproxEqAbs(@as(f32, -6.0206), path.replay_gain_db.?, 0.001);
+}
+
+test "an album correction reports the track correction it replaced" {
+    const album = SignalPath.describe(.{
+        .source = null,
+        .source_declared = false,
+        .codec = null,
+        .replay_gain = 0.5,
+        .replay_gain_source = .album,
+        .replay_gain_track = 0.25,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = null,
+        .device_rate = null,
+    });
+    try std.testing.expectEqual(processing.ReplayGainSource.album, album.replay_gain_source);
+    try std.testing.expectApproxEqAbs(@as(f32, -6.0206), album.replay_gain_db.?, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -12.0412), album.replay_gain_track_db.?, 0.001);
+
+    const fallback = SignalPath.describe(.{
+        .source = null,
+        .source_declared = false,
+        .codec = null,
+        .replay_gain = 0.25,
+        .replay_gain_source = .track_fallback,
+        .replay_gain_track = 0.25,
+        .equalizer = null,
+        .crossfeed = null,
+        .volume = 1,
+        .output = null,
+        .device_rate = null,
+    });
+    try std.testing.expectEqual(processing.ReplayGainSource.track_fallback, fallback.replay_gain_source);
+    try std.testing.expectEqual(@as(?f32, null), fallback.replay_gain_track_db);
+}
+
+fn testParametric(filters: []const Filter, preamp_db: f32) ParametricEqualizer {
+    var value: ParametricEqualizer = .{ .count = @intCast(filters.len), .preamp_db = preamp_db };
+    @memcpy(value.filters[0..filters.len], filters);
+    return value;
+}
+
+const test_parametric_filters = [_]Filter{
+    .{ .kind = .low_shelf, .frequency_hz = 105, .gain_db = 3, .q = 0.71 },
+    .{ .kind = .peak, .frequency_hz = 1000, .gain_db = -2, .q = 1.41 },
+    .{ .kind = .peak, .frequency_hz = 3000, .gain_db = 2.5, .q = 2 },
+    .{ .kind = .high_shelf, .frequency_hz = 10_000, .gain_db = -1.5, .q = 0.71 },
+};
+
+test "the parametric cascade applies what its response reports, preamp included" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    const setting = testParametric(&test_parametric_filters, -3);
+    try dsp.setParametricEqualizer(setting);
+    const frequencies = [_]f32{ 60, 105, 1000, 3000, 10_000 };
+    var expected: [frequencies.len]f32 = undefined;
+    setting.response(44_100, &frequencies, &expected);
+    for (frequencies, expected) |frequency_hz, expected_db|
+        try std.testing.expectApproxEqAbs(@as(f64, expected_db), measureGainDb(&dsp, 44_100, frequency_hz), 0.05);
+    try std.testing.expectEqual(@as(usize, 4), dsp.filter.band_count);
+}
+
+test "filters run in order, and disabled ones and those at zero gain are not built" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    var filters = test_parametric_filters;
+    filters[1].enabled = false;
+    filters[2].gain_db = 0;
+    try dsp.setParametricEqualizer(testParametric(&filters, 0));
+    dsp.prepare(48_000, 2, 1);
+    try std.testing.expectEqual(@as(usize, 2), dsp.filter.band_count);
+    try std.testing.expectEqual(
+        equalizer.lowShelfCoefficients(48_000, filters[0].band()),
+        dsp.filter.coefficients[0],
+    );
+    try std.testing.expectEqual(
+        equalizer.highShelfCoefficients(48_000, filters[3].band()),
+        dsp.filter.coefficients[1],
+    );
+}
+
+test "a parametric filter at or above 0.45 of the rate is left out of the cascade and the response" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    const filters = [_]Filter{
+        .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 4, .q = 1 },
+        .{ .kind = .high_shelf, .frequency_hz = 20_000, .gain_db = -6, .q = 0.7 },
+    };
+    const setting = testParametric(&filters, 0);
+    try dsp.setParametricEqualizer(setting);
+    dsp.prepare(44_100, 2, 1);
+    try std.testing.expectEqual(@as(usize, 1), dsp.filter.band_count);
+    dsp.prepare(48_000, 2, 1);
+    try std.testing.expectEqual(@as(usize, 2), dsp.filter.band_count);
+
+    const frequencies = [_]f32{ 1000, 15_000 };
+    var with_both: [2]f32 = undefined;
+    var peak_only: [2]f32 = undefined;
+    setting.response(44_100, &frequencies, &with_both);
+    testParametric(filters[0..1], 0).response(44_100, &frequencies, &peak_only);
+    try std.testing.expectEqualSlices(f32, &peak_only, &with_both);
+}
+
+test "a parametric equalizer that changes nothing leaves the volume path untouched" {
+    var reference_gain: processing.Gain = .{};
+    var dsp_gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&dsp_gain);
+    var filters = test_parametric_filters;
+    for (&filters) |*filter| filter.gain_db = 0;
+    filters[1].kind = .notch;
+    filters[1].enabled = false;
+    const setting = testParametric(&filters, 0);
+    try std.testing.expect(setting.isIdentity());
+    try dsp.setParametricEqualizer(setting);
+
+    var expected: [16]f32 = @splat(0.5);
+    var actual = expected;
+    reference_gain.processor().process(&expected, 8, 2);
+    dsp.prepare(44_100, 2, 1);
+    dsp.processor().process(&actual, 8, 2);
+    try std.testing.expectEqualSlices(f32, &expected, &actual);
+
+    filters[1].enabled = true;
+    try std.testing.expect(!testParametric(&filters, 0).isIdentity());
+    try std.testing.expect(!testParametric(&.{}, -1).isIdentity());
+}
+
+test "the parametric and ten-band equalizers exclude each other" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    const parametric = testParametric(&test_parametric_filters, -3);
+    try dsp.setEqualizer(Equalizer.preset(.bass));
+    try dsp.setParametricEqualizer(parametric);
+    try std.testing.expectEqual(@as(?Equalizer, null), dsp.settings.equalizer);
+    try std.testing.expectEqualSlices(Filter, parametric.filterList(), dsp.settings.parametric.?.filterList());
+
+    try dsp.setEqualizer(Equalizer.preset(.treble));
+    try std.testing.expectEqual(@as(?ParametricEqualizer, null), dsp.settings.parametric);
+    try std.testing.expectEqual(@as(?Equalizer, Equalizer.preset(.treble)), dsp.settings.equalizer);
+
+    try dsp.setParametricEqualizer(null);
+    try std.testing.expectEqual(@as(?Equalizer, Equalizer.preset(.treble)), dsp.settings.equalizer);
+    try dsp.setParametricEqualizer(parametric);
+    try dsp.setEqualizer(null);
+    try std.testing.expect(dsp.settings.parametric != null);
+
+    try std.testing.expectApproxEqAbs(@as(f64, -4.92), measureGainDb(&dsp, 44_100, 1000), 0.05);
+    try dsp.setEqualizer(.{ .gains_db = gainsWithBand(5, 6) });
+    try std.testing.expectApproxEqAbs(@as(f64, 6), measureGainDb(&dsp, 44_100, 1000), 0.1);
+}
+
+fn processConstant(dsp: *PlayerDsp, value: f32) [test_block_frames * 2]f32 {
+    var block: [test_block_frames * 2]f32 = @splat(value);
+    dsp.prepare(48_000, 2, 1);
+    dsp.processor().process(&block, test_block_frames, 2);
+    return block;
+}
+
+const test_silence: [test_block_frames * 2]f32 = @splat(0);
+const test_shelf_boost: Filter = .{ .kind = .low_shelf, .frequency_hz = 200, .gain_db = 24, .q = 0.71 };
+
+test "a filter retyped in its slot starts without the old filter's history" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    try dsp.setParametricEqualizer(testParametric(&.{test_shelf_boost}, 0));
+    var steady: [test_block_frames * 2]f32 = undefined;
+    for (0..16) |_| steady = processConstant(&dsp, 0.5);
+    try std.testing.expect(steady[steady.len - 1] > 7.5);
+
+    const high_pass: Filter = .{ .kind = .high_pass, .frequency_hz = 1000, .q = 0.71 };
+    try dsp.setParametricEqualizer(testParametric(&.{high_pass}, 0));
+    const retyped = processConstant(&dsp, 0.5);
+    for (retyped) |sample| try std.testing.expect(@abs(sample) <= 0.5);
+
+    var fresh_gain: processing.Gain = .{};
+    var fresh: PlayerDsp = .init(&fresh_gain);
+    try fresh.setParametricEqualizer(testParametric(&.{high_pass}, 0));
+    try std.testing.expectEqualSlices(f32, &processConstant(&fresh, 0.5), &retyped);
+}
+
+test "switching between the equalizers clears the cascade history" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    const peak: Filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 6, .q = 1 };
+
+    try dsp.setEqualizer(.{ .gains_db = gainsWithBand(0, 12) });
+    for (0..4) |_| _ = processConstant(&dsp, 0.5);
+    try dsp.setParametricEqualizer(testParametric(&.{peak}, 0));
+    try std.testing.expectEqualSlices(f32, &test_silence, &processConstant(&dsp, 0));
+
+    for (0..4) |_| _ = processConstant(&dsp, 0.5);
+    try dsp.setEqualizer(.{ .gains_db = gainsWithBand(0, 12) });
+    try std.testing.expectEqualSlices(f32, &test_silence, &processConstant(&dsp, 0));
+}
+
+test "a filter added back to an emptied slot starts without the slot's old history" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    try dsp.setParametricEqualizer(testParametric(&.{test_shelf_boost}, 0));
+    for (0..16) |_| _ = processConstant(&dsp, 0.5);
+    try dsp.setParametricEqualizer(testParametric(&.{}, -1));
+    _ = processConstant(&dsp, 0.5);
+    try dsp.setParametricEqualizer(testParametric(&.{test_shelf_boost}, 0));
+    try std.testing.expectEqualSlices(f32, &test_silence, &processConstant(&dsp, 0));
+}
+
+test "moving a filter's gain, frequency and Q keeps its history, so the move does not click" {
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    try dsp.setParametricEqualizer(testParametric(&.{test_shelf_boost}, 0));
+    var steady: [test_block_frames * 2]f32 = undefined;
+    for (0..16) |_| steady = processConstant(&dsp, 0.5);
+
+    var moved = test_shelf_boost;
+    moved.gain_db = 23;
+    moved.frequency_hz = 250;
+    moved.q = 0.8;
+    try dsp.setParametricEqualizer(testParametric(&.{moved}, 0));
+    const after = processConstant(&dsp, 0.5);
+    try std.testing.expectApproxEqAbs(steady[steady.len - 1], after[0], 1);
+}
+
+test "turning one filter off keeps the history of the filters after it" {
+    const first: Filter = .{ .kind = .low_shelf, .frequency_hz = 100, .gain_db = 12, .q = 0.71 };
+    const second: Filter = .{ .kind = .low_shelf, .frequency_hz = 200, .gain_db = 6, .q = 0.71 };
+    const third: Filter = .{ .kind = .low_shelf, .frequency_hz = 400, .gain_db = -6, .q = 0.71 };
+
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    try dsp.setParametricEqualizer(testParametric(&.{ first, second, third }, 0));
+    for (0..16) |_| _ = processConstant(&dsp, 0.5);
+    var disabled = first;
+    disabled.enabled = false;
+    try dsp.setParametricEqualizer(testParametric(&.{ disabled, second, third }, 0));
+    const after = processConstant(&dsp, 0.5);
+
+    var reference_gain: processing.Gain = .{};
+    var reference: PlayerDsp = .init(&reference_gain);
+    try reference.setParametricEqualizer(testParametric(&.{ second, third }, 0));
+    var steady: [test_block_frames * 2]f32 = undefined;
+    for (0..16) |_| steady = processConstant(&reference, 0.5);
+    try std.testing.expectApproxEqAbs(steady[steady.len - 1], after[0], 0.02);
+}
+
+test "turning a ten-band band on keeps the history of the bands after it" {
+    var gains_db = gainsWithBand(8, 12);
+    gains_db[9] = -12;
+    var turned_on = gains_db;
+    turned_on[0] = 0.01;
+
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    try dsp.setEqualizer(.{ .gains_db = gains_db });
+    for (0..16) |_| _ = processConstant(&dsp, 0.5);
+    try dsp.setEqualizer(.{ .gains_db = turned_on });
+    const after = processConstant(&dsp, 0.5);
+
+    var reference_gain: processing.Gain = .{};
+    var reference: PlayerDsp = .init(&reference_gain);
+    try reference.setEqualizer(.{ .gains_db = turned_on });
+    var steady: [test_block_frames * 2]f32 = undefined;
+    for (0..16) |_| steady = processConstant(&reference, 0.5);
+    try std.testing.expectApproxEqAbs(steady[steady.len - 1], after[0], 0.02);
+}
+
+test "parametric validation rejects out-of-range and non-finite values and keeps the last setting" {
+    const peak: Filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 3, .q = 1 };
+    const Case = struct { filter: Filter, err: anyerror };
+    const cases = [_]Case{
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 3, .q = 0 }, .err = error.FilterQOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 3, .q = 20.5 }, .err = error.FilterQOutOfRange },
+        .{ .filter = .{ .kind = .low_shelf, .frequency_hz = 100, .gain_db = 3, .q = 2.5 }, .err = error.FilterQOutOfRange },
+        .{ .filter = .{ .kind = .high_shelf, .frequency_hz = 8000, .gain_db = 3, .q = 0.2 }, .err = error.FilterQOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = 25, .q = 1 }, .err = error.FilterGainOutOfRange },
+        .{ .filter = .{ .kind = .low_pass, .frequency_hz = 1000, .gain_db = -25, .q = 1 }, .err = error.FilterGainOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 19.9, .gain_db = 3, .q = 1 }, .err = error.FilterFrequencyOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 20_001, .gain_db = 3, .q = 1 }, .err = error.FilterFrequencyOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = std.math.nan(f32), .gain_db = 3, .q = 1 }, .err = error.FilterFrequencyOutOfRange },
+        .{ .filter = .{ .kind = .peak, .frequency_hz = 1000, .gain_db = std.math.inf(f32), .q = 1 }, .err = error.FilterGainOutOfRange },
+        .{ .filter = .{ .kind = .notch, .frequency_hz = 1000, .q = std.math.nan(f32) }, .err = error.FilterQOutOfRange },
+    };
+    for (cases) |case| {
+        var disabled = case.filter;
+        disabled.enabled = false;
+        try std.testing.expectError(case.err, testParametric(&.{ peak, case.filter }, 0).validate());
+        try std.testing.expectError(case.err, testParametric(&.{disabled}, 0).validate());
+    }
+    try std.testing.expectError(error.ParametricPreampOutOfRange, testParametric(&.{peak}, 7).validate());
+    try std.testing.expectError(error.ParametricPreampOutOfRange, testParametric(&.{peak}, -24.5).validate());
+    try std.testing.expectError(error.ParametricPreampOutOfRange, testParametric(&.{peak}, std.math.nan(f32)).validate());
+    var too_many = testParametric(&.{peak}, 0);
+    too_many.count = max_parametric_filters + 1;
+    try std.testing.expectError(error.TooManyFilters, too_many.validate());
+
+    try testParametric(&.{
+        .{ .kind = .peak, .frequency_hz = 20, .gain_db = -24, .q = 0.1 },
+        .{ .kind = .peak, .frequency_hz = 20_000, .gain_db = 24, .q = 20 },
+        .{ .kind = .low_shelf, .frequency_hz = 100, .gain_db = 3, .q = 0.3 },
+        .{ .kind = .high_shelf, .frequency_hz = 8000, .gain_db = 3, .q = 2 },
+    }, 6).validate();
+    try testParametric(&.{}, -24).validate();
+
+    var gain: processing.Gain = .{};
+    var dsp: PlayerDsp = .init(&gain);
+    const kept = testParametric(&.{peak}, -3);
+    try dsp.setParametricEqualizer(kept);
+    const generation = dsp.generation;
+    try std.testing.expectError(
+        error.ParametricPreampOutOfRange,
+        dsp.setParametricEqualizer(testParametric(&.{peak}, 7)),
+    );
+    try std.testing.expectEqual(generation, dsp.generation);
+    try std.testing.expectEqualSlices(Filter, kept.filterList(), dsp.settings.parametric.?.filterList());
+}
+
+test "the suggested preamp is minus the largest boost of an enabled peak or shelf" {
+    var filters = test_parametric_filters;
+    try std.testing.expectEqual(@as(f32, -3), testParametric(&filters, 0).suggestedPreamp());
+    filters[0].enabled = false;
+    try std.testing.expectEqual(@as(f32, -2.5), testParametric(&filters, 0).suggestedPreamp());
+    const cuts = [_]Filter{
+        .{ .kind = .peak, .frequency_hz = 1000, .gain_db = -4, .q = 1 },
+        .{ .kind = .low_pass, .frequency_hz = 1000, .gain_db = 9, .q = 1 },
+    };
+    try std.testing.expectEqual(@as(f32, 0), testParametric(&cuts, 0).suggestedPreamp());
+    try std.testing.expectEqual(@as(f32, 0), testParametric(&.{}, 0).suggestedPreamp());
+}
+
+test "a parametric equalizer counts as sample processing unless it changes nothing" {
+    const identity = testParametric(&.{.{ .kind = .peak, .frequency_hz = 1000, .gain_db = 0, .q = 1 }}, 0);
+    const Case = struct { parametric: ParametricEqualizer, processing: bool };
+    for ([_]Case{
+        .{ .parametric = testParametric(&test_parametric_filters, -3), .processing = true },
+        .{ .parametric = testParametric(&.{}, -1), .processing = true },
+        .{ .parametric = identity, .processing = false },
+    }) |case| {
+        const path = SignalPath.describe(.{
+            .source = test_float_format,
+            .source_declared = true,
+            .codec = null,
+            .replay_gain = 1,
+            .equalizer = null,
+            .parametric = case.parametric,
+            .crossfeed = null,
+            .volume = 1,
+            .output = test_float_format,
+            .device_rate = null,
+        });
+        try std.testing.expectEqual(!case.processing, path.bit_perfect_eligible);
+        const reasons: []const signal_path.Reason = if (case.processing) &.{.sample_processing} else &.{};
+        try std.testing.expectEqualSlices(signal_path.Reason, reasons, path.reasonList());
+        try std.testing.expectEqual(case.parametric.count, path.parametric.?.count);
+    }
 }

@@ -32,11 +32,20 @@ pub const Change = struct {
     after: ?[]const u8,
 };
 
+/// A file's whole genre list replaced. `before` is the list as the file's
+/// reader returns it now, a precondition like `Change.before`; `after` is the
+/// list the file will state, one genre per value.
+pub const GenreChange = struct {
+    before: []const []const u8,
+    after: []const []const u8,
+};
+
 pub const Action = union(enum) {
     write_tags: struct {
         path: []const u8,
         expected: FileIdentity,
         changes: []const Change,
+        genres: ?GenreChange = null,
     },
     move: struct {
         source_path: []const u8,
@@ -87,8 +96,16 @@ pub const Plan = struct {
         if (id == 0 or actions.len == 0) return error.InvalidMutationPlan;
         for (actions) |action| switch (action) {
             .write_tags => |write| {
-                if (write.path.len == 0 or write.changes.len == 0)
+                if (write.path.len == 0 or (write.changes.len == 0 and write.genres == null))
                     return error.InvalidMutationPlan;
+                if (write.genres) |genres| {
+                    if (genres.after.len == 0) return error.InvalidMutationPlan;
+                    for (genres.after) |genre| {
+                        if (genre.len == 0 or std.mem.indexOfScalar(u8, genre, 0) != null or
+                            !std.unicode.utf8ValidateSlice(genre))
+                            return error.InvalidMutationPlan;
+                    }
+                }
                 for (write.changes) |change| switch (change.field) {
                     .musicbrainz_recording_id,
                     .musicbrainz_release_id,
@@ -98,6 +115,10 @@ pub const Plan = struct {
                     => {
                         const value = change.after orelse continue;
                         if (!model.isMusicBrainzId(value)) return error.InvalidMutationPlan;
+                    },
+                    .explicit => {
+                        const value = change.after orelse continue;
+                        if (model.Explicit.fromAdvisoryText(value) == null) return error.InvalidMutationPlan;
                     },
                     .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => {},
                 };
@@ -128,7 +149,7 @@ pub const Plan = struct {
         for (self.actions) |action| switch (action) {
             .write_tags => |write| {
                 result.tag_writes += 1;
-                result.field_changes += write.changes.len;
+                result.field_changes += write.changes.len + @intFromBool(write.genres != null);
             },
             .move => result.moves += 1,
         };
@@ -179,10 +200,13 @@ fn copyActions(allocator: std.mem.Allocator, actions: []const Action) ![]const A
                 const path = try allocator.dupe(u8, write.path);
                 errdefer allocator.free(path);
                 const changes = try copyChanges(allocator, write.changes);
+                errdefer freeChanges(allocator, changes);
+                const genres: ?GenreChange = if (write.genres) |genres| try copyGenreChange(allocator, genres) else null;
                 destination.* = .{ .write_tags = .{
                     .path = path,
                     .expected = write.expected,
                     .changes = changes,
+                    .genres = genres,
                 } };
             },
             .move => |move| {
@@ -218,6 +242,31 @@ fn copyChanges(allocator: std.mem.Allocator, changes: []const Change) ![]const C
     return owned;
 }
 
+fn copyGenreChange(allocator: std.mem.Allocator, genres: GenreChange) !GenreChange {
+    const before = try copyValues(allocator, genres.before);
+    errdefer freeValues(allocator, before);
+    return .{ .before = before, .after = try copyValues(allocator, genres.after) };
+}
+
+fn copyValues(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    const owned = try allocator.alloc([]const u8, values.len);
+    var copied: usize = 0;
+    errdefer {
+        for (owned[0..copied]) |value| allocator.free(value);
+        allocator.free(owned);
+    }
+    for (values, owned) |source, *destination| {
+        destination.* = try allocator.dupe(u8, source);
+        copied += 1;
+    }
+    return owned;
+}
+
+fn freeValues(allocator: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| allocator.free(value);
+    allocator.free(values);
+}
+
 fn freeChangeElements(allocator: std.mem.Allocator, changes: []const Change) void {
     for (changes) |change| {
         if (change.before) |value| allocator.free(value);
@@ -235,6 +284,10 @@ fn freeActionElements(allocator: std.mem.Allocator, actions: []const Action) voi
         .write_tags => |write| {
             allocator.free(write.path);
             freeChanges(allocator, write.changes);
+            if (write.genres) |genres| {
+                freeValues(allocator, genres.before);
+                freeValues(allocator, genres.after);
+            }
         },
         .move => |move| {
             allocator.free(move.source_path);
@@ -264,6 +317,11 @@ fn digestOf(id: u64, actions: []const Action) Digest {
                 updateOptionalBytes(&hasher, change.before);
                 updateOptionalBytes(&hasher, change.after);
             }
+            if (write.genres) |genres| {
+                hasher.update("genres");
+                updateValues(&hasher, genres.before);
+                updateValues(&hasher, genres.after);
+            }
         },
         .move => |move| {
             hasher.update(&.{1});
@@ -291,6 +349,11 @@ fn updateBytes(hasher: *std.crypto.hash.Blake3, value: []const u8) void {
 fn updateOptionalBytes(hasher: *std.crypto.hash.Blake3, value: ?[]const u8) void {
     hasher.update(&.{if (value == null) 0 else 1});
     updateBytes(hasher, value orelse "");
+}
+
+fn updateValues(hasher: *std.crypto.hash.Blake3, values: []const []const u8) void {
+    updateInt(hasher, values.len);
+    for (values) |value| updateBytes(hasher, value);
 }
 
 fn updateIdentity(hasher: *std.crypto.hash.Blake3, value: FileIdentity) void {
@@ -421,6 +484,44 @@ test "approval digests separate plans that differ only in a single value" {
         error.MutationApprovalMismatch,
         second_plan.approve(first_plan.approval()),
     );
+}
+
+test "a genre list alone is a tag write, sealed into the digest and copied away from the caller" {
+    var genre_buffer = "Shoegaze".*;
+    const genres_only = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .changes = &.{},
+        .genres = .{ .before = &.{"Rock, Pop"}, .after = &.{ &genre_buffer, "Dream Pop" } },
+    } }};
+    var plan = try Plan.init(std.testing.allocator, 9, &genres_only);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.preview().field_changes);
+    @memcpy(&genre_buffer, "Attacker");
+    try std.testing.expectEqualStrings("Shoegaze", plan.actions[0].write_tags.genres.?.after[0]);
+
+    const reordered = [_]Action{.{ .write_tags = .{
+        .path = "/music/example.flac",
+        .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+        .changes = &.{},
+        .genres = .{ .before = &.{"Rock, Pop"}, .after = &.{ "Dream Pop", "Shoegaze" } },
+    } }};
+    var reordered_plan = try Plan.init(std.testing.allocator, 9, &reordered);
+    defer reordered_plan.deinit();
+    try std.testing.expectError(error.MutationApprovalMismatch, reordered_plan.approve(plan.approval()));
+    try plan.approve(plan.approval());
+}
+
+test "a genre write refuses an empty list, a blank genre or one containing NUL" {
+    for ([_][]const []const u8{ &.{}, &.{""}, &.{ "Rock", "Po\x00p" } }) |after| {
+        const actions = [_]Action{.{ .write_tags = .{
+            .path = "/music/example.flac",
+            .expected = .{ .size_bytes = 100, .modified_ns = 200, .quick_hash = quick_hash.zero },
+            .changes = &.{},
+            .genres = .{ .before = &.{}, .after = after },
+        } }};
+        try std.testing.expectError(error.InvalidMutationPlan, Plan.init(std.testing.allocator, 9, &actions));
+    }
 }
 
 test "file identity separates same-size edits that preserve a timestamp" {

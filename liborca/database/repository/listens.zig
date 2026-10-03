@@ -10,7 +10,6 @@ const WriteLane = @import("write_lane.zig").WriteLane;
 
 pub const ListenInput = struct {
     file_id: i64,
-    recording_id: ?i64 = null,
     started_at: i64,
     listened_ms: u64,
     duration_ms: ?u64 = null,
@@ -58,7 +57,11 @@ pub const ListenRepository = struct {
     pub fn record(self: *ListenRepository, input: ListenInput) !?i64 {
         self.write_lane.acquire();
         defer self.write_lane.release();
-        return self.insertLocked(input);
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+        const id = try self.insertLocked(input);
+        try self.db.exec("COMMIT;");
+        return id;
     }
 
     /// Records a listen and queues `payload` for `service` in one transaction,
@@ -95,25 +98,42 @@ pub const ListenRepository = struct {
             \\INSERT INTO listens(
             \\    file_id, recording_id, started_at, listened_ms, duration_ms,
             \\    title, artist, album, recording_mbid, player_client)
-            \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            \\VALUES (?1, (SELECT recording_id FROM files WHERE id = ?1), ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             \\ON CONFLICT(file_id, started_at) DO NOTHING
-            \\RETURNING id;
+            \\RETURNING id, recording_id;
         );
         defer statement.deinit();
         try statement.bindInt64(1, input.file_id);
-        try statement.bindOptionalInt64(2, input.recording_id);
-        try statement.bindInt64(3, input.started_at);
-        try statement.bindInt64(4, listened_ms);
-        try statement.bindOptionalInt64(5, duration_ms);
-        try statement.bindText(6, input.title);
-        try statement.bindText(7, input.artist);
-        try statement.bindText(8, input.album);
-        try statement.bindOptionalText(9, input.recording_mbid);
-        try statement.bindText(10, input.player_client);
-        const inserted = try statement.step() == .row;
-        const id = if (inserted) statement.columnInt64(0) else null;
-        if (inserted and try statement.step() != .done) return error.SqlFailed;
+        try statement.bindInt64(2, input.started_at);
+        try statement.bindInt64(3, listened_ms);
+        try statement.bindOptionalInt64(4, duration_ms);
+        try statement.bindText(5, input.title);
+        try statement.bindText(6, input.artist);
+        try statement.bindText(7, input.album);
+        try statement.bindOptionalText(8, input.recording_mbid);
+        try statement.bindText(9, input.player_client);
+        if (try statement.step() != .row) return null;
+        const id = statement.columnInt64(0);
+        const recording_id = optionalInt64(statement, 1);
+        if (try statement.step() != .done) return error.SqlFailed;
+        if (recording_id) |recording| try countPlayLocked(self.db, recording, input.started_at);
         return id;
+    }
+
+    /// Counts a listen in the transaction that inserts it. The other writer of
+    /// `recording_play_stats` is the `files_recording_moves_listens` trigger.
+    fn countPlayLocked(db: sqlite.Database, recording_id: i64, started_at: i64) !void {
+        var statement = try db.prepare(
+            \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+            \\VALUES (?1, 1, ?2)
+            \\ON CONFLICT(recording_id) DO UPDATE SET
+            \\    play_count = play_count + 1,
+            \\    last_played_at = max(last_played_at, excluded.last_played_at);
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, recording_id);
+        try statement.bindInt64(2, started_at);
+        if (try statement.step() != .done) return error.SqlFailed;
     }
 
     /// Raises a recorded listen's `listened_ms` to `listened_ms`; a smaller
@@ -132,12 +152,17 @@ pub const ListenRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
     }
 
-    /// Plays of the file a Track resolves to. Keyed on the file, so the count
-    /// survives an edit that reprojects the Track under a new id.
+    /// Plays of the Track's recording, from every file of it. Keyed on the
+    /// recording, so the count survives an edit that reprojects the Track
+    /// under a new id.
     pub fn trackPlayStats(self: *const ListenRepository, track_id: i64) !PlayStats {
         var statement = try self.db.prepare(
-            "SELECT count(*), max(started_at) FROM listens WHERE file_id = " ++
-                "(SELECT " ++ track_play_file ++ " FROM tracks WHERE tracks.id = ?1);",
+            \\SELECT COALESCE(recording_play_stats.play_count, 0), recording_play_stats.last_played_at
+            \\FROM tracks LEFT JOIN recording_play_stats
+            \\    ON recording_play_stats.recording_id = tracks.recording_id
+            \\WHERE tracks.id = ?1
+            \\UNION ALL SELECT 0, NULL
+            \\LIMIT 1;
         );
         defer statement.deinit();
         try statement.bindInt64(1, track_id);

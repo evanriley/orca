@@ -1,6 +1,8 @@
 const std = @import("std");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
+const artist_info = @import("artist_info.zig");
+const release_info = @import("release_info.zig");
 const cover_art = @import("cover_art.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
@@ -44,6 +46,63 @@ pub const LyricsRequest = struct {
     track_id: i64,
     options: LyricsOptions = .{},
     setup: ?LyricsSetup = null,
+};
+
+pub const ArtistInfoOutcome = artist_info.Outcome;
+
+pub const ArtistInfoSetup = struct {
+    io: std.Io,
+    identity: OwnedIdentity,
+    hooks: MatchingHooks,
+    musicbrainz_server: OwnedServer,
+    wikidata_server: OwnedServer,
+    commons_server: OwnedServer,
+    /// Null asks the language's own Wikipedia.
+    wikipedia_server: ?OwnedServer,
+    listenbrainz_server: OwnedServer,
+    listenbrainz_labs_server: OwnedServer,
+};
+
+/// A Wikipedia language code the request owns.
+pub const ArtistInfoLanguage = struct {
+    bytes: [12]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn init(language: []const u8) error{InvalidLanguage}!ArtistInfoLanguage {
+        if (!providers.wikidata.isLanguage(language)) return error.InvalidLanguage;
+        var result: ArtistInfoLanguage = .{ .len = @intCast(language.len) };
+        @memcpy(result.bytes[0..language.len], language);
+        return result;
+    }
+
+    pub fn view(self: *const ArtistInfoLanguage) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+pub const ArtistInfoRequest = struct {
+    artist_id: i64,
+    language: ArtistInfoLanguage,
+    force: bool = false,
+    offline: bool = false,
+    include_releases: bool = false,
+    setup: ArtistInfoSetup,
+};
+
+pub const ReleaseInfoTarget = union(enum) {
+    /// One Release's description, and its genres unless turned off.
+    release: i64,
+    /// Genres only, for at most this many Releases with a MusicBrainz
+    /// release ID and a Track with no genre.
+    missing_genres: u32,
+};
+
+pub const ReleaseInfoRequest = struct {
+    target: ReleaseInfoTarget,
+    language: ArtistInfoLanguage,
+    force: bool = false,
+    offline: bool = false,
+    setup: ArtistInfoSetup,
 };
 
 pub const ScanRequest = struct {
@@ -343,6 +402,8 @@ pub const Request = union(enum) {
     metadata_lookup: MatchingRequest,
     acoustid_submission: SubmissionSetup,
     lyrics: LyricsRequest,
+    artist_info: ArtistInfoRequest,
+    release_info: ReleaseInfoRequest,
 
     pub fn kind(self: Request) job.Kind {
         return switch (self) {
@@ -356,6 +417,8 @@ pub const Request = union(enum) {
             .metadata_lookup => .metadata_lookup,
             .acoustid_submission => .acoustid_submission,
             .lyrics => .lyrics,
+            .artist_info => .artist_info,
+            .release_info => .release_info,
         };
     }
 
@@ -367,7 +430,7 @@ pub const Request = union(enum) {
             .analysis => |request| request.batch_size,
             .duplicate_scan => |request| request.batch_size,
             .metadata_lookup => |request| request.batch_size,
-            .projection, .mutation, .acoustid_submission, .lyrics => null,
+            .projection, .mutation, .acoustid_submission, .lyrics, .artist_info, .release_info => null,
         };
     }
 };
@@ -598,12 +661,17 @@ const LiveLyricsStats = struct {
     result: ?Lyrics = null,
 };
 
+const LiveArtistInfoStats = struct {
+    outcome: std.atomic.Value(ArtistInfoOutcome) = .init(.not_requested),
+};
+
 pub const Stats = union(enum) {
     scan: LiveScanStats,
     duplicates: LiveDuplicateStats,
     matching: LiveMatchStats,
     submission: LiveSubmissionStats,
     lyrics: LiveLyricsStats,
+    artist_info: LiveArtistInfoStats,
 
     pub fn init(request: Request) Stats {
         return switch (request) {
@@ -612,6 +680,82 @@ pub const Stats = union(enum) {
             .metadata_lookup => .{ .matching = .{} },
             .acoustid_submission => .{ .submission = .{} },
             .lyrics => .{ .lyrics = .{} },
+            .artist_info, .release_info => .{ .artist_info = .{} },
+        };
+    }
+};
+
+/// The gateways and clients an artist or release info job asks through:
+/// one gateway per service, each holding its service's lease while it asks.
+const InfoServices = struct {
+    standard: network.StandardTransport,
+    system_clock: network.SystemClock,
+    random_source: std.Random.IoSource,
+    wall_clock: network.client.Clock,
+    gateways: [names.len]network.Gateway,
+    musicbrainz: providers.musicbrainz.MusicBrainz,
+    clients: [4]providers.cached_get.CachedGet,
+    setup: *const ArtistInfoSetup,
+
+    const names = [_][]const u8{
+        providers.musicbrainz.service,
+        providers.wikidata.service,
+        providers.wikimedia_commons.service,
+        providers.wikipedia.service,
+        providers.listenbrainz_labs.service,
+        providers.listenbrainz.service,
+    };
+
+    fn init(self: *InfoServices, worker: *JobWorker, setup: *const ArtistInfoSetup, offline: bool) void {
+        self.setup = setup;
+        self.standard = .init(worker.allocator, setup.io);
+        self.system_clock = .{ .io = setup.io };
+        self.random_source = .{ .io = setup.io };
+        self.wall_clock = setup.hooks.wall_clock orelse self.system_clock.wallClock();
+        const shared_state = providers.shared_state.store(&worker.database.provider_state);
+        for (&self.gateways, names) |*gateway, service| gateway.* = .{
+            .transport = setup.hooks.transport orelse self.standard.transport(),
+            .clock = setup.hooks.clock orelse self.system_clock.clock(),
+            .wall_clock = self.wall_clock,
+            .random = setup.hooks.random orelse self.random_source.interface(),
+            .config = .{ .identity = setup.identity.view(), .offline = offline },
+            .cancel = &worker.registration.cancel,
+            .sharing = .{ .store = shared_state, .service = service },
+        };
+        self.gateways[2].config.max_response_bytes = providers.wikimedia_commons.max_image_bytes;
+        self.musicbrainz = .{
+            .gateway = &self.gateways[0],
+            .cache = &worker.database.provider_cache,
+            .wall_clock = self.wall_clock,
+            .server = setup.musicbrainz_server.view(),
+        };
+        for (&self.clients, self.gateways[1..5], names[1..5]) |*client, *gateway, service| client.* = .{
+            .gateway = gateway,
+            .cache = &worker.database.provider_cache,
+            .wall_clock = self.wall_clock,
+            .service = service,
+        };
+        self.clients[3].cache_ttl_seconds = providers.listenbrainz_labs.cache_ttl_seconds;
+    }
+
+    fn deinit(self: *InfoServices) void {
+        for (&self.gateways) |*gateway| gateway.releaseLease();
+        self.standard.deinit();
+    }
+
+    fn view(self: *InfoServices) artist_info.Services {
+        return .{
+            .musicbrainz = &self.musicbrainz,
+            .wikidata = &self.clients[0],
+            .wikidata_server = self.setup.wikidata_server.view(),
+            .commons = &self.clients[1],
+            .commons_server = self.setup.commons_server.view(),
+            .wikipedia = &self.clients[2],
+            .wikipedia_server = if (self.setup.wikipedia_server) |*server| server.view() else null,
+            .listenbrainz = &self.gateways[5],
+            .listenbrainz_server = self.setup.listenbrainz_server.view(),
+            .labs = &self.clients[3],
+            .labs_server = self.setup.listenbrainz_labs_server.view(),
         };
     }
 };
@@ -675,6 +819,8 @@ pub const JobWorker = struct {
             .metadata_lookup => |request| self.runMatching(request),
             .acoustid_submission => |setup| self.runSubmission(setup),
             .lyrics => |request| self.runLyrics(request),
+            .artist_info => |*request| self.runArtistInfo(request),
+            .release_info => |*request| self.runReleaseInfo(request),
         }
     }
 
@@ -734,6 +880,72 @@ pub const JobWorker = struct {
         fetch.lrclib = &archive;
         fetch.wall_clock = wall_clock;
         self.finishLyrics(&fetch, request.track_id);
+    }
+
+    fn runArtistInfo(self: *JobWorker, request: *const ArtistInfoRequest) void {
+        const stats = &self.stats.artist_info;
+        if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
+        var services: InfoServices = undefined;
+        services.init(self, &request.setup, request.offline);
+        defer services.deinit();
+        var fetch: artist_info.Fetch = .{
+            .allocator = self.allocator,
+            .io = self.threaded.io(),
+            .library = self.database,
+            .services = services.view(),
+            .wall_clock = services.wall_clock,
+            .language = request.language.view(),
+            .force = request.force,
+            .include_releases = request.include_releases,
+        };
+        const outcome = fetch.run(request.artist_id) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        stats.outcome.store(if (self.cancelled()) .cancelled else outcome, .release);
+    }
+
+    fn runReleaseInfo(self: *JobWorker, request: *const ReleaseInfoRequest) void {
+        const stats = &self.stats.artist_info;
+        if (self.cancelled()) return stats.outcome.store(.cancelled, .release);
+        var services: InfoServices = undefined;
+        services.init(self, &request.setup, request.offline);
+        defer services.deinit();
+        var fetch: release_info.Fetch = .{
+            .allocator = self.allocator,
+            .library = self.database,
+            .services = services.view(),
+            .wall_clock = services.wall_clock,
+            .language = request.language.view(),
+            .force = request.force,
+        };
+        const outcome = self.fetchReleaseInfo(&fetch, request.target) catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        stats.outcome.store(if (self.cancelled()) .cancelled else outcome, .release);
+    }
+
+    fn fetchReleaseInfo(self: *JobWorker, fetch: *release_info.Fetch, target: ReleaseInfoTarget) !ArtistInfoOutcome {
+        const limit = switch (target) {
+            .release => |release_id| return fetch.run(release_id),
+            .missing_genres => |limit| limit,
+        };
+        fetch.genres_only = true;
+        const releases = try self.database.genres.releasesWithoutGenres(self.allocator, limit);
+        defer self.allocator.free(releases);
+        var failure: ?ArtistInfoOutcome = null;
+        for (releases) |release_id| {
+            if (self.cancelled()) return .cancelled;
+            const outcome = try fetch.run(release_id);
+            switch (outcome) {
+                .fetched, .cached, .no_musicbrainz_id, .not_found => {},
+                .cancelled => return .cancelled,
+                else => failure = failure orelse outcome,
+            }
+            _ = self.progress.fetchAdd(1, .acq_rel);
+        }
+        return failure orelse .fetched;
     }
 
     fn finishLyrics(self: *JobWorker, fetch: *lyrics_fetch.Fetch, track_id: i64) void {
@@ -1443,6 +1655,10 @@ pub const JobWorker = struct {
             .scan => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
             .duplicates => |*stats| stats.files_seen.load(.acquire) + self.progress.load(.acquire),
             .lyrics => 0,
+            .artist_info => switch (self.request) {
+                .release_info => self.progress.load(.acquire),
+                else => 0,
+            },
         };
     }
 
@@ -1454,7 +1670,7 @@ pub const JobWorker = struct {
                 break :stats read;
             },
             .duplicates => |*stats| stats.read(self.progress.load(.acquire)).scanStats(),
-            .matching, .lyrics => .{},
+            .matching, .lyrics, .artist_info => .{},
             .submission => |*stats| .{ .cancelled = stats.cancelled.load(.acquire) },
         };
     }
@@ -1462,14 +1678,14 @@ pub const JobWorker = struct {
     pub fn matchStats(self: *const JobWorker) MatchStats {
         return switch (self.stats) {
             .matching => |*stats| stats.read(),
-            .scan, .duplicates, .submission, .lyrics => .{},
+            .scan, .duplicates, .submission, .lyrics, .artist_info => .{},
         };
     }
 
     pub fn submissionStats(self: *const JobWorker) SubmissionStats {
         if (self.retired or self.registration.isFinished()) return switch (self.stats) {
             .submission => |*stats| stats.result,
-            .scan, .duplicates, .matching, .lyrics => .{},
+            .scan, .duplicates, .matching, .lyrics, .artist_info => .{},
         };
         return .{ .files_examined = self.progress.load(.acquire) };
     }
@@ -1480,7 +1696,17 @@ pub const JobWorker = struct {
         if (!self.retired and !self.registration.isFinished()) return .not_requested;
         return switch (self.stats) {
             .lyrics => |*stats| stats.outcome.load(.acquire),
-            .scan, .duplicates, .matching, .submission => .not_requested,
+            .scan, .duplicates, .matching, .submission, .artist_info => .not_requested,
+        };
+    }
+
+    /// `not_requested` while the job runs and for a job that is not an
+    /// artist info job.
+    pub fn artistInfoOutcome(self: *const JobWorker) ArtistInfoOutcome {
+        if (!self.retired and !self.registration.isFinished()) return .not_requested;
+        return switch (self.stats) {
+            .artist_info => |*stats| stats.outcome.load(.acquire),
+            .scan, .duplicates, .matching, .submission, .lyrics => .not_requested,
         };
     }
 
@@ -1494,7 +1720,7 @@ pub const JobWorker = struct {
                 stats.result = null;
                 break :taken lyrics;
             },
-            .scan, .duplicates, .matching, .submission => null,
+            .scan, .duplicates, .matching, .submission, .artist_info => null,
         };
     }
 
@@ -1510,6 +1736,7 @@ pub const JobWorker = struct {
             .matching => |*stats| stats.cancelled.load(.acquire),
             .submission => |*stats| stats.cancelled.load(.acquire),
             .lyrics => |*stats| stats.outcome.load(.acquire) == .cancelled,
+            .artist_info => |*stats| stats.outcome.load(.acquire) == .cancelled,
         };
     }
 };

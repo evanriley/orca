@@ -6,7 +6,9 @@
 
 const std = @import("std");
 const codec = @import("codec/root.zig");
+const eq_text = @import("audio/eq_text.zig");
 const m3u = @import("library/m3u.zig");
+const smart_playlist = @import("library/smart_playlist.zig");
 const metadata = @import("metadata/root.zig");
 const storage = @import("storage/root.zig");
 
@@ -21,6 +23,7 @@ const id3v2_fixtures = [_][]const u8{
     "id3-footer-prefixed-reference.flac",
     "id3-covered-reference.flac",
     "lyrics-sylt.mp3",
+    "explicit-reference.mp3",
 };
 const mp4_fixtures = [_][]const u8{
     "tagged-reference-alac.m4a",
@@ -28,6 +31,7 @@ const mp4_fixtures = [_][]const u8{
     "chirp-reference-aac.m4a",
     "covered-reference.m4a",
     "lyrics-plain.m4a",
+    "explicit-reference.m4a",
 };
 const vorbis_comment_fixtures = [_][]const u8{
     "tagged-reference.flac",
@@ -106,6 +110,14 @@ test "fuzz: M3U playlists parse and resolve or fail cleanly" {
 
 test "fuzz: LRC lyrics parse or fail cleanly" {
     try fuzzTarget(exerciseLrc, audio_fixture_dir, &lrc_fixtures, &.{"lrc"});
+}
+
+test "fuzz: smart playlist rules parse and compile to bound parameters or fail cleanly" {
+    try fuzzTarget(exerciseSmartPlaylist, "fixtures/fuzz", &.{}, &.{"smart-playlist"});
+}
+
+test "fuzz: EqualizerAPO text parses and writes back to the same filters or fails cleanly" {
+    try fuzzTarget(exerciseEqApo, "fixtures/fuzz", &.{}, &.{"eq-apo"});
 }
 
 const Exercise = fn (allocator: std.mem.Allocator, input: []const u8) void;
@@ -340,6 +352,41 @@ fn exerciseLrc(allocator: std.mem.Allocator, input: []const u8) void {
     defer lyrics.deinit();
     _ = lyrics.lineAt(0);
     _ = lyrics.lineAt(std.math.maxInt(u32));
+}
+
+fn exerciseSmartPlaylist(allocator: std.mem.Allocator, input: []const u8) void {
+    var rules = smart_playlist.parse(allocator, input) catch return;
+    defer rules.deinit();
+    var compiled = smart_playlist.compile(allocator, &rules, 1_700_000_000) catch return;
+    defer compiled.deinit();
+    const placeholders = std.mem.count(u8, compiled.predicate, "?");
+    if (placeholders != compiled.values.len)
+        std.debug.panic("predicate has {d} placeholders for {d} values", .{ placeholders, compiled.values.len });
+    if (compiled.limit == 0 or compiled.limit > smart_playlist.max_limit)
+        std.debug.panic("limit {d} is outside 1..{d}", .{ compiled.limit, smart_playlist.max_limit });
+}
+
+fn exerciseEqApo(_: std.mem.Allocator, input: []const u8) void {
+    const parsed = eq_text.parseEqualizerApo(input) catch return;
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    eq_text.writeEqualizerApo(&writer, parsed) catch
+        std.debug.panic("a valid equalizer took more than {d} bytes to write", .{buffer.len});
+    const again = eq_text.parseEqualizerApo(writer.buffered()) catch |err|
+        std.debug.panic("written text failed to parse: {s}", .{@errorName(err)});
+    if (again.preamp_db != parsed.preamp_db or again.count != parsed.count)
+        std.debug.panic("written text read back to a different preamp or filter count", .{});
+    for (parsed.filterList(), again.filterList(), 1..) |before, after, position| {
+        if (!std.meta.eql(before, after))
+            std.debug.panic("filter {d} changed on the way through text", .{position});
+    }
+    const frequencies = [_]f32{ 20, 100, 1000, 10_000, 19_000, 22_000 };
+    var gains_db: [frequencies.len]f32 = undefined;
+    parsed.response(44_100, &frequencies, &gains_db);
+    for (gains_db, frequencies) |gain_db, frequency_hz| {
+        if (!std.math.isFinite(gain_db))
+            std.debug.panic("response at {d} Hz is {d}", .{ frequency_hz, gain_db });
+    }
 }
 
 fn exerciseM3u(allocator: std.mem.Allocator, input: []const u8) void {

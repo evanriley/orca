@@ -180,9 +180,9 @@ thread would. No helper touches SQLite.
 ## ReplayGain on playback
 
 The correction is a property of the **audio**, not of the Player. Each
-`SourceSession` carries the linear correction measured from the bytes it is
-decoding, and scales the frames it produces by it. `Gain` is user volume and
-nothing else.
+`SourceSession` carries the linear corrections for the bytes it is decoding,
+track and album (`EntryReplayGain`), and scales the frames it produces by the
+one the mode selects. `Gain` is user volume and nothing else.
 
 That placement is the whole design, and it follows from where a gapless
 transition puts the audio. During one, the render pipe holds prepared blocks
@@ -217,15 +217,55 @@ the figure.
 - **A boost is capped at `1 / peak`.** Bringing a quiet track up only as far as
   its headroom allows is a deliberate quietening of the correction rather than
   a limiter, because a limiter would change the audio rather than its level.
-- **`ReplayGainMode` is `off` or `track`.** Album-level ReplayGain is out of
-  scope and is deliberately not a third value: it needs a release-scoped
-  measurement `analysis/` does not compute and a notion of "the release this
-  entry belongs to" the playback queue does not carry, and naming it without
-  both would apply track gain under an album label.
+- **`ReplayGainMode` is `off`, `track` or `album`.** Album correction is
+  described below.
+- **Only Orca's own measurements are used.** No reader observes a file's
+  `REPLAYGAIN_*` tags, so a file Orca has not analysed plays at unity in
+  either mode.
+
+### Album ReplayGain
+
+`album` corrects every Track of a Release by the same figure, so the levels
+within an album stay as mastered.
+
+- **Computed at open, never stored.** `TrackSourceOpener.openTrack` works the
+  album figure out as it attaches the track figure, from one bounded statement
+  over the entry's Release (`AnalysisCacheRepository.visitReleaseMembers`).
+  Nothing is cached per Release, so re-analysing a Track or moving it to
+  another Release cannot leave a stale album figure behind: the next open of
+  any Track of the Release uses the new measurements. There is no schema
+  change.
+- **Loudness: a duration-weighted energy mean.** The album's integrated
+  loudness is `10·log10(Σ dᵢ·10^(Lᵢ/10) / Σ dᵢ)` over the Tracks' integrated
+  loudness `Lᵢ` and durations `dᵢ`; the album gain is the canonical target
+  (−18 LUFS) minus it. Exact BS.1770 gating over the album's merged 400 ms
+  blocks would need every block's energy, and the stored result keeps only
+  each file's gated loudness. Measured on synthetic Releases, the mean is
+  0.007 LU from exact gating for steady material and 1.88 LU louder for a
+  Release with long quiet or silent passages, which the per-file relative
+  gates exclude and the album's gate would not; for the fixture files as one
+  Release the difference is 0.78 LU.
+- **Peak: the largest Track peak.** The boost cap uses the loudest Track's
+  sample peak, so no Track of the album clips.
+- **Fallback is visible.** An entry whose Release has a Track with no stored
+  measurement for its recorded bytes, a Track with no duration, more than 512
+  Tracks, or that has no Release, plays at its own track correction, and
+  `SignalPath.replay_gain_source` is `track_fallback`. A Track measured with
+  no gated loudness (too short or too quiet) adds no energy and no duration
+  but still counts toward the peak.
+- **Whose measurement.** The entry's own measurement is keyed on the bytes just
+  opened, as in track mode. Every other member's is keyed on
+  `files.quick_hash`, because hashing every file of the album at each open
+  would cost a disc's worth of reads per track.
+- **What a host sees.** `SignalPath` carries the applied gain
+  (`replay_gain_db`), its source (`replay_gain_source`: `none`, `track`,
+  `album` or `track_fallback`) and, for an album correction, the entry's own
+  track correction it replaced (`replay_gain_track_db`).
 
 ### Where each lane's work happens
 
-The opener reads SQLite and two 64 KiB file ranges. That happens on whichever
+The opener reads SQLite, including the Release statement in album mode, and two
+64 KiB file ranges. That happens on whichever
 lane opens the entry — the control lane for a hard load, the **engine thread**
 for an auto-advance. Both already resolve a Location and open a file there, and
 opening is not the decode path: it happens once per entry, and it is
@@ -469,9 +509,22 @@ dismissal. A dismissal goes with its file.
 
 `Runtime.libraryHealthSummary` (`orca-cli health --summary`) returns a
 `HealthSummary`: one `HealthKindSummary` per kind with at least one issue
-that is not dismissed, holding its count and the highest severity among
-those issues, highest severity first and then in kind order. The counts sum
-to `libraryHealthIssueCount`, and an empty Library has an empty summary.
+that is not dismissed, holding its count, the highest severity among
+those issues, its `files` and their summed size in `bytes`, highest
+severity first and then in kind order. The counts sum to
+`libraryHealthIssueCount`, and an empty Library has an empty summary. A
+file has at most one issue of a kind, so `files` equals the count.
+
+For `exact_duplicate` and `likely_duplicate`, `bytes` is what removing the
+redundant copies would free, not the size of every file in the group: a
+kept copy and two duplicates of 10 MB each report 20 MB. The kept copy is
+the lowest-numbered file of a group: a file counts when a lower-numbered
+file is linked to it by an issue of the same kind, as its related file or
+naming it as theirs. A duplicate held as a second location of one file row
+has no related file, and counts its size once per present location beyond
+the first. The links are read whether or not an issue is dismissed; only
+issues that are not dismissed are summed. The duplicate bytes run one
+further query per duplicate kind, through `library_health_by_related`.
 `libraryHealthIssuePageOfKind` (`orca-cli health --kind=KIND`) pages the
 issues of one kind in the order of `libraryHealthIssuePage`. Both leave out
 dismissed issues as the page and count do, and both reach the kind through

@@ -49,18 +49,40 @@ allocates, locks, waits, performs I/O or retains the sample slice. `Gain`
 ramps volume changes over frames.
 
 Every Player runs one built-in DSP chain, `PlayerDsp` in `audio/dsp.zig`:
-preamp, a ten-band peaking equalizer (31 Hz to 16 kHz, one octave apart,
-Q 1.41, up to 12 dB per band), stereo crossfeed, then the volume gain, in that
-order. It runs on the engine thread over canonical float32 PCM, after decoding
-and before fanout, never in the render callback. Before each pass the engine
-calls `prepare`, which rebuilds the filter coefficients when the settings or
-the canonical sample rate changed, leaving out bands at zero gain and bands at
-or above Nyquist, and clears filter history when the transport epoch or
-channel count changed, so a seek or a hard switch never rings with the old
-audio. The control lane writes the settings only while the engine is
-quiesced. Crossfeed applies to two-channel audio; other layouts pass through
-unchanged. With the equalizer and crossfeed off the chain is the volume gain
-and nothing else. `nodes.DcBlocker` is not part of it.
+preamp, an equalizer, stereo crossfeed, then the volume gain, in that order.
+The equalizer is either the ten-band graphic one (peaking filters 31 Hz to
+16 kHz, one octave apart, Q 1.41, up to 12 dB per band) or the parametric one,
+never both: turning either on turns the other off. The parametric equalizer
+(`ParametricEqualizer`) holds up to 16 filters, each a peak, low shelf, high
+shelf, low pass, high pass or notch with its own frequency (20 Hz to 20 kHz),
+gain (within 24 dB, on peaks and shelves) and Q (0.1 to 20, or 0.3 to 2 on a
+shelf), and a preamp of -24 to +6 dB. Every filter is an RBJ Audio EQ Cookbook
+biquad, designed in f64 in `audio/equalizer.zig` and run as one cascade.
+`audio/eq_text.zig` reads and writes the EqualizerAPO text that headphone
+correction tools publish (`Preamp:` and `Filter N: ON PK Fc … Hz Gain … dB
+Q …` lines); it rejects lines and filter types it cannot run rather than
+dropping them. The chain runs on the engine thread over canonical float32 PCM,
+after decoding and before fanout, never in the render callback. Before each
+pass the engine calls `prepare`, which rebuilds the filter coefficients when
+the settings or the canonical sample rate changed, leaving out bands and
+filters that leave samples unchanged (zero gain, or disabled) and those whose
+frequency is too close to Nyquist to design (at or above Nyquist for a graphic
+band, 0.45 of the rate for a parametric filter), and clears filter history
+when the transport epoch or channel count changed, so a seek or a hard switch
+never rings with the old audio. A rebuild clears a filter's history when
+the filter is new or of another kind, or the other equalizer was in use, and
+keeps it when only its gain, frequency or Q changed or another filter was
+turned off or on, so a band moved during playback does not click. History is
+keyed by the filter's index in the setting (the band for the ten-band
+equalizer), not by its slot in the cascade. The control lane writes the
+settings only while the engine is quiesced: the engine finishes its pass, the
+setter validates and stores the new settings and bumps their generation, and
+the engine's next `prepare` designs the coefficients before it processes
+another block. Nothing already queued for the render callback is discarded,
+so a change mid-track is gapless and takes effect a render-ahead later.
+Crossfeed applies to two-channel audio; other layouts pass through unchanged.
+With the equalizers and crossfeed off the chain is the volume gain and nothing
+else. `nodes.DcBlocker` is not part of it.
 
 User volume and loudness correction are applied in two different places
 because they are two different kinds of thing. Volume is one Player-scope
@@ -82,7 +104,8 @@ resampler is `resampler.SampleRate`, libsamplerate behind
 fingerprints; see [analysis.md](analysis.md#acoustid-fingerprints). Gain and
 metering have scalar references and tested Zig vector kernels
 (`audio/kernels.zig`); run `zig build -Doptimize=ReleaseFast dsp-bench` for
-host-specific evidence.
+host-specific evidence. It also times a 256-frame stereo block through the
+graphic equalizer with ten active bands and the parametric one with 16 filters.
 
 Signal-path reports list the processing nodes, format/rate/layout conversions,
 direct-RT eligibility, and total algorithmic latency. They distinguish source
@@ -90,17 +113,24 @@ PCM from canonical float32 working PCM and conservatively explain why a path is
 not bit-perfect. Widening an 8-, 16- or 24-bit integer source to float32 is
 exact, so it is not a reason; the report marks it `widened_exactly`. These are
 reasons: a 32-bit integer or 64-bit float source (`sample_format_conversion`),
-a lossy codec (`lossy_source`), any ReplayGain, equalizer, crossfeed or volume
-that is not exactly 1 (`sample_processing`), and a rate or channel layout that
-changes. Eligibility ends at the stream Orca hands the backend: it says nothing
-about what PipeWire does after it, and is not an assertion that the device
-negotiated a bit-perfect native path. `Runtime.playerSignalPath` reports the
-live path of one Player: the audible entry's source format, codec and
-ReplayGain, the equalizer and crossfeed, the volume the gain node is applying
-(not the target it ramps toward), and the format the clock Zone opened its
-stream with. A decoder that declares no source format, as lossy decoders do,
-leaves `source_declared` false: `source` then holds the canonical format, and
-only its rate and channels are meaningful.
+a lossy codec (`lossy_source`), any ReplayGain, either equalizer, crossfeed or
+volume that is not exactly 1 (`sample_processing`), and a rate or channel
+layout that changes. Eligibility ends at the stream Orca hands the backend: it
+says nothing about what PipeWire does after it, and is not an assertion that
+the device negotiated a bit-perfect native path. `Runtime.playerSignalPath`
+reports the live path of one Player: the audible entry's source format, codec
+and ReplayGain (the applied gain, whether it is the track's, the album's or
+the track's in place of a missing album figure, and for an album gain the
+track gain it replaced; see
+[analysis.md](analysis.md#album-replaygain)), the equalizer or parametric
+equalizer and crossfeed, the volume the gain node is applying (not the
+target it ramps toward), the
+format the clock Zone opened its stream with, the frames per period that
+Zone's device asks for (`device_quantum_frames`, null until the stream has
+run), and how that device is attached (`output_kind`). A decoder that declares no
+source format, as lossy decoders do, leaves `source_declared` false: `source`
+then holds the canonical format, and only its rate and channels are
+meaningful.
 
 A runtime Zone owns its whole private render path: `BlockPool`, `RenderPipe`,
 `RenderContext` and `OutputSession`, plus every atomic the render callback reads
@@ -241,6 +271,16 @@ Zones that still play.
 
 Device discovery returns bounded Orca-owned snapshots and uses PipeWire object
 serials for stream targeting; device ID zero delegates selection to the server.
+Each snapshot carries a `DeviceKind`: `usb`, `pci`, `bluetooth`, `hdmi`,
+`virtual` or `unknown`. Registry globals carry only filtered properties, so
+discovery binds each sink node and each `Audio/Device` and reads their info in
+a second round trip: a `support.null-audio-sink` node is virtual, a BlueZ node
+or device Bluetooth, an ALSA `hdmi:` path or HDMI profile HDMI, and otherwise
+`device.bus` decides. Only the first 64 sinks are bound; later ones, and device
+zero, report `unknown`. A Zone resolves its device's kind with one
+discovery when the engine thread opens its output, never in the render
+callback, and keeps it beside the open device ID; `playerSignalPath` only reads
+it, so a signal path query never round-trips to the server.
 Output requests validate the negotiated float32 contract and translate robust,
 interactive, custom, or explicit latency targets into PipeWire node latency.
 Timing snapshots report sample time, monotonic host time, callback quantum,
@@ -280,10 +320,17 @@ and mutated only by the control lane and the engine thread — never by a render
 callback — under the same `quiesce`/`release` handshake that protects
 `SourceQueue`. Enqueueing past capacity applies backpressure rather than growing.
 The three values a host polls (entry count, audible cursor, decode cursor) are
-atomics, so reporting now-playing never has to stop the producer. The engine
-stores the audible cursor after the position, duration and gain it describes,
-so a host reads the cursor first and never pairs an entry with its
-predecessor's figures.
+atomics, so reporting now-playing never has to stop the producer. Now-playing,
+`playerStatus` and listen tracking take the audible Track from the audible
+entry serial through the queue's serial records, never from the audible
+cursor, which trails the serial across a gapless transition; a read whose
+serial moves while it is resolved is retried, then names no Track, and serial
+0 (nothing audible, as after a stop) names the cursor's entry. The serial
+leaves an entry, and a hard load moves the cursor, before the next entry's
+duration and gain are published, so a host reads those first and never pairs
+an entry with its successor's figures. A hard load sets the serial to 0,
+moves the cursor, and adopts the new serial only once the queue records it,
+so a host never reads a serial the queue cannot name.
 
 The two cursors are separate because the decode cursor leads the audible one by
 the whole render-ahead depth. The audible cursor is derived from the
@@ -314,9 +361,25 @@ bump the last serial it published names audio that no longer exists.
 `previous` restarts the current entry past three seconds and moves the cursor
 back before it. Shuffle generates a permutation and keeps the playing entry at
 the cursor, so toggling it does not restart the song and `previous` still has
-real history; a random pick per advance would have neither property. `repeat_one`
-re-opens a *fresh* session for the same entry rather than seeking the one still
-draining into the pipe.
+real history; a random pick per advance would have neither property. Toggling it
+moves each serial record to the position its entry now has, and removing an
+entry forgets its record, so a serial never names an entry it did not play.
+`repeat_one` re-opens a *fresh* session for the same entry rather than seeking
+the one still draining into the pipe.
+
+Moving an entry to another position in playback order happens under one
+`quiesce`, and everything keyed by position follows the entry it named: both
+cursors, the position of a successor held for a format switch, and every serial
+record, stored with release ordering after the move as a shuffle toggle stores
+them. Under shuffle only the permutation changes, so turning shuffle off puts
+entries back in list order. The entries the engine has committed to cannot
+move: the audible and decoding entries while the Player holds audio, and a held
+successor. Nothing may land after the audible entry and up to the last committed
+one either, because the engine has already lined those up and would play past
+the moved entry. Both are refused with `QueueEntryInUse`, as removing a
+committed entry is. Moving into the played region, or past the committed
+entries, is allowed; under `repeat_all` the committed span can wrap past the end
+of the queue, and the refusal follows it.
 
 Auto-advance runs on the engine thread: at `current.eof` with no successor it
 resolves the next entry, opens it, and primes it. A canonical format mismatch is
@@ -329,3 +392,34 @@ cannot be opened is stepped over, with consecutive failures bounded.
 
 Gapless transitions append compatible successor PCM directly; there is no
 crossfade.
+
+## Queue history
+
+Each Player keeps the last `queue_history_capacity` (100) entries that
+stopped playing, newest first, as `QueueHistoryEntry` values: the
+`TrackRef`, `ended_at_ms` in Unix milliseconds, and a `QueueHistoryReason`.
+
+- `finished`: the audible entry serial moved on by itself, or the Player
+  drained. The control lane notices this when it samples Players, bound or
+  not, at most every 100 ms while it processes commands, and before any
+  history read.
+- `skipped`: next, previous to another entry, or a queue jump.
+- `replaced`: playing new Tracks, loading a file, or clearing the queue.
+
+Stop records nothing, because the entry stays current and plays again from
+its start. Closing the Library a Player is bound to stops it the same way.
+`previous` restarting the current entry records nothing. Each audible entry
+is recorded at most once. The 101st entry drops the oldest.
+
+An entry's Track is resolved from the audible entry serial through the
+queue's serial records, never from the audible cursor, which trails the
+serial across a gapless transition. A sample whose serial moves while it is
+being resolved is retried, then skipped. An entry that starts and ends between two
+samples is never seen, so it is not recorded. A serial with no queue entry
+behind it, such as a file loaded with `playerLoadFile`, records nothing.
+
+The history lives on the control lane in memory only. It is never persisted,
+so a new runtime starts empty, and it never records a listen: listens come
+only from the Player's `ListenTracker`. `playerQueueHistory` reads raw
+entries, `playerQueueHistoryTracks` reads them as `TrackSummary` rows, and
+`playerClearQueueHistory` empties the ring.

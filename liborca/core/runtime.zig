@@ -1,6 +1,8 @@
 const std = @import("std");
 const analysis_chromaprint = @import("../analysis/chromaprint.zig");
 const analysis_service = @import("../analysis/service.zig");
+const artist_info = @import("artist_info.zig");
+const release_info = @import("release_info.zig");
 const artwork = @import("artwork.zig");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
@@ -14,7 +16,11 @@ const listen_worker = @import("listen_worker.zig");
 const metadata = @import("../metadata/root.zig");
 const network = @import("../network/root.zig");
 const object = @import("object.zig");
+const provider_sources = @import("provider_sources.zig");
 const providers = @import("../providers/root.zig");
+const queue_history = @import("queue.zig");
+const runtime_artist_info = @import("runtime_artist_info.zig");
+const runtime_genres = @import("runtime_genres.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
@@ -36,6 +42,9 @@ pub const WorkHandle = work.WorkHandle;
 pub const TrackRef = audio.playback_queue.TrackRef;
 pub const RepeatMode = audio.playback_queue.RepeatMode;
 pub const QueueSnapshot = audio.playback_queue.Snapshot;
+pub const QueueHistoryEntry = queue_history.QueueHistoryEntry;
+pub const QueueHistoryReason = queue_history.QueueHistoryReason;
+pub const queue_history_capacity = queue_history.queue_history_capacity;
 pub const TrackDetails = track_details.TrackDetails;
 pub const RecordingIdSource = track_details.RecordingIdSource;
 pub const TrackLoudness = track_details.Loudness;
@@ -49,6 +58,11 @@ pub const PlaylistPage = database.PlaylistPage;
 pub const PlaylistEntry = database.PlaylistEntry;
 pub const PlaylistEntryPage = database.PlaylistEntryPage;
 pub const PlaylistInsertion = database.PlaylistInsertion;
+pub const PlaylistKind = database.PlaylistKind;
+pub const PlaylistCreator = database.PlaylistCreator;
+pub const PlaylistSort = database.PlaylistSort;
+pub const PlaylistQuery = database.PlaylistQuery;
+pub const PlaylistUpdate = database.PlaylistUpdate;
 pub const PlaylistImport = runtime_playlists.PlaylistImport;
 pub const PlaylistExport = runtime_playlists.PlaylistExport;
 pub const PlaylistExportOptions = runtime_playlists.PlaylistExportOptions;
@@ -124,6 +138,7 @@ pub const PlayerObject = struct {
     engine_work: ?WorkHandle = null,
     /// Sampled by the control lane while the Player is bound to a Library.
     listens: providers.listens.ListenTracker = .{},
+    history: queue_history.QueueHistory = .{},
 };
 pub const ZoneObject = struct {
     zone: *audio.zone_runtime.ZoneRuntime,
@@ -192,7 +207,13 @@ pub const TagWriteFile = struct {
     file_id: i64,
     path: []const u8,
     changes: []const TagWriteChange,
+    /// The file's genres replaced by the user's, or null when they stay.
+    genres: ?TagWriteGenres,
 };
+
+/// `before` is what the file states, value by value; `after` is the genres
+/// the user gave the Track.
+pub const TagWriteGenres = metadata.mutation.GenreChange;
 
 pub const TagWriteChange = struct {
     field: metadata.Field,
@@ -298,6 +319,23 @@ pub const CoverArtOutcome = job_worker.CoverArtOutcome;
 pub const Lyrics = job_worker.Lyrics;
 pub const LyricsOptions = job_worker.LyricsOptions;
 pub const LyricsOutcome = job_worker.LyricsOutcome;
+pub const ArtistInfoOutcome = job_worker.ArtistInfoOutcome;
+pub const ArtistInfoOptions = artist_info.Options;
+pub const ReleaseInfoOptions = release_info.Options;
+pub const ReleaseInfoOutcome = job_worker.ArtistInfoOutcome;
+
+/// Which providers may fill genres for Tracks with none, kept per Library.
+pub const GenreFill = struct {
+    /// MusicBrainz genres, CC BY-NC-SA 3.0. On unless turned off.
+    musicbrainz: bool = true,
+};
+
+pub const GenreFillOptions = struct {
+    /// At most this many Releases, 1 to `database.repository.max_page`.
+    limit: u32 = database.repository.max_page,
+    /// Make no request; use answers already cached.
+    offline: bool = false,
+};
 
 pub const AcoustIdUse = library_pass.matching.AcoustIdUse;
 pub const BusyService = library_pass.matching.BusyService;
@@ -402,6 +440,11 @@ pub const OrcaRuntime = struct {
     acoustid_client_key: ?job_worker.OwnedAcoustIdKey = null,
     coverartarchive_server: providers.url.OwnedServer = .fixed(providers.coverartarchive.default_server),
     lrclib_server: providers.url.OwnedServer = .fixed(providers.lrclib.default_server),
+    wikidata_server: providers.url.OwnedServer = .fixed(providers.wikidata.default_server),
+    wikimedia_commons_server: providers.url.OwnedServer = .fixed(providers.wikimedia_commons.default_server),
+    /// Null asks each language's own Wikipedia.
+    wikipedia_server: ?providers.url.OwnedServer = null,
+    listenbrainz_labs_server: providers.url.OwnedServer = .fixed(providers.listenbrainz_labs.default_server),
     /// One per runtime, created with the first listen worker and deinitialized
     /// after the last is joined. `Threaded.init` installs SIGIO and SIGPIPE
     /// handlers and `deinit` restores what it found, so a second instance torn
@@ -555,6 +598,7 @@ pub const OrcaRuntime = struct {
             const object_value = if (slot.value) |*value| value else continue;
             const opener = object_value.opener orelse continue;
             if (!opener.library.eql(library)) continue;
+            runtime_queue.forgetAudibleEntry(self, object_value);
             if (object_value.engine) |engine| {
                 engine.quiesce();
                 defer engine.release();
@@ -639,12 +683,12 @@ pub const OrcaRuntime = struct {
     }
 
     /// The browse listing: a bounded page of Tracks in a caller-named order,
-    /// optionally scoped to one Artist or one Release, or to loved Tracks.
+    /// scoped by every filter `page_query` sets.
     ///
-    /// A full-text `query` and a relational filter are alternatives, not a
-    /// combination: FTS5 orders by relevance, which no sort key or `tracks.id`
-    /// tiebreaker can reconcile with. Asking for both is a caller bug rather
-    /// than a silently-ignored argument.
+    /// A full-text `query` keeps those filters but orders the matches by
+    /// relevance: FTS5 ranks, and no sort key or `tracks.id` tiebreaker can be
+    /// reconciled with a rank, so `page_query.sort` and `direction` do not
+    /// apply to a search.
     pub fn libraryTrackQuery(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -653,9 +697,20 @@ pub const OrcaRuntime = struct {
     ) !database.TrackPage {
         const tracks = &(try libraryDatabase(self, library)).tracks;
         if (text_query.len == 0) return tracks.page(self.allocator, page_query);
-        if (page_query.artist_id != null or page_query.release_id != null or page_query.loved_only)
-            return error.SearchDoesNotFilter;
-        return tracks.search(self.allocator, text_query, page_query.limit, page_query.offset);
+        return tracks.search(self.allocator, text_query, page_query);
+    }
+
+    /// The Artists, Releases, Tracks, Playlists and Genres where every word of
+    /// `text` begins a word of the name or `SearchHit.subtitle`, ignoring case
+    /// and diacritics, up to each kind's cap in `limits`. Text with no word
+    /// gives no hits.
+    pub fn librarySearch(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        text: []const u8,
+        limits: database.SearchLimits,
+    ) !database.SearchResults {
+        return (try libraryDatabase(self, library)).search.find(self.allocator, text, limits);
     }
 
     pub fn libraryTrackMatchCount(
@@ -704,6 +759,16 @@ pub const OrcaRuntime = struct {
         artist_id: i64,
     ) !?database.ArtistSummary {
         return (try libraryDatabase(self, library)).artists.byId(self.allocator, artist_id);
+    }
+
+    /// The Artist's release, track and appearance counts and summed
+    /// duration, or null for an unknown Artist.
+    pub fn libraryArtistTotals(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        artist_id: i64,
+    ) !?database.ArtistTotals {
+        return (try libraryDatabase(self, library)).artists.totals(artist_id);
     }
 
     pub fn libraryReleaseCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -890,6 +955,34 @@ pub const OrcaRuntime = struct {
         return runtime_listens.setLrclibServer(self, base_url);
     }
 
+    /// Points artist info fetches started afterwards at another Wikidata,
+    /// under the same rule as `setListenBrainzServer`.
+    pub fn setWikidataServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+        return runtime_listens.setWikidataServer(self, base_url);
+    }
+
+    /// Points artist info fetches started afterwards at another Wikimedia
+    /// Commons API, under the same rule as `setListenBrainzServer`. Its
+    /// images come from `upload.wikimedia.org`, or from a loopback server's
+    /// own host.
+    pub fn setWikimediaCommonsServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+        return runtime_listens.setWikimediaCommonsServer(self, base_url);
+    }
+
+    /// Points artist info fetches started afterwards at one server for every
+    /// Wikipedia language, under the same rule as `setListenBrainzServer`.
+    /// Null asks `https://{language}.wikipedia.org`.
+    pub fn setWikipediaServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+        return runtime_listens.setWikipediaServer(self, base_url);
+    }
+
+    /// Points the related artists of artist info fetches started afterwards
+    /// at another ListenBrainz Labs API, under the same rule as
+    /// `setListenBrainzServer`.
+    pub fn setListenBrainzLabsServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+        return runtime_listens.setListenBrainzLabsServer(self, base_url);
+    }
+
     /// Sends this Library's listens and feedback to ListenBrainz, or stops
     /// sending them. Listens are recorded locally either way; one recorded
     /// while this is off is never sent later. At most one Library per runtime
@@ -1047,8 +1140,182 @@ pub const OrcaRuntime = struct {
         return runtime_playlists.librarySetReleaseLove(self, library, release_ids, loved);
     }
 
+    /// Loves or clears Artists. Artist love is kept in the Library only: it
+    /// is never queued for ListenBrainz.
+    pub fn librarySetArtistLove(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        artist_ids: []const i64,
+        loved: bool,
+    ) !database.ArtistLoveChange {
+        return runtime_artist_info.librarySetArtistLove(self, library, artist_ids, loved);
+    }
+
+    pub fn libraryArtistLoved(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !bool {
+        return runtime_artist_info.libraryArtistLoved(self, library, artist_id);
+    }
+
+    /// What `startArtistInfoFetch` last kept for an Artist, without the photo
+    /// bytes; null when nothing was ever fetched. The caller frees it with
+    /// `deinit`.
+    pub fn libraryArtistInfo(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !?database.ArtistInfo {
+        return runtime_artist_info.libraryArtistInfo(self, library, artist_id);
+    }
+
+    /// The Artist's kept photo, local or from Wikimedia Commons, or null.
+    /// The caller frees it with `deinit`.
+    pub fn libraryArtistPhoto(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !?metadata.EmbeddedImage {
+        return runtime_artist_info.libraryArtistPhoto(self, library, artist_id);
+    }
+
+    /// The Artist's kept links, by kind and then URL. The caller frees them
+    /// with `deinit`.
+    pub fn libraryArtistLinks(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !database.ArtistLinks {
+        return runtime_artist_info.libraryArtistLinks(self, library, artist_id);
+    }
+
+    /// The Artist's related artists from ListenBrainz Labs, most similar
+    /// first, at most `database.related_artists_max`, each with the Library
+    /// Artist it names when one exists. The caller frees them with `deinit`.
+    pub fn libraryRelatedArtists(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64) !database.RelatedArtists {
+        return runtime_artist_info.libraryRelatedArtists(self, library, artist_id);
+    }
+
+    /// The photo `startArtistInfoFetch` kept for a related artist outside
+    /// the Library, by MusicBrainz artist ID compared without case; null when
+    /// none is kept or it was found to have none. Reads only the Library.
+    /// The caller frees it with `deinit`.
+    pub fn libraryRelatedArtistPhoto(self: *OrcaRuntime, library: LibraryHandle, musicbrainz_artist_id: []const u8) !?metadata.EmbeddedImage {
+        return runtime_artist_info.libraryRelatedArtistPhoto(self, library, musicbrainz_artist_id);
+    }
+
+    /// Where the photo `libraryRelatedArtistPhoto` returns came from and the
+    /// credit it needs: its Commons page, licence, licence URL and author.
+    /// Null when no photo is kept. The caller frees it with `deinit`.
+    pub fn libraryRelatedArtistPhotoInfo(self: *OrcaRuntime, library: LibraryHandle, musicbrainz_artist_id: []const u8) !?database.RelatedArtistPhotoInfo {
+        return runtime_artist_info.libraryRelatedArtistPhotoInfo(self, library, musicbrainz_artist_id);
+    }
+
+    /// What `startReleaseInfoFetch` last kept for a Release; null when
+    /// nothing was ever fetched. The caller frees it with `deinit`.
+    pub fn libraryReleaseInfo(self: *OrcaRuntime, library: LibraryHandle, release_id: i64) !?database.ReleaseInfo {
+        return runtime_artist_info.libraryReleaseInfo(self, library, release_id);
+    }
+
+    /// Lets artist and release info fetches fill genres from MusicBrainz for
+    /// Tracks with none, or stops them. Kept in the Library.
+    pub fn setGenreFill(self: *OrcaRuntime, library: LibraryHandle, fill: GenreFill) !void {
+        return runtime_artist_info.setGenreFill(self, library, fill);
+    }
+
+    pub fn libraryGenreFill(self: *OrcaRuntime, library: LibraryHandle) !GenreFill {
+        return runtime_artist_info.libraryGenreFill(self, library);
+    }
+
+    /// Genres that some Track carries, with their counts.
+    pub fn libraryGenrePage(self: *OrcaRuntime, library: LibraryHandle, query: database.GenreQuery) !database.GenrePage {
+        return runtime_genres.libraryGenrePage(self, library, query);
+    }
+
+    pub fn libraryGenreCount(self: *OrcaRuntime, library: LibraryHandle, filter: []const u8) !u64 {
+        return runtime_genres.libraryGenreCount(self, library, filter);
+    }
+
+    /// Null when no Track carries the genre.
+    pub fn libraryGenre(self: *OrcaRuntime, library: LibraryHandle, genre_id: i64) !?database.GenreSummary {
+        return runtime_genres.libraryGenre(self, library, genre_id);
+    }
+
+    pub fn libraryTrackGenres(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !database.GenreNames {
+        return runtime_genres.libraryTrackGenres(self, library, track_id);
+    }
+
+    pub fn libraryReleaseGenres(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        release_id: i64,
+        limit: u32,
+    ) !database.GenreCounts {
+        return runtime_genres.libraryReleaseGenres(self, library, release_id, limit);
+    }
+
+    pub fn libraryArtistGenres(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        artist_id: i64,
+        limit: u32,
+    ) !database.GenreCounts {
+        return runtime_genres.libraryArtistGenres(self, library, artist_id, limit);
+    }
+
+    /// Gives each Track exactly `names` as the user's genres, which outrank
+    /// its file's on every later scan. Empty `names` restores the file's.
+    /// Kept in the library until `planTagWrite` writes them into the files.
+    pub fn librarySetTrackGenres(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+        names: []const []const u8,
+    ) !void {
+        return runtime_genres.librarySetTrackGenres(self, library, track_ids, names);
+    }
+
+    /// The genre's most played Releases that have a cover, for a cover mosaic.
+    pub fn libraryGenreArtwork(self: *OrcaRuntime, library: LibraryHandle, genre_id: i64, limit: u32) !database.ReleaseIds {
+        return runtime_genres.libraryGenreArtwork(self, library, genre_id, limit);
+    }
+
     pub fn libraryPlaylists(self: *OrcaRuntime, library: LibraryHandle, limit: u32, offset: u32) !PlaylistPage {
         return runtime_playlists.libraryPlaylists(self, library, limit, offset);
+    }
+
+    /// A page of playlists filtered and sorted as `query` asks. A smart
+    /// playlist's counts, length and genres are its rules evaluated now.
+    pub fn libraryPlaylistPage(self: *OrcaRuntime, library: LibraryHandle, query: PlaylistQuery) !PlaylistPage {
+        return runtime_playlists.libraryPlaylistPage(self, library, query);
+    }
+
+    /// How many playlists `query` selects, ignoring its sort and page.
+    pub fn libraryPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, query: PlaylistQuery) !u64 {
+        return runtime_playlists.libraryPlaylistCount(self, library, query);
+    }
+
+    pub fn libraryPlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64) !PlaylistSummary {
+        return runtime_playlists.libraryPlaylist(self, library, playlist_id);
+    }
+
+    /// Changes a playlist's description, pin, love or tags; the library
+    /// keeps them and no file is written.
+    pub fn libraryUpdatePlaylist(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64, change: PlaylistUpdate) !void {
+        return runtime_playlists.libraryUpdatePlaylist(self, library, playlist_id, change);
+    }
+
+    /// Creates a playlist whose Tracks are chosen by `rules_json`, the
+    /// format `docs/api.md` describes. Its entries cannot be edited.
+    pub fn libraryCreateSmartPlaylist(self: *OrcaRuntime, library: LibraryHandle, name: []const u8, rules_json: []const u8) !i64 {
+        return runtime_playlists.libraryCreateSmartPlaylist(self, library, name, rules_json);
+    }
+
+    pub fn librarySetSmartPlaylistRules(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64, rules_json: []const u8) !void {
+        return runtime_playlists.librarySetSmartPlaylistRules(self, library, playlist_id, rules_json);
+    }
+
+    /// A smart playlist's rules as stored, owned by the runtime's allocator;
+    /// null for a manual playlist.
+    pub fn librarySmartPlaylistRules(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64) !?[]u8 {
+        return runtime_playlists.librarySmartPlaylistRules(self, library, playlist_id);
+    }
+
+    /// A playlist's tags in the order they were given, owned by the
+    /// runtime's allocator.
+    pub fn libraryPlaylistTags(self: *OrcaRuntime, library: LibraryHandle, playlist_id: i64) ![][]u8 {
+        return runtime_playlists.libraryPlaylistTags(self, library, playlist_id);
+    }
+
+    /// How many Tracks `rules_json` matches now, up to its limit, without
+    /// saving it.
+    pub fn librarySmartPlaylistCount(self: *OrcaRuntime, library: LibraryHandle, rules_json: []const u8) !u64 {
+        return runtime_playlists.librarySmartPlaylistCount(self, library, rules_json);
     }
 
     pub fn libraryCreatePlaylist(self: *OrcaRuntime, library: LibraryHandle, name: []const u8) !i64 {
@@ -1140,6 +1407,18 @@ pub const OrcaRuntime = struct {
     /// How often the Track's file has been heard, and when last.
     pub fn libraryTrackPlayStats(self: *OrcaRuntime, library: LibraryHandle, track_id: i64) !PlayStats {
         return runtime_listens.libraryTrackPlayStats(self, library, track_id);
+    }
+
+    /// The Library's counts and sizes, and when it was last scanned and
+    /// analysed.
+    pub fn libraryStats(self: *OrcaRuntime, library: LibraryHandle) !database.LibraryStats {
+        return (try libraryDatabase(self, library)).stats.stats();
+    }
+
+    /// The services Orca takes data from, in `ProviderSourceId` order.
+    pub fn providerSources(self: *const OrcaRuntime) []const provider_sources.ProviderSource {
+        _ = self;
+        return provider_sources.provider_sources;
     }
 
     pub fn libraryHealthIssueCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
@@ -1511,6 +1790,17 @@ pub const OrcaRuntime = struct {
         return runtime_queue.playerQueueRemove(self, player, position);
     }
 
+    /// Moves the queue entry at playback position `from` so that it plays at
+    /// position `to`, both in playback order. Under shuffle only the shuffled
+    /// order changes: turning shuffle off afterwards restores list order. The
+    /// entries `playerQueueRemove` refuses cannot move, and nothing can land
+    /// between the entry playing and the one the engine has already lined up;
+    /// both are refused with `error.QueueEntryInUse`. Moving `from` onto
+    /// itself does nothing.
+    pub fn playerQueueMove(self: *OrcaRuntime, player: PlayerHandle, from: u32, to: u32) !void {
+        return runtime_queue.playerQueueMove(self, player, from, to);
+    }
+
     /// A user skip is a **hard** switch: the epoch bump makes the callback
     /// discard everything already prepared, so it is immediate rather than
     /// waiting for the current track to drain. Returns false at the end of a
@@ -1567,6 +1857,44 @@ pub const OrcaRuntime = struct {
         return runtime_queue.playerNowPlaying(self, player);
     }
 
+    /// The entries this Player stopped playing, newest first, from `offset`.
+    /// Held in memory only: a new runtime starts with none.
+    pub fn playerQueueHistory(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        offset: u32,
+        output: []QueueHistoryEntry,
+    ) !usize {
+        return runtime_queue.playerQueueHistory(self, player, offset, output);
+    }
+
+    /// `playerQueueHistory` as the rows a host displays, newest first. An
+    /// entry whose Library is closed or whose Track is gone is left out.
+    pub fn playerQueueHistoryTracks(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        allocator: std.mem.Allocator,
+        offset: u32,
+        limit: u32,
+    ) !database.TrackPage {
+        return runtime_queue.playerQueueHistoryTracks(self, player, allocator, offset, limit);
+    }
+
+    pub fn playerClearQueueHistory(self: *OrcaRuntime, player: PlayerHandle) !void {
+        return runtime_queue.playerClearQueueHistory(self, player);
+    }
+
+    /// Creates a playlist named `name` holding the current entry and every
+    /// entry after it, in playback order, and returns its id.
+    pub fn playerSaveQueueAsPlaylist(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        name: []const u8,
+    ) !i64 {
+        return runtime_queue.playerSaveQueueAsPlaylist(self, player, library, name);
+    }
+
     /// Reads engine-thread counters, so it stops the engine for the duration.
     /// Called after a run, never in a UI poll loop.
     pub fn playerQueueStats(self: *OrcaRuntime, player: PlayerHandle) !QueueStats {
@@ -1615,6 +1943,34 @@ pub const OrcaRuntime = struct {
         offset: u32,
     ) !database.repository.LibraryRootPage {
         return runtime_roots.libraryRootPage(self, library, limit, offset);
+    }
+
+    /// One page of a folder below library root `root_id`: subfolders with
+    /// recursive totals, then files with their Tracks. `relative_path` is
+    /// empty for the root itself; missing locations are left out.
+    pub fn libraryFolderPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        root_id: i64,
+        relative_path: []const u8,
+        limit: u32,
+        offset: u32,
+    ) !database.repository.FolderPage {
+        return runtime_roots.libraryFolderPage(self, library, root_id, relative_path, limit, offset);
+    }
+
+    /// `playerPlayTracks` with every Track below the folder, in path order,
+    /// at most `max_playlist_entries`, after setting shuffle to `shuffle`.
+    pub fn playerPlayFolder(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        library: LibraryHandle,
+        io: std.Io,
+        root_id: i64,
+        relative_path: []const u8,
+        shuffle: bool,
+    ) !void {
+        return runtime_roots.playerPlayFolder(self, player, library, io, root_id, relative_path, shuffle);
     }
 
     pub fn libraryTrackSummary(
@@ -1701,6 +2057,15 @@ pub const OrcaRuntime = struct {
     /// Drops a pending plan without writing anything.
     pub fn discardTagWrite(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64) !void {
         return runtime_roots.discardTagWrite(self, library, plan_id);
+    }
+
+    /// The genres a pending plan writes into one of its files, as its
+    /// `TagWritePlan` showed them, or null when the plan leaves the file's
+    /// genres alone or does not write the file. Borrowed from the plan until
+    /// it is started or discarded; a Zig host reads `TagWriteFile.genres`
+    /// instead.
+    pub fn tagWriteGenres(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64, file_id: i64) !?TagWriteGenres {
+        return runtime_roots.tagWriteGenres(self, library, plan_id, file_id);
     }
 
     /// Restores the files a tag write changed, on the caller's thread, and
@@ -1864,6 +2229,59 @@ pub const OrcaRuntime = struct {
     /// who frees them with `deinit`; a second call returns null.
     pub fn jobTakeLyrics(self: *OrcaRuntime, job_handle: JobHandle) !?Lyrics {
         return runtime_jobs.jobTakeLyrics(self, job_handle);
+    }
+
+    /// Fetches an Artist's photo, biography, years active and links on a job
+    /// worker and keeps them in the Library: an image in the Artist's folder,
+    /// else the Wikimedia Commons image MusicBrainz or Wikidata names, with
+    /// its licence and credit; the lead of the Artist's Wikipedia article in
+    /// `options.language`, else in English; and MusicBrainz's years and
+    /// links. Info fetched for the same MusicBrainz artist ID less than 30
+    /// days ago is kept without a request unless `options.force`.
+    /// `options.offline` makes no request and uses only answers already
+    /// cached. Needs `setClientIdentity` (`error.ClientIdentityRequired`);
+    /// fails with `error.UnknownArtist` or `error.InvalidLanguage` before
+    /// starting. `jobArtistInfoOutcome` reports what the job came to.
+    pub fn startArtistInfoFetch(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64, options: ArtistInfoOptions) !JobHandle {
+        return runtime_jobs.startArtistInfoFetch(self, library, artist_id, options);
+    }
+
+    /// An artist info job's outcome once it has finished; `not_requested`
+    /// while it runs. Fails with `error.NotAnArtistInfoJob` for another kind
+    /// of job.
+    pub fn jobArtistInfoOutcome(self: *OrcaRuntime, job_handle: JobHandle) !ArtistInfoOutcome {
+        return runtime_jobs.jobArtistInfoOutcome(self, job_handle);
+    }
+
+    /// Fetches a Release's description on a job worker and keeps it in the
+    /// Library: MusicBrainz names the release group, whose Wikidata item, or
+    /// failing that its Wikipedia link, names the article whose lead in
+    /// `options.language`, else in English, is kept. Unless `setGenreFill`
+    /// turned it off, the release group's MusicBrainz genres go on the
+    /// Release's Tracks with no genre from a file or an edit. Info fetched
+    /// for the same release ID less than 30 days ago is kept without a
+    /// request unless `options.force`. Needs `setClientIdentity`
+    /// (`error.ClientIdentityRequired`); fails with `error.UnknownRelease`
+    /// or `error.InvalidLanguage` before starting. `jobReleaseInfoOutcome`
+    /// reports what the job came to.
+    pub fn startReleaseInfoFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, options: ReleaseInfoOptions) !JobHandle {
+        return runtime_jobs.startReleaseInfoFetch(self, library, release_id, options);
+    }
+
+    /// Fills genres from MusicBrainz, whatever `setGenreFill` says, for at
+    /// most `options.limit` Releases with a MusicBrainz release ID and a
+    /// Track with no genre, as a release info job that keeps no
+    /// description. The job's completed units count the Releases asked
+    /// about. Needs `setClientIdentity`; fails with `error.InvalidLimit`.
+    pub fn startGenreFill(self: *OrcaRuntime, library: LibraryHandle, options: GenreFillOptions) !JobHandle {
+        return runtime_jobs.startGenreFill(self, library, options);
+    }
+
+    /// A release info job's outcome once it has finished; `not_requested`
+    /// while it runs. Fails with `error.NotAReleaseInfoJob` for another
+    /// kind of job.
+    pub fn jobReleaseInfoOutcome(self: *OrcaRuntime, job_handle: JobHandle) !ReleaseInfoOutcome {
+        return runtime_jobs.jobReleaseInfoOutcome(self, job_handle);
     }
 
     /// Fingerprints every file whose recording ID came from an accepted match
@@ -2081,6 +2499,7 @@ pub const OrcaRuntime = struct {
     /// Turns the ten-band equalizer on with `equalizer`, or off with null. The
     /// engine is stopped while the settings are written, so it never reads a
     /// half-written equalizer; it rebuilds its filters on its next pass.
+    /// Turning it on turns the parametric equalizer off.
     pub fn playerSetEqualizer(
         self: *OrcaRuntime,
         player: PlayerHandle,
@@ -2091,6 +2510,23 @@ pub const OrcaRuntime = struct {
 
     pub fn playerEqualizer(self: *OrcaRuntime, player: PlayerHandle) !?audio.dsp.Equalizer {
         return runtime_status.playerEqualizer(self, player);
+    }
+
+    /// Turns the parametric equalizer on with `equalizer`, or off with null,
+    /// under the same stop as `playerSetEqualizer`. Turning it on turns the
+    /// ten-band equalizer off, and turning that on turns this off; null turns
+    /// off only this one. Out-of-range or non-finite values are refused and
+    /// the last setting kept.
+    pub fn playerSetParametricEqualizer(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        equalizer: ?audio.dsp.ParametricEqualizer,
+    ) !void {
+        return runtime_status.playerSetParametricEqualizer(self, player, equalizer);
+    }
+
+    pub fn playerParametricEqualizer(self: *OrcaRuntime, player: PlayerHandle) !?audio.dsp.ParametricEqualizer {
+        return runtime_status.playerParametricEqualizer(self, player);
     }
 
     /// Turns stereo crossfeed on with an `amount` in [0, 1], or off with null.
@@ -2206,8 +2642,8 @@ pub const OrcaRuntime = struct {
 
     /// Executes at most one command on the runtime's serialized logical control
     /// lane. Returns false when there is no work or event backpressure applies.
-    /// Each call also samples bound Players for listens, at most once per
-    /// `listen_sample_interval_ms`.
+    /// Each call also samples Players for queue history and bound Players
+    /// for listens, at most once per `listen_sample_interval_ms`.
     pub fn processNextCommand(self: *OrcaRuntime) bool {
         if (self.state.load(.acquire) != .running) return false;
         self.host_signal.clear();

@@ -1,5 +1,6 @@
 const std = @import("std");
 const audio = @import("../audio/root.zig");
+const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
 const job = @import("job.zig");
@@ -12,6 +13,7 @@ const work = @import("work.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
 const runtime_listens = @import("runtime_listens.zig");
 const runtime_module = @import("runtime.zig");
+const runtime_queue = @import("runtime_queue.zig");
 const runtime_tests = @import("runtime_tests.zig");
 
 const AcoustIdUse = runtime_module.AcoustIdUse;
@@ -141,8 +143,11 @@ const ListenRig = struct {
     fn openLibrary(self: *ListenRig, uri: [:0]const u8) !struct { library: LibraryHandle, track_id: i64 } {
         const library = try self.runtime.openLibrary(std.testing.io, uri);
         const library_database = try libraryDatabase(&self.runtime, library);
+        try library_database.database.exec("INSERT INTO recordings(id, title) VALUES (1, 'Northern Sky');");
         const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+        try library_database.database.exec("UPDATE files SET recording_id = 1;");
         try library_database.tracks.upsertTracks(&.{.{
+            .recording_id = 1,
             .title = "Northern Sky",
             .artist = "Nick Drake",
             .album = "Bryter Layter",
@@ -157,6 +162,7 @@ const ListenRig = struct {
     fn startPlaying(self: *ListenRig, player: PlayerHandle, library: LibraryHandle, track_id: i64, serial: u32) !void {
         const object_value = try self.runtime.players.get(player);
         try object_value.queue.replace(&.{.{ .library = library, .track_id = track_id }}, 0);
+        object_value.queue.noteEntrySerial(serial, 0);
         object_value.player.published_sample_rate.store(1000, .release);
         object_value.player.published_frame_count.store(track_duration_ms, .release);
         object_value.player.audible_entry_serial.store(serial, .release);
@@ -290,6 +296,582 @@ test "a play heard past half its length records one listen, and without scrobbli
     try std.testing.expect(!status.enabled);
     try std.testing.expectEqual(@as(u64, 1), status.recorded_total);
     try std.testing.expectEqual(@as(u64, 0), status.dropped);
+}
+
+test "queue history records each entry that stops playing and never records a listen of its own" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-queue-history?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    const object_value = try rig.runtime.players.get(player);
+
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try rig.play(player, 10_000);
+    const first_ended_s = @divFloor(rig.clock.wallNow(), 1000);
+    object_value.queue.noteEntrySerial(8, 0);
+    object_value.player.audible_entry_serial.store(8, .release);
+    object_value.player.position_frames.store(0, .release);
+    try rig.play(player, 100);
+
+    var entries: [4]runtime_module.QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try rig.runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[0].reason);
+    try std.testing.expectEqual(fixture.track_id, entries[0].track.track_id);
+    try std.testing.expectEqual(first_ended_s * std.time.ms_per_s, entries[0].ended_at_ms);
+    try rig.awaitWorkerPasses(3);
+    try std.testing.expectEqual(@as(u64, 0), try rig.runtime.libraryListensRecorded(fixture.library));
+
+    try rig.play(player, 100_000);
+    object_value.player.drained.store(true, .release);
+    try rig.play(player, 200);
+    _ = try rig.awaitPlayCount(fixture.library, fixture.track_id, 1);
+    try rig.play(player, 1_000);
+    try rig.awaitWorkerPasses(3);
+
+    try std.testing.expectEqual(@as(usize, 2), try rig.runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[0].reason);
+    try std.testing.expect(entries[0].ended_at_ms > entries[1].ended_at_ms);
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryListensRecorded(fixture.library));
+    try std.testing.expectEqual(@as(u64, 1), (try rig.runtime.libraryTrackPlayStats(fixture.library, fixture.track_id)).play_count);
+
+    try rig.runtime.playerClearQueueHistory(player);
+    try std.testing.expectEqual(@as(usize, 0), try rig.runtime.playerQueueHistory(player, 0, &entries));
+}
+
+test "queue history names the Track each serial played while the cursor lags, and records nothing for an entry no sample saw" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const player = try rig.runtime.createPlayer();
+    const object_value = try rig.runtime.players.get(player);
+    const library: LibraryHandle = .{ .index = 0, .generation = 1 };
+    try object_value.queue.replace(&.{
+        .{ .library = library, .track_id = 1 },
+        .{ .library = library, .track_id = 2 },
+        .{ .library = library, .track_id = 3 },
+    }, 0);
+    object_value.queue.noteEntrySerial(7, 0);
+    object_value.queue.noteEntrySerial(8, 1);
+    object_value.queue.noteEntrySerial(9, 2);
+    object_value.player.audible_entry_serial.store(7, .release);
+    object_value.player.state.store(.playing, .release);
+    try rig.play(player, 200);
+
+    object_value.player.audible_entry_serial.store(8, .release);
+    object_value.player.audible_entry_serial.store(9, .release);
+    try rig.play(player, 200);
+    try std.testing.expectEqual(@as(i64, 1), object_value.queue.current().?.track_id);
+    object_value.player.drained.store(true, .release);
+    try rig.play(player, 200);
+
+    var entries: [4]runtime_module.QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 2), try rig.runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expectEqual(@as(i64, 3), entries[0].track.track_id);
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[0].reason);
+    try std.testing.expectEqual(@as(i64, 1), entries[1].track.track_id);
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[1].reason);
+}
+
+test "a listen sampled while the cursor lags the audible serial is credited to the Track that serial played" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const fixture = try rig.openLibrary("file:orca-listen-cursor-lag?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&rig.runtime, fixture.library);
+    const heard = try addMatchTrack(library_database, "Hazey Jane I", "Nick Drake", null);
+    try library_database.database.exec(
+        "INSERT INTO recordings(title) VALUES ('Hazey Jane I');" ++
+            "UPDATE files SET recording_id = (SELECT max(id) FROM recordings) " ++
+            "WHERE id = (SELECT preferred_file_id FROM tracks WHERE title = 'Hazey Jane I');" ++
+            "UPDATE tracks SET recording_id = (SELECT max(id) FROM recordings) WHERE title = 'Hazey Jane I';",
+    );
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, fixture.library, std.testing.io);
+    const object_value = try rig.runtime.players.get(player);
+    try rig.startPlaying(player, fixture.library, fixture.track_id, 7);
+    try object_value.queue.enqueue(&.{.{ .library = fixture.library, .track_id = heard }});
+    try rig.play(player, 1_000);
+
+    object_value.queue.noteEntrySerial(8, 1);
+    object_value.player.audible_entry_serial.store(8, .release);
+    object_value.player.position_frames.store(0, .release);
+    try rig.play(player, 100_000);
+
+    _ = try rig.awaitPlayCount(fixture.library, heard, 1);
+    try std.testing.expectEqual(@as(u32, 0), object_value.queue.cursorPosition());
+    try std.testing.expectEqual(@as(u64, 0), (try rig.runtime.libraryTrackPlayStats(fixture.library, fixture.track_id)).play_count);
+    try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryListensRecorded(fixture.library));
+}
+
+test "player status names the Track the audible serial played while the cursor lags, no Track for a serial the queue never held, and the cursor's entry once nothing is audible" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+    const library: LibraryHandle = .{ .index = 0, .generation = 1 };
+    try object_value.queue.replace(&.{
+        .{ .library = library, .track_id = 1 },
+        .{ .library = library, .track_id = 2 },
+    }, 0);
+    object_value.queue.noteEntrySerial(7, 0);
+    object_value.queue.noteEntrySerial(8, 1);
+    object_value.player.audible_entry_serial.store(8, .release);
+
+    const lagging = try runtime.playerStatus(player);
+    try std.testing.expectEqual(@as(u32, 0), object_value.queue.cursorPosition());
+    try std.testing.expectEqual(@as(?i64, 2), lagging.track_id);
+    try std.testing.expectEqual(@as(u32, 8), lagging.entry_serial);
+    try std.testing.expectEqual(@as(u32, 1), lagging.queue_index);
+    try std.testing.expectEqual(@as(i64, 2), (try runtime.playerNowPlaying(player)).?.track_id);
+
+    object_value.player.audible_entry_serial.store(9, .release);
+    try std.testing.expectEqual(@as(?i64, null), (try runtime.playerStatus(player)).track_id);
+    try std.testing.expectEqual(@as(?runtime_module.TrackRef, null), try runtime.playerNowPlaying(player));
+
+    object_value.player.audible_entry_serial.store(0, .release);
+    const stopped = try runtime.playerStatus(player);
+    try std.testing.expectEqual(@as(?i64, 1), stopped.track_id);
+    try std.testing.expectEqual(@as(u32, 0), stopped.queue_index);
+}
+
+fn eightTrackQueue(runtime: *OrcaRuntime, player: PlayerHandle, start: u32) !*audio.playback_queue.PlaybackQueue {
+    const library: LibraryHandle = .{ .index = 0, .generation = 1 };
+    var refs: [8]runtime_module.TrackRef = undefined;
+    for (&refs, 1..) |*ref, track_id| ref.* = .{ .library = library, .track_id = @intCast(track_id) };
+    const queue = (try runtime.players.get(player)).queue;
+    try queue.replace(&refs, start);
+    return queue;
+}
+
+test "turning shuffle off while a shuffled entry plays reports the Track that is playing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.shuffle_seed = 0xfeed;
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+    try runtime.playerSetShuffle(player, true);
+    const queue = try eightTrackQueue(&runtime, player, 0);
+    const position: u32 = 5;
+    try std.testing.expect(queue.entryIndex(position).? != position);
+    queue.seekTo(position);
+    queue.noteEntrySerial(7, position);
+    object_value.player.audible_entry_serial.store(7, .release);
+    const playing = queue.current().?.track_id;
+
+    try runtime.playerSetShuffle(player, false);
+    queue.observeRenderedSerial(7);
+    const status = try runtime.playerStatus(player);
+    try std.testing.expectEqual(@as(?i64, playing), status.track_id);
+    try std.testing.expectEqual(@as(u32, @intCast(playing - 1)), status.queue_index);
+    try std.testing.expectEqual(playing, queue.current().?.track_id);
+    try std.testing.expectEqual(playing, (try runtime.playerNowPlaying(player)).?.track_id);
+}
+
+test "turning shuffle on while an entry plays keeps reporting it, then reports the successor already decoding once that is heard" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.shuffle_seed = 0xfeed;
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+    const queue = try eightTrackQueue(&runtime, player, 3);
+    queue.noteEntrySerial(7, 3);
+    queue.advanceDecodeTo(4);
+    queue.noteEntrySerial(8, 4);
+    object_value.player.audible_entry_serial.store(7, .release);
+
+    try runtime.playerSetShuffle(player, true);
+    try std.testing.expect(queue.refAt(4).?.track_id != 5);
+    queue.observeRenderedSerial(7);
+    const shuffled = try runtime.playerStatus(player);
+    try std.testing.expectEqual(@as(?i64, 4), shuffled.track_id);
+    try std.testing.expectEqual(@as(u32, 3), shuffled.queue_index);
+
+    object_value.player.audible_entry_serial.store(8, .release);
+    queue.observeRenderedSerial(8);
+    try std.testing.expectEqual(@as(?i64, 5), (try runtime.playerStatus(player)).track_id);
+    try std.testing.expectEqual(@as(i64, 5), queue.current().?.track_id);
+}
+
+const SecondsDecoder = struct {
+    seconds: u64,
+
+    fn decoder(self: *SecondsDecoder) codec.decoder.Decoder {
+        return .{
+            .context = self,
+            .codec = codec.decoder.codec_id.pcm_float,
+            .vtable = &.{ .read_frames = read, .seek = seek, .deinit = release },
+            .format = .{
+                .sample_format = .float_32,
+                .channels = 1,
+                .sample_rate = 1_000,
+                .bits_per_sample = 32,
+                .bytes_per_frame = 4,
+            },
+            .frame_count = self.seconds * 1_000,
+        };
+    }
+
+    fn read(_: *anyopaque, _: []f32) !usize {
+        return 0;
+    }
+
+    fn seek(_: *anyopaque, _: u64) !void {}
+
+    fn release(_: *anyopaque) void {}
+};
+
+const HardLoader = struct {
+    object_value: *runtime_module.PlayerObject,
+    decoders: []SecondsDecoder,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *HardLoader) void {
+        for (self.decoders, 0..) |*decoder, position| audio.engine.loadQueueEntry(
+            self.object_value.player,
+            self.object_value.queue,
+            audio.source_session.SourceSession.init(decoder.decoder()),
+            @intCast(position),
+        );
+        self.done.store(true, .release);
+    }
+};
+
+test "a status read while entries hard-load never pairs a Track with a later entry's duration" {
+    const decoders = try std.testing.allocator.alloc(SecondsDecoder, audio.playback_queue.capacity);
+    defer std.testing.allocator.free(decoders);
+    const refs = try std.testing.allocator.alloc(runtime_module.TrackRef, decoders.len);
+    defer std.testing.allocator.free(refs);
+    for (decoders, refs, 1..) |*decoder, *ref, track_id| {
+        decoder.* = .{ .seconds = track_id };
+        ref.* = .{ .library = .{ .index = 0, .generation = 1 }, .track_id = @intCast(track_id) };
+    }
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+
+    var torn: u32 = 0;
+    for (0..4) |_| {
+        object_value.player.releaseSources();
+        try object_value.queue.replace(refs, 0);
+        var loader: HardLoader = .{ .object_value = object_value, .decoders = decoders };
+        const thread = try std.Thread.spawn(.{}, HardLoader.run, .{&loader});
+        while (!loader.done.load(.acquire)) {
+            const status = try runtime.playerStatus(player);
+            const track_id = status.track_id orelse continue;
+            if (status.duration_ms > @as(u64, @intCast(track_id)) * 1_000) torn += 1;
+        }
+        thread.join();
+    }
+    try std.testing.expectEqual(@as(u32, 0), torn);
+}
+
+fn expectQueueOrder(queue: *const audio.playback_queue.PlaybackQueue, expected: []const i64) !void {
+    try std.testing.expectEqual(expected.len, queue.len());
+    for (expected, 0..) |track_id, position|
+        try std.testing.expectEqual(track_id, queue.refAt(@intCast(position)).?.track_id);
+}
+
+test "the playing, decoding and pending entries refuse to move, and nothing lands between the playing entry and the one already lined up" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+    const queue = try eightTrackQueue(&runtime, player, 2);
+
+    try runtime.playerQueueMove(player, 2, 6);
+    try std.testing.expectEqual(@as(u32, 6), queue.cursorPosition());
+    try runtime.playerQueueMove(player, 6, 2);
+    try expectQueueOrder(queue, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    var decoders: [3]SecondsDecoder = .{ .{ .seconds = 3 }, .{ .seconds = 4 }, .{ .seconds = 5 } };
+    const engine = try runtime_queue.ensureEngine(&runtime, player);
+    engine.quiesce();
+    audio.engine.loadQueueEntry(object_value.player, queue, audio.source_session.SourceSession.init(decoders[0].decoder()), 2);
+    try object_value.player.primeNextSource(audio.source_session.SourceSession.init(decoders[1].decoder()));
+    queue.advanceDecodeTo(3);
+    const decoding_serial = object_value.player.sources.?.next_entry_serial;
+    queue.noteEntrySerial(decoding_serial, 3);
+    engine.pending_source = audio.source_session.SourceSession.init(decoders[2].decoder());
+    engine.pending_position = 4;
+    const playing_serial = object_value.player.audible_entry_serial.load(.acquire);
+    engine.release();
+
+    for ([_]u32{ 2, 3, 4 }) |from|
+        try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, from, 6));
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, 6, 3));
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, 6, 4));
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, 0, 3));
+    try expectQueueOrder(queue, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try runtime.playerQueueMove(player, 6, 2);
+    try runtime.playerQueueMove(player, 7, 6);
+    try runtime.playerQueueMove(player, 3, 3);
+    try expectQueueOrder(queue, &.{ 1, 2, 7, 3, 4, 5, 8, 6 });
+    try std.testing.expectEqual(@as(u32, 3), queue.cursorPosition());
+    try std.testing.expectEqual(@as(u32, 4), queue.decodePosition());
+    try std.testing.expectEqual(@as(?u32, 3), queue.positionForSerial(playing_serial));
+    try std.testing.expectEqual(@as(?u32, 4), queue.positionForSerial(decoding_serial));
+    engine.quiesce();
+    const pending_position = engine.pending_position;
+    engine.release();
+    try std.testing.expectEqual(@as(u32, 5), pending_position);
+    try std.testing.expectError(error.PositionOutOfRange, runtime.playerQueueMove(player, 8, 0));
+    try std.testing.expectError(error.PositionOutOfRange, runtime.playerQueueMove(player, 0, 8));
+
+    try runtime.playerSetRepeat(player, .all);
+    engine.quiesce();
+    engine.releasePending();
+    object_value.player.releaseSources();
+    _ = try eightTrackQueue(&runtime, player, 7);
+    audio.engine.loadQueueEntry(object_value.player, queue, audio.source_session.SourceSession.init(decoders[0].decoder()), 7);
+    try object_value.player.primeNextSource(audio.source_session.SourceSession.init(decoders[1].decoder()));
+    queue.advanceDecodeTo(0);
+    engine.release();
+
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, 3, 0));
+    try std.testing.expectError(error.QueueEntryInUse, runtime.playerQueueMove(player, 3, 7));
+    try runtime.playerQueueMove(player, 3, 1);
+    try expectQueueOrder(queue, &.{ 1, 4, 2, 3, 5, 6, 7, 8 });
+    try std.testing.expectEqual(@as(u32, 7), queue.cursorPosition());
+    try std.testing.expectEqual(@as(u32, 0), queue.decodePosition());
+}
+
+/// Opens each Track as silence `framesOf(track_id)` frames long, so the
+/// length of a loaded decoder names the Track it was opened for.
+const LengthOpener = struct {
+    allocator: std.mem.Allocator,
+
+    const Backing = struct {
+        allocator: std.mem.Allocator,
+        frames: u64,
+        position: u64 = 0,
+
+        fn decoder(self: *Backing) codec.decoder.Decoder {
+            return .{
+                .context = self,
+                .codec = codec.decoder.codec_id.pcm_float,
+                .vtable = &.{ .read_frames = read, .seek = seek, .deinit = finish },
+                .format = .{
+                    .sample_format = .float_32,
+                    .channels = 1,
+                    .sample_rate = 48_000,
+                    .bits_per_sample = 32,
+                    .bytes_per_frame = 4,
+                },
+                .frame_count = self.frames,
+            };
+        }
+
+        fn read(context: *anyopaque, output: []f32) !usize {
+            const self: *Backing = @ptrCast(@alignCast(context));
+            const frames = @min(output.len, self.frames - self.position);
+            @memset(output[0..frames], 0);
+            self.position += frames;
+            return frames;
+        }
+
+        fn seek(context: *anyopaque, frame: u64) !void {
+            const self: *Backing = @ptrCast(@alignCast(context));
+            self.position = frame;
+        }
+
+        fn finish(_: *anyopaque) void {}
+
+        fn release(context: *anyopaque) void {
+            const self: *Backing = @ptrCast(@alignCast(context));
+            self.allocator.destroy(self);
+        }
+    };
+
+    fn framesOf(track_id: i64) u64 {
+        return @as(u64, @intCast(track_id)) * 2_048;
+    }
+
+    fn opener(self: *LengthOpener) audio.playback_queue.TrackOpener {
+        return .{ .context = self, .open_fn = open };
+    }
+
+    fn open(context: *anyopaque, ref: audio.playback_queue.TrackRef) anyerror!audio.source_session.SourceSession {
+        const self: *LengthOpener = @ptrCast(@alignCast(context));
+        const backing = try self.allocator.create(Backing);
+        backing.* = .{ .allocator = self.allocator, .frames = framesOf(ref.track_id) };
+        return audio.source_session.SourceSession.initOwned(
+            backing.decoder(),
+            .{ .context = backing, .release = Backing.release },
+        );
+    }
+};
+
+/// Control lane, under `quiesce`. Frames in the decoder loaded under `serial`,
+/// while the Player still remembers it.
+fn framesLoadedFor(player: *const audio.player.Player, serial: u32) ?u64 {
+    if (player.sources) |*sources| {
+        if (sources.current_entry_serial == serial) return sources.current.decoder.frame_count;
+        if (sources.next) |*next| {
+            if (sources.next_entry_serial == serial) return next.decoder.frame_count;
+        }
+    }
+    for (player.entry_info) |record| {
+        if (record.serial == serial) return record.frame_count;
+    }
+    return null;
+}
+
+test "a host reading status while it moves queue entries never pairs a Track with another entry" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var lengths: LengthOpener = .{ .allocator = std.testing.allocator };
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const player = try runtime.createPlayer();
+    const object_value = try runtime.players.get(player);
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    _ = try eightTrackQueue(&runtime, player, 0);
+    try runtime.playerSetRepeat(player, .all);
+    const engine = try runtime_queue.ensureEngine(&runtime, player);
+    engine.quiesce();
+    engine.opener = lengths.opener();
+    engine.release();
+    try runtime.zoneRequestOutput(zone, 0);
+    try runtime.playPlayer(player);
+    var deadline: runtime_tests.TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const random = prng.random();
+    var samples: [256]f32 = undefined;
+    var moved: u32 = 0;
+    var checked: u32 = 0;
+    var mispaired: u32 = 0;
+    for (0..4_000) |_| {
+        stream.pump(&samples, samples.len);
+        const from = random.uintLessThan(u32, 8);
+        const to = random.uintLessThan(u32, 8);
+        if (runtime.playerQueueMove(player, from, to)) |_| {
+            if (from != to) moved += 1;
+        } else |err| if (err != error.QueueEntryInUse) return err;
+        const status = try runtime.playerStatus(player);
+        const track_id = status.track_id orelse continue;
+        if (status.entry_serial == 0) continue;
+        engine.quiesce();
+        const loaded = framesLoadedFor(object_value.player, status.entry_serial);
+        engine.release();
+        const frames = loaded orelse continue;
+        checked += 1;
+        if (frames != LengthOpener.framesOf(track_id)) mispaired += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 0), mispaired);
+    try std.testing.expect(moved >= 200);
+    try std.testing.expect(checked >= 2_000);
+}
+
+fn writeSilentWave(dir: std.Io.Dir, name: []const u8, frames: u32) !void {
+    const bytes = try std.testing.allocator.alloc(u8, 44 + frames * 2);
+    defer std.testing.allocator.free(bytes);
+    writeWaveHeader(bytes, 11_025, frames);
+    @memset(bytes[44..], 0);
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+}
+
+test "moved entries play in their new order and the queue history records them in that order" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-queue-move?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    var ids: [6]i64 = undefined;
+    for (&ids, 0..) |*id, index| {
+        var name_buffer: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "move-{d}.wav", .{index});
+        try writeSilentWave(temporary.dir, name, 22_050 + @as(u32, @intCast(index)) * 1_000);
+        id.* = try addAudioTrack(library_database, &temporary, name, name, "");
+    }
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.playerBindLibrary(player, library, std.testing.io);
+    try runtime.playerPlayTracksBound(player, library, &ids, 0);
+    try runtime.playerQueueMove(player, 4, 1);
+    try runtime.playerQueueMove(player, 5, 3);
+    try runtime.zoneRequestOutput(zone, 0);
+    var deadline: runtime_tests.TestDeadline = .init(5_000);
+    while (try runtime.zoneOutputState(zone) != .active and deadline.tick()) {}
+    const stream = backend.liveStream() orelse return error.OutputNeverOpened;
+
+    var history: [8]runtime_module.QueueHistoryEntry = undefined;
+    var heard: [8]i64 = undefined;
+    var heard_count: usize = 0;
+    var moved_into_played = false;
+    var samples: [256]f32 = undefined;
+    deadline = .init(20_000);
+    while (!try runtime.playerDrained(player)) {
+        if (!deadline.tick()) return error.QueueNeverPlayedOut;
+        stream.pump(&samples, samples.len);
+        _ = try runtime.playerQueueHistory(player, 0, &history);
+        const track_id = (try runtime.playerStatus(player)).track_id orelse continue;
+        if (heard_count > 0 and heard[heard_count - 1] == track_id) continue;
+        if (heard_count == heard.len) return error.TooManyTracksHeard;
+        heard[heard_count] = track_id;
+        heard_count += 1;
+        if (track_id == ids[4] and !moved_into_played) {
+            try runtime.playerQueueMove(player, 5, 0);
+            moved_into_played = true;
+        }
+    }
+
+    try std.testing.expectEqualSlices(i64, &.{ ids[0], ids[4], ids[1], ids[5], ids[2] }, heard[0..heard_count]);
+    var queued: [6]runtime_module.TrackRef = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try runtime.playerQueuePage(player, 0, &queued));
+    for (queued, [_]i64{ ids[3], ids[0], ids[4], ids[1], ids[5], ids[2] }) |ref, track_id|
+        try std.testing.expectEqual(track_id, ref.track_id);
+    try std.testing.expectEqual(@as(usize, 5), try runtime.playerQueueHistory(player, 0, &history));
+    for (history[0..5], [_]i64{ ids[2], ids[5], ids[1], ids[4], ids[0] }) |entry, track_id| {
+        try std.testing.expectEqual(track_id, entry.track.track_id);
+        try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entry.reason);
+    }
+}
+
+test "a Player whose Library closes mid-entry keeps its history and never records the entry cut off" {
+    var rig: ListenRig = undefined;
+    rig.init();
+    defer rig.runtime.deinit();
+    const first = try rig.openLibrary("file:orca-history-closed-first?mode=memory&cache=shared");
+    const player = try rig.runtime.createPlayer();
+    try rig.runtime.playerBindLibrary(player, first.library, std.testing.io);
+    const object_value = try rig.runtime.players.get(player);
+    try rig.startPlaying(player, first.library, first.track_id, 7);
+    try rig.play(player, 1_000);
+    object_value.queue.noteEntrySerial(8, 0);
+    object_value.player.audible_entry_serial.store(8, .release);
+    try rig.play(player, 1_000);
+
+    try rig.runtime.destroyLibrary(first.library);
+    try rig.play(player, 1_000);
+    var entries: [4]runtime_module.QueueHistoryEntry = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try rig.runtime.playerQueueHistory(player, 0, &entries));
+
+    const second = try rig.openLibrary("file:orca-history-closed-second?mode=memory&cache=shared");
+    try rig.runtime.playerBindLibrary(player, second.library, std.testing.io);
+    try rig.startPlaying(player, second.library, second.track_id, 9);
+    try rig.play(player, 1_000);
+    object_value.player.drained.store(true, .release);
+    try rig.play(player, 200);
+
+    try std.testing.expectEqual(@as(usize, 2), try rig.runtime.playerQueueHistory(player, 0, &entries));
+    try std.testing.expect(entries[0].track.library.eql(second.library));
+    try std.testing.expect(entries[1].track.library.eql(first.library));
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[0].reason);
+    try std.testing.expectEqual(runtime_module.QueueHistoryReason.finished, entries[1].reason);
 }
 
 test "a finished listen keeps the time heard until the track changed" {
@@ -788,10 +1370,10 @@ test "loving a Release leaves the feedback queued for ListenBrainz as it was and
     try std.testing.expectEqual(@as(usize, 1), loved.items.len);
     try std.testing.expectEqual(album, loved.items[0].id);
     try std.testing.expectEqual(@as(u64, 1), try rig.runtime.libraryReleaseCountMatching(fixture.library, .{ .loved_only = true }));
-    try std.testing.expectError(
-        error.SearchDoesNotFilter,
-        rig.runtime.libraryTrackQuery(fixture.library, "Northern", .{ .loved_only = true }),
-    );
+    var found = try rig.runtime.libraryTrackQuery(fixture.library, "Northern", .{ .loved_only = true });
+    defer found.deinit();
+    try std.testing.expectEqual(@as(usize, 1), found.items.len);
+    try std.testing.expectEqual(fixture.track_id, found.items[0].id);
 }
 
 test "love, dislike and love again while the love is being sent ends loved after at most two requests" {
@@ -1888,8 +2470,21 @@ pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     const rate = 11_025;
     const frames = 15 * rate;
     var bytes: [44 + frames * 2]u8 = undefined;
+    writeWaveHeader(&bytes, rate, frames);
+    for (0..frames) |frame| {
+        const time = @as(f32, @floatFromInt(frame)) / rate;
+        const wobble = frequency * (1 + 0.2 * @sin(2 * std.math.pi * 0.5 * time));
+        const sample: i16 = @intFromFloat(9000 * @sin(2 * std.math.pi * wobble * time));
+        std.mem.writeInt(i16, bytes[44 + frame * 2 ..][0..2], sample, .little);
+    }
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = &bytes });
+}
+
+/// A 16-bit mono PCM WAVE header for `frames` frames at `rate`, written over
+/// the first 44 of `bytes`.
+fn writeWaveHeader(bytes: []u8, rate: u32, frames: u32) void {
     @memcpy(bytes[0..4], "RIFF");
-    std.mem.writeInt(u32, bytes[4..8], bytes.len - 8, .little);
+    std.mem.writeInt(u32, bytes[4..8], 36 + frames * 2, .little);
     @memcpy(bytes[8..16], "WAVEfmt ");
     std.mem.writeInt(u32, bytes[16..20], 16, .little);
     std.mem.writeInt(u16, bytes[20..22], 1, .little);
@@ -1900,13 +2495,6 @@ pub fn writeToneWave(dir: std.Io.Dir, name: []const u8, frequency: f32) !void {
     std.mem.writeInt(u16, bytes[34..36], 16, .little);
     @memcpy(bytes[36..40], "data");
     std.mem.writeInt(u32, bytes[40..44], frames * 2, .little);
-    for (0..frames) |frame| {
-        const time = @as(f32, @floatFromInt(frame)) / rate;
-        const wobble = frequency * (1 + 0.2 * @sin(2 * std.math.pi * 0.5 * time));
-        const sample: i16 = @intFromFloat(9000 * @sin(2 * std.math.pi * wobble * time));
-        std.mem.writeInt(i16, bytes[44 + frame * 2 ..][0..2], sample, .little);
-    }
-    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = &bytes });
 }
 
 fn addAudioTrack(
@@ -4512,4 +5100,883 @@ test "a Track's own synced lyrics ask LRCLIB nothing, and its own plain lyrics g
     try std.testing.expectEqual(runtime_module.LyricsOutcome.cached, cached_synced.outcome);
     try std.testing.expectEqual(metadata.lyrics.Source.lrclib, cached_synced.lyrics.?.source);
     try std.testing.expectEqual(metadata.lyrics.Kind.synced, cached_synced.lyrics.?.kind);
+}
+
+const amine_mbid = "12398bf3-1b99-47b7-930c-f3956773f35a";
+const commons_thumbnail = "\x89PNG\r\n\x1a\nthumbnail";
+const related_thumbnail = "\x89PNG\r\n\x1a\nrelated";
+const saba_mbid = "d23f0824-128b-4f33-8c5c-7fd0a6a3a450";
+const saba_item = "Q9000001";
+const related_commons_body =
+    \\{"query":{"pages":{"1":{"pageid":1,"ns":6,"title":"File:Related.jpg","imageinfo":[{
+    \\"thumburl":"https://upload.wikimedia.org/related/thumb.png","url":"https://upload.wikimedia.org/related/full.png",
+    \\"descriptionurl":"https://commons.wikimedia.org/wiki/File:Related.jpg","mime":"image/png",
+    \\"extmetadata":{"LicenseShortName":{"value":"CC BY-SA 3.0"},
+    \\"LicenseUrl":{"value":"https://creativecommons.org/licenses/by-sa/3.0"},
+    \\"Artist":{"value":"<a href=\"https://commons.wikimedia.org/wiki/User:Related\">Related Photographer</a>"}}}]}}}}
+;
+const saba_entity =
+    \\{"entities":{"Q9000001":{"id":"Q9000001","claims":{"P18":[{"mainsnak":{"snaktype":"value","property":"P18",
+    \\"datavalue":{"value":"Related Saba.jpg","type":"string"}},"type":"statement","rank":"normal"}]},"sitelinks":{}}}}
+;
+
+const FakeArtistInfo = struct {
+    http: network.testing.ScriptedTransport = .{},
+    clock: network.testing.TestClock = .{ .wall_offset_ms = 1_800_000_000_000 },
+    musicbrainz: []u8 = &.{},
+    wikidata: []u8 = &.{},
+    commons: []u8 = &.{},
+    wikipedia: []u8 = &.{},
+    popularity: []u8 = &.{},
+    similar: []u8 = &.{},
+    release: []u8 = &.{},
+    release_group: []u8 = &.{},
+    musicbrainz_requests: std.atomic.Value(u32) = .init(0),
+    wikidata_requests: std.atomic.Value(u32) = .init(0),
+    commons_requests: std.atomic.Value(u32) = .init(0),
+    image_requests: std.atomic.Value(u32) = .init(0),
+    wikipedia_requests: std.atomic.Value(u32) = .init(0),
+    popularity_requests: std.atomic.Value(u32) = .init(0),
+    similar_requests: std.atomic.Value(u32) = .init(0),
+    release_requests: std.atomic.Value(u32) = .init(0),
+    release_group_requests: std.atomic.Value(u32) = .init(0),
+    release_wikidata_requests: std.atomic.Value(u32) = .init(0),
+    release_wikipedia_requests: std.atomic.Value(u32) = .init(0),
+    related_musicbrainz_requests: std.atomic.Value(u32) = .init(0),
+    related_wikidata_requests: std.atomic.Value(u32) = .init(0),
+    related_commons_requests: std.atomic.Value(u32) = .init(0),
+    related_image_requests: std.atomic.Value(u32) = .init(0),
+    /// A related artist whose MusicBrainz lookup answers 503.
+    related_unavailable: ?[]const u8 = null,
+    /// A related artist MusicBrainz names no image or Wikidata item for.
+    related_without_photo: ?[]const u8 = null,
+    related_body: [512]u8 = undefined,
+
+    fn init(self: *FakeArtistInfo) !void {
+        const dir = std.Io.Dir.cwd();
+        const limit: std.Io.Limit = .limited(256 * 1024);
+        self.musicbrainz = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-artist-lookup.json", std.testing.allocator, limit);
+        self.wikidata = try dir.readFileAlloc(std.testing.io, "fixtures/providers/wikidata-entity.json", std.testing.allocator, limit);
+        self.commons = try dir.readFileAlloc(std.testing.io, "fixtures/providers/wikimedia-commons-imageinfo.json", std.testing.allocator, limit);
+        self.wikipedia = try dir.readFileAlloc(std.testing.io, "fixtures/providers/wikipedia-summary.json", std.testing.allocator, limit);
+        self.popularity = try dir.readFileAlloc(std.testing.io, "fixtures/providers/listenbrainz-popularity.json", std.testing.allocator, limit);
+        self.similar = try dir.readFileAlloc(std.testing.io, "fixtures/providers/listenbrainz-labs-similar-artists.json", std.testing.allocator, limit);
+        self.release = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-release-lookup.json", std.testing.allocator, limit);
+        self.release_group = try dir.readFileAlloc(std.testing.io, "fixtures/providers/musicbrainz-release-group-lookup.json", std.testing.allocator, limit);
+    }
+
+    fn artistInfoRequests(self: *const FakeArtistInfo) u32 {
+        return self.requestCount() - self.popularity_requests.load(.monotonic) - self.similar_requests.load(.monotonic) -
+            self.relatedPhotoRequests();
+    }
+
+    fn relatedPhotoRequests(self: *const FakeArtistInfo) u32 {
+        return self.related_musicbrainz_requests.load(.monotonic) + self.related_wikidata_requests.load(.monotonic) +
+            self.related_commons_requests.load(.monotonic) + self.related_image_requests.load(.monotonic);
+    }
+
+    fn respondRelatedArtist(self: *FakeArtistInfo, mbid: []const u8) !network.testing.Reply {
+        _ = self.related_musicbrainz_requests.fetchAdd(1, .monotonic);
+        if (self.related_unavailable) |unavailable| if (std.mem.eql(u8, mbid, unavailable))
+            return .{ .respond = .{ .status = 503, .body = "{}" } };
+        const body = if (self.related_without_photo) |without| if (std.mem.eql(u8, mbid, without))
+            try std.fmt.bufPrint(&self.related_body, "{{\"id\":\"{s}\",\"relations\":[]}}", .{mbid})
+        else
+            null else null;
+        return .{ .respond = .{ .body = body orelse if (std.mem.eql(u8, mbid, saba_mbid))
+            try std.fmt.bufPrint(&self.related_body,
+                \\{{"id":"{s}","relations":[{{"type":"wikidata","target-type":"url","url":{{"resource":"https://www.wikidata.org/wiki/{s}"}}}}]}}
+            , .{ mbid, saba_item })
+        else
+            try std.fmt.bufPrint(&self.related_body,
+                \\{{"id":"{s}","relations":[{{"type":"image","target-type":"url","url":{{"resource":"https://commons.wikimedia.org/wiki/File:Related_{s}.jpg"}}}}]}}
+            , .{ mbid, mbid }) } };
+    }
+
+    fn hooks(self: *FakeArtistInfo) MatchingHooks {
+        self.http.clock = &self.clock;
+        self.http.responder = .{ .context = self, .respond_fn = respond };
+        return .{
+            .transport = self.http.transport(),
+            .clock = self.clock.clock(),
+            .wall_clock = self.clock.wallClock(),
+        };
+    }
+
+    fn deinit(self: *FakeArtistInfo) void {
+        for ([_][]u8{
+            self.musicbrainz, self.wikidata, self.commons,       self.wikipedia, self.popularity,
+            self.similar,     self.release,  self.release_group,
+        }) |body| std.testing.allocator.free(body);
+        self.http.deinit();
+    }
+
+    fn requestCount(self: *const FakeArtistInfo) u32 {
+        return self.http.requestCount();
+    }
+
+    fn respond(context: *anyopaque, exchange: network.testing.Exchange, _: ?network.testing.Reply) anyerror!network.testing.Reply {
+        const self: *FakeArtistInfo = @ptrCast(@alignCast(context));
+        const url = exchange.request.url;
+        const artist_prefix = "https://musicbrainz.org/ws/2/artist/";
+        if (std.mem.startsWith(u8, url, artist_prefix) and !std.mem.startsWith(u8, url, artist_prefix ++ amine_mbid) and
+            url.len >= artist_prefix.len + 36)
+            return self.respondRelatedArtist(url[artist_prefix.len..][0..36]);
+        const counter: *std.atomic.Value(u32), const body: []const u8 = if (std.mem.startsWith(u8, url, artist_prefix))
+            .{ &self.musicbrainz_requests, self.musicbrainz }
+        else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/release/"))
+            .{ &self.release_requests, self.release }
+        else if (std.mem.startsWith(u8, url, "https://musicbrainz.org/ws/2/release-group/"))
+            .{ &self.release_group_requests, self.release_group }
+        else if (std.mem.startsWith(u8, url, "https://api.listenbrainz.org/1/popularity/artist"))
+            .{ &self.popularity_requests, self.popularity }
+        else if (std.mem.startsWith(u8, url, "https://labs.api.listenbrainz.org/similar-artists/json?"))
+            .{ &self.similar_requests, self.similar }
+        else if (std.mem.startsWith(u8, url, "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=" ++ saba_item ++ "&"))
+            .{ &self.related_wikidata_requests, saba_entity }
+        else if (std.mem.startsWith(u8, url, "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=" ++ hot_space_item ++ "&"))
+            .{ &self.release_wikidata_requests, hot_space_entity }
+        else if (std.mem.startsWith(u8, url, "https://www.wikidata.org/w/api.php?action=wbgetentities"))
+            .{ &self.wikidata_requests, self.wikidata }
+        else if (std.mem.startsWith(u8, url, "https://en.wikipedia.org/api/rest_v1/page/summary/Hot_Space"))
+            .{ &self.release_wikipedia_requests, hot_space_summary }
+        else if (std.mem.startsWith(u8, url, "https://commons.wikimedia.org/w/api.php?action=query&titles=File%3ARelated"))
+            .{ &self.related_commons_requests, related_commons_body }
+        else if (std.mem.startsWith(u8, url, "https://commons.wikimedia.org/w/api.php?action=query"))
+            .{ &self.commons_requests, self.commons }
+        else if (std.mem.startsWith(u8, url, "https://upload.wikimedia.org/related/"))
+            .{ &self.related_image_requests, related_thumbnail }
+        else if (std.mem.startsWith(u8, url, "https://upload.wikimedia.org/"))
+            .{ &self.image_requests, commons_thumbnail }
+        else if (std.mem.startsWith(u8, url, "https://en.wikipedia.org/api/rest_v1/page/summary/"))
+            .{ &self.wikipedia_requests, self.wikipedia }
+        else
+            return .{ .respond = .{ .status = 404, .body = "{}" } };
+        _ = counter.fetchAdd(1, .monotonic);
+        return .{ .respond = .{ .body = body } };
+    }
+};
+
+const hot_space_item = "Q1193613";
+const hot_space_entity =
+    \\{"entities":{"Q1193613":{"id":"Q1193613","claims":{},"sitelinks":{"enwiki":{"site":"enwiki","title":"Hot Space","url":"https://en.wikipedia.org/wiki/Hot_Space"}}}}}
+;
+const hot_space_summary =
+    \\{"type":"standard","extract":"Hot Space is the tenth studio album by Queen.","content_urls":{"desktop":{"page":"https://en.wikipedia.org/wiki/Hot_Space"}}}
+;
+
+fn addAmine(library_database: *database.LibraryDatabase, root: []const u8, musicbrainz_artist_id: ?[]const u8) !i64 {
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, root);
+    return addArtistAlbum(library_database, root_id, root, "Aminé", "Good for You", musicbrainz_artist_id);
+}
+
+fn addArtistAlbum(
+    library_database: *database.LibraryDatabase,
+    root_id: i64,
+    root: []const u8,
+    artist: []const u8,
+    album: []const u8,
+    musicbrainz_artist_id: ?[]const u8,
+) !i64 {
+    const uri = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}/{s}/01.flac", .{ root, artist, album });
+    defer std.testing.allocator.free(uri);
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .root_id = root_id,
+        .uri = uri,
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "One",
+        .artist = artist,
+        .album = album,
+        .album_artist = artist,
+        .musicbrainz_album_artist_id = musicbrainz_artist_id,
+    } });
+    try projectAll(library_database);
+    var statement = try library_database.database.prepare("SELECT id FROM artists WHERE name = ?1;");
+    defer statement.deinit();
+    try statement.bindText(1, artist);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+fn runArtistInfo(runtime: *OrcaRuntime, library: LibraryHandle, artist_id: i64, options: runtime_module.ArtistInfoOptions) !runtime_module.ArtistInfoOutcome {
+    runtime.reapFinishedJobs();
+    const handle = try runtime.startArtistInfoFetch(library, artist_id, options);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, handle));
+    return runtime.jobArtistInfoOutcome(handle);
+}
+
+fn hasLink(links: database.ArtistLinks, kind: database.ArtistLinkKind, url: []const u8) bool {
+    for (links.items) |link| if (link.kind == kind and std.mem.eql(u8, link.url, url)) return true;
+    return false;
+}
+
+test "an Artist's photo, biography, years and links come from MusicBrainz, Wikidata, Commons and Wikipedia, and a second fetch asks nothing" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-fetched?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.startArtistInfoFetch(library, artist, .{}));
+    try runtime.setClientIdentity(network.testing.test_identity);
+    try std.testing.expectError(error.UnknownArtist, runtime.startArtistInfoFetch(library, artist + 1000, .{}));
+    try std.testing.expectError(error.InvalidLanguage, runtime.startArtistInfoFetch(library, artist, .{ .language = "en.evil.org/x" }));
+
+    const started_s = @divFloor(fake.clock.wallNow(), 1000);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.musicbrainz_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.wikidata_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.commons_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.image_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.wikipedia_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+    try std.testing.expectEqual(@as(u32, 1), fake.popularity_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.similar_requests.load(.monotonic));
+
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    const record = &info.record;
+    try std.testing.expectEqualStrings(amine_mbid, record.musicbrainz_artist_id.?);
+    try std.testing.expectEqualStrings("Q27830860", record.wikidata_id.?);
+    try std.testing.expectEqual(@as(?i32, 2014), record.begin_year);
+    try std.testing.expectEqual(@as(?i32, null), record.end_year);
+    try std.testing.expect(!record.ended);
+    try std.testing.expectEqualStrings("Person", record.artist_type.?);
+    try std.testing.expectEqual(database.ArtistPhotoSource.commons, record.photo_source.?);
+    try std.testing.expectEqualStrings("CC BY 2.0", record.photo_licence.?);
+    try std.testing.expectEqualStrings("https://creativecommons.org/licenses/by/2.0", record.photo_licence_url.?);
+    try std.testing.expectEqualStrings("Example Photographer & friends", record.photo_credit.?);
+    try std.testing.expectStringStartsWith(record.photo_url.?, "https://commons.wikimedia.org/wiki/File:");
+    try std.testing.expectStringStartsWith(record.biography.?, "Adam Aminé Daniel");
+    try std.testing.expectEqual(database.ArtistBiographySource.wikipedia, record.biography_source.?);
+    try std.testing.expectEqualStrings("https://en.wikipedia.org/wiki/Amin%C3%A9_(rapper)", record.biography_url.?);
+    try std.testing.expectEqualStrings("CC BY-SA 4.0", record.biography_licence.?);
+    try std.testing.expectEqualStrings("en", record.biography_language.?);
+    try std.testing.expectEqualStrings("en", record.requested_language.?);
+    try std.testing.expectEqual(@intFromEnum(runtime_module.ArtistInfoOutcome.fetched), record.outcome);
+    try std.testing.expectEqual(started_s, record.fetched_at);
+    try std.testing.expectEqual(@as(?u64, 9025), record.listeners);
+    var related = try runtime.libraryRelatedArtists(library, artist);
+    defer related.deinit();
+    try std.testing.expect(related.items.len > 0 and related.items.len <= database.related_artists_max);
+    try std.testing.expectEqualStrings("Smino", related.items[0].name);
+    try std.testing.expectEqual(@as(u32, 412), related.items[0].score);
+    try std.testing.expectEqual(@as(?i64, null), related.items[0].library_artist_id);
+
+    const photo = (try runtime.libraryArtistPhoto(library, artist)).?;
+    defer photo.deinit();
+    try std.testing.expectEqualStrings(commons_thumbnail, photo.bytes);
+    try std.testing.expectEqualStrings("image/png", photo.mime_type);
+
+    var links = try runtime.libraryArtistLinks(library, artist);
+    defer links.deinit();
+    try std.testing.expect(hasLink(links, .musicbrainz, "https://musicbrainz.org/artist/" ++ amine_mbid));
+    try std.testing.expect(hasLink(links, .wikipedia, "https://en.wikipedia.org/wiki/Amin%C3%A9_(rapper)"));
+    try std.testing.expect(links.items.len > 2);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try std.testing.expectEqual(@as(u32, 1), fake.musicbrainz_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 2), fake.image_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 6), fake.artistInfoRequests());
+
+    fake.clock.advance(31 * std.time.ms_per_day);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 2), fake.musicbrainz_requests.load(.monotonic));
+}
+
+test "an offline fetch makes no request, keeps the outcome offline, and keeps the photo already fetched" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-offline?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.offline, try runArtistInfo(&runtime, library, artist, .{ .offline = true }));
+    try std.testing.expectEqual(@as(u32, 0), fake.artistInfoRequests());
+    var first = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer first.deinit();
+    try std.testing.expectEqual(@intFromEnum(runtime_module.ArtistInfoOutcome.offline), first.record.outcome);
+    try std.testing.expectEqualStrings(amine_mbid, first.record.musicbrainz_artist_id.?);
+    try std.testing.expect(first.record.photo_source == null);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.offline, try runArtistInfo(&runtime, library, artist, .{ .force = true, .offline = true }));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+    var kept = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer kept.deinit();
+    try std.testing.expectEqual(database.ArtistPhotoSource.commons, kept.record.photo_source.?);
+    try std.testing.expectEqualStrings("CC BY 2.0", kept.record.photo_licence.?);
+    try std.testing.expectStringStartsWith(kept.record.biography.?, "Adam Aminé Daniel");
+    const photo = (try runtime.libraryArtistPhoto(library, artist)).?;
+    defer photo.deinit();
+    try std.testing.expectEqualStrings(commons_thumbnail, photo.bytes);
+}
+
+test "an image in the Artist's folder is the photo and Commons is not asked, and an Artist without a MusicBrainz ID asks nothing" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var music = std.testing.tmpDir(.{});
+    defer music.cleanup();
+    try music.dir.createDirPath(std.testing.io, "Aminé/Good for You");
+    try music.dir.writeFile(std.testing.io, .{ .sub_path = "Aminé/artist.jpg", .data = "\xff\xd8\xff\xe0local" });
+    try music.dir.writeFile(std.testing.io, .{ .sub_path = "Aminé/Good for You/folder.jpg", .data = "\xff\xd8\xff\xe0cover" });
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{music.sub_path});
+    defer std.testing.allocator.free(root);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-local?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, root, amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 0), fake.commons_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), fake.image_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 3), fake.artistInfoRequests());
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqual(database.ArtistPhotoSource.local, info.record.photo_source.?);
+    try std.testing.expect(info.record.photo_licence == null);
+    try std.testing.expect(info.record.photo_credit == null);
+    try std.testing.expect(info.record.biography != null);
+    const photo = (try runtime.libraryArtistPhoto(library, artist)).?;
+    defer photo.deinit();
+    try std.testing.expectEqualStrings("\xff\xd8\xff\xe0local", photo.bytes);
+
+    try library_database.database.exec("UPDATE artists SET musicbrainz_artist_id = NULL;");
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.no_musicbrainz_id, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try std.testing.expectEqual(@as(u32, 3), fake.artistInfoRequests());
+    var unidentified = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer unidentified.deinit();
+    try std.testing.expectEqual(database.ArtistPhotoSource.local, unidentified.record.photo_source.?);
+    try std.testing.expect(unidentified.record.musicbrainz_artist_id == null);
+}
+
+fn setReleaseDate(library_database: *database.LibraryDatabase, album: []const u8, date: []const u8) !void {
+    var statement = try library_database.database.prepare("UPDATE releases SET release_date = ?2 WHERE title = ?1;");
+    defer statement.deinit();
+    try statement.bindText(1, album);
+    try statement.bindText(2, date);
+    try std.testing.expectEqual(database.sqlite.Step.done, try statement.step());
+}
+
+test "a Person without a Wikidata work period is active from their earliest Release in the Library, not from birth" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    const work_start = std.mem.indexOf(u8, fake.wikidata, "\"P2031\"").?;
+    @memcpy(fake.wikidata[work_start + 1 ..][0..5], "P9999");
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-earliest-release?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, "/nonexistent/orca-more");
+    _ = try addArtistAlbum(library_database, root_id, "/nonexistent/orca-more", "Aminé", "Calling Brío", amine_mbid);
+    try setReleaseDate(library_database, "Good for You", "2017-07-28");
+    try setReleaseDate(library_database, "Calling Brío", "2016");
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.wikidata_requests.load(.monotonic));
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Person", info.record.artist_type.?);
+    try std.testing.expectEqual(@as(?i32, 2016), info.record.begin_year);
+    try std.testing.expectEqual(@as(?i32, null), info.record.end_year);
+    try std.testing.expect(!info.record.ended);
+}
+
+test "a Group is active from its MusicBrainz formation to its dissolution, whatever Wikidata's work period says" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    std.testing.allocator.free(fake.musicbrainz);
+    fake.musicbrainz = try std.testing.allocator.dupe(u8,
+        \\{"id":"12398bf3-1b99-47b7-930c-f3956773f35a","type":"Group",
+        \\ "life-span":{"begin":"2004-09","end":"2019-05-01","ended":true},
+        \\ "relations":[{"type":"wikidata","target-type":"url","url":{"resource":"https://www.wikidata.org/wiki/Q27830860"}}]}
+    );
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-group?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    try setReleaseDate(library_database, "Good for You", "2017-07-28");
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.wikidata_requests.load(.monotonic));
+    var info = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer info.deinit();
+    try std.testing.expectEqualStrings("Group", info.record.artist_type.?);
+    try std.testing.expectEqual(@as(?i32, 2004), info.record.begin_year);
+    try std.testing.expectEqual(@as(?i32, 2019), info.record.end_year);
+    try std.testing.expect(info.record.ended);
+}
+
+test "a biography that fell back to English is reused for the language that was asked, and another language asks again" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-info-language?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .language = "fr" }));
+    try std.testing.expectEqual(@as(u32, 1), fake.wikipedia_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+    {
+        var info = (try runtime.libraryArtistInfo(library, artist)).?;
+        defer info.deinit();
+        try std.testing.expectEqualStrings("en", info.record.biography_language.?);
+        try std.testing.expectEqualStrings("fr", info.record.requested_language.?);
+    }
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{ .language = "fr" }));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .language = "en" }));
+    var english = (try runtime.libraryArtistInfo(library, artist)).?;
+    defer english.deinit();
+    try std.testing.expectEqualStrings("en", english.record.requested_language.?);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{ .language = "en" }));
+}
+
+test "a loved Artist is listed and counted under the loved filter, newest love first, and its love and info survive reprojection" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-love?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const amine = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, "/nonexistent/orca-other");
+    const nick_drake = try addArtistAlbum(library_database, root_id, "/nonexistent/orca-other", "Nick Drake", "Pink Moon", null);
+    _ = try addArtistAlbum(library_database, root_id, "/nonexistent/orca-other", "Beach House", "Bloom", null);
+
+    try std.testing.expect(!try runtime.libraryArtistLoved(library, amine));
+    const loved = try runtime.librarySetArtistLove(library, &.{ nick_drake, amine + 1000 }, true);
+    try std.testing.expectEqual(@as(u32, 1), loved.updated);
+    try std.testing.expectEqual(@as(u32, 1), loved.skipped);
+    _ = try runtime.librarySetArtistLove(library, &.{amine}, true);
+    var backdate = try library_database.database.prepare("UPDATE artist_loves SET loved_at = loved_at - 60 WHERE artist_id = ?1;");
+    defer backdate.deinit();
+    try backdate.bindInt64(1, nick_drake);
+    try std.testing.expectEqual(database.sqlite.Step.done, try backdate.step());
+
+    const query: database.ArtistQuery = .{ .loved_only = true, .sort = .recently_loved };
+    try std.testing.expectEqual(@as(u64, 2), try runtime.libraryArtistCountMatching(library, query));
+    {
+        var page = try runtime.libraryArtistPage(library, query);
+        defer page.deinit();
+        try std.testing.expectEqual(@as(usize, 2), page.items.len);
+        try std.testing.expectEqual(amine, page.items[0].id);
+        try std.testing.expectEqual(nick_drake, page.items[1].id);
+        try std.testing.expect(page.items[0].loved and page.items[1].loved);
+    }
+    var everyone = try runtime.libraryArtistPage(library, .{});
+    defer everyone.deinit();
+    try std.testing.expectEqual(@as(usize, 3), everyone.items.len);
+    for (everyone.items) |summary| try std.testing.expectEqual(summary.id == amine or summary.id == nick_drake, summary.loved);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, amine, .{}));
+    try projectAll(library_database);
+    try std.testing.expect(try runtime.libraryArtistLoved(library, amine));
+    try std.testing.expect(try runtime.libraryArtistLoved(library, nick_drake));
+    var info = (try runtime.libraryArtistInfo(library, amine)).?;
+    defer info.deinit();
+    try std.testing.expectEqual(database.ArtistPhotoSource.commons, info.record.photo_source.?);
+
+    const cleared = try runtime.librarySetArtistLove(library, &.{nick_drake}, false);
+    try std.testing.expectEqual(@as(u32, 1), cleared.updated);
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryArtistCountMatching(library, query));
+}
+
+const hot_space_mbid = "047a4aae-27f8-4f2d-92fb-214fd8dc865a";
+
+fn addHotSpaceTrack(library_database: *database.LibraryDatabase, root_id: i64, title: []const u8, genres: []const []const u8) !void {
+    const uri = try std.fmt.allocPrint(std.testing.allocator, "/nonexistent/orca-queen/Hot Space/{s}.flac", .{title});
+    defer std.testing.allocator.free(uri);
+    const file_id = try library_database.files.create(.{ .audio_format = 1, .size_bytes = 1024 });
+    _ = try library_database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = database.LibraryDatabase.null_volume,
+        .root_id = root_id,
+        .uri = uri,
+        .state = .present,
+    });
+    try library_database.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = title,
+        .artist = "Queen",
+        .album = "Hot Space",
+        .album_artist = "Queen",
+        .genres = genres,
+        .musicbrainz_release_id = hot_space_mbid,
+    } });
+    try projectAll(library_database);
+}
+
+fn trackTitled(library_database: *database.LibraryDatabase, title: []const u8) !i64 {
+    var statement = try library_database.database.prepare("SELECT id FROM tracks WHERE title = ?1;");
+    defer statement.deinit();
+    try statement.bindText(1, title);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+fn runReleaseInfo(runtime: *OrcaRuntime, library: LibraryHandle, release_id: i64, options: runtime_module.ReleaseInfoOptions) !runtime_module.ReleaseInfoOutcome {
+    runtime.reapFinishedJobs();
+    const handle = try runtime.startReleaseInfoFetch(library, release_id, options);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(runtime, handle));
+    return runtime.jobReleaseInfoOutcome(handle);
+}
+
+fn expectTrackGenres(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64, provenance: metadata.Provenance, expected: []const []const u8) !void {
+    const genres = try runtime.libraryTrackGenres(library, track_id);
+    defer genres.deinit();
+    try std.testing.expectEqual(expected.len, genres.items.len);
+    for (genres.items, expected) |genre, name| {
+        try std.testing.expect(std.ascii.eqlIgnoreCase(name, genre.name));
+        try std.testing.expectEqual(provenance, genre.provenance);
+    }
+}
+
+fn hotSpaceRelease(library_database: *database.LibraryDatabase) !i64 {
+    var statement = try library_database.database.prepare("SELECT id FROM releases WHERE title = 'Hot Space';");
+    defer statement.deinit();
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return statement.columnInt64(0);
+}
+
+test "a Release's description comes from its release group's Wikipedia article, and its MusicBrainz genres go only on Tracks with none from a file or an edit" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-info?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, "/nonexistent/orca-queen");
+    try addHotSpaceTrack(library_database, root_id, "Staying Power", &.{});
+    try addHotSpaceTrack(library_database, root_id, "Dancer", &.{"Jazz"});
+    try addHotSpaceTrack(library_database, root_id, "Back Chat", &.{});
+    const bare = try trackTitled(library_database, "Staying Power");
+    const tagged = try trackTitled(library_database, "Dancer");
+    const edited = try trackTitled(library_database, "Back Chat");
+    try runtime.librarySetTrackGenres(library, &.{edited}, &.{"Disco"});
+    const release = try hotSpaceRelease(library_database);
+
+    try std.testing.expectError(error.ClientIdentityRequired, runtime.startReleaseInfoFetch(library, release, .{}));
+    try runtime.setClientIdentity(network.testing.test_identity);
+    try std.testing.expectError(error.UnknownRelease, runtime.startReleaseInfoFetch(library, release + 1000, .{}));
+    try std.testing.expect((try runtime.libraryGenreFill(library)).musicbrainz);
+    try std.testing.expectEqual(@as(?database.ReleaseInfo, null), try runtime.libraryReleaseInfo(library, release));
+
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.offline, try runReleaseInfo(&runtime, library, release, .{ .offline = true }));
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.fetched, try runReleaseInfo(&runtime, library, release, .{}));
+    try std.testing.expectEqual(@as(u32, 1), fake.release_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.release_group_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.release_wikidata_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.release_wikipedia_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
+    {
+        var info = (try runtime.libraryReleaseInfo(library, release)).?;
+        defer info.deinit();
+        const record = &info.record;
+        try std.testing.expectEqualStrings("Hot Space is the tenth studio album by Queen.", record.description.?);
+        try std.testing.expectEqual(database.ReleaseDescriptionSource.wikipedia, record.description_source.?);
+        try std.testing.expectEqualStrings("https://en.wikipedia.org/wiki/Hot_Space", record.description_url.?);
+        try std.testing.expectEqualStrings(providers.wikipedia.licence, record.description_licence.?);
+        try std.testing.expectEqualStrings("en", record.description_language.?);
+        try std.testing.expectEqualStrings(hot_space_mbid, record.musicbrainz_release_id.?);
+        try std.testing.expectEqualStrings("3918b90b-340e-3779-9d7e-ba1593653498", record.musicbrainz_release_group_id.?);
+        try std.testing.expectEqual(@intFromEnum(runtime_module.ReleaseInfoOutcome.fetched), record.outcome);
+    }
+    try expectTrackGenres(&runtime, library, bare, .provider, &.{ "rock", "funk", "pop rock", "synth-pop" });
+    try expectTrackGenres(&runtime, library, tagged, .observed_file, &.{"Jazz"});
+    try expectTrackGenres(&runtime, library, edited, .user, &.{"Disco"});
+    try runtime_tests.expectGenreTotalsInSync(library_database);
+
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.cached, try runReleaseInfo(&runtime, library, release, .{}));
+    try std.testing.expectEqual(@as(u32, 4), fake.requestCount());
+
+    try runtime.setGenreFill(library, .{ .musicbrainz = false });
+    try std.testing.expect(!(try runtime.libraryGenreFill(library)).musicbrainz);
+    try addHotSpaceTrack(library_database, root_id, "Cool Cat", &.{});
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.fetched, try runReleaseInfo(&runtime, library, release, .{ .force = true }));
+    try expectTrackGenres(&runtime, library, try trackTitled(library_database, "Cool Cat"), .provider, &.{});
+
+    runtime.reapFinishedJobs();
+    try std.testing.expectError(error.InvalidLimit, runtime.startGenreFill(library, .{ .limit = 0 }));
+    const fill = try runtime.startGenreFill(library, .{ .limit = 1 });
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&runtime, fill));
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.fetched, try runtime.jobReleaseInfoOutcome(fill));
+    try expectTrackGenres(&runtime, library, try trackTitled(library_database, "Cool Cat"), .provider, &.{ "rock", "funk", "pop rock", "synth-pop" });
+    try expectTrackGenres(&runtime, library, try trackTitled(library_database, "Staying Power"), .provider, &.{ "rock", "funk", "pop rock", "synth-pop" });
+    try expectTrackGenres(&runtime, library, try trackTitled(library_database, "Dancer"), .observed_file, &.{"Jazz"});
+    try expectTrackGenres(&runtime, library, try trackTitled(library_database, "Back Chat"), .user, &.{"Disco"});
+    try runtime_tests.expectGenreTotalsInSync(library_database);
+}
+
+fn releaseType(library_database: *database.LibraryDatabase, release_id: i64) !?[]const u8 {
+    var statement = try library_database.database.prepare("SELECT release_type FROM releases WHERE id = ?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, release_id);
+    try std.testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    if (statement.columnIsNull(0)) return null;
+    return try std.testing.allocator.dupe(u8, statement.columnText(0));
+}
+
+fn expectReleaseType(library_database: *database.LibraryDatabase, release_id: i64, expected: ?[]const u8) !void {
+    const stored = try releaseType(library_database, release_id);
+    defer if (stored) |text| std.testing.allocator.free(text);
+    if (expected) |text| try std.testing.expectEqualStrings(text, stored orelse return error.TestExpectedEqual) else try std.testing.expectEqual(@as(?[]const u8, null), stored);
+}
+
+test "a release fetch fills a Release's unknown type from its release group, and a type its files state outranks it" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.matching_hooks = fake.hooks();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-release-type?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const root_id = try library_database.library_roots.add(database.LibraryDatabase.null_volume, "/nonexistent/orca-queen");
+    try addHotSpaceTrack(library_database, root_id, "Staying Power", &.{});
+    const release = try hotSpaceRelease(library_database);
+    try expectReleaseType(library_database, release, null);
+
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.fetched, try runReleaseInfo(&runtime, library, release, .{}));
+    try expectReleaseType(library_database, release, "album");
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryReleaseCountMatching(library, .{ .release_kind = .album }));
+
+    const file_id = (try library_database.tracks.fileIds(std.testing.allocator, try trackTitled(library_database, "Staying Power")));
+    defer std.testing.allocator.free(file_id);
+    try library_database.observed_tags.upsert(.{ .file_id = file_id[0], .values = .{
+        .title = "Staying Power",
+        .artist = "Queen",
+        .album = "Hot Space",
+        .album_artist = "Queen",
+        .musicbrainz_release_id = hot_space_mbid,
+        .release_type = "EP; Remix",
+    } });
+    try projectAll(library_database);
+    try expectReleaseType(library_database, release, "ep");
+    try std.testing.expectEqual(runtime_module.ReleaseInfoOutcome.fetched, try runReleaseInfo(&runtime, library, release, .{ .force = true }));
+    try expectReleaseType(library_database, release, "ep");
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryReleaseCountMatching(library, .{ .release_kind = .ep_or_single }));
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryReleaseCountMatching(library, .{ .release_kind = .album }));
+}
+
+test "an Artist fetch fills the Artist's Tracks that have no genre, records listeners and related artists weekly, and a failed ListenBrainz step keeps the rest" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-artist-listenbrainz?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+    var track_statement = try library_database.database.prepare("SELECT id FROM tracks WHERE artist_id = ?1;");
+    defer track_statement.deinit();
+    try track_statement.bindInt64(1, artist);
+    try std.testing.expectEqual(database.sqlite.Step.row, try track_statement.step());
+    const track = track_statement.columnInt64(0);
+
+    fake.popularity = blk: {
+        std.testing.allocator.free(fake.popularity);
+        break :blk try std.testing.allocator.dupe(u8, "not json");
+    };
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.refused, try runArtistInfo(&runtime, library, artist, .{}));
+    try expectTrackGenres(&runtime, library, track, .provider, &.{ "hip hop", "hip house", "pop", "pop rap", "trap" });
+    {
+        var info = (try runtime.libraryArtistInfo(library, artist)).?;
+        defer info.deinit();
+        try std.testing.expectStringStartsWith(info.record.biography.?, "Adam Aminé Daniel");
+        try std.testing.expectEqual(@as(?u64, null), info.record.listeners);
+        try std.testing.expectEqual(@as(?i64, null), info.record.listeners_fetched_at);
+        var related = try runtime.libraryRelatedArtists(library, artist);
+        defer related.deinit();
+        try std.testing.expect(related.items.len > 0);
+    }
+
+    std.testing.allocator.free(fake.popularity);
+    fake.popularity = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/providers/listenbrainz-popularity.json", std.testing.allocator, .limited(64 * 1024));
+    const before = fake.popularity_requests.load(.monotonic);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(before + 1, fake.popularity_requests.load(.monotonic));
+    {
+        var info = (try runtime.libraryArtistInfo(library, artist)).?;
+        defer info.deinit();
+        try std.testing.expectEqual(@as(?u64, 9025), info.record.listeners);
+    }
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(before + 1, fake.popularity_requests.load(.monotonic));
+    fake.clock.advance(8 * std.time.ms_per_day);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(before + 2, fake.popularity_requests.load(.monotonic));
+}
+
+fn expectRelatedPhotos(runtime: *OrcaRuntime, library: LibraryHandle, artist: i64, expected: usize) !void {
+    var related = try runtime.libraryRelatedArtists(library, artist);
+    defer related.deinit();
+    var with_photo: usize = 0;
+    for (related.items) |item| {
+        try std.testing.expect(item.library_artist_id == null);
+        if (item.has_photo) with_photo += 1;
+    }
+    try std.testing.expectEqual(expected, with_photo);
+}
+
+test "an Artist fetch keeps photos with their Commons licence and credit for at most eight related artists outside the Library, the next fetch finishes the rest, and a forced fetch keeps them" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-related-photos?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 5), fake.artistInfoRequests());
+    try std.testing.expectEqual(@as(u32, 8), fake.related_musicbrainz_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fake.related_wikidata_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 8), fake.related_commons_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 8), fake.related_image_requests.load(.monotonic));
+    try expectRelatedPhotos(&runtime, library, artist, 8);
+    {
+        const photo = (try runtime.libraryRelatedArtistPhoto(library, "D23F0824-128B-4F33-8C5C-7FD0A6A3A450")).?;
+        defer photo.deinit();
+        try std.testing.expectEqualStrings(related_thumbnail, photo.bytes);
+        try std.testing.expectEqualStrings("image/png", photo.mime_type);
+        var photo_info = (try runtime.libraryRelatedArtistPhotoInfo(library, saba_mbid)).?;
+        defer photo_info.deinit();
+        try std.testing.expectEqual(database.ArtistPhotoSource.commons, photo_info.record.source);
+        try std.testing.expectEqualStrings("https://commons.wikimedia.org/wiki/File:Related.jpg", photo_info.record.url.?);
+        try std.testing.expectEqualStrings("CC BY-SA 3.0", photo_info.record.licence.?);
+        try std.testing.expectEqualStrings("https://creativecommons.org/licenses/by-sa/3.0", photo_info.record.licence_url.?);
+        try std.testing.expectEqualStrings("Related Photographer", photo_info.record.credit.?);
+    }
+    try std.testing.expect(try runtime.libraryRelatedArtistPhotoInfo(library, amine_mbid) == null);
+    try std.testing.expect(try runtime.libraryRelatedArtistPhoto(library, amine_mbid) == null);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 12), fake.related_musicbrainz_requests.load(.monotonic));
+    try expectRelatedPhotos(&runtime, library, artist, 12);
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 12), fake.related_musicbrainz_requests.load(.monotonic));
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{ .force = true }));
+    try expectRelatedPhotos(&runtime, library, artist, 12);
+}
+
+test "a related artist with no photo is remembered and not asked again until the photo is thirty days old, and offline asks nothing" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-related-photo-none?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.offline, try runArtistInfo(&runtime, library, artist, .{ .offline = true }));
+    try std.testing.expectEqual(@as(u32, 0), fake.requestCount());
+    try expectRelatedPhotos(&runtime, library, artist, 0);
+
+    fake.related_without_photo = saba_mbid;
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 8), fake.related_musicbrainz_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), fake.related_wikidata_requests.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 7), fake.related_commons_requests.load(.monotonic));
+    try expectRelatedPhotos(&runtime, library, artist, 7);
+    try std.testing.expect(try runtime.libraryRelatedArtistPhoto(library, saba_mbid) == null);
+
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 12), fake.related_musicbrainz_requests.load(.monotonic));
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 12), fake.related_musicbrainz_requests.load(.monotonic));
+    try expectRelatedPhotos(&runtime, library, artist, 11);
+
+    const requests = fake.requestCount();
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.offline, try runArtistInfo(&runtime, library, artist, .{ .force = true, .offline = true }));
+    try std.testing.expectEqual(requests, fake.requestCount());
+    try expectRelatedPhotos(&runtime, library, artist, 11);
+
+    fake.related_without_photo = null;
+    fake.clock.advance(31 * std.time.ms_per_day);
+    _ = try runArtistInfo(&runtime, library, artist, .{});
+    try std.testing.expectEqual(@as(u32, 20), fake.related_musicbrainz_requests.load(.monotonic));
+    const photo = (try runtime.libraryRelatedArtistPhoto(library, saba_mbid)).?;
+    defer photo.deinit();
+    try std.testing.expectEqualStrings(related_thumbnail, photo.bytes);
+}
+
+test "a related artist whose lookup fails leaves the other related artists' photos and is asked again on the next fetch" {
+    var fake: FakeArtistInfo = .{};
+    defer fake.deinit();
+    try fake.init();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.setClientIdentity(network.testing.test_identity);
+    runtime.matching_hooks = fake.hooks();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-related-photo-failure?mode=memory&cache=shared");
+    const library_database = try libraryDatabase(&runtime, library);
+    const artist = try addAmine(library_database, "/nonexistent/orca-music", amine_mbid);
+
+    fake.related_unavailable = saba_mbid;
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.fetched, try runArtistInfo(&runtime, library, artist, .{}));
+    try std.testing.expectEqual(@as(u32, 7), fake.related_image_requests.load(.monotonic));
+    try expectRelatedPhotos(&runtime, library, artist, 7);
+    try std.testing.expect(try runtime.libraryRelatedArtistPhoto(library, saba_mbid) == null);
+
+    fake.related_unavailable = null;
+    try std.testing.expectEqual(runtime_module.ArtistInfoOutcome.cached, try runArtistInfo(&runtime, library, artist, .{}));
+    try expectRelatedPhotos(&runtime, library, artist, 12);
+    const photo = (try runtime.libraryRelatedArtistPhoto(library, saba_mbid)).?;
+    defer photo.deinit();
+    try std.testing.expectEqualStrings(related_thumbnail, photo.bytes);
 }

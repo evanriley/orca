@@ -1,0 +1,46 @@
+{
+  "id": "3918b90b-340e-3779-9d7e-ba1593653498",
+  "title": "Hot Space",
+  "primary-type": "Album",
+  "secondary-types": [],
+  "first-release-date": "1982-05-21",
+  "disambiguation": "",
+  "relations": [
+    {
+      "type": "allmusic",
+      "target-type": "url",
+      "direction": "forward",
+      "ended": false,
+      "url": { "id": "b7e1f9d0-6a1e-4a54-9a43-0d6c3c7e1a01", "resource": "https://www.allmusic.com/album/mw0000190539" }
+    },
+    {
+      "type": "wikidata",
+      "target-type": "url",
+      "direction": "forward",
+      "ended": false,
+      "url": { "id": "0e1a3f0c-0c5d-4b5e-9d67-3a4e3f1c2b02", "resource": "https://www.wikidata.org/wiki/Q1193613" }
+    },
+    {
+      "type": "wikipedia",
+      "target-type": "url",
+      "direction": "forward",
+      "ended": true,
+      "url": { "id": "5f0c2d1e-9b8a-4c7d-8e6f-1a2b3c4d5e03", "resource": "https://en.wikipedia.org/wiki/Hot_Space_(old)" }
+    },
+    {
+      "type": "wikipedia",
+      "target-type": "url",
+      "direction": "forward",
+      "ended": false,
+      "url": { "id": "6a1d3e2f-0c9b-4d8e-9f70-2b3c4d5e6f04", "resource": "https://en.wikipedia.org/wiki/Hot_Space" }
+    }
+  ],
+  "genres": [
+    { "id": "0e3fc579-2d24-4f20-9dae-736e1ec78798", "name": "rock", "count": 7, "disambiguation": "" },
+    { "id": "1b50083b-1afa-4778-82c8-548b309af783", "name": "funk", "count": 4, "disambiguation": "" },
+    { "id": "4c6ea3c0-1e3d-4bc0-8f9a-6d0c0b0c3e05", "name": "pop rock", "count": 3, "disambiguation": "" },
+    { "id": "6b1e7c2d-3f4a-4b5c-8d6e-7f809a1b2c06", "name": "synth-pop", "count": 3, "disambiguation": "" },
+    { "id": "7c2f8d3e-4a5b-4c6d-9e7f-80912a3b4c07", "name": "disco", "count": 2, "disambiguation": "" },
+    { "id": "8d309e4f-5b6c-4d7e-af80-91a23b4c5d08", "name": "new wave", "count": 1, "disambiguation": "" }
+  ]
+}

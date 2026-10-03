@@ -1,0 +1,1 @@
+{"v":1,"rules":[{"rules":[{"match":"any","rules":[{"rules":[{"field":"bit_depth","op":"gte","value":24}]}]}]}]}

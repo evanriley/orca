@@ -39,4 +39,63 @@ pub fn main(init: std.process.Init) !void {
             @as(f64, @floatFromInt(scalar_ns)) / @as(f64, @floatFromInt(vector_ns)),
         },
     );
+
+    const graphic: liborca.Equalizer = .{
+        .gains_db = .{ 3, -2, 4, -3, 2, -4, 3, -2, 4, -3 },
+        .preamp_db = -4,
+    };
+    var parametric: liborca.ParametricEqualizer = .{ .count = liborca.max_parametric_filters, .preamp_db = -6 };
+    for (parametric.filters[0..parametric.count], 0..) |*filter, index| {
+        const fraction = @as(f32, @floatFromInt(index)) / (liborca.max_parametric_filters - 1);
+        filter.* = .{
+            .kind = .peak,
+            .frequency_hz = 25 * std.math.pow(f32, 640, fraction),
+            .gain_db = if (index % 2 == 0) 4 else -3,
+            .q = 1.41,
+        };
+    }
+    const graphic_ns = try timeEqualizer(init.io, scalar, iterations, graphic, null);
+    const parametric_ns = try timeEqualizer(init.io, scalar, iterations, null, parametric);
+    const blocks = (sample_count / (block_frames * channels)) * iterations;
+    std.debug.print(
+        "Orca {f} DSP equalizer benchmark: {d} blocks of {d} stereo frames, graphic 10-band {d} ns/block, parametric 16-filter {d} ns/block, {d:.2}x\n",
+        .{
+            liborca.version,
+            blocks,
+            block_frames,
+            @divTrunc(graphic_ns, blocks),
+            @divTrunc(parametric_ns, blocks),
+            @as(f64, @floatFromInt(parametric_ns)) / @as(f64, @floatFromInt(graphic_ns)),
+        },
+    );
+}
+
+const block_frames = 256;
+const channels = 2;
+
+fn timeEqualizer(
+    io: std.Io,
+    input: []const f32,
+    iterations: usize,
+    graphic: ?liborca.Equalizer,
+    parametric: ?liborca.ParametricEqualizer,
+) !i96 {
+    const audio = liborca.internal.audio;
+    var gain: audio.processing.Gain = .{};
+    var dsp: audio.dsp.PlayerDsp = .init(&gain);
+    try dsp.setEqualizer(graphic);
+    try dsp.setParametricEqualizer(parametric);
+    const block_samples = block_frames * channels;
+    var block: [block_samples]f32 = undefined;
+    const start = std.Io.Clock.awake.now(io);
+    for (0..iterations) |_| {
+        var offset: usize = 0;
+        while (offset + block_samples <= input.len) : (offset += block_samples) {
+            @memcpy(&block, input[offset..][0..block_samples]);
+            dsp.prepare(48_000, channels, 1);
+            dsp.processor().process(&block, block_frames, channels);
+            std.mem.doNotOptimizeAway(&block);
+        }
+    }
+    return start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
 }

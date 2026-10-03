@@ -509,7 +509,6 @@ pub const Worker = struct {
         const file_id = subject.file_id orelse return .dropped;
         const input: database.ListenInput = .{
             .file_id = file_id,
-            .recording_id = subject.recording_id,
             .started_at = listen.started_at,
             .listened_ms = listen.listened_ms,
             .duration_ms = listen.duration_ms,

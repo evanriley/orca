@@ -23,17 +23,24 @@ const StatusRead = struct {
     status: PlayerStatus,
     /// The queue entry `status.track_id` came from, read once with it.
     audible: ?TrackRef,
+    resolved: bool,
 };
 
 pub fn readStatus(object_value: *PlayerObject) StatusRead {
-    // The engine stores the cursor after the figures it describes, so it is read first.
     const queue_snapshot = object_value.queue.snapshot();
-    const current = object_value.queue.refAt(queue_snapshot.cursor);
     const snapshot = object_value.player.snapshot();
     const rate = object_value.player.published_sample_rate.load(.acquire);
     const frames = object_value.player.published_frame_count.load(.acquire);
+    // The serial leaves an entry, and a hard load moves the cursor, before the
+    // next entry's figures are published, so both are read after them and
+    // never pair an entry with its successor's figures.
+    const entry = readAudibleEntry(object_value);
+    const idle = if (entry) |value| value.entry_serial == 0 else false;
+    const position: ?u32 = if (idle) object_value.queue.cursorPosition() else if (entry) |value| value.position else null;
+    const current: ?TrackRef = if (idle) object_value.queue.refAt(position.?) else if (entry) |value| value.track else null;
     return .{
         .audible = current,
+        .resolved = entry != null,
         .status = .{
             .transport = snapshot.state,
             .repeat = queue_snapshot.repeat,
@@ -42,12 +49,36 @@ pub fn readStatus(object_value: *PlayerObject) StatusRead {
             .position_ms = if (rate == 0) 0 else snapshot.position_frames * 1000 / rate,
             .duration_ms = if (rate == 0) 0 else frames * 1000 / rate,
             .track_id = if (current) |ref| ref.track_id else null,
-            .entry_serial = object_value.player.audible_entry_serial.load(.acquire),
+            .entry_serial = if (entry) |value| value.entry_serial else object_value.player.audible_entry_serial.load(.acquire),
             .queue_length = queue_snapshot.entries,
-            .queue_index = queue_snapshot.cursor,
+            .queue_index = position orelse queue_snapshot.cursor,
             .volume = object_value.gain.linear.load(.acquire),
         },
     };
+}
+
+pub const AudibleEntry = struct {
+    entry_serial: u32,
+    position: ?u32,
+    track: ?TrackRef,
+    drained: bool,
+};
+
+/// Resolves the audible entry through the serial the engine publishes, never
+/// the cursor: across a gapless transition the engine moves the cursor after
+/// the serial, so a cursor read can still name the entry before it. A serial
+/// that moves on while it is being resolved is retried, then given up as null.
+pub fn readAudibleEntry(object_value: *PlayerObject) ?AudibleEntry {
+    const queue = object_value.queue;
+    for (0..3) |_| {
+        const entry_serial = object_value.player.audible_entry_serial.load(.acquire);
+        const position = queue.positionForSerial(entry_serial);
+        const track = if (position) |value| queue.refAt(value) else null;
+        const drained = object_value.player.drained.load(.acquire);
+        if (object_value.player.audible_entry_serial.load(.acquire) != entry_serial) continue;
+        return .{ .entry_serial = entry_serial, .position = position, .track = track, .drained = drained };
+    }
+    return null;
 }
 
 pub fn playerQueuePage(
@@ -161,6 +192,24 @@ pub fn playerEqualizer(self: *OrcaRuntime, player: PlayerHandle) !?audio.dsp.Equ
     return (try self.players.get(player)).dsp.settings.equalizer;
 }
 
+pub fn playerSetParametricEqualizer(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+    equalizer: ?audio.dsp.ParametricEqualizer,
+) !void {
+    try runtime.requireRunning(self);
+    const object_value = try self.players.get(player);
+    const engine = object_value.engine;
+    if (engine) |value| value.quiesce();
+    defer if (engine) |value| value.release();
+    try object_value.dsp.setParametricEqualizer(equalizer);
+}
+
+pub fn playerParametricEqualizer(self: *OrcaRuntime, player: PlayerHandle) !?audio.dsp.ParametricEqualizer {
+    try runtime.requireRunning(self);
+    return (try self.players.get(player)).dsp.settings.parametric;
+}
+
 pub fn playerSetCrossfeed(
     self: *OrcaRuntime,
     player: PlayerHandle,
@@ -186,12 +235,17 @@ pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.Sig
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
     const audible = object_value.player.audibleSource();
-    return .describe(.{
+    const corrections = object_value.player.audibleReplayGain();
+    const applied = corrections.applied(object_value.player.replayGainMode());
+    var path = audio.dsp.SignalPath.describe(.{
         .source = if (audible) |value| value.format else null,
         .source_declared = if (audible) |value| value.declared else false,
         .codec = if (audible) |value| value.codec else null,
-        .replay_gain = object_value.player.effectiveReplayGain(),
+        .replay_gain = applied.multiplier,
+        .replay_gain_source = applied.source,
+        .replay_gain_track = corrections.track,
         .equalizer = object_value.dsp.settings.equalizer,
+        .parametric = object_value.dsp.settings.parametric,
         .crossfeed = object_value.dsp.settings.crossfeed,
         .volume = if (engine != null)
             object_value.gain.applied()
@@ -199,7 +253,10 @@ pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.Sig
             object_value.gain.linear.load(.acquire),
         .output = if (engine) |value| value.outputFormat() else null,
         .device_rate = if (engine) |value| value.deviceRate() else null,
+        .device_quantum_frames = if (engine) |value| value.deviceQuantum() else null,
     });
+    if (engine) |value| path.output_kind = value.outputDeviceKind();
+    return path;
 }
 
 pub fn playerSeekMs(self: *OrcaRuntime, player: PlayerHandle, ms: u64) !u32 {

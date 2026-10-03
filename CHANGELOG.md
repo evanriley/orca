@@ -4,163 +4,384 @@
 
 ### Added
 
-- **Lyrics from a Track's file and a `.lrc` sidecar.** `Runtime.startTrackLyrics`
-  reads them on a job worker: a synced sidecar, then synced lyrics in the
-  file (ID3v2 `SYLT` or `USLT`, Vorbis comment `LYRICS` or
-  `UNSYNCEDLYRICS`, MP4 `©lyr`), then plain lyrics from each in the same
-  order. `Runtime.jobLyricsOutcome` and `Runtime.jobTakeLyrics` return the
-  result, and `Lyrics.lineAt` gives the synced line at a playback position.
-  `orca-cli lyrics DATABASE TRACK_ID` prints them, and `orca-cli play-tracks
-  --lyrics` prints each synced line as it is heard.
-- **Lyrics from LRCLIB.** `Runtime.startTrackLyrics` with `fetch` asks
-  LRCLIB for a Track without synced lyrics of its own, sending only its
-  title, artist, album and duration, and ranks the answer after local synced
-  lyrics and LRCLIB's plain lyrics after local plain ones. Answers are kept
-  in the Library under a digest of the query, so an edit asks again; a miss
-  is asked again after 7 days. A job without `fetch` still uses kept
-  answers. `Runtime.setLrclibServer` points it at another server, and
-  `orca-cli lyrics DATABASE TRACK_ID --fetch` fetches, with `ORCA_LRCLIB_URL`.
-- **Lyrics in the C ABI.** The C ABI's `orca_library_start_lyrics` starts an
-  `ORCA_JOB_KIND_LYRICS` Job, fetching from LRCLIB with `ORCA_LYRICS_FETCH`;
-  `orca_job_lyrics_outcome` reports where the lyrics came from and
-  `orca_job_lyrics` hands them over once as an `orca_lyrics_view`.
-  `ORCA_PROVIDER_SERVICE_LRCLIB` points LRCLIB at another server.
-- **Lyrics in `orca-gtk`.** A Lyrics page in the sidebar, in place of track
-  details (Ctrl+Shift+L or the header button), shows the playing Track's
-  lyrics: synced lyrics highlight the line being heard, dim the lines before
-  it and keep it centred, plain lyrics show as selectable text, and an
-  instrumental Track says so. Settings > Listening > Fetch lyrics from
-  LRCLIB, off by default, also asks LRCLIB; `ORCA_LRCLIB_URL` points it at
-  another server.
+- **Output kind and block size.** Each `Device` carries a `DeviceKind`
+  (`usb`, `pci`, `bluetooth`, `hdmi`, `virtual` or `unknown`), read on
+  Linux from the info of each PipeWire sink and of the device it belongs
+  to; the null sink `scripts/silent-sink.sh` creates is `virtual`.
+  `SignalPath` adds `output_kind`, the open device's kind, and
+  `device_quantum_frames`, the frames that device asks for per period, and
+  `equalizer_band_frequencies_hz` exports the ten bands' centre
+  frequencies. The C ABI adds `orca_enumerate_output_devices_v2` with
+  `orca_device_view_v2` and `orca_device_kind`, and `output_kind`,
+  `has_device_quantum` and `device_quantum_frames` in
+  `orca_signal_path_view`'s reserved bytes. `orca-cli devices` adds the
+  kind as a third column.
+- **Provider sources.** `providerSources` returns a fixed list of the
+  services Orca takes data from, MusicBrainz and its genres, the Cover Art
+  Archive, AcoustID, ListenBrainz, LRCLIB, Wikidata, Wikimedia Commons and
+  Wikipedia, each a `ProviderSource` with its URL, what it supplies, its
+  licence and the licence's URL, so every frontend credits the same
+  sources. The C ABI adds `orca_provider_sources` with
+  `orca_provider_source_view` and `orca_provider_source_id`, and `orca-cli`
+  adds `sources`.
+- **Folder browsing.** `libraryFolderPage` pages one folder of a root:
+  subfolders first, with file and Track counts and duration counted through
+  every folder below, then files with their Track ids, leaving missing files
+  out. `playerPlayFolder` plays every Track below a folder, recursively in
+  path order. Both read the existing `locations` index; no migration. The C
+  ABI adds `orca_library_query_folder`, `orca_folder_entry_view`,
+  `orca_folder_entry_kind` and `orca_player_play_folder`, and `orca-cli`
+  adds `folders DATABASE [ROOT_ID [PATH]]` and `play-folder`.
+- **Library stats and health sizes.** `libraryStats` returns
+  `LibraryStats`: Artist, Release and Track counts, the files with a
+  location that is not missing and their bytes, total duration, and when
+  the last scan completed and the last analysis was stored.
+  `HealthKindSummary` gains `files` and `bytes`; for `exact_duplicate` and
+  `likely_duplicate`, `bytes` counts only the redundant copies, what
+  removing them would free. The C ABI adds `orca_library_stats` with
+  `orca_library_stats_view`, and `orca_library_health_summary_v2` with
+  `orca_health_kind_summary_view_v2`. `orca-cli stats` prints the stats as
+  `key=value` lines, and `health --summary` adds files and bytes after the
+  count. Schema version 38 indexes `analysis_results.created_at` so the
+  last analysis time is an index probe.
+- **Parametric equalizer.** `playerSetParametricEqualizer` runs a
+  `ParametricEqualizer` on a Player in place of the ten-band equalizer: up
+  to 16 RBJ biquad filters (peak, low and high shelf, low and high pass,
+  notch), each with its own frequency, gain and Q, and a preamp, applied on
+  the engine thread with coefficients rebuilt off the render callback.
+  Turning either equalizer on turns the other off, and a change mid-track is
+  gapless. A filter that is new, of another kind, or in place of the other
+  equalizer starts without history; one whose gain, frequency or Q changes
+  keeps its history, so moving it does not click, and so does one whose
+  neighbour is turned off or on.
+  `playerParametricEqualizer` reads it back, `SignalPath` carries it
+  as `parametric`, `ParametricEqualizer.response` gives its gain at any
+  frequencies, and `parseEqualizerApo` and `writeEqualizerApo` read and
+  write EqualizerAPO text, with a fuzz target. The C ABI adds
+  `orca_player_set_parametric_equalizer`,
+  `orca_player_parametric_equalizer_get`,
+  `orca_parametric_equalizer_response`,
+  `orca_parametric_equalizer_parse_apo`,
+  `orca_parametric_equalizer_write_apo`, `orca_parametric_equalizer`,
+  `orca_parametric_filter`, `orca_parametric_filter_kind`, the
+  `ORCA_PARAMETRIC_*` limits, and `parametric` and `has_parametric` at the
+  end of `orca_signal_path_view`. `orca-cli play-tracks` takes
+  `--peq=FILE`, and `peq-check` and `peq-response` validate a file and
+  print its curve. `dsp-bench` also times both equalizers.
+- **Artist totals, release types and appearances.**
+  `libraryArtistTotals` returns an Artist's `ArtistTotals`: own Release
+  (appearances left out), Track and appearance counts and summed duration.
+  Projection now fills
+  `releases.release_type` from the files' tags, lowercased, and a
+  release-info fetch fills it from the MusicBrainz release group's primary
+  type when the tags state none. `ReleaseQuery.release_kind` filters by
+  `ReleaseKind` (`album`, counting an unknown type, `ep_or_single`,
+  `other`), `ReleaseQuery.appearing_artist_id` lists the Releases an Artist
+  appears on without being their album artist,
+  `ReleaseQuery.own_releases_only` narrows `album_artist_id` to the
+  Artist's own Releases, and `ArtistSort.recently_added` orders Artists by
+  their newest Release. The C ABI adds `orca_library_artist_totals`,
+  `orca_artist_totals`, `orca_release_kind`, `kind`, `appearing_artist_id`
+  and `own_releases_only` in `orca_release_query_v2` and
+  `ORCA_ARTIST_SORT_RECENTLY_ADDED`. `orca-cli artist-info` prints a
+  `totals` line, `releases` takes `--type=album|ep-single|other`,
+  `--appears=ARTIST_ID` and `--own` (with `--artist`), and `artists`
+  `--sort recently_added`.
+- **Photos for related artists outside the Library.** An Artist fetch
+  finds photos for up to 8 related artists with no library Artist, through
+  MusicBrainz, Wikidata and Wikimedia Commons, and keeps them by
+  MusicBrainz artist ID in the new `related_artist_photos` table (migration
+  37), with a marker for an artist that has none; each is asked again after
+  30 days or with `force`. Each photo keeps its Commons page, licence,
+  licence URL and credit, as the Artist's own photo does.
+  `RelatedArtist.has_photo` says which related artists have a photo,
+  `libraryRelatedArtistPhoto` returns one and
+  `libraryRelatedArtistPhotoInfo` its attribution. The C ABI adds
+  `orca_library_related_artist_photo`,
+  `orca_library_related_artist_photo_info` with
+  `orca_related_artist_photo_info_view`, and `has_photo` in
+  `orca_related_artist_view`. `orca-cli` adds
+  `related-photo DATABASE MBID --out=PATH`, which also prints the licence
+  and credit, and `related` lines end in `photo=yes|no`.
+- **Queue history and saving the queue.** Each Player keeps its last 100
+  entries that stopped playing, newest first, with when each ended and why
+  (`finished`, `skipped`, `replaced`), in memory only and never as a
+  listen: `playerQueueHistory`, `playerQueueHistoryTracks` and
+  `playerClearQueueHistory`. `playerSaveQueueAsPlaylist` saves the current
+  entry and those after it as a playlist. The C ABI adds
+  `orca_player_query_queue_history`, `orca_player_clear_queue_history`,
+  `orca_player_save_queue_as_playlist` and `orca_queue_history_reason`.
+  `orca-cli play-tracks` takes `--print-history` and `--save-queue=NAME`.
+- **Moving a queue entry.** `playerQueueMove(player, from, to)` moves an
+  entry to another position in playback order under one engine stop, and
+  the cursors, a held successor and every entry serial follow the entries
+  they named. It refuses the entries `playerQueueRemove` refuses, and a
+  position between the playing entry and the one already lined up, with
+  `error.QueueEntryInUse`; under shuffle it changes only the shuffled
+  order. The C ABI adds `orca_player_queue_move`, and `orca-cli play-tracks`
+  takes `--move=MS:FROM:TO`, printing a `move` line with the result.
+- **Library search.** `librarySearch` finds Artists, Releases, Tracks,
+  Playlists and genres whose title or subtitle has a word beginning with
+  each word of the text, ignoring case and diacritics, grouped by kind
+  under per-kind `SearchLimits`; no character of the text is query syntax.
+  A Track whose title holds every word whole comes first, then one whose
+  title words begin with them, then one matching in its artist or album,
+  and `SearchHit.rank` is that tier, 0 to 2; other kinds rank by bm25.
+  Tracks are searched in `track_search`, updated only when a Track's
+  indexed text changes, and the other kinds in the `search_index` FTS5
+  table that triggers keep current (schema versions 36 and 38).
+  `ReleaseQuery.text` filters Releases the same way under every other
+  filter and sort. The C ABI adds `orca_library_search`,
+  `orca_search_kind`, `orca_search_limits`, `orca_search_hit_view` and
+  `text` in `orca_track_query_v2` and `orca_release_query_v2`.
+  `orca-cli search DATABASE TEXT` prints the hits, and `releases` takes
+  `--filter TEXT`.
+- **Release formats, review state and filters.** `ReleaseSummary` carries
+  the codec its Tracks' files share (or `mixed`), their highest sample rate
+  and bit depth, whether all are lossless, `release_type` and
+  `pending_reviews`. `ReleaseQuery` filters by `high_resolution_only`,
+  `needs_review_only`, `lossless_only`, `year_min`, `year_max` and
+  `has_artwork`, and `ReleaseSort.most_played` orders by listens. In the C
+  ABI, `orca_release_query_v2` gains those filters,
+  `orca_library_browse_releases_v2` passes an `orca_release_facts_view` beside
+  each `orca_release_view`, and `ORCA_RELEASE_SORT_MOST_PLAYED` is new.
+  `orca-cli releases` takes `--high-resolution`, `--needs-review`,
+  `--lossless`, `--year-from`, `--year-to`, `--with-artwork`,
+  `--without-artwork` and `--sort`, and ends each line with
+  `format=FLAC 24/96`, `lossless` and `reviews=N`.
+- **Playlist metadata.** A playlist has a description, a pin, a love and up
+  to eight tags, and remembers whether `playlist-import` created it.
+  `Runtime.libraryPlaylistPage` and `Runtime.libraryPlaylistCount` filter by
+  name, kind, pin and creator and sort by name, update, creation or entries;
+  `Runtime.libraryPlaylist` adds whether its entries name several Artists and
+  its three most common genres, and `Runtime.libraryUpdatePlaylist` changes
+  the metadata. `orca-cli playlist-update` sets it, and `orca-cli playlists`
+  takes `--smart`, `--manual`, `--pinned`, `--created-by-me`, `--imported`,
+  `--sort` and `--filter`. Schema version 35. The C ABI adds
+  `orca_library_query_playlists_v2`, `orca_library_playlist_count`,
+  `orca_library_playlist_get`, `orca_library_playlist_tags`,
+  `orca_library_playlist_genres` and `orca_library_update_playlist`.
+- **Smart playlists.** A smart playlist keeps version 1 rules JSON (fields
+  such as title, genre, year, play count, rating, added and last played
+  dates, loved and lossless, nested `all`/`any` groups, a sort and a limit)
+  and lists the Tracks they match each time it is read; playback and M3U
+  export take that list. Every rule value is bound as an SQL parameter.
+  `Runtime.libraryCreateSmartPlaylist`, `Runtime.librarySetSmartPlaylistRules`,
+  `Runtime.librarySmartPlaylistRules` and `Runtime.librarySmartPlaylistCount`
+  manage them, and `orca-cli smart-playlist-create`, `smart-playlist-rules`
+  and `smart-playlist-count` reach them. The C ABI adds
+  `orca_library_create_smart_playlist`,
+  `orca_library_set_smart_playlist_rules`,
+  `orca_library_smart_playlist_rules` and
+  `orca_library_smart_playlist_count`. A fuzz target replays rule seeds.
+- **Track filters.** `TrackQuery` filters by `year_min`, `year_max`,
+  `lossless`, `min_sample_rate` and `explicit_only`, alone or combined with
+  the Artist, Release, genre and loved filters, and `libraryTrackMatchCount`
+  counts them. A text search in `libraryTrackQuery` now keeps every filter,
+  ordered by relevance, instead of returning `error.SearchDoesNotFilter`. In
+  the C ABI, `orca_track_query_v2` gains the year range, an
+  `orca_track_format`, `min_sample_rate` and `explicit_only`, and
+  `orca_library_track_match_count_v2` is new. `orca-cli tracks` takes
+  `--year-from`, `--year-to`, `--lossless`, `--lossy`, `--min-rate` and
+  `--explicit`, and `--filter TEXT` searches with the other filters.
+- **Lyrics.** `Runtime.startTrackLyrics` reads a Track's lyrics on a job
+  worker: a synced `.lrc` sidecar, then synced lyrics in the file (ID3v2
+  `SYLT` or `USLT`, Vorbis comment `LYRICS` or `UNSYNCEDLYRICS`, MP4
+  `©lyr`), then plain lyrics from each in the same order. With `fetch` it
+  also asks LRCLIB for a Track without synced lyrics of its own, sending
+  only its title, artist, album and duration, and ranks the answer after
+  local synced lyrics and LRCLIB's plain lyrics after local plain ones.
+  Answers are kept in the Library under a digest of the query, so an edit
+  asks again; a miss is asked again after 7 days. A job without `fetch`
+  still uses kept answers. `Runtime.jobLyricsOutcome` returns a
+  `LyricsOutcome`, `Runtime.jobTakeLyrics` the result, `Lyrics.lineAt` the
+  synced line at a playback position, and `Runtime.setLrclibServer` points
+  LRCLIB at another server. Schema version 31 adds `track_lyrics`. The C
+  ABI's `orca_library_start_lyrics` starts an `ORCA_JOB_KIND_LYRICS` Job,
+  fetching from LRCLIB with `ORCA_LYRICS_FETCH`; `orca_job_lyrics_outcome`
+  reports where the lyrics came from and `orca_job_lyrics` hands them over
+  once as an `orca_lyrics_view`; `ORCA_PROVIDER_SERVICE_LRCLIB` points
+  LRCLIB at another server. `orca-cli lyrics DATABASE TRACK_ID [--fetch]`
+  prints them, with `ORCA_LRCLIB_URL`, and `orca-cli play-tracks --lyrics`
+  prints each synced line as it is heard.
 - **Library Health by kind.** `Runtime.libraryHealthSummary` returns each
   kind with an issue that is not dismissed, its count and its highest
   severity, and `Runtime.libraryHealthIssuePageOfKind` pages one kind's
   issues. The C ABI has them as `orca_library_health_summary` and
   `orca_library_query_health_items_of_kind`, and `orca-cli health` takes
   `--summary` and `--kind=KIND`.
+- **Track facts for song lists.** `TrackSummary` carries the playing file's
+  codec, sample rate, bit depth and whether it is lossy, the date it was first
+  seen, the recording's play count and last play, the parental advisory, track
+  and disc totals and the Release year; `TrackDetails` adds the totals, whether
+  the track total was counted, the advisory and the file's added and modified
+  dates. `TrackSort` appends `play_count`, `last_played` and `year`. Play counts
+  belong to the recording, so two files of one song played once each show two
+  plays on both; migration 32 adds `recording_play_stats`, filled from the
+  listen history. Track and disc totals come from the tags of any of the Track's
+  files, else the larger of the number of Tracks on the disc and its highest
+  track number, and the Release's disc count. The advisory stays unknown on
+  files scanned before this version until a rescan reads them. The C ABI adds
+  `orca_library_browse_tracks_v2` with an `orca_track_facts_view`,
+  `orca_library_track_details_v2`, `ORCA_TRACK_SORT_PLAY_COUNT`, `LAST_PLAYED`
+  and `YEAR`, `orca_explicit`, and an `explicit` byte in `orca_release_view`;
+  `orca-cli tracks` prints the facts and sorts by them, and `orca-cli track`
+  prints `track: n of N`, `disc: d of D`, the advisory and the file dates.
+- **Genres.** Migration 33 adds `genres` and `track_genres`, filled from each
+  Track's file tags, with spellings of one genre folded together (`Hip-Hop`,
+  `hip hop` and `Hip-Hop/Rap` are Hip Hop) and a value that lists several split
+  on commas and semicolons (`Indie Rock, Rock` is two genres; `R&B/Soul` and
+  `Folk, World, & Country` stay one). `Runtime.libraryGenrePage`,
+  `libraryGenreCount` and `libraryGenre` list genres with their Track, Release
+  and Artist counts; `libraryTrackGenres`, `libraryReleaseGenres`,
+  `libraryArtistGenres` and `libraryGenreArtwork` read them per item;
+  `TrackQuery`, `ReleaseQuery` and `ArtistQuery` filter by `genre_id`, and
+  `ArtistSort` orders Artists by name or Track count. `librarySetTrackGenres`
+  gives Tracks user genres that outrank their tags, and `planTagWrite` writes
+  them into FLAC, MP3 and ADTS files as `TagWriteFile.genres`: one `GENRE`
+  comment per genre, an ID3v2.4 `TCON` with one value per genre, or a 2.3 `TCON`
+  joined with `; `. `TrackDetails.genres` holds the first five. The C ABI adds
+  `orca_library_query_genres`, `orca_library_genre_count`,
+  `orca_library_genre_get`, `orca_library_track_genres`,
+  `orca_library_release_genres`, `orca_library_artist_genres`,
+  `orca_library_genre_artwork`, `orca_library_set_track_genres`,
+  `orca_library_query_tag_write_genres` (a held plan's genre change for one
+  file), `orca_library_browse_releases_v2`,
+  `orca_library_release_count_matching_v2`, `orca_library_query_artists_v2` and
+  `orca_library_artist_count_matching_v2`, and `orca_track_query_v2.genre_id`
+  now filters. `orca-cli genres` and `genre` list and show them, `tracks`,
+  `releases` and `artists` take `--genre ID`, `artists` takes `--sort
+  name|tracks`, `edit` takes `--genre=A;B` and `--clear=genre`, `track` prints
+  `genres:`, and `write-tags` prints a `genres` line for a genre change, as
+  `orca-gtk`'s write confirmation shows a `Genres` line. A Track count filtered
+  by genre alone counts `track_genres` rows. Each genre's Track, Release and
+  Artist counts are stored in `genre_totals` (schema version 38), with two
+  reference-count tables for the distinct Release and Artist counts, filled from
+  the Tracks and kept exact by triggers, so `libraryGenrePage`,
+  `libraryGenreCount` and `libraryGenre` read one row per genre: a page at
+  500,000 Tracks takes under 1 ms. Each `track_genres` row written costs about 7
+  µs more. `libraryGenreArtwork` lists only Releases with a cover.
+- **Artist info.** `Runtime.startArtistInfoFetch` gathers an Artist's
+  photo, biography, years active and links on a job: an image in the
+  Artist's folder, then MusicBrainz, Wikidata, Wikimedia Commons and
+  Wikipedia, each through its own rate-limited gateway. A Commons photo is
+  kept with its licence, licence URL and plain-text credit, and a Wikipedia
+  biography with its URL, language and CC BY-SA 4.0 licence; nothing is
+  written to a file. A group's years active are its MusicBrainz formation
+  and dissolution; anyone else's start at Wikidata's work period, else at
+  their earliest Release in the Library, never at a birth date. Info is
+  reused for 30 days, `offline` sends nothing, and only an Artist with a
+  MusicBrainz artist ID is looked up online.
+  Migration 34 adds `artist_info`, `artist_links`, `artist_loves`,
+  `artist_related`, `library_settings` and `release_info`. `libraryArtistInfo`,
+  `libraryArtistPhoto` and `libraryArtistLinks` read it, and
+  `setWikidataServer`, `setWikimediaCommonsServer` and `setWikipediaServer`
+  point it at other servers. The C ABI adds `orca_library_start_artist_info`,
+  `orca_job_artist_info_outcome`, `orca_library_artist_info`,
+  `orca_library_artist_photo`, `orca_library_artist_links`,
+  `ORCA_JOB_KIND_ARTIST_INFO` and `ORCA_PROVIDER_SERVICE_WIKIDATA`,
+  `WIKIMEDIA_COMMONS` and `WIKIPEDIA`. `orca-cli artist-info DATABASE
+  ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx]` prints it, with
+  `ORCA_WIKIDATA_URL`, `ORCA_WIKIMEDIA_URL` and `ORCA_WIKIPEDIA_URL`, and
+  `orca-cli artist-photo` saves the photo.
+- **Listeners, related artists, release info and MusicBrainz genres.** Artist
+  info also keeps ListenBrainz's listener count (`POST /1/popularity/artist`)
+  and up to 12 related artists from ListenBrainz Labs, refreshed at most weekly,
+  and `ArtistInfoOptions.include_releases` fetches the Artist's Releases too.
+  `Runtime.startReleaseInfoFetch` keeps a Release's Wikipedia description, found
+  through its MusicBrainz release group, and `libraryReleaseInfo` reads it.
+  MusicBrainz genres (CC BY-NC-SA 3.0) go on Tracks with no genre from a file or
+  an edit, as provider genres: on by default in artist and release info, turned
+  off with `setGenreFill`, or run with `startGenreFill`. `libraryRelatedArtists`
+  and `setListenBrainzLabsServer` are new. The C ABI adds
+  `orca_library_related_artists`, `orca_library_start_release_info`,
+  `orca_job_release_info_outcome`, `orca_library_release_info`,
+  `orca_library_set_genre_fill`, `orca_library_genre_fill`,
+  `orca_library_start_genre_fill`, `ORCA_JOB_KIND_RELEASE_INFO`,
+  `ORCA_PROVIDER_SERVICE_LISTENBRAINZ_LABS`, `include_releases` in
+  `orca_artist_info_options`, and `has_listeners` and `listeners` in
+  `orca_artist_info_view`. `orca-cli artist-info` prints `listeners=` and
+  `related:` and takes `--include-releases`; `related`, `release-info`,
+  `genre-fill` and `genres --fill-from-musicbrainz` are new, `track` prints the
+  genres' provenance, and `ORCA_LISTENBRAINZ_URL` and
+  `ORCA_LISTENBRAINZ_LABS_URL` select the servers.
+- **Artist love.** `Runtime.librarySetArtistLove` loves or clears Artists in
+  the Library only, never sent; `ArtistSummary.loved`,
+  `ArtistQuery.loved_only` and `ArtistSort.recently_loved` show, filter and
+  order by it. The C ABI adds `orca_library_set_artist_love`,
+  `orca_library_artist_loved`, `loved_only` in `orca_artist_query_v2`,
+  `ORCA_ARTIST_SORT_RECENTLY_LOVED` and `orca_artist_view_v2`, which
+  `orca_library_query_artists_v2` now calls back with.
+  `orca-cli love-artist DATABASE IDS [--clear]` loves Artists, and
+  `artists` takes `--loved` and `--sort loved`.
+- **Parental advisory.** The MP4 `rtng` atom and `ITUNESADVISORY` in MP4,
+  ID3v2 `TXXX` and Vorbis comments are read as `Explicit` (none, explicit or
+  clean). `orca-cli edit --explicit=yes|no|clean` sets it, and `write-tags`
+  writes it to FLAC and MP3 files.
+- **Album ReplayGain.** `ReplayGainMode.album` corrects every Track of a
+  Release by one figure: the duration-weighted energy mean of the Tracks'
+  measured loudness toward −18 LUFS, capped by the largest Track peak. It
+  is worked out when an entry opens, from the stored measurements, so
+  re-analysis or a move to another Release takes effect at the next open;
+  no migration. An entry whose Release is not fully measured, or has more
+  than 512 Tracks, plays at its own track gain. `SignalPath` adds
+  `replay_gain_source` (`ReplayGainSource`: `none`, `track`, `album`,
+  `track_fallback`) and `replay_gain_track_db`, the track gain an album
+  gain replaced. The C ABI adds `ORCA_REPLAY_GAIN_ALBUM`,
+  `orca_gain_source`, and `replay_gain_source`, `has_replay_gain_track` and
+  `replay_gain_track_db` in `orca_signal_path_view`'s reserved bytes.
+  `orca-cli play-tracks` takes `--replay-gain=album`, and its `signal:`
+  line names the source.
+- **Lyrics in `orca-gtk`.** The inspector's Lyrics mode (Ctrl+Shift+L or its
+  header toggle) shows the playing Track's lyrics: synced lyrics highlight the
+  line being heard, dim the lines before it and keep it centred, plain lyrics
+  show as selectable text, and an instrumental Track says so. Settings >
+  Listening > Fetch lyrics from LRCLIB, off by default, also asks LRCLIB;
+  `ORCA_LRCLIB_URL` points it at another server.
 
 ### Changed
 
-- **`orca-gtk` has its own dark look.** It forces the dark scheme, maps
-  libadwaita's colours onto a grayscale palette with a restrained blue
-  accent, sets the interface in Inter and album, artist and Now Playing
-  titles in Source Serif 4 (both bundled, SIL Open Font License, installed to
-  `share/orca/fonts`), aligns durations and counts with tabular figures, and
-  draws albums without covers as initials on a neutral surface instead of a
-  coloured gradient. The heart icons now resolve when `zig-out/bin/orca-gtk`
-  runs without `XDG_DATA_DIRS`.
-- **`orca-gtk`'s sidebar and page headers are reorganised.** The sidebar
-  opens with the Orca wordmark and groups its pages under Library,
-  Collection, Playback and Library Tools, with Settings pinned at its foot.
-  Header bars are flat and untitled; each page opens with a serif title and
-  its count, and an album, artist or playlist page shows a breadcrumb back to
-  where it was opened from. Tracks is now Songs and Preferences is now
-  Settings throughout the interface.
-- **`orca-gtk`'s player bar follows the new design.** It sits on the sidebar
-  colour under a hairline. The left shows the cover, title, artist and album
-  and the heart; the right shows the playing song's format (codec, bit depth
-  and sample rate), which opens the signal path, the output device's name,
-  which opens the device list, an inline volume slider and the queue button.
-  The signal path is no longer in the device list. When the window is narrow
-  the format line hides, the device name becomes an icon and the volume
-  slider moves into a popover. The play button draws its focus ring outside
-  its fill, and the seek handle shows while the seek bar has keyboard focus.
-- **`orca-gtk`'s details panel is now the inspector.** It shows a song as
-  flat Audio, Loudness, Identity, Metadata, History and File sections under
-  a serif title, hiding empty ones, and gains a Signal Path mode that draws
-  the playing audio's path from source to device with the bit-perfect
-  verdict. Three linked header toggles choose the track inspector, lyrics or
-  the signal path, saved as before plus `[view] signal_path`; the player
-  bar's format line opens the Signal Path mode on pages with an inspector.
-  A narrow window lays the inspector over the page instead of hiding it.
-- **`orca-gtk`'s Albums grid and album page follow the new design.** The
-  grid is denser, with each album's year under its artist, a play button and
-  a more button on hover or focus, and a Sort by menu in the title row.
-  Chips under the title choose All Albums, Recently Added or Loved, backed by
-  liborca's recently-added sort and loved-only Release query. The album page
-  opens with a larger cover over a blurred, darkened copy of it, an Album
-  overline, the artist as a link and a more button beside Play, Shuffle and
-  the heart; its track list is flush with the page under a # / Title /
-  duration header, marks the playing track with a play glyph and an accent
-  title, and shows each row's rating stars and more button on hover. A
-  narrow window stacks the album page's cover above its title.
-- **`orca-gtk`'s Songs list and Loved page follow the new design.** Songs
-  are thin-ruled rows under an uppercase header with a heart column: the
-  playing song shows a play mark and an accent title, rating stars show on
-  hover or once rated, and a more button on hover opens the track menu. A
-  Sort by menu beside the count offers the column sorts plus Date Added,
-  and a narrow window drops the Album and Rating columns. Loved opens with a
-  large title, Play and Shuffle for every loved song and the loved song and
-  album counts, then Loved Songs and Loved Albums tabs; Loved Songs uses the
-  Songs table and shows the selected song in the inspector.
-- **`orca-gtk`'s lists are one Tab stop each.** In the Songs table and the
-  Albums, Artists, Playlists and Queue lists, Tab visits the focused row's
-  buttons and then moves on, instead of through every row; the arrow keys
-  move between rows.
-- **`orca-gtk`'s playlists have an overview and follow the new design.**
-  The sidebar lists a single Playlists page instead of each playlist and
-  the New Playlist… and Import Playlist… entries. It is a grid of cards,
-  each with a mosaic of the playlist's first four album covers, its song
-  count and length, when it was updated and how many songs are unavailable;
-  hovering a card shows a play button and a more button with Play, Shuffle,
-  Rename…, Export… and Delete…. The title row offers Sort by Recently
-  Updated, Name or Recently Created, and the header a search over playlist
-  names, Import… and New Playlist; with no playlists the page offers both.
-  A playlist's page opens with the mosaic over a blurred cover, a Playlist
-  overline, the song count, length and unavailable count, Play, Shuffle and
-  a more button, and lists its songs in the Songs table numbered by
-  position, with the inspector for the selected song. A narrow window
-  stacks the mosaic above the name.
-- **`orca-gtk`'s Artists list and artist page follow the new design.** The
-  list is flush rows with a round cover thumbnail, loaded as each row is
-  shown, and each artist's album and song counts. The artist page opens
-  with their newest album's cover over a blurred copy of it, an Artist
-  overline, the years their albums span, Play, Shuffle and a more button,
-  and their album count, song count and time in the library. Songs lists
-  their five highest-rated songs, with See All opening Songs scoped to the
-  artist and the inspector for the selected song; Albums is a wrapping grid
-  with play and more buttons on hover. A narrow window hides the counts and
-  stacks the sections.
-- **`orca-gtk`'s Now Playing and Queue pages follow the new design.** Now
-  Playing shows the cover large over a blurred, darkened copy of it instead
-  of a wash of its average colour, with a Now Playing overline, the title in
-  serif, the artist and the album and year as links, a heart and a more
-  button, a seek bar and a transport that mirrors the player bar's: both are
-  refreshed from one place, so either drives playback and seeking, dragging
-  included, and the other follows. The synced line being heard shows under
-  the title once a lyrics view has loaded the song's lyrics; the page never
-  looks them up or fetches them. A wide window adds Up Next, the next ten
-  entries with Clear and View Full Queue, and Track Info; with nothing
-  playing the page says so. The Queue page lists flush rows with the
-  position or a play mark, a thumbnail, the title over the artist, the
-  heart, rating stars on hover or once rated, the duration and a remove
-  button on hover, under the song count, length and Clear. Secondary and
-  tertiary text over the covers behind album, artist and Now Playing headers
-  is white at reduced opacity, and the tertiary text colour is lighter
-  everywhere, so both stay above 4.5:1 on a light cover. The player bar's
-  format line and the inspector's Signal Path now show the Device stage on
-  the first song played, reading the signal path once more when the output
-  starts running and only while it is on screen.
-- **`orca-gtk`'s Settings is a page following the new design.** The
-  sidebar's Settings item, the main menu and Ctrl+, open it in the content
-  area instead of a dialog, with Settings selected in the sidebar. A
-  segmented tab bar chooses Library, Playback, Sound or Listening, each a
-  set of cards with an icon, a title and a one-line description, in two
-  columns or one when the window is narrow. Add Folder… and Rescan All
-  Folders are buttons under the folder list, and the tab last open is kept
-  until the app quits.
-- **`orca-gtk`'s Library Health and Matches pages follow the new design.**
-  Library Health opens with its issue count and the library's album, song
-  and artist counts, then a card for each kind of issue in
-  `libraryHealthSummary`'s order: a symbolic icon tinted by severity, the
-  kind's name, a one-line explanation, its file count and, for recording
-  mismatches, Review, which opens Matches. Expanding a card lists that
-  kind's files 512 at a time with Show more, each keeping its Fix, Fetch
-  Cover, Compare, Review, Show in Files and Dismiss actions. Open cards,
-  how far each has loaded and the scroll position survive a reload, such
-  as after a dismiss or a fix. The Analyse banner is a card above them.
-  Matches and its Corrections are cards of flush rows under the page title.
-- **Library schema version 31.** Adds `track_lyrics`.
+- **Play counts are per recording.** `Runtime.libraryTrackPlayStats`,
+  `TrackDetails` and `orca_library_track_play_stats` count the listens of the
+  Track's recording through any of its files, no longer of the one file the
+  Track plays. A Track without a recording counts no plays. Plays follow
+  the file: when a file joins another recording, as two Tracks merging do,
+  its listens move with it and the merged Track shows the sum.
+- **Sorted song lists page from an index.** A whole-library page sorted by
+  rating, love or date added, or by the new play count, last play and year
+  sorts, reads only the rows up to the page from version 32's indexes; on
+  500,000 Tracks a first page takes 0 to 2 ms. `TrackSort.date_added` orders
+  by when the playing file was first seen, the date it shows, instead of when
+  the Track row was created.
+
+### Fixed
+
+- **A ten-band equalizer band turned back on no longer rings.** Turning
+  bands off shortened the filter cascade but kept the history of the slots
+  past its end, and a band turned on again later started from that stale
+  history. A slot past the previous cascade's end now starts clear. History
+  now follows the filter, not its slot, so turning one filter or band off or
+  on no longer hands the filters after it their neighbour's history.
+- **Track search text is no longer FTS5 syntax.** Quotes, `*`, `-`,
+  brackets, `NEAR`, `OR` and column filters typed into a Track search
+  (`libraryTrackQuery`, `orca-cli tracks --filter`, `orca-gtk`'s search box)
+  failed the query or changed its meaning; each word now matches as the
+  beginning of a word, and text with no word matches nothing.
+- **A listen and the now-playing Track name the entry that was heard.**
+  `playerStatus` and listen tracking paired the audible entry serial with the
+  Track under the queue cursor, and `playerNowPlaying` named that Track, but
+  the engine stores the cursor after the serial, so a read around a track
+  change could name the entry before it and credit its listen to the wrong
+  Track. The Track now comes from the serial through the queue's serial
+  records; a listen sample whose serial moves while it is read is skipped.
+  A hard load (start, skip, seek re-open, format switch) records the new
+  serial in the queue before it becomes audible, so a read during one no
+  longer names no Track.
+- **Turning shuffle off no longer shows the wrong Track as playing.** Toggling
+  shuffle left each serial record at its old position, so the playing entry
+  resolved to whichever Track the new order put there, and the engine moved
+  the cursor onto it. Records now move to their entry's new position, and
+  removing an entry forgets its record.
 
 ## 0.8.1 - 2026-10-02
 

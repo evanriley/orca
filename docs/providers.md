@@ -1,8 +1,9 @@
 # Providers and listening history
 
 Orca talks to online services only through `network.Gateway`, and the rules
-below hold for every provider. ListenBrainz, MusicBrainz, AcoustID, the
-Cover Art Archive and LRCLIB are connected.
+below hold for every provider. ListenBrainz, ListenBrainz Labs, MusicBrainz,
+AcoustID, the Cover Art Archive, LRCLIB, Wikidata, Wikimedia Commons and
+Wikipedia are connected.
 Other services follow the same rules; a request that breaks one is a defect,
 not a tuning choice.
 
@@ -88,8 +89,12 @@ not a tuning choice.
   `Runtime.setListenBrainzServer`, a MusicBrainz mirror with
   `Runtime.setMusicBrainzServer`, another AcoustID server with
   `Runtime.setAcoustIdServer`, another Cover Art Archive with
-  `Runtime.setCoverArtArchiveServer` and another LRCLIB server with
-  `Runtime.setLrclibServer`. `http` is accepted only for `127.0.0.1`,
+  `Runtime.setCoverArtArchiveServer`, another LRCLIB server with
+  `Runtime.setLrclibServer`, and other Wikidata, Wikimedia Commons and
+  Wikipedia servers with `Runtime.setWikidataServer`,
+  `Runtime.setWikimediaCommonsServer` and `Runtime.setWikipediaServer`, and
+  another ListenBrainz Labs server with `Runtime.setListenBrainzLabsServer`.
+  `http` is accepted only for `127.0.0.1`,
   `[::1]` and `localhost`, so a token or a library's contents never cross a
   network in clear text.
 
@@ -105,7 +110,9 @@ Audible time counts only frames played at their natural rate. Paused time and
 positions skipped by a seek do not count. `started_at` is when the entry's
 first frame would have played, in Unix seconds: the moment playback started,
 less the position it started from. A track repeated in the queue is a new
-listen each time it starts.
+listen each time it starts. The listened Track is the one the audible entry
+serial names in the queue, never the audible cursor's; a sample whose serial
+moves while it is resolved is skipped rather than ending the listen.
 
 A listen is recorded by the Library's listen worker, off the control lane and
 the render callback. When the entry ends, the recorded time is raised to what
@@ -644,3 +651,196 @@ orca-cli lyrics DATABASE TRACK_ID [--fetch]
 ```
 
 `ORCA_LRCLIB_URL` points `lyrics --fetch` at another server.
+
+## Artist info
+
+`Runtime.startArtistInfoFetch(library, artist_id, options)` gathers an
+Artist's photo, biography, years active and links into the Library's
+`artist_info`, `artist_links`, `artist_related` and
+`related_artist_photos` tables
+([database.md](database.md#artist-info)). Media files are never written.
+`libraryArtistInfo`, `libraryArtistPhoto` and `libraryArtistLinks` read
+what was kept.
+
+- **Opt-in.** Nothing is fetched until a host starts the job, which needs
+  `setClientIdentity` (`error.ClientIdentityRequired`). `options.offline`
+  makes no request at all: the job uses the local image and answers already
+  in `provider_cache`, and reports `offline`.
+- **The order.**
+  1. **A local image.** The Artist's folder is the folder above each of the
+     Artist's release folders, or the deepest folder common to them, when it
+     lies inside the files' roots and holds no other Artist's files. The
+     first of `artist.jpg`, `artist.png`, `folder.jpg`, `thumb.jpg` and
+     `fanart.jpg` there that is an image by its bytes and at most 8 MiB is
+     the photo, and Commons is not asked for one unless `force` is set.
+  2. **MusicBrainz.** `GET /ws/2/artist/{mbid}?inc=url-rels+genres+artist-rels`
+     on the Artist's MusicBrainz artist ID, as the service `musicbrainz`. It
+     gives the type, the life span, the Wikidata item, the
+     links, and an `image` relation, which is used only when it names a
+     `commons.wikimedia.org/wiki/File:` page. An Artist without an ID gets
+     the local image only (`no_musicbrainz_id`), and nothing is sent.
+  3. **Wikidata.** `wbgetentities` for the item's image (P18), its work
+     period (P2031 start, P2032 end, each at year precision or finer) and
+     its Wikipedia sitelink in `options.language`, else English, as the
+     service `wikidata`. P18 outranks MusicBrainz's image relation.
+  4. **Wikimedia Commons.** `prop=imageinfo` for the file's licence
+     (`LicenseShortName`, `LicenseUrl`), its author (`Artist`) and an
+     800-pixel rendering, then the rendering itself, as the service
+     `wikimedia-commons`. Commons returns the author as HTML; Orca keeps
+     plain text with tags removed, entities decoded and whitespace collapsed,
+     at most 1 KiB. The rendering is fetched only over `https` on
+     `wikimedia.org` or a host under it, or on the loopback server set with
+     `setWikimediaCommonsServer`; at most 4 MiB, and only a JPEG, PNG or
+     WebP by its bytes.
+  5. **Wikipedia.** `GET /api/rest_v1/page/summary/{title}` on
+     `https://{language}.wikipedia.org`, as the service `wikipedia`: the
+     article's lead as plain text, at most 16 KiB, and its page. A
+     disambiguation page is no biography.
+  6. **Genres.** Unless genre fill is off, the MusicBrainz artist's genres
+     go on the Artist's Tracks that have none
+     ([Genres from MusicBrainz](#genres-from-musicbrainz)).
+  7. **ListenBrainz.** `POST /1/popularity/artist` with
+     `{"artist_mbids":[mbid]}` on the ListenBrainz server, as the service
+     `listenbrainz`, needing no token: its `total_user_count` is kept as the
+     Artist's listeners. Then `GET
+     /similar-artists/json?artist_mbids={mbid}&algorithm=…` on
+     `https://labs.api.listenbrainz.org`, as the service
+     `listenbrainz-labs`: the 12 highest-scored related artists other than
+     the Artist itself are kept. Both run at most once in 7 days per Artist,
+     unless `force` is set; the Labs answer is cached for 7 days.
+  8. **Related artist photos.** For each of the first 8 related artists
+     with no library Artist and no photo or no-photo marker kept less than
+     30 days ago (with `force`, the first 8 such artists whatever their
+     age), the photo is found as for the Artist itself: MusicBrainz on the
+     related artist's ID, Wikidata's P18 when MusicBrainz names an item,
+     then Commons' `imageinfo` and the rendering, under the same services
+     and limits. That is up to 32 requests, so at one a second per service
+     the step adds about 8 seconds. A photo is kept in
+     `related_artist_photos` by MusicBrainz artist ID; a related artist
+     with no image, or a refusal, keeps a marker so it is not asked again
+     for 30 days; an unavailable, busy or offline step keeps nothing and is
+     asked on the next fetch. One artist's failure neither stops the others
+     nor changes the outcome. Each kept photo keeps its attribution as the
+     Artist's own photo does: `photo_source` (Commons), `photo_url` (its
+     Commons page), `photo_licence`, `photo_licence_url` and `photo_credit`
+     from the `imageinfo` reply's `extmetadata`, which
+     `libraryRelatedArtistPhotoInfo` returns for a host to show with it.
+  9. **Releases.** With `options.include_releases`, each of up to 64 of the
+     Artist's Releases with a MusicBrainz release ID gets its
+     [release info](#release-info).
+- **Years active.** For a `Group`, `Orchestra` or `Choir`, MusicBrainz's
+  life span is formation to dissolution and is used as it is. For any
+  other type, a person among them, the life span is a lifetime, so its
+  begin is never used: the years start at Wikidata's P2031, else at the
+  earliest release date among the Artist's Releases in the Library, and
+  end at P2032. Such an Artist is `ended` when P2032 is set or MusicBrainz
+  says it ended, with no end year unless P2032 gives one.
+- **What is sent.** Only the MusicBrainz artist and release IDs, the
+  release group, Wikidata item and Commons file IDs and the article title
+  the services themselves returned, and the language. No path, file name, tag or other Library
+  content leaves the machine.
+- **Rules.** Each service has its own gateway: the client
+  identity's `User-Agent`, one request a second, the shared backoff and
+  block, and the service lease, as above. Answers are kept in
+  `provider_cache` for 30 days and a refusal for 7; when a service cannot be
+  reached an expired answer is used instead.
+- **Reuse.** Info fetched less than 30 days of wall time ago, for the same
+  MusicBrainz artist ID and the same requested language, is kept and nothing
+  is asked (`cached`). `force` asks again; it still answers from
+  `provider_cache` while those answers are fresh.
+- **Licences.** A Commons photo is shown with its licence, a link to the
+  licence and its author's credit, as Commons requires; the photo's Commons
+  page is kept as `photo_url`. A Wikipedia biography is CC BY-SA 4.0 and is
+  shown with that licence and a link to the article. Wikidata is CC0.
+  MusicBrainz's data is CC0, except its genres
+  ([Genres from MusicBrainz](#genres-from-musicbrainz)). ListenBrainz's
+  listener counts and related artists are shown as from ListenBrainz. A
+  local image carries no licence or credit.
+- **Failures.** A step that fails leaves what an earlier fetch stored for
+  that step, and the rest still run. The outcome is then the first failure:
+  `refused` (a `4xx`, a redirect off the service or a body Orca does not
+  accept), `unavailable` (`408`, `5xx`, a network failure or a block) or
+  `busy` (another process holds a service's lease). A cancelled job keeps
+  nothing and reports `cancelled`. None of these fail the job.
+
+`jobArtistInfoOutcome(job)` reports the `ArtistInfoOutcome`: `fetched`,
+`cached`, `no_musicbrainz_id`, `offline`, `not_found`, `refused`,
+`unavailable`, `busy` or `cancelled`. The outcome is also stored with the
+info.
+
+```sh
+orca-cli artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx]
+orca-cli artist-photo DATABASE ARTIST_ID --out=PATH
+orca-cli related-photo DATABASE MBID --out=PATH
+```
+
+`ORCA_MUSICBRAINZ_URL`, `ORCA_WIKIDATA_URL`, `ORCA_WIKIMEDIA_URL`,
+`ORCA_WIKIPEDIA_URL`, `ORCA_LISTENBRAINZ_URL` and `ORCA_LISTENBRAINZ_LABS_URL`
+point `artist-info --fetch`, `release-info --fetch` and
+`genres --fill-from-musicbrainz` at other servers. With `ORCA_WIKIPEDIA_URL`
+set, every language is asked of that one server. `artist-info` prints
+`listeners=N (ListenBrainz)` and `related: N` with one line per related
+artist, each ending in `photo=yes` or `photo=no`; `orca-cli related
+DATABASE ARTIST_ID` prints those lines alone, and `related-photo` writes a
+related artist's kept photo, then prints `source=`, `licence=`, `credit=`,
+`photo-url=` and `photo-licence-url=` lines.
+
+## Release info
+
+`Runtime.startReleaseInfoFetch(library, release_id, options)` starts a
+`release_info` Job that keeps a Release's description in `release_info`
+([database.md](database.md#artist-info)); `libraryReleaseInfo` reads it and
+`jobReleaseInfoOutcome` reports the outcome, an `ArtistInfoOutcome`. It needs
+`setClientIdentity`, and `error.UnknownRelease` names a Release that does not
+exist. Media files are never written.
+
+1. **MusicBrainz.** `GET /ws/2/release/{mbid}` on the Release's MusicBrainz
+   release ID gives the release group, then `GET
+   /ws/2/release-group/{id}?inc=url-rels+genres` its Wikidata item, its
+   Wikipedia link and its genres. A Release without an ID asks nothing
+   (`no_musicbrainz_id`).
+2. **Genres.** Unless genre fill is off, the release group's genres go on
+   the Release's Tracks ([Genres from MusicBrainz](#genres-from-musicbrainz)).
+3. **Wikidata.** The item's Wikipedia sitelink in `options.language`, else
+   English. A group without an item uses its Wikipedia link.
+4. **Wikipedia.** The article's REST summary, as for an Artist's biography:
+   the description, its page, its language and the CC BY-SA 4.0 licence.
+
+Each service is asked through the same gateways, caches, reuse and failure
+rules as artist info: info fetched less than 30 days ago for the same
+release ID and language is `cached`, `offline` sends nothing, and the
+outcome is the first failure while the other steps still run.
+
+```sh
+orca-cli release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline] [--lang=xx]
+```
+
+It prints `description=wikipedia url=… language=… licence="CC BY-SA 4.0"`,
+the `musicbrainz=` and `release-group=` IDs, the text and `outcome=`.
+
+## Genres from MusicBrainz
+
+MusicBrainz's genres are user-voted and are CC BY-NC-SA 3.0, not CC0, so
+genres filled from them are shown with "Genres from MusicBrainz, CC BY-NC-SA
+3.0" (`musicbrainz_genre_licence`).
+
+- **What is written.** The three most voted genres, with any tied with the
+  third, at most five, as provider genres (`provenance=provider`). A
+  Release's genres go on its Tracks that have no genres from a file or a
+  user's edit, replacing earlier provider genres; an Artist's go only on
+  its Tracks that have no genres at all. A file's or a user's genres are
+  never replaced, and replace provider genres when they appear.
+- **On by default.** Artist info and release info fill genres unless the
+  Library's setting is off: `setGenreFill(library, .{ .musicbrainz = false
+  })` turns it off and `libraryGenreFill` reads it. It is kept in the
+  Library's `library_settings`.
+- **On request.** `startGenreFill(library, .{ .limit, .offline })` starts a
+  `release_info` Job that asks MusicBrainz for the release group of up to
+  `limit` (1 to 512) Releases with a MusicBrainz release ID and a Track with
+  no genres, and fills them whatever the setting says. Its progress counts
+  Releases. Nothing but genres is fetched or stored.
+
+```sh
+orca-cli genres DATABASE --fill-from-musicbrainz [--limit N] [--offline]
+orca-cli genre-fill DATABASE [on|off]
+```

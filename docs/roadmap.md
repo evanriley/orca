@@ -10,8 +10,9 @@ Released `0.8.1`. `orca-gtk` is a daily-usable player on Linux: a
 designed libadwaita frontend, gapless playback between entries of one format,
 output at each source's sample rate, live equalizer and crossfeed, tag
 editing with undo, track details, lyrics that follow playback, a local
-play history, star ratings, album love, playlists with M3U import and
-export, ListenBrainz scrobbling, MusicBrainz and AcoustID matching with
+play history, star ratings, album and artist love, playlists with M3U import
+and export, smart playlists, a command palette, browsing by genre and by
+folder, artist and release info, ListenBrainz scrobbling, MusicBrainz and AcoustID matching with
 review, AcoustID submission and verification, actionable Health, idle
 maintenance, and watching of the music folders, so new, changed and
 removed files show up without a rescan. `liborca` builds for aarch64
@@ -36,8 +37,33 @@ more identification sources.
   cancellable.
 - File and Location identity keyed by stable volume identifiers (filesystem
   UUID, including device-mapper volumes, or a persisted volume marker).
-- Projection into artists, releases, recordings and tracks, with FTS5 search
-  and bounded browse pages by artist, release and track.
+- Projection into artists, releases, recordings and tracks, with bounded
+  browse pages by artist, release, track and genre. Releases filter by
+  format, review state, year, artwork and type, and Tracks by year, format,
+  sample rate and parental advisory, each with an exact count.
+- One search over Artists, Releases, Tracks, Playlists and genres, each word
+  a word prefix with no query syntax, Tracks ranked by where the words
+  match. Reachable through `Runtime.librarySearch`, `orca_library_search`,
+  `orca-cli search` and the command palette in `orca-gtk`.
+- Genres from file tags, with spellings folded together and user genres that
+  outrank tags, with Track, Release and Artist counts kept in
+  `genre_totals`. Reachable through `orca-cli genres` and `genre`, tag write
+  for FLAC, MP3 and ADTS, and the Genres page in `orca-gtk`.
+- Browsing by folder: a root's subfolders with totals counted through
+  everything below, and its files, and playing a folder recursively.
+  Reachable through `libraryFolderPage`, `orca_library_query_folder`,
+  `orca-cli folders` and `play-folder`, and the Folders page in `orca-gtk`.
+- Library stats (counts, bytes, duration, last scan and analysis) and
+  Health totals per kind. Reachable through `libraryStats`,
+  `orca_library_stats`, `orca-cli stats` and `health --summary`, and the
+  Health page in `orca-gtk`.
+- Artist and release info, fetched on a job and kept in the Library: an
+  Artist's photo, biography, years active, links, listeners and related
+  artists, a Release's description, and MusicBrainz genres for Tracks with
+  none, from MusicBrainz, Wikidata, Wikimedia Commons, Wikipedia and
+  ListenBrainz. Reachable through `orca-cli artist-info`, `release-info`,
+  `related` and `genre-fill`, the C ABI, and the Artist and album pages in
+  `orca-gtk`. See [providers.md](providers.md).
 - Property backfill for rows scanned before audio properties were recorded.
 - Folder-scoped reconciles, and filesystem watching on Linux (inotify) that
   reconciles what changes under each root, reconciles roots the watch limit
@@ -71,28 +97,38 @@ more identification sources.
   volume. A format change between entries reopens the output at the new
   format, and each stream asks PipeWire for its source's sample rate; the
   signal path reports the rate the device actually runs at.
-- Per-entry ReplayGain from analysis results.
+- Per-entry ReplayGain from analysis results, by track or by album. An album
+  figure is worked out when an entry opens from the Release's stored
+  measurements, and a Release that is not fully measured plays at track
+  gain.
 - A ten-band equalizer with presets, stereo crossfeed, and a signal-path
   report of the source, each processing stage, the output stream and whether
   the path could be bit-perfect up to PipeWire: exact widening of a source of
   24 bits or fewer to float is, a lossy source, a 32-bit integer or 64-bit
   float source and any gain that is not exactly 1 are not
   (`orca-cli play-tracks --eq --crossfeed`).
-- Output device selection.
+- A parametric equalizer of up to 16 peak, shelf, pass and notch filters and
+  a preamp, with EqualizerAPO import and export, through liborca, the C ABI
+  and `orca-cli` (`play-tracks --peq`, `peq-check`, `peq-response`).
+- Output device selection, with each device's kind (USB, PCI, Bluetooth,
+  HDMI or virtual) and the signal path's block size.
+- Queue history, moving a queue entry and saving the queue as a playlist,
+  through `orca-cli play-tracks`, the C ABI and the Queue page in
+  `orca-gtk`.
 - Tag write-back for FLAC, MP3 and ADTS from an approved plan, with undo.
   One process at a time owns a Library's mutation journal through a lock
   file; an undo interrupted by a crash is finished by the next open, and
   recovery never touches another process's write in progress.
 - Track details: format, file, loudness, tags and MusicBrainz recording ID
-  with its source for one Track (`orca-cli track`), and a details panel in
+  with its source for one Track (`orca-cli track`), and the inspector in
   `orca-gtk`.
 
 ### Listening
 
 - A local play history: every listen (a track of 30 s or more, heard for half
   its length or four minutes) is recorded in the Library and kept forever.
-  Play count and last play appear in `orca-cli track` and in the `orca-gtk`
-  details panel. `orca-cli play-tracks` records listens too.
+  Play count, counted per recording, and last play appear in `orca-cli
+  track`, in the `orca-gtk` inspector and as sortable Songs columns. `orca-cli play-tracks` records listens too.
 - ListenBrainz scrobbling, off until enabled: a leased, restart-safe queue, a
   gateway that identifies Orca, spaces requests and honours `429`, and a token
   held in the Secret Service (`orca-gtk` Settings > Listening) or read from
@@ -107,29 +143,36 @@ more identification sources.
   ListenBrainz while scrobbling for recordings with a MusicBrainz recording
   ID, from the file's tags or an accepted match. `orca-gtk` has a heart in the
   player bar, a heart button on every song row and context menu entries, and
-  its details panel says when a love cannot sync; `orca-cli feedback` sets
+  its inspector says when a love cannot sync; `orca-cli feedback` sets
   it.
 - Love for albums, kept in the Library per Release and never sent, since
   ListenBrainz feedback takes recordings only: `orca-cli love-release` and
   `releases --loved`, and in `orca-gtk` a heart on the album page, Love Album
-  in album menus, and a Loved page of loved albums and songs.
+  in album menus, and a Loved page of loved songs, albums and artists.
+- Love for artists, kept in the Library and never sent: `orca-cli
+  love-artist`, `artists --loved` and `--sort loved`, and a love button on
+  the Artist page in `orca-gtk`.
 - Now Playing, off until enabled: the playing track is announced to
   ListenBrainz after 10 s (`orca-gtk` Settings > Listening).
 - Star ratings, kept in the Library per recording: `orca-cli rate`, a sort
-  by rating, and stars on every song row, in the details panel and in song
+  by rating, and stars on every song row, in the inspector and in song
   menus in `orca-gtk`.
 - Playlists of up to 10,000 songs, kept per recording so edits do not break
-  them, with M3U and M3U8 import and export. Reachable through the
-  `orca-cli playlist*` commands and `play-tracks --playlist`, and in
-  `orca-gtk` through the sidebar's Playlists section, playlist pages and Add
-  to Playlist on song and album menus. See [playlists.md](playlists.md).
+  them, with M3U and M3U8 import and export, a description, a pin, a love
+  and up to eight tags, and smart playlists whose version 1 rules JSON lists
+  the Tracks it matches each time it is read. Reachable through the
+  `orca-cli playlist*` and `smart-playlist-*` commands and `play-tracks
+  --playlist`, and in `orca-gtk` through the Playlists page, playlist pages,
+  the Smart Playlist editor and Add to Playlist on song and album menus. See
+  [playlists.md](playlists.md).
 - Lyrics, plain and synced, from the file's tags (ID3v2 `USLT` and `SYLT`,
   Vorbis comment `LYRICS` and `UNSYNCEDLYRICS`, MP4 `©lyr`) and a sidecar
   `.lrc`, then, opt-in, from LRCLIB by title, artist, album and duration;
   fetched lyrics are cached in the Library and never written to a file.
-  `orca-cli lyrics` and `play-tracks --lyrics`, and in `orca-gtk` a Lyrics
-  page in the sidebar that highlights the line being heard and keeps it
-  centred, with fetching off until enabled (Settings > Listening).
+  `orca-cli lyrics` and `play-tracks --lyrics`, and in `orca-gtk` the
+  inspector's Lyrics mode and the lines under Now Playing's transport, which
+  highlight the line being heard, with fetching off until enabled (Settings
+  > Listening).
 
 ### Identification
 
@@ -140,7 +183,7 @@ more identification sources.
   stores it in files that have none; bulk acceptance of confident matches is an
   explicit action. Reachable through `orca-cli match`, `matches`,
   `accept-match`, `dismiss-match` and `accept-matches`, and in `orca-gtk`
-  through the Matches page, the details panel's MusicBrainz section (with a
+  through the Matches page, the inspector's MusicBrainz section (with a
   single-song Find Match) and the confidence threshold in Settings. See
   [providers.md](providers.md#matching).
 - AcoustID matching: the same job fingerprints each file with Chromaprint and
@@ -150,7 +193,7 @@ more identification sources.
   out), `matches` and `fingerprint`, and in `orca-gtk` through Find Matches
   (Settings > Library > Match by audio fingerprint turns it off), with
   each proposal's source and AcoustID score on the Matches page and in the
-  details panel.
+  inspector.
 - Match Album and cover art: a matching job scoped to one Release searches
   its Tracks, accepts its confident matches, and fetches its front cover from
   the Cover Art Archive when none of its files carries one, keeping the cover
@@ -167,7 +210,7 @@ more identification sources.
   album's matches at the release most of them list. Reachable through
   `orca-cli accept-match`, `accept-matches`, `apply-release`, `matches`,
   `track` and `match --release=ID`, and in `orca-gtk` through the Matches
-  page and the details panel. See
+  page and the inspector. See
   [metadata.md](metadata.md#release-consensus).
 - Verification: a matching job in `verify` mode checks each identified
   file's recording ID against what AcoustID hears in its fingerprint, one
@@ -180,7 +223,7 @@ more identification sources.
   `orca-cli verify`, `corrections`, `accept-correction`,
   `dismiss-correction` and `track`, and in `orca-gtk` through Verify and
   Verify Album on song and album menus, the Matches page's Corrections and
-  the details panel. See [providers.md](providers.md#verification) and
+  the inspector. See [providers.md](providers.md#verification) and
   [metadata.md](metadata.md#corrections).
 - Re-identify: a matching job in `reidentify` mode searches one Track or
   Release again, ignoring the recording ID in effect and earlier searches.
@@ -195,6 +238,10 @@ more identification sources.
   key from `ORCA_ACOUSTID_USER_KEY`; `orca-gtk` sends them from the Matches
   page's Submit to AcoustID, with the key saved in Settings > Library. See
   [providers.md](providers.md#acoustid-submission).
+- Provider sources: a fixed list of the services Orca takes data from, each
+  with its URL, what it supplies and its licence, so every frontend credits
+  the same sources. Reachable through `Runtime.providerSources`,
+  `orca_provider_sources` and `orca-cli sources`.
 
 ### Analysis
 
@@ -220,23 +267,30 @@ more identification sources.
 
 - `orca-cli`: scan, browse, search, library edits, tag write-back, undo and
   backup pruning, analysis, duplicates, artwork, queue playback, `feedback`,
-  ratings, playlists with M3U import and export, `scrobble`, MusicBrainz and AcoustID matching, fingerprints and AcoustID
-  submission.
-- `orca-gtk`: a libadwaita window with an album grid and album pages, artist
-  pages, track browsing and search, Now Playing, an editable queue, context
-  menus, tag editing with write-back and undo (Write Tags to Files on track and
-  album menus), Settings, a Health page, a player bar with cover art and an
-  output menu, job progress, a welcome page, toasts, a shortcuts dialog, MPRIS,
-  Health actions and dismissals, an idle maintenance switch,
-  ListenBrainz submission with play counts in the details panel, love and
-  dislike, star ratings, playlists with M3U import and export, MusicBrainz
-  and AcoustID match review, and AcoustID submission.
+  ratings, playlists and smart playlists with M3U import and export,
+  folders, genres, search, lyrics, artist and release info, `scrobble`,
+  MusicBrainz and AcoustID matching, fingerprints and AcoustID submission.
+- `orca-gtk`: a dark libadwaita window with Songs, Albums, Artists, Genres,
+  Folders, Playlists, Loved, Queue, Now Playing, Library Health and Matches
+  pages, a Settings page of seven tabs, a command palette, an inspector with
+  track, lyrics and signal path modes, context menus, tag editing with
+  write-back and undo (Write Tags to Files on track and album menus), a
+  player bar with cover art, format, output menu and volume, job progress, a
+  welcome page, toasts, a shortcuts dialog, MPRIS, Health actions and
+  dismissals, an idle maintenance switch, ListenBrainz submission with play
+  counts in the inspector, love and dislike, star ratings, playlists with
+  M3U import and export, a Smart Playlist editor, a parametric equalizer
+  editor, the data sources Orca credits, MusicBrainz and AcoustID match
+  review, and AcoustID submission.
 - C ABI (`liborca/orca.h`), exercised end to end by `tests/c_abi_smoke.c`,
   with `liborca.so.0` exporting exactly its functions and `orca.pc` for
-  pkg-config: browsing, search and track details, playback with queue edits,
-  the equalizer, crossfeed and the signal path, artwork and cover fetches,
+  pkg-config: browsing, search, folders, genres and track details, playback
+  with queue edits and history, the equalizer, parametric equalizer,
+  crossfeed and the signal path, artwork and cover fetches, lyrics, artist
+  and release info, provider sources, library stats,
   library edits, tag writes, undo and backup pruning, love and hate, ratings
-  and album love, playlists with M3U import and export, Health actions,
+  and album and artist love, playlists and smart playlists with M3U import
+  and export, Health actions,
   MusicBrainz and AcoustID matching, verification and corrections, AcoustID
   submission, ListenBrainz scrobbling, idle maintenance, provider servers
   and a credential callback for the host's secure storage.
@@ -273,22 +327,6 @@ In priority order. Each step leaves `orca-gtk` usable every day.
    devices held at another rate and for gapless playback across sample-rate
    changes. Output at the source rate stays the default, since it is the
    only path that can be bit-perfect.
-4. **What the redesign needs from liborca.** `orca-gtk`'s redesign has pages
-   liborca cannot back yet: genre and folder browsing, an artist's photo,
-   genres, biography, monthly listeners, external links, related artists
-   and love, album genres and descriptions, the Albums grid's High
-   Resolution and Needs Review filters, its Filters panel and Grid/List
-   toggle (a Release has no format summary or review state to filter on),
-   smart playlists, pinned playlists, a playlist's description, tags, genre,
-   creator and avatar and love, the Playlists page's Created by Me tab, All
-   Types filter and list view, a parametric equalizer, a search across
-   artists, albums and playlists behind a command palette, queue history, a
-   Loved Artists tab and count on the Loved page, an explicit badge on a
-   song, an artist page's Top Tracks by play count, and per-song format,
-   sample-rate, play-count, Date Added and Last Played columns
-   (`TrackSummary` has no codec, sample rate, play count, explicit flag,
-   added date or last-played time), and Now Playing's Track Info "3 of 16"
-   track and disc totals and genre (`TrackDetails` has neither).
 
 ## Releases
 
@@ -436,6 +474,25 @@ are sniffed or not recognized until then:
 
 ## Later
 
+- The Matches page's three-bucket layout from the design concepts
+  (Confident, Needs Review, Unmatched, each with its count). `orca-gtk`
+  lists proposals as flush rows under the page title.
+- Reading `REPLAYGAIN_TRACK_*` and `REPLAYGAIN_ALBUM_*` tags from files; a
+  figure comes only from Orca's own analysis.
+- Exact album loudness: the album figure is a duration-weighted energy mean
+  of the Tracks' gated loudness, which differs from BS.1770 gating over the
+  album's merged blocks. Storing each file's gated-block count would make it
+  exact ([analysis.md](analysis.md#album-replaygain)).
+- Batched Track inserts for the first scan.
+- `orca-cli tracks --filter` and a text `TrackQuery` rank every match by
+  bm25 before the page is cut, about 83 ms at 500,000 Tracks.
+- Tracks within a search tier are ordered by id, not by relevance.
+- The genre totals triggers cost about 7 µs per `track_genres` row, which
+  took the 500,000-Track benchmark's insert from 3.8 s to 10.3 s.
+- The output kind is unknown for device id 0, the system default, and for
+  any sink past the 64th PipeWire discovers.
+- `orca-gtk`'s Settings equalizer band captions are written in
+  `preferences.zig` rather than taken from `equalizer_band_frequencies_hz`.
 - macOS: a CoreAudio output behind the same backend contract, and a SwiftUI
   client rebuilt against the current C ABI. `liborca` compiles for macOS;
   without this output it cannot play there.

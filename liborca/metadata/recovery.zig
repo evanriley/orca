@@ -679,7 +679,7 @@ test "recovery restores a write journaled with its backup beside the music" {
         });
         try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, legacy_stage, harness.original, &.{
             .{ .field = .title, .before = "Original", .after = "Replaced" },
-        });
+        }, null);
         const staged = try file_mutation.identity(std.testing.io, legacy_stage);
         try library.mutation_journal.recordResultIdentity(
             operation,
@@ -782,7 +782,7 @@ test "opening a Library leaves another process's in-flight write alone" {
     });
     try file_mutation.stageMpeg(std.testing.allocator, std.testing.io, harness.source, harness.stage, harness.original, &.{
         .{ .field = .title, .before = "Original", .after = "Replaced" },
-    });
+    }, null);
     const staged = try file_mutation.identity(std.testing.io, harness.stage);
     try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
     try journal.transition(operation, .planned, .staged, null);
@@ -810,6 +810,60 @@ test "opening a Library leaves another process's in-flight write alone" {
 
 fn rewindToVersion25(db: sqlite.Database) !void {
     try db.exec(
+        \\DROP INDEX analysis_results_created;
+        \\DROP TRIGGER tracks_genre_totals_bd;
+        \\DROP TRIGGER tracks_genre_duration_au;
+        \\DROP TRIGGER tracks_genre_artist_au;
+        \\DROP TRIGGER tracks_genre_release_au;
+        \\DROP TRIGGER releases_genre_artist_au;
+        \\DROP TRIGGER track_genres_totals_ai;
+        \\DROP TRIGGER track_genres_totals_ad;
+        \\DROP TRIGGER track_genres_totals_au;
+        \\DROP TABLE genre_artist_refs;
+        \\DROP TABLE genre_release_tracks;
+        \\DROP TABLE genre_totals;
+        \\DROP TRIGGER tracks_au;
+        \\CREATE TRIGGER tracks_au AFTER UPDATE ON tracks BEGIN
+        \\    INSERT INTO track_search(track_search, rowid, title, artist, album, album_artist)
+        \\    VALUES ('delete', old.id, old.title, old.artist, old.album, old.album_artist);
+        \\    INSERT INTO track_search(rowid, title, artist, album, album_artist)
+        \\    VALUES (new.id, new.title, new.artist, new.album, new.album_artist);
+        \\END;
+        \\DROP TABLE related_artist_photos;
+        \\DROP TRIGGER artists_search_ai;
+        \\DROP TRIGGER artists_search_au;
+        \\DROP TRIGGER artists_search_ad;
+        \\DROP TRIGGER releases_search_ai;
+        \\DROP TRIGGER releases_search_au;
+        \\DROP TRIGGER releases_search_ad;
+        \\DROP TRIGGER playlists_search_ai;
+        \\DROP TRIGGER playlists_search_au;
+        \\DROP TRIGGER playlists_search_ad;
+        \\DROP TRIGGER genres_search_ai;
+        \\DROP TRIGGER genres_search_au;
+        \\DROP TRIGGER genres_search_ad;
+        \\DROP TABLE search_index;
+        \\DROP TABLE library_settings;
+        \\DROP TABLE playlist_tags;
+        \\DROP TABLE release_info;
+        \\DROP TABLE artist_related;
+        \\DROP TABLE artist_links;
+        \\DROP TABLE artist_loves;
+        \\DROP TABLE artist_info;
+        \\DROP TABLE track_genres;
+        \\DROP TABLE genres;
+        \\DROP TRIGGER files_recording_moves_listens;
+        \\DROP INDEX listens_by_recording;
+        \\DROP INDEX files_by_first_seen;
+        \\DROP INDEX releases_by_year;
+        \\DROP INDEX ratings_by_rating;
+        \\DROP INDEX feedback_loved;
+        \\DROP TABLE recording_play_stats;
+        \\ALTER TABLE observed_file_tags DROP COLUMN explicit;
+        \\ALTER TABLE tracks DROP COLUMN track_total;
+        \\ALTER TABLE tracks DROP COLUMN disc_total;
+        \\ALTER TABLE tracks DROP COLUMN explicit;
+        \\ALTER TABLE releases DROP COLUMN release_type;
         \\DROP TABLE track_lyrics;
         \\DROP TABLE release_loves;
         \\DROP TABLE health_dismissals;

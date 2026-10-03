@@ -162,9 +162,13 @@ whole listing under a BINARY collation. Hosts display `artists.name`.
 ### Ordering and paging
 
 `TrackRepository.page` takes a `TrackQuery`: a sort key (`id`, `artist`,
-`album`, `title`, `track_number`, `duration`, `date_added`), a direction, and
-relational filters on `artist_id` and `release_id`. `ArtistRepository.page` and
-`ReleaseRepository.page` are the same shape for their own tables. All three
+`album`, `title`, `track_number`, `duration`, `date_added`, `rating`, `loved`,
+`play_count`, `last_played`, `year`), a direction, and
+relational filters on `artist_id`, `release_id` and `genre_id`.
+`ArtistRepository.page` and `ReleaseRepository.page` are the same shape for
+their own tables, and both also filter by `genre_id`; an Artist listing sorts
+by `name`, `track_count` (the Tracks the Artist has in all) or
+`recently_loved`, and filters by `loved_only` ([Artist info](#artist-info)). All three
 return bounded, caller-owned pages of at most `columns.max_page` (512) rows and
 never expose a SQLite row or statement.
 
@@ -182,6 +186,59 @@ KEY`, so it *is* the rowid and SQLite already appends it to every index entry â€
 `ORDER BY title COLLATE NOCASE, tracks.id` is satisfied straight out of
 `tracks(title COLLATE NOCASE)` with no temp B-tree.
 
+**A page picks its ids before it joins.** The paged statement first selects
+the page's `tracks.id`s with only the join its sort reads, applies LIMIT and
+OFFSET there, and joins the columns a `TrackSummary` needs for those rows
+only, in the same order. A sort on a value outside `tracks` (`play_count`,
+`last_played`, `rating`, `loved`, `year`, `date_added`) over the whole library
+at an offset of at most 50,000 goes further: it takes the first
+`limit + offset` ids of each part of the library that orders differently
+(Tracks with a play-stats row, walked down `recording_play_stats_by_count`,
+and Tracks without one, walked by id), so no part is read past the page. The
+indexes those walks use are `recording_play_stats_by_count`,
+`recording_play_stats_by_last_played`, `ratings_by_rating`, `feedback_loved`,
+`releases_by_year` (on the leading four-digit year of `release_date`) and
+`files_by_first_seen`, all version 32. Past that offset, or with an artist,
+release, genre or loved filter, the ids come from one ordered pass over the
+matching Tracks.
+
+`zig build -Doptimize=ReleaseFast bench` on 500,000 Tracks (100-row pages,
+descending):
+
+| Sort | Offset 0 | Offset 50,000 | Offset 250,000 |
+| --- | --- | --- | --- |
+| `title` | 0 ms | 2 ms | 8 ms |
+| `play_count` | 2 ms | 128 ms | 294 ms |
+| `last_played` | 0 ms | 99 ms | 301 ms |
+| `rating` | 2 ms | 117 ms | 303 ms |
+| `loved` | 0 ms | 101 ms | 344 ms |
+| `year` | 1 ms | 54 ms | 380 ms |
+| `date_added` | 1 ms | 107 ms | 571 ms |
+
+The value filters (`year_min`, `year_max`, `lossless`, `min_sample_rate`,
+`explicit_only`) are bound parameters, each true when unset, as the Release
+filters are. A page with any of them set uses one more statement per
+relational filter, sort and direction, which binds the loved and genre filters
+too; a page, count or search with none uses the statements it used before,
+so the value filters cost an unfiltered listing nothing. The year reads the
+Release's leading four-digit year, as `releases_by_year` indexes it, and the
+format and sample rate filters read the Track's play file. `countMatching` and the FTS search read the same predicate text.
+With value filters set (100-row pages, offset 0):
+
+| Filter | Count | Count time | `play_count` page |
+| --- | --- | --- | --- |
+| 1990 to 1999 | 70,000 | 140 ms | 151 ms |
+| lossless | 375,000 | 332 ms | 430 ms |
+| lossy | 125,000 | 316 ms | 344 ms |
+| 96 kHz and above | 50,000 | 223 ms | 234 ms |
+| explicit | 45,454 | 84 ms | 87 ms |
+| lossless, 96 kHz, from 1990 | 11,000 | 273 ms | 261 ms |
+| loved and lossy | 17,857 | 166 ms | 158 ms |
+
+A `title` page with a value filter stops once it has its rows (0 to 11 ms at
+offset 0); a page sorted by another key, and every count, test each Track. A
+search with a value filter takes 324 to 358 ms, against 279 ms without.
+
 Every unfiltered sort is an ordered index scan, and every Artist-filtered sort
 but one is an indexed SEARCH. Two cases build a temp B-tree, both over a
 bounded set and both deliberate: an Artist-filtered listing sorted by artist
@@ -190,10 +247,44 @@ by anything other than disc-and-track (bounded by one Release). Indexing those
 would cost seven more composite indexes on the largest table in the schema to
 order at most a few dozen rows.
 
-Per-artist and per-release counts are correlated scalar subqueries rather than
-a GROUP BY join, because a join would have to aggregate the whole table before
-the LIMIT could apply. Each is one covering range count over `tracks_artist`,
-`tracks_release` or `releases_by_artist`.
+Per-artist counts are correlated scalar subqueries rather than a GROUP BY
+join, because a join would have to aggregate the whole table before the LIMIT
+could apply. Each is one covering range count over `tracks_artist` or
+`releases_by_artist`.
+
+A Release page picks its ids first, in a `MATERIALIZED` CTE, and then reads
+the facts of only those Releases in one grouped pass over their Tracks
+(`tracks_release`), each joined to the file it plays: Track count, duration,
+explicit advisory, highest sample rate and bit depth, codec, whether all are
+lossless, and whether any has a pending proposal. The exact review count, a
+distinct count over Tracks and album groups, runs only for a Release with a
+pending proposal. The Release filters (`high_resolution_only`,
+`needs_review_only`, `lossless_only`, the year range, `has_artwork`,
+`release_kind` and `appearing_artist_id`, read through `tracks_artist`) are
+bound parameters, each true when unset, so one statement per sort serves
+every combination; `countMatching` reads the same predicate text. With every
+filter set aside, a page's cost is proportional to the Tracks on its
+Releases, not to the library.
+
+`zig build -Doptimize=ReleaseFast bench` on 500,000 Tracks over 5,000 Releases
+(500 of them with 1,000 Tracks each), 100-row Release pages:
+
+| Release page | Time |
+| --- | --- |
+| `title`, offset 0 (100,000 Tracks on the page) | 127 ms |
+| `title`, offset 2,500 (no Tracks) | 1 ms |
+| `year`, offset 0 | 17 ms |
+| `most_played` | 236 ms |
+| `high_resolution_only` | 152 ms |
+| `needs_review_only` | 218 ms |
+| `lossless_only` | 168 ms |
+| a year range | 90 ms |
+| without artwork | 150 ms |
+
+A filter is an EXISTS over each candidate Release's Tracks and their files,
+so a filtered page reads every Track of the Releases it passes over;
+`most_played` sums `recording_play_stats` over every Release's Tracks before
+it can sort.
 
 ## Schema and migrations
 
@@ -340,18 +431,56 @@ wrapper. See `docs/codecs.md`.
 `listens` (version 15) is the local play history: one row per completed
 listen, kept forever. It is keyed on `files.id`, not on a Track. A Track id
 changes when an edit reprojects it, and a play count keyed on the Track would
-reset with it; the file identity survives, so `trackPlayStats` counts listens
-of the Track's playing file (`preferred_file_id`, else the first file of its
-Recording, as `playableLocation` resolves it). `UNIQUE(file_id, started_at)`
+reset with it; the file identity survives. `UNIQUE(file_id, started_at)`
 makes recording idempotent: the same file starting at the same second is one
 listen.
+
+`recording_play_stats` (version 32) holds each Recording's play count and
+latest `started_at`, one row per Recording with at least one listen. It is
+keyed on `recordings.id` like `ratings`, so a song's plays count once whichever
+of its files was heard, and survive a Track being reprojected. Migration 32
+fills it from `listens GROUP BY recording_id`, skipping listens with a null
+`recording_id`, after first setting every listen's `recording_id` to its
+file's. Two invariants hold after every write:
+
+- the table equals `SELECT recording_id, count(*), max(started_at) FROM
+  listens WHERE recording_id IS NOT NULL GROUP BY recording_id`;
+- every listen with a non-null `file_id` has its file's `recording_id`.
+
+Plays follow the song. `ListenRepository.insertLocked` takes the listen's
+`recording_id` from its file, not from the caller, and adds the listen to that
+Recording's row in the same transaction, only when a row was inserted. The
+production writer of `files.recording_id` is `FileRepository.setRecordingLocked`,
+which the projection calls; the trigger `files_recording_moves_listens` sits on
+the column itself, so it also covers any later writer. When a file with listens changes
+Recording, the trigger moves those listens to the new Recording and recomputes
+the old and new Recordings' rows from `listens`, deleting a row whose count
+falls to 0, all inside the statement that changed the file. A Recording that
+two files merge into therefore shows the sum of their plays. A listen whose
+file is gone keeps the `recording_id` it had and keeps counting there.
+A Recording deleted with `ON DELETE CASCADE` takes its row along; no
+production path deletes Recordings, and a path that deletes listens must
+subtract them here. `recording_play_stats_by_count` and
+`recording_play_stats_by_last_played` index the two orders, and
+`listens_by_recording` the trigger's recount.
+
+Moving a listen does not touch its `scrobble_queue` row: the payload is built
+from the listen's snapshot when it is queued and is keyed
+`listen:<listens.id>`, so a listen already queued is sent as it was heard.
+
+`trackPlayStats`, `TrackSummary.play_count` and `last_played_at`,
+`TrackDetails`, and `TrackSort.play_count` and `last_played` read the Track's
+Recording's row; a Track without a Recording, or a Recording without a row,
+has 0 plays and no last play. `filePlayStats` still counts the listens of one
+file, for the callers that ask about a file rather than a song.
 
 A listen stores a snapshot of the title, artist, album, duration and
 recording MBID that were heard, so history stays readable after the file is
 gone. `remove-root` deletes the root's files, and `ON DELETE SET NULL` on
 `file_id` (and `recording_id`) leaves the listen in place with a null file
 rather than deleting it or failing the delete. Rows with a null `file_id` no
-longer count towards any Track.
+longer count towards a file in `filePlayStats`, and still count towards their
+Recording.
 
 `ListenRepository.recordAndQueue` inserts the listen and its `scrobble_queue`
 row in one transaction with `event_key = "listen:<listens.id>"`, so a listen is
@@ -425,8 +554,110 @@ when an edit reprojects a Track, so no rating could have survived there.
   its Tracks, and `locations_by_uri ON locations(uri)` finds the location an
   imported playlist names.
 
-`TrackSort.rating` has no index; on 500,000 Tracks a page sorts in about
-0.1 s. See [playlists.md](playlists.md) for the behaviour.
+See [playlists.md](playlists.md) for the behaviour.
+
+### Playlist metadata
+
+Version 35 adds six columns to `playlists` and the `playlist_tags` table. Existing playlists
+keep their entries and order, and become manual, user-made and untagged.
+
+- `description` (`''` when unset), `pinned_at` and `loved_at` (null when
+  not). Pinning and loving leave `updated_at` alone; a description or tag
+  change moves it.
+- `kind` is 0 for a manual playlist and 1 for a smart one; `rules` holds a
+  smart playlist's rules JSON as given and is null for a manual one. A smart
+  playlist has no `playlist_entries` rows: its entries are the Tracks the
+  rules match when it is read, under the `now` the caller passes.
+- `creator` is 0 for a playlist the user made and 1 for one
+  `libraryImportPlaylist` created.
+- `playlist_tags` is `WITHOUT ROWID`, keyed on `(playlist_id, ordinal)`,
+  and goes with its playlist (`ON DELETE CASCADE`).
+
+## Library search
+
+Version 36 adds `search_index`, a plain FTS5 table holding one row per
+Artist (kind 0), Release (1), Playlist (3) and genre (4): `kind` and
+`entity_id` unindexed, `title` and `subtitle` indexed with
+`unicode61 remove_diacritics 2` and a prefix index on two and three
+characters. The subtitle is a Release's album artist, a Playlist's
+description, and empty for Artists and genres. Versions 36 and 37 also held
+Tracks as kind 2; version 38 removed them, and Tracks are searched in
+`track_search`, the external-content index the Track queries already use.
+
+Its rowid is `entity_id * 8 + kind`. Triggers keep it current: after an
+insert, after a delete, and after an update of the id or an indexed column
+whose value changed, each a rowid lookup. The same rowid lets a query keep
+one kind with `rowid % 8 = kind` without reading the unindexed columns,
+which is what keeps a short prefix fast.
+
+`track_search`'s update trigger, `tracks_au`, has the same guard since
+version 38: it fires on an update of `id`, `title`, `artist`, `album` or
+`album_artist` only when one of them changed. The projection rewrites those
+columns on every upsert; an update that changes none of them leaves the
+index alone instead of deleting and reinserting the Track's entry.
+
+`SearchRepository.find` turns the text into a match expression in which no
+character is syntax: each whitespace-separated word with a letter or digit
+is quoted, with `"` doubled, given a trailing `*`, and the words are ANDed.
+Artists, Releases, Playlists and genres are each ranked by
+`bm25(search_index, 0, 0, 10, 4)`, weighting the title over the subtitle,
+and limited separately, then the few hits are joined back for their text.
+`ReleaseQuery.text` adds the same expression as a `releases.id` filter.
+
+Tracks are ranked by tier instead, because bm25 scores every match before
+returning the first. Three `track_search` queries each take the first
+`limit` matches in rowid order:
+
+| Tier | Every word of the text |
+| --- | --- |
+| 0 | is a whole word of the title |
+| 1 | begins a word of the title |
+| 2 | begins a word of the title, artist or album |
+
+Each tier's matches are a subset of the next tier's, so taking a Track's
+lowest tier and ordering by tier, then Track id, returns exactly the first
+`limit` of all matches in that order. The tier is the hit's `rank`.
+`album_artist` is left out of tier 2 because the Track subtitle, which a
+match must explain, is the artist and album. Within a tier the order is by
+id, not by how well the Track matches.
+
+In the 500,000-Track benchmark (`zig build bench`), where `am` begins a word
+in 142,858 Track titles and `the` in 142,857, a search takes 6 ms and 32 ms;
+a three-word search takes 9 ms, and a Release page or count with text 14 ms
+and 1 ms. `the` costs more because the benchmark retitles every Track,
+leaving `track_search` in many unmerged segments that the prefix tiers
+read; after an FTS5 `optimize` its prefix tier takes 2 ms, as `am`'s does.
+Ranking every Track match with bm25 in `search_index`, as versions 36 and
+37 did, took 114 ms for either. The insert phase takes 13.6 s; it took
+22.2 s with Tracks in `search_index`, and takes 6.7 s with no full-text
+triggers on `tracks` at all.
+
+## Track facts
+
+Version 32 adds `tracks.track_total`, `tracks.disc_total` and
+`tracks.explicit`, which the projection writes from the Track's files.
+`track_total` is the total the preferred file's tag states, else any member
+file's, else a counted total: the larger of the number of positions on that
+disc of the Release and the highest track number there, so a disc holding
+tracks 2 to 4 counts 4, not 3. `TrackFileFacts.track_total_inferred` is true
+only for a counted total, when no file of the Track states one. `disc_total`
+is the preferred file's stated total, else any member file's, else the
+Release's disc count. `explicit` is
+`metadata.Explicit` by number (0 unknown, 1 none, 2 explicit, 3 clean), from
+`observed_file_tags.explicit` (also version 32) or a user's edit; see
+[metadata.md](metadata.md#parental-advisory). `ReleaseSummary.explicit` is
+explicit when any of its Tracks is, else clean, then none. The migration
+backfills the totals from the tags already observed; `explicit` stays unknown
+until a rescan reads the files again. `releases.release_type` is added empty;
+projection fills it with the lowercased primary type the files' tags agree
+on, and a release-info fetch fills it from the MusicBrainz release group
+only while it is NULL or empty, so a tag always outranks the provider.
+
+`TrackSummary` also carries the playing file's `codec`, `sample_rate`,
+`bit_depth` and `lossy`, `added_at` (`files.first_seen_at`) and `year` (the
+first four digits of the Release date). `TrackSort.date_added` orders by that
+same `files.first_seen_at` of the playing file, not by `tracks.created_at`,
+which an edit that reprojects a Track resets.
 
 ## Identification proposals
 
@@ -604,6 +835,248 @@ unused, and the next fetch replaces it. A Track's id survives its edits, so
 no row is handed over. `TrackLyricsRepository.put` replaces the row in one
 write-lane transaction and stores nothing for a Track that no longer
 exists. See [providers.md](providers.md#lrclib).
+
+## Genres
+
+`genres` (version 33) holds one row per genre: `name` is what it is shown as,
+and `key` the folded form two spellings of one genre share, uniquely indexed.
+`track_genres` gives a Track its genres in order: `(track_id, ordinal)` is the
+primary key, `genre_id` references `genres(id)`, both with `ON DELETE
+CASCADE`, and `provenance` is a `metadata.Provenance` (0 for a file's tags, 1
+for a user's edit, 2 for a provider's genres). `track_genres_by_genre(genre_id, track_id)` is unique, so
+a Track carries a genre once, which the Track counts below rely on, and it
+serves every genre filter.
+
+`metadata/genre_alias.zig` folds a value: `text_key.normalizeKey` with spaces,
+hyphens, underscores, dots, slashes and apostrophes removed, so `Hip-Hop`,
+`hip hop` and `HipHop` are the key `hiphop`, then an alias table maps common
+variants (`Hip-Hop/Rap`, `RnB`, `Alt Rock`) to one canonical genre and gives
+common genres a canonical name. A value the table does not know keeps the
+first spelling stored. `&` is part of the key, so `R&B/Soul` is its own genre.
+
+Before folding, `genre_alias.parts` splits a value on commas and semicolons,
+trims each part and drops empty ones; `genre_alias.foldAll` folds the parts
+and drops a key already seen, so a Track's genres keep the order of their
+first mention. A slash never splits. `unsplit_names` lists the genre names
+that contain a comma (Discogs' `Folk, World, & Country`); one at the start of
+the remaining text, ending there or at a separator, is taken whole. The tag
+readers split only repeated fields and NUL separators, so
+`observed_file_genres` keeps each value as the file stores it, and the split
+happens wherever genres are written to `track_genres`: the projection,
+`setTrackGenres` and migration 33.
+
+The projection writes a Track's genres from the genre tags of its preferred
+file, or else of the lowest-numbered file at that position that has any. It
+replaces the Track's file rows on every reprojection and never touches a Track
+that has user rows. `GenreRepository.setTrackGenres` replaces a Track's rows
+with user rows; with no names it restores the file rows. When a regroup
+removes a Track, its user rows move to the Track its file joins, unless that
+Track has its own. Genres no Track carries are pruned once per projection run
+and after each `setTrackGenres`.
+
+`GenreRepository.fillFromProvider` writes provider rows (provenance 2) on a
+Release's Tracks that have no file or user rows, replacing earlier provider
+rows, or on an Artist's Tracks that have no rows at all, so an Artist's
+genres never displace a Release's. The projection keeps provider rows on a
+Track whose file states no genre, and a file's or a user's genres replace
+them. `releasesWithoutGenres` lists the Releases with a MusicBrainz release
+ID and a Track with no rows. See
+[providers.md](providers.md#genres-from-musicbrainz).
+
+Migration 33 fills `track_genres` for every Track from the genres of its
+preferred file, or else of the lowest-numbered file of its recording that has
+any, through the same split and folding, registered as the SQL functions
+`orca_genre_part(value, n)` (the `n`th part, or NULL past the last),
+`orca_genre_key` and `orca_genre_name`. A recursive CTE expands each observed
+value into its parts, so a library scanned before version 33 gets split genres
+without a rescan.
+
+`genre_totals` (version 38) holds each carried genre's Track count,
+Release count, artist count and summed duration, so a genre listing, its
+count and `byId` read one row per genre and never aggregate `track_genres`.
+Its artists are the Track artists and the album artists of those Tracks'
+Releases, as `ArtistQuery.genre_id` lists them. Two reference-count tables
+keep the distinct counts exact: `genre_release_tracks(release_id, genre_id,
+tracks)` and `genre_artist_refs(genre_id, artist_id, refs)`, where `refs`
+counts a Track once for its artist and once for its Release's album artist.
+A Release or artist counts while its row exists.
+
+Triggers keep the three tables equal to a `GROUP BY` over the Tracks on
+every write, whichever code path makes it: inserting, deleting or moving a
+`track_genres` row; changing a Track's `duration_ms`, `artist_id` or
+`release_id`; and changing a Release's `album_artist_id`, which moves its
+`genre_release_tracks` counts from the old album artist to the new one. A
+row whose count reaches 0 is deleted, so a genre is listed exactly while a
+Track carries it, before pruning removes its `genres` row.
+`tracks_genre_totals_bd` deletes a Track's `track_genres` rows before the
+Track itself, because the cascade runs after the Track is gone and the
+totals need its columns. The upkeep costs about 7 Âµs per `track_genres` row
+written: seeding 744,000 rows on 500,000 Tracks takes 10.2 s instead of
+3.8 s, and a listing page takes under 1 ms instead of 540 ms.
+`migrations.genre_totals_drift_sql` counts the rows that differ from a fresh
+`GROUP BY`; the tests assert it is 0.
+
+`artworkReleases` lists the Releases of a genre that have a cover, by the
+test `ReleaseQuery.has_artwork` uses, most played first.
+
+A Track count filtered by genre alone counts `track_genres` rows for the
+genre, which hold each of a Track's genres once.
+
+## Artist info
+
+Version 34 adds five tables keyed by their owner's id with `ON DELETE
+CASCADE`, and `library_settings`. `artist_info`, `artist_links` and
+`artist_related` hold an Artist's fetched info, `artist_loves` the user's
+loves and `release_info` a Release's fetched description.
+
+- **`artist_info`**, one row per Artist: the `musicbrainz_artist_id` and
+  `wikidata_id` it was fetched for; the years active in `begin_year`,
+  `end_year` and `ended` (1 when the Artist stopped, with or without a
+  year), never a person's birth or death year (see
+  [providers.md](providers.md#artist-info)), and `artist_type`; the
+  biography's text, `biography_source` (0 Wikipedia), `biography_url`,
+  `biography_licence` and `biography_language`, the article's language;
+  `requested_language`, the language the fetch asked for, which differs
+  when the biography fell back to English and is what reuse compares; the photo's
+  bytes (`photo`, `photo_mime`), `photo_source` (0 a local image, 1
+  Wikimedia Commons), `photo_url` (its Commons page), `photo_licence`,
+  `photo_licence_url` and `photo_credit`; `fetched_at` in Unix seconds and
+  the `ArtistInfoOutcome` number in `outcome`. A photo's details are written
+  only with its bytes, so a credit can never describe another image.
+  `listeners` is ListenBrainz's count of distinct listeners, null when
+  ListenBrainz knows none, and `listeners_fetched_at` the Unix seconds of
+  the last ListenBrainz refresh in which every request succeeded; reuse
+  compares it, and `store` never changes either.
+- **`artist_related`**, `WITHOUT ROWID`, primary key `(artist_id,
+  ordinal)`: up to 12 related artists from ListenBrainz Labs, each with its
+  `related_mbid`, `related_name` and `score`, highest score first. A refresh
+  whose request succeeded replaces them all. `related` matches each to a
+  library Artist by MusicBrainz artist ID, else by folded name, when it
+  reads them.
+- **`release_info`**, one row per Release: the Wikipedia `description`
+  with `description_source` (0 Wikipedia), `description_url`,
+  `description_licence` and `description_language`; `requested_language`;
+  the `musicbrainz_release_id` and `musicbrainz_release_group_id` it was
+  fetched for; `fetched_at` and the outcome. `store` replaces the row
+  whole.
+- **`library_settings`**, `WITHOUT ROWID`: `key` and a text `value`, the
+  Library's own settings, never credentials. `genre_fill.musicbrainz` is
+  `0` when automatic genre fill from MusicBrainz is off; absent, it is on.
+- **`artist_links`**, `WITHOUT ROWID`, primary key `(artist_id, kind, url)`:
+  the Artist's links, `kind` a `database.ArtistLinkKind` number, at most 64
+  per Artist. A fetch that reached MusicBrainz replaces them all; one that
+  did not keeps them.
+- **`artist_loves`**: the Artists the user loves, `artist_id` the primary
+  key and `loved_at` the Unix seconds it was loved, as `release_loves` is
+  for albums ([Album love](#album-love)). Loving a loved Artist keeps its
+  `loved_at`. Kept in the Library only and never sent.
+  `ArtistSummary.loved` comes from a `LEFT JOIN artist_loves` in the page's
+  own statement; `ArtistQuery.loved_only` filters by it and
+  `ArtistSort.recently_loved` orders by `loved_at`, most recent first,
+  Artists not loved last, each ending in `artists.id`.
+
+`ArtistInfoRepository.store` writes the row and, when given, the links in
+one write-lane transaction, and `storeListenBrainz` the listeners and
+related artists of an Artist that has a row, keeping the stored photo and its details unless
+told to set or clear them. `earliestReleaseYear` gives the first four-digit
+year of the Artist's Releases' dates. `releaseFolders` returns one present location and
+its root for each of up to 64 of the Artist's Releases, from which
+`core/artist_info.zig` derives the Artist's folder, and
+`folderHoldsOtherArtists` checks that folder holds no other album artist's
+files. Artists are keyed by name, so an Artist the projection renames or
+prunes loses its rows with its id; nothing is handed over. See
+[providers.md](providers.md#artist-info).
+
+Version 37 adds **`related_artist_photos`**, `WITHOUT ROWID`, the photos of
+related artists outside the Library: `musicbrainz_artist_id` the primary
+key, `COLLATE NOCASE`; `photo` and `photo_mime`, both null for a marker
+that the artist has no photo, a `CHECK` keeping them null or set together;
+`photo_source` (a `PhotoSource`, always Commons), `photo_url` (the Commons
+page), `photo_licence`, `photo_licence_url` and `photo_credit`, the same
+attribution `artist_info` keeps, with `CHECK`s that `photo_source` is set
+exactly when `photo` is and that a marker has no details;
+and `fetched_at` in Unix seconds, which a fetch compares with
+`refresh_after_s`. It is keyed by MusicBrainz ID rather than by Artist, so a
+photo is shared by every Artist the artist is related to and outlives the
+`artist_related` rows that named it. `storeRelatedPhoto` replaces a row
+whole; `related` reports `has_photo` from it for an artist with no library
+match, `relatedPhoto` reads the bytes and `relatedPhotoInfo` the attribution
+without them.
+
+Version 38 adds the index `analysis_results_created` on
+`analysis_results(created_at)`, so `last_analysis_at` in the library stats
+is one index probe instead of a read of every measurement and its overflow
+pages. It also moves Track search out of `search_index`: it drops the
+triggers `tracks_search_ai`, `tracks_search_au` and `tracks_search_ad`,
+deletes the kind 2 rows, rebuilds `search_index` so no segment keeps the
+deleted entries, and recreates `tracks_au` with the guard described under
+[Library search](#library-search). `track_search` already holds every
+Track, so nothing is reindexed. At 500,000 Tracks the delete and rebuild
+take 2.9 s. Last, it creates `genre_totals`, `genre_release_tracks` and
+`genre_artist_refs`, fills them from the Tracks with one `GROUP BY` each,
+and then creates their triggers, described under [Genres](#genres).
+
+## Folder browsing
+
+`LocationRepository.folderPage` lists one folder of a root from `locations`
+alone; no schema serves it but the `UNIQUE(volume_id, uri)` index
+(`sqlite_autoindex_locations_1`). A location's `uri` is the root's `path`, a
+`/` and the path below it, so a folder is the half-open range
+`[prefix, upper)` on that index, where `prefix` is the root's path (and the
+folder's relative path) followed by `/`, and `upper` is `prefix` with the
+final `/` replaced by `0`, the byte after it. The range is compared
+bytewise, so `[`, `*`, `?`, `%` and `_` in a name match only themselves, and
+no `GLOB` or `LIKE` is used.
+
+- Children are found by skip scan: one `ORDER BY uri LIMIT 1` seek per
+  child. A seek returning `prefix/name/...` is a folder, and the next seek
+  starts at `prefix/name0`, skipping its whole subtree; one returning
+  `prefix/name` is a file, and the next seek starts after it. A page costs
+  one seek per child up to its end, not one row per file below the folder.
+- Folders come first, ordered bytewise by `name/`, so `A (Deluxe)` sorts
+  before `A`; files follow, ordered bytewise by name. `offset` counts
+  folders, then files.
+- A folder's totals read its range once into a materialized `DISTINCT
+  file_id` set: its size is `file_count`, its join with
+  `tracks_by_preferred_file` `track_count`, and its join with `files` the
+  summed `duration_ms`. A file located twice in the folder counts once.
+- Every statement filters `state <> 'missing'` and `+root_id`. The unary
+  `+` keeps the planner off `locations_sweep`, which would read the whole
+  root, as `mark_missing_under_sql` does.
+- `folderTrackIds` reads the folder's whole range joined to
+  `tracks_by_preferred_file`, ordered by `uri` then Track id, keeps each
+  Track once and stops at `max_playlist_entries`.
+
+`EXPLAIN QUERY PLAN` at a nested folder shows each statement as
+`SEARCH locations USING INDEX sqlite_autoindex_locations_1 (volume_id=? AND
+uri>? AND uri<?)`. At 500,000 locations in 25,000 artist folders
+(`zig build bench`), the root's first page of 512 folders with totals takes
+about 12 ms, a page two levels down under 1 ms, and the root's page at
+offset 24,000, which seeks past 24,000 folders first, about 50 ms.
+
+## Library stats
+
+`LibraryStatsRepository.stats` (`Runtime.libraryStats`, `orca-cli stats`)
+reads one row:
+
+- `artists`, `releases` and `tracks`: `count(*)` of each table, the totals
+  the unfiltered listings show.
+- `files` and `total_bytes`: the files with at least one location whose
+  state is not `missing`, counted once however many such locations they
+  have, and the sum of their `files.size_bytes`.
+- `total_duration_ms`: the sum of `tracks.duration_ms`, a null or negative
+  duration counting as zero.
+- `last_scan_finished_at`: `max(scan_runs.finished_at)` over completed runs.
+  A cancelled or failed run does not count.
+- `last_analysis_at`: `max(analysis_results.created_at)`, which the analysis
+  cache sets on every insert and update.
+
+The present files come from one scan of `locations` (`NOT INDEXED`) into an
+ordered `DISTINCT`, joined to `files` by primary key in id order. Letting
+the planner walk `locations_file` instead, or probing `locations` per file
+with `EXISTS`, costs a table lookup per row for `state` and is about three
+times slower at 500,000 files. `last_analysis_at` reads the last entry of
+`analysis_results_created`.
 
 ## Concurrency
 

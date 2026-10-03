@@ -186,6 +186,7 @@ pub const Executor = struct {
                         stage_path,
                         write.expected,
                         write.changes,
+                        write.genres,
                     ),
                     .flac => file_mutation.stageFlac(
                         self.allocator,
@@ -194,6 +195,7 @@ pub const Executor = struct {
                         stage_path,
                         write.expected,
                         write.changes,
+                        write.genres,
                     ),
                 }) catch |err| {
                     self.transition(operation, .planned, .failed, @errorName(err)) catch {};
@@ -1107,7 +1109,7 @@ test "recovery restores original after replacement before journal commit" {
         .field = .title,
         .before = "Before crash",
         .after = "Interrupted",
-    }});
+    }}, null);
     const staged_identity = try file_mutation.identity(std.testing.io, stage);
     try library.mutation_journal.recordResultIdentity(
         operation,
@@ -1152,7 +1154,7 @@ test "recovery restores original after replacement before journal commit" {
         .field = .title,
         .before = "Before crash",
         .after = "Staged only",
-    }});
+    }}, null);
     const staged_only_identity = try file_mutation.identity(std.testing.io, stage);
     try library.mutation_journal.recordResultIdentity(
         staged_only,
@@ -1200,7 +1202,7 @@ test "recovery restores original after replacement before journal commit" {
         .field = .title,
         .before = "Before crash",
         .after = "Interrupted again",
-    }});
+    }}, null);
     const changed_stage_identity = try file_mutation.identity(std.testing.io, stage);
     try library.mutation_journal.recordResultIdentity(
         changed_during_recovery,
@@ -1766,7 +1768,7 @@ fn commitLegacyWrite(fixture: *WriteFixture, plan_id: u64) ![]u8 {
     });
     try file_mutation.stageMpeg(allocator, std.testing.io, fixture.source, stage, fixture.original, &.{
         .{ .field = .title, .before = "Before write", .after = "After write" },
-    });
+    }, null);
     const staged = try file_mutation.identity(std.testing.io, stage);
     try journal.recordResultIdentity(operation, .planned, staged.size_bytes, staged.modified_ns, staged.quick_hash);
     try journal.transition(operation, .planned, .staged, null);

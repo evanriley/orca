@@ -1,3 +1,4 @@
+pub const artist_info = @import("artist_info.zig");
 pub const artwork = @import("artwork.zig");
 pub const control = @import("control.zig");
 pub const cover_art = @import("cover_art.zig");
@@ -7,11 +8,16 @@ pub const job_worker = @import("job_worker.zig");
 pub const listen_worker = @import("listen_worker.zig");
 pub const lyrics_fetch = @import("lyrics_fetch.zig");
 pub const object = @import("object.zig");
+pub const provider_sources = @import("provider_sources.zig");
 pub const queue = @import("queue.zig");
+pub const release_info = @import("release_info.zig");
 pub const runtime = @import("runtime.zig");
 pub const runtime_jobs = @import("runtime_jobs.zig");
 pub const runtime_listens = @import("runtime_listens.zig");
 pub const runtime_maintenance = @import("runtime_maintenance.zig");
+pub const runtime_artist_info = @import("runtime_artist_info.zig");
+pub const runtime_folder_tests = @import("runtime_folder_tests.zig");
+pub const runtime_genres = @import("runtime_genres.zig");
 pub const runtime_playlists = @import("runtime_playlists.zig");
 pub const runtime_provider_tests = @import("runtime_provider_tests.zig");
 pub const runtime_queue = @import("runtime_queue.zig");
@@ -33,6 +39,7 @@ pub const JobHandle = runtime.JobHandle;
 pub const WorkHandle = runtime.WorkHandle;
 
 test {
+    _ = @import("artist_info.zig");
     _ = @import("artwork.zig");
     _ = @import("control.zig");
     _ = @import("cover_art.zig");
@@ -42,11 +49,16 @@ test {
     _ = @import("listen_worker.zig");
     _ = @import("lyrics_fetch.zig");
     _ = @import("object.zig");
+    _ = @import("provider_sources.zig");
     _ = @import("queue.zig");
+    _ = @import("release_info.zig");
     _ = @import("runtime.zig");
     _ = @import("runtime_jobs.zig");
     _ = @import("runtime_listens.zig");
     _ = @import("runtime_maintenance.zig");
+    _ = @import("runtime_artist_info.zig");
+    _ = @import("runtime_folder_tests.zig");
+    _ = @import("runtime_genres.zig");
     _ = @import("runtime_playlists.zig");
     _ = @import("runtime_provider_tests.zig");
     _ = @import("runtime_queue.zig");

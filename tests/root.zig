@@ -32,7 +32,7 @@ test "registered lossless and lossy codecs share SourceSession pipeline" {
         );
         defer pool.deinit();
         var pipe: liborca.internal.audio.render.RenderPipe(2) = .{};
-        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, true));
+        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, .track));
         const output = try std.testing.allocator.alloc(f32, frames * channels);
         defer std.testing.allocator.free(output);
         try std.testing.expectEqual(frames, pipe.render(&pool, channels, 1, output));
@@ -775,6 +775,417 @@ test "an unanalyzed entry reached by a gapless advance plays at unity" {
     try std.testing.expect(unanalyzed_entry.peak > 2 * analyzed_entry.peak);
 }
 
+fn recordAlbumTrack(
+    database: *liborca.internal.database.LibraryDatabase,
+    volume_id: i64,
+    uri: []const u8,
+    title: []const u8,
+    release_id: i64,
+    track_number: i64,
+    seconds: i64,
+) !struct { file_id: i64, track_id: i64 } {
+    const digest = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, uri);
+    const file_id = try database.files.create(.{
+        .audio_format = 1,
+        .duration_ms = seconds * 1000,
+        .quick_hash = &digest,
+    });
+    _ = try database.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = volume_id,
+        .uri = uri,
+        .state = .present,
+    });
+    try database.tracks.upsertTracks(&.{.{
+        .title = title,
+        .release_id = release_id,
+        .track_number = track_number,
+        .duration_ms = seconds * 1000,
+        .preferred_file_id = file_id,
+    }});
+    var page = try database.tracks.page(std.testing.allocator, .{ .limit = 512, .offset = 0 });
+    defer page.deinit();
+    for (page.items) |item| {
+        if (std.mem.eql(u8, item.title, title))
+            return .{ .file_id = file_id, .track_id = item.id };
+    }
+    return error.TrackNotProjected;
+}
+
+fn referenceAlbumGain(
+    loudness: []const liborca.internal.analysis.encoding.Loudness,
+    seconds: []const f64,
+) f32 {
+    var energy: f64 = 0;
+    var total: f64 = 0;
+    var peak: f32 = 0;
+    for (loudness, seconds) |value, duration| {
+        energy += duration * std.math.pow(f64, 10, @as(f64, value.integrated_lufs) / 10);
+        total += duration;
+        peak = @max(peak, value.sample_peak);
+    }
+    const target: f64 = (liborca.internal.analysis.diagnostics.Parameters{}).replay_gain_target_lufs;
+    const lufs = 10 * std.math.log10(energy / total);
+    return liborca.internal.audio.processing.replayGainMultiplier(@floatCast(target - lufs), peak);
+}
+
+fn decibels(multiplier: f32) f32 {
+    return 20 * std.math.log10(multiplier);
+}
+
+fn tempUri(buffer: []u8, temporary: *const std.testing.TmpDir, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buffer, ".zig-cache/tmp/{s}/{s}", .{ temporary.sub_path, name });
+}
+
+test "album ReplayGain plays every Track of a Release at the gain the reference computation gives the whole Release" {
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeSineWav(temporary.dir, "loud.wav", 0.5, 2);
+    try writeSineWav(temporary.dir, "quiet.wav", 0.05, 3);
+    var loud_path: [128]u8 = undefined;
+    var quiet_path: [128]u8 = undefined;
+    const loud_uri = try tempUri(&loud_path, &temporary, "loud.wav");
+    const quiet_uri = try tempUri(&quiet_path, &temporary, "quiet.wav");
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-album-gain-reference?mode=memory&cache=shared",
+    );
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:album-gain-reference" });
+    const release_id = try database.releases.upsert(.{ .release_key = "album", .title = "Album" });
+    const loud = try recordAlbumTrack(database, volume_id, loud_uri, "Loud", release_id, 1, 2);
+    const quiet = try recordAlbumTrack(database, volume_id, quiet_uri, "Quiet", release_id, 2, 3);
+    try std.testing.expectEqual(@as(u64, 2), (try runLibraryAnalysis(database)).changed);
+    const loud_loudness = (try storedLoudness(database, loud.file_id, loud_uri)).?;
+    const quiet_loudness = (try storedLoudness(database, quiet.file_id, quiet_uri)).?;
+    const expected = referenceAlbumGain(&.{ loud_loudness, quiet_loudness }, &.{ 2, 3 });
+    try std.testing.expect(@abs(decibels(expected) - decibels(expectedGain(loud_loudness))) > 2);
+    try std.testing.expect(@abs(decibels(expected) - decibels(expectedGain(quiet_loudness))) > 2);
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = 8192 } }, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerSetReplayGainMode(player, .album);
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{ loud.track_id, quiet.track_id }, 0);
+
+    const loud_entry = try observeEntry(&runtime, &backend, player, 0, 100);
+    const loud_path_view = try runtime.playerSignalPath(player);
+    const quiet_entry = try observeEntry(&runtime, &backend, player, 1, 100);
+    const quiet_path_view = try runtime.playerSignalPath(player);
+
+    try std.testing.expectApproxEqRel(expected, loud_entry.gain, 0.001);
+    try std.testing.expectApproxEqRel(expected, quiet_entry.gain, 0.001);
+    try std.testing.expectApproxEqRel(0.5 * expected, loud_entry.peak, 0.05);
+    try std.testing.expectApproxEqRel(0.05 * expected, quiet_entry.peak, 0.05);
+
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, loud_path_view.replay_gain_source);
+    try std.testing.expectApproxEqAbs(decibels(expected), loud_path_view.replay_gain_db.?, 0.01);
+    try std.testing.expectApproxEqAbs(decibels(expectedGain(loud_loudness)), loud_path_view.replay_gain_track_db.?, 0.01);
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, quiet_path_view.replay_gain_source);
+    try std.testing.expectApproxEqAbs(decibels(expectedGain(quiet_loudness)), quiet_path_view.replay_gain_track_db.?, 0.01);
+}
+
+test "album ReplayGain falls back to the Track's own correction while another Track of its Release is unmeasured" {
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeSineWav(temporary.dir, "first.wav", 0.5, 2);
+    try writeSineWav(temporary.dir, "second.wav", 0.1, 2);
+    var first_path: [128]u8 = undefined;
+    var second_path: [128]u8 = undefined;
+    const first_uri = try tempUri(&first_path, &temporary, "first.wav");
+    const second_uri = try tempUri(&second_path, &temporary, "second.wav");
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-album-gain-fallback?mode=memory&cache=shared",
+    );
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:album-gain-fallback" });
+    const release_id = try database.releases.upsert(.{ .release_key = "partial", .title = "Partial" });
+    const first = try recordAlbumTrack(database, volume_id, first_uri, "First", release_id, 1, 2);
+    try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
+    const second = try recordAlbumTrack(database, volume_id, second_uri, "Second", release_id, 2, 2);
+    const first_loudness = (try storedLoudness(database, first.file_id, first_uri)).?;
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneOpenOutput(zone, 0, .robust, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerSetReplayGainMode(player, .album);
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{ first.track_id, second.track_id }, 0);
+
+    try std.testing.expectApproxEqRel(expectedGain(first_loudness), try runtime.playerEffectiveGain(player), 0.001);
+    var path = try runtime.playerSignalPath(player);
+    try std.testing.expectEqual(liborca.ReplayGainSource.track_fallback, path.replay_gain_source);
+    try std.testing.expectEqual(@as(?f32, null), path.replay_gain_track_db);
+
+    try std.testing.expect(try runtime.playerNext(player));
+    try std.testing.expectEqual(@as(f32, 1), try runtime.playerEffectiveGain(player));
+    path = try runtime.playerSignalPath(player);
+    try std.testing.expectEqual(liborca.ReplayGainSource.none, path.replay_gain_source);
+
+    try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
+    const second_loudness = (try storedLoudness(database, second.file_id, second_uri)).?;
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{first.track_id}, 0);
+    try std.testing.expectApproxEqRel(
+        referenceAlbumGain(&.{ first_loudness, second_loudness }, &.{ 2, 2 }),
+        try runtime.playerEffectiveGain(player),
+        0.001,
+    );
+    path = try runtime.playerSignalPath(player);
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, path.replay_gain_source);
+}
+
+test "re-analysing a Track or moving it to another Release changes the album gain at the next open" {
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeSineWav(temporary.dir, "kept.wav", 0.5, 2);
+    try writeSineWav(temporary.dir, "changed.wav", 0.05, 2);
+    var kept_path: [128]u8 = undefined;
+    var changed_path: [128]u8 = undefined;
+    const kept_uri = try tempUri(&kept_path, &temporary, "kept.wav");
+    const changed_uri = try tempUri(&changed_path, &temporary, "changed.wav");
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-album-gain-fresh?mode=memory&cache=shared",
+    );
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:album-gain-fresh" });
+    const first_release = try database.releases.upsert(.{ .release_key = "first", .title = "First" });
+    const second_release = try database.releases.upsert(.{ .release_key = "second", .title = "Second" });
+    const kept = try recordAlbumTrack(database, volume_id, kept_uri, "Kept", first_release, 1, 2);
+    const changed = try recordAlbumTrack(database, volume_id, changed_uri, "Changed", first_release, 2, 2);
+    try std.testing.expectEqual(@as(u64, 2), (try runLibraryAnalysis(database)).changed);
+    const kept_loudness = (try storedLoudness(database, kept.file_id, kept_uri)).?;
+    const quiet_loudness = (try storedLoudness(database, changed.file_id, changed_uri)).?;
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneOpenOutput(zone, 0, .robust, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerSetReplayGainMode(player, .album);
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{kept.track_id}, 0);
+    const before = try runtime.playerEffectiveGain(player);
+    try std.testing.expectApproxEqRel(referenceAlbumGain(&.{ kept_loudness, quiet_loudness }, &.{ 2, 2 }), before, 0.001);
+
+    try runtime.stopPlayer(player);
+    try writeSineWav(temporary.dir, "changed.wav", 0.5, 2);
+    const digest = try liborca.internal.storage.quick_hash.fromPath(std.testing.io, changed_uri);
+    try database.files.update(changed.file_id, .{ .audio_format = 1, .duration_ms = 2000, .quick_hash = &digest });
+    try std.testing.expectEqual(@as(u64, 1), (try runLibraryAnalysis(database)).changed);
+    const loud_loudness = (try storedLoudness(database, changed.file_id, changed_uri)).?;
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{kept.track_id}, 0);
+    const reanalysed = try runtime.playerEffectiveGain(player);
+    try std.testing.expectApproxEqRel(referenceAlbumGain(&.{ kept_loudness, loud_loudness }, &.{ 2, 2 }), reanalysed, 0.001);
+    try std.testing.expect(decibels(before) - decibels(reanalysed) > 1);
+
+    try runtime.stopPlayer(player);
+    var sql: [128]u8 = undefined;
+    try database.database.exec(try std.fmt.bufPrintSentinel(
+        &sql,
+        "UPDATE tracks SET release_id = {d} WHERE id = {d};",
+        .{ second_release, changed.track_id },
+        0,
+    ));
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{ kept.track_id, changed.track_id }, 0);
+    try std.testing.expectApproxEqRel(expectedGain(kept_loudness), try runtime.playerEffectiveGain(player), 0.001);
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, (try runtime.playerSignalPath(player)).replay_gain_source);
+    try std.testing.expect(try runtime.playerNext(player));
+    try std.testing.expectApproxEqRel(expectedGain(loud_loudness), try runtime.playerEffectiveGain(player), 0.001);
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, (try runtime.playerSignalPath(player)).replay_gain_source);
+}
+
+fn framesUntilPeak(
+    backend: *liborca.internal.audio.output.TestBackend,
+    threshold: f32,
+    falling: bool,
+) !usize {
+    var samples: [128]f32 = @splat(0);
+    var frames: usize = 0;
+    var attempts: usize = 0;
+    while (attempts < 4_000_000) : (attempts += 1) {
+        const stream = backend.liveStream() orelse {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        stream.pump(&samples, 128);
+        var peak: f32 = 0;
+        for (samples) |value| peak = @max(peak, @abs(value));
+        if (peak == 0) {
+            std.Thread.yield() catch {};
+            continue;
+        }
+        frames += samples.len;
+        if (if (falling) peak < threshold else peak > threshold) return frames;
+    }
+    return error.PeakNeverCrossed;
+}
+
+fn settle(backend: *liborca.internal.audio.output.TestBackend, frames: usize) !void {
+    var samples: [128]f32 = @splat(0);
+    var rendered: usize = 0;
+    var attempts: usize = 0;
+    while (rendered < frames and attempts < 4_000_000) : (attempts += 1) {
+        const stream = backend.liveStream() orelse {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        stream.pump(&samples, 128);
+        var peak: f32 = 0;
+        for (samples) |value| peak = @max(peak, @abs(value));
+        if (peak == 0) {
+            std.Thread.yield() catch {};
+            continue;
+        }
+        rendered += samples.len;
+        std.Thread.yield() catch {};
+    }
+    if (rendered < frames) return error.EntryRenderedNothing;
+}
+
+test "a switch to album ReplayGain reaches the audible samples as promptly as a switch to track ReplayGain" {
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try writeSineWav(temporary.dir, "long.wav", 0.5, 10);
+    try writeSineWav(temporary.dir, "short.wav", 0.05, 10);
+    var long_path: [128]u8 = undefined;
+    var short_path: [128]u8 = undefined;
+    const long_uri = try tempUri(&long_path, &temporary, "long.wav");
+    const short_uri = try tempUri(&short_path, &temporary, "short.wav");
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-album-gain-switch?mode=memory&cache=shared",
+    );
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:album-gain-switch" });
+    const release_id = try database.releases.upsert(.{ .release_key = "switch", .title = "Switch" });
+    const long = try recordAlbumTrack(database, volume_id, long_uri, "Long", release_id, 1, 10);
+    const short = try recordAlbumTrack(database, volume_id, short_uri, "Short", release_id, 2, 10);
+    try std.testing.expectEqual(@as(u64, 2), (try runLibraryAnalysis(database)).changed);
+    const long_loudness = (try storedLoudness(database, long.file_id, long_uri)).?;
+    const short_loudness = (try storedLoudness(database, short.file_id, short_uri)).?;
+    const track_gain = expectedGain(long_loudness);
+    const album_gain = referenceAlbumGain(&.{ long_loudness, short_loudness }, &.{ 10, 10 });
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    const target_frames = 8192;
+    try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = target_frames } }, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerSetReplayGainMode(player, .off);
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{long.track_id}, 0);
+    _ = try framesUntilPeak(&backend, 0.45, false);
+    try settle(&backend, 4 * target_frames);
+
+    try runtime.playerSetReplayGainMode(player, .track);
+    const to_track = try framesUntilPeak(&backend, 0.5 * (1 + track_gain) / 2, true);
+    try runtime.playerSetReplayGainMode(player, .off);
+    _ = try framesUntilPeak(&backend, 0.45, false);
+    try settle(&backend, 4 * target_frames);
+    try runtime.playerSetReplayGainMode(player, .album);
+    const to_album = try framesUntilPeak(&backend, 0.5 * (1 + album_gain) / 2, true);
+
+    try std.testing.expect(to_track < 44_100);
+    try std.testing.expect(to_album <= to_track + target_frames / 2);
+    try std.testing.expectEqual(liborca.ReplayGainSource.album, (try runtime.playerSignalPath(player)).replay_gain_source);
+}
+
+test "shuffle across two Releases plays each entry at its own Release's album gain" {
+    var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = liborca.Runtime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const names = [_][]const u8{ "a1.wav", "a2.wav", "b1.wav", "b2.wav" };
+    const amplitudes = [_]f32{ 0.5, 0.05, 0.2, 0.1 };
+    for (names, amplitudes) |name, amplitude| try writeSineWav(temporary.dir, name, amplitude, 2);
+    var paths: [4][128]u8 = undefined;
+    var uris: [4][]const u8 = undefined;
+    for (&paths, &uris, names) |*path, *uri, name| uri.* = try tempUri(path, &temporary, name);
+
+    const library = try runtime.openLibrary(
+        std.testing.io,
+        "file:orca-album-gain-shuffle?mode=memory&cache=shared",
+    );
+    const database = try liborca.internal.core.runtime.databaseOf(&runtime, library);
+    const volume_id = try database.volumes.ensure(.{ .stable_key = "uuid:album-gain-shuffle" });
+    const releases = [_]i64{
+        try database.releases.upsert(.{ .release_key = "a", .title = "A" }),
+        try database.releases.upsert(.{ .release_key = "b", .title = "B" }),
+    };
+    const titles = [_][]const u8{ "A1", "A2", "B1", "B2" };
+    var track_ids: [4]i64 = undefined;
+    var loudness: [4]liborca.internal.analysis.encoding.Loudness = undefined;
+    var file_ids: [4]i64 = undefined;
+    for (0..4) |index| {
+        const recorded = try recordAlbumTrack(database, volume_id, uris[index], titles[index], releases[index / 2], @intCast(index % 2 + 1), 2);
+        track_ids[index] = recorded.track_id;
+        file_ids[index] = recorded.file_id;
+    }
+    try std.testing.expectEqual(@as(u64, 4), (try runLibraryAnalysis(database)).changed);
+    for (0..4) |index| loudness[index] = (try storedLoudness(database, file_ids[index], uris[index])).?;
+    const album_gains = [_]f32{
+        referenceAlbumGain(loudness[0..2], &.{ 2, 2 }),
+        referenceAlbumGain(loudness[2..4], &.{ 2, 2 }),
+    };
+    try std.testing.expect(@abs(decibels(album_gains[0]) - decibels(album_gains[1])) > 3);
+
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneOpenOutput(zone, 0, .{ .custom = .{ .target_frames = 8192 } }, 0);
+    try runtime.playerSetVolume(player, 1);
+    try runtime.playerSetReplayGainMode(player, .album);
+    try runtime.playerSetShuffle(player, true);
+    try runtime.playerPlayTracks(player, library, std.testing.io, &.{ track_ids[0], track_ids[2], track_ids[1], track_ids[3] }, 0);
+
+    var heard: [4]bool = @splat(false);
+    for (0..4) |position| {
+        const entry = try observeEntry(&runtime, &backend, player, @intCast(position), 60);
+        const track_id = (try runtime.playerStatus(player)).track_id.?;
+        const index = std.mem.indexOfScalar(i64, &track_ids, track_id).?;
+        heard[index] = true;
+        const expected = album_gains[index / 2];
+        try std.testing.expectApproxEqRel(expected, entry.gain, 0.001);
+        try std.testing.expectApproxEqRel(amplitudes[index] * expected, entry.peak, 0.05);
+    }
+    for (heard) |value| try std.testing.expect(value);
+}
 test "the queue reports the rows a host displays, in the order it will play them" {
     // Resolving queue rows is liborca's job, never a frontend's.
     var backend: liborca.internal.audio.output.TestBackend = .{ .allocator = std.testing.allocator };

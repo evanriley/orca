@@ -6,6 +6,7 @@ const providers = @import("../providers/root.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
+const runtime_queue = @import("runtime_queue.zig");
 const runtime_status = @import("runtime_status.zig");
 
 const ClientIdentity = runtime.ClientIdentity;
@@ -84,6 +85,26 @@ pub fn setCoverArtArchiveServer(self: *OrcaRuntime, base_url: ?[]const u8) !void
 pub fn setLrclibServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
     try runtime.requireRunning(self);
     self.lrclib_server = try .init(base_url orelse providers.lrclib.default_server);
+}
+
+pub fn setWikidataServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+    try runtime.requireRunning(self);
+    self.wikidata_server = try .init(base_url orelse providers.wikidata.default_server);
+}
+
+pub fn setWikimediaCommonsServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+    try runtime.requireRunning(self);
+    self.wikimedia_commons_server = try .init(base_url orelse providers.wikimedia_commons.default_server);
+}
+
+pub fn setWikipediaServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+    try runtime.requireRunning(self);
+    self.wikipedia_server = if (base_url) |value| try .init(value) else null;
+}
+
+pub fn setListenBrainzLabsServer(self: *OrcaRuntime, base_url: ?[]const u8) !void {
+    try runtime.requireRunning(self);
+    self.listenbrainz_labs_server = try .init(base_url orelse providers.listenbrainz_labs.default_server);
 }
 
 fn withListenSettings(self: *OrcaRuntime, config: listen_worker.Config) listen_worker.Config {
@@ -428,23 +449,27 @@ pub fn sampleTime(self: *OrcaRuntime) listen_worker.SampleTime {
     };
 }
 
-/// One lock-free status read per bound Player, turned into listens and
-/// handed to the Library's worker. No SQLite, I/O or allocation here,
-/// except restarting a worker a drain released.
+/// One lock-free status read per Player for its queue history and, when it
+/// is bound, for listens handed to the Library's worker. No SQLite, I/O or
+/// allocation here, except restarting a worker a drain released.
 pub fn sampleListens(self: *OrcaRuntime) void {
     for (self.players.slots.items) |*slot| {
-        const object_value = if (slot.value) |*value| value else continue;
-        if (object_value.opener != null) break;
+        if (slot.value != null) break;
     } else return;
     const now = sampleTime(self);
     if (self.last_listen_sample_ms) |last| {
         if (now.mono_ms - last < listen_sample_interval_ms) return;
     }
     self.last_listen_sample_ms = now.mono_ms;
+    const history_now_ms = runtime_queue.historyNowMs(self);
     for (self.players.slots.items) |*slot| {
         const object_value = if (slot.value) |*value| value else continue;
+        runtime_queue.observeQueueHistory(object_value, history_now_ms);
         const opener = object_value.opener orelse continue;
         const read = runtime_status.readStatus(object_value);
+        // Observing an unresolved read as no Track would end the listen in
+        // progress for good, so it is skipped.
+        if (!read.resolved) continue;
         // A queue entry from a Library this Player was bound to before
         // names a Track id of that Library, not of this one.
         const track_id: ?i64 = if (read.audible) |ref|

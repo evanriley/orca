@@ -108,19 +108,70 @@ pub fn Chain(comptime capacity: usize) type {
 }
 
 /// How a Player chooses the loudness correction for the entry it loads.
-///
-/// Album-level ReplayGain is deliberately not a third value here. An album
-/// gain is one figure measured across a whole release, which needs both a
-/// release-scoped measurement `analysis/` does not compute and a notion of
-/// "the release this queue entry belongs to" the playback queue does not
-/// carry. Adding the name without either would apply track gain under an
-/// album label, which is worse than not offering it.
 pub const ReplayGainMode = enum(u8) {
     /// No correction at all. Every entry plays at the volume the user set.
     off,
     /// Each entry is corrected by its own measured loudness, if the Library
     /// holds one that still describes the file.
     track,
+    /// Each entry is corrected by the loudness of its whole Release, so the
+    /// album's own dynamics survive. An entry whose Release cannot be measured
+    /// as a whole plays at its track correction instead, and says so.
+    album,
+};
+
+pub const ReplayGainSource = enum(u8) {
+    /// None: correction is off, or the entry has no usable measurement.
+    none,
+    track,
+    album,
+    /// Album was asked for, but the entry has no Release or not every Track
+    /// of it is measured, so its own track correction applies.
+    track_fallback,
+};
+
+/// The corrections one entry carries, as linear multipliers already capped
+/// against their peaks. Null is "no usable measurement".
+pub const EntryReplayGain = struct {
+    track: ?f32 = null,
+    album: ?f32 = null,
+
+    pub const Applied = struct {
+        multiplier: f32,
+        source: ReplayGainSource,
+    };
+
+    pub fn applied(self: EntryReplayGain, mode: ReplayGainMode) Applied {
+        const none: Applied = .{ .multiplier = 1, .source = .none };
+        return switch (mode) {
+            .off => none,
+            .track => if (self.track) |track| .{ .multiplier = track, .source = .track } else none,
+            .album => if (self.album) |album|
+                .{ .multiplier = album, .source = .album }
+            else if (self.track) |track|
+                .{ .multiplier = track, .source = .track_fallback }
+            else
+                none,
+        };
+    }
+
+    /// Both corrections in one word, so a reader on another lane never sees
+    /// one entry's track figure beside another entry's album figure. A
+    /// multiplier is always positive, so zero bits stand for null.
+    pub fn pack(self: EntryReplayGain) u64 {
+        const track: u64 = if (self.track) |value| @as(u32, @bitCast(value)) else 0;
+        const album: u64 = if (self.album) |value| @as(u32, @bitCast(value)) else 0;
+        return track | album << 32;
+    }
+
+    pub fn unpack(bits: u64) EntryReplayGain {
+        const track: u32 = @truncate(bits);
+        const album: u32 = @truncate(bits >> 32);
+        return .{
+            .track = if (track == 0) null else @bitCast(track),
+            .album = if (album == 0) null else @bitCast(album),
+        };
+    }
 };
 
 /// The linear multiplier a stored ReplayGain figure asks for.

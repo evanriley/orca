@@ -1,0 +1,16 @@
+{"v":1,"match":"any","rules":[
+  {"field":"title","op":"contains","value":"%_'\"; DROP TABLE tracks; --"},
+  {"field":"artist","op":"starts_with","value":"Nick"},
+  {"field":"album","op":"is_not","value":"Pink Moon"},
+  {"field":"codec","op":"is","value":"flac"},
+  {"field":"year","op":"between","value":[1969,1974]},
+  {"field":"play_count","op":"gt","value":3},
+  {"field":"duration_ms","op":"lt","value":240000},
+  {"field":"sample_rate","op":"lte","value":48000},
+  {"field":"last_played_at","op":"not_in_last_days","value":7},
+  {"field":"album_artist","op":"is_set"},
+  {"field":"release_type","op":"is_not_set"},
+  {"field":"lossless","op":"is","value":true},
+  {"field":"explicit","op":"is_not","value":true},
+  {"field":"has_artwork","op":"is","value":false}
+],"sort":{"field":"year"},"limit":10000}

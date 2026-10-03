@@ -2,8 +2,9 @@ const std = @import("std");
 const sqlite = @import("sqlite.zig");
 const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
+const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 31;
+pub const current_version = 38;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1073,6 +1074,500 @@ const migration_31 =
     \\);
 ;
 
+const migration_32 =
+    \\CREATE TABLE recording_play_stats (
+    \\    recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+    \\    play_count INTEGER NOT NULL,
+    \\    last_played_at INTEGER NOT NULL
+    \\);
+    \\UPDATE listens SET recording_id = (SELECT recording_id FROM files WHERE files.id = listens.file_id)
+    \\WHERE file_id IS NOT NULL;
+    \\INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+    \\    SELECT recording_id, count(*), max(started_at) FROM listens
+    \\    WHERE recording_id IS NOT NULL GROUP BY recording_id;
+    \\CREATE INDEX recording_play_stats_by_count
+    \\    ON recording_play_stats(play_count DESC, recording_id);
+    \\CREATE INDEX recording_play_stats_by_last_played
+    \\    ON recording_play_stats(last_played_at DESC, recording_id);
+    \\CREATE INDEX listens_by_recording ON listens(recording_id, started_at);
+    \\CREATE TRIGGER files_recording_moves_listens
+    \\AFTER UPDATE OF recording_id ON files
+    \\WHEN OLD.recording_id IS NOT NEW.recording_id
+    \\    AND EXISTS (SELECT 1 FROM listens WHERE file_id = NEW.id)
+    \\BEGIN
+    \\    UPDATE listens SET recording_id = NEW.recording_id WHERE file_id = NEW.id;
+    \\    DELETE FROM recording_play_stats WHERE recording_id IN (OLD.recording_id, NEW.recording_id);
+    \\    INSERT INTO recording_play_stats(recording_id, play_count, last_played_at)
+    \\        SELECT recording_id, count(*), max(started_at) FROM listens
+    \\        WHERE recording_id IN (OLD.recording_id, NEW.recording_id) GROUP BY recording_id;
+    \\END;
+    \\ALTER TABLE observed_file_tags ADD COLUMN explicit INTEGER;
+    \\ALTER TABLE tracks ADD COLUMN track_total INTEGER;
+    \\ALTER TABLE tracks ADD COLUMN disc_total INTEGER;
+    \\ALTER TABLE tracks ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0;
+    \\ALTER TABLE releases ADD COLUMN release_type TEXT;
+    \\CREATE INDEX files_by_first_seen ON files(first_seen_at);
+    \\CREATE INDEX ratings_by_rating ON ratings(rating);
+    \\CREATE INDEX feedback_loved ON feedback(updated_at) WHERE score = 1;
+    \\CREATE INDEX releases_by_year ON releases((
+    \\    CASE WHEN substr(release_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
+    \\    THEN CAST(substr(release_date, 1, 4) AS INTEGER) END));
+    \\UPDATE tracks SET
+    \\    track_total = COALESCE(
+    \\        (SELECT track_total FROM observed_file_tags WHERE file_id = tracks.preferred_file_id
+    \\         AND track_total > 0),
+    \\        (SELECT member_tags.track_total FROM files AS member
+    \\         JOIN observed_file_tags AS member_tags ON member_tags.file_id = member.id
+    \\         WHERE member.recording_id = tracks.recording_id AND member_tags.track_total > 0
+    \\         ORDER BY member.id LIMIT 1),
+    \\        CASE WHEN tracks.release_id IS NOT NULL THEN
+    \\            (SELECT max(count(*), COALESCE(max(sibling.track_number), 0)) FROM tracks AS sibling
+    \\             WHERE sibling.release_id = tracks.release_id
+    \\               AND COALESCE(sibling.disc_number, 1) = COALESCE(tracks.disc_number, 1))
+    \\        END),
+    \\    disc_total = COALESCE(
+    \\        (SELECT disc_total FROM observed_file_tags WHERE file_id = tracks.preferred_file_id
+    \\         AND disc_total > 0),
+    \\        (SELECT member_tags.disc_total FROM files AS member
+    \\         JOIN observed_file_tags AS member_tags ON member_tags.file_id = member.id
+    \\         WHERE member.recording_id = tracks.recording_id AND member_tags.disc_total > 0
+    \\         ORDER BY member.id LIMIT 1),
+    \\        (SELECT disc_count FROM releases WHERE releases.id = tracks.release_id));
+;
+
+const migration_33 =
+    \\CREATE TABLE genres (
+    \\    id INTEGER PRIMARY KEY,
+    \\    name TEXT NOT NULL,
+    \\    key TEXT NOT NULL UNIQUE
+    \\);
+    \\CREATE TABLE track_genres (
+    \\    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+    \\    genre_id INTEGER NOT NULL REFERENCES genres(id) ON DELETE CASCADE,
+    \\    ordinal INTEGER NOT NULL,
+    \\    provenance INTEGER NOT NULL,
+    \\    PRIMARY KEY(track_id, ordinal)
+    \\) WITHOUT ROWID;
+    \\CREATE UNIQUE INDEX track_genres_by_genre ON track_genres(genre_id, track_id);
+    \\CREATE TEMP TABLE genre_sources AS
+    \\    SELECT tracks.id AS track_id, COALESCE(
+    \\        (SELECT tracks.preferred_file_id WHERE EXISTS
+    \\            (SELECT 1 FROM observed_file_genres WHERE file_id = tracks.preferred_file_id)),
+    \\        (SELECT min(member.id) FROM files AS member
+    \\         WHERE member.recording_id = tracks.recording_id
+    \\           AND EXISTS (SELECT 1 FROM observed_file_genres WHERE file_id = member.id))) AS file_id
+    \\    FROM tracks;
+    \\DELETE FROM temp.genre_sources WHERE file_id IS NULL;
+    \\CREATE TEMP TABLE genre_values AS
+    \\    WITH RECURSIVE parts(track_id, ordinal, value, part_index, part) AS (
+    \\        SELECT source.track_id, observed.ordinal, observed.value, 0, orca_genre_part(observed.value, 0)
+    \\        FROM temp.genre_sources AS source
+    \\        JOIN observed_file_genres AS observed ON observed.file_id = source.file_id
+    \\        UNION ALL
+    \\        SELECT track_id, ordinal, value, part_index + 1, orca_genre_part(value, part_index + 1)
+    \\        FROM parts WHERE part IS NOT NULL)
+    \\    SELECT track_id,
+    \\           row_number() OVER (PARTITION BY track_id ORDER BY ordinal, part_index) AS position,
+    \\           orca_genre_key(part) AS key, orca_genre_name(part) AS name
+    \\    FROM parts WHERE part IS NOT NULL;
+    \\DELETE FROM temp.genre_values WHERE key = '';
+    \\INSERT INTO genres(name, key)
+    \\    SELECT name, key FROM temp.genre_values WHERE true
+    \\    ORDER BY track_id, position
+    \\ON CONFLICT(key) DO NOTHING;
+    \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance)
+    \\    SELECT track_id, genre_id, row_number() OVER (PARTITION BY track_id ORDER BY first_position) - 1, 0
+    \\    FROM (SELECT value.track_id, genres.id AS genre_id, min(value.position) AS first_position
+    \\          FROM temp.genre_values AS value JOIN genres ON genres.key = value.key
+    \\          GROUP BY value.track_id, genres.id);
+    \\DROP TABLE temp.genre_values;
+    \\DROP TABLE temp.genre_sources;
+;
+
+const migration_34 =
+    \\CREATE TABLE artist_info (
+    \\    artist_id INTEGER PRIMARY KEY REFERENCES artists(id) ON DELETE CASCADE,
+    \\    musicbrainz_artist_id TEXT,
+    \\    wikidata_id TEXT,
+    \\    begin_year INTEGER,
+    \\    end_year INTEGER,
+    \\    ended INTEGER NOT NULL DEFAULT 0,
+    \\    artist_type TEXT,
+    \\    biography TEXT,
+    \\    biography_source INTEGER,
+    \\    biography_url TEXT,
+    \\    biography_licence TEXT,
+    \\    biography_language TEXT,
+    \\    requested_language TEXT,
+    \\    photo BLOB,
+    \\    photo_mime TEXT,
+    \\    photo_source INTEGER,
+    \\    photo_url TEXT,
+    \\    photo_licence TEXT,
+    \\    photo_licence_url TEXT,
+    \\    photo_credit TEXT,
+    \\    listeners INTEGER,
+    \\    listeners_fetched_at INTEGER,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    outcome INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE artist_links (
+    \\    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    \\    kind INTEGER NOT NULL,
+    \\    url TEXT NOT NULL,
+    \\    PRIMARY KEY(artist_id, kind, url)
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE artist_related (
+    \\    artist_id INTEGER NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    \\    ordinal INTEGER NOT NULL,
+    \\    related_mbid TEXT NOT NULL,
+    \\    related_name TEXT NOT NULL,
+    \\    score INTEGER NOT NULL,
+    \\    PRIMARY KEY(artist_id, ordinal)
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE artist_loves (
+    \\    artist_id INTEGER PRIMARY KEY REFERENCES artists(id) ON DELETE CASCADE,
+    \\    loved_at INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE release_info (
+    \\    release_id INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
+    \\    description TEXT,
+    \\    description_source INTEGER,
+    \\    description_url TEXT,
+    \\    description_licence TEXT,
+    \\    description_language TEXT,
+    \\    requested_language TEXT,
+    \\    musicbrainz_release_id TEXT,
+    \\    musicbrainz_release_group_id TEXT,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    outcome INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE library_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+;
+
+const migration_35 =
+    \\ALTER TABLE playlists ADD COLUMN description TEXT NOT NULL DEFAULT '';
+    \\ALTER TABLE playlists ADD COLUMN pinned_at INTEGER;
+    \\ALTER TABLE playlists ADD COLUMN loved_at INTEGER;
+    \\ALTER TABLE playlists ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;
+    \\ALTER TABLE playlists ADD COLUMN rules TEXT;
+    \\ALTER TABLE playlists ADD COLUMN creator INTEGER NOT NULL DEFAULT 0;
+    \\CREATE TABLE playlist_tags (
+    \\    playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    \\    ordinal INTEGER NOT NULL,
+    \\    tag TEXT NOT NULL,
+    \\    PRIMARY KEY(playlist_id, ordinal)
+    \\) WITHOUT ROWID;
+;
+
+const migration_37 =
+    \\CREATE TABLE related_artist_photos (
+    \\    musicbrainz_artist_id TEXT PRIMARY KEY COLLATE NOCASE,
+    \\    photo BLOB,
+    \\    photo_mime TEXT,
+    \\    photo_source INTEGER,
+    \\    photo_url TEXT,
+    \\    photo_licence TEXT,
+    \\    photo_licence_url TEXT,
+    \\    photo_credit TEXT,
+    \\    fetched_at INTEGER NOT NULL,
+    \\    CHECK ((photo IS NULL) = (photo_mime IS NULL)),
+    \\    CHECK ((photo IS NULL) = (photo_source IS NULL)),
+    \\    CHECK (photo IS NOT NULL OR (photo_url IS NULL AND photo_licence IS NULL
+    \\        AND photo_licence_url IS NULL AND photo_credit IS NULL))
+    \\) WITHOUT ROWID;
+;
+
+const migration_38 =
+    \\CREATE INDEX analysis_results_created ON analysis_results(created_at);
+    \\DROP TRIGGER tracks_search_ai;
+    \\DROP TRIGGER tracks_search_au;
+    \\DROP TRIGGER tracks_search_ad;
+    \\DELETE FROM search_index WHERE kind = 2;
+    \\INSERT INTO search_index(search_index) VALUES ('rebuild');
+    \\DROP TRIGGER tracks_au;
+    \\CREATE TRIGGER tracks_au AFTER UPDATE OF id, title, artist, album, album_artist ON tracks
+    \\WHEN old.id IS NOT new.id OR old.title IS NOT new.title OR old.artist IS NOT new.artist
+    \\    OR old.album IS NOT new.album OR old.album_artist IS NOT new.album_artist BEGIN
+    \\    INSERT INTO track_search(track_search, rowid, title, artist, album, album_artist)
+    \\    VALUES ('delete', old.id, old.title, old.artist, old.album, old.album_artist);
+    \\    INSERT INTO track_search(rowid, title, artist, album, album_artist)
+    \\    VALUES (new.id, new.title, new.artist, new.album, new.album_artist);
+    \\END;
+    \\
+++ genre_totals_schema;
+
+const genre_totals_schema =
+    \\CREATE TABLE genre_totals (
+    \\    genre_id INTEGER PRIMARY KEY,
+    \\    track_count INTEGER NOT NULL,
+    \\    release_count INTEGER NOT NULL,
+    \\    artist_count INTEGER NOT NULL,
+    \\    duration_ms INTEGER NOT NULL
+    \\);
+    \\CREATE TABLE genre_release_tracks (
+    \\    release_id INTEGER NOT NULL,
+    \\    genre_id INTEGER NOT NULL,
+    \\    tracks INTEGER NOT NULL,
+    \\    PRIMARY KEY(release_id, genre_id)
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE genre_artist_refs (
+    \\    genre_id INTEGER NOT NULL,
+    \\    artist_id INTEGER NOT NULL,
+    \\    refs INTEGER NOT NULL,
+    \\    PRIMARY KEY(genre_id, artist_id)
+    \\) WITHOUT ROWID;
+    \\INSERT INTO genre_release_tracks(release_id, genre_id, tracks)
+    \\    SELECT tracks.release_id, track_genres.genre_id, count(*)
+    \\    FROM track_genres CROSS JOIN tracks ON tracks.id = track_genres.track_id
+    \\    WHERE tracks.release_id IS NOT NULL
+    \\    GROUP BY tracks.release_id, track_genres.genre_id;
+    \\INSERT INTO genre_artist_refs(genre_id, artist_id, refs)
+    \\    SELECT genre_id, artist_id, count(*) FROM (
+    \\        SELECT track_genres.genre_id AS genre_id, tracks.artist_id AS artist_id
+    \\        FROM track_genres CROSS JOIN tracks ON tracks.id = track_genres.track_id
+    \\        WHERE tracks.artist_id IS NOT NULL
+    \\        UNION ALL
+    \\        SELECT track_genres.genre_id, releases.album_artist_id
+    \\        FROM track_genres CROSS JOIN tracks ON tracks.id = track_genres.track_id
+    \\        CROSS JOIN releases ON releases.id = tracks.release_id
+    \\        WHERE releases.album_artist_id IS NOT NULL)
+    \\    GROUP BY genre_id, artist_id;
+    \\INSERT INTO genre_totals(genre_id, track_count, release_count, artist_count, duration_ms)
+    \\    SELECT track_genres.genre_id, count(*),
+    \\        (SELECT count(*) FROM genre_release_tracks WHERE genre_release_tracks.genre_id = track_genres.genre_id),
+    \\        (SELECT count(*) FROM genre_artist_refs WHERE genre_artist_refs.genre_id = track_genres.genre_id),
+    \\        COALESCE(sum(tracks.duration_ms), 0)
+    \\    FROM track_genres CROSS JOIN tracks ON tracks.id = track_genres.track_id
+    \\    GROUP BY track_genres.genre_id;
+    \\CREATE TRIGGER genre_totals_au AFTER UPDATE OF track_count ON genre_totals
+    \\WHEN new.track_count = 0 BEGIN
+    \\    DELETE FROM genre_totals WHERE genre_id = new.genre_id;
+    \\END;
+    \\CREATE TRIGGER genre_release_tracks_ai AFTER INSERT ON genre_release_tracks BEGIN
+    \\    UPDATE genre_totals SET release_count = release_count + 1 WHERE genre_id = new.genre_id;
+    \\END;
+    \\CREATE TRIGGER genre_release_tracks_au AFTER UPDATE OF tracks ON genre_release_tracks
+    \\WHEN new.tracks = 0 BEGIN
+    \\    DELETE FROM genre_release_tracks WHERE release_id = new.release_id AND genre_id = new.genre_id;
+    \\END;
+    \\CREATE TRIGGER genre_release_tracks_ad AFTER DELETE ON genre_release_tracks BEGIN
+    \\    UPDATE genre_totals SET release_count = release_count - 1 WHERE genre_id = old.genre_id;
+    \\END;
+    \\CREATE TRIGGER genre_artist_refs_ai AFTER INSERT ON genre_artist_refs BEGIN
+    \\    UPDATE genre_totals SET artist_count = artist_count + 1 WHERE genre_id = new.genre_id;
+    \\END;
+    \\CREATE TRIGGER genre_artist_refs_au AFTER UPDATE OF refs ON genre_artist_refs
+    \\WHEN new.refs = 0 BEGIN
+    \\    DELETE FROM genre_artist_refs WHERE genre_id = new.genre_id AND artist_id = new.artist_id;
+    \\END;
+    \\CREATE TRIGGER genre_artist_refs_ad AFTER DELETE ON genre_artist_refs BEGIN
+    \\    UPDATE genre_totals SET artist_count = artist_count - 1 WHERE genre_id = old.genre_id;
+    \\END;
+    \\CREATE TRIGGER track_genres_totals_ai AFTER INSERT ON track_genres BEGIN
+    \\
+++ addTrackGenre("new") ++
+    \\END;
+    \\CREATE TRIGGER track_genres_totals_ad AFTER DELETE ON track_genres BEGIN
+    \\
+++ removeTrackGenre("old") ++
+    \\END;
+    \\CREATE TRIGGER track_genres_totals_au AFTER UPDATE OF track_id, genre_id ON track_genres
+    \\WHEN old.track_id IS NOT new.track_id OR old.genre_id IS NOT new.genre_id BEGIN
+    \\
+++ removeTrackGenre("old") ++ addTrackGenre("new") ++
+    \\END;
+    \\CREATE TRIGGER tracks_genre_totals_bd BEFORE DELETE ON tracks BEGIN
+    \\    DELETE FROM track_genres WHERE track_id = old.id;
+    \\END;
+    \\CREATE TRIGGER tracks_genre_duration_au AFTER UPDATE OF duration_ms ON tracks
+    \\WHEN old.duration_ms IS NOT new.duration_ms BEGIN
+    \\    UPDATE genre_totals SET duration_ms = duration_ms - COALESCE(old.duration_ms, 0) + COALESCE(new.duration_ms, 0)
+    \\    WHERE genre_id IN (SELECT genre_id FROM track_genres WHERE track_id = new.id);
+    \\END;
+    \\CREATE TRIGGER tracks_genre_artist_au AFTER UPDATE OF artist_id ON tracks
+    \\WHEN old.artist_id IS NOT new.artist_id BEGIN
+    \\    UPDATE genre_artist_refs SET refs = refs - 1
+    \\    WHERE artist_id = old.artist_id AND genre_id IN (SELECT genre_id FROM track_genres WHERE track_id = new.id);
+    \\    INSERT INTO genre_artist_refs(genre_id, artist_id, refs)
+    \\    SELECT genre_id, new.artist_id, 1 FROM track_genres WHERE track_id = new.id AND new.artist_id IS NOT NULL
+    \\    ON CONFLICT DO UPDATE SET refs = refs + 1;
+    \\END;
+    \\CREATE TRIGGER tracks_genre_release_au AFTER UPDATE OF release_id ON tracks
+    \\WHEN old.release_id IS NOT new.release_id BEGIN
+    \\    UPDATE genre_release_tracks SET tracks = tracks - 1
+    \\    WHERE release_id = old.release_id AND genre_id IN (SELECT genre_id FROM track_genres WHERE track_id = new.id);
+    \\    UPDATE genre_artist_refs SET refs = refs - 1
+    \\    WHERE artist_id = (SELECT album_artist_id FROM releases WHERE id = old.release_id)
+    \\        AND genre_id IN (SELECT genre_id FROM track_genres WHERE track_id = new.id);
+    \\    INSERT INTO genre_release_tracks(release_id, genre_id, tracks)
+    \\    SELECT new.release_id, genre_id, 1 FROM track_genres WHERE track_id = new.id AND new.release_id IS NOT NULL
+    \\    ON CONFLICT DO UPDATE SET tracks = tracks + 1;
+    \\    INSERT INTO genre_artist_refs(genre_id, artist_id, refs)
+    \\    SELECT track_genres.genre_id, releases.album_artist_id, 1
+    \\    FROM track_genres CROSS JOIN releases ON releases.id = new.release_id
+    \\    WHERE track_genres.track_id = new.id AND releases.album_artist_id IS NOT NULL
+    \\    ON CONFLICT DO UPDATE SET refs = refs + 1;
+    \\END;
+    \\CREATE TRIGGER releases_genre_artist_au AFTER UPDATE OF album_artist_id ON releases
+    \\WHEN old.album_artist_id IS NOT new.album_artist_id BEGIN
+    \\    UPDATE genre_artist_refs SET refs = refs - (SELECT tracks FROM genre_release_tracks
+    \\        WHERE genre_release_tracks.release_id = new.id AND genre_release_tracks.genre_id = genre_artist_refs.genre_id)
+    \\    WHERE artist_id = old.album_artist_id
+    \\        AND genre_id IN (SELECT genre_id FROM genre_release_tracks WHERE release_id = new.id);
+    \\    INSERT INTO genre_artist_refs(genre_id, artist_id, refs)
+    \\    SELECT genre_id, new.album_artist_id, tracks FROM genre_release_tracks
+    \\    WHERE release_id = new.id AND new.album_artist_id IS NOT NULL
+    \\    ON CONFLICT DO UPDATE SET refs = refs + excluded.refs;
+    \\END;
+    \\
+;
+
+fn addTrackGenre(comptime row: []const u8) []const u8 {
+    return "    INSERT INTO genre_totals(genre_id, track_count, release_count, artist_count, duration_ms)\n" ++
+        "    VALUES (" ++ row ++ ".genre_id, 1, 0, 0, COALESCE((SELECT duration_ms FROM tracks WHERE id = " ++ row ++ ".track_id), 0))\n" ++
+        "    ON CONFLICT(genre_id) DO UPDATE SET track_count = track_count + 1, duration_ms = duration_ms + excluded.duration_ms;\n" ++
+        "    INSERT INTO genre_release_tracks(release_id, genre_id, tracks)\n" ++
+        "    SELECT release_id, " ++ row ++ ".genre_id, 1 FROM tracks WHERE id = " ++ row ++ ".track_id AND release_id IS NOT NULL\n" ++
+        "    ON CONFLICT DO UPDATE SET tracks = tracks + 1;\n" ++
+        "    INSERT INTO genre_artist_refs(genre_id, artist_id, refs)\n" ++
+        "    SELECT " ++ row ++ ".genre_id, artist_id, 1 FROM tracks WHERE id = " ++ row ++ ".track_id AND artist_id IS NOT NULL\n" ++
+        "    ON CONFLICT DO UPDATE SET refs = refs + 1;\n" ++
+        "    INSERT INTO genre_artist_refs(genre_id, artist_id, refs)\n" ++
+        "    SELECT " ++ row ++ ".genre_id, releases.album_artist_id, 1\n" ++
+        "    FROM tracks CROSS JOIN releases ON releases.id = tracks.release_id\n" ++
+        "    WHERE tracks.id = " ++ row ++ ".track_id AND releases.album_artist_id IS NOT NULL\n" ++
+        "    ON CONFLICT DO UPDATE SET refs = refs + 1;\n";
+}
+
+fn removeTrackGenre(comptime row: []const u8) []const u8 {
+    return "    UPDATE genre_release_tracks SET tracks = tracks - 1\n" ++
+        "    WHERE genre_id = " ++ row ++ ".genre_id AND release_id = (SELECT release_id FROM tracks WHERE id = " ++ row ++ ".track_id);\n" ++
+        "    UPDATE genre_artist_refs SET refs = refs - 1\n" ++
+        "    WHERE genre_id = " ++ row ++ ".genre_id AND artist_id = (SELECT artist_id FROM tracks WHERE id = " ++ row ++ ".track_id);\n" ++
+        "    UPDATE genre_artist_refs SET refs = refs - 1\n" ++
+        "    WHERE genre_id = " ++ row ++ ".genre_id AND artist_id = (SELECT releases.album_artist_id\n" ++
+        "        FROM tracks CROSS JOIN releases ON releases.id = tracks.release_id WHERE tracks.id = " ++ row ++ ".track_id);\n" ++
+        "    UPDATE genre_totals SET track_count = track_count - 1,\n" ++
+        "        duration_ms = duration_ms - COALESCE((SELECT duration_ms FROM tracks WHERE id = " ++ row ++ ".track_id), 0)\n" ++
+        "    WHERE genre_id = " ++ row ++ ".genre_id;\n";
+}
+
+pub const genre_totals_drift_sql =
+    \\WITH fresh_releases(release_id, genre_id, tracks) AS (
+    \\    SELECT tracks.release_id, track_genres.genre_id, count(*)
+    \\    FROM track_genres JOIN tracks ON tracks.id = track_genres.track_id
+    \\    WHERE tracks.release_id IS NOT NULL GROUP BY 1, 2
+    \\), fresh_artists(genre_id, artist_id, refs) AS (
+    \\    SELECT genre_id, artist_id, count(*) FROM (
+    \\        SELECT track_genres.genre_id AS genre_id, tracks.artist_id AS artist_id
+    \\        FROM track_genres JOIN tracks ON tracks.id = track_genres.track_id WHERE tracks.artist_id IS NOT NULL
+    \\        UNION ALL SELECT track_genres.genre_id, releases.album_artist_id
+    \\        FROM track_genres JOIN tracks ON tracks.id = track_genres.track_id
+    \\        JOIN releases ON releases.id = tracks.release_id WHERE releases.album_artist_id IS NOT NULL)
+    \\    GROUP BY 1, 2
+    \\), fresh_totals(genre_id, track_count, release_count, artist_count, duration_ms) AS (
+    \\    SELECT track_genres.genre_id, count(*), count(DISTINCT tracks.release_id),
+    \\        (SELECT count(DISTINCT artist_id) FROM (
+    \\            SELECT tracks.artist_id AS artist_id FROM track_genres AS inner_genres
+    \\            JOIN tracks ON tracks.id = inner_genres.track_id WHERE inner_genres.genre_id = track_genres.genre_id
+    \\            UNION SELECT releases.album_artist_id FROM track_genres AS inner_genres
+    \\            JOIN tracks ON tracks.id = inner_genres.track_id JOIN releases ON releases.id = tracks.release_id
+    \\            WHERE inner_genres.genre_id = track_genres.genre_id)),
+    \\        COALESCE(sum(tracks.duration_ms), 0)
+    \\    FROM track_genres JOIN tracks ON tracks.id = track_genres.track_id
+    \\    GROUP BY track_genres.genre_id
+    \\)
+    \\SELECT (SELECT count(*) FROM (SELECT * FROM genre_totals EXCEPT SELECT * FROM fresh_totals))
+    \\     + (SELECT count(*) FROM (SELECT * FROM fresh_totals EXCEPT SELECT * FROM genre_totals))
+    \\     + (SELECT count(*) FROM (SELECT * FROM genre_release_tracks EXCEPT SELECT * FROM fresh_releases))
+    \\     + (SELECT count(*) FROM (SELECT * FROM fresh_releases EXCEPT SELECT * FROM genre_release_tracks))
+    \\     + (SELECT count(*) FROM (SELECT * FROM genre_artist_refs EXCEPT SELECT * FROM fresh_artists))
+    \\     + (SELECT count(*) FROM (SELECT * FROM fresh_artists EXCEPT SELECT * FROM genre_artist_refs));
+;
+
+const migration_36 =
+    \\CREATE VIRTUAL TABLE search_index USING fts5(
+    \\    kind UNINDEXED, entity_id UNINDEXED, title, subtitle,
+    \\    tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3'
+    \\);
+    \\INSERT INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    SELECT id * 8 + 0, 0, id, name, '' FROM artists;
+    \\INSERT INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    SELECT id * 8 + 1, 1, id, title, album_artist FROM releases;
+    \\INSERT INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    SELECT id * 8 + 2, 2, id, title, artist || ' ' || album FROM tracks;
+    \\INSERT INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    SELECT id * 8 + 3, 3, id, name, description FROM playlists;
+    \\INSERT INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    SELECT id * 8 + 4, 4, id, name, '' FROM genres;
+    \\CREATE TRIGGER artists_search_ai AFTER INSERT ON artists BEGIN
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 0, 0, new.id, new.name, '');
+    \\END;
+    \\CREATE TRIGGER artists_search_au AFTER UPDATE OF id, name ON artists
+    \\WHEN old.id IS NOT new.id OR old.name IS NOT new.name BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 0;
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 0, 0, new.id, new.name, '');
+    \\END;
+    \\CREATE TRIGGER artists_search_ad AFTER DELETE ON artists BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 0;
+    \\END;
+    \\CREATE TRIGGER releases_search_ai AFTER INSERT ON releases BEGIN
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 1, 1, new.id, new.title, new.album_artist);
+    \\END;
+    \\CREATE TRIGGER releases_search_au AFTER UPDATE OF id, title, album_artist ON releases
+    \\WHEN old.id IS NOT new.id OR old.title IS NOT new.title OR old.album_artist IS NOT new.album_artist BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 1;
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 1, 1, new.id, new.title, new.album_artist);
+    \\END;
+    \\CREATE TRIGGER releases_search_ad AFTER DELETE ON releases BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 1;
+    \\END;
+    \\CREATE TRIGGER tracks_search_ai AFTER INSERT ON tracks BEGIN
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 2, 2, new.id, new.title, new.artist || ' ' || new.album);
+    \\END;
+    \\CREATE TRIGGER tracks_search_au AFTER UPDATE OF id, title, artist, album ON tracks
+    \\WHEN old.id IS NOT new.id OR old.title IS NOT new.title OR old.artist IS NOT new.artist OR old.album IS NOT new.album BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 2;
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 2, 2, new.id, new.title, new.artist || ' ' || new.album);
+    \\END;
+    \\CREATE TRIGGER tracks_search_ad AFTER DELETE ON tracks BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 2;
+    \\END;
+    \\CREATE TRIGGER playlists_search_ai AFTER INSERT ON playlists BEGIN
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 3, 3, new.id, new.name, new.description);
+    \\END;
+    \\CREATE TRIGGER playlists_search_au AFTER UPDATE OF id, name, description ON playlists
+    \\WHEN old.id IS NOT new.id OR old.name IS NOT new.name OR old.description IS NOT new.description BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 3;
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 3, 3, new.id, new.name, new.description);
+    \\END;
+    \\CREATE TRIGGER playlists_search_ad AFTER DELETE ON playlists BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 3;
+    \\END;
+    \\CREATE TRIGGER genres_search_ai AFTER INSERT ON genres BEGIN
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 4, 4, new.id, new.name, '');
+    \\END;
+    \\CREATE TRIGGER genres_search_au AFTER UPDATE OF id, name ON genres
+    \\WHEN old.id IS NOT new.id OR old.name IS NOT new.name BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 4;
+    \\    INSERT OR REPLACE INTO search_index(rowid, kind, entity_id, title, subtitle)
+    \\    VALUES (new.id * 8 + 4, 4, new.id, new.name, '');
+    \\END;
+    \\CREATE TRIGGER genres_search_ad AFTER DELETE ON genres BEGIN
+    \\    DELETE FROM search_index WHERE rowid = old.id * 8 + 4;
+    \\END;
+;
+
 /// How much stack the key functions fold a name in.
 ///
 /// The folding never grows its input — fullwidth forms shrink, case folding is
@@ -1162,12 +1657,62 @@ fn releaseKeyFunction(
     sqlite.resultText(context, out.items);
 }
 
-/// Teach a connection the two foldings, so a migration can match the text a
+fn genreKeyFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldGenre(context, argc, argv, .key);
+}
+
+fn genreNameFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    foldGenre(context, argc, argv, .name);
+}
+
+fn foldGenre(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+    comptime part: enum { key, name },
+) void {
+    if (argc != 1) return sqlite.resultError(context, "expected one argument");
+    var buffer: [key_scratch_bytes]u8 = undefined;
+    var scratch: std.heap.FixedBufferAllocator = .init(&buffer);
+    const folded = genre_alias.fold(scratch.allocator(), sqlite.valueText(argv[0])) catch
+        return sqlite.resultError(context, "genre too long to fold");
+    sqlite.resultText(context, switch (part) {
+        .key => folded.key,
+        .name => folded.name,
+    });
+}
+
+fn genrePartFunction(
+    context: ?*sqlite.c.sqlite3_context,
+    argc: c_int,
+    argv: [*c]?*sqlite.c.sqlite3_value,
+) callconv(.c) void {
+    if (argc != 2) return sqlite.resultError(context, "expected two arguments");
+    var remaining = sqlite.valueInt64(argv[1]);
+    var parts = genre_alias.parts(sqlite.valueText(argv[0]));
+    while (parts.next()) |part| : (remaining -= 1) {
+        if (remaining == 0) return sqlite.resultText(context, part);
+    }
+    sqlite.resultNull(context);
+}
+
+/// Teach a connection the foldings, so a migration can match the text a
 /// projection wrote without reimplementing the fold in SQL.
 pub fn registerKeyFunctions(db: sqlite.Database) sqlite.Error!void {
-    try db.createTextFunction("orca_artist_key", null, artistKeyFunction);
-    try db.createTextFunction("orca_artist_sort_key", null, artistSortKeyFunction);
-    try db.createTextFunction("orca_release_key", null, releaseKeyFunction);
+    try db.createTextFunction("orca_artist_key", 1, null, artistKeyFunction);
+    try db.createTextFunction("orca_artist_sort_key", 1, null, artistSortKeyFunction);
+    try db.createTextFunction("orca_release_key", 1, null, releaseKeyFunction);
+    try db.createTextFunction("orca_genre_part", 2, null, genrePartFunction);
+    try db.createTextFunction("orca_genre_key", 1, null, genreKeyFunction);
+    try db.createTextFunction("orca_genre_name", 1, null, genreNameFunction);
 }
 
 /// The schema version at which `mutation_operations` exists. Startup journal
@@ -1230,6 +1775,13 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 29 and target_version >= 29) try db.exec(migration_29);
     if (version < 30 and target_version >= 30) try db.exec(migration_30);
     if (version < 31 and target_version >= 31) try db.exec(migration_31);
+    if (version < 32 and target_version >= 32) try db.exec(migration_32);
+    if (version < 33 and target_version >= 33) try db.exec(migration_33);
+    if (version < 34 and target_version >= 34) try db.exec(migration_34);
+    if (version < 35 and target_version >= 35) try db.exec(migration_35);
+    if (version < 36 and target_version >= 36) try db.exec(migration_36);
+    if (version < 37 and target_version >= 37) try db.exec(migration_37);
+    if (version < 38 and target_version >= 38) try db.exec(migration_38);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2426,5 +2978,451 @@ test "upgrading from version 30 adds an empty lyrics cache that follows its Trac
     );
     try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT track_id FROM track_lyrics;"));
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT instrumental FROM track_lyrics;"));
+    try checkForeignKeys(db);
+}
+
+test "migration 32 counts each listen under its file's recording, and a file changing recording carries its plays" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v31.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 31);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'Pink Moon'), (2, 'Road'), (3, 'Parasite');
+        \\INSERT INTO files(id, recording_id) VALUES (10, 1), (11, 1), (12, 2);
+        \\INSERT INTO listens(file_id, recording_id, started_at, listened_ms, title, artist) VALUES
+        \\    (10, 1, 100, 1, 'Pink Moon', 'Nick Drake'),
+        \\    (11, 1, 300, 1, 'Pink Moon', 'Nick Drake'),
+        \\    (10, 1, 200, 1, 'Pink Moon', 'Nick Drake'),
+        \\    (12, 3, 50, 1, 'Road', 'Nick Drake'),
+        \\    (NULL, NULL, 400, 1, 'Gone', 'Nick Drake');
+        \\INSERT INTO releases(id, title, disc_count) VALUES (5, 'Pink Moon', 1);
+        \\INSERT INTO observed_file_tags(file_id, track_total) VALUES (10, 11);
+        \\INSERT INTO tracks(id, title, recording_id, release_id, track_number, preferred_file_id) VALUES
+        \\    (1, 'Pink Moon', 1, 5, 1, 10), (2, 'Road', 2, 5, 2, 12);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db,
+        \\SELECT count(*) FROM (
+        \\    SELECT recording_id, play_count, last_played_at FROM recording_play_stats
+        \\    EXCEPT
+        \\    SELECT recording_id, count(*), max(started_at) FROM listens
+        \\    WHERE recording_id IS NOT NULL GROUP BY recording_id);
+    ));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM recording_play_stats;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT play_count FROM recording_play_stats WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 300), try scalar(db, "SELECT last_played_at FROM recording_play_stats WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 11), try scalar(db, "SELECT track_total FROM tracks WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT track_total FROM tracks WHERE id = 2;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT disc_total FROM tracks WHERE id = 2;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT explicit FROM tracks WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT recording_id FROM listens WHERE file_id = 12;"));
+
+    try db.exec("UPDATE files SET recording_id = 2 WHERE id = 11;");
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT recording_id FROM listens WHERE file_id = 11;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT play_count FROM recording_play_stats WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 200), try scalar(db, "SELECT last_played_at FROM recording_play_stats WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT play_count FROM recording_play_stats WHERE recording_id = 2;"));
+    try db.exec("UPDATE files SET recording_id = 2 WHERE id = 10;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM recording_play_stats WHERE recording_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT play_count FROM recording_play_stats WHERE recording_id = 2;"));
+    try db.exec("DELETE FROM listens; DELETE FROM tracks; DELETE FROM files; DELETE FROM recordings WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM recording_play_stats;"));
+    try checkForeignKeys(db);
+}
+
+test "migration 33 gives each Track the folded genres of its preferred file, else of its recording's lowest file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v32.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 32);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two'), (3, 'Three'), (4, 'Four');
+        \\INSERT INTO files(id, recording_id) VALUES (10, 1), (11, 2), (12, 2), (13, 3), (14, 4);
+        \\INSERT INTO observed_file_genres(file_id, ordinal, value) VALUES
+        \\    (10, 0, 'Hip-Hop/Rap'), (10, 1, 'hip hop'), (10, 2, 'R&B/Soul'), (10, 3, '  '),
+        \\    (11, 0, 'Folk'), (12, 0, 'Rock'),
+        \\    (13, 0, 'folk rock'), (13, 1, 'HipHop');
+        \\INSERT INTO tracks(id, title, recording_id, preferred_file_id) VALUES
+        \\    (1, 'One', 1, 10), (2, 'Two', 2, 12), (3, 'Three', 3, NULL), (4, 'Four', 4, 14);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM genres;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM genres WHERE name = 'Hip Hop' AND key = 'hiphop';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM genres WHERE name = 'R&B/Soul' AND key = 'r&bsoul';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM genres WHERE name = 'Folk Rock';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db,
+        \\SELECT count(*) FROM (
+        \\    SELECT track_id, ordinal, name, provenance FROM track_genres JOIN genres ON genres.id = genre_id
+        \\    EXCEPT
+        \\    VALUES (1, 0, 'Hip Hop', 0), (1, 1, 'R&B/Soul', 0), (2, 0, 'Rock', 0),
+        \\           (3, 0, 'Folk Rock', 0), (3, 1, 'Hip Hop', 0));
+    ));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM track_genres;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM track_genres WHERE track_id = 4;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genres WHERE name = 'Folk';"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO track_genres VALUES (9, 1, 0, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO track_genres SELECT 2, id, 5, 0 FROM genres WHERE name = 'Rock';"));
+    try db.exec("DELETE FROM tracks WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM track_genres;"));
+    try checkForeignKeys(db);
+}
+
+test "upgrading from version 33 adds empty artist info, release info and settings tables, the info following its Artist and Release" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v33.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 33);
+    try db.exec(
+        \\INSERT INTO artists(id, name, key) VALUES (1, 'Nick Drake', 'nickdrake'), (2, 'John Martyn', 'johnmartyn');
+        \\INSERT INTO releases(id, title, release_key) VALUES (1, 'Pink Moon', 'a'), (2, 'Solid Air', 'b');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    for ([_][:0]const u8{
+        "SELECT count(*) FROM artist_info;",
+        "SELECT count(*) FROM artist_links;",
+        "SELECT count(*) FROM artist_related;",
+        "SELECT count(*) FROM artist_loves;",
+        "SELECT count(*) FROM release_info;",
+        "SELECT count(*) FROM library_settings;",
+    }) |query| try std.testing.expectEqual(@as(i64, 0), try scalar(db, query));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO artist_loves VALUES (9, 0);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO artist_info(artist_id, fetched_at, outcome) VALUES (9, 0, 0);"));
+    try db.exec(
+        \\INSERT INTO artist_info(artist_id, begin_year, fetched_at, outcome) VALUES (1, 1969, 100, 1), (2, 1967, 100, 1);
+        \\INSERT INTO artist_links VALUES (1, 0, 'https://example.org'), (2, 0, 'https://example.com');
+        \\INSERT INTO artist_related VALUES (1, 0, 'mbid', 'John Martyn', 90);
+        \\INSERT INTO artist_loves VALUES (1, 100), (2, 200);
+        \\INSERT INTO release_info(release_id, description, fetched_at, outcome) VALUES (1, 'x', 100, 1), (2, 'y', 100, 1);
+        \\DELETE FROM artists WHERE id = 1;
+        \\DELETE FROM releases WHERE id = 1;
+    );
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT artist_id FROM artist_info;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT artist_id FROM artist_links;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM artist_related;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT artist_id FROM artist_loves;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT release_id FROM release_info;"));
+    try checkForeignKeys(db);
+}
+
+test "migration 33 splits a stated genre list as the projection does and keeps the observed value whole" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v32-split.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 32);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two');
+        \\INSERT INTO files(id, recording_id) VALUES (10, 1), (11, 2);
+        \\INSERT INTO observed_file_genres(file_id, ordinal, value) VALUES
+        \\    (10, 0, 'Indie Rock, Rock, Alternative Rock'), (10, 1, 'rock; Hip-Hop/Rap ;, '),
+        \\    (11, 0, 'Folk, World, & Country'), (11, 1, 'Folk;Jazz');
+        \\INSERT INTO tracks(id, title, recording_id, preferred_file_id) VALUES
+        \\    (1, 'One', 1, 10), (2, 'Two', 2, 11);
+    );
+    try db.exec("CREATE TEMP TABLE before_split AS SELECT * FROM observed_file_genres;");
+
+    try apply(db);
+
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db,
+        \\SELECT count(*) FROM (
+        \\    SELECT track_id, ordinal, name FROM track_genres JOIN genres ON genres.id = genre_id
+        \\    EXCEPT
+        \\    VALUES (1, 0, 'Indie Rock'), (1, 1, 'Rock'), (1, 2, 'Alternative Rock'), (1, 3, 'Hip Hop'),
+        \\           (2, 0, 'Folk, World, & Country'), (2, 1, 'Folk'), (2, 2, 'Jazz'));
+    ));
+    try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT count(*) FROM track_genres;"));
+    try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT count(*) FROM genres;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genres WHERE name LIKE '%;%' OR (name LIKE '%,%' AND name <> 'Folk, World, & Country');"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db,
+        \\SELECT count(*) FROM (SELECT * FROM observed_file_genres EXCEPT SELECT * FROM temp.before_split);
+    ));
+    try checkForeignKeys(db);
+}
+
+test "a version-34 library keeps every playlist's entries in order and gains manual, user-made, untagged metadata" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v34.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 34);
+    try db.exec(
+        \\INSERT INTO recordings(id, title) VALUES (1, 'One'), (2, 'Two'), (3, 'Three');
+        \\INSERT INTO playlists(id, name, created_at, updated_at) VALUES (1, 'Mix', 10, 20), (2, 'Other', 30, 40);
+        \\INSERT INTO playlist_entries VALUES (1, 0, 3, 0), (1, 1, 1, 0), (1, 2, 2, 0), (1, 3, 3, 0), (2, 0, 2, 0);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT group_concat(recording_id, ',') = '3,1,2,3' FROM
+        \\(SELECT recording_id FROM playlist_entries WHERE playlist_id = 1 ORDER BY position);
+    ));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT recording_id FROM playlist_entries WHERE playlist_id = 2;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db,
+        \\SELECT count(*) FROM playlists WHERE description = '' AND pinned_at IS NULL AND loved_at IS NULL
+        \\  AND kind = 0 AND rules IS NULL AND creator = 0;
+    ));
+    try std.testing.expectEqual(@as(i64, 20), try scalar(db, "SELECT updated_at FROM playlists WHERE id = 1;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM playlist_tags;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM library_settings;"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO playlist_tags VALUES (9, 0, 'x');"));
+    try db.exec("INSERT INTO playlist_tags VALUES (1, 0, 'focus'), (1, 1, 'lofi'); DELETE FROM playlists WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM playlist_tags;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-35 library gains a search index holding every Artist, Release, Playlist and Genre it has, and keeps its Tracks in track_search" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v35.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 35);
+    try db.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Sigur Rós', 'Sigur Rós', 'sigur ros'), (2, 'Aminé', 'Aminé', 'amine');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id) VALUES (1, 'Ágætis byrjun', 'Sigur Rós', 1);
+        \\INSERT INTO recordings(id, title) VALUES (1, 'Starálfur');
+        \\INSERT INTO tracks(id, recording_id, release_id, title, artist, album, artist_id)
+        \\    VALUES (1, 1, 1, 'Starálfur', 'Sigur Rós', 'Ágætis byrjun', 1);
+        \\INSERT INTO playlists(id, name, description, created_at, updated_at) VALUES (1, 'Morning', 'Quiet', 0, 0);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Post-Rock', 'post rock');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db, "SELECT count(*) FROM search_index;"));
+    try std.testing.expectEqual(@as(i64, 5), try scalar(db,
+        \\SELECT count(*) FROM search_index WHERE rowid = entity_id * 8 + kind AND
+        \\    ((kind = 0 AND entity_id = 1 AND title = 'Sigur Rós' AND subtitle = '') OR
+        \\     (kind = 0 AND entity_id = 2 AND title = 'Aminé' AND subtitle = '') OR
+        \\     (kind = 1 AND title = 'Ágætis byrjun' AND subtitle = 'Sigur Rós') OR
+        \\     (kind = 3 AND title = 'Morning' AND subtitle = 'Quiet') OR
+        \\     (kind = 4 AND title = 'Post-Rock' AND subtitle = ''));
+    ));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM search_index WHERE search_index MATCH '\"sigur\"* AND \"ros\"*';"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT entity_id FROM search_index WHERE search_index MATCH '\"amin\"*';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT rowid FROM track_search WHERE track_search MATCH '\"staralfur\"';"));
+    try db.exec("INSERT INTO search_index(search_index, rank) VALUES ('integrity-check', 0);");
+    try checkForeignKeys(db);
+}
+
+test "a version-36 library keeps its artist info and gains an empty related artist photo table keyed by MusicBrainz artist ID, whose details need a photo" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v36.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 36);
+    try db.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Aminé', 'Aminé', 'amine');
+        \\INSERT INTO artist_info(artist_id, musicbrainz_artist_id, photo, photo_mime, fetched_at, outcome)
+        \\    VALUES (1, 'c6b2b5ab-c4c6-4bd5-8d3c-e1b0a1e4c8a1', x'89504e47', 'image/png', 100, 1);
+        \\INSERT INTO artist_related(artist_id, ordinal, related_mbid, related_name, score)
+        \\    VALUES (1, 0, 'a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d', 'Smino', 412);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM artist_info WHERE photo = x'89504e47';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM artist_related;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM related_artist_photos;"));
+    try db.exec(
+        \\INSERT INTO related_artist_photos VALUES ('A0B1C2D3-E4F5-4A6B-8C7D-9E0F1A2B3C4D', x'ffd8ff', 'image/jpeg',
+        \\    1, 'https://commons.wikimedia.org/wiki/File:Smino.jpg', 'CC BY 2.0', 'https://creativecommons.org/licenses/by/2.0',
+        \\    'A. Photographer', 200);
+        \\INSERT INTO related_artist_photos VALUES ('b0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 200);
+    );
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM related_artist_photos WHERE photo_licence = 'CC BY 2.0' AND photo_credit = 'A. Photographer';
+    ));
+    try std.testing.expectEqual(@as(i64, 200), try scalar(db,
+        \\SELECT fetched_at FROM related_artist_photos WHERE musicbrainz_artist_id = 'a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d';
+    ));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO related_artist_photos VALUES ('a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 300);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO related_artist_photos VALUES ('c', x'ff', NULL, 1, NULL, NULL, NULL, NULL, 300);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO related_artist_photos VALUES ('d', NULL, 'image/png', NULL, NULL, NULL, NULL, NULL, 300);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO related_artist_photos VALUES ('e', x'ff', 'image/png', NULL, NULL, NULL, NULL, NULL, 300);"));
+    try std.testing.expectError(error.SqlFailed, db.exec("INSERT INTO related_artist_photos VALUES ('f', NULL, NULL, NULL, NULL, NULL, NULL, 'A. Photographer', 300);"));
+    try checkForeignKeys(db);
+}
+
+test "a version-37 library keeps its analysis results and gains an index that finds the latest by creation time" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v37.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 37);
+    try db.exec(
+        \\INSERT INTO files(id, size_bytes) VALUES (1, 100);
+        \\INSERT INTO analysis_results(file_id, kind, algorithm_id, algorithm_version, parameter_hash, source_identity, result, created_at)
+        \\VALUES (1, 1, 'orca.diagnostics', 1, x'00', x'01', x'0a0b', 1700000000),
+        \\       (1, 2, 'orca.temporal-fingerprint', 2, x'00', x'01', x'0c', 1700000300);
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_schema WHERE name = 'analysis_results_created';"));
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM analysis_results;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM analysis_results WHERE kind = 1 AND result = x'0a0b';"));
+    try std.testing.expectEqual(@as(i64, 1700000300), try scalar(db, "SELECT max(created_at) FROM analysis_results;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db,
+        \\SELECT count(*) FROM sqlite_schema
+        \\WHERE type = 'index' AND name = 'analysis_results_created' AND tbl_name = 'analysis_results';
+    ));
+    try checkForeignKeys(db);
+}
+
+const search_index_drift_sql =
+    \\WITH source(rowid, kind, entity_id, title, subtitle) AS (
+    \\    SELECT id * 8 + 0, 0, id, name, '' FROM artists
+    \\    UNION ALL SELECT id * 8 + 1, 1, id, title, album_artist FROM releases
+    \\    UNION ALL SELECT id * 8 + 3, 3, id, name, description FROM playlists
+    \\    UNION ALL SELECT id * 8 + 4, 4, id, name, '' FROM genres
+    \\), indexed AS (SELECT rowid, kind, entity_id, title, subtitle FROM search_index)
+    \\SELECT (SELECT count(*) FROM (SELECT * FROM indexed EXCEPT SELECT * FROM source))
+    \\     + (SELECT count(*) FROM (SELECT * FROM source EXCEPT SELECT * FROM indexed));
+;
+
+const track_index_changes_sql =
+    \\SELECT (SELECT count(*) FROM (SELECT id, block FROM track_search_data EXCEPT SELECT id, block FROM indexed_blocks))
+    \\     + (SELECT count(*) FROM (SELECT id, block FROM indexed_blocks EXCEPT SELECT id, block FROM track_search_data));
+;
+
+test "a version-37 library moves its Tracks from search_index to track_search, which reindexes a Track only when its text changes" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v37-search.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 37);
+    try db.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES (1, 'Sigur Rós', 'Sigur Rós', 'sigur ros');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id) VALUES (1, 'Ágætis byrjun', 'Sigur Rós', 1);
+        \\INSERT INTO tracks(id, release_id, title, artist, album, album_artist, artist_id) VALUES
+        \\    (1, 1, 'Starálfur', 'Sigur Rós', 'Ágætis byrjun', 'Sigur Rós', 1),
+        \\    (2, 1, 'Svefn-g-englar', 'Sigur Rós', 'Ágætis byrjun', 'Sigur Rós', 1);
+        \\INSERT INTO playlists(id, name, description, created_at, updated_at) VALUES (1, 'Morning', 'Quiet', 0, 0);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Post-Rock', 'post rock');
+    );
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM search_index WHERE kind = 2;"));
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM search_index WHERE kind = 2;"));
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT count(*) FROM search_index;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'tracks\\_search\\_%' ESCAPE '\\';"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, search_index_drift_sql));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM search_index WHERE search_index MATCH '\"staralfur\"';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT rowid FROM track_search WHERE track_search MATCH '{title}: \"staralfur\"';"));
+    try db.exec("INSERT INTO search_index(search_index, rank) VALUES ('integrity-check', 1);");
+    try db.exec("INSERT INTO track_search(track_search, rank) VALUES ('integrity-check', 1);");
+
+    try db.exec(
+        \\CREATE TEMP TABLE indexed_blocks AS SELECT id, block FROM track_search_data;
+        \\UPDATE tracks SET duration_ms = 1000, explicit = 1, title = title, album_artist = album_artist WHERE id = 1;
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, track_index_changes_sql));
+    try db.exec("UPDATE tracks SET title = 'Olsen Olsen' WHERE id = 1;");
+    try std.testing.expect(try scalar(db, track_index_changes_sql) > 0);
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM track_search WHERE track_search MATCH '\"staralfur\"';"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT rowid FROM track_search WHERE track_search MATCH '\"olsen\"';"));
+    try db.exec(
+        \\UPDATE artists SET name = 'Jónsi' WHERE id = 1;
+        \\DELETE FROM tracks WHERE id = 2;
+        \\INSERT INTO track_search(track_search, rank) VALUES ('integrity-check', 1);
+    );
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, search_index_drift_sql));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM search_index WHERE kind = 2;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-37 library gains genre totals equal to a count over its Tracks, which every later write keeps equal" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v37-genres.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 37);
+    try db.exec(
+        \\INSERT INTO artists(id, name, sort_name, key) VALUES
+        \\    (1, 'Band', 'Band', 'band'), (2, 'Guest', 'Guest', 'guest'), (3, 'Other', 'Other', 'other');
+        \\INSERT INTO releases(id, title, album_artist, album_artist_id) VALUES
+        \\    (1, 'First', 'Band', 1), (2, 'Second', 'Other', 3), (3, 'Untitled', '', NULL);
+        \\INSERT INTO tracks(id, release_id, title, artist_id, duration_ms) VALUES
+        \\    (1, 1, 'a', 1, 1000), (2, 1, 'b', 2, 2000), (3, 2, 'c', 3, NULL), (4, NULL, 'd', 2, 4000),
+        \\    (5, 3, 'e', NULL, 500);
+        \\INSERT INTO genres(id, name, key) VALUES (1, 'Rock', 'rock'), (2, 'Jazz', 'jazz'), (3, 'Unused', 'unused');
+        \\INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES
+        \\    (1, 1, 0, 0), (2, 1, 0, 0), (2, 2, 1, 0), (3, 2, 0, 0), (4, 1, 0, 0), (5, 2, 0, 0);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, genre_totals_drift_sql));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM genre_totals;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT track_count FROM genre_totals WHERE genre_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT release_count FROM genre_totals WHERE genre_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT artist_count FROM genre_totals WHERE genre_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 7000), try scalar(db, "SELECT duration_ms FROM genre_totals WHERE genre_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT release_count FROM genre_totals WHERE genre_id = 2;"));
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT artist_count FROM genre_totals WHERE genre_id = 2;"));
+    try std.testing.expectEqual(@as(i64, 2500), try scalar(db, "SELECT duration_ms FROM genre_totals WHERE genre_id = 2;"));
+
+    const steps = [_][:0]const u8{
+        "UPDATE tracks SET duration_ms = 3000 WHERE id = 3;",
+        "UPDATE tracks SET artist_id = 3 WHERE id = 1;",
+        "UPDATE tracks SET release_id = 2 WHERE id = 4;",
+        "UPDATE tracks SET release_id = NULL, artist_id = NULL WHERE id = 2;",
+        "UPDATE releases SET album_artist_id = 2 WHERE id = 1;",
+        "UPDATE releases SET album_artist_id = NULL WHERE id = 2;",
+        "UPDATE track_genres SET genre_id = 3 WHERE track_id = 5;",
+        "INSERT INTO track_genres(track_id, genre_id, ordinal, provenance) VALUES (1, 2, 1, 0);",
+        "DELETE FROM track_genres WHERE track_id = 3;",
+        "DELETE FROM tracks WHERE id = 1;",
+        "DELETE FROM genres WHERE id = 3;",
+    };
+    for (steps) |step| {
+        try db.exec(step);
+        try std.testing.expectEqual(@as(i64, 0), try scalar(db, genre_totals_drift_sql));
+    }
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_totals WHERE genre_id = 3;"));
+    try db.exec("DELETE FROM track_genres;");
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_totals;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_release_tracks;"));
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM genre_artist_refs;"));
     try checkForeignKeys(db);
 }

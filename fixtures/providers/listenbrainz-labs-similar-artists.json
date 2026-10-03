@@ -1,0 +1,137 @@
+[
+  {
+    "artist_mbid": "90c192cf-d3ac-44af-8f21-ddb66cad4a26",
+    "name": "Mick Jenkins",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 233,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "8e81973e-0bec-47b0-b898-d190f9ebdacc",
+    "name": "Vince Staples",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 150,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "ae97ba94-d0ed-482f-8f6d-05584ef8aa38",
+    "name": "Tyler, the Creator",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 64,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "8d116ece-1738-47d9-bd9c-172411e20b8f",
+    "name": "Isaiah Rashad",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 260,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a",
+    "name": "Aminé",
+    "comment": "rapper",
+    "type": "Person",
+    "gender": "Male",
+    "score": 999,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "a170b338-3926-4059-b28c-105d1fb17c23",
+    "name": "Noname",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 201,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "36f675cc-81e7-4ef5-a8e2-5d940ed90475",
+    "name": "Rex Orange County",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 301,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "92276658-1e27-41c0-8a6a-63ec24ede6a4",
+    "name": "Denzel Curry",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 97,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "6b0d549b-6f03-475a-9600-a35a099950d8",
+    "name": "Brockhampton",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 287,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "9531985d-5d9d-49f8-9818-e811892f902b",
+    "name": "Kevin Abstract",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 350,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "0cb1e29c-658c-4a14-95e6-0af593bd04cf",
+    "name": "Goldlink",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 166,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "6b4cb242-4a23-4596-a217-beaddbc496cb",
+    "name": "Joey Bada$$",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 120,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "0fd630f1-f29d-4da9-953f-48f1a09f76b5",
+    "name": "JID",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 180,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "6513270e-269e-4d37-b2a7-4de452e6b438",
+    "name": "Smino",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 412,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  },
+  {
+    "artist_mbid": "d23f0824-128b-4f33-8c5c-7fd0a6a3a450",
+    "name": "Saba",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 388,
+    "reference_mbid": "12398bf3-1b99-47b7-930c-f3956773f35a"
+  }
+]

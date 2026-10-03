@@ -1,0 +1,7 @@
+# Orca test fixture in EqualizerAPO form, shaped like a headphone
+# correction. Its values are made up for tests, not taken from a measurement.
+Preamp: -3 dB
+Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.71
+Filter 2: ON PK Fc 1000 Hz Gain -2.0 dB Q 1.41
+Filter 3: ON PK Fc 3000 Hz Gain 2.5 dB Q 2.0
+Filter 4: ON HSC Fc 10000 Hz Gain -1.5 dB Q 0.71

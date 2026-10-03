@@ -3,6 +3,7 @@ pub const backends = @import("backends/root.zig");
 pub const buffer = @import("buffer.zig");
 pub const dsp = @import("dsp.zig");
 pub const engine = @import("engine.zig");
+pub const eq_text = @import("eq_text.zig");
 pub const equalizer = @import("equalizer.zig");
 pub const fanout = @import("fanout.zig");
 pub const kernels = @import("kernels.zig");
@@ -27,6 +28,7 @@ test {
     _ = @import("buffer.zig");
     _ = @import("dsp.zig");
     _ = @import("engine.zig");
+    _ = @import("eq_text.zig");
     _ = @import("equalizer.zig");
     _ = @import("fanout.zig");
     _ = @import("kernels.zig");

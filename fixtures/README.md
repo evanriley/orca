@@ -73,6 +73,29 @@ with the artists' aliases removed. MusicBrainz data is CC0. It covers a joined
 artist credit, a recording with no length, several releases per recording and
 a track numbered `B6`.
 
+`providers/musicbrainz-artist-lookup.json`, `providers/wikidata-entity.json`,
+`providers/wikimedia-commons-imageinfo.json` and
+`providers/wikipedia-summary.json` are written by hand in the shape of the
+answers to the requests artist info makes for Aminé: MusicBrainz's
+`/ws/2/artist/12398bf3-1b99-47b7-930c-f3956773f35a?inc=url-rels+genres+artist-rels`
+(born 1994, a person, Wikidata item `Q27830860`, an `image` relation to a
+Commons file among 20 URL relations), Wikidata's `wbgetentities` for that item
+(a P18 image, a P2031 work period starting 2014, and `enwiki` and `dewiki`
+sitelinks), Commons' `imageinfo` for
+the image (`CC BY 2.0`, an HTML author credit, an 800-pixel rendering on
+`upload.wikimedia.org`), and Wikipedia's REST summary of the article. The
+text is invented for the tests and is not copied from the services.
+
+`providers/listenbrainz-popularity.json`,
+`providers/listenbrainz-labs-similar-artists.json` and
+`providers/musicbrainz-release-group-lookup.json` are written by hand in the
+shape of ListenBrainz's `POST /1/popularity/artist` answer for Aminé (9,025
+users), ListenBrainz Labs' `similar-artists/json` answer for Aminé (15
+artists, one of them Aminé, out of score order), and MusicBrainz's
+`/ws/2/release-group/3918b90b-340e-3779-9d7e-ba1593653498?inc=url-rels+genres`
+for Hot Space (Wikidata, AllMusic and two Wikipedia relations, and six genres, two tied
+for third). The counts and scores are invented for the tests.
+
 `audio/chromaprint-test.mp3` and `audio/chromaprint-test.fpcalc.txt` are
 `tests/data/test.mp3` and `tests/data/test.mp3.fpcalc.out` from Chromaprint
 1.6.1, copied unchanged: 10 s of audio and `fpcalc -raw`'s fingerprint of it.
@@ -98,8 +121,32 @@ frame (UTF-8, `eng`, millisecond timestamps, lyrics) with lines at 1 and
 2.5 seconds. `audio/lyrics-plain.m4a` is `audio/tagged-reference-aac.m4a`
 with its tags replaced by mutagen and two plain lines in `©lyr`.
 
+`audio/explicit-reference.mp3` is `audio/tagged-reference.mp3` with its
+ID3v2 tag replaced by mutagen: `TIT2` "Explicit MP3", `TPE1` "Orca
+Fixtures", `TALB` "Explicit References", `TRCK` "1/2" and a `TXXX`
+`ITUNESADVISORY` of `1`. `audio/explicit-reference.m4a` is
+`audio/tagged-reference-aac.m4a` with its tags replaced by mutagen: `©nam`
+"Explicit AAC", the same artist and album, `trkn` 2 of 2 and `rtng` 1. Both
+read as explicit, and together they make a two-track album.
+
 `playlists/relative.m3u8` is a UTF-8 extended M3U with relative paths, a
 percent-encoded `file://` URI, an `http://` stream and `#EXTINF` lines.
 `playlists/latin1.m3u` is Latin-1 with CRLF line ends, and
 `playlists/bom.m3u8` starts with a UTF-8 byte order mark and uses CRLF. They
 seed the M3U parser's tests and fuzz target; no path in them names a real file.
+
+`fuzz/smart-playlist/*.json` are hand-written smart playlist rules that seed
+the rules fuzz target: the documented example, every field type and operator
+(with a hostile SQL string as a value), nesting to the deepest allowed level,
+and an empty group.
+
+`eq/hd650.txt` is a hand-written EqualizerAPO file shaped like a headphone
+correction: a -3 dB preamp, a low shelf, two peaks and a high shelf. Its
+values are made up, not taken from a measurement. The EqualizerAPO parser's
+tests read it, and it is the file to pass to `orca-cli play-tracks --peq`,
+`peq-check` and `peq-response`.
+`fuzz/eq-apo/*.txt` are hand-written EqualizerAPO files that seed the
+EqualizerAPO fuzz target: a longer correction, every filter type with a
+`BW Oct` bandwidth and summed preamps, a CRLF file with a byte order mark,
+lower case and stray spacing, and a file with a band pass filter and a
+`Channel:` line that the parser rejects.

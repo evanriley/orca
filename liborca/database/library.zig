@@ -73,6 +73,13 @@ pub const LibraryDatabase = struct {
     feedback: repository.FeedbackRepository,
     ratings: repository.RatingRepository,
     release_loves: repository.ReleaseLoveRepository,
+    artist_loves: repository.ArtistLoveRepository,
+    artist_info: repository.ArtistInfoRepository,
+    release_info: repository.ReleaseInfoRepository,
+    settings: repository.LibrarySettingsRepository,
+    stats: repository.LibraryStatsRepository,
+    genres: repository.GenreRepository,
+    search: repository.SearchRepository,
     track_lyrics: repository.TrackLyricsRepository,
     playlists: repository.PlaylistRepository,
     identification_proposals: repository.IdentificationProposalRepository,
@@ -164,6 +171,13 @@ pub const LibraryDatabase = struct {
             .feedback = .{ .db = database, .write_lane = write_lane },
             .ratings = .{ .db = database, .write_lane = write_lane },
             .release_loves = .{ .db = database, .write_lane = write_lane },
+            .artist_loves = .{ .db = database, .write_lane = write_lane },
+            .artist_info = .{ .db = database, .write_lane = write_lane },
+            .release_info = .{ .db = database, .write_lane = write_lane },
+            .settings = .{ .db = database, .write_lane = write_lane },
+            .stats = .{ .db = database },
+            .genres = .{ .db = database, .write_lane = write_lane },
+            .search = .{ .db = database },
             .track_lyrics = .{ .db = database, .write_lane = write_lane },
             .playlists = .{ .db = database, .write_lane = write_lane },
             .identification_proposals = .{ .db = database, .write_lane = write_lane },
@@ -588,13 +602,96 @@ test "the health summary counts each kind's visible issues and names the highest
     _ = try addKindFixture(&library);
 
     try expectSummary(&library, &.{
-        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1 },
-        .{ .kind = .clipping, .severity = .warning, .count = 3 },
-        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1, .files = 1, .bytes = 100 },
+        .{ .kind = .clipping, .severity = .warning, .count = 3, .files = 3, .bytes = 300 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2, .files = 2, .bytes = 200 },
     });
     var total: u64 = 0;
     for ((try library.health_issues.summary()).items()) |entry| total += entry.count;
     try std.testing.expectEqual(try library.health_issues.count(), total);
+}
+
+fn addSizedHealthFile(library: *LibraryDatabase, uri: []const u8, size_bytes: i64) !i64 {
+    const file_id = try library.files.create(.{ .size_bytes = size_bytes });
+    _ = try library.locations.upsert(.{ .file_id = file_id, .volume_id = LibraryDatabase.null_volume, .uri = uri });
+    return file_id;
+}
+
+fn summaryOf(library: *LibraryDatabase, kind: repository.HealthIssueKind) !?repository.HealthKindSummary {
+    const summary = try library.health_issues.summary();
+    for (summary.items()) |entry| if (entry.kind == kind) return entry;
+    return null;
+}
+
+test "the health summary counts each kind's distinct files and sums their sizes" {
+    var library = try openHealthLibrary("summary-sizes");
+    defer library.close();
+    const small = try addSizedHealthFile(&library, "music/small.flac", 1_000);
+    const large = try addSizedHealthFile(&library, "music/large.flac", 250_000);
+    try library.health_issues.replaceFile(small, &.{
+        .{ .kind = .clipping, .severity = .warning },
+        .{ .kind = .missing_track_number, .severity = .information },
+    });
+    try library.health_issues.replaceFile(large, &.{.{ .kind = .clipping, .severity = .information }});
+
+    try expectSummary(&library, &.{
+        .{ .kind = .clipping, .severity = .warning, .count = 2, .files = 2, .bytes = 251_000 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 1, .files = 1, .bytes = 1_000 },
+    });
+}
+
+test "duplicate bytes in the health summary count only the redundant copies, not the copy that is kept" {
+    var library = try openHealthLibrary("summary-duplicates");
+    defer library.close();
+    const ten_megabytes = 10_000_000;
+    const kept = try addSizedHealthFile(&library, "music/kept.flac", ten_megabytes);
+    const first_copy = try addSizedHealthFile(&library, "music/copy-1.flac", ten_megabytes);
+    const second_copy = try addSizedHealthFile(&library, "music/copy-2.flac", ten_megabytes);
+    try library.health_issues.replaceFile(kept, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = first_copy }});
+    try library.health_issues.replaceFile(first_copy, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = kept }});
+    try library.health_issues.replaceFile(second_copy, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = kept }});
+    try std.testing.expectEqual(repository.HealthKindSummary{
+        .kind = .exact_duplicate,
+        .severity = .warning,
+        .count = 3,
+        .files = 3,
+        .bytes = 2 * ten_megabytes,
+    }, (try summaryOf(&library, .exact_duplicate)).?);
+
+    const resembles = try addSizedHealthFile(&library, "music/resembles.mp3", 4_000);
+    const resembled = try addSizedHealthFile(&library, "music/resembled.flac", 30_000);
+    const also_resembles = try addSizedHealthFile(&library, "music/also.ogg", 5_000);
+    try library.health_issues.replaceFile(resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
+    try library.health_issues.replaceFile(resembled, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = also_resembles }});
+    try library.health_issues.replaceFile(also_resembles, &.{.{ .kind = .likely_duplicate, .severity = .information, .related_file_id = resembled }});
+    try std.testing.expectEqual(@as(u64, 35_000), (try summaryOf(&library, .likely_duplicate)).?.bytes);
+
+    const located_twice = try addSizedHealthFile(&library, "music/twice-a.flac", 7_000);
+    _ = try library.locations.upsert(.{ .file_id = located_twice, .volume_id = LibraryDatabase.null_volume, .uri = "music/twice-b.flac" });
+    _ = try library.locations.upsert(.{ .file_id = located_twice, .volume_id = LibraryDatabase.null_volume, .uri = "music/twice-c.flac", .state = .missing });
+    try library.health_issues.replaceFile(located_twice, &.{.{ .kind = .exact_duplicate, .severity = .warning }});
+    try std.testing.expectEqual(@as(u64, 2 * ten_megabytes + 7_000), (try summaryOf(&library, .exact_duplicate)).?.bytes);
+}
+
+test "dismissed issues count toward neither the files nor the bytes of the health summary" {
+    var library = try openHealthLibrary("summary-sizes-dismissed");
+    defer library.close();
+    const kept = try addSizedHealthFile(&library, "music/kept.flac", 6_000);
+    const copy = try addSizedHealthFile(&library, "music/copy.flac", 6_000);
+    const loud = try addSizedHealthFile(&library, "music/loud.flac", 2_000);
+    try library.health_issues.replaceFile(kept, &.{
+        .{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = copy },
+        .{ .kind = .clipping, .severity = .warning },
+    });
+    try library.health_issues.replaceFile(copy, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = kept }});
+    try library.health_issues.replaceFile(loud, &.{.{ .kind = .clipping, .severity = .warning }});
+
+    try library.health_issues.dismiss(copy, .exact_duplicate);
+    try library.health_issues.dismiss(loud, .clipping);
+    try expectSummary(&library, &.{
+        .{ .kind = .clipping, .severity = .warning, .count = 1, .files = 1, .bytes = 6_000 },
+        .{ .kind = .exact_duplicate, .severity = .warning, .count = 1, .files = 1, .bytes = 0 },
+    });
 }
 
 test "an empty library has an empty health summary" {
@@ -611,8 +708,8 @@ test "a dismissed health issue leaves the summary and its kind's page, and retur
     try library.health_issues.dismiss(files[1], .corrupt_audio);
     try library.health_issues.dismiss(files[0], .clipping);
     try expectSummary(&library, &.{
-        .{ .kind = .clipping, .severity = .warning, .count = 2 },
-        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+        .{ .kind = .clipping, .severity = .warning, .count = 2, .files = 2, .bytes = 200 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2, .files = 2, .bytes = 200 },
     });
     var dismissed = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 0);
     defer dismissed.deinit();
@@ -626,9 +723,9 @@ test "a dismissed health issue leaves the summary and its kind's page, and retur
     try library.health_issues.restore(files[1], .corrupt_audio);
     try library.health_issues.restore(files[0], .clipping);
     try expectSummary(&library, &.{
-        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1 },
-        .{ .kind = .clipping, .severity = .warning, .count = 3 },
-        .{ .kind = .missing_track_number, .severity = .information, .count = 2 },
+        .{ .kind = .corrupt_audio, .severity = .error_severity, .count = 1, .files = 1, .bytes = 100 },
+        .{ .kind = .clipping, .severity = .warning, .count = 3, .files = 3, .bytes = 300 },
+        .{ .kind = .missing_track_number, .severity = .information, .count = 2, .files = 2, .bytes = 200 },
     });
     var restored = try library.health_issues.pageOfKind(std.testing.allocator, .clipping, 10, 0);
     defer restored.deinit();
@@ -791,6 +888,30 @@ test "listing, counting and summarising health issues reach kinds, dismissals an
     try std.testing.expect(std.mem.indexOf(u8, plans[3], "SCAN library_health_issues USING COVERING INDEX library_health_by_kind") != null);
 }
 
+test "duplicate bytes reach one kind's issues and their links through indexes and never scan files" {
+    var library = try openHealthLibrary("reclaimable-plan");
+    defer library.close();
+    const plan = try queryPlan(&library, @import("repository/health.zig").health_reclaimable_sql);
+    defer std.testing.allocator.free(plan);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH library_health_issues USING INDEX library_health_by_kind (kind=?)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "library_health_by_related") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN health_dismissals") == null);
+}
+
+test "library stats read each present file once, in id order, through a single scan of locations, and the latest analysis through an index" {
+    var library = try openHealthLibrary("stats-plan");
+    defer library.close();
+    const plan = try queryPlan(&library, repository.library_stats_sql);
+    defer std.testing.allocator.free(plan);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN locations\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH files USING INTEGER PRIMARY KEY (rowid=?)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN files") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "USE TEMP B-TREE FOR ORDER BY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SEARCH analysis_results USING COVERING INDEX analysis_results_created") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "SCAN analysis_results") == null);
+}
+
 test "the file behind a health issue reports its properties and its best location, or that every location is missing" {
     var library = try openHealthLibrary("file");
     defer library.close();
@@ -849,7 +970,7 @@ test "independent libraries retain separate state and FTS indexes" {
         .album_artist = "Floating Points",
     }});
 
-    var page = try first.tracks.search(std.testing.allocator, "Northern", 25, 0);
+    var page = try first.tracks.search(std.testing.allocator, "Northern", .{ .limit = 25 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 1), page.items.len);
     try std.testing.expectEqualStrings("Northern Sky", page.items[0].title);
@@ -1684,7 +1805,7 @@ test "opening a version-7 library recovers its journal before the schema moves" 
         try library.mutation_journal.state(1),
     );
     try std.testing.expectEqual(@as(u64, 5), try library.files.count());
-    var page = try library.tracks.search(std.testing.allocator, "Bryter", 10, 0);
+    var page = try library.tracks.search(std.testing.allocator, "Bryter", .{ .limit = 10 });
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
 
@@ -1913,8 +2034,10 @@ test "a recorded listen is counted for its Track and survives the Track being re
         "file:orca-test-listen-count?mode=memory&cache=shared",
     );
     defer library.close();
+    try library.database.exec("INSERT INTO recordings(id, title) VALUES (7, 'Northern Sky');");
     const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
     const track: repository.TrackInput = .{
+        .recording_id = 7,
         .title = "Northern Sky",
         .artist = "Nick Drake",
         .album = "Bryter Layter",
@@ -1927,8 +2050,12 @@ test "a recorded listen is counted for its Track and survives the Track being re
         try library.listens.trackPlayStats(first_id),
     );
 
-    try std.testing.expect(try library.listens.record(testListen(file_id, 1_700_000_000)) != null);
-    try std.testing.expect(try library.listens.record(testListen(file_id, 1_700_001_000)) != null);
+    try library.database.exec("UPDATE files SET recording_id = 7;");
+    var listen = testListen(file_id, 1_700_000_000);
+    try std.testing.expect(try library.listens.record(listen) != null);
+    listen.started_at = 1_700_001_000;
+    try std.testing.expect(try library.listens.record(listen) != null);
+    try std.testing.expect(try library.listens.record(listen) == null);
     try std.testing.expectEqual(
         repository.PlayStats{ .play_count = 2, .last_played_at = 1_700_001_000 },
         try library.listens.trackPlayStats(first_id),
@@ -1947,6 +2074,67 @@ test "a recorded listen is counted for its Track and survives the Track being re
         repository.PlayStats{ .play_count = 0, .last_played_at = null },
         try library.listens.trackPlayStats(second_id + 1000),
     );
+}
+
+test "a Track's total is counted only when none of its files states one" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-stated-total?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec("INSERT INTO recordings(id, title) VALUES (7, 'Northern Sky');");
+    const flac_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    const mp3_id = try library.files.create(.{ .audio_format = 2, .size_bytes = 2048 });
+    try library.database.exec("UPDATE files SET recording_id = 7;");
+    try library.observed_tags.upsert(.{ .file_id = flac_id, .values = .{ .title = "Northern Sky" } });
+    try library.observed_tags.upsert(.{ .file_id = mp3_id, .values = .{ .title = "Northern Sky", .track_total = 10 } });
+    try library.tracks.upsertTracks(&.{
+        .{ .recording_id = 7, .title = "Northern Sky", .preferred_file_id = flac_id, .track_total = 10 },
+    });
+    const track_id = try testScalar(library.database, "SELECT id FROM tracks;");
+    const stated = (try library.tracks.fileFacts(std.testing.allocator, track_id)).?;
+    defer stated.deinit();
+    try std.testing.expect(!stated.track_total_inferred);
+
+    try library.observed_tags.upsert(.{ .file_id = mp3_id, .values = .{ .title = "Northern Sky" } });
+    const counted = (try library.tracks.fileFacts(std.testing.allocator, track_id)).?;
+    defer counted.deinit();
+    try std.testing.expect(counted.track_total_inferred);
+}
+
+test "two files of one recording each played once count two plays on both Tracks" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-listen-recording?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec("INSERT INTO recordings(id, title) VALUES (7, 'Northern Sky');");
+    const flac_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    const mp3_id = try library.files.create(.{ .audio_format = 2, .size_bytes = 2048 });
+    try library.tracks.upsertTracks(&.{
+        .{ .recording_id = 7, .title = "Northern Sky", .album = "Bryter Layter", .preferred_file_id = flac_id },
+        .{ .recording_id = 7, .title = "Northern Sky", .album = "Best Of", .preferred_file_id = mp3_id },
+    });
+    try library.database.exec("UPDATE files SET recording_id = 7;");
+    var listen = testListen(flac_id, 1_700_000_000);
+    try std.testing.expect(try library.listens.record(listen) != null);
+    listen.file_id = mp3_id;
+    listen.started_at = 1_700_005_000;
+    try std.testing.expect(try library.listens.record(listen) != null);
+
+    var page = try library.tracks.page(std.testing.allocator, .{ .sort = .play_count, .direction = .descending });
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    for (page.items) |item| {
+        try std.testing.expectEqual(@as(u64, 2), item.play_count);
+        try std.testing.expectEqual(@as(?i64, 1_700_005_000), item.last_played_at);
+        try std.testing.expectEqual(
+            repository.PlayStats{ .play_count = 2, .last_played_at = 1_700_005_000 },
+            try library.listens.trackPlayStats(item.id),
+        );
+    }
 }
 
 test "a listen stays after its file is forgotten, with no file" {
@@ -2203,7 +2391,7 @@ test "feedback on one Track shows on every Track of its recording, in pages and 
         const expected: Feedback = if (item.id == other) .none else .loved;
         try std.testing.expectEqual(expected, item.feedback);
     }
-    var found = try library.tracks.search(std.testing.allocator, "Northern", 8, 0);
+    var found = try library.tracks.search(std.testing.allocator, "Northern", .{ .limit = 8 });
     defer found.deinit();
     try std.testing.expectEqual(@as(usize, 2), found.items.len);
     for (found.items) |item| try std.testing.expectEqual(Feedback.loved, item.feedback);
@@ -3083,6 +3271,48 @@ test "only loved Releases are listed and counted, most recently loved first" {
     try std.testing.expect(summary.loved);
 }
 
+test "only loved Artists are listed and counted, most recently loved first, and loving one twice keeps when it was loved" {
+    var library = try openFeedbackLibrary("artist-love-page");
+    defer library.close();
+    const drake = (try library.artists.ensure(.{ .key = "nick drake", .name = "Nick Drake", .sort_name = "nick drake" })).?;
+    const bush = (try library.artists.ensure(.{ .key = "kate bush", .name = "Kate Bush", .sort_name = "kate bush" })).?;
+    const eno = (try library.artists.ensure(.{ .key = "brian eno", .name = "Brian Eno", .sort_name = "brian eno" })).?;
+    _ = (try library.artists.ensure(.{ .key = "unloved", .name = "Unloved", .sort_name = "unloved" })).?;
+
+    const loved = try library.artist_loves.set(&.{ drake, bush, eno, 9999 }, true);
+    try std.testing.expectEqual(@as(u32, 3), loved.updated);
+    try std.testing.expectEqual(@as(u32, 1), loved.skipped);
+    try library.database.exec("UPDATE artist_loves SET loved_at = CASE artist_id WHEN (SELECT id FROM artists WHERE key = 'nick drake') THEN 300 WHEN (SELECT id FROM artists WHERE key = 'kate bush') THEN 100 ELSE 200 END;");
+    const again = try library.artist_loves.set(&.{drake}, true);
+    try std.testing.expectEqual(@as(u32, 0), again.updated);
+    try std.testing.expectEqual(@as(i64, 300), try testScalar(library.database, "SELECT loved_at FROM artist_loves WHERE artist_id = (SELECT id FROM artists WHERE key = 'nick drake');"));
+
+    for ([_]struct { query: repository.ArtistQuery, expected: []const i64 }{
+        .{ .query = .{ .loved_only = true, .sort = .recently_loved }, .expected = &.{ drake, eno, bush } },
+        .{ .query = .{ .loved_only = true }, .expected = &.{ eno, bush, drake } },
+        .{ .query = .{ .loved_only = true, .filter = "drake" }, .expected = &.{drake} },
+    }) |case| {
+        var page = try library.artists.page(std.testing.allocator, case.query);
+        defer page.deinit();
+        try std.testing.expectEqual(case.expected.len, page.items.len);
+        try std.testing.expectEqual(@as(u64, case.expected.len), try library.artists.countMatching(case.query));
+        for (case.expected, page.items) |expected, item| {
+            try std.testing.expectEqual(expected, item.id);
+            try std.testing.expect(item.loved);
+        }
+    }
+
+    var everyone = try library.artists.page(std.testing.allocator, .{ .sort = .recently_loved });
+    defer everyone.deinit();
+    try std.testing.expectEqual(@as(usize, 4), everyone.items.len);
+    try std.testing.expect(!everyone.items[3].loved);
+    const cleared = try library.artist_loves.set(&.{ bush, bush }, false);
+    try std.testing.expectEqual(@as(u32, 1), cleared.updated);
+    try std.testing.expect(!try library.artist_loves.isLoved(bush));
+    try std.testing.expectEqual(@as(u64, 2), try library.artists.countMatching(.{ .loved_only = true }));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM feedback;"));
+}
+
 test "only loved Tracks are listed and counted, most recently loved first, and a clear waiting to be sent is not a love" {
     var library = try openFeedbackLibrary("track-love-page");
     defer library.close();
@@ -3121,7 +3351,7 @@ test "only loved Tracks are listed and counted, most recently loved first, and a
 const SortDirection = repository.SortDirection;
 
 fn expectPlaylist(library: *LibraryDatabase, playlist_id: i64, expected: []const i64) !void {
-    var page = try library.playlists.entries(std.testing.allocator, playlist_id, repository.max_page, 0);
+    var page = try library.playlists.entries(std.testing.allocator, playlist_id, repository.max_page, 0, 0);
     defer page.deinit();
     try std.testing.expectEqual(expected.len, page.items.len);
     for (page.items, expected, 0..) |entry, recording_id, position| {
@@ -3144,7 +3374,7 @@ test "playlist names are trimmed, non-empty and unique" {
     try library.playlists.rename(mix, "Mix");
     try library.playlists.rename(mix, "A Mix");
 
-    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0);
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, 0);
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 2), page.items.len);
     try std.testing.expectEqualStrings("A Mix", page.items[0].name);
@@ -3191,7 +3421,7 @@ test "inserting, moving and removing playlist entries keeps positions contiguous
     try std.testing.expectEqual(@as(u32, 1), try library.playlists.remove(playlist, &.{ 0, 0 }));
     try expectPlaylist(&library, playlist, &.{ a, a });
 
-    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0);
+    var page = try library.playlists.list(std.testing.allocator, repository.max_page, 0, 0);
     defer page.deinit();
     try std.testing.expectEqual(@as(u32, 2), page.items[0].entries);
     try std.testing.expectEqual(@as(u32, 2), page.items[0].available);
@@ -3233,7 +3463,7 @@ test "deleting a playlist removes its entries" {
     try library.playlists.delete(playlist);
 
     try std.testing.expectError(error.UnknownPlaylist, library.playlists.delete(playlist));
-    try std.testing.expectError(error.UnknownPlaylist, library.playlists.entries(std.testing.allocator, playlist, 10, 0));
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.entries(std.testing.allocator, playlist, 10, 0, 0));
     try std.testing.expectEqual(@as(i64, 1), try testScalar(library.database, "SELECT count(*) FROM playlist_entries;"));
 }
 
@@ -3250,7 +3480,7 @@ test "a playlist entry plays its recording's lowest Track id and is unavailable 
     var sql: [64]u8 = undefined;
     try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "DELETE FROM tracks WHERE id = {d};", .{leaving}, 0));
 
-    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 0);
+    var page = try library.playlists.entries(std.testing.allocator, playlist, 10, 0, 0);
     defer page.deinit();
     try std.testing.expectEqual(@as(usize, 3), page.items.len);
     try std.testing.expectEqual(first, page.items[0].track.?.id);
@@ -3259,14 +3489,295 @@ test "a playlist entry plays its recording's lowest Track id and is unavailable 
     try std.testing.expectEqual(gone, page.items[1].recording_id);
     try std.testing.expectEqual(first, page.items[2].track.?.id);
 
-    const ids = try library.playlists.trackIds(std.testing.allocator, playlist);
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
     defer std.testing.allocator.free(ids);
     try std.testing.expectEqualSlices(i64, &.{ first, first }, ids);
 
-    var playlists = try library.playlists.list(std.testing.allocator, 10, 0);
+    var playlists = try library.playlists.list(std.testing.allocator, 10, 0, 0);
     defer playlists.deinit();
     try std.testing.expectEqual(@as(u32, 3), playlists.items[0].entries);
     try std.testing.expectEqual(@as(u32, 2), playlists.items[0].available);
+}
+
+test "playlist metadata keeps its tags in order, and only description and tag changes move updated_at" {
+    var library = try openFeedbackLibrary("playlist-metadata");
+    defer library.close();
+    const playlist = try library.playlists.create("Mix");
+    try library.database.exec("UPDATE playlists SET updated_at = 5;");
+
+    try library.playlists.update(playlist, .{ .pinned = true, .loved = true });
+    try std.testing.expectEqual(@as(i64, 5), try testScalar(library.database, "SELECT updated_at FROM playlists;"));
+    try std.testing.expect(try testScalar(library.database, "SELECT pinned_at FROM playlists;") > 5);
+
+    try library.playlists.update(playlist, .{ .description = "  Late night  ", .tags = &.{ " lofi ", "focus", "lofi" } });
+    try std.testing.expect(try testScalar(library.database, "SELECT updated_at FROM playlists;") > 5);
+    {
+        const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("Late night", summary.description);
+        try std.testing.expect(summary.pinned and summary.loved);
+        try std.testing.expectEqual(repository.PlaylistKind.manual, summary.kind);
+        try std.testing.expectEqual(repository.PlaylistCreator.user, summary.creator);
+        try std.testing.expectEqual(@as(usize, 2), summary.tags.len);
+        try std.testing.expectEqualStrings("lofi", summary.tags[0]);
+        try std.testing.expectEqualStrings("focus", summary.tags[1]);
+    }
+
+    try library.playlists.update(playlist, .{ .pinned = false, .tags = &.{} });
+    {
+        const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+        defer summary.deinit(std.testing.allocator);
+        try std.testing.expect(!summary.pinned and summary.loved);
+        try std.testing.expectEqual(@as(usize, 0), summary.tags.len);
+        try std.testing.expectEqualStrings("Late night", summary.description);
+    }
+
+    const nine: [9][]const u8 = .{ "a", "b", "c", "d", "e", "f", "g", "h", "i" };
+    try std.testing.expectError(error.TooManyPlaylistTags, library.playlists.update(playlist, .{ .tags = &nine }));
+    try std.testing.expectError(error.InvalidPlaylistTag, library.playlists.update(playlist, .{ .tags = &.{" "} }));
+    const long_tag: [65]u8 = @splat('t');
+    try std.testing.expectError(error.InvalidPlaylistTag, library.playlists.update(playlist, .{ .tags = &.{&long_tag} }));
+    const long_description: [4097]u8 = @splat('d');
+    try std.testing.expectError(error.PlaylistDescriptionTooLong, library.playlists.update(playlist, .{ .description = &long_description }));
+    try std.testing.expectError(error.UnknownPlaylist, library.playlists.update(9999, .{ .pinned = true }));
+    try std.testing.expectEqual(@as(i64, 0), try testScalar(library.database, "SELECT count(*) FROM playlist_tags;"));
+}
+
+test "playlist pages filter by name, kind, pin and creator and sort as asked" {
+    var library = try openFeedbackLibrary("playlist-page");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const track = try addFeedbackTrack(&library, "Song", recording, null);
+    const alpha = try library.playlists.create("Alpha mix");
+    const beta = try library.playlists.createSmart(std.testing.allocator, "Beta", "{\"v\":1,\"rules\":[]}");
+    const gamma = try library.playlists.createWithRecordings(std.testing.allocator, "Gamma mix", &.{ recording, recording });
+    _ = try library.playlists.insert(alpha, &.{track}, null);
+    try library.playlists.update(alpha, .{ .pinned = true });
+    try library.database.exec(
+        \\UPDATE playlists SET created_at = id, updated_at = 10 - id;
+    );
+
+    const Case = struct { query: repository.PlaylistQuery, ids: []const i64 };
+    const cases = [_]Case{
+        .{ .query = .{}, .ids = &.{ alpha, beta, gamma } },
+        .{ .query = .{ .sort = .created }, .ids = &.{ gamma, beta, alpha } },
+        .{ .query = .{ .sort = .name }, .ids = &.{ alpha, beta, gamma } },
+        .{ .query = .{ .sort = .entries }, .ids = &.{ gamma, alpha, beta } },
+        .{ .query = .{ .filter = "MIX" }, .ids = &.{ alpha, gamma } },
+        .{ .query = .{ .kind = .smart }, .ids = &.{beta} },
+        .{ .query = .{ .kind = .manual }, .ids = &.{ alpha, gamma } },
+        .{ .query = .{ .pinned_only = true }, .ids = &.{alpha} },
+        .{ .query = .{ .created_by = .imported }, .ids = &.{gamma} },
+        .{ .query = .{ .created_by = .user, .sort = .name }, .ids = &.{ alpha, beta } },
+        .{ .query = .{ .limit = 1, .offset = 1 }, .ids = &.{beta} },
+    };
+    for (cases) |case| {
+        var page = try library.playlists.page(std.testing.allocator, case.query, 0);
+        defer page.deinit();
+        try std.testing.expectEqual(case.ids.len, page.items.len);
+        for (page.items, case.ids) |item, id| try std.testing.expectEqual(id, item.id);
+        var unpaged = case.query;
+        unpaged.offset = 0;
+        unpaged.limit = repository.max_page;
+        if (case.query.limit == repository.max_page)
+            try std.testing.expectEqual(@as(u64, case.ids.len), try library.playlists.pageCount(unpaged));
+    }
+    try std.testing.expectError(error.PageOutOfRange, library.playlists.page(std.testing.allocator, .{ .limit = 0 }, 0));
+}
+
+fn addSmartTrack(library: *LibraryDatabase, title: []const u8, artist: []const u8) !i64 {
+    const recording = try addRecording(library);
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 4096 });
+    var sql: [96]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE files SET recording_id = {d} WHERE id = {d};", .{ recording, file_id }, 0));
+    try library.tracks.upsertTracks(&.{.{
+        .recording_id = recording,
+        .title = title,
+        .artist = artist,
+        .album = "Album",
+        .preferred_file_id = file_id,
+    }});
+    return testScalar(library.database, try std.fmt.bufPrintSentinel(&sql, "SELECT id FROM tracks WHERE preferred_file_id = {d};", .{file_id}, 0));
+}
+
+test "a smart playlist's relative dates count back from the clock it is given, not the wall clock" {
+    var library = try openFeedbackLibrary("playlist-smart-clock");
+    defer library.close();
+    const day = std.time.s_per_day;
+    const old = try addSmartTrack(&library, "Old", "Artist");
+    const recent = try addSmartTrack(&library, "Recent", "Artist");
+    var sql: [128]u8 = undefined;
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE files SET first_seen_at = {d} WHERE id = (SELECT preferred_file_id FROM tracks WHERE id = {d});", .{ 100 * day, old }, 0));
+    try library.database.exec(try std.fmt.bufPrintSentinel(&sql, "UPDATE files SET first_seen_at = {d} WHERE id = (SELECT preferred_file_id FROM tracks WHERE id = {d});", .{ 200 * day, recent }, 0));
+    const in_last =
+        \\{"v":1,"rules":[{"field":"added_at","op":"in_last_days","value":30}]}
+    ;
+    const not_in_last =
+        \\{"v":1,"rules":[{"field":"added_at","op":"not_in_last_days","value":30}]}
+    ;
+    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, in_last, 110 * day));
+    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, in_last, 210 * day));
+    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, in_last, 300 * day));
+    try std.testing.expectEqual(@as(u64, 0), try library.playlists.smartCount(std.testing.allocator, not_in_last, 110 * day));
+    try std.testing.expectEqual(@as(u64, 1), try library.playlists.smartCount(std.testing.allocator, not_in_last, 210 * day));
+
+    const playlist = try library.playlists.createSmart(std.testing.allocator, "Recent", in_last);
+    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, 210 * day);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.items.len);
+    try std.testing.expectEqual(recent, page.items[0].track.?.id);
+}
+test "a smart playlist lists one Track per matching recording in its rules' order up to its limit and refuses entry edits" {
+    var library = try openFeedbackLibrary("playlist-smart");
+    defer library.close();
+    const northern = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const pink = try addSmartTrack(&library, "Pink Moon", "Nick Drake");
+    const sky = try addSmartTrack(&library, "Sky Blue", "Peter Gabriel");
+    _ = try addSmartTrack(&library, "River Man", "Nick Drake");
+    const duplicate = try addFeedbackTrack(&library, "Northern Sky", try testScalar(library.database, "SELECT recording_id FROM tracks WHERE title = 'Northern Sky';"), null);
+    try std.testing.expect(duplicate > northern);
+    try library.database.exec(
+        \\INSERT INTO artists(name) SELECT DISTINCT artist FROM tracks;
+        \\UPDATE tracks SET artist_id = (SELECT id FROM artists WHERE artists.name = tracks.artist);
+    );
+    const rules =
+        \\{"v":1,"match":"any","rules":[{"field":"title","op":"contains","value":"SKY"},{"field":"title","op":"starts_with","value":"pink"}],
+        \\"sort":{"field":"title","descending":true},"limit":2}
+    ;
+    const playlist = try library.playlists.createSmart(std.testing.allocator, "Skies", rules);
+
+    var page = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 0, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page.items.len);
+    try std.testing.expectEqual(sky, page.items[0].track.?.id);
+    try std.testing.expectEqual(pink, page.items[1].track.?.id);
+    try std.testing.expectEqual(@as(u32, 1), page.items[1].position);
+    var second = try library.playlists.entries(std.testing.allocator, playlist, repository.max_page, 1, 0);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(usize, 1), second.items.len);
+    try std.testing.expectEqual(@as(u32, 1), second.items[0].position);
+
+    const ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(i64, &.{ sky, pink }, ids);
+    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(std.testing.allocator, rules, 0));
+    try std.testing.expectEqual(@as(u64, 2), try library.playlists.smartCount(
+        std.testing.allocator,
+        "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"contains\",\"value\":\"sky\"}]}",
+        0,
+    ));
+
+    const summary = try library.playlists.summary(std.testing.allocator, playlist, 0);
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(repository.PlaylistKind.smart, summary.kind);
+    try std.testing.expectEqual(@as(u32, 2), summary.entries);
+    try std.testing.expectEqual(@as(u32, 2), summary.available);
+    try std.testing.expect(summary.mixed_artists);
+
+    const exported = try library.playlists.exportRows(std.testing.allocator, playlist, 0);
+    defer exported.deinit();
+    try std.testing.expectEqual(@as(usize, 0), exported.items.len);
+    try std.testing.expectEqual(@as(u32, 2), exported.unavailable);
+
+    try std.testing.expectError(error.PlaylistIsSmart, library.playlists.insert(playlist, &.{northern}, null));
+    try std.testing.expectError(error.PlaylistIsSmart, library.playlists.remove(playlist, &.{0}));
+    try std.testing.expectError(error.PlaylistIsSmart, library.playlists.move(playlist, 0, 1));
+    const stored = (try library.playlists.rules(std.testing.allocator, playlist)).?;
+    defer std.testing.allocator.free(stored);
+    try std.testing.expectEqualStrings(rules, stored);
+
+    const manual = try library.playlists.create("Manual");
+    try std.testing.expect(try library.playlists.rules(std.testing.allocator, manual) == null);
+    try std.testing.expectError(error.PlaylistIsManual, library.playlists.setRules(std.testing.allocator, manual, rules));
+    try std.testing.expectError(error.UnknownRuleField, library.playlists.setRules(
+        std.testing.allocator,
+        playlist,
+        "{\"v\":1,\"rules\":[{\"field\":\"path\",\"op\":\"is\",\"value\":\"x\"}]}",
+    ));
+    try std.testing.expectError(error.UnknownRuleField, library.playlists.createSmart(
+        std.testing.allocator,
+        "Bad",
+        "{\"v\":1,\"rules\":[{\"field\":\"path\",\"op\":\"is\",\"value\":\"x\"}]}",
+    ));
+    try library.playlists.setRules(std.testing.allocator, playlist, "{\"v\":1,\"rules\":[{\"field\":\"artist\",\"op\":\"is\",\"value\":\"peter gabriel\"}]}");
+    const now_ids = try library.playlists.trackIds(std.testing.allocator, playlist, 0);
+    defer std.testing.allocator.free(now_ids);
+    try std.testing.expectEqualSlices(i64, &.{sky}, now_ids);
+}
+
+test "a hostile smart playlist value is matched literally and never runs as SQL" {
+    var library = try openFeedbackLibrary("playlist-smart-hostile");
+    defer library.close();
+    const hostile = try addSmartTrack(&library, "x'); DROP TABLE tracks; --", "A");
+    const percent = try addSmartTrack(&library, "100%_done", "A");
+    _ = try addSmartTrack(&library, "1000 done", "A");
+
+    const is_hostile = try library.playlists.createSmart(
+        std.testing.allocator,
+        "Hostile",
+        "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"is\",\"value\":\"x'); DROP TABLE tracks; --\"}]}",
+    );
+    const ids = try library.playlists.trackIds(std.testing.allocator, is_hostile, 0);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqualSlices(i64, &.{hostile}, ids);
+
+    const wildcard = try library.playlists.createSmart(
+        std.testing.allocator,
+        "Wildcard",
+        "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"contains\",\"value\":\"%_\"}]}",
+    );
+    const literal = try library.playlists.trackIds(std.testing.allocator, wildcard, 0);
+    defer std.testing.allocator.free(literal);
+    try std.testing.expectEqualSlices(i64, &.{percent}, literal);
+    try std.testing.expectEqual(@as(i64, 3), try testScalar(library.database, "SELECT count(*) FROM tracks;"));
+}
+
+test "every rule field with every operator it accepts runs against the library" {
+    var library = try openFeedbackLibrary("playlist-smart-fields");
+    defer library.close();
+    _ = try addSmartTrack(&library, "Northern Sky", "Nick Drake");
+    const smart_playlist = @import("../library/smart_playlist.zig");
+    var checked: usize = 0;
+    inline for (std.meta.fields(smart_playlist.Field)) |field_info| {
+        const field: smart_playlist.Field = @enumFromInt(field_info.value);
+        inline for (std.meta.fields(smart_playlist.Operator)) |operator_info| {
+            const operator: smart_playlist.Operator = @enumFromInt(operator_info.value);
+            if (operator.appliesTo(field.fieldType())) {
+                const value: []const u8 = switch (operator) {
+                    .is_set, .is_not_set => "",
+                    .between => ",\"value\":[1,2]",
+                    .in_last_days, .not_in_last_days => ",\"value\":30",
+                    else => switch (field.fieldType()) {
+                        .text => ",\"value\":\"sky\"",
+                        .integer, .date => ",\"value\":1",
+                        .boolean => ",\"value\":true",
+                    },
+                };
+                var buffer: [256]u8 = undefined;
+                const rules = try std.fmt.bufPrint(
+                    &buffer,
+                    "{{\"v\":1,\"rules\":[{{\"field\":\"{s}\",\"op\":\"{s}\"{s}}}],\"sort\":{{\"field\":\"{s}\"}}}}",
+                    .{ field_info.name, operator_info.name, value, if (field == .added_at) "added_at" else "title" },
+                );
+                _ = library.playlists.smartCount(std.testing.allocator, rules, 1_000_000) catch |err| {
+                    std.debug.print("{s}\n", .{rules});
+                    return err;
+                };
+                checked += 1;
+            }
+        }
+    }
+    try std.testing.expect(checked > 100);
+}
+
+test "an imported playlist is created by import, not by the user" {
+    var library = try openFeedbackLibrary("playlist-imported");
+    defer library.close();
+    const recording = try addRecording(&library);
+    const imported = try library.playlists.createWithRecordings(std.testing.allocator, "From file", &.{recording});
+    const summary = try library.playlists.summary(std.testing.allocator, imported, 0);
+    defer summary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(repository.PlaylistCreator.imported, summary.creator);
 }
 
 test "a Track's lyrics row is replaced whole, is not stored for a gone Track, and goes with its Track" {

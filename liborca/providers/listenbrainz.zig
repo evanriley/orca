@@ -3,6 +3,7 @@ const network = @import("../network/root.zig");
 const database = @import("../database/root.zig");
 const credentials = @import("credentials.zig");
 const scrobble = @import("scrobble.zig");
+const isMusicBrainzId = @import("../metadata/model.zig").isMusicBrainzId;
 
 pub const service = "listenbrainz";
 
@@ -12,6 +13,7 @@ pub const default_server = "https://api.listenbrainz.org";
 const submit_path = "/1/submit-listens";
 const validate_path = "/1/validate-token";
 const feedback_path = "/1/feedback/recording-feedback";
+const popularity_path = "/1/popularity/artist";
 
 const batch_limit: u32 = 100;
 const lease_seconds: i64 = 120;
@@ -718,6 +720,48 @@ fn present(value: ?[]const u8) ?[]const u8 {
 }
 
 const shared_state = @import("shared_state.zig");
+
+/// How many distinct users have listened to the artist, from `POST
+/// {server}/1/popularity/artist`, which needs no token. Null when
+/// ListenBrainz does not know the artist.
+pub fn artistListeners(
+    gateway: *network.Gateway,
+    allocator: std.mem.Allocator,
+    server: []const u8,
+    artist_mbid: []const u8,
+) !?u64 {
+    if (!isMusicBrainzId(artist_mbid)) return error.InvalidMusicBrainzId;
+    const url = try std.fmt.allocPrint(allocator, "{s}" ++ popularity_path, .{std.mem.trimEnd(u8, server, "/")});
+    defer allocator.free(url);
+    const body = try std.fmt.allocPrint(allocator, "{{\"artist_mbids\":[\"{s}\"]}}", .{artist_mbid});
+    defer allocator.free(body);
+    const response = try gateway.execute(allocator, .post, url, body, &.{
+        .{ .name = "accept", .value = "application/json" },
+        .{ .name = "content-type", .value = "application/json" },
+    });
+    defer response.deinit();
+    if (response.status == 408 or response.status >= 500) return error.ProviderUnavailable;
+    if (response.status != 200) return error.ProviderRejectedRequest;
+    const Entry = struct {
+        artist_mbid: ?[]const u8 = null,
+        total_user_count: ?i64 = null,
+    };
+    const parsed = std.json.parseFromSlice([]const ?Entry, allocator, response.body, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidProviderResponse,
+    };
+    defer parsed.deinit();
+    for (parsed.value) |maybe_entry| {
+        const entry = maybe_entry orelse continue;
+        const mbid = entry.artist_mbid orelse continue;
+        if (!std.ascii.eqlIgnoreCase(mbid, artist_mbid)) continue;
+        const count = entry.total_user_count orelse return null;
+        return std.math.cast(u64, count) orelse return error.InvalidProviderResponse;
+    }
+    return null;
+}
 
 const Fixture = struct {
     library: database.LibraryDatabase,
@@ -1858,4 +1902,29 @@ test "a change the service accepted but that could not be marked is not sent aga
     try fixture.setFeedback(track, .hated);
     try std.testing.expectEqual(Outcome.delivered, (try fixture.syncFeedback()).outcome);
     try std.testing.expectEqual(@as(usize, 2), fixture.transport.requestCount());
+}
+
+test "artist listeners are the total user count ListenBrainz gives the artist, and null for an artist it does not know" {
+    var net: network.testing.TestGateway = undefined;
+    net.init(.{ .now_ms = 1_800_000_000_000 });
+    defer net.deinit();
+    net.gateway.config.minimum_interval_ms = 0;
+    net.transport.keep_history = true;
+    const mbid = "12398bf3-1b99-47b7-930c-f3956773f35a";
+    const body = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/providers/listenbrainz-popularity.json", std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(body);
+    net.transport.otherwise = .{ .respond = .{ .body = body } };
+
+    try std.testing.expectEqual(@as(?u64, 9025), try artistListeners(&net.gateway, std.testing.allocator, "http://127.0.0.1:9/", mbid));
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/1/popularity/artist", net.transport.lastUrl());
+    try std.testing.expectEqualStrings("{\"artist_mbids\":[\"" ++ mbid ++ "\"]}", net.transport.history.items[0].body);
+    try std.testing.expectEqualStrings("", net.transport.lastAuthorization());
+
+    net.transport.otherwise = .{ .respond = .{ .body = "[{\"artist_mbid\":\"" ++ mbid ++ "\",\"total_listen_count\":null,\"total_user_count\":null}]" } };
+    try std.testing.expectEqual(@as(?u64, null), try artistListeners(&net.gateway, std.testing.allocator, default_server, mbid));
+    net.transport.otherwise = .{ .respond = .{ .body = "[null]" } };
+    try std.testing.expectEqual(@as(?u64, null), try artistListeners(&net.gateway, std.testing.allocator, default_server, mbid));
+    net.transport.otherwise = .{ .respond = .{ .status = 503 } };
+    try std.testing.expectError(error.ProviderUnavailable, artistListeners(&net.gateway, std.testing.allocator, default_server, mbid));
+    try std.testing.expectError(error.InvalidMusicBrainzId, artistListeners(&net.gateway, std.testing.allocator, default_server, "Aminé"));
 }

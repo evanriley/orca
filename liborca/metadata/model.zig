@@ -24,7 +24,51 @@ pub const Field = enum {
     musicbrainz_release_group_id,
     musicbrainz_release_track_id,
     musicbrainz_album_artist_id,
+    /// Held as an `ITUNESADVISORY` value: `1` explicit, `2` clean, `0` neither.
+    explicit,
 };
+
+/// A recording's content advisory. `unknown` is what a file that states none
+/// projects to; `none` is a file that says it carries no advisory.
+pub const Explicit = enum(u8) {
+    unknown,
+    none,
+    explicit,
+    clean,
+
+    pub fn fromAdvisory(number: u64) ?Explicit {
+        return switch (number) {
+            0 => .none,
+            1, 4 => .explicit,
+            2 => .clean,
+            else => null,
+        };
+    }
+
+    pub fn fromAdvisoryText(text: []const u8) ?Explicit {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n\x00");
+        return fromAdvisory(std.fmt.parseUnsigned(u8, trimmed, 10) catch return null);
+    }
+
+    pub fn advisoryText(self: Explicit) ?[]const u8 {
+        return switch (self) {
+            .unknown => null,
+            .none => "0",
+            .explicit => "1",
+            .clean => "2",
+        };
+    }
+};
+
+test "advisory numbers map to explicit, clean and none, and anything else is unstated" {
+    try std.testing.expectEqual(Explicit.explicit, Explicit.fromAdvisory(1).?);
+    try std.testing.expectEqual(Explicit.explicit, Explicit.fromAdvisory(4).?);
+    try std.testing.expectEqual(Explicit.clean, Explicit.fromAdvisory(2).?);
+    try std.testing.expectEqual(Explicit.none, Explicit.fromAdvisory(0).?);
+    try std.testing.expect(Explicit.fromAdvisory(3) == null);
+    try std.testing.expectEqual(Explicit.clean, Explicit.fromAdvisoryText(" 2\x00").?);
+    try std.testing.expect(Explicit.fromAdvisoryText("yes") == null);
+}
 
 pub fn isMusicBrainzId(text: []const u8) bool {
     if (text.len != 36) return false;
@@ -242,6 +286,7 @@ pub const ObservedTags = struct {
     musicbrainz_release_track_id: ?[]const u8 = null,
     musicbrainz_artist_id: ?[]const u8 = null,
     musicbrainz_album_artist_id: ?[]const u8 = null,
+    explicit: ?Explicit = null,
     artwork: ?Artwork = null,
 
     pub fn isEmpty(self: ObservedTags) bool {

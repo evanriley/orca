@@ -72,7 +72,19 @@ pub const TrackDetails = struct {
     /// parameters, an older algorithm, or bytes it no longer has.
     loudness: ?Loudness,
     has_artwork: bool,
-    /// Listens of the file the Track plays.
+    /// The Track's total on its disc: a total one of its files states, else
+    /// the larger of the positions on the disc and the highest track number
+    /// there (`track_total_inferred`).
+    track_total: ?i64,
+    track_total_inferred: bool,
+    /// The file's stated disc total, else the Release's disc count.
+    disc_total: ?i64,
+    explicit: metadata.Explicit,
+    /// When the library first saw the file, in Unix seconds.
+    added_at: ?i64,
+    /// The file's modification time at the last scan, in Unix seconds.
+    modified_at: ?i64,
+    /// Listens of the Track's recording through any of its files.
     play_count: u64,
     /// Unix seconds at which the latest listen started.
     last_played_at: ?i64,
@@ -89,8 +101,14 @@ pub const TrackDetails = struct {
     musicbrainz_release_track_id_source: ?RecordingIdSource,
     musicbrainz_album_artist_id: ?[]u8,
     musicbrainz_album_artist_id_source: ?RecordingIdSource,
+    /// The Track's first `max_genres` genres, in the order its source gave
+    /// them.
+    genres: [][]u8,
+
+    pub const max_genres = 5;
 
     pub fn deinit(self: TrackDetails) void {
+        freeGenres(self.allocator, self.genres);
         self.allocator.free(self.title);
         self.allocator.free(self.artist);
         self.allocator.free(self.album);
@@ -114,7 +132,9 @@ pub fn load(
     library: *database.LibraryDatabase,
     track_id: i64,
 ) !?TrackDetails {
-    const summary = (try library.tracks.byId(allocator, track_id)) orelse return null;
+    var summary = (try library.tracks.byId(allocator, track_id)) orelse return null;
+    allocator.free(summary.codec);
+    summary.codec = &.{};
     errdefer summary.deinit(allocator);
     const facts = try library.tracks.fileFacts(allocator, track_id);
     errdefer if (facts) |value| value.deinit();
@@ -134,6 +154,8 @@ pub fn load(
     errdefer if (release_track_mbid) |value| value.deinit(allocator);
     const album_artist_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_album_artist_id);
     errdefer if (album_artist_mbid) |value| value.deinit(allocator);
+    const genres = try loadGenres(allocator, library, track_id);
+    errdefer freeGenres(allocator, genres);
     const codec_identifier = if (facts) |file| file.codec else try allocator.alloc(u8, 0);
 
     return .{
@@ -159,6 +181,12 @@ pub fn load(
         .file_missing = if (facts) |file| file.path == null else true,
         .loudness = loudness,
         .has_artwork = if (facts) |file| file.has_artwork else false,
+        .track_total = summary.track_total,
+        .track_total_inferred = if (facts) |file| file.track_total_inferred else false,
+        .disc_total = summary.disc_total,
+        .explicit = summary.explicit,
+        .added_at = if (facts) |file| file.first_seen_at else null,
+        .modified_at = if (facts) |file| file.modified_at else null,
         .play_count = plays.play_count,
         .last_played_at = plays.last_played_at,
         .feedback = summary.feedback,
@@ -174,7 +202,24 @@ pub fn load(
         .musicbrainz_release_track_id_source = if (release_track_mbid) |value| RecordingIdSource.of(value.provenance) else null,
         .musicbrainz_album_artist_id = if (album_artist_mbid) |value| value.text else null,
         .musicbrainz_album_artist_id_source = if (album_artist_mbid) |value| RecordingIdSource.of(value.provenance) else null,
+        .genres = genres,
     };
+}
+
+fn loadGenres(allocator: std.mem.Allocator, library: *database.LibraryDatabase, track_id: i64) ![][]u8 {
+    const names = try library.genres.forTrack(allocator, track_id);
+    defer names.deinit();
+    const genres = try allocator.alloc([]u8, @min(names.items.len, TrackDetails.max_genres));
+    for (genres, names.items[0..genres.len]) |*genre, *name| {
+        genre.* = name.name;
+        name.name = &.{};
+    }
+    return genres;
+}
+
+fn freeGenres(allocator: std.mem.Allocator, genres: []const []u8) void {
+    for (genres) |genre| allocator.free(genre);
+    allocator.free(genres);
 }
 
 /// The size and duration a bitrate is derived from, rounded to the nearest

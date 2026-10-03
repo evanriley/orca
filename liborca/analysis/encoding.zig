@@ -95,6 +95,15 @@ pub fn decodeLoudness(bytes: []const u8) !?Loudness {
     };
 }
 
+/// The sample peak out of an encoded result, which is stored whether or not
+/// the result has a loudness.
+pub fn decodeSamplePeak(bytes: []const u8) !f32 {
+    if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..4], magic))
+        return error.InvalidAnalysisResult;
+    if (readInt(u16, bytes[4..6]) != version) return error.UnsupportedAnalysisResultVersion;
+    return readFloat(bytes[16..20]);
+}
+
 pub fn parameterHash(parameters: diagnostics.Parameters) [32]u8 {
     var encoded: [12]u8 = undefined;
     writeFloat(encoded[0..4], parameters.silence_threshold);
@@ -203,6 +212,7 @@ test "a result with no measurable loudness reads as absent rather than as no cor
     const bytes = try encode(allocator, original);
     defer allocator.free(bytes);
     try std.testing.expectEqual(@as(?Loudness, null), try decodeLoudness(bytes));
+    try std.testing.expectEqual(@as(f32, 0.5), try decodeSamplePeak(bytes));
 }
 
 test "a truncated or foreign blob is refused rather than read as a correction" {

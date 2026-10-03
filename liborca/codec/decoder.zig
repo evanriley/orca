@@ -74,11 +74,14 @@ pub const codec_id = struct {
     /// for; it is a property of the identifier, so it stays here rather than
     /// becoming a second column that could disagree with the first.
     pub fn isLossless(identifier: []const u8) bool {
-        inline for (.{ codec_id.pcm, codec_id.pcm_float, codec_id.flac, codec_id.alac }) |lossless| {
-            if (std.mem.eql(u8, identifier, lossless)) return true;
+        inline for (lossless) |lossless_identifier| {
+            if (std.mem.eql(u8, identifier, lossless_identifier)) return true;
         }
         return false;
     }
+
+    /// The identifiers `isLossless` accepts, for SQL that must agree with it.
+    pub const lossless = [_][]const u8{ codec_id.pcm, codec_id.pcm_float, codec_id.flac, codec_id.alac };
 };
 
 test "every codec identifier is classified as lossy or lossless exactly once" {

@@ -158,6 +158,7 @@ const ReleaseIdentity = struct {
     album_artist_mbid: ?[]const u8,
     release_date: ?[]const u8,
     musicbrainz_release_id: ?[]const u8,
+    release_type: ?[]const u8,
     is_compilation: bool,
     disc_count: i64,
 };
@@ -185,7 +186,12 @@ const Entry = struct {
     compilation: ?bool,
     musicbrainz_release_id: ?[]const u8,
     musicbrainz_recording_id: ?[]const u8,
+    track_total: ?i64 = null,
+    disc_total: ?i64 = null,
+    explicit: ?metadata.Explicit = null,
+    release_type: ?[]const u8 = null,
     embedded_artwork: bool = false,
+    genres: []const []const u8 = &.{},
     /// Decided on the tags before the filename stands in for a missing title.
     missing_metadata: ?database.HealthIssueInput = null,
     release_id: i64 = 0,
@@ -207,6 +213,7 @@ const ExtraOverrides = struct {
     date: ?metadata.Value = null,
     compilation: ?metadata.Value = null,
     musicbrainz_release_id: ?metadata.Value = null,
+    explicit: ?metadata.Value = null,
 };
 
 fn resolvedText(observed: ?[]const u8, orca: ?metadata.Value, policy: metadata.ResolutionPolicy) ?[]const u8 {
@@ -231,6 +238,59 @@ fn resolvedNumber(observed: ?i64, orca: ?metadata.Value, policy: metadata.Resolu
 fn boolText(value: ?bool) ?[]const u8 {
     const flag = value orelse return null;
     return if (flag) "1" else "0";
+}
+
+const TotalKind = enum { track, disc };
+
+/// The total a position's files state, the preferred file's first.
+fn statedTotal(entries: []const Entry, members: []const usize, preferred: *const Entry, kind: TotalKind) ?i64 {
+    const pick = struct {
+        fn total(entry: *const Entry, which: TotalKind) ?i64 {
+            const value = switch (which) {
+                .track => entry.track_total,
+                .disc => entry.disc_total,
+            } orelse return null;
+            return if (value > 0) value else null;
+        }
+    };
+    if (pick.total(preferred, kind)) |value| return value;
+    for (members) |index| {
+        if (pick.total(&entries[index], kind)) |value| return value;
+    }
+    return null;
+}
+
+fn countedTrackTotal(positions: []const Position, disc: i64) i64 {
+    var count: i64 = 0;
+    var highest: i64 = 0;
+    for (positions) |position| {
+        if (position.disc != disc) continue;
+        count += 1;
+        highest = @max(highest, position.number);
+    }
+    return @max(count, highest);
+}
+
+/// The advisory a position's files state, the preferred file's first.
+fn statedAdvisory(entries: []const Entry, members: []const usize, preferred: *const Entry) metadata.Explicit {
+    if (preferred.explicit) |value| return value;
+    for (members) |index| {
+        if (entries[index].explicit) |value| return value;
+    }
+    return .unknown;
+}
+
+/// The genres a position's files state: the preferred file's, else those of
+/// the lowest-numbered file that states any, as migration 33 chose them.
+fn statedGenres(entries: []const Entry, members: []const usize, preferred: *const Entry) []const []const u8 {
+    if (preferred.genres.len != 0) return preferred.genres;
+    var chosen: ?*const Entry = null;
+    for (members) |index| {
+        const entry = &entries[index];
+        if (entry.genres.len == 0) continue;
+        if (chosen == null or entry.file_id < chosen.?.file_id) chosen = entry;
+    }
+    return if (chosen) |entry| entry.genres else &.{};
 }
 
 /// A resolved Track: one position on a Release, and the files that encode it.
@@ -269,6 +329,7 @@ pub const Projection = struct {
             try self.projectFolder(scratch.allocator(), folder, &result);
             result.folders_visited += 1;
         }
+        if (folders.len != 0) try self.pruneGenres();
         return result;
     }
 
@@ -286,6 +347,7 @@ pub const Projection = struct {
         allocator: std.mem.Allocator,
         entries: []const Entry,
         written: []const WrittenPosition,
+        genres: *database.GenreWriter,
         result: *Result,
     ) !void {
         const db = self.library.database;
@@ -317,6 +379,7 @@ pub const Projection = struct {
             }
             try candidates.reset();
             for (stale.items) |track_id| {
+                try genres.carryUser(track_id, entry.file_id);
                 try delete_track.bindInt64(1, track_id);
                 if (try delete_track.step() != .done) return error.SqlFailed;
                 try delete_track.reset();
@@ -332,6 +395,17 @@ pub const Projection = struct {
         );
         result.releases_pruned += pruned.releases;
         result.artists_pruned += pruned.artists;
+    }
+
+    /// Deletes the genres the run left without a Track, once rather than per
+    /// folder, because it reads every genre.
+    fn pruneGenres(self: *Projection) !void {
+        self.library.write_lane.acquire();
+        defer self.library.write_lane.release();
+        try self.library.database.exec("BEGIN IMMEDIATE;");
+        errdefer self.library.database.exec("ROLLBACK;") catch {};
+        try database.repository.pruneOrphanGenresLocked(self.library.database);
+        try self.library.database.exec("COMMIT;");
     }
 
     /// Runs after `pruneStale`, because a cover carried to a Release by a
@@ -362,6 +436,9 @@ pub const Projection = struct {
             entry.compilation = std.mem.eql(u8, text, "1");
         const tagged_release = if (entry.musicbrainz_release_id) |tag| (if (tag.len == 0) null else tag) else null;
         entry.musicbrainz_release_id = resolvedText(tagged_release, extra.musicbrainz_release_id, self.policy);
+        const tagged_advisory = if (entry.explicit) |advisory| advisory.advisoryText() else null;
+        if (resolvedText(tagged_advisory, extra.explicit, self.policy)) |text|
+            entry.explicit = metadata.Explicit.fromAdvisoryText(text) orelse entry.explicit;
     }
 
     /// The folders the scope touches, deduplicated and ordered.
@@ -432,6 +509,8 @@ pub const Projection = struct {
         defer self.library.write_lane.release();
         try self.library.database.exec("BEGIN IMMEDIATE;");
         errdefer self.library.database.exec("ROLLBACK;") catch {};
+        var genres: database.GenreWriter = try .init(self.library.database);
+        defer genres.deinit();
 
         var written: std.ArrayList(WrittenPosition) = .empty;
         var start: usize = 0;
@@ -439,11 +518,11 @@ pub const Projection = struct {
             var end = start + 1;
             while (end < entries.len and
                 std.mem.eql(u8, entries[end].album_key, entries[start].album_key)) end += 1;
-            try self.projectGroup(allocator, folder, entries[start..end], &written, result);
+            try self.projectGroup(allocator, folder, entries[start..end], &written, &genres, result);
             result.groups_projected += 1;
             start = end;
         }
-        try self.pruneStale(allocator, entries, written.items, result);
+        try self.pruneStale(allocator, entries, written.items, &genres, result);
         try self.settleArtwork(entries);
         try self.library.database.exec("COMMIT;");
     }
@@ -464,7 +543,8 @@ pub const Projection = struct {
             \\       t.track_number, t.disc_number, t.date, t.compilation,
             \\       t.musicbrainz_release_id, t.musicbrainz_recording_id,
             \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id,
-            \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL
+            \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL,
+            \\       t.track_total, t.disc_total, t.explicit, t.release_type
             \\FROM locations l
             \\JOIN files f ON f.id = l.file_id
             \\LEFT JOIN observed_file_tags t ON t.file_id = l.file_id
@@ -482,6 +562,11 @@ pub const Projection = struct {
             \\FROM orca_metadata_values WHERE file_id = ?1;
         );
         defer overrides.deinit();
+
+        var genres = try self.library.database.prepare(
+            "SELECT value FROM observed_file_genres WHERE file_id = ?1 ORDER BY ordinal;",
+        );
+        defer genres.deinit();
 
         var entries: std.ArrayList(Entry) = .empty;
         while (try statement.step() == .row) {
@@ -518,6 +603,7 @@ pub const Projection = struct {
                     .date => extra.date = value,
                     .compilation => extra.compilation = value,
                     .musicbrainz_release_id => extra.musicbrainz_release_id = value,
+                    .explicit => extra.explicit = value,
                     .musicbrainz_recording_id,
                     .musicbrainz_release_group_id,
                     .musicbrainz_release_track_id,
@@ -555,8 +641,20 @@ pub const Projection = struct {
                 .musicbrainz_release_id = try dupeNullable(allocator, statement, 16),
                 .musicbrainz_recording_id = try dupeNullable(allocator, statement, 17),
                 .embedded_artwork = statement.columnInt64(20) != 0,
+                .track_total = optionalInt64(statement, 21),
+                .disc_total = optionalInt64(statement, 22),
+                .explicit = if (statement.columnIsNull(23))
+                    null
+                else
+                    std.enums.fromInt(metadata.Explicit, statement.columnInt64(23)),
+                .release_type = try dupeNullable(allocator, statement, 24),
             };
             self.applyExtraOverrides(&entry, extra);
+            var values: std.ArrayList([]const u8) = .empty;
+            try genres.bindInt64(1, file_id);
+            while (try genres.step() == .row) try values.append(allocator, try allocator.dupe(u8, genres.columnText(0)));
+            try genres.reset();
+            entry.genres = values.items;
             entry.missing_metadata = health.missingMetadata(entry.title, entry.artist, entry.album);
             // A blank row helps nobody find their music; the filename often
             // carries the title the tags lack.
@@ -576,6 +674,7 @@ pub const Projection = struct {
         folder: Folder,
         entries: []Entry,
         written: *std.ArrayList(WrittenPosition),
+        genres: *database.GenreWriter,
         result: *Result,
     ) !void {
         const identity = try self.resolveRelease(allocator, folder, entries);
@@ -596,6 +695,7 @@ pub const Projection = struct {
             .is_compilation = identity.is_compilation,
             .disc_count = identity.disc_count,
             .musicbrainz_release_id = identity.musicbrainz_release_id,
+            .release_type = identity.release_type,
         });
         result.releases_written += 1;
         if (identity.is_compilation) result.compilations += 1;
@@ -604,6 +704,7 @@ pub const Projection = struct {
         const positions = try groupByPosition(allocator, entries);
 
         var tracks: std.ArrayList(database.TrackInput) = .empty;
+        var track_genres: std.ArrayList([]const []const u8) = .empty;
         for (positions) |position| {
             const members = position.entries.items;
             const lead = &entries[members[0]];
@@ -628,7 +729,12 @@ pub const Projection = struct {
                 .track_number = position.number,
                 .disc_number = position.disc,
                 .preferred_file_id = preferred.file_id,
+                .track_total = statedTotal(entries, members, preferred, .track) orelse
+                    countedTrackTotal(positions, position.disc),
+                .disc_total = statedTotal(entries, members, preferred, .disc) orelse identity.disc_count,
+                .explicit = statedAdvisory(entries, members, preferred),
             });
+            try track_genres.append(allocator, statedGenres(entries, members, preferred));
 
             for (members) |index| {
                 const entry = &entries[index];
@@ -676,6 +782,8 @@ pub const Projection = struct {
             }
         }
         try self.library.tracks.upsertTracksLocked(tracks.items);
+        for (positions, track_genres.items) |position, values|
+            try genres.projectAt(allocator, release_id, position.disc, position.number, values);
         result.tracks_written += @intCast(tracks.items.len);
     }
 
@@ -757,6 +865,7 @@ pub const Projection = struct {
 
         const release_mbid = consensus(entries, mbReleaseId);
         const release_date = consensus(entries, releaseDate);
+        const release_type = consensus(entries, releaseType);
         var disc_count: i64 = 1;
         for (entries) |entry| disc_count = @max(disc_count, entry.disc_number orelse 1);
 
@@ -789,6 +898,7 @@ pub const Projection = struct {
             .album_artist_mbid = album_artist_mbid,
             .release_date = release_date,
             .musicbrainz_release_id = release_mbid,
+            .release_type = release_type,
             .is_compilation = is_compilation,
             .disc_count = disc_count,
         };
@@ -885,6 +995,10 @@ fn mbReleaseId(entry: Entry) ?[]const u8 {
 
 fn releaseDate(entry: Entry) ?[]const u8 {
     return entry.date;
+}
+
+fn releaseType(entry: Entry) ?[]const u8 {
+    return entry.release_type;
 }
 
 fn year(date: []const u8) []const u8 {
@@ -1793,12 +1907,12 @@ test "projected tracks are searchable by title, artist, album and album artist" 
     var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
     _ = try projection.run(.all);
     for ([_][]const u8{
-        "title:Glory",
-        "artist:Portishead",
-        "album:Dummy",
-        "album_artist:Collective",
+        "Glory",
+        "Portishead",
+        "Dummy",
+        "Collective",
     }) |query| {
-        var page = try library.tracks.search(testing.allocator, query, 8, 0);
+        var page = try library.tracks.search(testing.allocator, query, .{ .limit = 8 });
         defer page.deinit();
         try testing.expectEqual(@as(usize, 1), page.items.len);
         try testing.expectEqualStrings("Glory Box", page.items[0].title);
@@ -2647,4 +2761,194 @@ test "removing an unknown root is refused" {
     );
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM locations;"));
     try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM library_roots;"));
+}
+
+fn genreNames(library: *database.LibraryDatabase, track_id: i64) ![]const u8 {
+    var names = try library.genres.forTrack(testing.allocator, track_id);
+    defer names.deinit();
+    var joined: std.ArrayList(u8) = .empty;
+    errdefer joined.deinit(testing.allocator);
+    for (names.items, 0..) |name, index| {
+        if (index != 0) try joined.appendSlice(testing.allocator, "; ");
+        try joined.appendSlice(testing.allocator, name.name);
+    }
+    return joined.toOwnedSlice(testing.allocator);
+}
+
+fn expectGenres(library: *database.LibraryDatabase, track_id: i64, expected: []const u8) !void {
+    const names = try genreNames(library, track_id);
+    defer testing.allocator.free(names);
+    try testing.expectEqualStrings(expected, names);
+}
+
+fn trackOf(library: *database.LibraryDatabase, file_id: i64) !i64 {
+    var buffer: [96]u8 = undefined;
+    return scalar(library.database, try std.fmt.bufPrintSentinel(
+        &buffer,
+        "SELECT id FROM tracks WHERE preferred_file_id = {d};",
+        .{file_id},
+        0,
+    ));
+}
+
+test "the projection gives a Track its file's folded genres and follows the file when it is retagged" {
+    var library = try openTestLibrary("file:orca-projection-genres?mode=memory&cache=shared");
+    defer library.close();
+    var tags = albumTags("Album", 1);
+    tags.genres = &.{ "Hip-Hop/Rap", "hip hop", "R&B/Soul" };
+    const first = try observe(&library, "/m/Artist/Album/1.flac", .flac, tags);
+    tags.track_number = 2;
+    tags.genres = &.{"HipHop"};
+    const second = try observe(&library, "/m/Artist/Album/2.flac", .flac, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    try expectGenres(&library, try trackOf(&library, first), "Hip Hop; R&B/Soul");
+    try expectGenres(&library, try trackOf(&library, second), "Hip Hop");
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM genres;"));
+
+    tags.track_number = 1;
+    tags.genres = &.{"Jazz"};
+    try library.observed_tags.upsert(.{ .file_id = first, .values = tags });
+    _ = try projection.run(.{ .files = &.{first} });
+    try expectGenres(&library, try trackOf(&library, first), "Jazz");
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM genres WHERE name = 'R&B/Soul';"));
+
+    tags.genres = &.{};
+    try library.observed_tags.upsert(.{ .file_id = first, .values = tags });
+    _ = try projection.run(.{ .files = &.{first} });
+    try expectGenres(&library, try trackOf(&library, first), "");
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "the projection splits a file's comma and semicolon genre lists while the observed value stays whole" {
+    var library = try openTestLibrary("file:orca-projection-split-genres?mode=memory&cache=shared");
+    defer library.close();
+    var tags = albumTags("Album", 1);
+    tags.genres = &.{ "Indie Rock, Rock, Alternative Rock", "Folk, World, & Country; rock" };
+    const file = try observe(&library, "/m/Artist/Album/1.flac", .flac, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    try expectGenres(&library, try trackOf(&library, file), "Indie Rock; Rock; Alternative Rock; Folk, World, & Country");
+    try testing.expectEqual(@as(i64, 1), try scalar(
+        library.database,
+        "SELECT count(*) FROM observed_file_genres WHERE value = 'Indie Rock, Rock, Alternative Rock';",
+    ));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "user genres split a listed name and refuse more than the per-Track limit after splitting" {
+    var library = try openTestLibrary("file:orca-projection-user-split-genres?mode=memory&cache=shared");
+    defer library.close();
+    const file = try observe(&library, "/m/Artist/Album/1.flac", .flac, albumTags("Album", 1));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const track = try trackOf(&library, file);
+
+    try library.genres.setTrackGenres(testing.allocator, &.{track}, &.{ "Shoegaze, Dream Pop", "shoegaze" });
+    try expectGenres(&library, track, "Shoegaze; Dream Pop");
+    try testing.expectError(error.InvalidGenre, library.genres.setTrackGenres(testing.allocator, &.{track}, &.{ "Jazz", " ; , " }));
+    try testing.expectError(
+        error.TooManyGenres,
+        library.genres.setTrackGenres(testing.allocator, &.{track}, &.{ "A, B, C, D, E, F, G, H", "I; J; K; L; M; N; O; P; Q" }),
+    );
+    try expectGenres(&library, track, "Shoegaze; Dream Pop");
+}
+
+test "a Track's user genres outrank its file's on a rescan and follow it to a new Release" {
+    var library = try openTestLibrary("file:orca-projection-user-genres?mode=memory&cache=shared");
+    defer library.close();
+    var files: [1]i64 = undefined;
+    var tags = albumTags("Old Title", 1);
+    tags.genres = &.{"Rock"};
+    files[0] = try observe(&library, "/m/Artist/Old Title/1.flac", .flac, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    const old = try trackOf(&library, files[0]);
+    try library.genres.setTrackGenres(testing.allocator, &.{old}, &.{ "Shoegaze", "dream pop" });
+    try expectGenres(&library, old, "Shoegaze; Dream Pop");
+
+    tags.genres = &.{"Metal"};
+    try library.observed_tags.upsert(.{ .file_id = files[0], .values = tags });
+    _ = try projection.run(.all);
+    try testing.expectEqual(old, try trackOf(&library, files[0]));
+    try expectGenres(&library, old, "Shoegaze; Dream Pop");
+
+    tags.album = "New Title";
+    try library.observed_tags.upsert(.{ .file_id = files[0], .values = tags });
+    _ = try projection.run(.all);
+    const moved = try trackOf(&library, files[0]);
+    try testing.expect(moved != old);
+    try expectGenres(&library, moved, "Shoegaze; Dream Pop");
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM genres WHERE name IN ('Rock', 'Metal');"));
+
+    try library.genres.setTrackGenres(testing.allocator, &.{moved}, &.{});
+    try expectGenres(&library, moved, "Metal");
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM genres WHERE name = 'Shoegaze';"));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a genre lists only its Tracks, their Releases and the Artists owning them, with counts that agree" {
+    var library = try openTestLibrary("file:orca-projection-genre-browse?mode=memory&cache=shared");
+    defer library.close();
+    var tags = albumTags("One", 1);
+    tags.genres = &.{ "Rock", "Jazz" };
+    _ = try observe(&library, "/m/Artist/One/1.flac", .flac, tags);
+    tags.track_number = 2;
+    tags.genres = &.{"Rock"};
+    tags.artist = "Guest";
+    _ = try observe(&library, "/m/Artist/One/2.flac", .flac, tags);
+    tags = albumTags("Two", 1);
+    tags.album_artist = "Other";
+    tags.artist = "Other";
+    tags.genres = &.{"Jazz"};
+    _ = try observe(&library, "/m/Other/Two/1.flac", .flac, tags);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+
+    var genres = try library.genres.page(testing.allocator, .{ .sort = .track_count });
+    defer genres.deinit();
+    try testing.expectEqual(@as(usize, 2), genres.items.len);
+    const jazz = genres.items[0];
+    try testing.expectEqualStrings("Jazz", jazz.name);
+    try testing.expectEqual(@as(u32, 2), jazz.track_count);
+    try testing.expectEqual(@as(u32, 2), jazz.release_count);
+    try testing.expectEqual(@as(u32, 2), jazz.artist_count);
+    const rock = genres.items[1];
+    try testing.expectEqualStrings("Rock", rock.name);
+    try testing.expectEqual(@as(u32, 2), rock.track_count);
+    try testing.expectEqual(@as(u32, 1), rock.release_count);
+    try testing.expectEqual(@as(u32, 2), rock.artist_count);
+    try testing.expectEqual(@as(u64, 1), try library.genres.count(testing.allocator, "ro"));
+
+    for (genres.items) |genre| {
+        const tracks = try library.tracks.countMatching(.{ .genre_id = genre.id });
+        try testing.expectEqual(@as(u64, genre.track_count), tracks);
+        var track_page = try library.tracks.page(testing.allocator, .{ .genre_id = genre.id, .sort = .title });
+        defer track_page.deinit();
+        try testing.expectEqual(@as(usize, genre.track_count), track_page.items.len);
+        const releases = try library.releases.countMatching(.{ .genre_id = genre.id });
+        try testing.expectEqual(@as(u64, genre.release_count), releases);
+        var release_page = try library.releases.page(testing.allocator, .{ .genre_id = genre.id });
+        defer release_page.deinit();
+        try testing.expectEqual(@as(usize, genre.release_count), release_page.items.len);
+        const artists = try library.artists.countMatching(.{ .genre_id = genre.id });
+        try testing.expectEqual(@as(u64, genre.artist_count), artists);
+        var artist_page = try library.artists.page(testing.allocator, .{ .genre_id = genre.id, .sort = .track_count });
+        defer artist_page.deinit();
+        try testing.expectEqual(@as(usize, genre.artist_count), artist_page.items.len);
+        try testing.expect(artist_page.items[0].track_count >= artist_page.items[artist_page.items.len - 1].track_count);
+    }
+
+    var release_page = try library.releases.page(testing.allocator, .{ .genre_id = rock.id });
+    defer release_page.deinit();
+    var counts = try library.genres.forRelease(testing.allocator, release_page.items[0].id, 8);
+    defer counts.deinit();
+    try testing.expectEqual(@as(usize, 2), counts.items.len);
+    try testing.expectEqualStrings("Rock", counts.items[0].name);
+    try testing.expectEqual(@as(u32, 2), counts.items[0].track_count);
+    var artwork = try library.genres.artworkReleases(testing.allocator, jazz.id, 8);
+    defer artwork.deinit();
+    try testing.expectEqual(@as(usize, 0), artwork.ids.len);
 }

@@ -14,6 +14,7 @@ const NativeDevice = extern struct {
     id: u64,
     name_len: u16,
     name: [256]u8,
+    kind: u8,
 };
 extern fn orca_pw_discover([*]NativeDevice, u32, *u32) c_int;
 pub const RenderFn = *const fn (?*anyopaque, [*]f32, u32, u32) callconv(.c) void;
@@ -66,6 +67,7 @@ pub const Backend = struct {
                 .id = source.id,
                 .name = source.name,
                 .name_len = source.name_len,
+                .kind = std.enums.fromInt(contract.DeviceKind, source.kind) orelse .unknown,
             };
         }
         return count;
@@ -284,6 +286,57 @@ test "PipeWire callback bridge fills interleaved float output" {
 
     orca_pw_fill(null, null, &samples, 3, 2);
     for (samples) |sample| try std.testing.expectEqual(@as(f32, 0), sample);
+}
+
+const SpaDictItem = extern struct { key: [*:0]const u8, value: [*:0]const u8 };
+const SpaDict = extern struct { flags: u32 = 0, n_items: u32, items: [*]const SpaDictItem };
+extern fn orca_pw_properties_kind(?*const SpaDict) u8;
+
+fn kindOf(items: []const SpaDictItem) contract.DeviceKind {
+    const dict: SpaDict = .{ .n_items = @intCast(items.len), .items = items.ptr };
+    return std.enums.fromInt(contract.DeviceKind, orca_pw_properties_kind(&dict)).?;
+}
+
+test "a PipeWire output's kind comes from its bus, Bluetooth and HDMI hints, or the null-sink factory" {
+    try std.testing.expectEqual(.virtual, kindOf(&.{
+        .{ .key = "factory.name", .value = "support.null-audio-sink" },
+        .{ .key = "media.class", .value = "Audio/Sink" },
+    }));
+    try std.testing.expectEqual(.usb, kindOf(&.{
+        .{ .key = "device.api", .value = "alsa" },
+        .{ .key = "device.bus", .value = "usb" },
+        .{ .key = "api.alsa.path", .value = "hw:II,0" },
+        .{ .key = "device.profile.name", .value = "HiFi: Headphones: sink" },
+    }));
+    try std.testing.expectEqual(.pci, kindOf(&.{
+        .{ .key = "device.bus", .value = "pci" },
+        .{ .key = "api.alsa.path", .value = "front:1" },
+        .{ .key = "device.profile.name", .value = "analog-stereo" },
+    }));
+    try std.testing.expectEqual(.hdmi, kindOf(&.{
+        .{ .key = "device.bus", .value = "pci" },
+        .{ .key = "api.alsa.path", .value = "hdmi:0,1" },
+    }));
+    try std.testing.expectEqual(.hdmi, kindOf(&.{
+        .{ .key = "device.bus", .value = "pci" },
+        .{ .key = "device.profile.name", .value = "hdmi-stereo-extra1" },
+    }));
+    try std.testing.expectEqual(.bluetooth, kindOf(&.{
+        .{ .key = "factory.name", .value = "api.bluez5.a2dp.sink" },
+        .{ .key = "api.bluez5.address", .value = "00:11:22:33:44:55" },
+    }));
+    try std.testing.expectEqual(.bluetooth, kindOf(&.{
+        .{ .key = "device.api", .value = "bluez5" },
+    }));
+    try std.testing.expectEqual(.bluetooth, kindOf(&.{
+        .{ .key = "device.bus", .value = "bluetooth" },
+    }));
+    try std.testing.expectEqual(.unknown, kindOf(&.{
+        .{ .key = "factory.name", .value = "support.node.driver" },
+        .{ .key = "media.class", .value = "Audio/Sink" },
+    }));
+    try std.testing.expectEqual(.unknown, kindOf(&.{}));
+    try std.testing.expectEqual(@as(u8, 0), orca_pw_properties_kind(null));
 }
 
 test "PipeWire callback consumes Orca prepared blocks without allocation" {

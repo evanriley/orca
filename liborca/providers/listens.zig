@@ -95,9 +95,9 @@ pub const ListenTracker = struct {
         return self.end();
     }
 
-    /// The engine publishes the queue cursor and the audible serial as two
-    /// atomics, so one sample taken during a transition can pair the new
-    /// track with the old serial. Only a pair seen twice in a row is trusted.
+    /// One sample taken during a transition can pair the new serial with the
+    /// previous entry's position, so only a pair seen twice in a row is
+    /// trusted.
     fn tryOpen(self: *ListenTracker, previous: Sample, sample: Sample) void {
         const track_id = sample.track_id orelse return;
         if (sample.drained) return;

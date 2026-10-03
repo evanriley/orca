@@ -87,7 +87,7 @@ pub const TrackSourceOpener = struct {
     }
 
     /// Opens a queue entry's audio, already carrying its own loudness
-    /// correction.
+    /// corrections, track and album.
     ///
     /// The correction is attached **here**, at the one place a queue entry
     /// becomes audio, rather than at each caller. Every path that produces a
@@ -96,8 +96,9 @@ pub const TrackSourceOpener = struct {
     /// audible entry — goes through this function, so none of them can forget
     /// to publish one and none of them can publish a stale one.
     ///
-    /// That does mean the engine thread reads two indexed rows and two 64 KiB
-    /// file ranges when it opens an entry. It already resolves the Location
+    /// That does mean the engine thread reads a few indexed rows, one bounded
+    /// statement over the entry's Release, and two 64 KiB file ranges when it
+    /// opens an entry. It already resolves the Location
     /// and opens the file on that lane for the same reason: opening is not the
     /// decode path, it happens once per entry, and it is emphatically not the
     /// render lane. Pre-resolving corrections on the control lane instead
@@ -132,16 +133,20 @@ pub const TrackSourceOpener = struct {
         // cannot vouch for, which is the same answer as one that is absent —
         // and it must never fail the load, because the track is playable
         // either way.
-        session.replay_gain = self.replayGain(
+        const own = self.measurement(
             resolved.file_id,
             observedIdentity(self.io, resolved.uri),
-        ) catch 1;
+        ) catch null;
+        session.replay_gain = .{
+            .track = if (own) |value| value.trackGain() else null,
+            .album = if (own) |value| self.albumGain(ref.track_id, value) catch null else null,
+        };
         return session;
     }
 
-    /// The loudness correction measured from exactly these bytes, or 1.
+    /// The measurement taken from exactly these bytes, or null.
     ///
-    /// Unity covers four different situations on purpose — never analyzed,
+    /// Null covers four different situations on purpose — never analyzed,
     /// analyzed under other parameters, analyzed under an older algorithm, and
     /// analyzed from bytes this file no longer has — because a Player does the
     /// same thing with all four: play at unity. A correction whose provenance
@@ -156,23 +161,104 @@ pub const TrackSourceOpener = struct {
     ///
     /// Reads only the fixed header of the stored result. The rest is a
     /// waveform, and this runs while a track is loading.
-    fn replayGain(
+    fn measurement(
         self: *const TrackSourceOpener,
         file_id: i64,
         source_identity: ?quick_hash.Digest,
-    ) !f32 {
-        const identity = source_identity orelse return 1;
+    ) !?Measurement {
+        const identity = source_identity orelse return null;
         var header: [analysis.encoding.header_size]u8 = undefined;
-        const stored = (try self.analysis_cache.resultInto(
-            analysis.service.diagnosticsKey(file_id, identity, .{}),
-            &header,
-        )) orelse return 1;
-        if (stored < header.len) return 1;
-        const loudness = (try analysis.encoding.decodeLoudness(&header)) orelse return 1;
-        return audio.processing.replayGainMultiplier(
-            loudness.replay_gain_db,
-            loudness.sample_peak,
-        );
+        const key = analysis.service.diagnosticsKey(file_id, identity, .{});
+        const stored = (try self.analysis_cache.resultInto(key, &header)) orelse return null;
+        if (stored < header.len) return null;
+        return try Measurement.decode(&header);
+    }
+
+    /// The album correction for the Release `track_id` belongs to, or null
+    /// when it has none or not every Track of it is measured.
+    ///
+    /// Computed here, at open, from the per-file measurements rather than
+    /// stored per Release, so re-analysing a Track or moving it to another
+    /// Release can never leave a stale album figure behind. The entry's own
+    /// measurement is `entry`, taken from the bytes just opened; every other
+    /// member's is keyed on the identity the Library recorded for its file,
+    /// because opening every file of the album to hash it would cost a disc's
+    /// worth of reads per track.
+    fn albumGain(self: *const TrackSourceOpener, track_id: i64, entry: Measurement) !?f32 {
+        var album: AlbumLoudness = .{ .entry_track_id = track_id, .entry = entry };
+        const selector = analysis.service.diagnosticsSelector(.{});
+        return switch (try self.analysis_cache.visitReleaseMembers(track_id, &selector, &album)) {
+            .visited => album.gain(),
+            .no_release, .too_large => null,
+        };
+    }
+};
+
+/// What one stored diagnostics header says about loudness.
+const Measurement = struct {
+    /// Null when the analysis found no gated loudness: audio too quiet or too
+    /// short for any 400 ms block to pass the absolute gate.
+    loudness: ?analysis.encoding.Loudness,
+    sample_peak: f32,
+
+    fn decode(header: []const u8) !Measurement {
+        return .{
+            .loudness = try analysis.encoding.decodeLoudness(header),
+            .sample_peak = try analysis.encoding.decodeSamplePeak(header),
+        };
+    }
+
+    fn trackGain(self: Measurement) ?f32 {
+        const loudness = self.loudness orelse return null;
+        return audio.processing.replayGainMultiplier(loudness.replay_gain_db, loudness.sample_peak);
+    }
+};
+
+/// The loudness of a Release as one programme: the duration-weighted mean of
+/// its Tracks' integrated loudness in the energy domain, toward the canonical
+/// target, capped against the loudest Track's peak.
+///
+/// BS.1770 gating over the album's merged blocks would be exact, but the
+/// stored result keeps only each file's gated loudness. A Track with no gated
+/// loudness contributes no energy and no duration, as its blocks would fall
+/// below the absolute gate of the album too, while its peak still counts.
+const AlbumLoudness = struct {
+    entry_track_id: i64,
+    entry: Measurement,
+    weighted_energy: f64 = 0,
+    weighted_seconds: f64 = 0,
+    peak: f32 = 0,
+    complete: bool = true,
+
+    pub fn visit(self: *AlbumLoudness, member: database.ReleaseMember) !void {
+        const measured = if (member.track_id == self.entry_track_id)
+            self.entry
+        else
+            Measurement.decode(member.result) catch {
+                self.complete = false;
+                return;
+            };
+        self.add(measured, member.duration_ms);
+    }
+
+    fn add(self: *AlbumLoudness, measured: Measurement, duration_ms: ?i64) void {
+        self.peak = @max(self.peak, measured.sample_peak);
+        const loudness = measured.loudness orelse return;
+        const milliseconds = duration_ms orelse 0;
+        if (milliseconds <= 0) {
+            self.complete = false;
+            return;
+        }
+        const seconds = @as(f64, @floatFromInt(milliseconds)) / 1000;
+        self.weighted_energy += seconds * std.math.pow(f64, 10, @as(f64, loudness.integrated_lufs) / 10);
+        self.weighted_seconds += seconds;
+    }
+
+    fn gain(self: *const AlbumLoudness) ?f32 {
+        if (!self.complete or self.weighted_seconds == 0) return null;
+        const lufs = 10 * std.math.log10(self.weighted_energy / self.weighted_seconds);
+        const target: f64 = (analysis.diagnostics.Parameters{}).replay_gain_target_lufs;
+        return audio.processing.replayGainMultiplier(@floatCast(target - lufs), self.peak);
     }
 };
 
@@ -237,7 +323,7 @@ test "a track id resolves to a self-contained decodable session" {
     // Self-contained: nothing backing the decoder lives in this frame.
     try testing.expect(session.owned_source != null);
     var samples: [64]f32 = undefined;
-    try testing.expect(try session.readFrames(&samples, true) > 0);
+    try testing.expect(try session.readFrames(&samples, .track) > 0);
 }
 
 test "a track whose file has gone marks its location missing and fails typed" {

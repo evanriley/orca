@@ -11,6 +11,11 @@ const runtime_watch = @import("runtime_watch.zig");
 
 const AcoustIdSubmittablePage = runtime.AcoustIdSubmittablePage;
 const AnalysisRequest = runtime.AnalysisRequest;
+const ArtistInfoOptions = runtime.ArtistInfoOptions;
+const ArtistInfoOutcome = runtime.ArtistInfoOutcome;
+const ReleaseInfoOptions = runtime.ReleaseInfoOptions;
+const ReleaseInfoOutcome = runtime.ReleaseInfoOutcome;
+const GenreFillOptions = runtime.GenreFillOptions;
 const BackfillRequest = runtime.BackfillRequest;
 const DuplicateScanRequest = runtime.DuplicateScanRequest;
 const JobHandle = runtime.JobHandle;
@@ -193,6 +198,79 @@ fn lyricsWorker(self: *OrcaRuntime, job_handle: JobHandle) !*JobWorker {
         if (!worker.job.eql(job_handle)) continue;
         if (worker.kind() != .lyrics) return error.NotALyricsJob;
         return worker;
+    }
+    return error.StaleHandle;
+}
+
+pub fn startArtistInfoFetch(self: *OrcaRuntime, library: LibraryHandle, artist_id: i64, options: ArtistInfoOptions) !JobHandle {
+    try runtime.requireRunning(self);
+    const language: job_worker.ArtistInfoLanguage = try .init(options.language);
+    _ = try (try runtime.libraryDatabase(self, library)).artist_info.subject(artist_id) orelse return error.UnknownArtist;
+    return startJobWorker(self, library, .{ .artist_info = .{
+        .artist_id = artist_id,
+        .language = language,
+        .force = options.force,
+        .offline = options.offline,
+        .include_releases = options.include_releases,
+        .setup = try infoSetup(self),
+    } });
+}
+
+fn infoSetup(self: *OrcaRuntime) !job_worker.ArtistInfoSetup {
+    return .{
+        .io = try runtime_listens.networkIo(self),
+        .identity = self.client_identity orelse return error.ClientIdentityRequired,
+        .hooks = self.matching_hooks,
+        .musicbrainz_server = self.musicbrainz_server,
+        .wikidata_server = self.wikidata_server,
+        .commons_server = self.wikimedia_commons_server,
+        .wikipedia_server = self.wikipedia_server,
+        .listenbrainz_server = self.listenbrainz_server,
+        .listenbrainz_labs_server = self.listenbrainz_labs_server,
+    };
+}
+
+pub fn startReleaseInfoFetch(self: *OrcaRuntime, library: LibraryHandle, release_id: i64, options: ReleaseInfoOptions) !JobHandle {
+    try runtime.requireRunning(self);
+    const language: job_worker.ArtistInfoLanguage = try .init(options.language);
+    _ = try (try runtime.libraryDatabase(self, library)).release_info.subject(release_id) orelse return error.UnknownRelease;
+    return startJobWorker(self, library, .{ .release_info = .{
+        .target = .{ .release = release_id },
+        .language = language,
+        .force = options.force,
+        .offline = options.offline,
+        .setup = try infoSetup(self),
+    } });
+}
+
+pub fn startGenreFill(self: *OrcaRuntime, library: LibraryHandle, options: GenreFillOptions) !JobHandle {
+    try runtime.requireRunning(self);
+    if (options.limit == 0 or options.limit > database.repository.max_page) return error.InvalidLimit;
+    _ = try runtime.libraryDatabase(self, library);
+    return startJobWorker(self, library, .{ .release_info = .{
+        .target = .{ .missing_genres = options.limit },
+        .language = try .init("en"),
+        .offline = options.offline,
+        .setup = try infoSetup(self),
+    } });
+}
+
+pub fn jobReleaseInfoOutcome(self: *OrcaRuntime, job_handle: JobHandle) !ReleaseInfoOutcome {
+    if (queuedHostJob(self, job_handle)) return error.NotAReleaseInfoJob;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        if (worker.kind() != .release_info) return error.NotAReleaseInfoJob;
+        return worker.artistInfoOutcome();
+    }
+    return error.StaleHandle;
+}
+
+pub fn jobArtistInfoOutcome(self: *OrcaRuntime, job_handle: JobHandle) !ArtistInfoOutcome {
+    if (queuedHostJob(self, job_handle)) return error.NotAnArtistInfoJob;
+    for (self.job_workers.items) |worker| {
+        if (!worker.job.eql(job_handle)) continue;
+        if (worker.kind() != .artist_info) return error.NotAnArtistInfoJob;
+        return worker.artistInfoOutcome();
     }
     return error.StaleHandle;
 }
@@ -411,7 +489,7 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
         else
             try library_database.recording_verifications.verifiableCount(matching.setup.scope, matching.limit),
         .acoustid_submission => try library_database.acoustid_submissions.submittableCount(),
-        .scan, .reconcile, .projection, .lyrics => null,
+        .scan, .reconcile, .projection, .lyrics, .artist_info, .release_info => null,
     };
 }
 

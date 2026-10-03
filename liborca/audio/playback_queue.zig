@@ -46,7 +46,18 @@ pub const TrackOpener = struct {
     }
 };
 
-const SerialRecord = struct { serial: u32 = 0, position: u32 = 0 };
+const SerialRecord = struct {
+    serial: u32,
+    position: u32,
+
+    fn pack(self: SerialRecord) u64 {
+        return @as(u64, self.serial) << 32 | self.position;
+    }
+
+    fn unpack(word: u64) SerialRecord {
+        return .{ .serial = @truncate(word >> 32), .position = @truncate(word) };
+    }
+};
 
 pub const Snapshot = struct {
     entries: u32,
@@ -88,15 +99,16 @@ pub const PlaybackQueue = struct {
     order: std.ArrayList(u32) = .empty,
     /// Audible position, decode position and entry count are read by the
     /// control lane while the engine thread is running, so the three values a
-    /// snapshot needs are atomics. Everything else here is plain state guarded
-    /// by the `quiesce`/`release` handshake.
+    /// snapshot needs are atomics, as are the serial records queue history
+    /// resolves. Everything else here is plain state guarded by the
+    /// `quiesce`/`release` handshake.
     cursor: std.atomic.Value(u32) = .init(0),
     decode_position: std.atomic.Value(u32) = .init(0),
     entry_count: std.atomic.Value(u32) = .init(0),
     repeat: RepeatMode = .off,
     shuffle: bool = false,
     prng: std.Random.DefaultPrng,
-    serials: [serial_map_len]SerialRecord = @splat(.{}),
+    serials: [serial_map_len]std.atomic.Value(u64) = @splat(.init(0)),
     serial_head: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, seed: u64) PlaybackQueue {
@@ -231,6 +243,10 @@ pub const PlaybackQueue = struct {
             }
         }
         self.publishCount();
+        for (&self.serials) |*slot| {
+            const record = SerialRecord.unpack(slot.load(.monotonic));
+            if (record.serial != 0 and record.position == position) slot.store(0, .release);
+        }
         self.shiftPositions(position + 1, 1, .down, pending);
     }
 
@@ -243,10 +259,54 @@ pub const PlaybackQueue = struct {
         }.apply;
         self.setCursor(shift(self.cursorPosition(), from, by, direction));
         self.decode_position.store(shift(self.decodePosition(), from, by, direction), .release);
-        for (&self.serials) |*record| {
-            if (record.serial != 0) record.position = shift(record.position, from, by, direction);
+        for (&self.serials) |*slot| {
+            const record = SerialRecord.unpack(slot.load(.monotonic));
+            if (record.serial == 0) continue;
+            slot.store(SerialRecord.pack(.{
+                .serial = record.serial,
+                .position = shift(record.position, from, by, direction),
+            }), .release);
         }
         if (pending) |value| value.* = shift(value.*, from, by, direction);
+    }
+
+    /// Moves the entry at playback position `from` so that it plays at `to`.
+    /// Under shuffle only the permutation changes, so turning shuffle off puts
+    /// entries back in list order. Every position — the cursors, recorded
+    /// serials, and `pending` if the caller holds one — follows the entry it
+    /// named. The caller refuses moves the engine has committed to.
+    pub fn move(self: *PlaybackQueue, from: u32, to: u32, pending: ?*u32) !void {
+        const count = self.entries.items.len;
+        if (from >= count or to >= count) return error.PositionOutOfRange;
+        if (from == to) return;
+        if (self.order.items.len == count)
+            moveItem(u32, self.order.items, from, to)
+        else
+            moveItem(TrackRef, self.entries.items, from, to);
+        self.setCursor(movedPosition(self.cursorPosition(), from, to));
+        self.decode_position.store(movedPosition(self.decodePosition(), from, to), .release);
+        for (&self.serials) |*slot| {
+            const record = SerialRecord.unpack(slot.load(.monotonic));
+            if (record.serial == 0) continue;
+            slot.store(SerialRecord.pack(.{
+                .serial = record.serial,
+                .position = movedPosition(record.position, from, to),
+            }), .release);
+        }
+        if (pending) |value| value.* = movedPosition(value.*, from, to);
+    }
+
+    fn moveItem(comptime T: type, items: []T, from: u32, to: u32) void {
+        if (from < to)
+            std.mem.rotate(T, items[from .. to + 1], 1)
+        else
+            std.mem.rotate(T, items[to .. from + 1], from - to);
+    }
+
+    fn movedPosition(position: u32, from: u32, to: u32) u32 {
+        if (position == from) return to;
+        const remaining = if (position > from) position - 1 else position;
+        return if (remaining >= to) remaining + 1 else remaining;
     }
 
     pub fn clear(self: *PlaybackQueue) void {
@@ -268,6 +328,9 @@ pub const PlaybackQueue = struct {
     pub fn setShuffle(self: *PlaybackQueue, enabled: bool) !void {
         if (enabled == self.shuffle) return;
         const playing = self.entryIndex(self.cursorPosition());
+        var serial_entries: [serial_map_len]?u32 = undefined;
+        for (&self.serials, &serial_entries) |*slot, *entry|
+            entry.* = self.entryIndex(SerialRecord.unpack(slot.load(.monotonic)).position);
         self.shuffle = enabled;
         if (enabled) {
             try self.regenerateOrder();
@@ -279,6 +342,28 @@ pub const PlaybackQueue = struct {
             if (playing) |index| self.setCursor(index);
         }
         self.decode_position.store(self.cursorPosition(), .release);
+        self.remapSerials(&serial_entries);
+    }
+
+    fn positionOfEntry(self: *const PlaybackQueue, entry: u32) ?u32 {
+        if (entry >= self.entries.items.len) return null;
+        if (self.order.items.len != self.entries.items.len) return entry;
+        for (self.order.items, 0..) |value, position| {
+            if (value == entry) return @intCast(position);
+        }
+        return null;
+    }
+
+    fn remapSerials(self: *PlaybackQueue, entries: *const [serial_map_len]?u32) void {
+        for (&self.serials, entries) |*slot, entry| {
+            const record = SerialRecord.unpack(slot.load(.monotonic));
+            if (record.serial == 0) continue;
+            const position = if (entry) |index| self.positionOfEntry(index) else null;
+            slot.store(if (position) |value|
+                SerialRecord.pack(.{ .serial = record.serial, .position = value })
+            else
+                0, .release);
+        }
     }
 
     fn regenerateOrder(self: *PlaybackQueue) !void {
@@ -353,13 +438,14 @@ pub const PlaybackQueue = struct {
     /// Records that blocks carrying `serial` belong to queue `position`.
     pub fn noteEntrySerial(self: *PlaybackQueue, serial: u32, position: u32) void {
         if (serial == 0) return;
-        self.serials[self.serial_head] = .{ .serial = serial, .position = position };
+        self.serials[self.serial_head].store(SerialRecord.pack(.{ .serial = serial, .position = position }), .release);
         self.serial_head = (self.serial_head + 1) % serial_map_len;
     }
 
     pub fn positionForSerial(self: *const PlaybackQueue, serial: u32) ?u32 {
         if (serial == 0) return null;
-        for (self.serials) |record| {
+        for (&self.serials) |*slot| {
+            const record = SerialRecord.unpack(slot.load(.acquire));
             if (record.serial == serial) return record.position;
         }
         return null;
@@ -374,7 +460,7 @@ pub const PlaybackQueue = struct {
     }
 
     fn forgetSerials(self: *PlaybackQueue) void {
-        self.serials = @splat(.{});
+        for (&self.serials) |*slot| slot.store(0, .release);
         self.serial_head = 0;
     }
 };
@@ -569,4 +655,102 @@ test "removing an entry before the cursor keeps the cursor on the same track" {
     try queue.removeAt(0, null);
     try testing.expectEqual(@as(u32, 1), queue.cursorPosition());
     try testing.expectEqual(@as(i64, 3), queue.current().?.track_id);
+}
+
+test "removing an entry forgets its serial rather than naming the entry that takes its place" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 2);
+    queue.noteEntrySerial(7, 0);
+    queue.noteEntrySerial(8, 2);
+    try queue.removeAt(0, null);
+    try testing.expectEqual(@as(?u32, null), queue.positionForSerial(7));
+    try testing.expectEqual(@as(?u32, 1), queue.positionForSerial(8));
+}
+
+fn movedIds(before: []const i64, from: u32, to: u32, out: []i64) []i64 {
+    var list: std.ArrayList(i64) = .initBuffer(out);
+    list.appendSliceAssumeCapacity(before);
+    const moved = list.orderedRemove(from);
+    list.insertAssumeCapacity(to, moved);
+    return list.items;
+}
+
+test "moving an upcoming entry earlier and later keeps the cursor, decode position and every serial naming the same entries" {
+    for ([_]bool{ false, true }) |shuffled| {
+        var queue = PlaybackQueue.init(testing.allocator, 0xbeef);
+        defer queue.deinit();
+        const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+        defer testing.allocator.free(refs);
+        try queue.replace(refs, 2);
+        if (shuffled) try queue.setShuffle(true);
+        const serials = [_]u32{ 11, 12, 13, 15, 17 };
+        const serial_positions = [_]u32{ 1, 2, 3, 5, 7 };
+        for (serials, serial_positions) |serial, position| queue.noteEntrySerial(serial, position);
+        queue.advanceDecodeTo(3);
+        var pending: u32 = 4;
+
+        var serial_tracks: [serials.len]i64 = undefined;
+        for (serials, &serial_tracks) |serial, *track|
+            track.* = queue.refAt(queue.positionForSerial(serial).?).?.track_id;
+        const playing = queue.current().?.track_id;
+        const decoding = queue.refAt(queue.decodePosition()).?.track_id;
+        const lined_up = queue.refAt(pending).?.track_id;
+
+        for ([_][2]u32{ .{ 7, 5 }, .{ 5, 7 }, .{ 6, 4 } }) |step| {
+            var before_buffer: [8]i64 = undefined;
+            var expected_buffer: [8]i64 = undefined;
+            var after_buffer: [8]i64 = undefined;
+            const before = trackIdsInOrder(&queue, &before_buffer);
+            const expected = movedIds(before, step[0], step[1], &expected_buffer);
+            try queue.move(step[0], step[1], &pending);
+            try testing.expectEqualSlices(i64, expected, trackIdsInOrder(&queue, &after_buffer));
+            try testing.expectEqual(playing, queue.current().?.track_id);
+            try testing.expectEqual(decoding, queue.refAt(queue.decodePosition()).?.track_id);
+            try testing.expectEqual(lined_up, queue.refAt(pending).?.track_id);
+            for (serials, serial_tracks) |serial, track|
+                try testing.expectEqual(track, queue.refAt(queue.positionForSerial(serial).?).?.track_id);
+        }
+        try testing.expectEqual(@as(u32, 2), queue.cursorPosition());
+        try testing.expectEqual(@as(u32, 3), queue.decodePosition());
+        try testing.expectEqual(@as(u32, 5), pending);
+
+        if (shuffled) {
+            try queue.setShuffle(false);
+            var buffer: [8]i64 = undefined;
+            try testing.expectEqualSlices(i64, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, trackIdsInOrder(&queue, &buffer));
+            try testing.expectEqual(playing, queue.current().?.track_id);
+        }
+    }
+}
+
+test "moving into the played region shifts the cursor with the playing entry" {
+    var queue = PlaybackQueue.init(testing.allocator, 1);
+    defer queue.deinit();
+    const refs = try makeRefs(testing.allocator, &.{ 1, 2, 3, 4, 5, 6 });
+    defer testing.allocator.free(refs);
+    try queue.replace(refs, 3);
+    queue.noteEntrySerial(20, 3);
+    queue.advanceDecodeTo(4);
+    queue.noteEntrySerial(21, 4);
+
+    try queue.move(5, 1, null);
+    var buffer: [8]i64 = undefined;
+    try testing.expectEqualSlices(i64, &.{ 1, 6, 2, 3, 4, 5 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(u32, 4), queue.cursorPosition());
+    try testing.expectEqual(@as(i64, 4), queue.current().?.track_id);
+    try testing.expectEqual(@as(i64, 5), queue.refAt(queue.decodePosition()).?.track_id);
+    try testing.expectEqual(@as(?u32, 4), queue.positionForSerial(20));
+    try testing.expectEqual(@as(?u32, 5), queue.positionForSerial(21));
+
+    try queue.move(0, 5, null);
+    try testing.expectEqualSlices(i64, &.{ 6, 2, 3, 4, 5, 1 }, trackIdsInOrder(&queue, &buffer));
+    try testing.expectEqual(@as(u32, 3), queue.cursorPosition());
+    try testing.expectEqual(@as(i64, 4), queue.current().?.track_id);
+    try testing.expectEqual(@as(?u32, 3), queue.positionForSerial(20));
+    try testing.expectEqual(@as(?u32, 4), queue.positionForSerial(21));
+    try testing.expectError(error.PositionOutOfRange, queue.move(6, 0, null));
+    try testing.expectError(error.PositionOutOfRange, queue.move(0, 6, null));
 }

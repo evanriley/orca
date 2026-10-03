@@ -1,0 +1,66 @@
+{
+ "batchcomplete": "",
+ "query": {
+  "normalized": [
+   {
+    "from": "File:Amine at the SXSW Youtube Party 2017 (33556409746).jpg",
+    "to": "File:Amine at the SXSW Youtube Party 2017 (33556409746).jpg"
+   }
+  ],
+  "pages": {
+   "57361048": {
+    "pageid": 57361048,
+    "ns": 6,
+    "title": "File:Amine at the SXSW Youtube Party 2017 (33556409746).jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4f/Amine_at_the_SXSW_Youtube_Party_2017_(33556409746).jpg/800px-Amine_at_the_SXSW_Youtube_Party_2017_(33556409746).jpg",
+      "thumbwidth": 800,
+      "thumbheight": 1200,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/4f/Amine_at_the_SXSW_Youtube_Party_2017_(33556409746).jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File:Amine_at_the_SXSW_Youtube_Party_2017_(33556409746).jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=57361048",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "DateTime": {
+        "value": "2017-03-20 10:00:00",
+        "source": "mediawiki-metadata",
+        "hidden": ""
+       },
+       "Credit": {
+        "value": "<a rel=\"nofollow\" class=\"external text\" href=\"https://www.flickr.com/photos/example/33556409746/\">Amine at the SXSW Youtube Party 2017</a>",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "<a rel=\"nofollow\" class=\"external text\" href=\"https://www.flickr.com/people/example\">Example Photographer</a> &amp; friends",
+        "source": "commons-desc-page"
+       },
+       "LicenseShortName": {
+        "value": "CC BY 2.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by/2.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "AttributionRequired": {
+        "value": "true",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Copyrighted": {
+        "value": "True",
+        "source": "commons-desc-page",
+        "hidden": ""
+       }
+      }
+     }
+    ]
+   }
+  }
+ }
+}

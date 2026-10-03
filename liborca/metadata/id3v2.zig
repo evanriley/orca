@@ -437,6 +437,10 @@ fn applyUserText(
         if (tags.compilation == null) tags.compilation = isTruthy(value);
         return;
     }
+    if (eqlAny(description, advisory_descriptions)) {
+        if (tags.explicit == null) tags.explicit = model.Explicit.fromAdvisoryText(value);
+        return;
+    }
 }
 
 const recording_id_descriptions: []const []const u8 = &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" };
@@ -444,6 +448,7 @@ const release_id_descriptions: []const []const u8 = &.{ "MusicBrainz Album Id", 
 const release_group_id_descriptions: []const []const u8 = &.{ "MusicBrainz Release Group Id", "MUSICBRAINZ_RELEASEGROUPID" };
 const release_track_id_descriptions: []const []const u8 = &.{ "MusicBrainz Release Track Id", "MUSICBRAINZ_RELEASETRACKID" };
 const album_artist_id_descriptions: []const []const u8 = &.{ "MusicBrainz Album Artist Id", "MUSICBRAINZ_ALBUMARTISTID" };
+const advisory_descriptions: []const []const u8 = &.{"ITUNESADVISORY"};
 const musicbrainz_ufid_owner = "http://musicbrainz.org";
 
 fn applyUniqueFileIdentifier(
@@ -714,10 +719,15 @@ pub const Rewrite = struct {
 /// trailer otherwise. The tag keeps its version -- 2.3 stays 2.3, 2.4 stays
 /// 2.4 -- and a stream with none gets 2.4. Only the frames for the changed
 /// fields are replaced; every other frame is copied byte for byte.
+///
+/// `genres` replaces every `TCON` frame with one: its genres NUL-separated in
+/// 2.4, and joined with `; ` in 2.3, which has no multi-value text frames. The
+/// ID3v1 trailer's genre byte is left as it was.
 pub fn rewrite(
     allocator: std.mem.Allocator,
     readable: source.ReadableSource,
     changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
 ) !Rewrite {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -753,13 +763,29 @@ pub fn rewrite(
             if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidTagValue;
         }
     }
+    if (genres) |genre_change| {
+        if (genre_change.before.len != current.tags.genres.len) return error.MetadataPreconditionChanged;
+        for (genre_change.before, current.tags.genres) |expected, value| {
+            if (!std.mem.eql(u8, expected, value)) return error.MetadataPreconditionChanged;
+        }
+        if (genre_change.after.len == 0) return error.InvalidTagValue;
+        for (genre_change.after) |value| {
+            if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null or
+                !std.unicode.utf8ValidateSlice(value))
+                return error.InvalidTagValue;
+        }
+    }
 
     var body: std.ArrayList(u8) = .empty;
-    if (loaded) |tag| try copyUnchangedFrames(scratch, &body, tag, changes);
-    if (current.origin == .trailer) try appendTrailerFrames(scratch, &body, major, current.tags, changes);
+    if (loaded) |tag| try copyUnchangedFrames(scratch, &body, tag, changes, genres != null);
+    if (current.origin == .trailer) try appendTrailerFrames(scratch, &body, major, current.tags, changes, genres != null);
     for (changes) |change| {
         const value = change.after orelse continue;
         try appendChangedFrames(scratch, &body, major, change.field, value, current.tags);
+    }
+    if (genres) |genre_change| {
+        const separator = if (major >= 4) "\x00" else "; ";
+        try appendTextFrame(scratch, &body, major, "TCON", try std.mem.join(scratch, separator, genre_change.after));
     }
     try body.appendNTimes(scratch, 0, write_padding);
     if (body.items.len >= 1 << 28) return error.Id3v2TagTooLarge;
@@ -820,6 +846,7 @@ fn currentValue(allocator: std.mem.Allocator, tags: model.ObservedTags, field: m
         .musicbrainz_release_group_id => tags.musicbrainz_release_group_id,
         .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
         .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
+        .explicit => if (tags.explicit) |advisory| advisory.advisoryText() else null,
     };
 }
 
@@ -840,6 +867,7 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .musicbrainz_release_group_id,
         .musicbrainz_release_track_id,
         .musicbrainz_album_artist_id,
+        .explicit,
         => &.{},
     };
 }
@@ -853,6 +881,7 @@ fn userTextDescriptions(field: mutation.Field) []const []const u8 {
         .musicbrainz_release_group_id => release_group_id_descriptions,
         .musicbrainz_release_track_id => release_track_id_descriptions,
         .musicbrainz_album_artist_id => album_artist_id_descriptions,
+        .explicit => advisory_descriptions,
         .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => &.{},
     };
 }
@@ -861,8 +890,15 @@ fn userTextDescriptions(field: mutation.Field) []const []const u8 {
 /// under a description the reader accepts, and a recording ID also in a `UFID`
 /// frame owned by MusicBrainz, so those two frame types are told apart by
 /// description and owner, and every other description or owner is kept.
-fn replaced(allocator: std.mem.Allocator, frame: []const u8, major: u8, changes: []const mutation.Change) !bool {
+fn replaced(
+    allocator: std.mem.Allocator,
+    frame: []const u8,
+    major: u8,
+    changes: []const mutation.Change,
+    replaces_genres: bool,
+) !bool {
     const identifier = frame[0..4];
+    if (replaces_genres and std.mem.eql(u8, identifier, "TCON")) return true;
     for (changes) |change| {
         for (fieldFrames(change.field, major)) |candidate| {
             if (std.mem.eql(u8, identifier, candidate)) return true;
@@ -918,6 +954,7 @@ fn copyUnchangedFrames(
     body: *std.ArrayList(u8),
     tag: LoadedTag,
     changes: []const mutation.Change,
+    replaces_genres: bool,
 ) !void {
     var position: usize = 0;
     while (position + 10 <= tag.span.len) {
@@ -931,7 +968,7 @@ fn copyUnchangedFrames(
         if (declared > tag.span.len - position - 10) return error.TruncatedId3v2Tag;
         const frame = tag.span[position .. position + 10 + declared];
         position += frame.len;
-        if (try replaced(allocator, frame, tag.major, changes)) continue;
+        if (try replaced(allocator, frame, tag.major, changes, replaces_genres)) continue;
         try body.appendSlice(allocator, frame);
     }
 }
@@ -942,6 +979,7 @@ fn appendTrailerFrames(
     major: u8,
     tags: model.ObservedTags,
     changes: []const mutation.Change,
+    replaces_genres: bool,
 ) !void {
     for ([_]mutation.Field{ .title, .artist, .album, .date, .track_number }) |field| {
         if (changesField(changes, field)) continue;
@@ -951,6 +989,7 @@ fn appendTrailerFrames(
         else
             try appendChangedFrames(allocator, body, major, field, value, tags);
     }
+    if (replaces_genres) return;
     for (tags.genres) |genre| try appendTextFrame(allocator, body, major, "TCON", genre);
 }
 
@@ -989,6 +1028,7 @@ fn appendChangedFrames(
         .musicbrainz_release_group_id,
         .musicbrainz_release_track_id,
         .musicbrainz_album_artist_id,
+        .explicit,
         => try appendUserText(allocator, body, major, userTextDescriptions(field)[0], value),
     }
 }
@@ -1127,6 +1167,7 @@ fn updatedTrailer(legacy: id3v1.Tag, original: [128]u8, changes: []const mutatio
             .musicbrainz_release_group_id,
             .musicbrainz_release_track_id,
             .musicbrainz_album_artist_id,
+            .explicit,
             => {},
         }
     }
@@ -1394,11 +1435,41 @@ test "tagged MP3 fixture reads its real ID3v2 frames" {
     try std.testing.expect(try prefixLength(file.readable()) > 10);
 }
 
+test "a TXXX ITUNESADVISORY of 1 marks an MP3 explicit, and a rewrite to 2 reads back clean" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const original = try readFixtureBytes("fixtures/audio/explicit-reference.mp3");
+    defer std.testing.allocator.free(original);
+    var memory = source.MemorySource{ .bytes = original };
+    const tags = (try read(allocator, memory.readable())).?;
+    try std.testing.expectEqual(@as(?model.Explicit, .explicit), tags.explicit);
+    try std.testing.expectEqual(@as(?u32, 2), tags.track_total);
+
+    const rewritten = try applyRewrite(allocator, original, &.{
+        .{ .field = .explicit, .before = "1", .after = "2" },
+    });
+    var rewritten_memory = source.MemorySource{ .bytes = rewritten };
+    const after = (try read(allocator, rewritten_memory.readable())).?;
+    try std.testing.expectEqual(@as(?model.Explicit, .clean), after.explicit);
+    try std.testing.expectEqualStrings("Explicit MP3", after.title.?);
+}
+
 /// Applies a planned rewrite to `original` in memory, as `stageMpeg` does on
 /// disk, so the result can be read back.
 fn applyRewrite(allocator: std.mem.Allocator, original: []const u8, changes: []const mutation.Change) ![]u8 {
+    return applyGenreRewrite(allocator, original, changes, null);
+}
+
+fn applyGenreRewrite(
+    allocator: std.mem.Allocator,
+    original: []const u8,
+    changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
+) ![]u8 {
     var memory = source.MemorySource{ .bytes = original };
-    const planned = try rewrite(allocator, memory.readable(), changes);
+    const planned = try rewrite(allocator, memory.readable(), changes, genres);
     defer planned.deinit();
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -1498,6 +1569,7 @@ test "a rewrite refuses a change whose before no longer matches the file" {
         std.testing.allocator,
         memory.readable(),
         &.{.{ .field = .title, .before = "Not what the file says", .after = "New" }},
+        null,
     ));
 }
 
@@ -1582,6 +1654,75 @@ test "a recording id is added to a tag that had none, and an earlier MusicBrainz
     });
     try std.testing.expectEqualStrings(second_id, (try expectTags(allocator, second)).?.musicbrainz_recording_id.?);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, second, "http://musicbrainz.org"));
+}
+
+fn expectGenreRewrite(comptime major: u8) !void {
+    const genre_alias = @import("genre_alias.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const title = try buildFrame(allocator, "TIT2", major, "\x00Kept");
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TCON", major, "\x00(17)"));
+    try frames.appendSlice(allocator, title);
+    try frames.appendSlice(allocator, try buildFrame(allocator, "TCON", major, "\x00Indie Rock, Rock"));
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, major, 0, frames.items), "\xff\xfb\x90\x64audio" });
+    const genres: mutation.GenreChange = .{
+        .before = &.{ "Rock", "Indie Rock, Rock" },
+        .after = &.{ "Shoegaze", "Dream Pop" },
+    };
+
+    const written = try applyGenreRewrite(allocator, original, &.{}, genres);
+    try std.testing.expectEqual(major, written[3]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "TCON"));
+    try std.testing.expect(std.mem.indexOf(u8, written, title) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Indie") == null);
+    try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    if (major >= 4) {
+        try std.testing.expectEqual(@as(usize, 2), after.genres.len);
+        try std.testing.expectEqualStrings("Shoegaze", after.genres[0]);
+        try std.testing.expectEqualStrings("Dream Pop", after.genres[1]);
+    } else {
+        try std.testing.expectEqual(@as(usize, 1), after.genres.len);
+        try std.testing.expectEqualStrings("Shoegaze; Dream Pop", after.genres[0]);
+    }
+    const canonical = try genre_alias.foldAll(allocator, after.genres);
+    try std.testing.expectEqual(@as(usize, 2), canonical.len);
+    try std.testing.expectEqualStrings("Shoegaze", canonical[0].name);
+    try std.testing.expectEqualStrings("Dream Pop", canonical[1].name);
+
+    try std.testing.expectError(error.MetadataPreconditionChanged, applyGenreRewrite(allocator, original, &.{}, .{
+        .before = &.{"Rock"},
+        .after = &.{"Shoegaze"},
+    }));
+}
+
+test "a genre write replaces every TCON frame with one holding each genre as a separate 2.4 value" {
+    try expectGenreRewrite(4);
+}
+
+test "a genre write replaces every TCON frame with one semicolon list in 2.3, which canonicalisation splits" {
+    try expectGenreRewrite(3);
+}
+
+test "a genre write to a trailer-only stream puts the genres in the new ID3v2 tag and leaves the trailer's genre byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{ "\xff\xfb\x90\x64audio", &trailer });
+
+    const written = try applyGenreRewrite(allocator, original, &.{}, .{ .before = &.{"Rock"}, .after = &.{ "Jazz", "Blues" } });
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written, "TCON"));
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings("Song", after.title.?);
+    try std.testing.expectEqualStrings("1999", after.date.?);
+    try std.testing.expectEqual(@as(usize, 2), after.genres.len);
+    try std.testing.expectEqualStrings("Jazz", after.genres[0]);
+    try std.testing.expectEqualStrings("Blues", after.genres[1]);
 }
 
 fn legacyTrailer(year: []const u8) ![128]u8 {

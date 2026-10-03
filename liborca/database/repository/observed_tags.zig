@@ -75,10 +75,10 @@ pub const ObservedTagsRepository = struct {
             \\    musicbrainz_recording_id, musicbrainz_release_id,
             \\    musicbrainz_release_group_id, musicbrainz_release_track_id,
             \\    musicbrainz_artist_id, musicbrainz_album_artist_id,
-            \\    artwork_mime_type, artwork_byte_size, artwork_kind, observed_at
+            \\    artwork_mime_type, artwork_byte_size, artwork_kind, explicit, observed_at
             \\) VALUES (
             \\    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            \\    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28,
+            \\    ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
             \\    unixepoch()
             \\) ON CONFLICT(file_id) DO UPDATE SET
             \\    title=excluded.title, artist=excluded.artist, album=excluded.album,
@@ -100,6 +100,7 @@ pub const ObservedTagsRepository = struct {
             \\    artwork_mime_type=excluded.artwork_mime_type,
             \\    artwork_byte_size=excluded.artwork_byte_size,
             \\    artwork_kind=excluded.artwork_kind,
+            \\    explicit=excluded.explicit,
             \\    observed_at=excluded.observed_at;
         );
         defer statement.deinit();
@@ -150,6 +151,7 @@ pub const ObservedTagsRepository = struct {
                 try statement.bindOptionalInt64(27, null);
                 try statement.bindOptionalInt64(28, null);
             }
+            try statement.bindOptionalInt64(29, if (tags.explicit) |advisory| @intFromEnum(advisory) else null);
             if (try statement.step() != .done) return error.SqlFailed;
             try statement.reset();
 
@@ -195,7 +197,7 @@ pub const ObservedTagsRepository = struct {
             \\       musicbrainz_recording_id, musicbrainz_release_id,
             \\       musicbrainz_release_group_id, musicbrainz_release_track_id,
             \\       musicbrainz_artist_id, musicbrainz_album_artist_id,
-            \\       artwork_mime_type, artwork_byte_size, artwork_kind
+            \\       artwork_mime_type, artwork_byte_size, artwork_kind, explicit
             \\FROM observed_file_tags WHERE file_id=?1;
         );
         defer statement.deinit();
@@ -235,6 +237,10 @@ pub const ObservedTagsRepository = struct {
             .musicbrainz_release_track_id = try dupeNullable(scratch, statement, 21),
             .musicbrainz_artist_id = try dupeNullable(scratch, statement, 22),
             .musicbrainz_album_artist_id = try dupeNullable(scratch, statement, 23),
+            .explicit = if (statement.columnIsNull(27))
+                null
+            else
+                std.enums.fromInt(metadata.Explicit, statement.columnInt64(27)),
         };
         if (try dupeNullable(scratch, statement, 24)) |mime_type| values.artwork = .{
             .mime_type = mime_type,

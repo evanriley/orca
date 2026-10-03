@@ -80,7 +80,7 @@ pub const Database = struct {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
 
-    /// Register a deterministic, one-argument text function on this connection.
+    /// Register a deterministic text function on this connection.
     ///
     /// This exists so a migration can call Zig from SQL. The artist key is
     /// computed by one function in one place (`text_key.zig`); a backfill that
@@ -91,13 +91,14 @@ pub const Database = struct {
     pub fn createTextFunction(
         self: Database,
         name: [:0]const u8,
+        argument_count: c_int,
         context: ?*anyopaque,
         function: TextFunction,
     ) Error!void {
         if (c.sqlite3_create_function_v2(
             self.handle,
             name.ptr,
-            1,
+            argument_count,
             c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC,
             context,
             function,
@@ -114,12 +115,20 @@ pub const TextFunction = *const fn (
     [*c]?*c.sqlite3_value,
 ) callconv(.c) void;
 
-/// The argument of a one-argument text function, as UTF-8 bytes.
+/// An argument of a text function, as UTF-8 bytes.
 pub fn valueText(value: ?*c.sqlite3_value) []const u8 {
     const raw = c.sqlite3_value_text(value);
     if (raw == null) return "";
     const len: usize = @intCast(c.sqlite3_value_bytes(value));
     return @as([*]const u8, @ptrCast(raw))[0..len];
+}
+
+pub fn valueInt64(value: ?*c.sqlite3_value) i64 {
+    return c.sqlite3_value_int64(value);
+}
+
+pub fn resultNull(context: ?*c.sqlite3_context) void {
+    c.sqlite3_result_null(context);
 }
 
 /// Hand a copy of a caller-owned slice to SQLite, which frees it.

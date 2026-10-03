@@ -44,6 +44,11 @@ Recording; one Recording may appear several times.
 - `playerPlayPlaylist(player, library, io, playlist_id, start)` replaces the
   queue with the available entries; `start` indexes those. A playlist with
   no available entry is `error.PlaylistEmpty` and leaves the queue as it was.
+- `playerSaveQueueAsPlaylist(player, library, name)` creates a playlist from
+  the current queue entry and every entry after it, in playback order, and
+  returns its id. Entries of another Library and Tracks without a Recording
+  are left out. A queue with no current entry is `error.QueueEmpty`; a
+  failed insert deletes the new playlist.
 
 ```sh
 zig build run -- playlists DATABASE
@@ -57,6 +62,34 @@ zig build run -- play-tracks DATABASE --playlist=ID --device=ID
 
 Removing a root and scanning the same folder again creates new Recordings, so
 the entries of the old ones become unavailable.
+
+## Metadata
+
+A playlist also has a description of at most 4,096 bytes
+(`error.PlaylistDescriptionTooLong`), a pin, a love, and up to eight tags
+(`error.TooManyPlaylistTags`) of 1 to 64 bytes each after trimming
+(`error.InvalidPlaylistTag`), kept in the order given with repeats dropped.
+A playlist `playlist-import` creates is marked imported. Listing filters by
+kind, pin and creator and by a name substring, and sorts by name, last
+update, creation or entry count; smart playlists sort after manual ones by
+entry count, because their count is evaluated, not stored.
+
+## Smart playlists
+
+A smart playlist's entries are the Tracks its rules match when it is read,
+one per Recording, in the rules' order and up to their limit. Inserting,
+removing or moving its entries is `error.PlaylistIsSmart`; asking for a manual
+playlist's rules gives null. A stored rule set that no longer compiles fails
+the read with `error.InvalidStoredPlaylist`. Playback and M3U export take the
+entries as they are at that moment. The rules format is in
+[api.md](api.md#smart-playlist-rules).
+
+```sh
+zig build run -- playlist-update DATABASE ID --description=TEXT --pin --love --tags=focus,lofi
+zig build run -- playlists DATABASE --smart
+zig build run -- smart-playlist-create DATABASE NAME RULES_FILE
+zig build run -- smart-playlist-count DATABASE RULES_FILE
+```
 
 ## M3U import
 

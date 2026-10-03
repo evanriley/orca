@@ -20,6 +20,7 @@ const RemovedRoot = runtime.RemovedRoot;
 const TagWriteChange = runtime.TagWriteChange;
 const TagWriteConflict = runtime.TagWriteConflict;
 const TagWriteFile = runtime.TagWriteFile;
+const TagWriteGenres = runtime.TagWriteGenres;
 const TagWritePlan = runtime.TagWritePlan;
 const TagWriteSkip = runtime.TagWriteSkip;
 const TagWriteSkipReason = runtime.TagWriteSkipReason;
@@ -39,6 +40,8 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
         },
         .compilation => if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1"))
             return error.InvalidEditValue,
+        .explicit => if (!std.mem.eql(u8, value, "0") and !std.mem.eql(u8, value, "1") and
+            !std.mem.eql(u8, value, "2")) return error.InvalidEditValue,
         .musicbrainz_recording_id,
         .musicbrainz_release_id,
         .musicbrainz_release_group_id,
@@ -65,6 +68,7 @@ fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field
         .musicbrainz_release_group_id => tags.musicbrainz_release_group_id,
         .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
         .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
+        .explicit => if (tags.explicit) |advisory| advisory.advisoryText() else null,
     };
 }
 
@@ -152,6 +156,43 @@ pub fn libraryRootPage(
         limit,
         offset,
     );
+}
+
+pub fn libraryFolderPage(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    root_id: i64,
+    relative_path: []const u8,
+    limit: u32,
+    offset: u32,
+) !database.repository.FolderPage {
+    return (try runtime.libraryDatabase(self, library)).locations.folderPage(
+        self.allocator,
+        root_id,
+        relative_path,
+        limit,
+        offset,
+    );
+}
+
+pub fn playerPlayFolder(
+    self: *OrcaRuntime,
+    player: runtime.PlayerHandle,
+    library: LibraryHandle,
+    io: std.Io,
+    root_id: i64,
+    relative_path: []const u8,
+    shuffle: bool,
+) !void {
+    const track_ids = try (try runtime.libraryDatabase(self, library)).locations.folderTrackIds(
+        self.allocator,
+        root_id,
+        relative_path,
+    );
+    defer self.allocator.free(track_ids);
+    if (track_ids.len == 0) return error.FolderEmpty;
+    try self.playerSetShuffle(player, shuffle);
+    return self.playerPlayTracks(player, library, io, track_ids, 0);
 }
 
 pub fn libraryTrackSummary(
@@ -311,15 +352,25 @@ pub fn planTagWrite(
                 .provenance = value.provenance,
             });
         }
-        if (changes.items.len == 0) continue;
+        const genres = try userGenreChange(scratch, library_database, file_id, track_ids, tags.genres);
+        if (changes.items.len == 0 and genres == null) continue;
         try actions.append(scratch, .{ .write_tags = .{
             .path = location.uri,
             .expected = try metadata.file_mutation.identity(io, location.uri),
             .changes = changes.items,
+            .genres = genres,
         } });
         try locations.append(scratch, location);
         try planned_file_ids.append(scratch, file_id);
-        try files.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .changes = shown.items });
+        try files.append(owned, .{
+            .file_id = file_id,
+            .path = try owned.dupe(u8, location.uri),
+            .changes = shown.items,
+            .genres = if (genres) |change| .{
+                .before = try dupeValues(owned, change.before),
+                .after = try dupeValues(owned, change.after),
+            } else null,
+        });
     }
     preview.skipped = skipped.items;
     preview.conflicts = conflicts.items;
@@ -364,6 +415,42 @@ pub fn planTagWrite(
     return preview;
 }
 
+fn userGenreChange(
+    allocator: std.mem.Allocator,
+    library_database: *database.LibraryDatabase,
+    file_id: i64,
+    track_ids: []const i64,
+    observed: []const []const u8,
+) !?metadata.mutation.GenreChange {
+    const backed = try library_database.tracks.idsForFile(allocator, file_id);
+    for (track_ids) |track_id| {
+        if (std.mem.indexOfScalar(i64, backed, track_id) == null) continue;
+        const names = try library_database.genres.forTrack(allocator, track_id);
+        if (names.items.len == 0 or names.items[0].provenance != .user) continue;
+        const after = try allocator.alloc([]const u8, names.items.len);
+        for (after, names.items) |*name, genre| name.* = genre.name;
+        if (try sameGenres(allocator, observed, after)) return null;
+        return .{ .before = observed, .after = after };
+    }
+    return null;
+}
+
+fn sameGenres(allocator: std.mem.Allocator, left: []const []const u8, right: []const []const u8) !bool {
+    const left_genres = try metadata.genre_alias.foldAll(allocator, left);
+    const right_genres = try metadata.genre_alias.foldAll(allocator, right);
+    if (left_genres.len != right_genres.len) return false;
+    for (left_genres, right_genres) |left_genre, right_genre| {
+        if (!std.mem.eql(u8, left_genre.key, right_genre.key)) return false;
+    }
+    return true;
+}
+
+fn dupeValues(allocator: std.mem.Allocator, values: []const []const u8) ![]const []const u8 {
+    const copies = try allocator.alloc([]const u8, values.len);
+    for (copies, values) |*copy, value| copy.* = try allocator.dupe(u8, value);
+    return copies;
+}
+
 pub fn startTagWrite(
     self: *OrcaRuntime,
     library: LibraryHandle,
@@ -396,6 +483,20 @@ pub fn discardTagWrite(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64)
         pending.destroy(self.control_threaded.io());
         candidate.* = null;
         return;
+    }
+    return error.UnknownTagWritePlan;
+}
+
+pub fn tagWriteGenres(self: *OrcaRuntime, library: LibraryHandle, plan_id: u64, file_id: i64) !?TagWriteGenres {
+    _ = try runtime.libraryDatabase(self, library);
+    for (self.pending_tag_writes) |held| {
+        const pending = held orelse continue;
+        if (pending.plan.id != plan_id or !pending.library.eql(library)) continue;
+        const index = std.mem.indexOfScalar(i64, pending.file_ids, file_id) orelse return null;
+        return switch (pending.plan.actions[index]) {
+            .write_tags => |write| write.genres,
+            .move => null,
+        };
     }
     return error.UnknownTagWritePlan;
 }

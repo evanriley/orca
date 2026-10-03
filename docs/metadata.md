@@ -34,7 +34,8 @@ or Artist when the edit says so. Editable fields are title, artist, album, album
 artist, track number, disc number, date and compilation, the fields the
 projection groups and orders by, and the MusicBrainz recording, release,
 release-group, release-track and album-artist IDs, which must be lowercase
-UUIDs; `metadata.Field` appends new ones, because
+UUIDs, and the parental advisory (`0`, `1` or `2`; see
+[Parental advisory](#parental-advisory)); `metadata.Field` appends new ones, because
 `orca_metadata_values.field` stores them by number. `orca-cli edit` and the
 `orca-gtk` tag editor drive it; the recording ID is `--recording-id` there,
 and the editor's MusicBrainz Recording field for a single track.
@@ -184,6 +185,50 @@ than every other pending proposal of the file. A file accepted at one
 confidence is therefore accepted at every lower one. `confidentCount` runs
 the same selection, so it is what `acceptConfident` accepts.
 
+## Parental advisory
+
+`metadata.Explicit` is a Track's parental advisory: `unknown` when no file
+states one, `none`, `explicit`, or `clean` for an edited version. The readers
+map the iTunes advisory number, 0 none, 1 or 4 explicit, 2 clean, from:
+
+- MP4: the `rtng` atom, or an `ITUNESADVISORY` freeform atom;
+- ID3v2: a `TXXX` frame described `ITUNESADVISORY`;
+- Vorbis comments: an `ITUNESADVISORY` comment, in any case.
+
+Any other value states nothing. The projection takes the preferred file's
+advisory, else the first member file's that states one. A user edit
+(`metadata.Field.explicit`, `orca-cli edit --explicit=yes|no|clean`) stores
+`1`, `0` or `2` and outranks the files; `write-tags` writes it back as the same
+`TXXX` frame or Vorbis comment. `Explicit.advisoryText` and
+`fromAdvisoryText` convert between the enum and that text, and are the only
+place the numbers are spelled.
+
+## Genres
+
+A Track's genres are kept in order in `track_genres` with their
+`Provenance`: every genre its file's tags give, or up to 16 the user set. The
+readers report each genre value as the file stores it: repeated `GENRE`
+comments, ID3v2 `TCON` values split on NUL, MP4 `©gen` and `gnre`.
+`observed_file_genres` keeps those values whole.
+
+`metadata/genre_alias.zig` turns the values into genres. A value that lists
+several genres with commas or semicolons (`Indie Rock, Rock, Alternative
+Rock`, `Rock; Pop`) is split into them, and a slash never splits, so
+`R&B/Soul` and `Hip-Hop/Rap` stay one value each. A genre whose name contains
+a comma, such as Discogs' `Folk, World, & Country`, is matched whole before
+splitting. Each part is folded to a key, so spellings of one genre
+(`Hip-Hop`, `hip hop`, `Hip-Hop/Rap`) become one genre with one name, and a
+genre listed twice keeps its first place. The rules are in
+[database.md](database.md#genres).
+
+The projection takes genres from the Track's files and does not overwrite a
+Track's `user` genres. `Runtime.librarySetTrackGenres`
+(`orca-cli edit --genre=A;B`) replaces a Track's genres with `user` ones, split
+the same way, which outrank its files until they are cleared with no names
+(`--clear=genre`). `write-tags` writes a Track's `user` genres into its files;
+see [Writing tags back](#writing-tags-back). Genres that came from a file are
+never rewritten.
+
 ## Cover art
 
 Artwork is two questions, and they are answered in two places.
@@ -332,8 +377,8 @@ were found or why none were (see
 
 File writes and moves only execute from an explicitly approved immutable
 `MutationPlan`. A plan deep-copies every action, path, change and value into
-plan-owned storage at construction and seals that copy with a BLAKE3 content
-digest; approval names the digest as well as the plan ID, and `beginExecution`
+plan-owned storage at construction, genres included, and seals that copy with
+a BLAKE3 content digest; approval names the digest as well as the plan ID, and `beginExecution`
 reverifies the seal. A caller therefore cannot preview one plan and execute
 another through an alias it still holds.
 
@@ -525,10 +570,20 @@ never replaced by an automatic value:
   listed in `TagWritePlan.conflicts` with both values and not written; the
   file's other changes are. Editing the field locks the user's choice, which
   the next write applies.
+- A Track's `user` genres replace the file's genres when the two lists differ
+  once split and folded. The genres come from the first selected Track the
+  file backs that has `user` genres. The file's current values are the
+  change's `before`, and the write refuses to start if the file no longer
+  states exactly them.
 
 The returned `TagWritePlan` lists each file's changes with the provenance of
-Orca's value (`user` for an edit, `provider` for a match), the conflicts, the
-files it left out and why, and the plan's ID and digest:
+Orca's value (`user` for an edit, `provider` for a match), its genre change as
+`TagWriteFile.genres` (a `TagWriteGenres` with the file's values before and
+the user's genres after, or null), the conflicts, the files it left out and
+why, and the plan's ID and digest. The digest covers the genre change. The C
+ABI's `orca_tag_write_file_view` does not list a genre change yet, so a file
+whose only change is its genres has a `change_count` of 0 there. The skip
+reasons are:
 
 - `missing`: no present location to write to.
 - `format_not_writable`: no writer for the sniffed format yet. FLAC, MP3 and
@@ -591,18 +646,29 @@ Writers keep what they do not understand:
   replaces only the `TXXX` frames under that description or its Vorbis
   spelling, such as `MUSICBRAINZ_ALBUMID`, in any case. Other `UFID` owners
   and `TXXX` descriptions are kept byte for byte. In 2.3 a `TXXX` frame is
-  UTF-16 with a byte-order mark on each string; in 2.4 it is UTF-8.
+  UTF-16 with a byte-order mark on each string; in 2.4 it is UTF-8. Genres
+  replace every `TCON` frame with one: in 2.4 it holds each genre as a
+  NUL-separated value, and in 2.3, which has no multi-value text frames, the
+  genres joined with `; `, which canonicalisation splits again. The ID3v1
+  trailer's genre byte is kept. A name that `TCON` reserves is written as
+  given but reads back as something else: digits only as that ID3v1 genre
+  (`80` as `Folk`, or nothing for a number past the table up to 255), a name
+  in parentheses without them (`(Live)` as `Live`), and `RX` and `CR` as
+  `Remix` and `Cover`. This is a known, minor limitation.
 - Vorbis comments in FLAC match fields by the same aliases and canonical values
   the reader uses, so a write never duplicates a field under another spelling.
   The release-level IDs are `MUSICBRAINZ_ALBUMID`,
   `MUSICBRAINZ_RELEASEGROUPID`, `MUSICBRAINZ_RELEASETRACKID` and
   `MUSICBRAINZ_ALBUMARTISTID`. A write replaces every entry under the key, in
-  any case, with one.
+  any case, with one. Genres replace every `GENRE` entry, in any case, with
+  one entry per genre.
+- MP4 has no tag writer, so its genres are not written either.
 - The audio bytes are copied unchanged; only the tag region is rewritten.
 
 From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,
-each change labelled `edit` or `match`, a `conflict` line per conflict, and
-the digest; `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
+each change labelled `edit` or `match`, a genre change as
+`genres<TAB>BEFORE -> AFTER<TAB>edit` with each list joined by `; `, a
+`conflict` line per conflict, and the digest; `orca-cli write-tags DATABASE IDS --approve=DIGEST` replans and
 writes it if the digest still matches, `orca-cli undo-tags DATABASE GROUP`
 undoes it or prints `group GROUP was already undone`, and `orca-cli prune-backups DATABASE` deletes the backups that make
 undo possible; see [Pruning backups](#pruning-backups).

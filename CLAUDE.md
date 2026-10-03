@@ -16,11 +16,12 @@ fastest way to load a subsystem's invariants before editing it.
 
 ## Licence
 
-Orca is MPL-2.0 (`LICENSE`): embedders may keep their own code closed, changes
-to Orca's files stay open, and App Store distribution stays possible.
+Orca is MPL-2.0 (`LICENSE`): embedders may keep their own code closed and
+changes to Orca's files stay open. Orca is open source and desktop-only; it is
+not distributed through app stores.
 `liborca`'s dependencies, and anything it vendors or links statically, must
 be permissive (BSD, MIT, Apache-2.0, zlib, CC0, public domain): a GPL or LGPL
-dependency there would bind every embedder and rule out the App Stores. This is
+dependency there would bind every embedder. This is
 why AAC comes from libxaac (Apache-2.0) rather than libfaad2 (GPL) or libfdk-aac
 (FDK licence), and why Chromaprint is built without its bundled LGPL
 resampler, with libsamplerate (BSD-2-Clause) resampling instead; a build step
@@ -119,20 +120,23 @@ zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
 
 ```sh
 zig build run -- demo
-zig build run -- devices
+zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown); the silent sink is virtual
 
 # library
 zig build run -- scan DATABASE ROOT
 zig build run -- roots DATABASE
 zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now
 zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
+zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or subfolders with recursive counts, then files with track ids
 zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
-zig build run -- health DATABASE --summary   # kind, highest severity, count per kind with an issue
+zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only
+zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
+zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at= (- when none)
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
 zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO
@@ -140,22 +144,27 @@ zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-af
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
-zig build run -- artists DATABASE [--filter TEXT] [--limit N] [--offset N]
-zig build run -- releases DATABASE [--artist ID] [--loved] [--limit N] [--offset N]   # a loved Release ends in `loved`
-zig build run -- tracks DATABASE [--artist ID] [--release ID] [--loved] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating, loved
+zig build run -- artists DATABASE [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`
+zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--sort title|artist|year|recently_added|loved|most_played] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances
+zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--explicit] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year; a search ranks by relevance
 zig build run -- track DATABASE ID
+zig build run -- search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]   # kind, id, title, subtitle; each word a word prefix, no syntax
+zig build run -- genres DATABASE [--filter TEXT] [--sort name|tracks] [--limit N] [--offset N]
+zig build run -- genre DATABASE ID   # counts, top artists, most played releases
+zig build run -- genres DATABASE --fill-from-musicbrainz [--limit N] [--offline]   # provider genres on Tracks with none from a file or an edit
+zig build run -- genre-fill DATABASE [on|off]   # automatic MusicBrainz genre fill in artist-info and release-info; on by default
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; --fetch: see LRCLIB below
-zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--clear=FIELD]…   # library only
+zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--genre=A;B] [--clear=FIELD]…   # library only
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
 
 # ratings and playlists -- kept per recording in the library; no file is written
 zig build run -- rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)
-zig build run -- playlists DATABASE
-zig build run -- playlist DATABASE ID [--limit N] [--offset N]
+zig build run -- playlists DATABASE [--smart|--manual] [--pinned] [--created-by-me|--imported] [--sort name|updated|created|entries] [--filter TEXT]   # kind, then imported/pinned/loved/tags= when they apply
+zig build run -- playlist DATABASE ID [--limit N] [--offset N]   # a `playlist` line (kind, description, tags, genres), then entries
 zig build run -- playlist-create DATABASE NAME
 zig build run -- playlist-rename DATABASE ID NAME
 zig build run -- playlist-delete DATABASE ID
@@ -164,21 +173,31 @@ zig build run -- playlist-remove DATABASE ID POSITIONS
 zig build run -- playlist-move DATABASE ID FROM TO
 zig build run -- playlist-import DATABASE FILE [--name=NAME]   # M3U/M3U8; matches by path, then #EXTINF; never scans
 zig build run -- playlist-export DATABASE ID FILE [--relative] [--force]   # atomic; refuses an existing FILE without --force
+zig build run -- playlist-update DATABASE ID [--description=TEXT] [--pin|--unpin] [--love|--unlove] [--tags=A,B]   # at most 8 tags; replaces them
+zig build run -- smart-playlist-create DATABASE NAME RULES_FILE   # version 1 rules JSON, see docs/api.md
+zig build run -- smart-playlist-rules DATABASE ID [RULES_FILE]   # prints the rules, replacing them with RULES_FILE first
+zig build run -- smart-playlist-count DATABASE RULES_FILE   # Tracks the rules match now; stores nothing
 
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
 zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
-    [--replay-gain=off|track] [--volume=LINEAR] [--set-volume=MS:LINEAR]
-    [--eq=PRESET|G1,...,G10[:PREAMP]] [--crossfeed=0..1]   # prints a `signal:` line
+    [--replay-gain=off|track|album] [--volume=LINEAR] [--set-volume=MS:LINEAR]
+    [--eq=PRESET|G1,...,G10[:PREAMP] | --peq=FILE] [--crossfeed=0..1]   # prints a `signal:` line; FILE is EqualizerAPO text
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
     [--lyrics]   # prints a `lyric at=` line as each synced line is heard
+    [--move=MS:FROM:TO]...   # at MS, moves the entry at playback position FROM to TO; prints `move at= ... result=ok|in_use|out_of_range`
+    [--print-history] [--save-queue=NAME]   # at the end: queue history newest first; the queue from the current entry as a playlist
     # records listens in the play history; never sends them
+zig build run -- play-folder DATABASE ROOT_ID PATH --device=ID [--shuffle] [--limit=MS]   # every Track below PATH, recursively in path order
+zig build run -- peq-check FILE   # validates an EqualizerAPO file and prints it back normalised
+zig build run -- peq-response FILE [--rate=HZ]   # HZ<TAB>DB at 32 log-spaced frequencies, preamp included; --rate defaults to 44100
 
 # listening history and ListenBrainz -- token from ORCA_LISTENBRAINZ_TOKEN,
 # server from ORCA_LISTENBRAINZ_URL (https, or http to localhost)
 zig build run -- scrobble DATABASE [--status] [--timeout=MS]   # send queued listens and feedback (nothing queued: no request); --status sends nothing
 zig build run -- feedback DATABASE IDS (--love | --hate | --clear)   # kept locally; scrobble syncs it to ListenBrainz
 zig build run -- love-release DATABASE IDS [--clear]   # album love; kept in the library, never sent
+zig build run -- love-artist DATABASE IDS [--clear]   # artist love; kept in the library, never sent
 
 # MusicBrainz and AcoustID matching -- servers from ORCA_MUSICBRAINZ_URL and
 # ORCA_ACOUSTID_URL (https, or http to localhost); AcoustID application key from
@@ -204,6 +223,17 @@ zig build run -- cover-art DATABASE RELEASE_ID   # prints source=embedded|fetche
 # LRCLIB -- server from ORCA_LRCLIB_URL (https, or http to localhost); caches in
 # the library, never writes a file
 zig build run -- lyrics DATABASE TRACK_ID --fetch   # local synced, LRCLIB synced, local plain, LRCLIB plain; prints outcome=
+
+# Artist and release info -- MusicBrainz, Wikidata, Wikimedia Commons, Wikipedia,
+# ListenBrainz and ListenBrainz Labs, servers from ORCA_MUSICBRAINZ_URL,
+# ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL, ORCA_LISTENBRAINZ_URL
+# and ORCA_LISTENBRAINZ_LABS_URL (https, or http to localhost); kept in the
+# library, never in a file
+zig build run -- artist-info DATABASE ARTIST_ID [--fetch] [--force] [--offline] [--lang=xx] [--include-releases]   # totals (own releases, appearances apart), photo=, biography=, years=, links:, listeners=, related:, outcome=
+zig build run -- artist-photo DATABASE ARTIST_ID --out=PATH
+zig build run -- related DATABASE ARTIST_ID   # score, name, mbid, library=ID, photo=yes|no
+zig build run -- related-photo DATABASE MBID --out=PATH   # a related artist's photo, kept by the artist-info fetch; prints source=, licence=, credit=
+zig build run -- release-info DATABASE RELEASE_ID [--fetch] [--force] [--offline] [--lang=xx]   # description=, release-group=, outcome=
 
 # AcoustID submission of recording IDs from accepted matches or edits -- user key
 # from ORCA_ACOUSTID_USER_KEY; point ORCA_ACOUSTID_URL at a local mock when testing
@@ -233,6 +263,16 @@ ORCA_COVERARTARCHIVE_URL=http://127.0.0.1:PORT zig build run-linux
 
 # Point lyrics fetches at a local mock instead of lrclib.net
 ORCA_LRCLIB_URL=http://127.0.0.1:PORT zig build run-linux
+
+# Point artist info at local mocks instead of wikidata.org, commons.wikimedia.org
+# and wikipedia.org; orca-cli artist-info and orca-gtk's Artist page read them
+ORCA_WIKIDATA_URL=http://127.0.0.1:PORT ORCA_WIKIMEDIA_URL=http://127.0.0.1:PORT \
+  ORCA_WIKIPEDIA_URL=http://127.0.0.1:PORT zig build run -- artist-info DATABASE ARTIST_ID --fetch
+
+# Point related artists at a local mock instead of labs.api.listenbrainz.org;
+# listeners follow ORCA_LISTENBRAINZ_URL
+ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:PORT ORCA_LISTENBRAINZ_URL=http://127.0.0.1:PORT \
+  zig build run -- artist-info DATABASE ARTIST_ID --fetch
 ```
 
 The app opens an output on first play, not at launch, so an idle window does

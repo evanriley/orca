@@ -25,6 +25,9 @@ fn describe(err: anyerror) []const u8 {
         error.LibraryJobRunning => "a job is running on this library",
         error.LibraryScanRunning => "a scan is already running on this library; wait for it to finish",
         error.InvalidReconcileDirectory => "each DIR must be a path relative to the root, with no '.', '..', empty or trailing component",
+        error.InvalidFolderPath => "PATH must be relative to the root, with no '.', '..', empty or trailing component",
+        error.FolderEmpty => "no track below that folder",
+        error.MissingDevice => "play-folder needs --device=ID; scripts/silent-sink.sh prints a silent one",
         error.WatchingUnsupported => "watching folders needs Linux",
         error.InvalidWatchOptions => "--quiet must be at least 1 and --max-delay at least --quiet",
         error.InvalidMaintenanceOptions => "--maintenance must be at least 1",
@@ -32,7 +35,11 @@ fn describe(err: anyerror) []const u8 {
         error.WatcherStopped => "the watcher stopped on an error it could not recover from",
         error.InvalidToken => "ListenBrainz does not accept the token in ORCA_LISTENBRAINZ_TOKEN",
         error.NeedsToken => "set ORCA_LISTENBRAINZ_TOKEN to a ListenBrainz user token",
-        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL and ORCA_LRCLIB_URL must be https, or http to localhost",
+        error.InvalidServerUrl => "ORCA_LISTENBRAINZ_URL, ORCA_MUSICBRAINZ_URL, ORCA_ACOUSTID_URL, ORCA_COVERARTARCHIVE_URL, ORCA_LRCLIB_URL, ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL and ORCA_LISTENBRAINZ_LABS_URL must be https, or http to localhost",
+        error.UnknownArtist => "no artist with that id",
+        error.InvalidLanguage => "--lang must be a Wikipedia language code such as en or pt-br",
+        error.NoArtistPhoto => "the artist has no photo; run artist-info --fetch first",
+        error.OwnNeedsArtist => "--own needs --artist",
         error.InvalidMatchRequest => "--accept-min-score and --cover-art need --release; --reidentify needs --track or --release and takes no --accept-min-score; --track and --release do not go together",
         error.UnknownRelease => "no release with that id",
         error.CoverArtRefused => "the Cover Art Archive's answer was refused: a redirect off archive.org, a refusal, or not a JPEG or PNG of at most 4 MiB",
@@ -70,10 +77,33 @@ fn describe(err: anyerror) []const u8 {
         error.PlaylistEmpty => "the playlist has no entry with a track to play, or the playlist file lists no entries",
         error.PlaylistTooLarge => "a playlist file may be at most 4 MiB and 10000 entries; nothing was imported",
         error.PathAlreadyExists => "that file already exists; pass --force to replace it",
+        error.PlaylistIsSmart => "a smart playlist's entries come from its rules; change them with smart-playlist-rules",
+        error.PlaylistIsManual => "that playlist is not a smart playlist",
+        error.InvalidPlaylistTag => "a tag must not be empty and may be at most 64 bytes",
+        error.TooManyPlaylistTags => "a playlist has at most 8 tags",
+        error.PlaylistDescriptionTooLong => "a description may be at most 4096 bytes",
+        error.NoPlaylistUpdate => "give at least one of --description, --pin, --unpin, --love, --unlove or --tags",
+        error.InvalidSmartPlaylistRules => "the rules are not valid smart playlist JSON (version 1, at most 16 KiB); see docs/api.md",
+        error.UnknownRuleField => "a rule names a field smart playlists do not know (UnknownRuleField)",
+        error.UnknownRuleOperator => "a rule names an operator smart playlists do not know (UnknownRuleOperator)",
+        error.RuleOperatorMismatch => "a rule's operator does not apply to its field (RuleOperatorMismatch)",
+        error.InvalidRuleValue => "a rule's value does not fit its field and operator (InvalidRuleValue)",
+        error.RuleNestingTooDeep => "rules nest at most 4 groups deep (RuleNestingTooDeep)",
+        error.TooManyRules => "a smart playlist has at most 32 rules (TooManyRules)",
+        error.InvalidEqualizerApo => "the file is not EqualizerAPO text Orca reads: Preamp: and Filter: lines, blank lines and # comments only, at most 64 KiB",
+        error.UnsupportedFilterType => "a filter type Orca does not run; it runs PK, PEQ, LS, LSC, HS, HSC, LP, HP and NO, with no dB slope",
+        error.TooManyFilters => "a parametric equalizer has at most 16 filters",
+        error.FilterFrequencyOutOfRange => "a filter's Fc must be 20 to 20000 Hz",
+        error.FilterGainOutOfRange => "a filter's Gain must be within 24 dB",
+        error.FilterQOutOfRange => "a filter's Q must be 0.1 to 20, or 0.3 to 2 on a shelf",
+        error.ParametricPreampOutOfRange => "the Preamp lines must add up to -24 to +6 dB",
+        error.EqualizerAndParametric => "give either --eq or --peq, not both",
+        error.InvalidSampleRate => "--rate must be a sample rate above 0",
         error.PageOutOfRange => "at most 512 ids at a time, and --limit must be 1 to 512",
         error.TracksAndPlaylist => "give either IDS or --playlist=ID, not both",
         error.UnknownHealthKind => "KIND must be the kind health prints, such as clipping or exact_duplicate",
         error.SummaryWithPage => "--summary lists every kind at once; give it no --kind or OFFSET",
+        error.LosslessAndLossy => "give either --lossless or --lossy, not both",
         error.UnknownFile => "no file with that id",
         else => @errorName(err),
     };
@@ -146,17 +176,24 @@ const commands = [_]Command{
     .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
     .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
     .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
+    .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
+    .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
+    .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
+    .{ .name = "peq-check", .usage = "peq-check FILE", .min_arguments = 1, .max_arguments = 1, .run = checkEqualizerApo },
+    .{ .name = "peq-response", .usage = "peq-response FILE [--rate=HZ]", .min_arguments = 1, .max_arguments = 2, .run = printEqualizerResponse, .shares_usage_line = true },
     .{ .name = "health-dismiss", .usage = "health-dismiss DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = dismissHealthIssue },
     .{ .name = "health-restore", .usage = "health-restore DATABASE FILE_ID KIND", .min_arguments = 3, .max_arguments = 3, .run = restoreHealthIssue, .shares_usage_line = true },
     .{ .name = "play-tracks", .usage = "play-tracks DATABASE (IDS | --playlist=ID) [OPTIONS]", .min_arguments = 2, .max_arguments = null, .run = playTracks },
+    .{ .name = "play-folder", .usage = "play-folder DATABASE ROOT_ID PATH --device=ID [--shuffle] [--limit=MS]", .min_arguments = 4, .max_arguments = 6, .run = playFolder },
     .{ .name = "scrobble", .usage = "scrobble DATABASE [--status] [--timeout=MS]", .min_arguments = 1, .max_arguments = null, .run = scrobble },
     .{ .name = "feedback", .usage = "feedback DATABASE IDS (--love | --hate | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setFeedback },
     .{ .name = "rate", .usage = "rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)", .min_arguments = 3, .max_arguments = 3, .run = setRating },
     .{ .name = "love-release", .usage = "love-release DATABASE IDS [--clear]", .min_arguments = 2, .max_arguments = 3, .run = setReleaseLove },
-    .{ .name = "playlists", .usage = "playlists DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listPlaylists },
+    .{ .name = "love-artist", .usage = "love-artist DATABASE IDS [--clear]", .min_arguments = 2, .max_arguments = 3, .run = setArtistLove, .shares_usage_line = true },
+    .{ .name = "playlists", .usage = "playlists DATABASE [--smart|--manual] [--pinned] [--created-by-me|--imported] [--sort name|updated|created|entries] [--filter TEXT]", .min_arguments = 1, .max_arguments = 9, .run = listPlaylists },
     .{ .name = "playlist", .usage = "playlist DATABASE ID [--limit N] [--offset N]", .min_arguments = 2, .max_arguments = 6, .run = showPlaylist },
     .{ .name = "playlist-create", .usage = "playlist-create DATABASE NAME", .min_arguments = 2, .max_arguments = 2, .run = createPlaylist },
     .{ .name = "playlist-rename", .usage = "playlist-rename DATABASE ID NAME", .min_arguments = 3, .max_arguments = 3, .run = renamePlaylist, .shares_usage_line = true },
@@ -166,6 +203,10 @@ const commands = [_]Command{
     .{ .name = "playlist-move", .usage = "playlist-move DATABASE ID FROM TO", .min_arguments = 4, .max_arguments = 4, .run = moveInPlaylist },
     .{ .name = "playlist-import", .usage = "playlist-import DATABASE FILE [--name=NAME]", .min_arguments = 2, .max_arguments = 3, .run = importPlaylist },
     .{ .name = "playlist-export", .usage = "playlist-export DATABASE ID FILE [--relative] [--force]", .min_arguments = 3, .max_arguments = 5, .run = exportPlaylist },
+    .{ .name = "playlist-update", .usage = "playlist-update DATABASE ID [--description=TEXT] [--pin|--unpin] [--love|--unlove] [--tags=A,B]", .min_arguments = 3, .max_arguments = 6, .run = updatePlaylist },
+    .{ .name = "smart-playlist-create", .usage = "smart-playlist-create DATABASE NAME RULES_FILE", .min_arguments = 3, .max_arguments = 3, .run = createSmartPlaylist },
+    .{ .name = "smart-playlist-rules", .usage = "smart-playlist-rules DATABASE ID [RULES_FILE]", .min_arguments = 2, .max_arguments = 3, .run = smartPlaylistRules },
+    .{ .name = "smart-playlist-count", .usage = "smart-playlist-count DATABASE RULES_FILE", .min_arguments = 2, .max_arguments = 2, .run = smartPlaylistCount },
     .{
         .name = "match",
         .usage = "match DATABASE [--batch=N] [--limit=N] [--no-fingerprints]\n" ++ usage_indent ++
@@ -194,13 +235,35 @@ const commands = [_]Command{
     .{ .name = "dismiss-match", .usage = "dismiss-match DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = dismissMatch, .shares_usage_line = true },
     .{ .name = "accept-matches", .usage = "accept-matches DATABASE --min-score=SCORE", .min_arguments = 2, .max_arguments = 2, .run = acceptConfidentMatches },
     .{ .name = "apply-release", .usage = "apply-release DATABASE RELEASE_ID", .min_arguments = 2, .max_arguments = 2, .run = applyMatchedRelease, .shares_usage_line = true },
+    .{ .name = "genres", .usage = "genres DATABASE ([--filter TEXT] [--sort name|tracks] [--offset N] | --fill-from-musicbrainz [--offline]) [--limit N]", .min_arguments = 1, .max_arguments = null, .run = listGenres },
+    .{ .name = "genre-fill", .usage = "genre-fill DATABASE [on|off]", .min_arguments = 1, .max_arguments = 2, .run = genreFill, .shares_usage_line = true },
+    .{ .name = "genre", .usage = "genre DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showGenre, .shares_usage_line = true },
     .{ .name = "artists", .usage = "artists DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listArtists },
-    .{ .name = "releases", .usage = "releases DATABASE [--artist ID] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
-    .{ .name = "tracks", .usage = "tracks DATABASE [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
+    .{ .name = "releases", .usage = "releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--sort title|artist|year|recently_added|loved|most_played] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listReleases },
+    .{ .name = "tracks", .usage = "tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--explicit] [--sort KEY] [--desc] [OPTIONS]", .min_arguments = 1, .max_arguments = null, .run = listTracks },
     .{ .name = "track", .usage = "track DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = showTrack },
+    .{ .name = "search", .usage = "search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]", .min_arguments = 2, .max_arguments = 12, .run = searchLibrary },
     .{ .name = "artwork", .usage = "artwork DATABASE (--track=ID | --release=ID) [--out=PATH]", .min_arguments = 1, .max_arguments = null, .run = showArtwork },
     .{ .name = "covers", .usage = "covers DATABASE [--limit N] [--offset N]", .min_arguments = 1, .max_arguments = null, .run = loadCovers },
     .{ .name = "lyrics", .usage = "lyrics DATABASE TRACK_ID [--fetch]", .min_arguments = 2, .max_arguments = 3, .run = showLyrics, .shares_usage_line = true },
+    .{
+        .name = "artist-info",
+        .usage = "artist-info DATABASE ARTIST_ID [--fetch] [--force] [--lang=CODE] [--offline] [--include-releases]",
+        .min_arguments = 2,
+        .max_arguments = 7,
+        .run = showArtistInfo,
+    },
+    .{ .name = "related", .usage = "related DATABASE ARTIST_ID", .min_arguments = 2, .max_arguments = 2, .run = showRelatedArtists },
+    .{
+        .name = "release-info",
+        .usage = "release-info DATABASE RELEASE_ID [--fetch] [--force] [--lang=CODE] [--offline]",
+        .min_arguments = 2,
+        .max_arguments = 6,
+        .run = showReleaseInfo,
+        .shares_usage_line = true,
+    },
+    .{ .name = "artist-photo", .usage = "artist-photo DATABASE ARTIST_ID --out=PATH", .min_arguments = 3, .max_arguments = 3, .run = saveArtistPhoto },
+    .{ .name = "related-photo", .usage = "related-photo DATABASE MBID --out=PATH", .min_arguments = 3, .max_arguments = 3, .run = saveRelatedArtistPhoto },
     .{ .name = "edit", .usage = "edit DATABASE IDS [EDITS]", .min_arguments = 2, .max_arguments = null, .run = editTracks },
     .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
     .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
@@ -259,17 +322,26 @@ const help_details =
     \\file, Track, Release and Artist that exists only under it; a file also
     \\located under another root stays. Files on disk are not touched.
     \\
+    \\folders lists each root with its file and Track counts and duration.
+    \\With ROOT_ID it lists the root's subfolders, each with the same totals
+    \\counted through every folder below it, and then its files with their
+    \\Track ids; with PATH, relative to the root, it lists that folder
+    \\instead. Missing files are left out.
+    \\
     \\edit sets Orca's own values for a comma-separated list of Track ids;
     \\the files are not written. With no edits it lists the values held.
     \\  --title= --artist= --album= --album-artist= --date=
     \\  --track=N --disc=N --compilation=0|1 --recording-id=MBID
+    \\  --explicit=yes|no|clean
+    \\  --genre=A;B        the Tracks' genres, which outrank their files' tags
+    \\                     from then on; --clear=genre restores the tags'
     \\  --clear=FIELD      drop Orca's value so the file's tag applies again
     \\                     (title|artist|album|album_artist|track_number|
     \\                      disc_number|date|compilation|
     \\                      musicbrainz_recording_id|musicbrainz_release_id|
     \\                      musicbrainz_release_group_id|
     \\                      musicbrainz_release_track_id|
-    \\                      musicbrainz_album_artist_id)
+    \\                      musicbrainz_album_artist_id|explicit|genre)
     \\
     \\write-tags writes Orca's values for the Tracks into their files: an edit
     \\or an accepted correction wherever it differs from the file's tag, a
@@ -294,14 +366,47 @@ const help_details =
     \\scoped to one Artist or one Release. Options:
     \\  --artist ID        only this Artist
     \\  --release ID       only this Release (tracks only)
-    \\  --loved            only loved Releases, or Tracks whose recording is
-    \\                     loved
+    \\  --genre ID         only Tracks with this genre, Releases with such a
+    \\                     Track, or Artists credited on one
+    \\  --loved            only loved Artists or Releases, or Tracks whose
+    \\                     recording is loved
     \\  --sort KEY         id|artist|album|title|track|duration|added|rating|
-    \\                     loved (tracks only; unrated or unloved last either
-    \\                     way; loved is most recently loved first)
+    \\                     loved|play_count|last_played|year (tracks;
+    \\                     unrated, unloved, unplayed or undated last either
+    \\                     way; loved is most recently loved first), or
+    \\                     name|tracks|loved|recently_added (artists; tracks
+    \\                     is most Tracks first, loved most recently loved
+    \\                     first, recently_added newest Release first)
     \\  --desc             reverse the order
     \\  --limit N          page size, 1 to 512 (default 50)
     \\  --offset N         rows to skip
+    \\
+    \\genres lists the genres some Track carries, by name or with --sort
+    \\tracks most Tracks first; --filter keeps those whose name contains the
+    \\text, ignoring case, spaces, hyphens, slashes and dots. A file's genre
+    \\tags are folded so that spellings of one genre (Hip-Hop, hip hop, Hip
+    \\Hop/Rap) are one. genre prints one genre's counts, its Artists with the
+    \\most Tracks and its most played Releases.
+    \\
+    \\genres --fill-from-musicbrainz asks MusicBrainz for the genres of up to
+    \\--limit (default 512) Releases that have a MusicBrainz release ID and a
+    \\Track with no genre, and puts the release group's three most voted
+    \\genres, with any tied with the third and at most five, on the Release's
+    \\Tracks with no genre from a file or an edit (provenance=provider in
+    \\track). It prints `genre-fill: releases=N outcome=OUTCOME`. Genres from
+    \\MusicBrainz are CC BY-NC-SA 3.0. artist-info --fetch and
+    \\release-info --fetch fill them the same way unless genre-fill off was
+    \\set; genre-fill prints the setting, or sets it to on or off.
+    \\
+    \\search lists the Artists, Releases, Tracks, Playlists and genres where
+    \\every word of TEXT begins a word of the name or subtitle, ignoring case
+    \\and diacritics, one `kind<TAB>id<TAB>title<TAB>subtitle` line each,
+    \\grouped in that kind order and most relevant first. The subtitle is a
+    \\Release's album artist, a Track's artist and album, or a Playlist's
+    \\description. --artists, --releases, --tracks, --playlists and --genres
+    \\cap each kind (default 5, 5, 8, 4, 3; at most 50). No character of TEXT
+    \\is query syntax. releases --filter TEXT keeps the Releases search would
+    \\find for it, under every other filter and sort.
     \\
     \\track prints what the Library recorded about one Track and its file: tags,
     \\format, size, path, stored loudness, whether the file carries a cover,
@@ -323,6 +428,35 @@ const help_details =
     \\ORCA_LRCLIB_URL selects another server (https, or http to localhost
     \\only).
     \\
+    \\artist-info prints what the Library keeps about one Artist: `photo=`
+    \\with its source (local or commons), size, licence and credit,
+    \\`biography=` with its source, article and licence, `years=`, the
+    \\MusicBrainz and Wikidata IDs, `links:` with one line per link, the
+    \\biography's text and `outcome=`. With --fetch it first looks for an
+    \\image in the Artist's folder, then asks MusicBrainz for the Artist's
+    \\MusicBrainz ID, Wikidata for its image, article and links, Wikimedia
+    \\Commons for the image and its licence, and Wikipedia for the article's
+    \\lead, in --lang (default en). Info fetched in the last 30 days is kept
+    \\(outcome=cached) unless --force. --offline makes no request and uses
+    \\only what is cached. It also asks ListenBrainz how many users listened
+    \\to the Artist (`listeners=N (ListenBrainz)`) and ListenBrainz Labs for
+    \\related artists (`related: N`, then one `score name mbid library=ID`
+    \\line each), at most weekly. --include-releases then fetches each of the
+    \\Artist's Releases as release-info does. ORCA_MUSICBRAINZ_URL,
+    \\ORCA_WIKIDATA_URL, ORCA_WIKIMEDIA_URL, ORCA_WIKIPEDIA_URL,
+    \\ORCA_LISTENBRAINZ_URL and ORCA_LISTENBRAINZ_LABS_URL select other
+    \\servers (https, or http to localhost only). artist-photo writes the
+    \\photo to PATH. related prints the kept related artists alone.
+    \\related-photo writes the photo kept for a related artist outside the
+    \\Library to PATH, then prints its source, licence, credit and pages.
+    \\
+    \\release-info prints what the Library keeps about one Release:
+    \\`description=` with its source, article, language and licence, the
+    \\MusicBrainz release and release group IDs, the text and `outcome=`.
+    \\With --fetch it asks MusicBrainz for the release group, Wikidata or the
+    \\group's Wikipedia link for the article, and Wikipedia for its lead, in
+    \\--lang (default en); --force and --offline work as for artist-info.
+    \\
     \\play-tracks plays a comma-separated list of Track ids, or with
     \\--playlist=ID the playlist's entries that have a Track, as a playback
     \\queue. Options:
@@ -330,12 +464,20 @@ const help_details =
     \\  --volume=LINEAR    volume as a linear gain, 0 to 4 (default 1)
     \\  --set-volume=MS:LINEAR  set the volume to LINEAR once, MS after
     \\                     playback starts
-    \\  --replay-gain=off|track   loudness correction per entry (default track)
+    \\  --move=MS:FROM:TO  MS after playback starts, move the queue entry at
+    \\                     position FROM to position TO and print a `move` line
+    \\                     with result=ok|in_use|out_of_range; repeatable, at
+    \\                     most 8 times
+    \\  --replay-gain=off|track|album   loudness correction per entry (default
+    \\                     track); album uses the Release's, or the track's
+    \\                     when the Release is not fully measured
     \\  --eq=PRESET        equalizer preset: flat|bass|treble|vocal|loudness
     \\  --eq=G1,...,G10[:PREAMP]   ten band gains in dB (31 Hz to 16 kHz, each
     \\                     within 12) and a preamp in dB (default: minus the
     \\                     largest boost)
     \\  --crossfeed=AMOUNT stereo crossfeed for headphones, 0 to 1
+    \\  --peq=FILE         parametric equalizer from an EqualizerAPO file, read
+    \\                     as peq-check reads it; not with --eq
     \\  --start=N          queue position to begin at
     \\  --repeat=off|all|one
     \\  --shuffle
@@ -345,11 +487,34 @@ const help_details =
     \\  --limit=MS         stop after MS of wall clock
     \\  --lyrics           read each audible Track's lyrics as lyrics does, and
     \\                     print a `lyric` line as each synced line is reached
+    \\  --print-history    at the end, print the queue history newest first:
+    \\                     one `history` line per entry with ended_at (Unix ms),
+    \\                     reason (finished|skipped|replaced), track and title
+    \\  --save-queue=NAME  at the end, save the current entry and those after
+    \\                     it as playlist NAME and print its id and entry count
     \\
     \\play-tracks prints one `signal:` line once playback is a second in: the
     \\source, each stage that changes the samples, the output stream, and
     \\whether the path could be bit-perfect. It records listens in the
     \\Library's play history and never sends them anywhere.
+    \\
+    \\play-folder plays every Track below PATH (relative to root ROOT_ID; ""
+    \\is the root itself), recursively in path order, at most 10000. It
+    \\prints the queue, then a `now-playing` line as each entry is heard.
+    \\--device=ID is required; --shuffle shuffles the queue after its first
+    \\entry; --limit=MS stops after MS of wall clock (default 10 minutes).
+    \\
+    \\peq-check reads an EqualizerAPO file and prints it back normalised: the
+    \\Preamp, then one Filter line per filter, shelves as LSC and HSC, Gain on
+    \\peaks and shelves, and Q on every filter. It reads Preamp lines, which
+    \\add up, and at most 16 Filter lines of type PK, PEQ, LS, LSC, HS, HSC,
+    \\LP, HP or NO with Fc 20 to 20000 Hz, Gain within 24 dB, and Q 0.1 to 20
+    \\(0.3 to 2 on a shelf) or BW Oct; the Preamp must add up to -24 to +6 dB.
+    \\peq-response prints the gain in dB the file applies at 32 frequencies
+    \\from 20 Hz to 20 kHz, Preamp included, one `HZ<TAB>DB` line each, at the
+    \\sample rate --rate gives (default 44100), stopping below half the rate;
+    \\a filter at or above 0.45 of the rate is left out, as playback leaves it
+    \\out.
     \\
     \\scrobble sends the listens and the love/hate changes queued for
     \\ListenBrainz. The token comes from ORCA_LISTENBRAINZ_TOKEN;
@@ -367,7 +532,8 @@ const help_details =
     \\
     \\love-release loves the Releases, or clears their love, and prints how
     \\many changed and how many were skipped as unknown. Album love is kept
-    \\in the Library only; scrobble never sends it.
+    \\in the Library only; scrobble never sends it. love-artist does the
+    \\same for Artists.
     \\
     \\rate rates the Tracks' recordings in whole stars (--stars=N stores N*20)
     \\or 1 to 100, or clears the rating, and prints how many Tracks changed and
@@ -375,13 +541,26 @@ const help_details =
     \\Library only; no file is written.
     \\
     \\Playlists are ordered lists of recordings, kept in the Library. playlists
-    \\lists them: id, name, entries, entries with a Track, and length.
-    \\playlist lists one's entries from position 0: the Track each plays (the
-    \\lowest Track id of its recording), or `unavailable` when its recording
-    \\has none. playlist-add appends the Tracks' recordings, or inserts them
-    \\before position --at=N; playlist-remove removes a comma-separated list of
-    \\positions; playlist-move moves the entry at FROM to TO. A playlist holds
-    \\at most 10000 entries.
+    \\lists them by name: id, name, entries, entries with a Track, length and
+    \\kind (manual or smart), then `imported`, `pinned`, `loved` and tags= when
+    \\they apply. --smart, --manual, --pinned, --created-by-me and --imported
+    \\keep only those playlists; --filter keeps names containing TEXT.
+    \\playlist prints a `playlist` line with the kind, description, tags and
+    \\most common genres, then the entries from position 0: the Track each
+    \\plays (the lowest Track id of its recording), or `unavailable` when its
+    \\recording has none. playlist-add appends the Tracks' recordings, or
+    \\inserts them before position --at=N; playlist-remove removes a
+    \\comma-separated list of positions; playlist-move moves the entry at FROM
+    \\to TO. A playlist holds at most 10000 entries. playlist-update sets the
+    \\description, pin, love or tags (at most 8, replacing the old ones) and
+    \\prints the playlist's line.
+    \\
+    \\A smart playlist's entries are the Tracks its rules match whenever it is
+    \\read, one per recording; its entries cannot be added, removed or moved.
+    \\RULES_FILE is version 1 rules JSON, described in docs/api.md.
+    \\smart-playlist-create creates one; smart-playlist-rules prints its rules,
+    \\or replaces them with RULES_FILE first; smart-playlist-count prints how
+    \\many Tracks RULES_FILE matches now, storing nothing.
     \\
     \\playlist-import creates a playlist from an M3U or M3U8 file, named after
     \\the file or --name=NAME, with " (2)" and so on added if that is taken.
@@ -502,9 +681,16 @@ const help_details =
     \\that resolves it (match_or_edit, fetch_cover_art, compare_duplicate,
     \\review_correction or reveal_file), path and details. --kind=KIND lists
     \\only issues of that kind, in the same order. --summary prints one line
-    \\per kind with an issue: kind, highest severity and count. health-dismiss
-    \\hides an issue of a file until the file's bytes change; health-restore
-    \\shows it again. KIND is the kind health prints.
+    \\per kind with an issue: kind, highest severity, count, files and bytes;
+    \\for exact_duplicate and likely_duplicate, bytes counts only the copies
+    \\beyond the one kept. health-dismiss hides an issue of a file until the
+    \\file's bytes change; health-restore shows it again. KIND is the kind
+    \\health prints.
+    \\
+    \\stats prints key=value lines: artists, releases, tracks, files (those
+    \\with a location that is not missing), bytes, duration_ms,
+    \\last_scan_finished_at and last_analysis_at, in Unix seconds, or - when
+    \\no scan has completed or nothing is analysed.
     \\
     \\backfill re-reads the headers of files whose declared audio properties
     \\are missing and reprojects the Tracks derived from them, without walking
@@ -971,8 +1157,8 @@ fn listHealthIssues(context: Context) !void {
     if (summary) {
         const kinds = try runtime.libraryHealthSummary(library_handle);
         for (kinds.items()) |entry| try context.stdout.print(
-            "{s}\t{s}\t{d}\n",
-            .{ @tagName(entry.kind), @tagName(entry.severity), entry.count },
+            "{s}\t{s}\t{d}\t{d}\t{d}\n",
+            .{ @tagName(entry.kind), @tagName(entry.severity), entry.count, entry.files, entry.bytes },
         );
         return;
     }
@@ -985,6 +1171,36 @@ fn listHealthIssues(context: Context) !void {
         "{d}\t{s}\t{s}\t{s}\t{s}\t{s}\n",
         .{ issue.file_id, @tagName(issue.severity), @tagName(issue.kind), @tagName(issue.action), issue.path, issue.details },
     );
+}
+
+fn printLibraryStats(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const stats = try runtime.libraryStats(library_handle);
+    try context.stdout.print(
+        "artists={d}\nreleases={d}\ntracks={d}\nfiles={d}\nbytes={d}\nduration_ms={d}\n",
+        .{ stats.artists, stats.releases, stats.tracks, stats.files, stats.total_bytes, stats.total_duration_ms },
+    );
+    try printOptionalStat(context.stdout, "last_scan_finished_at", stats.last_scan_finished_at);
+    try printOptionalStat(context.stdout, "last_analysis_at", stats.last_analysis_at);
+}
+
+fn listProviderSources(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    for (runtime.providerSources()) |source| {
+        try context.stdout.print("{s}\t{s}\t{s}\t{s}\t{s}", .{ @tagName(source.id), source.name, source.url, source.licence, source.supplies });
+        if (source.licence_url) |licence_url| try context.stdout.print("\t{s}", .{licence_url});
+        try context.stdout.writeAll("\n");
+    }
+}
+
+fn printOptionalStat(stdout: *std.Io.Writer, key: []const u8, value: ?i64) !void {
+    if (value) |seconds|
+        try stdout.print("{s}={d}\n", .{ key, seconds })
+    else
+        try stdout.print("{s}=-\n", .{key});
 }
 
 fn dismissHealthIssue(context: Context) !void {
@@ -1017,6 +1233,141 @@ fn listRoots(context: Context) !void {
         "{d}\t{s}\t{s}\n",
         .{ root.id, if (root.enabled) "enabled" else "disabled", root.path },
     );
+}
+
+/// `orca-cli folders DATABASE [ROOT_ID [PATH]]`: the roots with their totals,
+/// or one folder's subfolders with their totals and then its files.
+fn listFolders(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    if (context.arguments.len == 1) {
+        const roots = try runtime.libraryRootPage(library, 512, 0);
+        defer roots.deinit();
+        for (roots.items) |root| {
+            var files: u64 = 0;
+            var tracks: u64 = 0;
+            var duration_ms: i64 = 0;
+            var offset: u32 = 0;
+            while (true) {
+                const page = try runtime.libraryFolderPage(library, root.id, "", 512, offset);
+                defer page.deinit();
+                for (page.items) |entry| {
+                    files += entry.file_count;
+                    tracks += entry.track_count;
+                    duration_ms += entry.total_duration_ms;
+                }
+                if (page.items.len < 512) break;
+                offset += 512;
+            }
+            try stdout.print("{d}\t{s}\t{d} files\t{d} tracks\t", .{
+                root.id,
+                if (root.enabled) "enabled" else "disabled",
+                files,
+                tracks,
+            });
+            try writeDuration(stdout, duration_ms);
+            try stdout.print("\t{s}\n", .{root.path});
+        }
+        return;
+    }
+    const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const path = if (context.arguments.len == 3) context.arguments[2] else "";
+    var offset: u32 = 0;
+    while (true) {
+        const page = try runtime.libraryFolderPage(library, root_id, path, 512, offset);
+        defer page.deinit();
+        for (page.items) |entry| switch (entry.kind) {
+            .folder => {
+                try stdout.print("folder\t{d} files\t{d} tracks\t", .{ entry.file_count, entry.track_count });
+                try writeDuration(stdout, entry.total_duration_ms);
+                try stdout.print("\t{s}\n", .{entry.name});
+            },
+            .file => {
+                if (entry.track_id) |track_id|
+                    try stdout.print("file\ttrack={d}\t", .{track_id})
+                else
+                    try stdout.writeAll("file\ttrack=-\t");
+                try writeDuration(stdout, entry.total_duration_ms);
+                try stdout.print("\t{s}\n", .{entry.name});
+            },
+        };
+        if (page.items.len < 512) break;
+        offset += 512;
+    }
+}
+
+/// `orca-cli play-folder`: every Track below a folder, recursively in path
+/// order, as the playback queue.
+fn playFolder(context: Context) !void {
+    const io = context.io;
+    const stdout = context.stdout;
+    const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const path = context.arguments[2];
+    var device: ?u64 = null;
+    var shuffle = false;
+    var limit_ms: u64 = 10 * 60 * 1000;
+    for (context.arguments[3..]) |argument| {
+        if (std.mem.eql(u8, argument, "--shuffle")) {
+            shuffle = true;
+        } else if (std.mem.startsWith(u8, argument, "--device=")) {
+            device = try std.fmt.parseInt(u64, argument["--device=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--limit=")) {
+            limit_ms = try std.fmt.parseInt(u64, argument["--limit=".len..], 10);
+        } else return error.UnknownOption;
+    }
+
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    const library = try openBrowseLibrary(context.allocator, io, &runtime, context.arguments[0]);
+    const player = try runtime.createPlayer();
+    const zone = try runtime.createZone();
+    try runtime.attachZone(zone, player);
+    try runtime.zoneRequestOutput(zone, device orelse return error.MissingDevice);
+    try runtime.playerPlayFolder(player, library, io, root_id, path, shuffle);
+
+    var refs: [64]liborca.TrackRef = undefined;
+    var position: u32 = 0;
+    while (true) {
+        const count = try runtime.playerQueuePage(player, position, &refs);
+        for (refs[0..count]) |ref| {
+            const details = try runtime.libraryTrackDetails(library, ref.track_id);
+            defer if (details) |value| value.deinit();
+            try stdout.print("queue position={d} track={d} title={s}\n", .{
+                position,
+                ref.track_id,
+                if (details) |value| value.title else "",
+            });
+            position += 1;
+        }
+        if (count < refs.len) break;
+    }
+    try stdout.flush();
+
+    var elapsed_ms: u64 = 0;
+    var last_cursor: ?u32 = null;
+    while (elapsed_ms < limit_ms) {
+        _ = runtime.processNextCommand();
+        const snapshot = try runtime.playerQueueSnapshot(player);
+        if (last_cursor == null or last_cursor.? != snapshot.cursor) {
+            last_cursor = snapshot.cursor;
+            const now_playing = try runtime.playerNowPlaying(player);
+            try stdout.print("now-playing at={d}ms position={d} track={?d}\n", .{
+                elapsed_ms,
+                snapshot.cursor,
+                if (now_playing) |ref| ref.track_id else null,
+            });
+            try stdout.flush();
+        }
+        if (try runtime.playerDrained(player)) break;
+        sleepMilliseconds(10);
+        elapsed_ms += 10;
+    }
+    try runtime.pausePlayer(player);
+    const snapshot = try runtime.playerQueueSnapshot(player);
+    try stdout.print("queue entries={d} cursor={d}\n", .{ snapshot.entries, snapshot.cursor });
 }
 
 fn removeRoot(context: Context) !void {
@@ -1066,7 +1417,7 @@ fn listDevices(context: Context) !void {
     var devices: [32]liborca.Device = undefined;
     const count = try runtime.enumerateOutputDevices(&devices);
     for (devices[0..count]) |device|
-        try context.stdout.print("{d}\t{s}\n", .{ device.id, device.nameSlice() });
+        try context.stdout.print("{d}\t{s}\t{t}\n", .{ device.id, device.nameSlice(), device.kind });
 }
 
 /// The one object graph: a runtime Player owns the source and the single
@@ -1158,12 +1509,23 @@ const ScheduledVolume = struct {
     linear: f32,
 };
 
+const ScheduledMove = struct {
+    at_ms: u64,
+    from: u32,
+    to: u32,
+};
+
+const max_scheduled_moves = 8;
+
 const PlayTracksOptions = struct {
     device: u64 = 0,
     volume: f32 = 1,
     set_volume: ?ScheduledVolume = null,
+    moves: [max_scheduled_moves]ScheduledMove = undefined,
+    move_count: usize = 0,
     replay_gain: liborca.ReplayGainMode = .track,
     equalizer: ?liborca.Equalizer = null,
+    parametric_path: ?[]const u8 = null,
     crossfeed: ?f32 = null,
     start: u32 = 0,
     repeat: liborca.RepeatMode = .off,
@@ -1174,6 +1536,8 @@ const PlayTracksOptions = struct {
     limit_ms: u64 = 10 * 60 * 1000,
     playlist_id: ?i64 = null,
     lyrics: bool = false,
+    print_history: bool = false,
+    save_queue: ?[]const u8 = null,
 };
 
 fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
@@ -1183,6 +1547,10 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     }
     if (std.mem.eql(u8, argument, "--lyrics")) {
         options.lyrics = true;
+        return;
+    }
+    if (std.mem.eql(u8, argument, "--print-history")) {
+        options.print_history = true;
         return;
     }
     const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
@@ -1199,6 +1567,19 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
             .at_ms = try std.fmt.parseInt(u64, value[0..separator], 10),
             .linear = try std.fmt.parseFloat(f32, value[separator + 1 ..]),
         };
+    } else if (std.mem.eql(u8, name, "--move")) {
+        if (options.move_count == max_scheduled_moves) return error.TooManyScheduledMoves;
+        var fields = std.mem.splitScalar(u8, value, ':');
+        const at_ms = fields.next().?;
+        const from = fields.next() orelse return error.MalformedScheduledMove;
+        const to = fields.next() orelse return error.MalformedScheduledMove;
+        if (fields.next() != null) return error.MalformedScheduledMove;
+        options.moves[options.move_count] = .{
+            .at_ms = try std.fmt.parseInt(u64, at_ms, 10),
+            .from = try std.fmt.parseInt(u32, from, 10),
+            .to = try std.fmt.parseInt(u32, to, 10),
+        };
+        options.move_count += 1;
     } else if (std.mem.eql(u8, name, "--start")) {
         options.start = try std.fmt.parseInt(u32, value, 10);
     } else if (std.mem.eql(u8, name, "--replay-gain")) {
@@ -1206,10 +1587,14 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
             .off
         else if (std.mem.eql(u8, value, "track"))
             .track
+        else if (std.mem.eql(u8, value, "album"))
+            .album
         else
             return error.UnknownReplayGainMode;
     } else if (std.mem.eql(u8, name, "--eq")) {
         options.equalizer = try parseEqualizer(value);
+    } else if (std.mem.eql(u8, name, "--peq")) {
+        options.parametric_path = value;
     } else if (std.mem.eql(u8, name, "--crossfeed")) {
         options.crossfeed = try std.fmt.parseFloat(f32, value);
     } else if (std.mem.eql(u8, name, "--repeat")) {
@@ -1231,6 +1616,8 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
         options.limit_ms = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--playlist")) {
         options.playlist_id = try std.fmt.parseInt(i64, value, 10);
+    } else if (std.mem.eql(u8, name, "--save-queue")) {
+        options.save_queue = value;
     } else return error.UnknownOption;
 }
 
@@ -1256,6 +1643,43 @@ fn parseEqualizer(value: []const u8) !liborca.Equalizer {
     return equalizer;
 }
 
+const max_equalizer_apo_bytes = 64 * 1024;
+const response_points = 32;
+
+fn readEqualizerApo(context: Context, path: []const u8) !liborca.ParametricEqualizer {
+    const text = std.Io.Dir.cwd().readFileAlloc(context.io, path, context.allocator, .limited(max_equalizer_apo_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return error.InvalidEqualizerApo,
+        else => return err,
+    };
+    return liborca.parseEqualizerApo(text);
+}
+
+fn checkEqualizerApo(context: Context) !void {
+    try liborca.writeEqualizerApo(context.stdout, try readEqualizerApo(context, context.arguments[0]));
+}
+
+fn printEqualizerResponse(context: Context) !void {
+    var sample_rate: u32 = 44_100;
+    if (context.arguments.len == 2) {
+        const option = context.arguments[1];
+        if (!std.mem.startsWith(u8, option, "--rate=")) return error.UnknownOption;
+        sample_rate = try std.fmt.parseInt(u32, option["--rate=".len..], 10);
+        if (sample_rate == 0) return error.InvalidSampleRate;
+    }
+    const equalizer = try readEqualizerApo(context, context.arguments[0]);
+    var frequencies: [response_points]f32 = undefined;
+    for (&frequencies, 0..) |*frequency_hz, index| {
+        const fraction = @as(f32, @floatFromInt(index)) / (response_points - 1);
+        frequency_hz.* = 20 * std.math.pow(f32, 1000, fraction);
+    }
+    var gains: [response_points]f32 = undefined;
+    equalizer.response(sample_rate, &frequencies, &gains);
+    for (frequencies, gains) |frequency_hz, gain_db| {
+        if (frequency_hz * 2 >= @as(f32, @floatFromInt(sample_rate))) break;
+        try context.stdout.print("{d:.1}\t{d:.2}\n", .{ frequency_hz, gain_db });
+    }
+}
+
 fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
     try stdout.writeAll("signal: ");
     if (path.source) |source| {
@@ -1267,8 +1691,20 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
         if (path.source_declared) try stdout.print("{d}-bit ", .{source.bits_per_sample});
         try stdout.print("{d} Hz {d} ch", .{ source.sample_rate, source.channels });
     } else try stdout.writeAll("no source");
-    if (path.replay_gain_db) |decibels| try stdout.print(" -> replay gain {d:.1} dB", .{decibels});
+    if (path.replay_gain_db) |decibels| {
+        try stdout.print(" -> replay gain {d:.1} dB ({s}", .{ decibels, switch (path.replay_gain_source) {
+            .none, .track => "track",
+            .album => "album",
+            .track_fallback => "track, no album gain",
+        } });
+        if (path.replay_gain_track_db) |track| try stdout.print(", track {d:.1} dB", .{track});
+        try stdout.writeByte(')');
+    }
     if (path.equalizer != null) try stdout.writeAll(" -> eq");
+    if (path.parametric) |parametric| try stdout.print(
+        " -> parametric {d} {s} preamp {d:.1} dB",
+        .{ parametric.count, if (parametric.count == 1) "filter" else "filters", parametric.preamp_db },
+    );
     if (path.crossfeed) |amount| try stdout.print(" -> crossfeed {d:.2}", .{amount});
     try stdout.print(" -> volume {d:.2}", .{path.volume});
     if (path.output) |output| {
@@ -1319,6 +1755,8 @@ fn playTracks(context: Context) !void {
     var options: PlayTracksOptions = .{};
     for (option_arguments) |argument| try parseOption(&options, argument);
     if (id_list != null and options.playlist_id != null) return error.TracksAndPlaylist;
+    if (options.equalizer != null and options.parametric_path != null) return error.EqualizerAndParametric;
+    const parametric = if (options.parametric_path) |path| try readEqualizerApo(context, path) else null;
 
     var ids: std.ArrayList(i64) = if (id_list) |list| try parseTrackIds(allocator, list) else .empty;
     defer ids.deinit(allocator);
@@ -1337,6 +1775,7 @@ fn playTracks(context: Context) !void {
     try runtime.playerSetVolume(player, options.volume);
     try runtime.playerSetReplayGainMode(player, options.replay_gain);
     try runtime.playerSetEqualizer(player, options.equalizer);
+    try runtime.playerSetParametricEqualizer(player, parametric);
     try runtime.playerSetCrossfeed(player, options.crossfeed);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
@@ -1349,6 +1788,7 @@ fn playTracks(context: Context) !void {
     var last_cursor: ?u32 = null;
     var took_previous = options.previous_after_ms == null;
     var set_volume = options.set_volume == null;
+    var moves_made: [max_scheduled_moves]bool = @splat(false);
     var printed_signal_path = false;
     // How often the producer was observed a whole entry ahead of the audio.
     // Nonzero is the proof that now-playing is derived from rendered audio
@@ -1398,6 +1838,26 @@ fn playTracks(context: Context) !void {
                     try runtime.playerEffectiveGain(player),
                 },
             );
+            try stdout.flush();
+        }
+        for (options.moves[0..options.move_count], moves_made[0..options.move_count]) |scheduled, *made| {
+            if (made.* or elapsed_ms < scheduled.at_ms) continue;
+            made.* = true;
+            const cursor_before = (try runtime.playerQueueSnapshot(player)).cursor;
+            const result: []const u8 = if (runtime.playerQueueMove(player, scheduled.from, scheduled.to)) |_|
+                "ok"
+            else |err| switch (err) {
+                error.QueueEntryInUse => "in_use",
+                error.PositionOutOfRange => "out_of_range",
+                else => return err,
+            };
+            if (last_cursor == cursor_before) last_cursor = (try runtime.playerQueueSnapshot(player)).cursor;
+            try stdout.print("move at={d}ms from={d} to={d} result={s}\n", .{
+                elapsed_ms,
+                scheduled.from,
+                scheduled.to,
+                result,
+            });
             try stdout.flush();
         }
         if (!took_previous and elapsed_ms >= options.previous_after_ms.?) {
@@ -1454,6 +1914,33 @@ fn playTracks(context: Context) !void {
             @tagName(zone_stats.output_state),
         },
     );
+    if (options.print_history) try printQueueHistory(&runtime, stdout, player, library);
+    if (options.save_queue) |name| {
+        const playlist_id = try runtime.playerSaveQueueAsPlaylist(player, library, name);
+        const playlist = try runtime.libraryPlaylist(library, playlist_id);
+        defer playlist.deinit(runtime.allocator);
+        try stdout.print("saved-queue playlist_id={d} entries={d}\n", .{ playlist_id, playlist.entries });
+    }
+}
+
+fn printQueueHistory(
+    runtime: *liborca.Runtime,
+    stdout: *std.Io.Writer,
+    player: liborca.PlayerHandle,
+    library: liborca.LibraryHandle,
+) !void {
+    var entries: [liborca.queue_history_capacity]liborca.QueueHistoryEntry = undefined;
+    const count = try runtime.playerQueueHistory(player, 0, &entries);
+    for (entries[0..count]) |entry| {
+        const details = try runtime.libraryTrackDetails(library, entry.track.track_id);
+        defer if (details) |value| value.deinit();
+        try stdout.print("history ended_at={d} reason={t} track={d} title={s}\n", .{
+            entry.ended_at_ms,
+            entry.reason,
+            entry.track.track_id,
+            if (details) |value| value.title else "",
+        });
+    }
 }
 
 /// play-tracks --lyrics: resolves the audible Track's lyrics on a job, so the
@@ -1526,12 +2013,16 @@ const LyricsFollower = struct {
 
 const BrowseOptions = struct {
     artist_id: ?i64 = null,
-    /// Free text for `artists`, folded the way artist keys are folded, so
-    /// `--filter el-p` finds the one spelled with a U+2010 hyphen.
+    /// Free text: for `artists`, folded the way artist keys are folded, so
+    /// `--filter el-p` finds the one spelled with a U+2010 hyphen; for
+    /// `tracks`, a full-text search ranked by relevance; for `releases`, words
+    /// each beginning a word of the title or album artist.
     filter: []const u8 = "",
     release_id: ?i64 = null,
+    genre_id: ?i64 = null,
     loved_only: bool = false,
-    sort: liborca.TrackSort = .id,
+    /// Parsed by the verb, since each verb sorts by different keys.
+    sort: ?[]const u8 = null,
     descending: bool = false,
     limit: u32 = 50,
     offset: u32 = 0,
@@ -1565,34 +2056,55 @@ fn parseBrowseOptions(arguments: []const []const u8) !BrowseOptions {
             options.filter = value;
         } else if (std.mem.eql(u8, name, "--release")) {
             options.release_id = try std.fmt.parseInt(i64, value, 10);
+        } else if (std.mem.eql(u8, name, "--genre")) {
+            options.genre_id = try std.fmt.parseInt(i64, value, 10);
         } else if (std.mem.eql(u8, name, "--limit")) {
             options.limit = try std.fmt.parseInt(u32, value, 10);
         } else if (std.mem.eql(u8, name, "--offset")) {
             options.offset = try std.fmt.parseInt(u32, value, 10);
         } else if (std.mem.eql(u8, name, "--sort")) {
-            options.sort = if (std.mem.eql(u8, value, "id"))
-                .id
-            else if (std.mem.eql(u8, value, "artist"))
-                .artist
-            else if (std.mem.eql(u8, value, "album"))
-                .album
-            else if (std.mem.eql(u8, value, "title"))
-                .title
-            else if (std.mem.eql(u8, value, "track"))
-                .track_number
-            else if (std.mem.eql(u8, value, "duration"))
-                .duration
-            else if (std.mem.eql(u8, value, "added"))
-                .date_added
-            else if (std.mem.eql(u8, value, "rating"))
-                .rating
-            else if (std.mem.eql(u8, value, "loved"))
-                .loved
-            else
-                return error.UnknownSortKey;
+            options.sort = value;
         } else return error.UnknownOption;
     }
     return options;
+}
+
+fn parseTrackSort(key: ?[]const u8) !liborca.TrackSort {
+    const value = key orelse return .id;
+    return if (std.mem.eql(u8, value, "id"))
+        .id
+    else if (std.mem.eql(u8, value, "artist"))
+        .artist
+    else if (std.mem.eql(u8, value, "album"))
+        .album
+    else if (std.mem.eql(u8, value, "title"))
+        .title
+    else if (std.mem.eql(u8, value, "track"))
+        .track_number
+    else if (std.mem.eql(u8, value, "duration"))
+        .duration
+    else if (std.mem.eql(u8, value, "added"))
+        .date_added
+    else if (std.mem.eql(u8, value, "rating"))
+        .rating
+    else if (std.mem.eql(u8, value, "loved"))
+        .loved
+    else if (std.mem.eql(u8, value, "play_count"))
+        .play_count
+    else if (std.mem.eql(u8, value, "last_played"))
+        .last_played
+    else if (std.mem.eql(u8, value, "year"))
+        .year
+    else
+        error.UnknownSortKey;
+}
+
+/// `name` or `tracks`, the two orders artists and genres come in.
+fn parseCountSort(key: ?[]const u8) !enum { name, track_count } {
+    const value = key orelse return .name;
+    if (std.mem.eql(u8, value, "name")) return .name;
+    if (std.mem.eql(u8, value, "tracks")) return .track_count;
+    return error.UnknownSortKey;
 }
 
 /// `mm:ss` from a duration liborca reports in milliseconds.
@@ -1655,14 +2167,37 @@ fn editTracks(context: Context) !void {
     defer ids.deinit(allocator);
     var edits: std.ArrayList(liborca.TrackEdit) = .empty;
     defer edits.deinit(allocator);
+    var genres: ?std.ArrayList([]const u8) = null;
+    defer if (genres) |*names| names.deinit(allocator);
     for (option_arguments) |argument| {
         const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
         const name = argument[0..split];
         const value = argument[split + 1 ..];
+        if (std.mem.eql(u8, name, "--genre") or
+            (std.mem.eql(u8, name, "--clear") and std.mem.eql(u8, value, "genre")))
+        {
+            if (genres) |*names| names.clearRetainingCapacity() else genres = .empty;
+            if (std.mem.eql(u8, name, "--clear")) continue;
+            var walk = std.mem.splitScalar(u8, value, ';');
+            while (walk.next()) |genre| try genres.?.append(allocator, genre);
+            continue;
+        }
         if (std.mem.eql(u8, name, "--clear")) {
             const field = std.meta.stringToEnum(liborca.MetadataField, value) orelse
                 return error.UnknownField;
             try edits.append(allocator, .{ .field = field, .value = null });
+            continue;
+        }
+        if (std.mem.eql(u8, name, "--explicit")) {
+            const advisory: liborca.Explicit = if (std.mem.eql(u8, value, "yes"))
+                .explicit
+            else if (std.mem.eql(u8, value, "no"))
+                .none
+            else if (std.mem.eql(u8, value, "clean"))
+                .clean
+            else
+                return error.InvalidEditValue;
+            try edits.append(allocator, .{ .field = .explicit, .value = advisory.advisoryText() });
             continue;
         }
         for (edit_options) |option| {
@@ -1677,6 +2212,10 @@ fn editTracks(context: Context) !void {
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try runtime.openLibrary(io, database_path);
+    if (genres) |names| {
+        try runtime.librarySetTrackGenres(library, ids.items, names.items);
+        try stdout.print("set genres of {d} tracks\n", .{ids.items.len});
+    }
     if (edits.items.len > 0) {
         const edited = try runtime.libraryEditTracks(library, ids.items, edits.items);
         defer edited.deinit();
@@ -1685,6 +2224,7 @@ fn editTracks(context: Context) !void {
         try stdout.writeAll("\n");
         return;
     }
+    if (genres != null) return;
     for (ids.items) |track_id| {
         var page = try runtime.libraryTrackEdits(library, track_id);
         defer page.deinit();
@@ -1728,6 +2268,13 @@ fn writeTags(context: Context) !void {
             "\t{t}\t{s} -> {s}\t{s}\n",
             .{ change.field, change.before orelse "(none)", change.after orelse "(none)", provenanceLabel(change.provenance) },
         );
+        if (file.genres) |genres| {
+            try stdout.writeAll("\tgenres\t");
+            try writeGenreList(stdout, genres.before);
+            try stdout.writeAll(" -> ");
+            try writeGenreList(stdout, genres.after);
+            try stdout.writeAll("\tedit\n");
+        }
     }
     for (plan.conflicts) |conflict| try stdout.print(
         "conflict\t{d}\t{t}\tfile {s}\torca {s}\t{s}\t{s}\n",
@@ -1751,6 +2298,11 @@ fn writeTags(context: Context) !void {
     };
     const stats = try runtime.jobScanStats(job_handle);
     try stdout.print("wrote {d} files as group {d}\n", .{ stats.changed, plan.plan_id });
+}
+
+fn writeGenreList(stdout: *std.Io.Writer, genres: []const []const u8) !void {
+    if (genres.len == 0) return stdout.writeAll("(none)");
+    for (genres, 0..) |genre, index| try stdout.print("{s}{s}", .{ if (index == 0) "" else "; ", genre });
 }
 
 fn provenanceLabel(provenance: liborca.Provenance) []const u8 {
@@ -1781,8 +2333,20 @@ fn showTrack(context: Context) !void {
     try printDetail(stdout, "album", "{s}", .{details.album});
     try printDetail(stdout, "album artist", "{s}", .{details.album_artist});
     try printOptionalDetail(stdout, "date", "{s}", details.date);
-    try printOptionalDetail(stdout, "track", "{d}", details.track_number);
-    try printOptionalDetail(stdout, "disc", "{d}", details.disc_number);
+    try writeDetailKey(stdout, "genres");
+    for (details.genres, 0..) |genre, index| try stdout.print("{s}{s}", .{ if (index == 0) "" else "; ", genre });
+    if (details.genres.len == 0) try stdout.writeAll("-\n") else {
+        const genres = try runtime.libraryTrackGenres(library, track_id);
+        defer genres.deinit();
+        try stdout.print(" provenance={s}\n", .{if (genres.items.len == 0) "-" else @tagName(genres.items[0].provenance)});
+    }
+    try writeDetailKey(stdout, "track");
+    try writeOfTotal(stdout, details.track_number, details.track_total);
+    try stdout.writeAll(if (details.track_total_inferred) " (counted)\n" else "\n");
+    try writeDetailKey(stdout, "disc");
+    try writeOfTotal(stdout, details.disc_number, details.disc_total);
+    try stdout.writeAll("\n");
+    try printDetail(stdout, "explicit", "{s}", .{explicitName(details.explicit)});
     try printDetail(stdout, "codec", "{s}", .{if (details.codec.len == 0) "-" else details.codec});
     try printOptionalDetail(stdout, "sample rate", "{d} Hz", details.sample_rate);
     if (!details.lossy) try printOptionalDetail(stdout, "bit depth", "{d}-bit", details.bit_depth);
@@ -1795,6 +2359,12 @@ fn showTrack(context: Context) !void {
     if (details.path) |path| {
         try printDetail(stdout, "path", "{s}", .{path});
     } else try printDetail(stdout, "path", "{s}", .{"(file missing)"});
+    try writeDetailKey(stdout, "added");
+    if (details.added_at) |seconds| try writeIsoUtc(stdout, seconds) else try stdout.writeAll("-");
+    try stdout.writeAll("\n");
+    try writeDetailKey(stdout, "modified");
+    if (details.modified_at) |seconds| try writeIsoUtc(stdout, seconds) else try stdout.writeAll("-");
+    try stdout.writeAll("\n");
     if (details.loudness) |loudness| {
         try printDetail(
             stdout,
@@ -2129,23 +2699,94 @@ fn setReleaseLove(context: Context) !void {
     try context.stdout.print("release-love: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
 }
 
-fn listPlaylists(context: Context) !void {
+fn setArtistLove(context: Context) !void {
     const allocator = context.allocator;
-    const stdout = context.stdout;
+    const loved = if (context.arguments.len == 2)
+        true
+    else if (std.mem.eql(u8, context.arguments[2], "--clear"))
+        false
+    else
+        return error.UnknownOption;
+    var ids = try parseTrackIds(allocator, context.arguments[1]);
+    defer ids.deinit(allocator);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
-    var offset: u32 = 0;
+    const change = try runtime.librarySetArtistLove(library, ids.items, loved);
+    try context.stdout.print("artist-love: updated={d} skipped={d}\n", .{ change.updated, change.skipped });
+}
+
+fn listPlaylists(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var query: liborca.PlaylistQuery = .{ .sort = .name };
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--smart")) {
+            query.kind = .smart;
+        } else if (std.mem.eql(u8, argument, "--manual")) {
+            query.kind = .manual;
+        } else if (std.mem.eql(u8, argument, "--pinned")) {
+            query.pinned_only = true;
+        } else if (std.mem.eql(u8, argument, "--created-by-me")) {
+            query.created_by = .user;
+        } else if (std.mem.eql(u8, argument, "--imported")) {
+            query.created_by = .imported;
+        } else if (std.mem.eql(u8, argument, "--sort") or std.mem.eql(u8, argument, "--filter")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = context.arguments[index];
+            if (std.mem.eql(u8, argument, "--filter")) {
+                query.filter = value;
+            } else {
+                query.sort = try parsePlaylistSort(value);
+            }
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
     while (true) {
-        var page = try runtime.libraryPlaylists(library, 512, offset);
+        var page = try runtime.libraryPlaylistPage(library, query);
         defer page.deinit();
-        for (page.items) |playlist| {
-            try stdout.print("{d}\t{s}\t{d}\t{d}\t", .{ playlist.id, playlist.name, playlist.entries, playlist.available });
-            try writeDuration(stdout, playlist.duration_ms);
-            try stdout.writeAll("\n");
-        }
-        if (page.items.len < 512) break;
-        offset += 512;
+        for (page.items) |playlist| try writePlaylistLine(stdout, playlist);
+        if (page.items.len < query.limit) break;
+        query.offset += query.limit;
+    }
+}
+
+fn parsePlaylistSort(value: []const u8) !liborca.PlaylistSort {
+    return if (std.mem.eql(u8, value, "name"))
+        .name
+    else if (std.mem.eql(u8, value, "updated"))
+        .recently_updated
+    else if (std.mem.eql(u8, value, "created"))
+        .created
+    else if (std.mem.eql(u8, value, "entries"))
+        .entries
+    else
+        error.UnknownSortKey;
+}
+
+fn writePlaylistLine(stdout: *std.Io.Writer, playlist: liborca.PlaylistSummary) !void {
+    try stdout.print("{d}\t{s}\t{d}\t{d}\t", .{ playlist.id, playlist.name, playlist.entries, playlist.available });
+    try writeDuration(stdout, playlist.duration_ms);
+    try stdout.print("\t{t}", .{playlist.kind});
+    if (playlist.creator == .imported) try stdout.writeAll("\timported");
+    if (playlist.pinned) try stdout.writeAll("\tpinned");
+    if (playlist.loved) try stdout.writeAll("\tloved");
+    if (playlist.tags.len != 0) {
+        try stdout.writeAll("\ttags=");
+        try writeJoined(stdout, playlist.tags, ",");
+    }
+    try stdout.writeAll("\n");
+}
+
+fn writeJoined(stdout: *std.Io.Writer, values: []const []const u8, separator: []const u8) !void {
+    for (values, 0..) |value, index| {
+        if (index != 0) try stdout.writeAll(separator);
+        try stdout.writeAll(value);
     }
 }
 
@@ -2155,10 +2796,17 @@ fn showPlaylist(context: Context) !void {
     const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
     const options = try parseBrowseOptions(context.arguments[2..]);
     if (options.artist_id != null or options.release_id != null or options.filter.len != 0 or
-        options.descending or options.sort != .id) return error.UnknownOption;
+        options.genre_id != null or options.descending or options.sort != null) return error.UnknownOption;
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const playlist = try runtime.libraryPlaylist(library, playlist_id);
+    defer playlist.deinit(runtime.allocator);
+    try stdout.print("playlist\t{d}\t{s}\t{t}\tdescription={s}\ttags=", .{ playlist.id, playlist.name, playlist.kind, playlist.description });
+    try writeJoined(stdout, playlist.tags, ",");
+    try stdout.writeAll("\tgenres=");
+    try writeJoined(stdout, playlist.top_genres, "; ");
+    try stdout.writeAll("\n");
     var page = try runtime.libraryPlaylistEntries(library, playlist_id, options.limit, options.offset);
     defer page.deinit();
     for (page.items) |entry| {
@@ -2170,6 +2818,85 @@ fn showPlaylist(context: Context) !void {
         try writeDuration(stdout, track.duration_ms);
         try stdout.writeAll("\n");
     }
+}
+
+fn updatePlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var update: liborca.PlaylistUpdate = .{};
+    var tags: std.ArrayList([]const u8) = .empty;
+    defer tags.deinit(allocator);
+    var tags_given = false;
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.startsWith(u8, argument, "--description=")) {
+            update.description = argument["--description=".len..];
+        } else if (std.mem.eql(u8, argument, "--pin")) {
+            update.pinned = true;
+        } else if (std.mem.eql(u8, argument, "--unpin")) {
+            update.pinned = false;
+        } else if (std.mem.eql(u8, argument, "--love")) {
+            update.loved = true;
+        } else if (std.mem.eql(u8, argument, "--unlove")) {
+            update.loved = false;
+        } else if (std.mem.startsWith(u8, argument, "--tags=")) {
+            tags_given = true;
+            tags.clearRetainingCapacity();
+            var walk = std.mem.splitScalar(u8, argument["--tags=".len..], ',');
+            while (walk.next()) |tag| {
+                if (std.mem.trim(u8, tag, " ").len != 0) try tags.append(allocator, tag);
+            }
+        } else return error.UnknownOption;
+    }
+    if (tags_given) update.tags = tags.items;
+    if (update.description == null and update.pinned == null and update.loved == null and update.tags == null)
+        return error.NoPlaylistUpdate;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.libraryUpdatePlaylist(library, playlist_id, update);
+    const playlist = try runtime.libraryPlaylist(library, playlist_id);
+    defer playlist.deinit(runtime.allocator);
+    try writePlaylistLine(context.stdout, playlist);
+}
+
+fn readRulesFile(context: Context, path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(context.io, path, context.allocator, .limited(liborca.max_smart_playlist_rules_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => error.InvalidSmartPlaylistRules,
+        else => err,
+    };
+}
+
+fn createSmartPlaylist(context: Context) !void {
+    const allocator = context.allocator;
+    const rules = try readRulesFile(context, context.arguments[2]);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const playlist_id = try runtime.libraryCreateSmartPlaylist(library, context.arguments[1], rules);
+    try context.stdout.print("playlist_id={d}\n", .{playlist_id});
+}
+
+fn smartPlaylistRules(context: Context) !void {
+    const allocator = context.allocator;
+    const playlist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const replacement = if (context.arguments.len == 3) try readRulesFile(context, context.arguments[2]) else null;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    if (replacement) |rules| try runtime.librarySetSmartPlaylistRules(library, playlist_id, rules);
+    const stored = (try runtime.librarySmartPlaylistRules(library, playlist_id)) orelse return error.PlaylistIsManual;
+    defer runtime.allocator.free(stored);
+    try context.stdout.writeAll(stored);
+    if (!std.mem.endsWith(u8, stored, "\n")) try context.stdout.writeAll("\n");
+}
+
+fn smartPlaylistCount(context: Context) !void {
+    const allocator = context.allocator;
+    const rules = try readRulesFile(context, context.arguments[1]);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    try context.stdout.print("count={d}\n", .{try runtime.librarySmartPlaylistCount(library, rules)});
 }
 
 fn createPlaylist(context: Context) !void {
@@ -2439,6 +3166,278 @@ fn fetchCoverArt(context: Context) !void {
         try stdout.flush();
         return coverArtError(outcome) orelse error.JobFailed;
     }
+}
+
+fn configureArtistInfo(allocator: std.mem.Allocator, runtime: *liborca.Runtime, environ: *std.process.Environ.Map) !void {
+    if (environ.get("ORCA_MUSICBRAINZ_URL")) |url| {
+        if (url.len > 0) try runtime.setMusicBrainzServer(try allocator.dupe(u8, url));
+    }
+    if (environ.get("ORCA_WIKIDATA_URL")) |url| {
+        if (url.len > 0) try runtime.setWikidataServer(try allocator.dupe(u8, url));
+    }
+    if (environ.get("ORCA_WIKIMEDIA_URL")) |url| {
+        if (url.len > 0) try runtime.setWikimediaCommonsServer(try allocator.dupe(u8, url));
+    }
+    if (environ.get("ORCA_WIKIPEDIA_URL")) |url| {
+        if (url.len > 0) try runtime.setWikipediaServer(try allocator.dupe(u8, url));
+    }
+    if (environ.get("ORCA_LISTENBRAINZ_URL")) |url| {
+        if (url.len > 0) try runtime.setListenBrainzServer(try allocator.dupe(u8, url));
+    }
+    if (environ.get("ORCA_LISTENBRAINZ_LABS_URL")) |url| {
+        if (url.len > 0) try runtime.setListenBrainzLabsServer(try allocator.dupe(u8, url));
+    }
+}
+
+/// `orca-cli artist-info DATABASE ARTIST_ID [--fetch]`: what an artist page
+/// shows, fetched first on the job the GTK app starts.
+fn showArtistInfo(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const stdout = context.stdout;
+    const artist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var fetch = false;
+    var options: liborca.ArtistInfoOptions = .{};
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.eql(u8, argument, "--fetch")) {
+            fetch = true;
+        } else if (std.mem.eql(u8, argument, "--force")) {
+            options.force = true;
+        } else if (std.mem.eql(u8, argument, "--offline")) {
+            options.offline = true;
+        } else if (std.mem.eql(u8, argument, "--include-releases")) {
+            options.include_releases = true;
+        } else if (std.mem.startsWith(u8, argument, "--lang=")) {
+            options.language = argument["--lang=".len..];
+        } else return error.UnknownOption;
+    }
+    if (!fetch and (options.force or options.offline or options.include_releases)) return error.UnknownOption;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    if (fetch) {
+        try identifyOrca(&runtime);
+        try configureArtistInfo(allocator, &runtime, context.environ);
+    }
+    const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
+    var outcome: ?liborca.ArtistInfoOutcome = null;
+    if (fetch) {
+        const job_handle = try runtime.startArtistInfoFetch(library, artist_id, options);
+        try awaitJob(&runtime, stdout, job_handle, null);
+        outcome = try runtime.jobArtistInfoOutcome(job_handle);
+    }
+    if (try runtime.libraryArtistTotals(library, artist_id)) |totals| try stdout.print(
+        "totals releases={d} tracks={d} duration_ms={d} appearances={d}\n",
+        .{ totals.release_count, totals.track_count, totals.duration_ms, totals.appearance_count },
+    );
+    var info = (try runtime.libraryArtistInfo(library, artist_id)) orelse {
+        try stdout.print("artist-info: outcome={s}\n", .{if (outcome) |known| @tagName(known) else "none"});
+        return;
+    };
+    defer info.deinit();
+    const record = &info.record;
+    if (record.photo_source) |source| {
+        const photo = try runtime.libraryArtistPhoto(library, artist_id);
+        defer if (photo) |image| image.deinit();
+        try stdout.print("photo={s} bytes={d}", .{ @tagName(source), if (photo) |image| image.bytes.len else 0 });
+        if (record.photo_licence) |licence| try stdout.print(" licence=\"{s}\"", .{licence});
+        if (record.photo_credit) |credit| try stdout.print(" credit=\"{s}\"", .{credit});
+        try stdout.writeAll("\n");
+        if (record.photo_url) |url| try stdout.print("photo-url={s}\n", .{url});
+        if (record.photo_licence_url) |url| try stdout.print("photo-licence-url={s}\n", .{url});
+    } else try stdout.writeAll("photo=none\n");
+    if (record.biography_source) |source| {
+        try stdout.print("biography={s} url={s} language={s} licence=\"{s}\"\n", .{
+            @tagName(source),
+            record.biography_url orelse "-",
+            record.biography_language orelse "-",
+            record.biography_licence orelse "",
+        });
+    } else try stdout.writeAll("biography=none\n");
+    if (record.begin_year) |begin| {
+        try stdout.print("years={d}\u{2013}", .{begin});
+        if (record.end_year) |end|
+            try stdout.print("{d}\n", .{end})
+        else
+            try stdout.writeAll(if (record.ended) "?\n" else "present\n");
+    }
+    if (record.artist_type) |kind| try stdout.print("type={s}\n", .{kind});
+    if (record.musicbrainz_artist_id) |id| try stdout.print("musicbrainz={s}\n", .{id});
+    if (record.wikidata_id) |id| try stdout.print("wikidata={s}\n", .{id});
+    var links = try runtime.libraryArtistLinks(library, artist_id);
+    defer links.deinit();
+    try stdout.print("links: {d}\n", .{links.items.len});
+    for (links.items) |link| try stdout.print("{s}\t{s}\n", .{ @tagName(link.kind), link.url });
+    if (record.listeners) |count| try stdout.print("listeners={d} (ListenBrainz)\n", .{count});
+    try writeRelatedArtists(&runtime, stdout, library, artist_id);
+    if (record.biography) |text| try stdout.print("{s}\n", .{text});
+    const reported: liborca.ArtistInfoOutcome = outcome orelse
+        std.enums.fromInt(liborca.ArtistInfoOutcome, record.outcome) orelse .not_requested;
+    try stdout.print("outcome={s}\n", .{@tagName(reported)});
+}
+
+fn writeRelatedArtists(runtime: *liborca.Runtime, stdout: *std.Io.Writer, library: liborca.LibraryHandle, artist_id: i64) !void {
+    var related = try runtime.libraryRelatedArtists(library, artist_id);
+    defer related.deinit();
+    try stdout.print("related: {d}\n", .{related.items.len});
+    for (related.items) |artist| {
+        try stdout.print("{d}\t{s}\t{s}\t", .{ artist.score, artist.name, artist.mbid });
+        if (artist.library_artist_id) |id| try stdout.print("library={d}", .{id}) else try stdout.writeAll("library=-");
+        try stdout.print("\tphoto={s}\n", .{if (artist.has_photo) "yes" else "no"});
+    }
+}
+
+/// `orca-cli related DATABASE ARTIST_ID`
+fn showRelatedArtists(context: Context) !void {
+    const artist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try writeRelatedArtists(&runtime, context.stdout, library, artist_id);
+}
+
+/// `orca-cli release-info DATABASE RELEASE_ID [--fetch]`
+fn showReleaseInfo(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const release_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var fetch = false;
+    var options: liborca.ReleaseInfoOptions = .{};
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.eql(u8, argument, "--fetch")) {
+            fetch = true;
+        } else if (std.mem.eql(u8, argument, "--force")) {
+            options.force = true;
+        } else if (std.mem.eql(u8, argument, "--offline")) {
+            options.offline = true;
+        } else if (std.mem.startsWith(u8, argument, "--lang=")) {
+            options.language = argument["--lang=".len..];
+        } else return error.UnknownOption;
+    }
+    if (!fetch and (options.force or options.offline)) return error.UnknownOption;
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    if (fetch) {
+        try identifyOrca(&runtime);
+        try configureArtistInfo(allocator, &runtime, context.environ);
+    }
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    var outcome: ?liborca.ReleaseInfoOutcome = null;
+    if (fetch) {
+        const job_handle = try runtime.startReleaseInfoFetch(library, release_id, options);
+        try awaitJob(&runtime, stdout, job_handle, null);
+        outcome = try runtime.jobReleaseInfoOutcome(job_handle);
+    }
+    var info = (try runtime.libraryReleaseInfo(library, release_id)) orelse {
+        try stdout.print("release-info: outcome={s}\n", .{if (outcome) |known| @tagName(known) else "none"});
+        return;
+    };
+    defer info.deinit();
+    const record = &info.record;
+    if (record.description_source) |source| {
+        try stdout.print("description={s} url={s} language={s} licence=\"{s}\"\n", .{
+            @tagName(source),
+            record.description_url orelse "-",
+            record.description_language orelse "-",
+            record.description_licence orelse "",
+        });
+    } else try stdout.writeAll("description=none\n");
+    if (record.musicbrainz_release_id) |id| try stdout.print("musicbrainz={s}\n", .{id});
+    if (record.musicbrainz_release_group_id) |id| try stdout.print("release-group={s}\n", .{id});
+    if (record.description) |text| try stdout.print("{s}\n", .{text});
+    const reported: liborca.ReleaseInfoOutcome = outcome orelse
+        std.enums.fromInt(liborca.ReleaseInfoOutcome, record.outcome) orelse .not_requested;
+    try stdout.print("outcome={s}\n", .{@tagName(reported)});
+}
+
+/// `orca-cli genre-fill DATABASE [on|off]`
+fn genreFill(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    if (context.arguments.len == 2) {
+        const value = context.arguments[1];
+        const musicbrainz = if (std.mem.eql(u8, value, "on")) true else if (std.mem.eql(u8, value, "off")) false else return error.UnknownOption;
+        try runtime.setGenreFill(library, .{ .musicbrainz = musicbrainz });
+    }
+    const fill = try runtime.libraryGenreFill(library);
+    try context.stdout.print("genre-fill: musicbrainz={s} licence=\"{s}\"\n", .{
+        if (fill.musicbrainz) "on" else "off",
+        liborca.musicbrainz_genre_licence,
+    });
+}
+
+/// `orca-cli genres DATABASE --fill-from-musicbrainz [--limit N] [--offline]`
+fn fillGenres(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var options: liborca.GenreFillOptions = .{};
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--fill-from-musicbrainz")) continue;
+        if (std.mem.eql(u8, argument, "--offline")) {
+            options.offline = true;
+        } else if (std.mem.eql(u8, argument, "--limit")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            options.limit = try std.fmt.parseInt(u32, context.arguments[index], 10);
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    try configureArtistInfo(allocator, &runtime, context.environ);
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.startGenreFill(library, options);
+    try awaitJob(&runtime, stdout, job_handle, null);
+    const snapshot = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("genre-fill: releases={d} outcome={s}\n", .{
+        snapshot.completed_units,
+        @tagName(try runtime.jobReleaseInfoOutcome(job_handle)),
+    });
+}
+
+/// `orca-cli artist-photo DATABASE ARTIST_ID --out=PATH`
+fn saveArtistPhoto(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const artist_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const argument = context.arguments[2];
+    if (!std.mem.startsWith(u8, argument, "--out=")) return error.UnknownOption;
+    const path = argument["--out=".len..];
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
+    const photo = (try runtime.libraryArtistPhoto(library, artist_id)) orelse return error.NoArtistPhoto;
+    defer photo.deinit();
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = photo.bytes });
+    try context.stdout.print("{s}\t{d} bytes\twrote {s}\n", .{ photo.mime_type, photo.bytes.len, path });
+}
+
+/// `orca-cli related-photo DATABASE MBID --out=PATH`: the photo an
+/// `artist-info --fetch` kept for a related artist outside the Library.
+fn saveRelatedArtistPhoto(context: Context) !void {
+    const allocator = context.allocator;
+    const io = context.io;
+    const argument = context.arguments[2];
+    if (!std.mem.startsWith(u8, argument, "--out=")) return error.UnknownOption;
+    const path = argument["--out=".len..];
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, io, &runtime, context.arguments[0]);
+    const photo = (try runtime.libraryRelatedArtistPhoto(library, context.arguments[1])) orelse return error.NoArtistPhoto;
+    defer photo.deinit();
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = photo.bytes });
+    const stdout = context.stdout;
+    try stdout.print("{s}\t{d} bytes\twrote {s}\n", .{ photo.mime_type, photo.bytes.len, path });
+    var info = (try runtime.libraryRelatedArtistPhotoInfo(library, context.arguments[1])) orelse return;
+    defer info.deinit();
+    const record = &info.record;
+    try stdout.print("source={s}\n", .{@tagName(record.source)});
+    if (record.licence) |licence| try stdout.print("licence=\"{s}\"\n", .{licence});
+    if (record.credit) |credit| try stdout.print("credit=\"{s}\"\n", .{credit});
+    if (record.url) |url| try stdout.print("photo-url={s}\n", .{url});
+    if (record.licence_url) |url| try stdout.print("photo-licence-url={s}\n", .{url});
 }
 
 /// `orca-cli lyrics DATABASE TRACK_ID`: the Track's lyrics, read on a job.
@@ -2803,6 +3802,73 @@ fn showArtwork(context: Context) !void {
     }
 }
 
+fn listGenres(context: Context) !void {
+    for (context.arguments[1..]) |argument| {
+        if (std.mem.eql(u8, argument, "--fill-from-musicbrainz")) return fillGenres(context);
+    }
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const options = try parseBrowseOptions(context.arguments[1..]);
+    if (options.artist_id != null or options.release_id != null or options.genre_id != null or
+        options.loved_only or options.descending) return error.UnknownOption;
+    const sort: liborca.GenreSort = switch (try parseCountSort(options.sort)) {
+        .name => .name,
+        .track_count => .track_count,
+    };
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    var page = try runtime.libraryGenrePage(library, .{
+        .filter = options.filter,
+        .sort = sort,
+        .limit = options.limit,
+        .offset = options.offset,
+    });
+    defer page.deinit();
+    try stdout.print("{d} genres {s}\n", .{
+        try runtime.libraryGenreCount(library, options.filter),
+        if (options.filter.len == 0) "total" else "match",
+    });
+    for (page.items) |genre| try writeGenre(stdout, genre);
+}
+
+fn writeGenre(stdout: *std.Io.Writer, genre: liborca.GenreSummary) !void {
+    try stdout.print("{d}\t{s}\t{d} tracks\t{d} releases\t{d} artists\t", .{
+        genre.id,
+        genre.name,
+        genre.track_count,
+        genre.release_count,
+        genre.artist_count,
+    });
+    try writeDuration(stdout, genre.total_duration_ms);
+    try stdout.writeAll("\n");
+}
+
+/// `orca-cli genre DATABASE ID`: what a genre page shows.
+fn showGenre(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    const genre_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const genre = (try runtime.libraryGenre(library, genre_id)) orelse return error.GenreNotFound;
+    defer genre.deinit(allocator);
+    try writeGenre(stdout, genre);
+
+    var artists = try runtime.libraryArtistPage(library, .{ .genre_id = genre_id, .sort = .track_count, .limit = 5 });
+    defer artists.deinit();
+    for (artists.items) |artist| try stdout.print("artist\t{d}\t{s}\t{d} tracks\n", .{ artist.id, artist.name, artist.track_count });
+
+    const releases = try runtime.libraryGenreArtwork(library, genre_id, 5);
+    defer releases.deinit();
+    for (releases.ids) |release_id| {
+        const release = (try runtime.libraryRelease(library, release_id)) orelse continue;
+        defer release.deinit(allocator);
+        try stdout.print("release\t{d}\t{s}\t{s}\n", .{ release.id, release.title, release.album_artist });
+    }
+}
+
 fn listArtists(context: Context) !void {
     const allocator = context.allocator;
     const io = context.io;
@@ -2813,25 +3879,36 @@ fn listArtists(context: Context) !void {
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
+    const sort: liborca.ArtistSort = if (options.sort != null and std.mem.eql(u8, options.sort.?, "loved"))
+        .recently_loved
+    else if (options.sort != null and std.mem.eql(u8, options.sort.?, "recently_added"))
+        .recently_added
+    else switch (try parseCountSort(options.sort)) {
+        .name => .name,
+        .track_count => .track_count,
+    };
     var page = try runtime.libraryArtistPage(library, .{
         .filter = options.filter,
+        .genre_id = options.genre_id,
+        .loved_only = options.loved_only,
+        .sort = sort,
         .limit = options.limit,
         .offset = options.offset,
     });
     defer page.deinit();
     // The count of what matched, not of the library, or a filtered listing
     // reports a total it is not showing.
-    const query: liborca.ArtistQuery = .{ .filter = options.filter };
+    const query: liborca.ArtistQuery = .{ .filter = options.filter, .genre_id = options.genre_id, .loved_only = options.loved_only };
     try stdout.print(
         "{d} artists {s}\n",
         .{
             try runtime.libraryArtistCountMatching(library, query),
-            if (options.filter.len == 0) "total" else "match",
+            if (options.filter.len == 0 and options.genre_id == null and !options.loved_only) "total" else "match",
         },
     );
     for (page.items) |artist| try stdout.print(
-        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]\n",
-        .{ artist.id, artist.name, artist.release_count, artist.track_count, artist.sort_name },
+        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]{s}\n",
+        .{ artist.id, artist.name, artist.release_count, artist.track_count, artist.sort_name, if (artist.loved) "\tloved" else "" },
     );
 }
 
@@ -2883,28 +3960,119 @@ fn loadCovers(context: Context) !void {
     });
 }
 
+const ReleaseFilters = struct {
+    high_resolution_only: bool = false,
+    needs_review_only: bool = false,
+    lossless_only: bool = false,
+    year_min: ?i32 = null,
+    year_max: ?i32 = null,
+    has_artwork: ?bool = null,
+    release_kind: ?liborca.ReleaseKind = null,
+    appearing_artist_id: ?i64 = null,
+    own_releases_only: bool = false,
+
+    fn any(self: ReleaseFilters) bool {
+        return self.high_resolution_only or self.needs_review_only or self.lossless_only or
+            self.year_min != null or self.year_max != null or self.has_artwork != null or
+            self.release_kind != null or self.appearing_artist_id != null or self.own_releases_only;
+    }
+};
+
+/// Takes the flags only `releases` reads out of `arguments`, leaving the rest
+/// in `remaining` for `parseBrowseOptions`, so every other verb still refuses
+/// them.
+fn parseReleaseFilters(arguments: []const []const u8, remaining: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !ReleaseFilters {
+    var filters: ReleaseFilters = .{};
+    var index: usize = 0;
+    while (index < arguments.len) : (index += 1) {
+        const name = arguments[index];
+        if (std.mem.eql(u8, name, "--high-resolution")) {
+            filters.high_resolution_only = true;
+        } else if (std.mem.eql(u8, name, "--needs-review")) {
+            filters.needs_review_only = true;
+        } else if (std.mem.eql(u8, name, "--lossless")) {
+            filters.lossless_only = true;
+        } else if (std.mem.eql(u8, name, "--with-artwork")) {
+            filters.has_artwork = true;
+        } else if (std.mem.eql(u8, name, "--without-artwork")) {
+            filters.has_artwork = false;
+        } else if (std.mem.startsWith(u8, name, "--type=")) {
+            const kind = name["--type=".len..];
+            filters.release_kind = if (std.mem.eql(u8, kind, "album"))
+                .album
+            else if (std.mem.eql(u8, kind, "ep-single"))
+                .ep_or_single
+            else if (std.mem.eql(u8, kind, "other"))
+                .other
+            else
+                return error.UnknownOption;
+        } else if (std.mem.startsWith(u8, name, "--appears=")) {
+            filters.appearing_artist_id = try std.fmt.parseInt(i64, name["--appears=".len..], 10);
+        } else if (std.mem.eql(u8, name, "--own")) {
+            filters.own_releases_only = true;
+        } else if (std.mem.eql(u8, name, "--year-from") or std.mem.eql(u8, name, "--year-to")) {
+            index += 1;
+            if (index >= arguments.len) return error.MissingOptionValue;
+            const year = try std.fmt.parseInt(i32, arguments[index], 10);
+            if (std.mem.eql(u8, name, "--year-from")) filters.year_min = year else filters.year_max = year;
+        } else {
+            try remaining.append(allocator, name);
+            if (std.mem.startsWith(u8, name, "--") and !std.mem.eql(u8, name, "--loved") and
+                !std.mem.eql(u8, name, "--desc") and index + 1 < arguments.len)
+            {
+                index += 1;
+                try remaining.append(allocator, arguments[index]);
+            }
+        }
+    }
+    return filters;
+}
+
 fn listReleases(context: Context) !void {
     const allocator = context.allocator;
     const io = context.io;
     const stdout = context.stdout;
     const database_path_argument = context.arguments[0];
-    const option_arguments = context.arguments[1..];
-    const options = try parseBrowseOptions(option_arguments);
+    var browse_arguments: std.ArrayList([]const u8) = .empty;
+    defer browse_arguments.deinit(allocator);
+    const filters = try parseReleaseFilters(context.arguments[1..], &browse_arguments, allocator);
+    const options = try parseBrowseOptions(browse_arguments.items);
+    if (options.descending) return error.UnknownOption;
+    if (filters.own_releases_only and options.artist_id == null) return error.OwnNeedsArtist;
+    const sort: liborca.ReleaseSort = if (options.sort) |key|
+        std.meta.stringToEnum(liborca.ReleaseSort, key) orelse return error.UnknownOption
+    else
+        .title;
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
-    var page = try runtime.libraryReleasePage(library, .{
+    const query: liborca.ReleaseQuery = .{
         .album_artist_id = options.artist_id,
+        .own_releases_only = filters.own_releases_only,
+        .appearing_artist_id = filters.appearing_artist_id,
+        .release_kind = filters.release_kind,
+        .genre_id = options.genre_id,
+        .sort = sort,
         .loved_only = options.loved_only,
+        .high_resolution_only = filters.high_resolution_only,
+        .needs_review_only = filters.needs_review_only,
+        .lossless_only = filters.lossless_only,
+        .year_min = filters.year_min,
+        .year_max = filters.year_max,
+        .has_artwork = filters.has_artwork,
+        .text = if (options.filter.len == 0) null else options.filter,
         .limit = options.limit,
         .offset = options.offset,
-    });
+    };
+    var page = try runtime.libraryReleasePage(library, query);
     defer page.deinit();
+    if (options.genre_id != null or options.filter.len != 0 or filters.any())
+        try stdout.print("{d} releases match\n", .{try runtime.libraryReleaseCountMatching(library, query)});
     for (page.items) |release| {
         try stdout.print("{d}\t{s}\t{s}\t", .{ release.id, release.title, release.album_artist });
         try writeDuration(stdout, release.total_duration_ms);
         try stdout.print(
-            "\t{d} tracks\t{d} disc(s)\t{s}{s}{s}\n",
+            "\t{d} tracks\t{d} disc(s)\t{s}{s}{s}\t",
             .{
                 release.track_count,
                 release.disc_count orelse 1,
@@ -2913,7 +4081,106 @@ fn listReleases(context: Context) !void {
                 if (release.loved) "\tloved" else "",
             },
         );
+        try writeReleaseFormat(stdout, release);
+        try stdout.print("{s}\treviews={d}\n", .{ if (release.lossless) "\tlossless" else "", release.pending_reviews });
     }
+}
+
+/// `orca-cli search DATABASE TEXT [--artists N] ...`: one line per hit,
+/// `kind<TAB>id<TAB>title<TAB>subtitle`, grouped in kind order.
+fn searchLibrary(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var limits: liborca.SearchLimits = .{};
+    const options = context.arguments[2..];
+    var index: usize = 0;
+    while (index < options.len) : (index += 2) {
+        if (index + 1 >= options.len) return error.MissingOptionValue;
+        const cap = try std.fmt.parseInt(u8, options[index + 1], 10);
+        inline for (std.meta.fields(liborca.SearchLimits)) |field| {
+            if (std.mem.eql(u8, options[index], "--" ++ field.name)) {
+                @field(limits, field.name) = cap;
+                break;
+            }
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    var results = try runtime.librarySearch(library, context.arguments[1], limits);
+    defer results.deinit();
+    for (results.hits) |hit| {
+        try stdout.print("{s}\t{d}\t{s}\t{s}\n", .{ @tagName(hit.kind), hit.id, hit.title, hit.subtitle });
+    }
+}
+
+/// `format=FLAC 24/96`: codec, then bits per sample over kilohertz, either
+/// left out when no file states it.
+fn writeReleaseFormat(writer: *std.Io.Writer, release: liborca.ReleaseSummary) !void {
+    try writer.writeAll("format=");
+    if (release.codec.len == 0) {
+        try writer.writeAll("-");
+    } else for (release.codec) |byte| try writer.writeByte(std.ascii.toUpper(byte));
+    const rate = release.max_sample_rate orelse {
+        if (release.max_bit_depth) |bits| try writer.print(" {d}-bit", .{bits});
+        return;
+    };
+    try writer.writeByte(' ');
+    if (release.max_bit_depth) |bits| try writer.print("{d}/", .{bits});
+    try writer.print("{d}", .{rate / 1000});
+    const fraction = rate % 1000;
+    if (fraction != 0) {
+        var digits: [3]u8 = undefined;
+        _ = std.fmt.bufPrint(&digits, "{d:0>3}", .{fraction}) catch unreachable;
+        var length: usize = digits.len;
+        while (digits[length - 1] == '0') length -= 1;
+        try writer.print(".{s}", .{digits[0..length]});
+    }
+    if (release.max_bit_depth == null) try writer.writeAll("kHz");
+}
+
+const TrackFilters = struct {
+    year_min: ?i32 = null,
+    year_max: ?i32 = null,
+    lossless: ?bool = null,
+    min_sample_rate: ?u32 = null,
+    explicit_only: bool = false,
+};
+
+/// Takes the flags only `tracks` reads out of `arguments`, leaving the rest
+/// in `remaining` for `parseBrowseOptions`, so every other verb still refuses
+/// them.
+fn parseTrackFilters(arguments: []const []const u8, remaining: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !TrackFilters {
+    var filters: TrackFilters = .{};
+    var index: usize = 0;
+    while (index < arguments.len) : (index += 1) {
+        const name = arguments[index];
+        if (std.mem.eql(u8, name, "--lossless") or std.mem.eql(u8, name, "--lossy")) {
+            const lossless = std.mem.eql(u8, name, "--lossless");
+            if (filters.lossless) |chosen| if (chosen != lossless) return error.LosslessAndLossy;
+            filters.lossless = lossless;
+        } else if (std.mem.eql(u8, name, "--explicit")) {
+            filters.explicit_only = true;
+        } else if (std.mem.eql(u8, name, "--year-from") or std.mem.eql(u8, name, "--year-to")) {
+            index += 1;
+            if (index >= arguments.len) return error.MissingOptionValue;
+            const year = try std.fmt.parseInt(i32, arguments[index], 10);
+            if (std.mem.eql(u8, name, "--year-from")) filters.year_min = year else filters.year_max = year;
+        } else if (std.mem.eql(u8, name, "--min-rate")) {
+            index += 1;
+            if (index >= arguments.len) return error.MissingOptionValue;
+            filters.min_sample_rate = try std.fmt.parseInt(u32, arguments[index], 10);
+        } else {
+            try remaining.append(allocator, name);
+            if (std.mem.startsWith(u8, name, "--") and !std.mem.eql(u8, name, "--loved") and
+                !std.mem.eql(u8, name, "--desc") and index + 1 < arguments.len)
+            {
+                index += 1;
+                try remaining.append(allocator, arguments[index]);
+            }
+        }
+    }
+    return filters;
 }
 
 fn listTracks(context: Context) !void {
@@ -2921,23 +4188,31 @@ fn listTracks(context: Context) !void {
     const io = context.io;
     const stdout = context.stdout;
     const database_path_argument = context.arguments[0];
-    const option_arguments = context.arguments[1..];
-    const options = try parseBrowseOptions(option_arguments);
+    var browse_arguments: std.ArrayList([]const u8) = .empty;
+    defer browse_arguments.deinit(allocator);
+    const filters = try parseTrackFilters(context.arguments[1..], &browse_arguments, allocator);
+    const options = try parseBrowseOptions(browse_arguments.items);
     var runtime = liborca.Runtime.init(allocator);
     defer runtime.deinit();
     const library = try openBrowseLibrary(allocator, io, &runtime, database_path_argument);
     const query: liborca.TrackQuery = .{
         .artist_id = options.artist_id,
         .release_id = options.release_id,
+        .genre_id = options.genre_id,
         .loved_only = options.loved_only,
-        .sort = options.sort,
+        .year_min = filters.year_min,
+        .year_max = filters.year_max,
+        .lossless = filters.lossless,
+        .min_sample_rate = filters.min_sample_rate,
+        .explicit_only = filters.explicit_only,
+        .sort = try parseTrackSort(options.sort),
         .direction = if (options.descending) .descending else .ascending,
         .limit = options.limit,
         .offset = options.offset,
     };
-    var page = try runtime.libraryTrackQuery(library, "", query);
+    var page = try runtime.libraryTrackQuery(library, options.filter, query);
     defer page.deinit();
-    try stdout.print(
+    if (options.filter.len == 0) try stdout.print(
         "{d} tracks match\n",
         .{try runtime.libraryTrackMatchCount(library, query)},
     );
@@ -2949,8 +4224,42 @@ fn listTracks(context: Context) !void {
             .{ track.id, disc, number, track.title, track.artist, track.album },
         );
         try writeDuration(stdout, track.duration_ms);
+        try stdout.print("\tcodec={s} rate=", .{if (track.codec.len == 0) "unknown" else track.codec});
+        try writeOptionalNumber(stdout, track.sample_rate);
+        try stdout.writeAll(" bits=");
+        try writeOptionalNumber(stdout, track.bit_depth);
+        try stdout.writeAll(" added=");
+        if (track.added_at) |added_at| try writeIsoUtc(stdout, added_at) else try stdout.writeAll("unknown");
+        try stdout.print(" plays={d} last=", .{track.play_count});
+        if (track.last_played_at) |last| try writeIsoUtc(stdout, last) else try stdout.writeAll("never");
+        try stdout.print(" explicit={s} pos=", .{explicitName(track.explicit)});
+        try writeOptionalNumber(stdout, track.track_number);
+        try stdout.writeAll("/");
+        try writeOptionalNumber(stdout, track.track_total);
+        try stdout.print(" disc={d}/", .{disc});
+        try writeOptionalNumber(stdout, track.disc_total);
         try stdout.print("{s}\n", .{if (track.has_playable_file) "" else "\tunreachable"});
     }
+}
+
+/// `n of N`, `n` alone without a total, `-` without a number.
+fn writeOfTotal(stdout: *std.Io.Writer, number: ?i64, total: ?i64) !void {
+    const value = number orelse return stdout.writeAll("-");
+    if (total) |count| return stdout.print("{d} of {d}", .{ value, count });
+    try stdout.print("{d}", .{value});
+}
+
+fn writeOptionalNumber(stdout: *std.Io.Writer, value: anytype) !void {
+    if (value) |number| try stdout.print("{d}", .{number}) else try stdout.writeAll("?");
+}
+
+fn explicitName(advisory: liborca.Explicit) []const u8 {
+    return switch (advisory) {
+        .unknown => "unknown",
+        .none => "no",
+        .explicit => "yes",
+        .clean => "clean",
+    };
 }
 
 fn sleepMilliseconds(milliseconds: u32) void {

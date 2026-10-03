@@ -18,14 +18,135 @@ struct orca_pw_output {
     void *wake_context;
 };
 
+#define DISCOVERY_BOUND 64
+
+struct bound_object {
+    struct pw_proxy *proxy;
+    struct spa_hook listener;
+    uint32_t global_id;
+    uint32_t device_object;
+    uint8_t kind;
+};
+
 struct discovery {
     struct pw_main_loop *loop;
+    struct pw_core *core;
+    struct pw_registry *registry;
     struct orca_pw_device *devices;
     uint32_t capacity;
     uint32_t count;
     int sequence;
+    int bound_synced;
     int result;
+    struct bound_object nodes[DISCOVERY_BOUND];
+    struct bound_object audio_devices[DISCOVERY_BOUND];
+    uint32_t audio_device_count;
 };
+
+static int has_prefix(const char *value, const char *prefix) {
+    return value != NULL && strncmp(value, prefix, strlen(prefix)) == 0;
+}
+
+static int equals(const char *value, const char *expected) {
+    return value != NULL && strcmp(value, expected) == 0;
+}
+
+static int has_bluez5_property(const struct spa_dict *props) {
+    const struct spa_dict_item *item;
+    spa_dict_for_each(item, props) {
+        if (has_prefix(item->key, "api.bluez5."))
+            return 1;
+    }
+    return 0;
+}
+
+uint8_t orca_pw_properties_kind(const struct spa_dict *props) {
+    if (props == NULL)
+        return ORCA_PW_DEVICE_UNKNOWN;
+    const char *factory = spa_dict_lookup(props, PW_KEY_FACTORY_NAME);
+    if (equals(factory, "support.null-audio-sink"))
+        return ORCA_PW_DEVICE_VIRTUAL;
+    const char *api = spa_dict_lookup(props, PW_KEY_DEVICE_API);
+    const char *bus = spa_dict_lookup(props, PW_KEY_DEVICE_BUS);
+    if (equals(api, "bluez5") || equals(bus, "bluetooth") ||
+        has_prefix(factory, "api.bluez5.") || has_bluez5_property(props))
+        return ORCA_PW_DEVICE_BLUETOOTH;
+    const char *profile = spa_dict_lookup(props, "device.profile.name");
+    if (has_prefix(spa_dict_lookup(props, "api.alsa.path"), "hdmi:") ||
+        (profile != NULL && strstr(profile, "hdmi") != NULL))
+        return ORCA_PW_DEVICE_HDMI;
+    if (equals(bus, "usb"))
+        return ORCA_PW_DEVICE_USB;
+    if (equals(bus, "pci"))
+        return ORCA_PW_DEVICE_PCI;
+    return ORCA_PW_DEVICE_UNKNOWN;
+}
+
+static void discovery_node_info(void *userdata, const struct pw_node_info *info) {
+    struct bound_object *node = userdata;
+    if ((info->change_mask & PW_NODE_CHANGE_MASK_PROPS) && info->props != NULL)
+        node->kind = orca_pw_properties_kind(info->props);
+}
+
+static const struct pw_node_events discovery_node_events = {
+    PW_VERSION_NODE_EVENTS,
+    .info = discovery_node_info,
+};
+
+static void discovery_device_info(void *userdata,
+                                  const struct pw_device_info *info) {
+    struct bound_object *device = userdata;
+    if ((info->change_mask & PW_DEVICE_CHANGE_MASK_PROPS) && info->props != NULL)
+        device->kind = orca_pw_properties_kind(info->props);
+}
+
+static const struct pw_device_events discovery_device_events = {
+    PW_VERSION_DEVICE_EVENTS,
+    .info = discovery_device_info,
+};
+
+/* Registry globals carry only a filtered set of properties; the bus, the
+ * ALSA path and the factory name arrive in the info of a bound proxy. */
+static void discovery_bind_node(struct discovery *discovery,
+                                struct bound_object *entry, uint32_t id,
+                                const struct spa_dict *props) {
+    const char *device_object = spa_dict_lookup(props, PW_KEY_DEVICE_ID);
+    entry->global_id = id;
+    entry->device_object = device_object != NULL
+                               ? (uint32_t)strtoul(device_object, NULL, 10)
+                               : SPA_ID_INVALID;
+    struct pw_node *node = pw_registry_bind(
+        discovery->registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0);
+    if (node == NULL)
+        return;
+    entry->proxy = (struct pw_proxy *)node;
+    pw_node_add_listener(node, &entry->listener, &discovery_node_events, entry);
+}
+
+static void discovery_bind_device(struct discovery *discovery, uint32_t id,
+                                  const struct spa_dict *props) {
+    if (!equals(spa_dict_lookup(props, PW_KEY_MEDIA_CLASS), "Audio/Device") ||
+        discovery->audio_device_count >= DISCOVERY_BOUND)
+        return;
+    struct pw_device *device = pw_registry_bind(
+        discovery->registry, id, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE, 0);
+    if (device == NULL)
+        return;
+    struct bound_object *entry =
+        &discovery->audio_devices[discovery->audio_device_count++];
+    entry->global_id = id;
+    entry->proxy = (struct pw_proxy *)device;
+    pw_device_add_listener(device, &entry->listener, &discovery_device_events,
+                           entry);
+}
+
+static void discovery_unbind(struct bound_object *entry) {
+    if (entry->proxy == NULL)
+        return;
+    spa_hook_remove(&entry->listener);
+    pw_proxy_destroy(entry->proxy);
+    entry->proxy = NULL;
+}
 
 static void discovery_global(void *userdata, uint32_t id,
                              uint32_t permissions, const char *type,
@@ -33,7 +154,13 @@ static void discovery_global(void *userdata, uint32_t id,
     (void)permissions;
     (void)version;
     struct discovery *discovery = userdata;
-    if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || props == NULL)
+    if (props == NULL)
+        return;
+    if (strcmp(type, PW_TYPE_INTERFACE_Device) == 0) {
+        discovery_bind_device(discovery, id, props);
+        return;
+    }
+    if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0)
         return;
     const char *media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
     if (media_class == NULL || strcmp(media_class, "Audio/Sink") != 0)
@@ -41,8 +168,11 @@ static void discovery_global(void *userdata, uint32_t id,
     if (discovery->count >= discovery->capacity)
         return;
 
-    struct orca_pw_device *device = &discovery->devices[discovery->count++];
+    const uint32_t index = discovery->count++;
+    struct orca_pw_device *device = &discovery->devices[index];
     memset(device, 0, sizeof(*device));
+    if (index < DISCOVERY_BOUND)
+        discovery_bind_node(discovery, &discovery->nodes[index], id, props);
     const char *serial = spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL);
     device->id = serial != NULL ? strtoull(serial, NULL, 10) : id;
     const char *name = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
@@ -57,15 +187,38 @@ static void discovery_global(void *userdata, uint32_t id,
     device->name_len = name_len;
 }
 
+static void discovery_resolve_kinds(struct discovery *discovery) {
+    for (uint32_t index = 0; index < discovery->count && index < DISCOVERY_BOUND;
+         index++) {
+        const struct bound_object *node = &discovery->nodes[index];
+        uint8_t kind = node->kind;
+        for (uint32_t entry = 0;
+             kind == ORCA_PW_DEVICE_UNKNOWN && entry < discovery->audio_device_count;
+             entry++) {
+            if (discovery->audio_devices[entry].global_id == node->device_object)
+                kind = discovery->audio_devices[entry].kind;
+        }
+        discovery->devices[index].kind = kind;
+    }
+}
+
 static const struct pw_registry_events discovery_registry_events = {
     PW_VERSION_REGISTRY_EVENTS,
     .global = discovery_global,
 };
 
+/* The first round trip delivers the globals, which bind proxies; the second
+ * delivers those proxies' info. */
 static void discovery_done(void *userdata, uint32_t id, int sequence) {
     struct discovery *discovery = userdata;
-    if (id == PW_ID_CORE && sequence == discovery->sequence)
-        pw_main_loop_quit(discovery->loop);
+    if (id != PW_ID_CORE || sequence != discovery->sequence)
+        return;
+    if (!discovery->bound_synced) {
+        discovery->bound_synced = 1;
+        discovery->sequence = pw_core_sync(discovery->core, PW_ID_CORE, 0);
+        return;
+    }
+    pw_main_loop_quit(discovery->loop);
 }
 
 static void discovery_error(void *userdata, uint32_t id, int sequence,
@@ -193,6 +346,8 @@ int orca_pw_discover(struct orca_pw_device *devices, uint32_t capacity,
     registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
     if (registry == NULL)
         goto fail;
+    discovery.core = core;
+    discovery.registry = registry;
     pw_registry_add_listener(registry, &registry_listener,
                              &discovery_registry_events, &discovery);
     pw_core_add_listener(core, &core_listener, &discovery_core_events,
@@ -200,12 +355,17 @@ int orca_pw_discover(struct orca_pw_device *devices, uint32_t capacity,
     discovery.sequence = pw_core_sync(core, PW_ID_CORE, 0);
     discovery.result = pw_main_loop_run(discovery.loop);
 
+    for (uint32_t index = 0; index < DISCOVERY_BOUND; index++) {
+        discovery_unbind(&discovery.nodes[index]);
+        discovery_unbind(&discovery.audio_devices[index]);
+    }
     spa_hook_remove(&core_listener);
     spa_hook_remove(&registry_listener);
     pw_proxy_destroy((struct pw_proxy *)registry);
     pw_core_disconnect(core);
     pw_context_destroy(context);
     pw_main_loop_destroy(discovery.loop);
+    discovery_resolve_kinds(&discovery);
     *count = discovery.count;
     return discovery.result;
 

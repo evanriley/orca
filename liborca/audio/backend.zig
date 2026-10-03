@@ -1,10 +1,13 @@
 const pcm = @import("pcm.zig");
 const zone = @import("zone.zig");
 
+pub const DeviceKind = enum(u8) { unknown, usb, pci, bluetooth, hdmi, virtual };
+
 pub const Device = struct {
     id: u64,
     name: [256]u8,
     name_len: u16,
+    kind: DeviceKind = .unknown,
 
     pub fn nameSlice(self: *const Device) []const u8 {
         return self.name[0..self.name_len];

@@ -2,6 +2,7 @@ const std = @import("std");
 const control = @import("../core/control.zig");
 const object = @import("../core/object.zig");
 const work = @import("../core/work.zig");
+const contract = @import("backend.zig");
 const dsp_api = @import("dsp.zig");
 const output_api = @import("output.zig");
 const pcm = @import("pcm.zig");
@@ -239,6 +240,22 @@ pub const PlayerEngine = struct {
         return if (rate == 0) null else rate;
     }
 
+    /// Control lane, under `quiesce`. Frames the clock Zone's device last
+    /// asked for per period, or null while unknown.
+    pub fn deviceQuantum(self: *const PlayerEngine) ?u32 {
+        const zone_value = self.clock_zone orelse return null;
+        const frames = zone_value.published_quantum_frames.load(.acquire);
+        return if (frames == 0) null else frames;
+    }
+
+    /// Control lane, under `quiesce`. How the clock Zone's open device is
+    /// attached, resolved once when its output opened.
+    pub fn outputDeviceKind(self: *const PlayerEngine) contract.DeviceKind {
+        const zone_value = self.clock_zone orelse return .unknown;
+        if (zone_value.open_format == null) return .unknown;
+        return zone_value.open_device_kind;
+    }
+
     pub fn isDrained(self: *const PlayerEngine) bool {
         return self.player.drained.load(.acquire);
     }
@@ -395,10 +412,8 @@ pub const PlayerEngine = struct {
         // A held format-switch successor describes a transition that is no
         // longer happening.
         self.releasePending();
-        self.player.replaceSource(session);
+        loadQueueEntry(self.player, queue, session, position);
         session = undefined;
-        queue.seekTo(position);
-        queue.noteEntrySerial(self.player.entrySerial(), position);
         self.seekLoadedSource(request.frame);
         self.consecutive_open_failures = 0;
         self.seek_reopens += 1;
@@ -441,10 +456,8 @@ pub const PlayerEngine = struct {
                 if (queue.followingPosition()) |next| queue.seekTo(next);
                 return;
             };
-            self.player.replaceSource(session);
+            loadQueueEntry(self.player, queue, session, position);
             session = undefined;
-            queue.seekTo(position);
-            queue.noteEntrySerial(self.player.entrySerial(), position);
             self.consecutive_open_failures = 0;
             self.entries_started += 1;
             return;
@@ -493,9 +506,7 @@ pub const PlayerEngine = struct {
         const pending = self.pending_source.?;
         self.pending_source = null;
         const position = self.pending_position;
-        self.player.replaceSource(pending);
-        queue.seekTo(position);
-        queue.noteEntrySerial(self.player.entrySerial(), position);
+        loadQueueEntry(self.player, queue, pending, position);
         self.consecutive_open_failures = 0;
         self.entries_started += 1;
         self.format_switch_transitions += 1;
@@ -804,10 +815,9 @@ pub const PlayerEngine = struct {
         // next pass reports the new epoch's position instead of a stale one.
         if (self.player.epoch.load(.acquire) != epoch) return;
         // Now-playing follows the serial the callback rendered, not the decode
-        // cursor. Position, duration and gain are published for it before the
-        // queue cursor, which is stored last with release: a host that reads
-        // the cursor first never pairs a new entry with the previous entry's
-        // figures.
+        // cursor. Duration and gain are published after the serial, so a host
+        // that reads them first never pairs an entry with its successor's
+        // figures. The queue cursor is stored last.
         self.player.position_frames.store(frames, .release);
         self.player.observeRenderedSerial(serial);
         self.player.publishSourceInfo();
@@ -860,6 +870,21 @@ fn watchOutput(runtime_zone: *ZoneRuntime, waker: ?work.Waker) void {
 
 fn zoneDrains(runtime_zone: *const ZoneRuntime) bool {
     return runtime_zone.output_requested.load(.acquire) and !runtime_zone.recoveryExhausted();
+}
+
+/// Hard-loads `session` as queue `position`. A host resolves the audible serial
+/// through the queue, so the serial reads 0 while the cursor moves and is
+/// adopted only once the queue records it.
+pub fn loadQueueEntry(
+    player: *player_api.Player,
+    queue: *playback_queue.PlaybackQueue,
+    session: source_session.SourceSession,
+    position: u32,
+) void {
+    player.releaseSources();
+    queue.seekTo(position);
+    queue.noteEntrySerial(player.stageSource(session), position);
+    player.adoptLoadedEntryAsAudible();
 }
 
 const source_session = @import("source_session.zig");
@@ -2366,4 +2391,39 @@ test "a parked engine services a seek issued while its Player is paused" {
     try std.testing.expect(harness.player.pending_seek == null);
     try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
     try std.testing.expectEqual(target, harness.player.snapshot().position_frames);
+}
+
+const AudibleSerialReader = struct {
+    player: *const player_api.Player,
+    queue: *const playback_queue.PlaybackQueue,
+    stop: std.atomic.Value(bool) = .init(false),
+    unrecorded: std.atomic.Value(u32) = .init(0),
+
+    fn run(self: *AudibleSerialReader) void {
+        while (!self.stop.load(.acquire)) {
+            const serial = self.player.audible_entry_serial.load(.acquire);
+            if (serial == 0 or self.queue.positionForSerial(serial) != null) continue;
+            if (self.player.audible_entry_serial.load(.acquire) == serial)
+                _ = self.unrecorded.fetchAdd(1, .monotonic);
+        }
+    }
+};
+
+test "a host reading the audible serial while entries hard-load always finds that serial in the queue" {
+    var player: player_api.Player = .{};
+    defer player.deinit();
+    var queue = playback_queue.PlaybackQueue.init(std.testing.allocator, 1);
+    defer queue.deinit();
+    try queue.enqueue(&.{
+        .{ .library = .{ .index = 0, .generation = 1 }, .track_id = 10 },
+        .{ .library = .{ .index = 0, .generation = 1 }, .track_id = 11 },
+    });
+    var decoder: ConstantDecoder = .{ .value = 0.25 };
+    var reader: AudibleSerialReader = .{ .player = &player, .queue = &queue };
+    const thread = try std.Thread.spawn(.{}, AudibleSerialReader.run, .{&reader});
+    for (0..20_000) |load|
+        loadQueueEntry(&player, &queue, source_session.SourceSession.init(decoder.decoder()), @intCast(load % 2));
+    reader.stop.store(true, .release);
+    thread.join();
+    try std.testing.expectEqual(@as(u32, 0), reader.unrecorded.load(.monotonic));
 }

@@ -27,6 +27,11 @@ pub const Kind = enum {
     mutation,
     /// Reading one Track's lyrics.
     lyrics,
+    /// Fetching one Artist's photo, biography, years active and links.
+    artist_info,
+    /// Fetching Releases' descriptions, or filling their Tracks' genres from
+    /// MusicBrainz.
+    release_info,
     dummy,
 };
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const database = @import("../database/root.zig");
 const metadata = @import("../metadata/model.zig");
+const wikidata = @import("wikidata.zig");
 const network = @import("../network/root.zig");
 const model = @import("model.zig");
 const scoring = @import("scoring.zig");
@@ -49,6 +50,40 @@ pub const MusicBrainz = struct {
         );
         defer allocator.free(request_url);
         return self.request(ReleaseLookup, allocator, request_url, ReleaseParser{});
+    }
+
+    /// `GET {server}/ws/2/artist/{mbid}?fmt=json&inc=url-rels+genres+artist-rels`,
+    /// cached like every other lookup.
+    pub fn lookUpArtist(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        artist_mbid: []const u8,
+    ) !ArtistLookup {
+        if (!metadata.isMusicBrainzId(artist_mbid)) return error.InvalidMusicBrainzId;
+        const request_url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/ws/2/artist/{s}?fmt=json&inc=url-rels+genres+artist-rels",
+            .{ std.mem.trimEnd(u8, self.server, "/"), artist_mbid },
+        );
+        defer allocator.free(request_url);
+        return self.request(ArtistLookup, allocator, request_url, ArtistParser{});
+    }
+
+    /// `GET {server}/ws/2/release-group/{mbid}?fmt=json&inc=url-rels+genres`,
+    /// cached like every other lookup.
+    pub fn lookUpReleaseGroup(
+        self: *MusicBrainz,
+        allocator: std.mem.Allocator,
+        group_mbid: []const u8,
+    ) !ReleaseGroupLookup {
+        if (!metadata.isMusicBrainzId(group_mbid)) return error.InvalidMusicBrainzId;
+        const request_url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/ws/2/release-group/{s}?fmt=json&inc=url-rels+genres",
+            .{ std.mem.trimEnd(u8, self.server, "/"), group_mbid },
+        );
+        defer allocator.free(request_url);
+        return self.request(ReleaseGroupLookup, allocator, request_url, ReleaseGroupParser{});
     }
 
     /// One cached GET: a fresh cached answer without a request, else the
@@ -168,6 +203,271 @@ const ReleaseParser = struct {
     }
 };
 
+/// What Orca reads from a MusicBrainz artist. Strings live in `arena`.
+pub const ArtistLookup = struct {
+    arena: std.heap.ArenaAllocator,
+    artist_type: ?[]const u8 = null,
+    begin_year: ?i32 = null,
+    end_year: ?i32 = null,
+    ended: bool = false,
+    wikidata_id: ?[]const u8 = null,
+    /// The Commons file an `image` relationship names, without `File:`.
+    /// An `image` relationship to anywhere else is ignored.
+    commons_image_file: ?[]const u8 = null,
+    /// The artist's current URL relationships, at most
+    /// `database.artist_links_max` of them.
+    links: []const database.ArtistLink = &.{},
+    /// The genres MusicBrainz users voted for, at most `max_genres`, in the
+    /// order MusicBrainz lists them. CC BY-NC-SA 3.0, unlike the CC0 rest.
+    genres: []const Genre = &.{},
+
+    pub fn deinit(self: ArtistLookup) void {
+        self.arena.deinit();
+    }
+};
+
+/// A genre and how many MusicBrainz users voted for it.
+pub const Genre = struct {
+    name: []const u8,
+    count: u32,
+};
+
+/// The licence of MusicBrainz genres, credited wherever they are shown.
+pub const genre_licence = "CC BY-NC-SA 3.0";
+/// At most this many genres are read from one artist or release group.
+pub const max_genres = 64;
+
+const GenreBody = struct {
+    name: []const u8 = "",
+    count: i64 = 0,
+};
+
+fn readGenres(arena: std.mem.Allocator, listed: []const GenreBody) ![]const Genre {
+    var genres: std.ArrayList(Genre) = .empty;
+    for (listed) |genre| {
+        if (genres.items.len == max_genres) break;
+        const name = std.mem.trim(u8, genre.name, " \t");
+        if (name.len == 0 or genre.count <= 0) continue;
+        try genres.append(arena, .{ .name = name, .count = std.math.cast(u32, genre.count) orelse std.math.maxInt(u32) });
+    }
+    return genres.items;
+}
+
+/// A genre fill writes the three genres with the most votes, and any tied
+/// with the third, but never more than `fill_genres_max`.
+pub const fill_genres_min = 3;
+pub const fill_genres_max = 5;
+
+/// The genres a fill writes, most votes first, ties in MusicBrainz's order.
+pub fn topGenres(genres: []const Genre, buffer: *[fill_genres_max][]const u8) []const []const u8 {
+    var sorted: [max_genres]Genre = undefined;
+    const count = @min(genres.len, max_genres);
+    @memcpy(sorted[0..count], genres[0..count]);
+    std.sort.insertion(Genre, sorted[0..count], {}, moreVotes);
+    var kept: usize = 0;
+    for (sorted[0..count]) |genre| {
+        if (kept == fill_genres_max) break;
+        if (kept >= fill_genres_min and genre.count < sorted[fill_genres_min - 1].count) break;
+        buffer[kept] = genre.name;
+        kept += 1;
+    }
+    return buffer[0..kept];
+}
+
+fn moreVotes(_: void, a: Genre, b: Genre) bool {
+    return a.count > b.count;
+}
+
+/// What Orca reads from a MusicBrainz release group. Strings live in
+/// `arena`.
+pub const ReleaseGroupLookup = struct {
+    arena: std.heap.ArenaAllocator,
+    wikidata_id: ?[]const u8 = null,
+    /// The URL of a current `wikipedia` relationship.
+    wikipedia_url: ?[]const u8 = null,
+    genres: []const Genre = &.{},
+    /// The group's primary type as MusicBrainz names it, such as "Album" or
+    /// "EP".
+    primary_type: ?[]const u8 = null,
+
+    pub fn deinit(self: ReleaseGroupLookup) void {
+        self.arena.deinit();
+    }
+};
+
+const ReleaseGroupBody = struct {
+    id: []const u8 = "",
+    @"primary-type": ?[]const u8 = null,
+    relations: []const ArtistRelation = &.{},
+    genres: []const GenreBody = &.{},
+};
+
+const ReleaseGroupParser = struct {
+    fn parse(_: ReleaseGroupParser, allocator: std.mem.Allocator, body: []const u8) !ReleaseGroupLookup {
+        var result: ReleaseGroupLookup = .{ .arena = .init(allocator) };
+        errdefer result.deinit();
+        const arena = result.arena.allocator();
+        const parsed = std.json.parseFromSliceLeaky(ReleaseGroupBody, arena, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidProviderResponse,
+        };
+        if (!metadata.isMusicBrainzId(parsed.id)) return error.InvalidProviderResponse;
+        for (parsed.relations) |relation| {
+            if (!std.mem.eql(u8, relation.@"target-type", "url")) continue;
+            if (relation.ended orelse false) continue;
+            const resource = (relation.url orelse continue).resource;
+            if (resource.len == 0) continue;
+            if (std.mem.eql(u8, relation.type, "wikidata") and result.wikidata_id == null)
+                result.wikidata_id = wikidata.itemIdFromUrl(resource);
+            if (std.mem.eql(u8, relation.type, "wikipedia") and result.wikipedia_url == null)
+                result.wikipedia_url = resource;
+        }
+        result.genres = try readGenres(arena, parsed.genres);
+        result.primary_type = parsed.@"primary-type";
+        return result;
+    }
+};
+
+const ArtistLifeSpan = struct {
+    begin: ?[]const u8 = null,
+    end: ?[]const u8 = null,
+    ended: ?bool = null,
+};
+
+const ArtistRelationUrl = struct {
+    resource: []const u8 = "",
+};
+
+const ArtistRelation = struct {
+    type: []const u8 = "",
+    @"target-type": []const u8 = "",
+    ended: ?bool = null,
+    url: ?ArtistRelationUrl = null,
+};
+
+const ArtistBody = struct {
+    id: []const u8 = "",
+    type: ?[]const u8 = null,
+    @"life-span": ?ArtistLifeSpan = null,
+    relations: []const ArtistRelation = &.{},
+    genres: []const GenreBody = &.{},
+};
+
+const ArtistParser = struct {
+    fn parse(_: ArtistParser, allocator: std.mem.Allocator, body: []const u8) !ArtistLookup {
+        var result: ArtistLookup = .{ .arena = .init(allocator) };
+        errdefer result.deinit();
+        const arena = result.arena.allocator();
+        const parsed = std.json.parseFromSliceLeaky(ArtistBody, arena, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidProviderResponse,
+        };
+        if (!metadata.isMusicBrainzId(parsed.id)) return error.InvalidProviderResponse;
+        if (parsed.type) |kind| if (kind.len != 0) {
+            result.artist_type = kind;
+        };
+        if (parsed.@"life-span") |span| {
+            result.begin_year = yearOf(span.begin);
+            result.end_year = yearOf(span.end);
+            result.ended = (span.ended orelse false) or result.end_year != null;
+        }
+        var links: std.ArrayList(database.ArtistLink) = .empty;
+        for (parsed.relations) |relation| {
+            if (!std.mem.eql(u8, relation.@"target-type", "url")) continue;
+            if (relation.ended orelse false) continue;
+            const resource = (relation.url orelse continue).resource;
+            if (resource.len == 0) continue;
+            if (std.mem.eql(u8, relation.type, "image")) {
+                if (result.commons_image_file == null)
+                    result.commons_image_file = try commonsFileName(arena, resource);
+                continue;
+            }
+            if (std.mem.eql(u8, relation.type, "wikidata") and result.wikidata_id == null)
+                result.wikidata_id = wikidata.itemIdFromUrl(resource);
+            if (links.items.len < database.artist_links_max)
+                try links.append(arena, .{ .kind = linkKind(relation.type, resource), .url = resource });
+        }
+        result.links = links.items;
+        result.genres = try readGenres(arena, parsed.genres);
+        return result;
+    }
+};
+
+fn yearOf(date: ?[]const u8) ?i32 {
+    const text = date orelse return null;
+    if (text.len < 4) return null;
+    return std.fmt.parseInt(i32, text[0..4], 10) catch null;
+}
+
+/// The file name a `commons.wikimedia.org/wiki/File:…` URL names, decoded,
+/// with underscores as spaces. Null for any other URL.
+fn commonsFileName(arena: std.mem.Allocator, resource: []const u8) !?[]const u8 {
+    const uri = std.Uri.parse(resource) catch return null;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (uri.getHost(&host_buffer) catch return null).bytes;
+    if (!std.ascii.eqlIgnoreCase(host, "commons.wikimedia.org")) return null;
+    const path = switch (uri.path) {
+        .raw, .percent_encoded => |text| text,
+    };
+    const prefix = "/wiki/File:";
+    if (!std.mem.startsWith(u8, path, prefix) or path.len == prefix.len) return null;
+    const decoded = try arena.dupe(u8, path[prefix.len..]);
+    const name = std.Uri.percentDecodeInPlace(decoded);
+    std.mem.replaceScalar(u8, name, '_', ' ');
+    if (!std.unicode.utf8ValidateSlice(name)) return null;
+    return name;
+}
+
+fn linkKind(relation_type: []const u8, resource: []const u8) database.ArtistLinkKind {
+    const by_type = [_]struct { []const u8, database.ArtistLinkKind }{
+        .{ "official homepage", .official },
+        .{ "wikidata", .wikidata },
+        .{ "wikipedia", .wikipedia },
+        .{ "discogs", .discogs },
+        .{ "last.fm", .lastfm },
+        .{ "bandcamp", .bandcamp },
+        .{ "soundcloud", .soundcloud },
+        .{ "youtube", .youtube },
+        .{ "youtube music", .youtube },
+        .{ "apple music", .apple_music },
+    };
+    for (by_type) |entry| if (std.mem.eql(u8, relation_type, entry[0])) return entry[1];
+    const uri = std.Uri.parse(resource) catch return .other;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = (uri.getHost(&host_buffer) catch return .other).bytes;
+    const by_host = [_]struct { []const u8, database.ArtistLinkKind }{
+        .{ "spotify.com", .spotify },
+        .{ "music.apple.com", .apple_music },
+        .{ "itunes.apple.com", .apple_music },
+        .{ "tidal.com", .tidal },
+        .{ "deezer.com", .deezer },
+        .{ "instagram.com", .instagram },
+        .{ "twitter.com", .x },
+        .{ "x.com", .x },
+        .{ "facebook.com", .facebook },
+        .{ "tiktok.com", .tiktok },
+        .{ "bandcamp.com", .bandcamp },
+        .{ "soundcloud.com", .soundcloud },
+        .{ "youtube.com", .youtube },
+        .{ "discogs.com", .discogs },
+        .{ "last.fm", .lastfm },
+    };
+    for (by_host) |entry| if (hostWithin(host, entry[0])) return entry[1];
+    return .other;
+}
+
+fn hostWithin(host: []const u8, domain: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, domain)) return true;
+    return host.len > domain.len and host[host.len - domain.len - 1] == '.' and
+        std.ascii.eqlIgnoreCase(host[host.len - domain.len ..], domain);
+}
+
 pub const max_release_mbids = 25;
 
 const CreditedArtist = struct {
@@ -220,6 +520,11 @@ pub const ReleaseLookup = struct {
 
     pub fn id(self: *const ReleaseLookup) []const u8 {
         return self.parsed.value.id;
+    }
+
+    pub fn releaseGroupId(self: *const ReleaseLookup) ?[]const u8 {
+        const group = self.parsed.value.@"release-group" orelse return null;
+        return validId(group.id);
     }
 
     /// What the release says about the track holding `recording_mbid`: the
@@ -781,4 +1086,108 @@ test "a search keeps each listed release's status, date and track count" {
     try testing.expectEqualStrings("2014", fact.?.date.?);
     try testing.expectEqual(@as(?u32, 19), fact.?.track_count);
     for (list.items) |candidate| try testing.expectEqual(candidate.release_mbids.len, candidate.release_facts.len);
+}
+
+const amine_mbid = "12398bf3-1b99-47b7-930c-f3956773f35a";
+
+fn readArtistFixture() ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(testing.io, "fixtures/providers/musicbrainz-artist-lookup.json", testing.allocator, .limited(64 * 1024));
+}
+
+test "an artist lookup yields the life span, type, Wikidata item, Commons image and links by kind" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-artist?mode=memory&cache=shared");
+    defer rig.deinit();
+    const body = try readArtistFixture();
+    defer testing.allocator.free(body);
+    rig.respond(200, body);
+
+    const artist = try rig.adapter.lookUpArtist(testing.allocator, amine_mbid);
+    defer artist.deinit();
+    try testing.expectEqualStrings(
+        "https://musicbrainz.org/ws/2/artist/" ++ amine_mbid ++ "?fmt=json&inc=url-rels+genres+artist-rels",
+        rig.net.transport.lastUrl(),
+    );
+    try testing.expectEqualStrings("Person", artist.artist_type.?);
+    try testing.expectEqual(@as(?i32, 1994), artist.begin_year);
+    try testing.expectEqual(@as(?i32, null), artist.end_year);
+    try testing.expect(!artist.ended);
+    try testing.expectEqualStrings("Q27830860", artist.wikidata_id.?);
+    try testing.expectEqualStrings("Amine performing on Jimmy Fallon in 2017 (crop).png", artist.commons_image_file.?);
+    try testing.expectEqual(@as(usize, 19), artist.links.len);
+    var seen: std.EnumSet(database.ArtistLinkKind) = .initEmpty();
+    for (artist.links) |link| seen.insert(link.kind);
+    for ([_]database.ArtistLinkKind{
+        .official, .wikidata, .discogs,   .lastfm, .soundcloud, .youtube, .spotify, .apple_music,
+        .tidal,    .deezer,   .instagram, .x,      .facebook,   .tiktok,  .other,
+    }) |kind| try testing.expect(seen.contains(kind));
+    try testing.expectError(error.InvalidMusicBrainzId, rig.adapter.lookUpArtist(testing.allocator, "Aminé"));
+    try testing.expectEqual(@as(usize, 5), artist.genres.len);
+    try testing.expectEqualStrings("hip hop", artist.genres[0].name);
+    try testing.expectEqual(@as(u32, 2), artist.genres[0].count);
+}
+
+test "a release group lookup asks for URL relations and genres and yields the current Wikidata and Wikipedia links" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-release-group?mode=memory&cache=shared");
+    defer rig.deinit();
+    const body = try std.Io.Dir.cwd().readFileAlloc(testing.io, "fixtures/providers/musicbrainz-release-group-lookup.json", testing.allocator, .limited(64 * 1024));
+    defer testing.allocator.free(body);
+    rig.respond(200, body);
+
+    const group_mbid = "3918b90b-340e-3779-9d7e-ba1593653498";
+    const group = try rig.adapter.lookUpReleaseGroup(testing.allocator, group_mbid);
+    defer group.deinit();
+    try testing.expectEqualStrings(
+        "https://musicbrainz.org/ws/2/release-group/" ++ group_mbid ++ "?fmt=json&inc=url-rels+genres",
+        rig.net.transport.lastUrl(),
+    );
+    try testing.expectEqualStrings("Q1193613", group.wikidata_id.?);
+    try testing.expectEqualStrings("https://en.wikipedia.org/wiki/Hot_Space", group.wikipedia_url.?);
+    try testing.expectEqual(@as(usize, 6), group.genres.len);
+    try testing.expectEqualStrings("synth-pop", group.genres[3].name);
+    try testing.expectEqualStrings("Album", group.primary_type.?);
+    var buffer: [fill_genres_max][]const u8 = undefined;
+    const top = topGenres(group.genres, &buffer);
+    try testing.expectEqual(@as(usize, 4), top.len);
+    try testing.expectEqualStrings("rock", top[0]);
+    try testing.expectEqualStrings("synth-pop", top[3]);
+    try testing.expectError(error.InvalidMusicBrainzId, rig.adapter.lookUpReleaseGroup(testing.allocator, "Hot Space"));
+}
+
+test "an image relationship off Commons is ignored, and an ended relationship is no link" {
+    var rig: Rig = undefined;
+    try rig.init("file:orca-musicbrainz-artist-image?mode=memory&cache=shared");
+    defer rig.deinit();
+    rig.respond(200,
+        \\{"id":"12398bf3-1b99-47b7-930c-f3956773f35a","life-span":{"begin":"1968","end":"1974-11-25","ended":true},
+        \\ "relations":[
+        \\  {"type":"image","target-type":"url","url":{"resource":"https://example.org/wiki/File:Fake.jpg"}},
+        \\  {"type":"image","target-type":"url","url":{"resource":"https://commons.wikimedia.org/wiki/Category:Nick_Drake"}},
+        \\  {"type":"social network","target-type":"url","ended":true,"url":{"resource":"https://twitter.com/old"}},
+        \\  {"type":"member of band","target-type":"artist"}]}
+    );
+    const artist = try rig.adapter.lookUpArtist(testing.allocator, amine_mbid);
+    defer artist.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), artist.commons_image_file);
+    try testing.expectEqual(@as(usize, 0), artist.links.len);
+    try testing.expectEqual(@as(?i32, 1968), artist.begin_year);
+    try testing.expectEqual(@as(?i32, 1974), artist.end_year);
+    try testing.expect(artist.ended);
+    try testing.expectEqual(@as(?[]const u8, null), artist.artist_type);
+}
+
+test "a genre fill keeps the three most voted genres and those tied with the third, at most five" {
+    var buffer: [fill_genres_max][]const u8 = undefined;
+    const tied = [_]Genre{
+        .{ .name = "a", .count = 1 }, .{ .name = "b", .count = 2 }, .{ .name = "c", .count = 1 },
+        .{ .name = "d", .count = 1 }, .{ .name = "e", .count = 1 }, .{ .name = "f", .count = 1 },
+        .{ .name = "g", .count = 1 },
+    };
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "b", "a", "c", "d", "e" }), topGenres(&tied, &buffer));
+    const distinct = [_]Genre{
+        .{ .name = "a", .count = 9 }, .{ .name = "b", .count = 8 }, .{ .name = "c", .count = 7 }, .{ .name = "d", .count = 6 },
+    };
+    try testing.expectEqualDeep(@as([]const []const u8, &.{ "a", "b", "c" }), topGenres(&distinct, &buffer));
+    try testing.expectEqual(@as(usize, 0), topGenres(&.{}, &buffer).len);
 }

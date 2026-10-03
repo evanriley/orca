@@ -1,15 +1,19 @@
 const std = @import("std");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
+const database = @import("../database/root.zig");
+const queue_history = @import("queue.zig");
 const track_source = @import("track_source.zig");
 const runtime = @import("runtime.zig");
 const runtime_listens = @import("runtime_listens.zig");
+const runtime_status = @import("runtime_status.zig");
 const runtime_zones = @import("runtime_zones.zig");
 
 const LibraryHandle = runtime.LibraryHandle;
 const OrcaRuntime = runtime.OrcaRuntime;
 const PlayerHandle = runtime.PlayerHandle;
 const PlayerObject = runtime.PlayerObject;
+const QueueHistoryEntry = runtime.QueueHistoryEntry;
 const QueueSnapshot = runtime.QueueSnapshot;
 const QueueStats = runtime.QueueStats;
 const RepeatMode = runtime.RepeatMode;
@@ -46,6 +50,7 @@ pub fn pausePlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
 pub fn stopPlayer(self: *OrcaRuntime, player: PlayerHandle) !void {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
+    forgetAudibleEntry(self, object_value);
     if (object_value.engine) |engine| {
         engine.quiesce();
         defer engine.release();
@@ -87,7 +92,9 @@ pub fn playerLoadFile(
     // under it would race its own reads.
     engine.quiesce();
     defer engine.release();
-    (try self.players.get(player)).player.replaceSource(owned);
+    const object_value = try self.players.get(player);
+    endAudibleEntry(self, object_value, .replaced);
+    object_value.player.replaceSource(owned);
 }
 
 pub fn playerDrained(self: *OrcaRuntime, player: PlayerHandle) !bool {
@@ -179,6 +186,7 @@ pub fn playerPlayTracksBound(
     defer engine.release();
     engine.discardPending();
     const object_value = try self.players.get(player);
+    endAudibleEntry(self, object_value, .replaced);
     try object_value.queue.replace(refs, start);
     // `replace` has already destroyed whatever this Player was playing, so
     // a start that cannot open its first entry has no consistent state to
@@ -238,6 +246,7 @@ pub fn playerQueueJump(self: *OrcaRuntime, player: PlayerHandle, position: u32) 
     if (engine) |value| value.quiesce();
     defer if (engine) |value| value.release();
     if (engine) |value| value.discardPending();
+    endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(position);
     try loadCursor(object_value);
     object_value.player.play();
@@ -283,6 +292,46 @@ pub fn playerQueueRemove(self: *OrcaRuntime, player: PlayerHandle, position: u32
     try queue.removeAt(position, pending);
 }
 
+pub fn playerQueueMove(self: *OrcaRuntime, player: PlayerHandle, from: u32, to: u32) !void {
+    try runtime.requireRunning(self);
+    const object_value = try self.players.get(player);
+    const queue = object_value.queue;
+    if (from >= queue.len() or to >= queue.len()) return error.PositionOutOfRange;
+    if (from == to) return;
+    const engine = object_value.engine;
+    if (engine) |value| value.quiesce();
+    defer if (engine) |value| value.release();
+    const pending: ?*u32 = if (engine) |value|
+        (if (value.pending_source != null) &value.pending_position else null)
+    else
+        null;
+    const holds_audio = object_value.player.sources != null;
+    const cursor = queue.cursorPosition();
+    if (holds_audio and (from == cursor or from == queue.decodePosition()))
+        return error.QueueEntryInUse;
+    if (pending) |value| if (value.* == from) return error.QueueEntryInUse;
+    const committed: ?u32 = if (pending) |value|
+        value.*
+    else if (holds_audio)
+        queue.decodePosition()
+    else
+        null;
+    if (committed) |value| {
+        if (landsInCommittedSpan(withoutEntry(cursor, from), withoutEntry(value, from), to))
+            return error.QueueEntryInUse;
+    }
+    try queue.move(from, to, pending);
+}
+
+fn withoutEntry(position: u32, removed: u32) u32 {
+    return if (position > removed) position - 1 else position;
+}
+
+fn landsInCommittedSpan(cursor: u32, committed: u32, to: u32) bool {
+    if (committed >= cursor) return cursor < to and to <= committed;
+    return to > cursor or to <= committed;
+}
+
 pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     try runtime.requireRunning(self);
     const object_value = try self.players.get(player);
@@ -291,6 +340,7 @@ pub fn playerNext(self: *OrcaRuntime, player: PlayerHandle) !bool {
     defer if (engine) |value| value.release();
     if (engine) |value| value.discardPending();
     const target = object_value.queue.nextPosition() orelse return false;
+    endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(target);
     try loadCursor(object_value);
     object_value.player.play();
@@ -318,6 +368,7 @@ pub fn playerPrevious(self: *OrcaRuntime, player: PlayerHandle) !bool {
         return false;
     };
     if (engine) |value| value.discardPending();
+    endAudibleEntry(self, object_value, .skipped);
     object_value.queue.seekTo(target);
     try loadCursor(object_value);
     object_value.player.play();
@@ -357,6 +408,7 @@ pub fn playerSetShuffle(
 
 pub fn playerClearQueue(self: *OrcaRuntime, player: PlayerHandle) !void {
     try runtime.requireRunning(self);
+    endAudibleEntry(self, try self.players.get(player), .replaced);
     try self.stopPlayer(player);
     const object_value = try self.players.get(player);
     if (object_value.engine) |engine| {
@@ -378,7 +430,108 @@ pub fn playerQueueSnapshot(
 
 pub fn playerNowPlaying(self: *OrcaRuntime, player: PlayerHandle) !?TrackRef {
     try runtime.requireRunning(self);
-    return (try self.players.get(player)).queue.current();
+    return runtime_status.readStatus(try self.players.get(player)).audible;
+}
+
+pub fn playerQueueHistory(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+    offset: u32,
+    output: []QueueHistoryEntry,
+) !usize {
+    try runtime.requireRunning(self);
+    const object_value = try self.players.get(player);
+    observeQueueHistory(object_value, historyNowMs(self));
+    var count: usize = 0;
+    while (count < output.len) : (count += 1) {
+        output[count] = object_value.history.newest(@as(usize, offset) + count) orelse break;
+    }
+    return count;
+}
+
+pub fn playerQueueHistoryTracks(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+    allocator: std.mem.Allocator,
+    offset: u32,
+    limit: u32,
+) !database.TrackPage {
+    try runtime.requireRunning(self);
+    if (limit == 0 or limit > database.repository.max_page)
+        return error.PageOutOfRange;
+    const object_value = try self.players.get(player);
+    observeQueueHistory(object_value, historyNowMs(self));
+
+    var rows: std.ArrayList(database.TrackSummary) = .empty;
+    errdefer {
+        for (rows.items) |item| item.deinit(allocator);
+        rows.deinit(allocator);
+    }
+    for (0..limit) |index| {
+        const entry = object_value.history.newest(@as(usize, offset) + index) orelse break;
+        const library_database = runtime.libraryDatabase(self, entry.track.library) catch |err| switch (err) {
+            error.StaleHandle, error.LibraryHasNoDatabase => continue,
+            else => return err,
+        };
+        const summary = try library_database.tracks.byId(allocator, entry.track.track_id) orelse
+            continue;
+        try rows.append(allocator, summary);
+    }
+    return .{ .allocator = allocator, .items = try rows.toOwnedSlice(allocator) };
+}
+
+pub fn playerClearQueueHistory(self: *OrcaRuntime, player: PlayerHandle) !void {
+    try runtime.requireRunning(self);
+    (try self.players.get(player)).history.clear();
+}
+
+pub fn playerSaveQueueAsPlaylist(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+    library: LibraryHandle,
+    name: []const u8,
+) !i64 {
+    try runtime.requireRunning(self);
+    try requireBoundLibrary(self, player, library);
+    const playback_queue = (try self.players.get(player)).queue;
+    var track_ids: std.ArrayList(i64) = .empty;
+    defer track_ids.deinit(self.allocator);
+    var position = playback_queue.cursorPosition();
+    while (playback_queue.refAt(position)) |ref| : (position += 1) {
+        if (ref.library.eql(library)) try track_ids.append(self.allocator, ref.track_id);
+    }
+    if (track_ids.items.len == 0) return error.QueueEmpty;
+
+    const playlists = &(try runtime.libraryDatabase(self, library)).playlists;
+    const playlist_id = try playlists.create(name);
+    errdefer playlists.delete(playlist_id) catch {};
+    var start: usize = 0;
+    while (start < track_ids.items.len) : (start += database.repository.max_page) {
+        const end = @min(start + database.repository.max_page, track_ids.items.len);
+        _ = try playlists.insert(playlist_id, track_ids.items[start..end], null);
+    }
+    return playlist_id;
+}
+
+pub fn observeQueueHistory(object_value: *PlayerObject, now_ms: i64) void {
+    const entry = runtime_status.readAudibleEntry(object_value) orelse return;
+    object_value.history.observe(entry.entry_serial, entry.track, entry.drained, now_ms);
+}
+
+fn endAudibleEntry(self: *OrcaRuntime, object_value: *PlayerObject, reason: queue_history.QueueHistoryReason) void {
+    const now_ms = historyNowMs(self);
+    observeQueueHistory(object_value, now_ms);
+    object_value.history.end(reason, now_ms);
+}
+
+pub fn forgetAudibleEntry(self: *OrcaRuntime, object_value: *PlayerObject) void {
+    observeQueueHistory(object_value, historyNowMs(self));
+    object_value.history.forget();
+}
+
+pub fn historyNowMs(self: *OrcaRuntime) i64 {
+    if (self.listen_hooks.sample_clock) |clock| return clock.now().wall_s * std.time.ms_per_s;
+    return std.Io.Clock.real.now(self.control_threaded.io()).toMilliseconds();
 }
 
 fn requireBoundLibrary(
@@ -455,9 +608,7 @@ fn loadCursor(object_value: *PlayerObject) !void {
         session.deinit();
         return error.UnsupportedChannelCount;
     }
-    object_value.player.replaceSource(session);
-    object_value.queue.seekTo(cursor);
-    object_value.queue.noteEntrySerial(object_value.player.entrySerial(), cursor);
+    audio.engine.loadQueueEntry(object_value.player, object_value.queue, session, cursor);
 }
 
 /// Spawns the Player's single decode producer. Registered with

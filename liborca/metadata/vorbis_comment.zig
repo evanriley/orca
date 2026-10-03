@@ -338,6 +338,10 @@ fn assign(
         if (tags.compilation == null) tags.compilation = isTruthy(value);
         return;
     }
+    if (matches(key, &.{"ITUNESADVISORY"})) {
+        if (tags.explicit == null) tags.explicit = model.Explicit.fromAdvisoryText(value);
+        return;
+    }
     if (matches(key, &.{ "LABEL", "ORGANIZATION" }))
         return setText(allocator, &tags.label, value);
     if (matches(key, &.{"MEDIA"})) return setText(allocator, &tags.media, value);
@@ -444,16 +448,23 @@ fn readExact(readable: source.ReadableSource, offset: u64, buffer: []u8) !usize 
     return filled;
 }
 
+/// `genres` replaces every GENRE entry with one entry per genre, after
+/// checking the file's current GENRE values are `genres.before`.
 pub fn rewrite(
     allocator: std.mem.Allocator,
     payload: []const u8,
     changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
 ) ![]u8 {
     try validateChanges(changes);
     var cursor: usize = 0;
     const vendor_text = try takeString(payload, &cursor);
     const count = try takeU32(payload, &cursor);
 
+    if (genres) |genre_change| {
+        if (!try genresMatch(payload, cursor, count, genre_change.before))
+            return error.MetadataPreconditionChanged;
+    }
     for (changes) |change| {
         if (change.before) |expected| {
             var found = false;
@@ -493,7 +504,7 @@ pub fn rewrite(
     for (0..count) |_| {
         const entry = try takeString(payload, &cursor);
         const parsed = try parseEntry(entry);
-        var replaced = false;
+        var replaced = genres != null and isGenreKey(parsed.key);
         for (changes) |change| {
             if (fieldMatches(change.field, parsed.key)) {
                 replaced = true;
@@ -524,6 +535,15 @@ pub fn rewrite(
         try output.appendSlice(allocator, suffix);
         output_count = try std.math.add(u32, output_count, 1);
     };
+    if (genres) |genre_change| for (genre_change.after) |genre| {
+        if (!std.unicode.utf8ValidateSlice(genre)) return error.InvalidMetadataText;
+        const length = try std.math.add(usize, genre_key.len + 1, genre.len);
+        try appendU32(&output, allocator, std.math.cast(u32, length) orelse
+            return error.MetadataValueTooLong);
+        try output.appendSlice(allocator, genre_key ++ "=");
+        try output.appendSlice(allocator, genre);
+        output_count = try std.math.add(u32, output_count, 1);
+    };
     std.mem.writeInt(u32, output.items[count_offset..][0..4], output_count, .little);
     return output.toOwnedSlice(allocator);
 }
@@ -531,14 +551,39 @@ pub fn rewrite(
 pub fn create(
     allocator: std.mem.Allocator,
     changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
 ) ![]u8 {
     for (changes) |change| if (change.before != null)
+        return error.MetadataPreconditionChanged;
+    if (genres) |genre_change| if (genre_change.before.len != 0)
         return error.MetadataPreconditionChanged;
     var base: [12]u8 = undefined;
     std.mem.writeInt(u32, base[0..4], vendor.len, .little);
     @memcpy(base[4 .. 4 + vendor.len], vendor);
     std.mem.writeInt(u32, base[8..12], 0, .little);
-    return rewrite(allocator, &base, changes);
+    return rewrite(allocator, &base, changes, genres);
+}
+
+const genre_key = "GENRE";
+
+fn isGenreKey(key: []const u8) bool {
+    return matches(key, &.{genre_key});
+}
+
+/// Whether the GENRE values the reader would collect from the `count`
+/// entries at `cursor` are exactly `expected`, in order.
+fn genresMatch(payload: []const u8, cursor: usize, count: u32, expected: []const []const u8) !bool {
+    var check_cursor = cursor;
+    var matched: usize = 0;
+    for (0..count) |_| {
+        const parsed = try parseEntry(try takeString(payload, &check_cursor));
+        if (!isGenreKey(parsed.key)) continue;
+        const value = std.mem.trim(u8, parsed.value, " \t\r\n");
+        if (value.len == 0) continue;
+        if (matched == expected.len or !std.mem.eql(u8, value, expected[matched])) return false;
+        matched += 1;
+    }
+    return matched == expected.len;
 }
 
 pub const Entry = struct { key: []const u8, value: []const u8 };
@@ -579,6 +624,7 @@ fn fieldMatches(field: mutation.Field, key: []const u8) bool {
         .musicbrainz_release_group_id => &.{"MUSICBRAINZ_RELEASEGROUPID"},
         .musicbrainz_release_track_id => &.{"MUSICBRAINZ_RELEASETRACKID"},
         .musicbrainz_album_artist_id => &.{"MUSICBRAINZ_ALBUMARTISTID"},
+        .explicit => &.{"ITUNESADVISORY"},
     };
     return matches(key, spellings);
 }
@@ -612,6 +658,7 @@ fn fieldKey(field: mutation.Field) []const u8 {
         .musicbrainz_release_group_id => "MUSICBRAINZ_RELEASEGROUPID",
         .musicbrainz_release_track_id => "MUSICBRAINZ_RELEASETRACKID",
         .musicbrainz_album_artist_id => "MUSICBRAINZ_ALBUMARTISTID",
+        .explicit => "ITUNESADVISORY",
     };
 }
 
@@ -655,7 +702,7 @@ test "Vorbis comment rewrite preserves unknown entries and supports UTF-8" {
     const rewritten = try rewrite(std.testing.allocator, payload.items, &.{
         .{ .field = .title, .before = "Old title", .after = "Néw title" },
         .{ .field = .artist, .before = "Old artist", .after = null },
-    });
+    }, null);
     defer std.testing.allocator.free(rewritten);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "TITLE=Néw title") != null);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, "CUSTOM=preserved") != null);
@@ -665,13 +712,13 @@ test "Vorbis comment rewrite preserves unknown entries and supports UTF-8" {
 test "Vorbis comment rewrite validates preconditions and framing" {
     try std.testing.expectError(
         error.InvalidVorbisComment,
-        rewrite(std.testing.allocator, "short", &.{}),
+        rewrite(std.testing.allocator, "short", &.{}, null),
     );
     const created = try create(std.testing.allocator, &.{.{
         .field = .album,
         .before = null,
         .after = "Generated album",
-    }});
+    }}, null);
     defer std.testing.allocator.free(created);
     try std.testing.expect(std.mem.indexOf(u8, created, "ALBUM=Generated album") != null);
 }
@@ -808,6 +855,24 @@ test "both total-count conventions and MusicBrainz identifiers are read" {
     try std.testing.expectEqualStrings("CD", tags.media.?);
     try std.testing.expectEqualStrings("GBAAA2600001", tags.isrc.?);
     try std.testing.expectEqualStrings("1999", tags.original_date.?);
+}
+
+test "an ITUNESADVISORY comment states the advisory, and a value outside 0 to 2 states none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for ([_]struct { comment: []const u8, expected: ?model.Explicit }{
+        .{ .comment = "ITUNESADVISORY=2", .expected = .clean },
+        .{ .comment = "iTunesAdvisory=1", .expected = .explicit },
+        .{ .comment = "ITUNESADVISORY=0", .expected = .none },
+        .{ .comment = "ITUNESADVISORY=yes", .expected = null },
+    }) |case| {
+        const payload = try buildComments(allocator, &.{ "TITLE=Advisory", case.comment });
+        const tags = (try readStream(allocator, try buildFlac(allocator, &.{
+            .{ .block_type = 4, .payload = payload },
+        }))).?;
+        try std.testing.expectEqual(case.expected, tags.explicit);
+    }
 }
 
 test "packed track totals and missing core fields are normal outcomes" {
@@ -952,7 +1017,7 @@ test "a rewrite matches what the reader saw: aliased keys, n/total numbers and t
         .{ .field = .track_number, .before = "2", .after = "5" },
         .{ .field = .compilation, .before = "1", .after = "0" },
         .{ .field = .date, .before = "1999", .after = "2024" },
-    });
+    }, null);
     const after = try parse(allocator, rewritten);
     try std.testing.expectEqualStrings("New Artist", after.album_artist.?);
     try std.testing.expectEqual(@as(?u32, 5), after.track_number);
@@ -979,13 +1044,58 @@ test "a recording id rewrite replaces the existing MUSICBRAINZ_TRACKID in place 
 
     const rewritten = try rewrite(allocator, payload, &.{
         .{ .field = .musicbrainz_recording_id, .before = old_id, .after = new_id },
-    });
+    }, null);
     const after = try parse(allocator, rewritten);
     try std.testing.expectEqualStrings(new_id, after.musicbrainz_recording_id.?);
     try std.testing.expectEqualStrings("release-track-uuid", after.musicbrainz_release_track_id.?);
     try std.testing.expectEqualStrings("Kept", after.title.?);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, old_id) == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rewritten, "MUSICBRAINZ_TRACKID="));
+}
+
+test "a genre rewrite replaces every GENRE entry in any case with one entry per genre" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const payload = try commentPayload(allocator, &.{
+        "genre=Indie Rock, Rock",
+        "TITLE=Kept",
+        "GENRE= ",
+        "Genre=Pop",
+    });
+    const changed: mutation.GenreChange = .{
+        .before = &.{ "Indie Rock, Rock", "Pop" },
+        .after = &.{ "Shoegaze", "Dream Pop" },
+    };
+
+    const rewritten = try rewrite(allocator, payload, &.{}, changed);
+    const after = try parse(allocator, rewritten);
+    try std.testing.expectEqual(@as(usize, 2), after.genres.len);
+    try std.testing.expectEqualStrings("Shoegaze", after.genres[0]);
+    try std.testing.expectEqualStrings("Dream Pop", after.genres[1]);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    try std.testing.expectEqual(@as(usize, 2), try countEntries(rewritten, "GENRE"));
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "Indie Rock") == null);
+
+    const created = try create(allocator, &.{}, .{ .before = &.{}, .after = &.{"Jazz"} });
+    try std.testing.expectEqualStrings("Jazz", (try parse(allocator, created)).genres[0]);
+}
+
+test "a genre rewrite refuses a file whose genres are no longer the ones previewed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const payload = try commentPayload(allocator, &.{ "GENRE=Rock", "GENRE=Pop" });
+    for ([_][]const []const u8{ &.{"Rock"}, &.{ "Pop", "Rock" }, &.{ "Rock", "Pop", "Jazz" }, &.{} }) |before| {
+        try std.testing.expectError(
+            error.MetadataPreconditionChanged,
+            rewrite(allocator, payload, &.{}, .{ .before = before, .after = &.{"Jazz"} }),
+        );
+    }
+    try std.testing.expectError(
+        error.MetadataPreconditionChanged,
+        create(allocator, &.{}, .{ .before = &.{"Rock"}, .after = &.{"Jazz"} }),
+    );
 }
 
 fn countEntries(payload: []const u8, key: []const u8) !usize {
@@ -1016,7 +1126,7 @@ test "a release id rewrite replaces every MUSICBRAINZ_ALBUMID entry in any case 
 
     const rewritten = try rewrite(allocator, payload, &.{
         .{ .field = .musicbrainz_release_id, .before = old_id, .after = new_id },
-    });
+    }, null);
     const after = try parse(allocator, rewritten);
     try std.testing.expectEqualStrings(new_id, after.musicbrainz_release_id.?);
     try std.testing.expectEqualStrings(recording_id, after.musicbrainz_recording_id.?);
@@ -1043,7 +1153,7 @@ test "every release-level MusicBrainz id is written under Picard's Vorbis key an
         .{ .field = .musicbrainz_release_group_id, .before = null, .after = release_group_id },
         .{ .field = .musicbrainz_release_track_id, .before = null, .after = release_track_id },
         .{ .field = .musicbrainz_album_artist_id, .before = null, .after = album_artist_id },
-    });
+    }, null);
     const tags = try parse(allocator, created);
     try std.testing.expectEqualStrings(release_id, tags.musicbrainz_release_id.?);
     try std.testing.expectEqualStrings(release_group_id, tags.musicbrainz_release_group_id.?);

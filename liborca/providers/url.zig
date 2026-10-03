@@ -46,7 +46,10 @@ pub const OwnedServer = struct {
     }
 
     pub fn fixed(comptime base_url: []const u8) OwnedServer {
-        return comptime init(base_url) catch @compileError("not a valid server: " ++ base_url);
+        return comptime server: {
+            @setEvalBranchQuota(10_000);
+            break :server init(base_url) catch @compileError("not a valid server: " ++ base_url);
+        };
     }
 
     pub fn view(self: *const OwnedServer) []const u8 {

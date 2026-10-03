@@ -597,7 +597,7 @@ fn isMusicBrainzIdField(field: metadata.Field) bool {
         .musicbrainz_release_track_id,
         .musicbrainz_album_artist_id,
         => true,
-        .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => false,
+        .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation, .explicit => false,
     };
 }
 

@@ -88,9 +88,30 @@ pub const AnalysisCacheKey = struct {
     source_identity: quick_hash.Digest,
 };
 
+pub const ReleaseMember = struct {
+    track_id: i64,
+    /// Null when the Track resolves to no file.
+    file_id: ?i64,
+    /// The file's recorded duration, or the Track's when the file has none.
+    duration_ms: ?i64,
+    /// The stored result, valid only for the visit. Empty when none is stored
+    /// under the identity the Library recorded for the file.
+    result: []const u8,
+};
+
+pub const ReleaseVisit = enum {
+    visited,
+    no_release,
+    /// The Release has more than `max_release_members` Tracks. Some were
+    /// visited before the visit stopped.
+    too_large,
+};
+
 pub const AnalysisCacheRepository = struct {
     db: sqlite.Database,
     write_lane: *WriteLane,
+
+    pub const max_release_members = 512;
 
     /// The full key, every column of it. `source_identity` is not optional
     /// here and never should be: a stored measurement that is returned for
@@ -138,6 +159,52 @@ pub const AnalysisCacheRepository = struct {
         const copied = @min(stored.len, buffer.len);
         @memcpy(buffer[0..copied], stored[0..copied]);
         return stored.len;
+    }
+
+    /// A member's result is keyed on `files.quick_hash`, the identity the
+    /// Library recorded, as `unanalyzed_predicate` keys it. One statement over
+    /// `tracks_release` and the primary key of `analysis_results`, at most
+    /// `max_release_members` rows, and nothing allocated.
+    pub fn visitReleaseMembers(
+        self: *const AnalysisCacheRepository,
+        track_id: i64,
+        selector: *const AnalysisSelector,
+        context: anytype,
+    ) !ReleaseVisit {
+        var statement = try self.db.prepare(
+            \\SELECT member.id, files.id, COALESCE(files.duration_ms, member.duration_ms),
+            \\       analysis_results.result
+            \\FROM tracks AS entry
+            \\JOIN tracks AS member ON member.release_id = entry.release_id
+            \\LEFT JOIN files ON files.id = COALESCE(
+            \\    member.preferred_file_id,
+            \\    (SELECT id FROM files WHERE recording_id = member.recording_id ORDER BY id LIMIT 1)
+            \\)
+            \\LEFT JOIN analysis_results ON analysis_results.file_id = files.id
+            \\    AND analysis_results.kind = ?3
+            \\    AND analysis_results.algorithm_id = ?4
+            \\    AND analysis_results.algorithm_version = ?5
+            \\    AND analysis_results.parameter_hash = ?6
+            \\    AND analysis_results.source_identity = files.quick_hash
+            \\WHERE entry.id = ?1 AND entry.release_id IS NOT NULL
+            \\ORDER BY member.id
+            \\LIMIT ?2;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, track_id);
+        try statement.bindInt64(2, max_release_members + 1);
+        try bindAnalysisSelector(statement, selector);
+        var visited: usize = 0;
+        while (try statement.step() == .row) : (visited += 1) {
+            if (visited == max_release_members) return .too_large;
+            try context.visit(.{
+                .track_id = statement.columnInt64(0),
+                .file_id = if (statement.columnIsNull(1)) null else statement.columnInt64(1),
+                .duration_ms = if (statement.columnIsNull(2)) null else statement.columnInt64(2),
+                .result = if (statement.columnIsNull(3)) &.{} else statement.columnBlob(3),
+            });
+        }
+        return if (visited == 0) .no_release else .visited;
     }
 
     pub fn put(self: *AnalysisCacheRepository, key: AnalysisCacheKey, result: []const u8) !void {

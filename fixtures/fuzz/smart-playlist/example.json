@@ -1,0 +1,5 @@
+{"v":1,"match":"all","rules":[
+  {"field":"genre","op":"is","value":"Hip Hop"},
+  {"match":"any","rules":[{"field":"loved","op":"is","value":true},{"field":"rating","op":"gte","value":80}]},
+  {"field":"added_at","op":"in_last_days","value":30}
+],"sort":{"field":"added_at","descending":true},"limit":200}

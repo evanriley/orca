@@ -153,6 +153,13 @@ fn assign(
     }
     if (std.mem.eql(u8, &code, "trkn")) return setPair(value, &tags.track_number, &tags.track_total);
     if (std.mem.eql(u8, &code, "disk")) return setPair(value, &tags.disc_number, &tags.disc_total);
+    if (std.mem.eql(u8, &code, "rtng")) {
+        if (value.bytes.len == 0 or value.bytes.len > 8 or tags.explicit != null) return false;
+        var number: u64 = 0;
+        for (value.bytes) |byte| number = number << 8 | byte;
+        tags.explicit = model.Explicit.fromAdvisory(number) orelse return false;
+        return true;
+    }
     if (std.mem.eql(u8, &code, "cpil")) {
         if (value.bytes.len == 0 or tags.compilation != null) return false;
         tags.compilation = value.bytes[0] != 0;
@@ -169,6 +176,12 @@ fn assignFreeform(allocator: std.mem.Allocator, item: []const u8, tags: *model.O
     const name = name_box.body[4..];
     const value = try firstValue(item) orelse return false;
     const string = text(value) orelse return false;
+
+    if (std.ascii.eqlIgnoreCase(name, "ITUNESADVISORY")) {
+        if (tags.explicit != null) return false;
+        tags.explicit = model.Explicit.fromAdvisoryText(string) orelse return false;
+        return true;
+    }
 
     const Freeform = struct { names: []const []const u8, field: []const u8 };
     const freeform = [_]Freeform{
@@ -249,6 +262,22 @@ test "iTunes atoms of an ALAC file carry the tags of the FLAC it came from" {
     try std.testing.expectEqualStrings("Reference Tone", tags.title.?);
     try std.testing.expectEqual(@as(?u32, 1), tags.track_number);
     try std.testing.expectEqual(@as(?u32, 3), tags.track_total);
+}
+
+test "an rtng atom of 1 marks an MP4 file explicit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const tags = (try readFixture(arena.allocator(), "fixtures/audio/explicit-reference.m4a")).?;
+    try std.testing.expectEqual(model.Explicit.explicit, tags.explicit.?);
+    try std.testing.expectEqual(@as(?u32, 2), tags.track_number);
+    try std.testing.expectEqual(@as(?u32, 2), tags.track_total);
+}
+
+test "an MP4 file without an rtng atom states no advisory" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const tags = (try readFixture(arena.allocator(), "fixtures/audio/tagged-reference-aac.m4a")).?;
+    try std.testing.expect(tags.explicit == null);
 }
 
 test "a cover atom is observed and read back as the same image" {

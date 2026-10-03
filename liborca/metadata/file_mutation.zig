@@ -73,6 +73,7 @@ pub fn stageFlac(
     stage_path: []const u8,
     expected: mutation.FileIdentity,
     changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
 ) !void {
     const source = try std.Io.Dir.cwd().openFile(io, source_path, .{});
     defer source.close(io);
@@ -111,7 +112,7 @@ pub fn stageFlac(
             const payload = try allocator.alloc(u8, length);
             defer allocator.free(payload);
             try readExact(source, io, payload, offset);
-            const rewritten = try vorbis_comment.rewrite(allocator, payload, changes);
+            const rewritten = try vorbis_comment.rewrite(allocator, payload, changes, genres);
             defer allocator.free(rewritten);
             if (rewritten.len > max_flac_metadata_block_size)
                 return error.MetadataValueTooLong;
@@ -125,7 +126,7 @@ pub fn stageFlac(
         offset += length;
         if (is_last) {
             if (!found_comment) {
-                const created = try vorbis_comment.create(allocator, changes);
+                const created = try vorbis_comment.create(allocator, changes, genres);
                 defer allocator.free(created);
                 if (created.len > max_flac_metadata_block_size)
                     return error.MetadataValueTooLong;
@@ -151,6 +152,7 @@ pub fn stageMpeg(
     stage_path: []const u8,
     expected: mutation.FileIdentity,
     changes: []const mutation.Change,
+    genres: ?mutation.GenreChange,
 ) !void {
     const source = try std.Io.Dir.cwd().openFile(io, source_path, .{});
     defer source.close(io);
@@ -159,7 +161,7 @@ pub fn stageMpeg(
 
     var readable = try storage_source.LocalFileSource.open(io, source_path);
     defer readable.close();
-    const planned = try id3v2.rewrite(allocator, readable.readable(), changes);
+    const planned = try id3v2.rewrite(allocator, readable.readable(), changes, genres);
     defer planned.deinit();
     if (planned.audio_start > planned.audio_end or planned.audio_end > stat.size)
         return error.InvalidMpegStream;
@@ -409,7 +411,7 @@ test "a replacement keeps an identical backup and a restore puts the original ba
         .field = .title,
         .before = "Old title",
         .after = "New title",
-    }});
+    }}, null);
     try std.testing.expect(expected.eql(try identity(std.testing.io, source_path)));
     try commitReplacement(std.testing.io, source_path, stage_path, backup_path, expected);
     try expectTitle(source_path, "New title");
@@ -459,7 +461,7 @@ test "a restore leaves alone a source that changed after the write" {
         .field = .title,
         .before = "Old title",
         .after = "New title",
-    }});
+    }}, null);
     try commitReplacement(std.testing.io, source_path, stage_path, backup_path, expected);
     const replaced = try identity(std.testing.io, source_path);
     try forgeInPlaceEdit(source_path, 0, "GENERATED");
@@ -550,6 +552,7 @@ test "FLAC replacement rewrites comments and preserves audio bytes" {
         stage_path,
         expected,
         &.{.{ .field = .title, .before = "Old title", .after = "New title" }},
+        null,
     );
     const stage = try std.Io.Dir.cwd().openFile(std.testing.io, stage_path, .{});
     defer stage.close(std.testing.io);
@@ -602,6 +605,7 @@ test "FLAC replacement writes a comment block longer than one length byte with i
         stage_path,
         try identity(std.testing.io, source_path),
         &.{.{ .field = .title, .before = "Old title", .after = "New title" }},
+        null,
     );
     const staged = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, stage_path, allocator, .limited(1 << 20));
     const block_length = std.mem.readInt(u24, staged[43..46], .big);
@@ -630,6 +634,7 @@ test "FLAC replacement remains decodable by the Zig-native codec" {
         stage_path,
         try identity(std.testing.io, source_path),
         &.{.{ .field = .title, .before = null, .after = "Generated reference" }},
+        null,
     );
     var source = try storage.LocalFileSource.open(std.testing.io, stage_path);
     defer source.close();
@@ -697,6 +702,7 @@ test "staging rejects a same-size edit that preserved the modification time" {
         stage_path,
         expected,
         &.{.{ .field = .title, .before = "Old title", .after = "New title" }},
+        null,
     ));
 }
 
@@ -733,7 +739,7 @@ test "commit refuses to replace a source edited between staging and rename" {
         .field = .title,
         .before = "Old title",
         .after = "New title",
-    }});
+    }}, null);
     try forgeInPlaceEdit(source_path, 0, "GENERATED");
     try std.testing.expectError(error.FileIdentityChanged, commitReplacement(
         std.testing.io,

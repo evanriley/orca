@@ -27,6 +27,16 @@ pub const Pipe = render.RenderPipe(block_count);
 pub const Context = render.RenderContext(block_count);
 pub const Sink = fanout.ZoneSink(block_count);
 
+fn discoverDeviceKind(factory: output_api.Factory, device_id: u64) contract.DeviceKind {
+    if (device_id == 0) return .unknown;
+    var devices: [64]contract.Device = undefined;
+    const count = factory.discover(&devices) catch return .unknown;
+    for (devices[0..count]) |device| {
+        if (device.id == device_id) return device.kind;
+    }
+    return .unknown;
+}
+
 /// A runtime Zone: policy plus the whole private render path.
 ///
 /// `docs/audio-engine.md` requires each Zone to own its buffering so one Zone's
@@ -95,6 +105,8 @@ pub const ZoneRuntime = struct {
     /// a queue entry in a different format needs the output reopened rather
     /// than resampled — see `docs/audio-engine.md` on the resampler.
     open_format: ?pcm.Format = null,
+    open_device_id: u64 = 0,
+    open_device_kind: contract.DeviceKind = .unknown,
     /// Consecutive engine passes during which this Zone accepted no PCM while
     /// its output claimed to be active. A backend that stops consuming must not
     /// be able to stall the shared decode cursor for every other Zone.
@@ -247,6 +259,8 @@ pub const ZoneRuntime = struct {
         };
         self.output = try factory.open(request, Context.callback, self.context.userdata());
         self.open_format = format;
+        self.open_device_id = device_id;
+        self.open_device_kind = discoverDeviceKind(factory, device_id);
     }
 
     /// True when the open stream cannot carry `format` — the two properties
@@ -263,6 +277,8 @@ pub const ZoneRuntime = struct {
             self.output = null;
         }
         self.open_format = null;
+        self.open_device_id = 0;
+        self.open_device_kind = .unknown;
     }
 
     /// Reclaims every block still held by the render path. Legal only while no

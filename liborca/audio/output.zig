@@ -99,6 +99,7 @@ pub const TestBackend = struct {
     fail_next_open: bool = false,
     fail_device_id: ?u64 = null,
     opens: usize = 0,
+    discoveries: std.atomic.Value(usize) = .init(0),
 
     pub const max_streams = 8;
 
@@ -179,9 +180,11 @@ pub const TestBackend = struct {
         return .{ .context = stream, .vtable = &output_vtable };
     }
 
-    fn discover(_: ?*anyopaque, devices: []contract.Device) anyerror!usize {
+    fn discover(context: ?*anyopaque, devices: []contract.Device) anyerror!usize {
+        const self: *TestBackend = @ptrCast(@alignCast(context.?));
+        _ = self.discoveries.fetchAdd(1, .monotonic);
         if (devices.len == 0) return 0;
-        var device: contract.Device = .{ .id = 1, .name = undefined, .name_len = 0 };
+        var device: contract.Device = .{ .id = 1, .name = undefined, .name_len = 0, .kind = .virtual };
         const name = "Test Output";
         @memcpy(device.name[0..name.len], name);
         device.name_len = name.len;
@@ -241,6 +244,7 @@ test "the test backend hands out independently closable streams" {
     var devices: [4]contract.Device = undefined;
     try std.testing.expectEqual(@as(usize, 1), try factory.discover(&devices));
     try std.testing.expectEqualStrings("Test Output", devices[0].nameSlice());
+    try std.testing.expectEqual(contract.DeviceKind.virtual, devices[0].kind);
 
     const request: contract.OpenRequest = .{
         .device_id = 0,
