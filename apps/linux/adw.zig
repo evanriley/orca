@@ -197,6 +197,7 @@ pub extern fn adw_split_button_set_dropdown_tooltip(button: *SplitButton, toolti
 
 pub extern fn adw_navigation_page_new(child: *gtk.Widget, title: [*:0]const u8) *NavigationPage;
 pub extern fn adw_navigation_page_get_child(page: *NavigationPage) ?*gtk.Widget;
+pub extern fn adw_navigation_page_set_child(page: *NavigationPage, child: ?*gtk.Widget) void;
 pub extern fn adw_navigation_page_get_tag(page: *NavigationPage) ?[*:0]const u8;
 pub extern fn adw_navigation_page_set_title(page: *NavigationPage, title: [*:0]const u8) void;
 pub extern fn adw_navigation_page_set_tag(page: *NavigationPage, tag: ?[*:0]const u8) void;

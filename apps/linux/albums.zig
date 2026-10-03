@@ -467,6 +467,45 @@ pub fn reload(self: *App) void {
     loadNextPage(self);
 }
 
+pub fn reloadKeepingScroll(self: *App) void {
+    const scroll = page_ui.visibleScroll(self.albums_body);
+    const loaded = self.albums_loaded;
+    reload(self);
+    while (!self.albums_exhausted and self.albums_loaded < loaded) {
+        const before = self.albums_loaded;
+        loadNextPage(self);
+        if (self.albums_loaded == before) break;
+    }
+    if (scroll) |kept| page_ui.restoreScroll(self, kept);
+}
+
+pub const RowRefresh = enum { not_listed, replaced, release_gone };
+
+pub fn refreshReleaseRow(self: *App, store: *gtk.ListStore, release_id: i64) RowRefresh {
+    const library = self.library orelse return .not_listed;
+    const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return .release_gone;
+    defer release.deinit(self.allocator);
+    const model = gtk.cast(gtk.ListModel, store);
+    const count = gtk.g_list_model_get_n_items(model);
+    var position: c_uint = 0;
+    while (position < count) : (position += 1) {
+        if (releaseAt(store, position) != release_id) continue;
+        const row = newReleaseRow(&release) orelse return .not_listed;
+        var replacement: [1]?*anyopaque = .{row};
+        gtk.g_list_store_splice(store, position, 1, &replacement, 1);
+        gtk.g_object_unref(row);
+        return .replaced;
+    }
+    return .not_listed;
+}
+
+pub fn releaseChanged(self: *App, release_id: i64) void {
+    if (self.album_store) |store| {
+        if (refreshReleaseRow(self, store, release_id) == .release_gone) reloadKeepingScroll(self);
+    }
+    refreshPages(self, release_id);
+}
+
 fn emptyText(self: *const App) struct { title: [*:0]const u8, description: [*:0]const u8 } {
     if (self.album_search.value.len != 0)
         return .{ .title = "No matching albums", .description = "Try another search." };
@@ -506,6 +545,16 @@ pub fn releaseFormat(buffer: []u8, release: *const liborca.ReleaseSummary) [:0]c
     return buffer[0..writer.end :0];
 }
 
+fn newReleaseRow(release: *const liborca.ReleaseSummary) ?*BrowseObject {
+    var format: [64]u8 = undefined;
+    return browse_model.newRelease(release.id, release.title, release.album_artist, releaseYear(release.*), releaseFormat(&format, release), .{
+        .track_count = release.track_count,
+        .duration_ms = release.total_duration_ms,
+        .loved = release.loved,
+        .explicit = release.explicit == .explicit,
+    });
+}
+
 pub fn appendReleasePage(self: *App, store: *gtk.ListStore, query: liborca.ReleaseQuery) ?u32 {
     const library = self.library orelse return null;
     var page = self.runtime.libraryReleasePage(library, query) catch return null;
@@ -513,13 +562,7 @@ pub fn appendReleasePage(self: *App, store: *gtk.ListStore, query: liborca.Relea
     var additions: std.ArrayList(?*anyopaque) = .empty;
     defer additions.deinit(self.allocator);
     for (page.items) |*release| {
-        var format: [64]u8 = undefined;
-        const row = browse_model.newRelease(release.id, release.title, release.album_artist, releaseYear(release.*), releaseFormat(&format, release), .{
-            .track_count = release.track_count,
-            .duration_ms = release.total_duration_ms,
-            .loved = release.loved,
-            .explicit = release.explicit == .explicit,
-        }) orelse continue;
+        const row = newReleaseRow(release) orelse continue;
         additions.append(self.allocator, row) catch {
             gtk.g_object_unref(row);
             break;
@@ -980,6 +1023,7 @@ pub const AlbumPage = struct {
     source: ?*gtk.Widget = null,
     licence: ?*gtk.Widget = null,
     scroller: ?*gtk.Widget = null,
+    pushed: ?*adw.NavigationPage = null,
     more_pending: bool = false,
     expanded: bool = false,
     column_headers: std.enums.EnumArray(Column, ?*gtk.Widget) = .initFill(null),
@@ -1639,17 +1683,21 @@ fn eyebrow(buffer: []u8, release_type: ?[]const u8, is_compilation: bool) [:0]co
 }
 
 pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) void {
-    const library = self.library orelse return;
-    const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return;
+    _ = showAlbum(self, navigation, release_id, null);
+}
+
+fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into: ?*adw.NavigationPage) bool {
+    const library = self.library orelse return false;
+    const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return false;
     defer release.deinit(self.allocator);
     var tracks = self.runtime.libraryTrackQuery(library, "", .{
         .release_id = release_id,
         .sort = .track_number,
         .limit = app.page_size,
-    }) catch return;
+    }) catch return false;
     defer tracks.deinit();
 
-    const page = self.allocator.create(AlbumPage) catch return;
+    const page = self.allocator.create(AlbumPage) catch return false;
     page.* = .{
         .self = self,
         .navigation = navigation,
@@ -1663,25 +1711,25 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     };
     page.ids = self.allocator.alloc(i64, tracks.items.len) catch {
         self.allocator.destroy(page);
-        return;
+        return false;
     };
     page.songs = self.allocator.alloc(feedback.Target, tracks.items.len) catch {
         self.allocator.free(page.ids);
         self.allocator.destroy(page);
-        return;
+        return false;
     };
     page.artists = self.allocator.alloc(?i64, tracks.items.len) catch {
         self.allocator.free(page.ids);
         self.allocator.free(page.songs);
         self.allocator.destroy(page);
-        return;
+        return false;
     };
     page.rows = self.allocator.alloc(?*gtk.Widget, tracks.items.len) catch {
         self.allocator.free(page.ids);
         self.allocator.free(page.songs);
         self.allocator.free(page.artists);
         self.allocator.destroy(page);
-        return;
+        return false;
     };
     for (page.ids, page.songs, page.artists, page.rows, tracks.items) |*id, *song, *artist_id, *row, item| {
         id.* = item.id;
@@ -1804,8 +1852,33 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     registerPage(page);
 
     const title_text = strings.printZ(&buffer, "{s}", .{if (release.title.len != 0) release.title else "Album"}) catch "Album";
+    if (into) |pushed| {
+        page.pushed = pushed;
+        adw.adw_navigation_page_set_child(pushed, scroller);
+        adw.adw_navigation_page_set_title(pushed, title_text.ptr);
+        window.markPushed(pushed, .{ .album = release_id });
+        return true;
+    }
     const pushed = adw.adw_navigation_page_new(scroller, title_text.ptr);
+    page.pushed = pushed;
     window.markPushed(pushed, .{ .album = release_id });
     adw.adw_navigation_view_push(navigation, pushed);
     _ = gtk.gtk_widget_grab_focus(play);
+    return true;
+}
+
+fn refreshPages(self: *App, release_id: i64) void {
+    var targets: [app.open_album_page_limit]struct { navigation: *adw.NavigationView, pushed: *adw.NavigationPage } = undefined;
+    var count: usize = 0;
+    for (self.open_album_pages[0..self.open_album_page_count]) |page| {
+        if (page.release_id != release_id) continue;
+        targets[count] = .{ .navigation = page.navigation, .pushed = page.pushed orelse continue };
+        count += 1;
+    }
+    for (targets[0..count]) |target| {
+        if (showAlbum(self, target.navigation, release_id, target.pushed)) continue;
+        if (adw.adw_navigation_view_get_previous_page(target.navigation, target.pushed)) |previous|
+            _ = adw.adw_navigation_view_pop_to_page(target.navigation, previous);
+    }
+    if (count != 0) window.syncInspector(self);
 }

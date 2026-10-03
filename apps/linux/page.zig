@@ -3,6 +3,7 @@
 //! inspector's toggles — and the title block that opens the content with the
 //! page's name and its count.
 
+const std = @import("std");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const app = @import("app.zig");
@@ -231,4 +232,42 @@ pub fn withTitle(block: Title, body: *gtk.Widget) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), block.widget);
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), body);
     return column;
+}
+
+pub const Scroll = struct {
+    adjustment: *gtk.Adjustment,
+    value: f64,
+};
+
+pub fn scrollOf(scroller: *gtk.Widget) Scroll {
+    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller));
+    return .{ .adjustment = adjustment, .value = gtk.gtk_adjustment_get_value(adjustment) };
+}
+
+pub fn visibleScroll(body: ?*gtk.Stack) ?Scroll {
+    const stack = body orelse return null;
+    const name = gtk.gtk_stack_get_visible_child_name(stack) orelse return null;
+    if (std.mem.eql(u8, std.mem.span(name), "empty")) return null;
+    return scrollOf(gtk.gtk_stack_get_child_by_name(stack, name) orelse return null);
+}
+
+const PendingScroll = struct {
+    allocator: std.mem.Allocator,
+    scroll: Scroll,
+};
+
+pub fn restoreScroll(self: *App, scroll: Scroll) void {
+    if (!(scroll.value > 0)) return;
+    const pending = self.allocator.create(PendingScroll) catch return;
+    pending.* = .{ .allocator = self.allocator, .scroll = scroll };
+    _ = gtk.g_object_ref(scroll.adjustment);
+    _ = gtk.g_idle_add(restoreScrollIdle, pending);
+}
+
+fn restoreScrollIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const pending: *PendingScroll = @ptrCast(@alignCast(data.?));
+    gtk.gtk_adjustment_set_value(pending.scroll.adjustment, pending.scroll.value);
+    gtk.g_object_unref(pending.scroll.adjustment);
+    pending.allocator.destroy(pending);
+    return gtk.SOURCE_REMOVE;
 }

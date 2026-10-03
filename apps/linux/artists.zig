@@ -263,6 +263,18 @@ pub fn reload(self: *App) void {
     loadNextPage(self);
 }
 
+pub fn reloadKeepingScroll(self: *App) void {
+    const scroll = page_ui.visibleScroll(self.artists_body);
+    const loaded = self.artist_list_loaded;
+    reload(self);
+    while (!self.artist_list_exhausted and self.artist_list_loaded < loaded) {
+        const before = self.artist_list_loaded;
+        loadNextPage(self);
+        if (self.artist_list_loaded == before) break;
+    }
+    if (scroll) |kept| page_ui.restoreScroll(self, kept);
+}
+
 fn loadNextPage(self: *App) void {
     const store = self.artist_list_store orelse return;
     if (self.artist_list_exhausted) return;

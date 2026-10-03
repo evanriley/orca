@@ -609,6 +609,10 @@
 
 ### Fixed
 
+- **Fetching a cover or matching an album keeps your place.** The album
+  page stays open and the Albums list keeps its scroll position; the
+  fetched cover replaces the placeholder everywhere it shows, including
+  pages opened before the fetch.
 - **Lyrics layout warnings.** Resizing the lyrics view no longer logs
   GtkListBox allocation warnings.
 - **No Show Album or Show Artist for the page already open.** The context

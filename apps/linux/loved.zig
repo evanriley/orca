@@ -18,6 +18,7 @@ const art = @import("art.zig");
 const details = @import("details.zig");
 const feedback = @import("feedback.zig");
 const menu = @import("menu.zig");
+const page_ui = @import("page.zig");
 const strings = @import("strings.zig");
 const browse_model = @import("browse_model.zig");
 const song_table = @import("song_table.zig");
@@ -65,6 +66,24 @@ pub fn reload(self: *App) void {
     reloadAlbums(self);
     reloadSongs(self);
     reloadArtists(self);
+    showMosaic(self);
+}
+
+pub fn releaseChanged(self: *App, release_id: i64) void {
+    if (self.loved.album_store) |store| {
+        if (albums.refreshReleaseRow(self, store, release_id) == .release_gone) {
+            const scroll = page_ui.visibleScroll(self.loved.albums_body);
+            const loaded = self.loved.albums_loaded;
+            reloadAlbums(self);
+            while (!self.loved.albums_exhausted and self.loved.albums_loaded < loaded) {
+                const before = self.loved.albums_loaded;
+                loadNextAlbums(self);
+                if (self.loved.albums_loaded == before) break;
+            }
+            if (scroll) |kept| page_ui.restoreScroll(self, kept);
+        }
+    }
+    song_table.refreshRelease(&self.loved.songs, release_id);
     showMosaic(self);
 }
 

@@ -295,17 +295,10 @@ fn paint(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
 /// Shows `key`'s cover in `stack_widget` now if it is cached, and when it
 /// arrives if not. Replaces whatever the widget was registered for.
 pub fn show(self: *App, stack_widget: *gtk.Widget, key: Key) void {
-    const stack = gtk.cast(gtk.Stack, stack_widget);
     forget(self, stack_widget);
-    const cache = &self.art;
-    if (cache.entries.getPtr(key)) |entry| {
-        touch(cache, entry);
-        paint(stack, entry.texture);
-        return;
-    }
-    paint(stack, null);
-    cache.bindings.append(self.allocator, .{ .stack = stack, .key = key }) catch return;
-    want(self, key);
+    const binding: Binding = .{ .stack = gtk.cast(gtk.Stack, stack_widget), .key = key };
+    self.art.bindings.append(self.allocator, binding) catch return paint(binding.stack, null);
+    paintBinding(self, binding);
 }
 
 /// The widget no longer shows a cover. A request nobody else is waiting for
@@ -337,6 +330,11 @@ pub fn clear(self: *App, stack_widget: *gtk.Widget) void {
 /// shows, so a cover fetched since replaces the placeholder.
 pub fn refreshRelease(self: *App, release_id: i64) void {
     inline for (comptime std.enums.values(Size)) |size| refresh(self, Key.release(release_id, size));
+    var tracks: std.ArrayList(Key) = .empty;
+    defer tracks.deinit(self.allocator);
+    var keys = self.art.entries.keyIterator();
+    while (keys.next()) |key| if (key.kind == .track) tracks.append(self.allocator, key.*) catch break;
+    for (tracks.items) |key| refresh(self, key);
 }
 
 pub fn refreshArtist(self: *App, artist_id: i64) void {

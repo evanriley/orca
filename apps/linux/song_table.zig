@@ -562,6 +562,29 @@ pub fn markPlaying(tables: []const *Table, track_id: ?i64) void {
     }
 }
 
+pub fn refreshRelease(table: *Table, release_id: i64) void {
+    const store = table.store orelse return;
+    const self = table.app;
+    const library = self.library orelse return;
+    const kept = keepSelection(table);
+    defer restoreSelection(table, kept);
+    const model = gtk.cast(gtk.ListModel, store);
+    const count = gtk.g_list_model_get_n_items(model);
+    var index: c_uint = 0;
+    while (index < count) : (index += 1) {
+        const item = gtk.g_list_model_get_item(model, index) orelse continue;
+        defer gtk.g_object_unref(item);
+        const row: *TrackObject = @ptrCast(@alignCast(item));
+        if (!row.inLibrary() or !std.meta.eql(row.releaseId(), release_id)) continue;
+        const summary = (self.runtime.libraryTrackSummary(library, row.id()) catch null) orelse continue;
+        defer summary.deinit(self.allocator);
+        const fresh = track_model.new(summary) orelse continue;
+        var replacement: [1]?*anyopaque = .{fresh};
+        gtk.g_list_store_splice(store, index, 1, &replacement, 1);
+        gtk.g_object_unref(fresh);
+    }
+}
+
 pub fn repaint(table: *Table, changed: *const feedback.Recordings, change: track_model.Change) void {
     const store = table.store orelse return;
     const kept = keepSelection(table);

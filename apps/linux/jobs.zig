@@ -25,6 +25,7 @@ const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
+const song_table = @import("song_table.zig");
 
 const App = app.App;
 
@@ -385,9 +386,25 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     tags.undoLastWrite(state(data));
 }
 
+fn albumAccepted(self: *App, release_id: i64) void {
+    matches.reload(self);
+    health.reload(self);
+    albums.releaseChanged(self, release_id);
+    artists.reloadKeepingScroll(self);
+    loved.releaseChanged(self, release_id);
+    song_table.refreshRelease(&self.songs, release_id);
+    song_table.refreshRelease(&self.playlists.songs, release_id);
+    self.genres.stale = true;
+    self.folders.stale = true;
+}
+
 fn albumFinished(self: *App, release_id: i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
     art.refreshRelease(self, release_id);
-    matches.accepted(self);
+    if (stats) |result| {
+        if (result.accepted != 0) albumAccepted(self, release_id) else if (result.matched != 0) matches.reload(self);
+    }
+    details.invalidate(self);
+    self.requestTick();
     if (state_value == .cancelled) return self.toast("Stopped");
     const result = stats orelse return self.toast("Could not match the album");
     if (state_value != .succeeded) return self.toast(switch (result.cover_art) {
