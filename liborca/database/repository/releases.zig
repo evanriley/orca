@@ -177,7 +177,7 @@ pub const ReleaseSort = enum {
     /// Most listens of the Tracks' recordings first.
     most_played,
 
-    fn terms(comptime self: ReleaseSort) []const u8 {
+    pub fn terms(comptime self: ReleaseSort) []const u8 {
         return switch (self) {
             .title => "releases.title COLLATE NOCASE, releases.id",
             .artist => "releases.album_artist COLLATE NOCASE, releases.release_date IS NULL, " ++

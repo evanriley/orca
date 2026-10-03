@@ -974,6 +974,11 @@ loves and `release_info` a Release's fetched description.
   own statement; `ArtistQuery.loved_only` filters by it and
   `ArtistSort.recently_loved` orders by `loved_at`, most recent first,
   Artists not loved last, each ending in `artists.id`.
+  `ArtistSummary.has_photo` and `cover_release_id` are correlated
+  subqueries in the same statement: an `artist_info` primary-key lookup, and
+  the first Release in `ReleaseSort.artist` order through
+  `releases_by_artist` (own Releases) or `tracks_artist` (appearances), so a
+  page reads only its own Artists' Releases and needs no further index.
 
 `ArtistInfoRepository.store` writes the row and, when given, the links in
 one write-lane transaction, and `storeListenBrainz` the listeners and

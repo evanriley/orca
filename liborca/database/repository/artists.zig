@@ -4,9 +4,11 @@ const text_key = @import("../text_key.zig");
 const columns = @import("../columns.zig");
 
 const max_page = columns.max_page;
+const optionalInt64 = columns.optionalInt64;
 const presentText = columns.presentText;
 const by_artist = @import("tracks.zig").by_artist;
 const by_release_artist = @import("tracks.zig").by_release_artist;
+const ReleaseSort = @import("releases.zig").ReleaseSort;
 const byAppearingArtist = @import("releases.zig").byAppearingArtist;
 const artistsOfGenre = @import("genres.zig").artistsOfGenre;
 const WriteLane = @import("write_lane.zig").WriteLane;
@@ -36,6 +38,8 @@ pub const ArtistSummary = struct {
     release_count: u32,
     track_count: u32,
     loved: bool = false,
+    has_photo: bool = false,
+    cover_release_id: ?i64 = null,
 
     pub fn deinit(self: ArtistSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -237,7 +241,16 @@ const artist_columns =
     "SELECT artists.id, artists.name, COALESCE(artists.sort_name, ''),\n" ++
     "       (SELECT count(*) FROM releases WHERE " ++ artistOwns(by_release_artist) ++ "),\n" ++
     "       (SELECT count(*) FROM tracks WHERE " ++ artistOwns(by_artist) ++ "),\n" ++
-    "       artist_loves.artist_id IS NOT NULL\n";
+    "       artist_loves.artist_id IS NOT NULL,\n" ++
+    "       EXISTS (SELECT 1 FROM artist_info WHERE artist_info.artist_id = artists.id\n" ++
+    "           AND artist_info.photo IS NOT NULL),\n" ++
+    "       " ++ cover_release ++ "\n";
+
+const cover_release_order = "ORDER BY " ++ ReleaseSort.artist.terms() ++ " LIMIT 1";
+
+const cover_release = "COALESCE(\n" ++
+    "    (SELECT releases.id FROM releases WHERE releases.album_artist_id = artists.id " ++ cover_release_order ++ "),\n" ++
+    "    (SELECT releases.id FROM releases WHERE " ++ artistOwns(by_release_artist) ++ " " ++ cover_release_order ++ "))";
 
 const artist_from = "FROM artists LEFT JOIN artist_loves ON artist_loves.artist_id = artists.id\n";
 
@@ -292,6 +305,8 @@ fn collectArtistPage(allocator: std.mem.Allocator, statement: sqlite.Statement) 
             .release_count = @intCast(statement.columnInt64(3)),
             .track_count = @intCast(statement.columnInt64(4)),
             .loved = statement.columnInt64(5) != 0,
+            .has_photo = statement.columnInt64(6) != 0,
+            .cover_release_id = optionalInt64(statement, 7),
         });
     }
     return .{ .allocator = allocator, .items = try results.toOwnedSlice(allocator) };
@@ -383,4 +398,45 @@ test "artists sort by their newest release, filed under them or appeared on, new
     try std.testing.expectEqual(@as(usize, 2), window.items.len);
     try std.testing.expectEqual(@as(i64, 3), window.items[0].id);
     try std.testing.expectEqual(@as(i64, 2), window.items[1].id);
+}
+
+test "an artist has a photo only when their artist info stores one" {
+    var library = try openArtistLibrary("has-photo");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artist_info(artist_id, photo, fetched_at, outcome) VALUES
+        \\    (1, x'89504E470D0A1A0A00000000', 10, 1), (2, NULL, 10, 1);
+    );
+    var listed = try library.artists.page(std.testing.allocator, .{});
+    defer listed.deinit();
+    for (listed.items) |item| try std.testing.expectEqual(item.id == 1, item.has_photo);
+    const host = (try library.artists.byId(std.testing.allocator, 1)).?;
+    defer host.deinit(std.testing.allocator);
+    try std.testing.expect(host.has_photo);
+}
+
+test "an artist's cover release is their first own release in shelf order, else the first they appear on, and none without releases" {
+    var library = try openArtistLibrary("cover-release");
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO releases(id, title, release_key, album_artist_id) VALUES (5, 'Aardvark', 'r5', NULL);
+        \\INSERT INTO tracks(id, release_id, title, artist_id) VALUES (7, 5, 'Appearance', 1);
+    );
+    var listed = try library.artists.page(std.testing.allocator, .{});
+    defer listed.deinit();
+    var covers: [4]?i64 = undefined;
+    for (listed.items, 0..) |item, index| covers[index] = item.cover_release_id;
+    var ids: [4]i64 = undefined;
+    for (listed.items, 0..) |item, index| ids[index] = item.id;
+    try std.testing.expectEqualSlices(i64, &.{ 3, 1, 2, 4 }, ids[0..listed.items.len]);
+    try std.testing.expectEqualSlices(?i64, &.{ 3, 3, 2, null }, covers[0..listed.items.len]);
+
+    var shelf = try library.releases.page(std.testing.allocator, .{
+        .album_artist_id = 1,
+        .own_releases_only = true,
+        .sort = .artist,
+        .limit = 1,
+    });
+    defer shelf.deinit();
+    try std.testing.expectEqual(shelf.items[0].id, covers[1].?);
 }

@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Artist photos in listings.** `ArtistSummary` adds `has_photo`, true
+  when the Library stores the Artist's photo, and `cover_release_id`, the
+  Artist's first own Release in shelf order or else the first they appear
+  on, so a frontend can show a photo or a fallback cover without a query
+  per Artist. `ArtworkSubject.artist` loads a stored photo through the
+  artwork loader, off the caller's thread. The C ABI adds `has_photo` in
+  `orca_artist_view_v2`'s reserved bytes and
+  `ORCA_ARTWORK_SUBJECT_ARTIST`, and `orca-cli artists` ends a line in
+  `photo`.
 - **Output kind and block size.** Each `Device` carries a `DeviceKind`
   (`usb`, `pci`, `bluetooth`, `hdmi`, `virtual` or `unknown`), read on
   Linux from the info of each PipeWire sink and of the device it belongs

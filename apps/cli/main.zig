@@ -3907,8 +3907,16 @@ fn listArtists(context: Context) !void {
         },
     );
     for (page.items) |artist| try stdout.print(
-        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]{s}\n",
-        .{ artist.id, artist.name, artist.release_count, artist.track_count, artist.sort_name, if (artist.loved) "\tloved" else "" },
+        "{d}\t{s}\t{d} releases\t{d} tracks\t[{s}]{s}{s}\n",
+        .{
+            artist.id,
+            artist.name,
+            artist.release_count,
+            artist.track_count,
+            artist.sort_name,
+            if (artist.loved) "\tloved" else "",
+            if (artist.has_photo) "\tphoto" else "",
+        },
     );
 }
 

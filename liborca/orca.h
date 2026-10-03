@@ -303,11 +303,14 @@ typedef struct orca_artist_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_artist_callback)(void *context, const orca_artist_view *artist);
 
-/* An Artist with whether the user loved it (orca_library_set_artist_love). */
+/* An Artist with whether the user loved it (orca_library_set_artist_love)
+ * and whether the Library stores a photo of it, which
+ * orca_library_request_artwork returns for ORCA_ARTWORK_SUBJECT_ARTIST. */
 typedef struct orca_artist_view_v2 {
     orca_artist_view base;
     uint8_t loved;
-    uint8_t reserved[7];
+    uint8_t has_photo;
+    uint8_t reserved[6];
 } orca_artist_view_v2;
 
 /* String views are valid only for the duration of this callback. */
@@ -2556,10 +2559,12 @@ typedef enum orca_artwork_kind {
     ORCA_ARTWORK_KIND_OTHER = 2,
 } orca_artwork_kind;
 
-/* What an artwork request asks about: a Track or a Release id. */
+/* What an artwork request asks about: a Track, a Release or an Artist id. An
+ * Artist's image is the photo stored by its artist info. */
 typedef enum orca_artwork_subject {
     ORCA_ARTWORK_SUBJECT_TRACK = 0,
     ORCA_ARTWORK_SUBJECT_RELEASE = 1,
+    ORCA_ARTWORK_SUBJECT_ARTIST = 2,
 } orca_artwork_subject;
 
 /* One cover image. `bytes` and `mime_type` are valid only for the duration of
@@ -2577,8 +2582,9 @@ typedef struct orca_image_view {
 typedef void (*orca_image_callback)(void *context, const orca_image_view *image);
 
 /* One finished artwork request. `subject` is an orca_artwork_subject and
- * `subject_id` the Track or Release id it was asked for. A subject with no
- * readable cover arrives with `has_image` 0 and an `image` of length 0. */
+ * `subject_id` the Track, Release or Artist id it was asked for. A subject
+ * with no readable cover or stored photo arrives with `has_image` 0 and an
+ * `image` of length 0. */
 typedef struct orca_artwork_result_view {
     uint64_t request;
     int64_t subject_id;
@@ -2617,8 +2623,9 @@ orca_status orca_library_release_artwork(
     void *context,
     orca_image_callback callback
 );
-/* Asks for the cover of a Track or Release (`subject`, an
- * orca_artwork_subject, and its `id`) without waiting for it. The lookup runs
+/* Asks for the cover of a Track or Release, or the photo of an Artist
+ * (`subject`, an orca_artwork_subject, and its `id`) without waiting for
+ * it. The lookup runs
  * on the Library's artwork thread, which is started on the first request;
  * when it finishes, liborca calls the wake callback, and the host collects
  * the result with orca_library_take_artwork after its next pump. `request`

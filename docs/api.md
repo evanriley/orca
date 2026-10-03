@@ -276,7 +276,13 @@ defer page.deinit();
   `libraryReleaseArtwork`) or off it: `libraryRequestArtwork` queues a lookup
   on the Library's artwork loader, at most 64 outstanding, and
   `libraryTakeArtwork` collects finished ones. `libraryCancelArtwork` skips a
-  request that has not started.
+  request that has not started. `ArtworkSubject.artist` asks the loader for
+  the photo the Artist's artist info stores, with no image when none is.
+- `ArtistSummary.has_photo` says whether an Artist's artist info stores a
+  photo, and `ArtistSummary.cover_release_id` names the Release to show in
+  its place: the first the Artist's `ReleaseQuery` lists with
+  `own_releases_only` and `ReleaseSort.artist`, else the first it lists
+  without `own_releases_only`, null when the Artist has no Release.
 - Lyrics are read on a job: `startTrackLyrics` starts one for a Track, and
   with `LyricsOptions.fetch` also asks LRCLIB, which needs the client
   identity and can be pointed at another server with `setLrclibServer`.

@@ -173,7 +173,8 @@ pub const ArtistCallback = *const fn (?*anyopaque, *const ArtistView) callconv(.
 pub const ArtistViewV2 = extern struct {
     base: ArtistView,
     loved: u8,
-    _reserved: [7]u8 = @splat(0),
+    has_photo: u8,
+    _reserved: [6]u8 = @splat(0),
 };
 
 pub const ArtistV2Callback = *const fn (?*anyopaque, *const ArtistViewV2) callconv(.c) void;
@@ -2157,7 +2158,11 @@ pub export fn orca_library_query_artists_v2(
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view: ArtistViewV2 = .{ .base = artistView(item), .loved = @intFromBool(item.loved) };
+        const view: ArtistViewV2 = .{
+            .base = artistView(item),
+            .loved = @intFromBool(item.loved),
+            .has_photo = @intFromBool(item.has_photo),
+        };
         visit(context, &view);
     }
     return .ok;
@@ -3097,6 +3102,7 @@ pub export fn orca_library_request_artwork(
     const wanted: core.runtime.ArtworkSubject = switch (kind) {
         .track => .{ .track = id },
         .release => .{ .release = id },
+        .artist => .{ .artist = id },
     };
     destination.* = box.runtime.libraryRequestArtwork(importLibrary(library), box.io(), wanted) catch |err|
         return box.fail(@src(), err);
@@ -3127,7 +3133,7 @@ pub export fn orca_library_take_artwork(
     const view: ArtworkResultView = .{
         .request = result.request,
         .subject_id = switch (result.subject) {
-            .track, .release => |id| id,
+            .track, .release, .artist => |id| id,
         },
         .subject = exportArtworkSubject(result.subject),
         .has_image = @intFromBool(result.image != null),
@@ -5724,6 +5730,7 @@ pub fn importArtworkSubject(value: u8) ?std.meta.Tag(core.runtime.ArtworkSubject
     return switch (value) {
         0 => .track,
         1 => .release,
+        2 => .artist,
         else => null,
     };
 }
@@ -5732,6 +5739,7 @@ pub fn exportArtworkSubject(subject: core.runtime.ArtworkSubject) u8 {
     return switch (subject) {
         .track => 0,
         .release => 1,
+        .artist => 2,
     };
 }
 
@@ -7838,7 +7846,7 @@ test "artwork calls refuse null outputs and unknown subjects, find no cover for 
     try std.testing.expectEqual(@as(usize, 0), images);
 
     var request: u64 = 0;
-    try std.testing.expectEqual(Status.invalid_argument, orca_library_request_artwork(runtime, library, 2, 1, &request));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_request_artwork(runtime, library, 3, 1, &request));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_request_artwork(runtime, library, 0, 1, null));
     var captured: ArtworkResultView = undefined;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_take_artwork(runtime, library, &captured, null));

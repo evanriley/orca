@@ -2327,7 +2327,7 @@ static int artwork_smoke(orca_runtime *runtime, orca_handle library) {
     SMOKE_CHECK(orca_library_request_artwork(runtime, library, ORCA_ARTWORK_SUBJECT_TRACK,
                                              coverless, &coverless_request) == ORCA_STATUS_OK);
     SMOKE_CHECK(covered_request != coverless_request);
-    SMOKE_CHECK(orca_library_request_artwork(runtime, library, 2, covered, &covered_request) ==
+    SMOKE_CHECK(orca_library_request_artwork(runtime, library, 3, covered, &covered_request) ==
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_library_cancel_artwork(runtime, library, 999999) == ORCA_STATUS_OK);
 
@@ -2439,6 +2439,7 @@ struct artist_smoke_capture {
     uint32_t count;
     int64_t first_id;
     uint8_t loved;
+    uint8_t has_photo;
     uint8_t outcome;
     uint8_t has_info;
     uint8_t has_listeners;
@@ -2452,6 +2453,7 @@ static void capture_smoke_artist(void *context, const orca_artist_view_v2 *artis
     if (capture->count == 0) {
         capture->first_id = artist->base.id;
         capture->loved = artist->loved;
+        capture->has_photo = artist->has_photo;
     }
     capture->count += 1;
 }
@@ -2487,6 +2489,31 @@ static void capture_smoke_artist_links(void *context, const orca_artist_link_vie
     capture->link_count = count;
 }
 
+static int artist_photo_smoke(orca_runtime *runtime, orca_handle library, int64_t artist, uint8_t has_photo) {
+    struct image_capture photo;
+    memset(&photo, 0, sizeof photo);
+    SMOKE_CHECK(orca_library_artist_photo(runtime, library, artist, &photo, capture_image) ==
+                (has_photo ? ORCA_STATUS_OK : ORCA_STATUS_NOT_FOUND));
+    uint64_t request = 0;
+    SMOKE_CHECK(orca_library_request_artwork(runtime, library, ORCA_ARTWORK_SUBJECT_ARTIST, artist, &request) ==
+                ORCA_STATUS_OK);
+    struct artwork_result_capture result;
+    memset(&result, 0, sizeof result);
+    long deadline = now_ms() + 5000;
+    for (;;) {
+        orca_status status = orca_library_take_artwork(runtime, library, &result, capture_artwork_result);
+        if (status == ORCA_STATUS_OK) break;
+        SMOKE_CHECK(status == ORCA_STATUS_NOT_FOUND);
+        SMOKE_CHECK(now_ms() < deadline);
+        SMOKE_CHECK(wait_for_runtime(runtime, deadline) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+    }
+    SMOKE_CHECK(result.request == request && result.subject == ORCA_ARTWORK_SUBJECT_ARTIST &&
+                result.subject_id == artist);
+    SMOKE_CHECK(result.has_image == has_photo);
+    return 0;
+}
+
 static int artist_smoke(orca_runtime *runtime, orca_handle library) {
     orca_artist_query_v2 query;
     memset(&query, 0, sizeof query);
@@ -2497,6 +2524,7 @@ static int artist_smoke(orca_runtime *runtime, orca_handle library) {
                 ORCA_STATUS_OK);
     SMOKE_CHECK(all.count > 0 && all.loved == 0);
     int64_t artist = all.first_id;
+    SMOKE_CHECK(artist_photo_smoke(runtime, library, artist, all.has_photo) == 0);
 
     const int64_t artists[2] = {artist, 999999999};
     orca_change_count change;

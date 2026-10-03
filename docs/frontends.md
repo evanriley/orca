@@ -73,7 +73,8 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_explicit` advisory. `orca_library_query_artists_v2` takes an
   `orca_artist_query_v2` with `loved_only` and `ORCA_ARTIST_SORT_RECENTLY_LOVED`
   and calls back with an `orca_artist_view_v2`, which adds whether the
-  Artist is loved. `orca_library_browse_tracks_v2` takes an
+  Artist is loved and whether the Library stores its photo, which
+  `orca_library_request_artwork` returns for `ORCA_ARTWORK_SUBJECT_ARTIST`. `orca_library_browse_tracks_v2` takes an
   `orca_track_query_v2`, with `has_*` flags in place of negative ids, and
   calls back with each Track's summary and an `orca_track_facts_view`: codec,
   sample rate, bit depth, date added, the recording's play count and last

@@ -144,7 +144,7 @@ zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-af
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
 
 # browse
-zig build run -- artists DATABASE [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`
+zig build run -- artists DATABASE [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`, then `photo` when its photo is stored
 zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--sort title|artist|year|recently_added|loved|most_played] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances
 zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--explicit] [--sort KEY] [--desc] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year; a search ranks by relevance
 zig build run -- track DATABASE ID

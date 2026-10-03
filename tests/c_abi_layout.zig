@@ -377,6 +377,7 @@ const export_mappings = .{
             return c_api.exportArtworkSubject(switch (tag) {
                 .track => .{ .track = 1 },
                 .release => .{ .release = 1 },
+                .artist => .{ .artist = 1 },
             });
         }
     },

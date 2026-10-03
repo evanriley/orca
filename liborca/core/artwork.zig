@@ -1,4 +1,4 @@
-//! Cover art, found and read off the caller's thread.
+//! Cover art and artist photos, found and read off the caller's thread.
 //!
 //! A host showing a grid of albums asks for dozens of covers at once, and each
 //! is at least one indexed query and one file read. `Loader` does that work on
@@ -18,10 +18,11 @@ const work = @import("work.zig");
 pub const Subject = union(enum) {
     track: i64,
     release: i64,
+    artist: i64,
 };
 
 /// One finished request. `image` is null when the subject has no readable
-/// cover. The caller owns `image` and releases it with its `deinit`.
+/// cover or stored photo. The caller owns `image` and releases it with its `deinit`.
 pub const Result = struct {
     request: u64,
     subject: Subject,
@@ -149,6 +150,7 @@ pub const Loader = struct {
         const image = switch (next.subject) {
             .track => |id| trackArtwork(self.allocator, io, self.database, id),
             .release => |id| releaseArtwork(self.allocator, io, self.database, id),
+            .artist => |id| self.database.artist_info.photo(self.allocator, id),
         } catch null;
         // Cannot fail: `outstanding` never exceeds the results' capacity.
         if (!self.results.push(.{ .request = next.id, .subject = next.subject, .image = image })) {
@@ -263,6 +265,43 @@ test "a cancelled request is skipped and the rest arrive in order" {
     try std.testing.expectEqual(third, b.request);
     try std.testing.expect(a.image == null and b.image == null);
     try std.testing.expectEqual(@as(u32, 0), loader.outstanding.load(.acquire));
+}
+
+test "an artist request returns the stored photo, and no image when the artist has none" {
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-artwork-loader-artist?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try library.database.exec(
+        \\INSERT INTO artists(id, name, sort_name) VALUES (1, 'Pictured', 'pictured'), (2, 'Unpictured', 'unpictured');
+        \\INSERT INTO artist_info(artist_id, photo, fetched_at, outcome) VALUES
+        \\    (1, x'89504E470D0A1A0A00000000', 10, 1), (2, NULL, 10, 1);
+    );
+    var registration: work.Registration = .{};
+    var loader: Loader = .{
+        .allocator = std.testing.allocator,
+        .database = &library,
+        .registration = &registration,
+    };
+    defer loader.deinit();
+    const pictured = try loader.request(std.testing.io, .{ .artist = 1 });
+    const unpictured = try loader.request(std.testing.io, .{ .artist = 2 });
+    const unknown = try loader.request(std.testing.io, .{ .artist = 3 });
+    while (loader.step(std.testing.io)) {}
+
+    const photo = loader.take().?;
+    defer if (photo.image) |image| image.deinit();
+    try std.testing.expectEqual(pictured, photo.request);
+    try std.testing.expectEqual(Subject{ .artist = 1 }, photo.subject);
+    try std.testing.expectEqualStrings("image/png", photo.image.?.mime_type);
+    const none = loader.take().?;
+    try std.testing.expectEqual(unpictured, none.request);
+    try std.testing.expect(none.image == null);
+    const missing = loader.take().?;
+    try std.testing.expectEqual(unknown, missing.request);
+    try std.testing.expect(missing.image == null);
 }
 
 test "each finished request wakes the host, and a skipped one does not" {
