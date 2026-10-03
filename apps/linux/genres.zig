@@ -126,7 +126,7 @@ pub fn shown(self: *App) void {
 pub fn open(self: *App, genre_id: i64) void {
     const genres = &self.genres;
     genres.selected = genre_id;
-    if (genres.navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, navigation_tag);
+    if (genres.navigation) |navigation| window.popToTag(self, navigation, navigation_tag);
     window.showPage(self, .genres);
     if (!genres.stale and genres.idle == 0) restoreSelection(self);
 }

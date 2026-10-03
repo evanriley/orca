@@ -619,6 +619,11 @@
 
 ### Fixed
 
+- **Swipe back keeps Back and Forward in step.** In orca-gtk, a swipe
+  back, Escape or the breadcrumb's parent button on an album, artist,
+  genre or playlist page now steps back in history like the Back button:
+  Forward reopens the page just left, where before it was disabled and
+  Back reopened that page.
 - **No warnings when closing the window.** Closing orca-gtk with the
   window's close button no longer logs GTK critical warnings: song table
   headers, grid columns, scroll restores and the playback tick stop

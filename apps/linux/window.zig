@@ -384,6 +384,7 @@ pub const History = struct {
     len: usize = 0,
     index: usize = 0,
     pending: c_uint = 0,
+    navigating: bool = false,
 
     pub fn deinit(self: *History) void {
         if (self.pending != 0) _ = gtk.g_source_remove(self.pending);
@@ -536,14 +537,14 @@ fn revisit(self: *App, visit: Visit) bool {
     switchTo(self, visit.page);
     const navigation = pageNavigation(self, visit.page) orelse return true;
     const pushed = visit.pushed orelse {
-        _ = adw.adw_navigation_view_pop_to_tag(navigation, visit.page.name());
+        popToTag(self, navigation, visit.page.name());
         return true;
     };
     if (findInStack(self, navigation, pushed)) |page| {
-        _ = adw.adw_navigation_view_pop_to_page(navigation, page);
+        popToPage(self, navigation, page);
         return true;
     }
-    _ = adw.adw_navigation_view_pop_to_tag(navigation, visit.page.name());
+    popToTag(self, navigation, visit.page.name());
     open(self, navigation, pushed);
     return currentVisit(self).eql(visit);
 }
@@ -553,9 +554,46 @@ fn popUnrecorded(self: *App) void {
     if (pushedPage(self, self.current_page) == null) return;
     const history = &self.history;
     const popped = history.visits[history.index];
-    _ = adw.adw_navigation_view_pop(navigation);
+    pop(self, navigation);
     history.visits[history.index] = currentVisit(self);
     history.insertAfterCurrent(popped);
+}
+
+fn keepPopped(self: *App, popped: Visit) void {
+    const history = &self.history;
+    if (history.pending != 0) _ = gtk.g_source_remove(history.pending);
+    history.pending = 0;
+    const current = currentVisit(self);
+    if (history.index > 0 and history.visits[history.index - 1].eql(current)) {
+        history.index -= 1;
+    } else if (history.len != 0 and history.visits[history.index].eql(popped)) {
+        history.visits[history.index] = current;
+        history.insertAfterCurrent(popped);
+    } else record(self);
+}
+
+fn beginNavigating(self: *App) bool {
+    const was = self.history.navigating;
+    self.history.navigating = true;
+    return was;
+}
+
+fn pop(self: *App, navigation: *adw.NavigationView) void {
+    const was = beginNavigating(self);
+    defer self.history.navigating = was;
+    _ = adw.adw_navigation_view_pop(navigation);
+}
+
+pub fn popToTag(self: *App, navigation: *adw.NavigationView, tag: [*:0]const u8) void {
+    const was = beginNavigating(self);
+    defer self.history.navigating = was;
+    _ = adw.adw_navigation_view_pop_to_tag(navigation, tag);
+}
+
+pub fn popToPage(self: *App, navigation: *adw.NavigationView, page: *adw.NavigationPage) void {
+    const was = beginNavigating(self);
+    defer self.history.navigating = was;
+    _ = adw.adw_navigation_view_pop_to_page(navigation, page);
 }
 
 const Direction = enum { back, forward };
@@ -628,10 +666,21 @@ fn sectionChanged(navigation: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) ca
     navigated(self);
 }
 
+fn sectionPopped(navigation: ?*anyopaque, page: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.history.navigating) return;
+    const showing = pageNavigation(self, self.current_page) orelse return;
+    if (@as(?*anyopaque, showing) != navigation) return;
+    const popped: *adw.NavigationPage = @ptrCast(page orelse return);
+    keepPopped(self, .{ .page = self.current_page, .pushed = pushedOf(self, popped) });
+    page_ui.refresh(self);
+}
+
 fn watchSections(self: *App) void {
     for ([_]Page{ .albums, .artists, .genres, .loved, .playlists }) |page| {
         const navigation = pageNavigation(self, page) orelse continue;
         _ = gtk.signalConnect(navigation, "notify::visible-page", gtk.callback(sectionChanged), self);
+        _ = gtk.signalConnect(navigation, "popped", gtk.callback(sectionPopped), self);
     }
 }
 
@@ -714,19 +763,19 @@ fn switchTo(self: *App, page: Page) void {
 pub fn showAlbum(self: *App, release_id: i64) void {
     showPage(self, .albums);
     const navigation = self.albums_navigation orelse return;
-    _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    popToTag(self, navigation, "albums");
     albums.openAlbum(self, navigation, release_id);
 }
 
 pub fn showArtist(self: *App, artist_id: i64) void {
     showPage(self, .artists);
     const navigation = self.artists_navigation orelse return;
-    _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
+    popToTag(self, navigation, "artists");
     artists.openArtist(self, navigation, artist_id);
 }
 
 pub fn goTo(self: *App, page: Page) void {
-    if (pageNavigation(self, page)) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, page.name());
+    if (pageNavigation(self, page)) |navigation| popToTag(self, navigation, page.name());
     showPage(self, page);
 }
 

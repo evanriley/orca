@@ -366,7 +366,7 @@ pub fn showGenre(self: *App, genre_id: i64, name: []const u8) void {
     showGenreChip(self);
     reload(self);
     window.showPage(self, .artists);
-    if (self.artists_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
+    if (self.artists_navigation) |navigation| window.popToTag(self, navigation, "artists");
 }
 
 fn activated(_: ?*anyopaque, position: c_uint, data: ?*anyopaque) callconv(.c) void {

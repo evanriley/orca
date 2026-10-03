@@ -705,7 +705,7 @@ pub fn showGenre(self: *App, genre_id: i64) void {
     settings.save(self);
     reload(self);
     window.showPage(self, .albums);
-    if (self.albums_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    if (self.albums_navigation) |navigation| window.popToTag(self, navigation, "albums");
 }
 
 fn showArtistChip(self: *App) void {
@@ -742,7 +742,7 @@ pub fn showArtist(self: *App, artist_id: i64, name: []const u8, scope: ArtistSco
     settings.save(self);
     reload(self);
     window.showPage(self, .albums);
-    if (self.albums_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
+    if (self.albums_navigation) |navigation| window.popToTag(self, navigation, "albums");
 }
 
 fn chooseChip(self: *App, chip: Chip) void {
@@ -1946,7 +1946,7 @@ fn refreshPages(self: *App, release_id: i64) void {
     for (targets[0..count]) |target| {
         if (showAlbum(self, target.navigation, release_id, target.pushed)) continue;
         if (adw.adw_navigation_view_get_previous_page(target.navigation, target.pushed)) |previous|
-            _ = adw.adw_navigation_view_pop_to_page(target.navigation, previous);
+            window.popToPage(self, target.navigation, previous);
     }
     if (count != 0) window.syncInspector(self);
 }

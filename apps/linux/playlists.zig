@@ -342,7 +342,7 @@ pub fn refresh(self: *App) void {
     }
     if (playlists.open_id) |id| if (!exists(self, id)) {
         playlists.open_id = null;
-        if (playlists.navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, overview_tag);
+        if (playlists.navigation) |navigation| window.popToTag(self, navigation, overview_tag);
         reloadPage(self, false);
     };
     splice(playlists.pinned_store, pinned.items);
@@ -929,7 +929,7 @@ pub fn open(self: *App, playlist_id: i64) void {
     const navigation = self.playlists.navigation orelse return;
     const visible = adw.adw_navigation_view_get_visible_page_tag(navigation);
     if (visible != null and std.mem.eql(u8, std.mem.span(visible.?), page_tag)) return;
-    _ = adw.adw_navigation_view_pop_to_tag(navigation, overview_tag);
+    window.popToTag(self, navigation, overview_tag);
     adw.adw_navigation_view_push_by_tag(navigation, page_tag);
 }
 

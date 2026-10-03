@@ -12,6 +12,7 @@ const adw = @import("adw.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const jobs = @import("jobs.zig");
+const window = @import("window.zig");
 
 const App = app.App;
 
@@ -157,8 +158,8 @@ fn save(editor: *Editor) bool {
 /// an accepted match that may have moved tracks between them, they go back to
 /// their lists.
 pub fn popPages(self: *App) void {
-    if (self.albums_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "albums");
-    if (self.artists_navigation) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, "artists");
+    if (self.albums_navigation) |navigation| window.popToTag(self, navigation, "albums");
+    if (self.artists_navigation) |navigation| window.popToTag(self, navigation, "artists");
 }
 
 fn saveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
