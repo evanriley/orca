@@ -414,6 +414,13 @@ Small defects that are not yet scheduled:
 - Files in different folders at the same release position share one Track,
   and the folder projected last decides which File it prefers; the other
   File is on no Track. An undo can switch the Track between them.
+- A file keeps its Track id only when it moves to a position no row holds.
+  When two files of a Release swap positions, their Track ids trade files,
+  so a queued id plays the other song. When numbers shift, such as 1 to 2
+  and 2 to 3, the file landing on the occupied position takes that Track's
+  id and the other file gets a new one. Match Album correcting track
+  numbers does this. To fix: repeat the move pass until no row moves, and
+  let a row leave a position another file of the Release now claims.
 - `playerNext` and `playerPrevious` move the queue before opening the
   target, so a target that fails to open leaves now-playing on it while the
   previous entry keeps playing.
