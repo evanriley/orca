@@ -128,6 +128,7 @@ pub const State = struct {
     listed_grid: ?*gtk.GridView = null,
     pinned_columns: c_uint = 0,
     listed_columns: c_uint = 0,
+    columns_idle: c_uint = 0,
     open_id: ?i64 = null,
     open_kind: liborca.PlaylistKind = .manual,
     open_pinned: bool = false,
@@ -1381,11 +1382,20 @@ fn columnsFitting(width: f64, card: c_int) c_uint {
 
 fn applyColumns(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const playlists = &state(data).playlists;
+    playlists.columns_idle = 0;
     for ([_]?*gtk.GridView{ playlists.pinned_grid, playlists.listed_grid }, [_]c_uint{ playlists.pinned_columns, playlists.listed_columns }) |grid, columns| {
         gtk.gtk_grid_view_set_min_columns(grid orelse continue, columns);
         gtk.gtk_grid_view_set_max_columns(grid.?, columns);
     }
-    return gtk.false_;
+    return gtk.SOURCE_REMOVE;
+}
+
+fn cardGridDestroyed(grid: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const playlists = &state(data).playlists;
+    if (playlists.columns_idle != 0) _ = gtk.g_source_remove(playlists.columns_idle);
+    playlists.columns_idle = 0;
+    if (@as(?*anyopaque, playlists.pinned_grid) == grid) playlists.pinned_grid = null;
+    if (@as(?*anyopaque, playlists.listed_grid) == grid) playlists.listed_grid = null;
 }
 
 fn overviewResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1396,7 +1406,7 @@ fn overviewResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void
     if (pinned == self.playlists.pinned_columns and listed == self.playlists.listed_columns) return;
     self.playlists.pinned_columns = pinned;
     self.playlists.listed_columns = listed;
-    _ = gtk.g_idle_add(applyColumns, self);
+    if (self.playlists.columns_idle == 0) self.playlists.columns_idle = gtk.g_idle_add(applyColumns, self);
 }
 
 fn newRowList(self: *App, store: *gtk.ListStore) *gtk.Widget {
@@ -1431,6 +1441,7 @@ fn buildPinned(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, section), heading);
     const grid = newCardGrid(self, store, gtk.callback(setupWideCard), gtk.callback(pinnedActivated));
     self.playlists.pinned_grid = gtk.cast(gtk.GridView, grid);
+    _ = gtk.signalConnect(grid, "destroy", gtk.callback(cardGridDestroyed), self);
     gtk.gtk_box_append(gtk.cast(gtk.Box, section), grid);
     return section;
 }
@@ -1478,6 +1489,7 @@ fn buildListed(self: *App) *gtk.Widget {
     self.playlists.overview_body = gtk.cast(gtk.Stack, body);
     const grid = newCardGrid(self, store, gtk.callback(setupCard), gtk.callback(listedActivated));
     self.playlists.listed_grid = gtk.cast(gtk.GridView, grid);
+    _ = gtk.signalConnect(grid, "destroy", gtk.callback(cardGridDestroyed), self);
     _ = gtk.gtk_stack_add_named(self.playlists.overview_body.?, grid, "grid");
     _ = gtk.gtk_stack_add_named(self.playlists.overview_body.?, newRowList(self, store), "list");
     _ = gtk.gtk_stack_add_named(self.playlists.overview_body.?, empty, "empty");

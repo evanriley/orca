@@ -136,6 +136,13 @@ pub fn invalidate(self: *App) void {
     if (self.current_page == .genres) shown(self);
 }
 
+fn bodyDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const genres = &state(data).genres;
+    if (genres.idle != 0) _ = gtk.g_source_remove(genres.idle);
+    genres.idle = 0;
+    genres.body = null;
+}
+
 fn loadIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const self = state(data);
     self.genres.idle = 0;
@@ -1061,6 +1068,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(loading, gtk.ALIGN_CENTER);
     const body = gtk.gtk_stack_new();
     self.genres.body = gtk.cast(gtk.Stack, body);
+    _ = gtk.signalConnect(body, "destroy", gtk.callback(bodyDestroyed), self);
     _ = gtk.gtk_stack_add_named(self.genres.body.?, loading, "loading");
     _ = gtk.gtk_stack_add_named(self.genres.body.?, bin, "content");
     _ = gtk.gtk_stack_add_named(self.genres.body.?, buildEmpty(self), "empty");

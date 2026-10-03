@@ -174,6 +174,7 @@ pub const Table = struct {
     sorted: ?Column = null,
     chooser: ?*gtk.GMenuModel = null,
     save_source: c_uint = 0,
+    header_source: c_uint = 0,
 
     pub fn header(self: *const Table, column: Column) ?*gtk.ColumnViewColumn {
         return self.columns[@intFromEnum(column)];
@@ -701,12 +702,22 @@ fn decorateHeader(table: *Table) void {
 }
 
 fn headerRebuilt(data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    decorateHeader(tableData(data));
-    return gtk.false_;
+    const table = tableData(data);
+    table.header_source = 0;
+    decorateHeader(table);
+    return gtk.SOURCE_REMOVE;
 }
 
 fn columnsChanged(_: ?*anyopaque, _: c_uint, _: c_uint, _: c_uint, data: ?*anyopaque) callconv(.c) void {
-    _ = gtk.g_idle_add(headerRebuilt, data);
+    const table = tableData(data);
+    if (table.header_source == 0) table.header_source = gtk.g_idle_add(headerRebuilt, table);
+}
+
+fn viewDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const table = tableData(data);
+    if (table.header_source != 0) _ = gtk.g_source_remove(table.header_source);
+    table.header_source = 0;
+    table.view = null;
 }
 
 /// Highlights the title of the column the rows are sorted by, if it is shown.
@@ -861,5 +872,6 @@ pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
     applyVisibility(table);
     decorateHeader(table);
     _ = gtk.signalConnect(gtk.gtk_column_view_get_columns(table.view.?), "items-changed", gtk.callback(columnsChanged), table);
+    _ = gtk.signalConnect(view, "destroy", gtk.callback(viewDestroyed), table);
     return view;
 }

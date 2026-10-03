@@ -235,13 +235,16 @@ pub fn withTitle(block: Title, body: *gtk.Widget) *gtk.Widget {
 }
 
 pub const Scroll = struct {
-    adjustment: *gtk.Adjustment,
+    scroller: *gtk.Widget,
     value: f64,
 };
 
+fn verticalAdjustment(scroller: *gtk.Widget) *gtk.Adjustment {
+    return gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller));
+}
+
 pub fn scrollOf(scroller: *gtk.Widget) Scroll {
-    const adjustment = gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller));
-    return .{ .adjustment = adjustment, .value = gtk.gtk_adjustment_get_value(adjustment) };
+    return .{ .scroller = scroller, .value = gtk.gtk_adjustment_get_value(verticalAdjustment(scroller)) };
 }
 
 pub fn visibleScroll(body: ?*gtk.Stack) ?Scroll {
@@ -260,14 +263,15 @@ pub fn restoreScroll(self: *App, scroll: Scroll) void {
     if (!(scroll.value > 0)) return;
     const pending = self.allocator.create(PendingScroll) catch return;
     pending.* = .{ .allocator = self.allocator, .scroll = scroll };
-    _ = gtk.g_object_ref(scroll.adjustment);
+    _ = gtk.g_object_ref(scroll.scroller);
     _ = gtk.g_idle_add(restoreScrollIdle, pending);
 }
 
 fn restoreScrollIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const pending: *PendingScroll = @ptrCast(@alignCast(data.?));
-    gtk.gtk_adjustment_set_value(pending.scroll.adjustment, pending.scroll.value);
-    gtk.g_object_unref(pending.scroll.adjustment);
+    const scroller = pending.scroll.scroller;
+    if (gtk.gtk_widget_get_root(scroller) != null) gtk.gtk_adjustment_set_value(verticalAdjustment(scroller), pending.scroll.value);
+    gtk.g_object_unref(scroller);
     pending.allocator.destroy(pending);
     return gtk.SOURCE_REMOVE;
 }

@@ -241,9 +241,13 @@ var unsized_popover: ?*gtk.Popover = null;
 /// only a parent that re-presents it on allocation corrects that; a column
 /// view cell does not, so the menu stayed a row short. `gtk_popover_present`
 /// re-sends the size only while an allocation is pending.
-fn presentUnsized(_: ?*anyopaque) callconv(.c) gtk.gboolean {
+fn presentUnsized(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const queued = gtk.cast(gtk.Popover, data.?);
+    defer gtk.g_object_unref(queued);
     const popover = unsized_popover orelse return gtk.SOURCE_REMOVE;
+    if (popover != queued) return gtk.SOURCE_REMOVE;
     unsized_popover = null;
+    if (gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, popover)) == null) return gtk.SOURCE_REMOVE;
     gtk.gtk_widget_queue_resize(gtk.cast(gtk.Widget, popover));
     gtk.gtk_popover_present(popover);
     return gtk.SOURCE_REMOVE;
@@ -271,7 +275,7 @@ pub fn popupModel(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, x: f64, y: f
     _ = gtk.signalConnect(popover, "closed", gtk.callback(closed), null);
     gtk.gtk_popover_popup(gtk.cast(gtk.Popover, popover));
     unsized_popover = gtk.cast(gtk.Popover, popover);
-    _ = gtk.g_idle_add(presentUnsized, null);
+    _ = gtk.g_idle_add(presentUnsized, gtk.g_object_ref(popover));
 }
 
 /// A right-button click gesture on `widget`, calling `handler` with the

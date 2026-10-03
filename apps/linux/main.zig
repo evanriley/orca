@@ -79,18 +79,19 @@ fn tick(self: *App) void {
         },
         else => {},
     };
-    if (library_changed) jobs.reloadLibraryViews(self);
-
-    art.tick(self);
-    transport.tick(self);
-    queue.tick(self);
-    jobs.tick(self);
-    maintenance.tick(self);
-    preferences.tick(self);
-    details.tick(self);
-    lyrics.tick(self);
-    albums.tick(self);
-    artists.tick(self);
+    if (self.window != null) {
+        if (library_changed) jobs.reloadLibraryViews(self);
+        art.tick(self);
+        transport.tick(self);
+        queue.tick(self);
+        jobs.tick(self);
+        maintenance.tick(self);
+        preferences.tick(self);
+        details.tick(self);
+        lyrics.tick(self);
+        albums.tick(self);
+        artists.tick(self);
+    }
     armTimeout(self);
 }
 
@@ -135,6 +136,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
         gtk.gtk_window_present(existing);
         return;
     }
+    if (self.pages != null) return;
     if (gtk.gdk_display_get_default()) |display| appearance.apply(self.io, display);
     _ = window.build(self, gtk.cast(gtk.Application, application));
     appearance.applyChoices(self);

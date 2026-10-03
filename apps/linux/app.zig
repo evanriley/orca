@@ -356,6 +356,7 @@ pub const App = struct {
     album_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
     album_grid: ?*gtk.GridView = null,
     album_grid_columns: c_uint = 0,
+    album_grid_idle: c_uint = 0,
     album_tile_pixels: c_int = default_album_tile_pixels,
     album_columns: albums.ColumnSet = .initEmpty(),
     album_info: albums.Info = .{},
@@ -393,8 +394,6 @@ pub const App = struct {
     matches_submit_button: ?*gtk.Widget = null,
     /// The Track whose row is open, kept open across reloads.
     matches_open_track: ?i64 = null,
-    /// The open row, focused once laid out so the list scrolls to it.
-    matches_focus_row: ?*gtk.Widget = null,
     /// Accept Confident takes a song's best match at or above this.
     match_threshold_percent: u8 = default_match_threshold_percent,
     match_fingerprints: bool = true,
@@ -448,6 +447,7 @@ pub const App = struct {
     artist_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
     artist_grid: ?*gtk.GridView = null,
     artist_grid_columns: c_uint = 0,
+    artist_grid_idle: c_uint = 0,
     artist_tile_pixels: c_int = 150,
     artists_body: ?*gtk.Stack = null,
     artists_empty: ?*adw.StatusPage = null,

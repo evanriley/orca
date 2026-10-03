@@ -1133,6 +1133,7 @@ pub fn build(self: *App) *gtk.Widget {
 
     const scroller = gtk.gtk_scrolled_window_new();
     self.health.scroller = gtk.cast(gtk.ScrolledWindow, scroller);
+    _ = gtk.signalConnect(scroller, "destroy", gtk.callback(scrollerDestroyed), self);
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
@@ -1285,6 +1286,10 @@ pub fn reload(self: *App) void {
 
     if (self.health.restore_scroll == null) _ = gtk.g_idle_add(restoreScroll, self);
     self.health.restore_scroll = scrolled;
+}
+
+fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    state(data).health.scroller = null;
 }
 
 fn restoreScroll(data: ?*anyopaque) callconv(.c) gtk.gboolean {

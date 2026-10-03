@@ -671,10 +671,9 @@ fn showAcceptConfident(self: *App, library: liborca.LibraryHandle) void {
 }
 
 fn focusOpenRow(data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    const self = state(data);
-    const row = self.matches_focus_row orelse return gtk.SOURCE_REMOVE;
-    self.matches_focus_row = null;
-    _ = gtk.gtk_widget_grab_focus(row);
+    const row = gtk.cast(gtk.Widget, data.?);
+    defer gtk.g_object_unref(row);
+    if (gtk.gtk_widget_get_root(row) != null) _ = gtk.gtk_widget_grab_focus(row);
     return gtk.SOURCE_REMOVE;
 }
 
@@ -687,7 +686,6 @@ pub fn reveal(self: *App, track_id: i64) void {
 
 pub fn reload(self: *App) void {
     const list = self.matches_list orelse return;
-    self.matches_focus_row = null;
     gtk.gtk_list_box_remove_all(list);
     const library = self.library orelse return;
     reloadCorrections(self, library);
@@ -727,8 +725,7 @@ pub fn reload(self: *App) void {
         gtk.gtk_list_box_append(list, row);
         if (item.track_id != self.matches_open_track) continue;
         adw.adw_expander_row_set_expanded(gtk.cast(adw.ExpanderRow, row), gtk.true_);
-        self.matches_focus_row = row;
-        _ = gtk.g_idle_add(focusOpenRow, self);
+        _ = gtk.g_idle_add(focusOpenRow, gtk.g_object_ref(row));
     }
     if (self.matches_note) |note| {
         const text: [:0]const u8 = if (total > page.items.len)

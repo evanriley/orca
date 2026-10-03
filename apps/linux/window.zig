@@ -29,6 +29,7 @@ const song_table = @import("song_table.zig");
 const song_filters = @import("song_filters.zig");
 const preferences = @import("preferences.zig");
 const palette = @import("palette.zig");
+const lyrics = @import("lyrics.zig");
 
 const App = app.App;
 const Column = track_model.Column;
@@ -126,6 +127,8 @@ fn sortChosen(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
 fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_browse_signals) return;
+    const view = gtk.cast(gtk.Widget, self.songs.view orelse return);
+    if (gtk.gtk_widget_get_root(view) == null) return;
     const column_sorter = gtk.cast(gtk.ColumnViewSorter, sorter);
     const primary = gtk.gtk_column_view_sorter_get_primary_sort_column(column_sorter);
     self.browse.sort = .id;
@@ -1099,9 +1102,20 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     syncSidebarSelection(self);
 }
 
+fn windowDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.window = null;
+    self.toasts = null;
+    if (self.history.pending != 0) _ = gtk.g_source_remove(self.history.pending);
+    self.history.pending = 0;
+    preferences.shutdown(self);
+    lyrics.shutdown(self);
+}
+
 pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const window = adw.adw_application_window_new(application);
     self.window = gtk.cast(gtk.Window, window);
+    _ = gtk.signalConnect(window, "destroy", gtk.callback(windowDestroyed), self);
 
     const keys = gtk.gtk_event_controller_key_new();
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);

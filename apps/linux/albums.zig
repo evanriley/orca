@@ -890,14 +890,22 @@ pub fn sizeTile(tile: *gtk.Widget, pixels: c_int) void {
 
 fn applyGridColumns(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const self = state(data);
-    const grid = self.album_grid orelse return gtk.false_;
+    self.album_grid_idle = 0;
+    const grid = self.album_grid orelse return gtk.SOURCE_REMOVE;
     gtk.gtk_grid_view_set_min_columns(grid, self.album_grid_columns);
     gtk.gtk_grid_view_set_max_columns(grid, self.album_grid_columns);
     var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, grid));
     while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
         if (gtk.gtk_widget_get_first_child(cell)) |tile| sizeTile(tile, self.album_tile_pixels);
     }
-    return gtk.false_;
+    return gtk.SOURCE_REMOVE;
+}
+
+fn gridDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.album_grid_idle != 0) _ = gtk.g_source_remove(self.album_grid_idle);
+    self.album_grid_idle = 0;
+    self.album_grid = null;
 }
 
 fn gridResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -908,7 +916,7 @@ fn gridResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (columns == self.album_grid_columns and pixels == self.album_tile_pixels) return;
     self.album_grid_columns = columns;
     self.album_tile_pixels = pixels;
-    _ = gtk.g_idle_add(applyGridColumns, self);
+    if (self.album_grid_idle == 0) self.album_grid_idle = gtk.g_idle_add(applyGridColumns, self);
 }
 
 pub fn resizeGrid(self: *App) void {
@@ -1006,6 +1014,7 @@ pub fn build(self: *App) *gtk.Widget {
     self.album_store = store;
     const grid = newGrid(self, store, gtk.callback(tileActivated));
     self.album_grid = gtk.cast(gtk.GridView, grid);
+    _ = gtk.signalConnect(grid, "destroy", gtk.callback(gridDestroyed), self);
     const scroller = pagingScroller(self, grid);
     _ = gtk.signalConnect(
         gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),

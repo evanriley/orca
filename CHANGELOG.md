@@ -619,6 +619,10 @@
 
 ### Fixed
 
+- **No warnings when closing the window.** Closing orca-gtk with the
+  window's close button no longer logs GTK critical warnings: song table
+  headers, grid columns, scroll restores and the playback tick stop
+  touching widgets once the window is gone.
 - **The inspector remembers your track on each page.** Coming back to an
   album, artist or genre page shows the track last chosen there again,
   while it is still one of the page's tracks.

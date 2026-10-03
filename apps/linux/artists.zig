@@ -391,14 +391,22 @@ fn gridTilePixels(width: f64) c_int {
 
 fn applyGridColumns(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const self = state(data);
-    const grid = self.artist_grid orelse return gtk.false_;
+    self.artist_grid_idle = 0;
+    const grid = self.artist_grid orelse return gtk.SOURCE_REMOVE;
     gtk.gtk_grid_view_set_min_columns(grid, self.artist_grid_columns);
     gtk.gtk_grid_view_set_max_columns(grid, self.artist_grid_columns);
     var child = gtk.gtk_widget_get_first_child(gtk.cast(gtk.Widget, grid));
     while (child) |cell| : (child = gtk.gtk_widget_get_next_sibling(cell)) {
         if (gtk.gtk_widget_get_first_child(cell)) |tile| albums.sizeTile(tile, self.artist_tile_pixels);
     }
-    return gtk.false_;
+    return gtk.SOURCE_REMOVE;
+}
+
+fn gridDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.artist_grid_idle != 0) _ = gtk.g_source_remove(self.artist_grid_idle);
+    self.artist_grid_idle = 0;
+    self.artist_grid = null;
 }
 
 fn gridResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -409,7 +417,7 @@ fn gridResized(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (columns == self.artist_grid_columns and pixels == self.artist_tile_pixels) return;
     self.artist_grid_columns = columns;
     self.artist_tile_pixels = pixels;
-    _ = gtk.g_idle_add(applyGridColumns, self);
+    if (self.artist_grid_idle == 0) self.artist_grid_idle = gtk.g_idle_add(applyGridColumns, self);
 }
 
 fn pagingScroller(self: *App, child: *gtk.Widget) *gtk.Widget {
@@ -529,6 +537,7 @@ pub fn build(self: *App) *gtk.Widget {
     self.artist_list_store = store;
     const grid = newGrid(self, store);
     self.artist_grid = gtk.cast(gtk.GridView, grid);
+    _ = gtk.signalConnect(grid, "destroy", gtk.callback(gridDestroyed), self);
     const grid_scroller = pagingScroller(self, grid);
     _ = gtk.signalConnect(
         gtk.gtk_scrolled_window_get_hadjustment(gtk.cast(gtk.ScrolledWindow, grid_scroller)),
