@@ -28,6 +28,7 @@ const page_ui = @import("page.zig");
 const song_table = @import("song_table.zig");
 const song_filters = @import("song_filters.zig");
 const preferences = @import("preferences.zig");
+const palette = @import("palette.zig");
 
 const App = app.App;
 const Column = track_model.Column;
@@ -148,11 +149,9 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
     self.reload();
 }
 
-fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.suppress_browse_signals) return;
-    const text = gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry));
-    self.query.set(self.allocator, std.mem.span(text));
+fn filterSongs(self: *App, text: []const u8) void {
+    if (std.mem.eql(u8, text, self.query.value)) return;
+    self.query.set(self.allocator, text);
     // A text match and a browse scope are alternatives to liborca, so a search
     // takes the listing over rather than narrowing what a pane already chose.
     // The Artist pane's filter is untouched: it says which Artists are listed,
@@ -161,9 +160,50 @@ fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.reload();
 }
 
-/// Enter in the search box plays what it found, in the order shown.
-fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+pub fn filterTarget(self: *App) ?Page {
+    return switch (self.current_page) {
+        .albums, .artists, .tracks, .playlists => |page| if (pushedPage(self, page) == null) page else null,
+        else => null,
+    };
+}
+
+fn applyFilter(self: *App, page: Page, text: []const u8) void {
+    switch (page) {
+        .albums => albums.setFilter(self, text),
+        .artists => artists.setFilter(self, text),
+        .tracks => filterSongs(self, text),
+        .playlists => playlists.setFilter(self, text),
+        else => {},
+    }
+}
+
+pub fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
+    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry)));
+    const target = filterTarget(self);
+    if (self.filtered_page) |page| {
+        if (page != target) applyFilter(self, page, "");
+    }
+    self.filtered_page = null;
+    const page = target orelse return;
+    applyFilter(self, page, text);
+    if (text.len != 0) self.filtered_page = page;
+}
+
+pub fn clearSearch(self: *App) void {
+    palette.dismiss(self);
+    if (self.filtered_page) |page| applyFilter(self, page, "");
+    self.filtered_page = null;
+    const entry = self.top_bar.entry orelse return;
+    if (gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry))[0] == 0) return;
+    self.palette.suppress = true;
+    defer self.palette.suppress = false;
+    gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, entry), "");
+}
+
+pub fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (filterTarget(self) != .tracks or self.palette.popover != null) return;
     var ids = song_table.playableIds(&self.songs, self.allocator);
     defer ids.deinit(self.allocator);
     if (ids.items.len != 0) transport.playIds(self, ids.items, 0);
@@ -199,14 +239,31 @@ fn windowKeyPressed(
         transport.previous(self);
         return gtk.true_;
     }
-    if (held == gtk.MODIFIER_ALT and keyval == gtk.KEY_Left) {
-        back(self);
-        return gtk.true_;
-    }
     return gtk.false_;
 }
 
+/// Runs in the capture phase so that the navigation views' own Alt+Left pop
+/// cannot step around the window's history.
+fn windowHistoryKeyPressed(
+    _: ?*anyopaque,
+    keyval: c_uint,
+    _: c_uint,
+    modifiers: c_uint,
+    data: ?*anyopaque,
+) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    if (held != gtk.MODIFIER_ALT) return gtk.false_;
+    switch (keyval) {
+        gtk.KEY_Left => back(self),
+        gtk.KEY_Right => forward(self),
+        else => return gtk.false_,
+    }
+    return gtk.true_;
+}
+
 const mouse_back_button: c_uint = 8;
+const mouse_forward_button: c_uint = 9;
 
 pub const Page = enum(c_uint) {
     albums,
@@ -258,19 +315,88 @@ pub const Page = enum(c_uint) {
 };
 
 pub fn showPage(self: *App, page: Page) void {
-    switchTo(self, page, true);
+    switchTo(self, page);
 }
 
-fn remember(self: *App, page: Page) void {
-    if (self.page_history_len == self.page_history.len) {
-        @memmove(self.page_history[0 .. self.page_history_len - 1], self.page_history[1..self.page_history_len]);
-        self.page_history_len -= 1;
+const history_limit = 32;
+
+pub const Pushed = union(enum) {
+    album: i64,
+    artist: i64,
+    playlist: i64,
+};
+
+fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
+    return "orca-pushed-" ++ @tagName(kind);
+}
+
+pub fn markPushed(page: *adw.NavigationPage, pushed: Pushed) void {
+    switch (pushed) {
+        inline else => |id, kind| {
+            const value = std.math.cast(usize, id) orelse return;
+            gtk.g_object_set_data(page, pushedKey(kind), @ptrFromInt(value));
+        },
     }
-    self.page_history[self.page_history_len] = page;
-    self.page_history_len += 1;
 }
 
-fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
+fn pushedOf(self: *App, page: *adw.NavigationPage) ?Pushed {
+    inline for (.{ .album, .artist }) |kind| {
+        if (gtk.g_object_get_data(page, pushedKey(kind))) |value|
+            return @unionInit(Pushed, @tagName(kind), @intCast(@intFromPtr(value)));
+    }
+    if (adw.adw_navigation_page_get_tag(page)) |tag| {
+        if (std.mem.eql(u8, std.mem.span(tag), playlists.page_tag))
+            return .{ .playlist = self.playlists.open_id orelse return null };
+    }
+    return null;
+}
+
+const Visit = struct {
+    page: Page,
+    pushed: ?Pushed,
+
+    fn eql(self: Visit, other: Visit) bool {
+        return self.page == other.page and std.meta.eql(self.pushed, other.pushed);
+    }
+};
+
+pub const History = struct {
+    visits: [history_limit]Visit = undefined,
+    len: usize = 0,
+    index: usize = 0,
+    pending: c_uint = 0,
+
+    pub fn deinit(self: *History) void {
+        if (self.pending != 0) _ = gtk.g_source_remove(self.pending);
+        self.pending = 0;
+        self.len = 0;
+        self.index = 0;
+    }
+
+    fn remove(self: *History, at: usize) void {
+        std.mem.copyForwards(Visit, self.visits[at .. self.len - 1], self.visits[at + 1 .. self.len]);
+        self.len -= 1;
+        if (self.index > at) self.index -= 1;
+    }
+
+    fn append(self: *History, visit: Visit) void {
+        if (self.len != 0) self.len = self.index + 1;
+        if (self.len == history_limit) self.remove(0);
+        self.visits[self.len] = visit;
+        self.index = self.len;
+        self.len += 1;
+    }
+
+    fn insertAfterCurrent(self: *History, visit: Visit) void {
+        if (self.len == history_limit) self.remove(if (self.index == 0) self.len - 1 else 0);
+        const at = self.index + 1;
+        std.mem.copyBackwards(Visit, self.visits[at + 1 .. self.len + 1], self.visits[at..self.len]);
+        self.visits[at] = visit;
+        self.len += 1;
+    }
+};
+
+pub fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     return switch (page) {
         .albums => self.albums_navigation,
         .artists => self.artists_navigation,
@@ -281,26 +407,213 @@ fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     };
 }
 
-fn popPushedPage(self: *App) bool {
-    const navigation = pageNavigation(self, self.current_page) orelse return false;
-    const at_root = if (adw.adw_navigation_view_get_visible_page_tag(navigation)) |tag|
-        std.mem.eql(u8, std.mem.span(tag), std.mem.span(self.current_page.name()))
-    else
-        false;
-    if (at_root) return false;
-    return adw.adw_navigation_view_pop(navigation) != 0;
+pub fn pushedPage(self: *App, page: Page) ?*adw.NavigationPage {
+    const navigation = pageNavigation(self, page) orelse return null;
+    const visible = adw.adw_navigation_view_get_visible_page(navigation) orelse return null;
+    if (adw.adw_navigation_view_get_visible_page_tag(navigation)) |tag| {
+        if (std.mem.eql(u8, std.mem.span(tag), std.mem.span(page.name()))) return null;
+    }
+    return visible;
+}
+
+pub fn visibleContent(self: *App) ?*gtk.Widget {
+    if (pageNavigation(self, self.current_page)) |navigation| {
+        const visible = adw.adw_navigation_view_get_visible_page(navigation) orelse return null;
+        return gtk.cast(gtk.Widget, visible);
+    }
+    const pages = self.pages orelse return null;
+    return gtk.gtk_stack_get_child_by_name(pages, self.current_page.name());
+}
+
+fn currentVisit(self: *App) Visit {
+    const pushed = pushedPage(self, self.current_page);
+    return .{ .page = self.current_page, .pushed = if (pushed) |page| pushedOf(self, page) else null };
+}
+
+fn record(self: *App) void {
+    const history = &self.history;
+    if (history.pending != 0) _ = gtk.g_source_remove(history.pending);
+    history.pending = 0;
+    const visit = currentVisit(self);
+    if (history.len != 0 and history.visits[history.index].eql(visit)) return;
+    history.append(visit);
+}
+
+fn recordLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    self.history.pending = 0;
+    record(self);
+    page_ui.refresh(self);
+    return gtk.SOURCE_REMOVE;
+}
+
+/// Waits for the end of the change, so opening an album from another page is
+/// one step and not the album section's root followed by the album.
+fn navigated(self: *App) void {
+    page_ui.refresh(self);
+    if (self.history.pending == 0) self.history.pending = gtk.g_idle_add(recordLater, self);
+}
+
+pub fn canGoBack(self: *App) bool {
+    return pushedPage(self, self.current_page) != null or self.history.index != 0;
+}
+
+pub fn canGoForward(self: *App) bool {
+    return self.history.index + 1 < self.history.len;
+}
+
+fn findInStack(self: *App, navigation: *adw.NavigationView, pushed: Pushed) ?*adw.NavigationPage {
+    var at = adw.adw_navigation_view_get_visible_page(navigation);
+    while (at) |shown| : (at = adw.adw_navigation_view_get_previous_page(navigation, shown)) {
+        const shown_pushed = pushedOf(self, shown) orelse continue;
+        if (std.meta.eql(shown_pushed, pushed)) return shown;
+    }
+    return null;
+}
+
+fn open(self: *App, navigation: *adw.NavigationView, pushed: Pushed) void {
+    switch (pushed) {
+        .album => |release_id| albums.openAlbum(self, navigation, release_id),
+        .artist => |artist_id| artists.openArtist(self, navigation, artist_id),
+        .playlist => |playlist_id| playlists.open(self, playlist_id),
+    }
+}
+
+fn revisit(self: *App, visit: Visit) bool {
+    if (visit.pushed) |pushed| switch (pushed) {
+        .playlist => |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
+        else => {},
+    };
+    switchTo(self, visit.page);
+    const navigation = pageNavigation(self, visit.page) orelse return true;
+    const pushed = visit.pushed orelse {
+        _ = adw.adw_navigation_view_pop_to_tag(navigation, visit.page.name());
+        return true;
+    };
+    if (findInStack(self, navigation, pushed)) |page| {
+        _ = adw.adw_navigation_view_pop_to_page(navigation, page);
+        return true;
+    }
+    _ = adw.adw_navigation_view_pop_to_tag(navigation, visit.page.name());
+    open(self, navigation, pushed);
+    return currentVisit(self).eql(visit);
+}
+
+fn popUnrecorded(self: *App) void {
+    const navigation = pageNavigation(self, self.current_page) orelse return;
+    if (pushedPage(self, self.current_page) == null) return;
+    const history = &self.history;
+    const popped = history.visits[history.index];
+    _ = adw.adw_navigation_view_pop(navigation);
+    history.visits[history.index] = currentVisit(self);
+    history.insertAfterCurrent(popped);
+}
+
+const Direction = enum { back, forward };
+
+fn step(self: *App, direction: Direction) void {
+    const history = &self.history;
+    var skipped = false;
+    while (switch (direction) {
+        .back => history.index != 0,
+        .forward => history.index + 1 < history.len,
+    }) {
+        const at = switch (direction) {
+            .back => history.index - 1,
+            .forward => history.index + 1,
+        };
+        if (revisit(self, history.visits[at])) {
+            history.index = at;
+            return;
+        }
+        history.remove(at);
+        skipped = true;
+    }
+    if (skipped) _ = revisit(self, history.visits[history.index]);
 }
 
 pub fn back(self: *App) void {
-    if (popPushedPage(self)) return;
-    if (self.page_history_len == 0) return;
-    self.page_history_len -= 1;
-    switchTo(self, self.page_history[self.page_history_len], false);
+    record(self);
+    if (self.history.index == 0) popUnrecorded(self) else step(self, .back);
+    record(self);
+    page_ui.refresh(self);
+}
+
+pub fn forward(self: *App) void {
+    record(self);
+    step(self, .forward);
+    record(self);
+    page_ui.refresh(self);
+}
+
+pub fn popSection(self: *App) void {
+    if (pushedPage(self, self.current_page) == null) return;
+    _ = adw.adw_navigation_view_pop(pageNavigation(self, self.current_page).?);
 }
 
 fn backPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
     _ = gtk.gtk_gesture_set_state(gtk.cast(gtk.Gesture, gesture), gtk.EVENT_SEQUENCE_CLAIMED);
     back(state(data));
+}
+
+fn forwardPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    _ = gtk.gtk_gesture_set_state(gtk.cast(gtk.Gesture, gesture), gtk.EVENT_SEQUENCE_CLAIMED);
+    forward(state(data));
+}
+
+fn addMouseButton(window: *gtk.Widget, button: c_uint, pressed: gtk.GCallback, self: *App) void {
+    const press = gtk.gtk_gesture_click_new();
+    gtk.gtk_gesture_single_set_button(gtk.cast(gtk.GestureSingle, press), button);
+    gtk.gtk_event_controller_set_propagation_phase(press, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(press, "pressed", pressed, self);
+    gtk.gtk_widget_add_controller(window, press);
+}
+
+fn sectionChanged(navigation: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const showing = pageNavigation(self, self.current_page) orelse return;
+    if (@as(?*anyopaque, showing) != navigation) return;
+    clearSearch(self);
+    settleFocus(self);
+    navigated(self);
+}
+
+fn watchSections(self: *App) void {
+    for ([_]Page{ .albums, .artists, .genres, .loved, .playlists }) |page| {
+        const navigation = pageNavigation(self, page) orelse continue;
+        _ = gtk.signalConnect(navigation, "notify::visible-page", gtk.callback(sectionChanged), self);
+    }
+}
+
+fn mainList(self: *App) ?*gtk.Widget {
+    if (pushedPage(self, self.current_page) != null) return null;
+    return switch (self.current_page) {
+        .albums => if (self.albums_body) |body| gtk.cast(gtk.Widget, body) else null,
+        .artists => if (self.artists_body) |body| gtk.cast(gtk.Widget, body) else null,
+        .tracks => if (self.tracks_body) |body| gtk.cast(gtk.Widget, body) else null,
+        else => null,
+    };
+}
+
+fn focusPage(self: *App, content: *gtk.Widget) void {
+    if (mainList(self)) |list| {
+        if (gtk.gtk_widget_child_focus(list, gtk.DIR_TAB_FORWARD) != 0) return;
+    }
+    _ = gtk.gtk_widget_child_focus(content, gtk.DIR_TAB_FORWARD);
+}
+
+fn settleFocus(self: *App) void {
+    const root = self.window orelse return;
+    const content = visibleContent(self) orelse return;
+    if (gtk.gtk_window_get_focus(root)) |focus| {
+        if (focus == content or gtk.gtk_widget_is_ancestor(focus, content) != 0) return;
+        const pages = gtk.cast(gtk.Widget, self.pages orelse return);
+        const in_pages = gtk.gtk_widget_is_ancestor(focus, pages) != 0;
+        const search = self.top_bar.search orelse return;
+        const in_search = gtk.gtk_widget_is_ancestor(focus, gtk.cast(gtk.Widget, search)) != 0;
+        if (!in_pages and !in_search) return;
+    }
+    focusPage(self, content);
 }
 
 /// `AdwSidebar` numbers items across sections, in the order `buildSidebar`
@@ -326,8 +639,8 @@ pub fn syncSidebarSelection(self: *App) void {
     if (adw.adw_sidebar_get_selected(settings) != settings_wanted) adw.adw_sidebar_set_selected(settings, settings_wanted);
 }
 
-fn switchTo(self: *App, page: Page, remember_previous: bool) void {
-    if (remember_previous and page != self.current_page) remember(self, self.current_page);
+fn switchTo(self: *App, page: Page) void {
+    if (page != self.current_page) clearSearch(self);
     if (self.current_page == .settings and page != .settings) preferences.leave(self);
     self.current_page = page;
     if (self.pages) |pages| gtk.gtk_stack_set_visible_child_name(pages, page.name());
@@ -343,6 +656,8 @@ fn switchTo(self: *App, page: Page, remember_previous: bool) void {
         queue.invalidate(self);
         queue.tick(self);
     }
+    settleFocus(self);
+    navigated(self);
 }
 
 pub fn showAlbum(self: *App, release_id: i64) void {
@@ -485,21 +800,9 @@ fn browseToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn focusSearch(self: *App) void {
-    showPage(self, .tracks);
-    const entry = self.search_entry orelse return;
-    _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, entry));
-}
-
-pub fn focusPageSearch(self: *App) void {
-    const entry: ?*gtk.Widget = switch (self.current_page) {
-        .albums => if (self.album_search_entry) |editable| gtk.cast(gtk.Widget, editable) else null,
-        .artists => self.artist_list_search,
-        .playlists => self.playlists.overview_search,
-        else => null,
-    };
-    const found = entry orelse return focusSearch(self);
-    goTo(self, self.current_page);
-    _ = gtk.gtk_widget_grab_focus(found);
+    if (self.header_compact) return palette.summon(self);
+    const entry = self.top_bar.entry orelse return;
+    _ = gtk.gtk_widget_grab_focus(entry);
 }
 
 fn buildTrackList(self: *App) *gtk.Widget {
@@ -583,20 +886,6 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
 
-    const search = gtk.gtk_search_entry_new();
-    self.search_entry = gtk.cast(gtk.Editable, search);
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search songs, artists, albums…");
-    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, search), app.search_delay_ms);
-    gtk.gtk_widget_set_size_request(search, wide_search_width, -1);
-    gtk.gtk_widget_set_hexpand(search, gtk.true_);
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
-    _ = gtk.signalConnect(search, "activate", gtk.callback(searchActivated), self);
-    const search_field = page_ui.searchField(search, "Ctrl F");
-    gtk.gtk_widget_add_css_class(search_field, "songs-search");
-    gtk.gtk_widget_set_valign(search_field, gtk.ALIGN_CENTER);
-    const header = page_ui.headerWith(search_field);
-    header.add(song_filters.build(self));
-
     const title = page_ui.title("Songs");
     gtk.gtk_widget_add_css_class(title.widget, "songs-title");
     self.tracks_meta = title.meta;
@@ -624,12 +913,10 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
     title.add(sort_label);
     title.add(buildSortDropdown(self));
+    title.add(song_filters.build(self));
     title.add(view_switch);
 
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, page_ui.withTitle(title, body), .{ .selection = self.songs.selection.? }).widget);
-    return view;
+    return details.besideContent(self, page_ui.withTitle(title, body), .{ .selection = self.songs.selection.? }).widget;
 }
 
 /// Below this width the sidebar folds away behind a back button and the
@@ -637,8 +924,6 @@ fn buildTracksPage(self: *App) *gtk.Widget {
 const collapse_condition = "max-width: 760sp";
 const compact_condition = "max-width: 900sp";
 const crowded_condition = "max-width: 1100sp";
-const wide_search_width = 330;
-const narrow_search_width = 120;
 
 fn setBoolean(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const u8, value: bool) void {
     var boxed: gtk.GValue = .{};
@@ -669,10 +954,6 @@ fn tightenPlayerBar(self: *App, breakpoint: *adw.Breakpoint) void {
     if (self.volume_menu) |button| setBoolean(breakpoint, button, "visible", true);
 }
 
-fn shortenSongsSearch(self: *App, breakpoint: *adw.Breakpoint) void {
-    if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", narrow_search_width);
-}
-
 fn overlayInspectorWhenCrowded(self: *App, window: *gtk.Widget) void {
     const condition = adw.adw_breakpoint_condition_parse(crowded_condition) orelse return;
     const breakpoint = adw.adw_breakpoint_new(condition);
@@ -697,7 +978,6 @@ fn compactWhenNarrow(self: *App, window: *gtk.Widget) void {
     const condition = adw.adw_breakpoint_condition_parse(compact_condition) orelse return;
     const breakpoint = adw.adw_breakpoint_new(condition);
     tightenPlayerBar(self, breakpoint);
-    shortenSongsSearch(self, breakpoint);
     if (self.folders.pane) |pane| setBoolean(breakpoint, pane, "visible", false);
     _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(compacted), self);
     _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(uncompacted), self);
@@ -733,8 +1013,6 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
     if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
     if (self.list_toggle) |toggle| setBoolean(breakpoint, toggle, "active", true);
     tightenPlayerBar(self, breakpoint);
-    shortenSongsSearch(self, breakpoint);
-    if (self.playlists.overview_search) |entry| setInt(breakpoint, entry, "width-request", 120);
     if (self.loved.stats) |stats| setBoolean(breakpoint, stats, "visible", false);
     if (self.folders.pane) |pane| setBoolean(breakpoint, pane, "visible", false);
     _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(narrowed), self);
@@ -781,14 +1059,16 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(windowKeyPressed), self);
     gtk.gtk_widget_add_controller(window, keys);
-    const back_button = gtk.gtk_gesture_click_new();
-    gtk.gtk_gesture_single_set_button(gtk.cast(gtk.GestureSingle, back_button), mouse_back_button);
-    gtk.gtk_event_controller_set_propagation_phase(back_button, gtk.PHASE_CAPTURE);
-    _ = gtk.signalConnect(back_button, "pressed", gtk.callback(backPressed), self);
-    gtk.gtk_widget_add_controller(window, back_button);
+    const history_keys = gtk.gtk_event_controller_key_new();
+    gtk.gtk_event_controller_set_propagation_phase(history_keys, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(history_keys, "key-pressed", gtk.callback(windowHistoryKeyPressed), self);
+    gtk.gtk_widget_add_controller(window, history_keys);
+    addMouseButton(window, mouse_back_button, gtk.callback(backPressed), self);
+    addMouseButton(window, mouse_forward_button, gtk.callback(forwardPressed), self);
     gtk.gtk_window_set_title(self.window.?, "Orca");
     gtk.gtk_window_set_default_size(self.window.?, 1240, 800);
 
+    const top_bar = page_ui.build(self);
     const pages = gtk.gtk_stack_new();
     self.pages = gtk.cast(gtk.Stack, pages);
     gtk.gtk_stack_set_transition_type(self.pages.?, gtk.STACK_TRANSITION_CROSSFADE);
@@ -805,7 +1085,11 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, playlists.build(self), Page.playlists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, preferences.build(self), Page.settings.name());
 
-    const content = adw.adw_navigation_page_new(pages, Page.albums.title());
+    watchSections(self);
+    const framed = adw.adw_toolbar_view_new();
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
+    const content = adw.adw_navigation_page_new(framed, Page.albums.title());
     self.content_page = content;
     const sidebar = adw.adw_navigation_page_new(buildSidebar(self), "Orca");
 
@@ -828,5 +1112,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     overlayInspectorWhenCrowded(self, window);
     compactWhenNarrow(self, window);
     adaptWhenNarrow(self, window, split);
+    record(self);
+    page_ui.refresh(self);
     return window;
 }

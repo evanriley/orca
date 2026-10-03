@@ -387,6 +387,13 @@
 
 ### Changed
 
+- **One top bar in orca-gtk.** The window has a single header on every
+  page: Back and Forward over a 32-entry history (also Alt+Left/Right and
+  mouse buttons 8/9), a breadcrumb the showing page fills, one library
+  search and the inspector toggles. The search filters Albums, Artists,
+  Songs and the Playlists overview in place of their own search boxes,
+  and opens the results popup elsewhere; focusing it no longer opens the
+  popup, and changing page never moves focus into it.
 - **Play counts are per recording.** `Runtime.libraryTrackPlayStats`,
   `TrackDetails` and `orca_library_track_play_stats` count the listens of the
   Track's recording through any of its files, no longer of the one file the

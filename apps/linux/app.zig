@@ -31,13 +31,13 @@ const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
 const queue = @import("queue.zig");
 const palette = @import("palette.zig");
+const page_ui = @import("page.zig");
 const parametric = @import("parametric.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
 pub const page_size: u32 = 512;
 pub const search_delay_ms: c_uint = 200;
-pub const page_history_depth = 16;
 pub const open_album_page_limit = 32;
 pub const open_artist_page_limit = 8;
 
@@ -255,7 +255,6 @@ pub const App = struct {
     release_selection: ?*gtk.SingleSelection = null,
     releases_loaded: u32 = 0,
     releases_exhausted: bool = false,
-    search_entry: ?*gtk.Editable = null,
     artist_header: ?*gtk.Label = null,
     release_header: ?*gtk.Label = null,
     /// What the Artist pane's search box says. Passed to liborca unfolded — the
@@ -281,8 +280,9 @@ pub const App = struct {
     settings_sidebar: ?*adw.Sidebar = null,
     pages: ?*gtk.Stack = null,
     current_page: window.Page = .albums,
-    page_history: [page_history_depth]window.Page = undefined,
-    page_history_len: usize = 0,
+    history: window.History = .{},
+    top_bar: page_ui.Bar = .{},
+    filtered_page: ?window.Page = null,
     tracks_meta: ?*gtk.Label = null,
     /// The Tracks page's body: the browser and list, or a status page when
     /// there is nothing to list.
@@ -301,7 +301,6 @@ pub const App = struct {
     window_narrow: bool = false,
     inspector_overlaid: bool = false,
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
-    header_searches: [std.meta.fields(window.Page).len + details.panel_limit]?*gtk.Stack = @splat(null),
     header_compact: bool = false,
     inspector_crowded: bool = false,
     lyrics: lyrics.State = .{},
@@ -321,7 +320,6 @@ pub const App = struct {
     album_filters: album_filters.Filters = .{},
     album_filters_ui: album_filters.Ui = .{},
     album_search: OwnedText = .{},
-    album_search_entry: ?*gtk.Editable = null,
     album_artist_filter: ?albums.ArtistFilter = null,
     album_artist_name: OwnedText = .{},
     album_artist_chip: ?*gtk.Widget = null,
@@ -414,7 +412,6 @@ pub const App = struct {
     artist_list_genre_name: OwnedText = .{},
     artist_genre_chip: ?*gtk.Widget = null,
     artist_list_meta: ?*gtk.Label = null,
-    artist_list_search: ?*gtk.Widget = null,
     artists_navigation: ?*adw.NavigationView = null,
     artist_sort: liborca.ArtistSort = .name,
     artist_sort_control: ?*gtk.DropDown = null,
@@ -700,6 +697,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.history.deinit();
         if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
         parametric.deinit(self);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);

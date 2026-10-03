@@ -17,6 +17,7 @@ const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const browse_model = @import("browse_model.zig");
+const window = @import("window.zig");
 
 const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
@@ -213,11 +214,7 @@ fn selectedRow(selection: ?*gtk.SingleSelection) ?*BrowseObject {
 pub fn clearSearch(self: *App) void {
     if (self.query.value.len == 0) return;
     self.query.clear(self.allocator);
-    const entry = self.search_entry orelse return;
-    const previous = self.suppress_browse_signals;
-    self.suppress_browse_signals = true;
-    defer self.suppress_browse_signals = previous;
-    gtk.gtk_editable_set_text(entry, "");
+    window.clearSearch(self);
 }
 
 /// Returns the panes to "All", for a search that has just taken over the

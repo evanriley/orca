@@ -170,7 +170,7 @@ fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
 }
 
 fn activateFind(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    window.focusPageSearch(@ptrCast(@alignCast(data.?)));
+    window.focusSearch(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

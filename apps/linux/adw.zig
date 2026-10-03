@@ -157,6 +157,8 @@ pub extern fn adw_navigation_view_pop(view: *NavigationView) gtk.gboolean;
 pub extern fn adw_navigation_view_pop_to_tag(view: *NavigationView, tag: [*:0]const u8) gtk.gboolean;
 pub extern fn adw_navigation_view_get_visible_page_tag(view: *NavigationView) ?[*:0]const u8;
 pub extern fn adw_navigation_view_get_visible_page(view: *NavigationView) ?*NavigationPage;
+pub extern fn adw_navigation_view_get_previous_page(view: *NavigationView, page: *NavigationPage) ?*NavigationPage;
+pub extern fn adw_navigation_view_pop_to_page(view: *NavigationView, page: *NavigationPage) gtk.gboolean;
 
 pub const VIEW_SWITCHER_POLICY_WIDE: c_int = 1;
 
@@ -193,6 +195,7 @@ pub extern fn adw_split_button_set_menu_model(button: *SplitButton, menu_model: 
 pub extern fn adw_split_button_set_dropdown_tooltip(button: *SplitButton, tooltip: [*:0]const u8) void;
 
 pub extern fn adw_navigation_page_new(child: *gtk.Widget, title: [*:0]const u8) *NavigationPage;
+pub extern fn adw_navigation_page_get_tag(page: *NavigationPage) ?[*:0]const u8;
 pub extern fn adw_navigation_page_set_title(page: *NavigationPage, title: [*:0]const u8) void;
 pub extern fn adw_navigation_page_set_tag(page: *NavigationPage, tag: ?[*:0]const u8) void;
 pub extern fn adw_navigation_page_get_title(page: *NavigationPage) [*:0]const u8;

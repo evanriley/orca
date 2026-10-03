@@ -655,9 +655,7 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(clear, "clicked", gtk.callback(clearClicked), self);
     title.add(clear);
 
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header(self).bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, body));
+    const view = page_ui.withTitle(title, body);
 
     const group = gtk.g_simple_action_group_new();
     addAction(group, "play-next", gtk.callback(playNextActivated), self);

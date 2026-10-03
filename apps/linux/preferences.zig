@@ -1951,9 +1951,7 @@ pub fn build(self: *App) *gtk.Widget {
     addFit(self, bin, "max-width: 1260sp", .stacked);
     addFit(self, bin, "max-width: 1040sp", .icons);
 
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header(self).bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), bin);
+    const view = bin;
     return view;
 }
 

@@ -17,7 +17,6 @@ const lyrics = @import("lyrics.zig");
 const transport = @import("transport.zig");
 const window = @import("window.zig");
 const track_model = @import("track_model.zig");
-const page_ui = @import("page.zig");
 const inspector = @import("details.zig");
 const signal_path = @import("signal_path.zig");
 
@@ -100,12 +99,8 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), content);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), content, gtk.true_);
 
-    const header = page_ui.header(self);
-    const view = adw.adw_toolbar_view_new();
+    const view = inspector.besideContent(self, layers, .playing).widget;
     gtk.gtk_widget_add_css_class(view, "now-playing-page");
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_extend_content_to_top_edge(gtk.cast(adw.ToolbarView, view), gtk.true_);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), inspector.besideContent(self, header, layers, .playing).widget);
     placePanel(self);
     return view;
 }

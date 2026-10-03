@@ -20,7 +20,6 @@ const feedback = @import("feedback.zig");
 const menu = @import("menu.zig");
 const strings = @import("strings.zig");
 const browse_model = @import("browse_model.zig");
-const page_ui = @import("page.zig");
 const song_table = @import("song_table.zig");
 
 const App = app.App;
@@ -706,13 +705,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), switcher);
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), views);
 
-    const header = page_ui.header(self);
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(
-        gtk.cast(adw.ToolbarView, view),
-        details.besideContent(self, header, column, .{ .selection = self.loved.songs.selection.? }).widget,
-    );
+    const view = details.besideContent(self, column, .{ .selection = self.loved.songs.selection.? }).widget;
 
     const navigation = adw.adw_navigation_view_new();
     self.loved.navigation = gtk.cast(adw.NavigationView, navigation);

@@ -2039,12 +2039,14 @@ pub const Placed = struct {
     panel: ?*Panel,
 };
 
-/// `content` with an inspector at its end, and the inspector's mode toggles at
-/// the end of `header`. Without a free panel slot, `content` alone.
-pub fn besideContent(self: *App, header: page_ui.Header, content: *gtk.Widget, source: Source) Placed {
+/// `content` with an inspector at its end, and the inspector's mode toggles in
+/// the top bar while it shows. Without a free panel slot, `content` alone.
+pub fn besideContent(self: *App, content: *gtk.Widget, source: Source) Placed {
     const panel = newPanel(self, source, content) orelse return .{ .widget = content, .panel = null };
     gtk.gtk_widget_set_valign(panel.toggles, gtk.ALIGN_CENTER);
-    header.add(panel.toggles);
-    header.add(panel.overflow);
+    const controls = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, controls), panel.toggles);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, controls), panel.overflow);
+    page_ui.adoptPanelControls(self, controls, panel.split);
     return .{ .widget = panel.split, .panel = panel };
 }

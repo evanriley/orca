@@ -607,6 +607,8 @@ pub extern fn gtk_button_set_child(button: *Button, child: ?*Widget) void;
 pub extern fn gtk_button_get_child(button: *Button) ?*Widget;
 pub extern fn gtk_widget_set_overflow(widget: *Widget, overflow: c_int) void;
 pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
+pub const DIR_TAB_FORWARD: c_int = 0;
+pub extern fn gtk_widget_child_focus(widget: *Widget, direction: c_int) gboolean;
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
 pub extern fn gtk_widget_is_ancestor(widget: *Widget, ancestor: *Widget) gboolean;
 pub extern fn gtk_window_get_focus(window: *Window) ?*Widget;
@@ -659,6 +661,9 @@ pub extern fn gtk_stack_set_visible_child_name(stack: *Stack, name: [*:0]const u
 pub extern fn gtk_stack_set_transition_type(stack: *Stack, transition: c_int) void;
 pub extern fn gtk_stack_get_child_by_name(stack: *Stack, name: [*:0]const u8) ?*Widget;
 pub extern fn gtk_stack_get_visible_child_name(stack: *Stack) ?[*:0]const u8;
+pub extern fn gtk_stack_add_child(stack: *Stack, child: *Widget) ?*anyopaque;
+pub extern fn gtk_stack_remove(stack: *Stack, child: *Widget) void;
+pub extern fn gtk_stack_set_visible_child(stack: *Stack, child: *Widget) void;
 pub extern fn gtk_grid_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 pub extern fn gtk_grid_view_set_max_columns(view: *GridView, columns: c_uint) void;
 pub extern fn gtk_grid_view_set_min_columns(view: *GridView, columns: c_uint) void;

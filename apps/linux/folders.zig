@@ -1276,12 +1276,11 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 pub fn build(self: *App) *gtk.Widget {
-    const header = page_ui.header(self);
     const crumbs = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 2);
     gtk.gtk_widget_add_css_class(crumbs, "breadcrumb");
     self.folders.crumbs = gtk.cast(gtk.Box, crumbs);
-    adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, header.bar), crumbs);
     rebuildCrumbs(self);
+    page_ui.addTrail(self, .folders, crumbs);
 
     const body = gtk.gtk_stack_new();
     self.folders.body = gtk.cast(gtk.Stack, body);
@@ -1324,9 +1323,5 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(keys, gtk.PHASE_BUBBLE);
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(keyPressed), self);
     gtk.gtk_widget_add_controller(split, keys);
-
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), split);
-    return view;
+    return split;
 }

@@ -30,7 +30,6 @@ const entry_height: c_int = 48;
 const thumb_pixels: c_int = 28;
 const search_delay_ms: c_uint = 120;
 const recent_limit = 5;
-const entry_key = "orca-palette-entry";
 const index_key = "orca-palette-index";
 const watched_key = "orca-palette-watched";
 
@@ -178,14 +177,16 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-pub fn attach(self: *App, switcher: *gtk.Widget, entry: *gtk.Widget) void {
-    gtk.g_object_set_data(switcher, entry_key, entry);
+pub fn attach(self: *App, entry: *gtk.Widget) void {
     _ = gtk.signalConnect(entry, "changed", gtk.callback(typed), self);
     addKeys(self, entry);
     const focus = gtk.gtk_event_controller_focus_new();
-    _ = gtk.signalConnect(focus, "enter", gtk.callback(focused), self);
     _ = gtk.signalConnect(focus, "leave", gtk.callback(unfocused), self);
     gtk.gtk_widget_add_controller(entry, focus);
+    const press = gtk.gtk_gesture_click_new();
+    gtk.gtk_event_controller_set_propagation_phase(press, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(press, "pressed", gtk.callback(clicked), self);
+    gtk.gtk_widget_add_controller(entry, press);
 }
 
 fn addKeys(self: *App, entry: *gtk.Widget) void {
@@ -196,32 +197,18 @@ fn addKeys(self: *App, entry: *gtk.Widget) void {
 }
 
 pub fn summon(self: *App) void {
-    var button: ?*gtk.Widget = null;
-    for (self.header_searches) |maybe| {
-        const switcher = maybe orelse continue;
-        const widget = gtk.cast(gtk.Widget, switcher);
-        if (gtk.gtk_widget_get_mapped(widget) == 0) continue;
-        const showing = gtk.gtk_stack_get_visible_child_name(switcher) orelse continue;
-        if (std.mem.eql(u8, std.mem.span(showing), "entry")) {
-            const found = gtk.g_object_get_data(widget, entry_key) orelse continue;
-            const entry = gtk.cast(gtk.Widget, found);
-            if (focusWithin(self, entry)) return open(self, entry, false);
-            _ = gtk.gtk_widget_grab_focus(entry);
-            return;
-        }
-        button = gtk.gtk_stack_get_child_by_name(switcher, "icon");
+    const switcher = self.top_bar.search orelse return;
+    if (self.header_compact) {
+        const button = gtk.gtk_stack_get_child_by_name(switcher, "icon") orelse return;
+        return open(self, button, true);
     }
-    const anchor = button orelse pageField(self) orelse return;
-    open(self, anchor, true);
+    const entry = self.top_bar.entry orelse return;
+    if (!focusWithin(self, entry)) _ = gtk.gtk_widget_grab_focus(entry);
+    open(self, entry, false);
 }
 
-fn pageField(self: *App) ?*gtk.Widget {
-    const field: *gtk.Widget = switch (self.current_page) {
-        .tracks => gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, self.search_entry orelse return null)) orelse return null,
-        .playlists => self.playlists.overview_search orelse return null,
-        else => return null,
-    };
-    return if (gtk.gtk_widget_get_mapped(field) != 0) field else null;
+pub fn dismiss(self: *App) void {
+    close(self, false);
 }
 
 fn focusWithin(self: *App, widget: *gtk.Widget) bool {
@@ -388,9 +375,10 @@ fn anchorDestroyed(anchor: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     gtk.gtk_widget_unparent(popover);
 }
 
-fn focused(controller_pointer: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn clicked(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const controller = gtk.cast(gtk.EventController, controller_pointer.?);
+    if (window.filterTarget(self) != null) return;
+    const controller = gtk.cast(gtk.EventController, gesture.?);
     open(self, gtk.gtk_event_controller_get_widget(controller), false);
 }
 
@@ -408,7 +396,10 @@ fn typed(editable: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const palette = &self.palette;
     if (palette.suppress) return;
     const entry = gtk.cast(gtk.Widget, editable.?);
-    if (palette.entry != entry) return open(self, entry, false);
+    if (palette.entry != entry) {
+        if (window.filterTarget(self) != null) return;
+        return open(self, entry, false);
+    }
     if (palette.timer != 0) _ = gtk.g_source_remove(palette.timer);
     palette.timer = 0;
     if (gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry))[0] == 0) return refresh(self);

@@ -313,9 +313,7 @@ fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     if (remaining < page * 2) loadNextPage(self);
 }
 
-fn filterChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry)));
+pub fn setFilter(self: *App, text: []const u8) void {
     if (std.mem.eql(u8, text, self.artist_list_filter.value)) return;
     self.artist_list_filter.set(self.allocator, text);
     reload(self);
@@ -343,8 +341,8 @@ fn genreChipClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 pub fn showGenre(self: *App, genre_id: i64, name: []const u8) void {
     self.artist_list_genre = genre_id;
     self.artist_list_genre_name.set(self.allocator, name);
+    window.clearSearch(self);
     self.artist_list_filter.clear(self.allocator);
-    if (self.artist_list_search) |search| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, search), "");
     showGenreChip(self);
     reload(self);
     window.showPage(self, .artists);
@@ -528,31 +526,19 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.artists_body.?, empty, "empty");
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
 
-    const search = gtk.gtk_search_entry_new();
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search artists");
-    gtk.gtk_widget_set_halign(search, gtk.ALIGN_START);
-    gtk.gtk_widget_set_size_request(search, 240, -1);
-    gtk.gtk_widget_add_css_class(search, "artists-search");
-    self.artist_list_search = search;
-    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, search), app.search_delay_ms);
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(filterChanged), self);
     const chip = gtk.gtk_button_new_with_label("Genre");
     gtk.gtk_widget_add_css_class(chip, "album-chip");
     gtk.gtk_widget_add_css_class(chip, "genre-chip");
-    gtk.gtk_widget_set_valign(chip, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_add_css_class(chip, "artists-genre-chip");
+    gtk.gtk_widget_set_halign(chip, gtk.ALIGN_START);
     gtk.gtk_widget_set_tooltip_text(chip, "Show every genre");
     gtk.gtk_widget_set_visible(chip, gtk.false_);
     _ = gtk.signalConnect(chip, "clicked", gtk.callback(genreChipClicked), self);
     self.artist_genre_chip = chip;
-    const search_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_widget_add_css_class(search_row, "artists-search-row");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, search_row), search);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, search_row), chip);
     const listing = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, listing), search_row);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, listing), chip);
     gtk.gtk_box_append(gtk.cast(gtk.Box, listing), body);
 
-    const header = page_ui.header(self);
     const title = page_ui.title("Artists");
     self.artist_list_meta = title.meta;
     var labels: [sorts.len + 1]?[*:0]const u8 = undefined;
@@ -571,10 +557,7 @@ pub fn build(self: *App) *gtk.Widget {
     title.add(newLayoutSwitch(self));
     syncControls(self);
     gtk.gtk_stack_set_visible_child_name(self.artists_body.?, @tagName(self.artist_layout));
-
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, listing));
+    const view = page_ui.withTitle(title, listing);
 
     const navigation = adw.adw_navigation_view_new();
     self.artists_navigation = gtk.cast(adw.NavigationView, navigation);
@@ -1612,14 +1595,12 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     registerPage(page);
     markPlaying(self, self.shown_track_id);
 
-    const header = page_ui.pushedHeader(self, navigation, page.name.ptr);
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    const beside = details.besideContent(self, header, scroller, .{ .ids = page.song_ids[0..page.song_count] });
+    const beside = details.besideContent(self, scroller, .{ .ids = page.song_ids[0..page.song_count] });
     page.details = beside.panel;
     if (beside.panel) |panel| details.showArtist(panel, artist_id);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), beside.widget);
-    adw.adw_navigation_view_push(navigation, adw.adw_navigation_page_new(view, page.name.ptr));
+    const pushed = adw.adw_navigation_page_new(beside.widget, page.name.ptr);
+    window.markPushed(pushed, .{ .artist = artist_id });
+    adw.adw_navigation_view_push(navigation, pushed);
     _ = gtk.gtk_widget_grab_focus(play_button);
 }
 

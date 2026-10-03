@@ -1050,12 +1050,9 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, title.meta), "numeric");
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, title.meta), "genres-tagline");
 
-    const header = page_ui.header(self);
-    const placed = details.besideContent(self, header, page_ui.withTitle(title, body), .{ .ids = self.genres.song_ids[0..] });
+    const placed = details.besideContent(self, page_ui.withTitle(title, body), .{ .ids = self.genres.song_ids[0..] });
     self.genres.details = placed.panel;
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), placed.widget);
+    const view = placed.widget;
 
     const navigation = adw.adw_navigation_view_new();
     self.genres.navigation = gtk.cast(adw.NavigationView, navigation);

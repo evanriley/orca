@@ -586,9 +586,7 @@ fn sortChanged(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callco
     reload(self);
 }
 
-fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry)));
+pub fn setFilter(self: *App, text: []const u8) void {
     if (std.mem.eql(u8, text, self.album_search.value)) return;
     self.album_search.set(self.allocator, text);
     reload(self);
@@ -600,8 +598,8 @@ pub fn showGenre(self: *App, genre_id: i64) void {
     self.album_artist_filter = null;
     self.album_artist_name.clear(self.allocator);
     showArtistChip(self);
+    window.clearSearch(self);
     self.album_search.clear(self.allocator);
-    if (self.album_search_entry) |entry| gtk.gtk_editable_set_text(entry, "");
     self.album_shelf = .all;
     if (self.album_sort == .recently_added) self.album_sort = self.album_shelf_sort;
     syncControls(self);
@@ -636,8 +634,8 @@ pub fn showArtist(self: *App, artist_id: i64, name: []const u8, scope: ArtistSco
     self.album_artist_name.set(self.allocator, name);
     self.album_filters = .{};
     album_filters.showActive(self);
+    window.clearSearch(self);
     self.album_search.clear(self.allocator);
-    if (self.album_search_entry) |entry| gtk.gtk_editable_set_text(entry, "");
     self.album_shelf = .all;
     if (self.album_sort == .recently_added) self.album_sort = self.album_shelf_sort;
     syncControls(self);
@@ -686,6 +684,9 @@ fn chipKeyPressed(
     data: ?*anyopaque,
 ) callconv(.c) gtk.gboolean {
     const self = state(data);
+    if (self.album_artist_chip) |chip| {
+        if (gtk.gtk_widget_has_focus(chip) != 0) return gtk.false_;
+    }
     const step: isize = switch (keyval) {
         gtk.KEY_Left => -1,
         gtk.KEY_Right => 1,
@@ -697,6 +698,18 @@ fn chipKeyPressed(
     const chip = self.album_chips[next] orelse return gtk.true_;
     _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, chip));
     return gtk.true_;
+}
+
+fn newArtistChip(self: *App) *gtk.Widget {
+    const chip = gtk.gtk_button_new_with_label("Artist");
+    gtk.gtk_widget_add_css_class(chip, "album-chip");
+    gtk.gtk_widget_add_css_class(chip, "genre-chip");
+    gtk.gtk_widget_set_valign(chip, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(chip, "Show every artist");
+    _ = gtk.signalConnect(chip, "clicked", gtk.callback(artistChipClicked), self);
+    self.album_artist_chip = chip;
+    showArtistChip(self);
+    return chip;
 }
 
 fn newChips(self: *App) *gtk.Widget {
@@ -716,6 +729,7 @@ fn newChips(self: *App) *gtk.Widget {
         _ = gtk.signalConnect(button, "toggled", gtk.callback(chipToggled), self);
         adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, row), button);
     }
+    adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, row), newArtistChip(self));
     const keys = gtk.gtk_event_controller_key_new();
     _ = gtk.signalConnect(keys, "key-pressed", gtk.callback(chipKeyPressed), self);
     gtk.gtk_widget_add_controller(row, keys);
@@ -911,32 +925,10 @@ pub fn build(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.albums_body.?, list_scroller, "list");
     _ = gtk.gtk_stack_add_named(self.albums_body.?, empty, "empty");
     gtk.gtk_widget_set_vexpand(body, gtk.true_);
-    const search = gtk.gtk_search_entry_new();
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search albums");
-    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, search), app.search_delay_ms);
-    gtk.gtk_widget_set_halign(search, gtk.ALIGN_START);
-    gtk.gtk_widget_set_size_request(search, 240, -1);
-    gtk.gtk_widget_add_css_class(search, "artists-search");
-    gtk.gtk_widget_add_css_class(search, "albums-search");
-    self.album_search_entry = gtk.cast(gtk.Editable, search);
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
-    const artist_chip = gtk.gtk_button_new_with_label("Artist");
-    gtk.gtk_widget_add_css_class(artist_chip, "album-chip");
-    gtk.gtk_widget_add_css_class(artist_chip, "genre-chip");
-    gtk.gtk_widget_set_valign(artist_chip, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_set_tooltip_text(artist_chip, "Show every artist");
-    _ = gtk.signalConnect(artist_chip, "clicked", gtk.callback(artistChipClicked), self);
-    self.album_artist_chip = artist_chip;
-    showArtistChip(self);
-    const search_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, search_row), search);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, search_row), artist_chip);
     const listing = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, listing), search_row);
     gtk.gtk_box_append(gtk.cast(gtk.Box, listing), newChips(self));
     gtk.gtk_box_append(gtk.cast(gtk.Box, listing), body);
 
-    const header = page_ui.header(self);
     const title = page_ui.title("Albums");
     self.albums_meta = title.meta;
     var labels: [sorts.len + 1]?[*:0]const u8 = undefined;
@@ -956,10 +948,7 @@ pub fn build(self: *App) *gtk.Widget {
     title.add(newLayoutSwitch(self));
     syncControls(self);
     showLayout(self);
-
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, listing));
+    const view = page_ui.withTitle(title, listing);
 
     const navigation = adw.adw_navigation_view_new();
     self.albums_navigation = gtk.cast(adw.NavigationView, navigation);
@@ -1805,13 +1794,11 @@ pub fn openAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64) v
     registerPage(page);
 
     const title_text = strings.printZ(&buffer, "{s}", .{if (release.title.len != 0) release.title else "Album"}) catch "Album";
-    const header = page_ui.pushedHeader(self, navigation, title_text.ptr);
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    const beside = details.besideContent(self, header, scroller, .{ .ids = page.ids });
+    const beside = details.besideContent(self, scroller, .{ .ids = page.ids });
     page.details = beside.panel;
     if (beside.panel) |panel| details.showAlbum(panel, release_id);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), beside.widget);
-    adw.adw_navigation_view_push(navigation, adw.adw_navigation_page_new(view, title_text.ptr));
+    const pushed = adw.adw_navigation_page_new(beside.widget, title_text.ptr);
+    window.markPushed(pushed, .{ .album = release_id });
+    adw.adw_navigation_view_push(navigation, pushed);
     _ = gtk.gtk_widget_grab_focus(play);
 }

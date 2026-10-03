@@ -42,7 +42,7 @@ const row_art_width: c_int = 64;
 const row_art_height: c_int = 32;
 const hero_pixels: c_int = 232;
 const overview_tag = "playlists";
-const page_tag = "playlist";
+pub const page_tag = "playlist";
 
 pub const Tab = enum { all, mine, smart };
 pub const TypeFilter = enum { all, manual, smart };
@@ -128,14 +128,12 @@ pub const State = struct {
     listed_grid: ?*gtk.GridView = null,
     pinned_columns: c_uint = 0,
     listed_columns: c_uint = 0,
-    overview_search: ?*gtk.Widget = null,
     open_id: ?i64 = null,
     open_kind: liborca.PlaylistKind = .manual,
     open_pinned: bool = false,
     open_loved: bool = false,
     open_name: ?[:0]u8 = null,
     songs: song_table.Table = .{},
-    crumb: ?*gtk.Label = null,
     hero: ?*gtk.Widget = null,
     hero_art: ?*gtk.Stack = null,
     mosaic: ?*gtk.Widget = null,
@@ -313,7 +311,7 @@ fn release(objects: *std.ArrayList(?*anyopaque), allocator: std.mem.Allocator) v
     objects.deinit(allocator);
 }
 
-fn exists(self: *App, playlist_id: i64) bool {
+pub fn exists(self: *App, playlist_id: i64) bool {
     const library = self.library orelse return false;
     const summary = self.runtime.libraryPlaylist(library, playlist_id) catch |err| return err != error.UnknownPlaylist;
     summary.deinit(self.runtime.allocator);
@@ -962,8 +960,8 @@ fn showHero(self: *App, summary: ?*const liborca.PlaylistSummary, covers: []cons
     playlists.open_loved = if (summary) |found| found.loved else false;
     const smart = playlists.open_kind == .smart;
 
-    if (playlists.crumb) |crumb| gtk.gtk_label_set_text(crumb, name.ptr);
     if (playlists.page) |page| adw.adw_navigation_page_set_title(page, name.ptr);
+    page_ui.refresh(self);
     if (playlists.title) |title| {
         const upper = gtk.g_utf8_strup(name.ptr, @intCast(name.len));
         defer if (upper) |text| gtk.g_free(text);
@@ -1171,11 +1169,11 @@ fn showAllClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     refresh(self);
 }
 
-fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.playlists.query) |text| self.allocator.free(text);
+pub fn setFilter(self: *App, text: []const u8) void {
+    const current: []const u8 = if (self.playlists.query) |query| query else "";
+    if (std.mem.eql(u8, text, current)) return;
+    if (self.playlists.query) |query| self.allocator.free(query);
     self.playlists.query = null;
-    const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry.?)));
     if (text.len != 0) self.playlists.query = self.allocator.dupeZ(u8, text) catch null;
     refresh(self);
 }
@@ -1490,22 +1488,11 @@ fn buildListed(self: *App) *gtk.Widget {
 }
 
 fn buildOverview(self: *App) *gtk.Widget {
-    const search = gtk.gtk_search_entry_new();
-    self.playlists.overview_search = search;
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search playlists…");
-    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, search), app.search_delay_ms);
-    gtk.gtk_widget_set_size_request(search, 220, -1);
-    gtk.gtk_widget_set_valign(search, gtk.ALIGN_CENTER);
-    gtk.gtk_widget_add_css_class(search, "playlists-search");
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
-    const header = page_ui.headerWith(search);
-    const create = albums.pill("New Playlist", "list-add-symbolic", true);
-    gtk.gtk_widget_set_valign(create, gtk.ALIGN_CENTER);
-    _ = gtk.signalConnect(create, "clicked", gtk.callback(newClicked), self);
-    header.add(create);
-
     const title = page_ui.title("Playlists");
     gtk.gtk_label_set_text(title.meta, "Your playlists, smart collections, and everything in between.");
+    const create = albums.pill("New Playlist", "list-add-symbolic", true);
+    _ = gtk.signalConnect(create, "clicked", gtk.callback(newClicked), self);
+    title.add(create);
     const smart = gtk.gtk_button_new_with_label("New Smart Playlist");
     _ = gtk.signalConnect(smart, "clicked", gtk.callback(newSmartClicked), self);
     const import = gtk.gtk_button_new_with_label("Import…");
@@ -1532,14 +1519,10 @@ fn buildOverview(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), newTabs(self));
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), scroller);
     syncControls(self);
-
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, column));
-    return view;
+    return page_ui.withTitle(title, column);
 }
 
-fn buildPlaylistPage(self: *App, navigation: *adw.NavigationView) *adw.NavigationPage {
+fn buildPlaylistPage(self: *App) *adw.NavigationPage {
     const list = song_table.build(&self.playlists.songs, self, .{ .multiple = false, .sortable = false, .playlist = true });
     const scroller = gtk.gtk_scrolled_window_new();
     self.playlists.scroller = scroller;
@@ -1635,14 +1618,9 @@ fn buildPlaylistPage(self: *App, navigation: *adw.NavigationView) *adw.Navigatio
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
 
-    const trail = page_ui.pushedTrail(self, navigation, "Playlist");
-    self.playlists.crumb = trail.current;
-    const placed = details.besideContent(self, trail.header, layers, .{ .selection = self.playlists.songs.selection.? });
+    const placed = details.besideContent(self, layers, .{ .selection = self.playlists.songs.selection.? });
     self.playlists.details = placed.panel;
-    const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), trail.header.bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), placed.widget);
-    const page = adw.adw_navigation_page_new(view, "Playlist");
+    const page = adw.adw_navigation_page_new(placed.widget, "Playlist");
     adw.adw_navigation_page_set_tag(page, page_tag);
     return page;
 }
@@ -1653,7 +1631,7 @@ pub fn build(self: *App) *gtk.Widget {
     const root = adw.adw_navigation_page_new(buildOverview(self), "Playlists");
     adw.adw_navigation_page_set_tag(root, overview_tag);
     adw.adw_navigation_view_add(self.playlists.navigation.?, root);
-    const page = buildPlaylistPage(self, self.playlists.navigation.?);
+    const page = buildPlaylistPage(self);
     self.playlists.page = page;
     adw.adw_navigation_view_add(self.playlists.navigation.?, page);
     refresh(self);

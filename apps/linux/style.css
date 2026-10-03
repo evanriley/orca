@@ -1174,25 +1174,17 @@ button.album-artist {
 
 /* Now Playing */
 
-.now-playing-page headerbar.page-header {
-  background-color: transparent;
-}
-
-.now-playing-page .inspector {
-  padding-top: 56px;
-}
-
 .now-playing-page .album-backdrop-fade {
   background-image:
     linear-gradient(to bottom, color-mix(in srgb, var(--orca-surface) 40%, transparent), color-mix(in srgb, var(--orca-surface) 62%, transparent) 60%, var(--orca-surface));
 }
 
 .now-centre {
-  margin: 56px 32px 28px 32px;
+  margin: 8px 32px 28px 32px;
 }
 
 .narrow .now-centre {
-  margin: 52px 16px 20px 16px;
+  margin: 8px 16px 20px 16px;
 }
 
 .now-eyebrow,
@@ -1316,7 +1308,7 @@ button.now-album {
 }
 
 .now-panel {
-  margin: 56px 20px 28px 20px;
+  margin: 8px 20px 28px 20px;
 }
 
 .now-panel-heading {
@@ -1437,7 +1429,7 @@ button.now-full-queue image {
   font-size: 1em;
 }
 
-.artists-search {
+.artists-genre-chip {
   margin: 0 24px 12px 24px;
 }
 
@@ -3187,10 +3179,6 @@ button.peq-add {
 
 /* Songs page */
 
-.songs-search > entry {
-  min-width: 120px;
-}
-
 button.filters-button,
 .filters-button > button {
   padding: 4px 14px;
@@ -3444,14 +3432,6 @@ list.genre-songs > row:last-child {
 
 button.genre-fill-link {
   color: var(--orca-accent-text);
-}
-
-.albums-search {
-  margin: 0 28px 12px 28px;
-}
-
-.narrow .albums-search {
-  margin: 0 16px 10px 16px;
 }
 
 button.genre-chip {
