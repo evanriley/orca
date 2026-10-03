@@ -609,6 +609,9 @@
 
 ### Fixed
 
+- **Space pauses in orca-gtk wherever focus is.** A focused button, row or
+  tile no longer takes Space to activate itself; it toggles playback
+  unless focus is in a text field, a dialog or a popover.
 - **Headless test audio.** `scripts/headless-audio.sh` no longer times
   out waiting for WirePlumber: under `pipefail`, `pw-dump | grep -q`
   failed whenever `grep` exited before `pw-dump` finished writing.

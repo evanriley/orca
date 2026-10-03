@@ -214,10 +214,8 @@ fn addFolderClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 /// Returns true only when it actually consumed the key. Reached in the bubble
-/// phase, so the focused widget has already declined it — which is what lets a
-/// space typed into the search entry stay a space, and Ctrl+arrows keep moving
-/// by word there. An application accelerator would be matched before the
-/// focused widget and would eat them.
+/// phase, so the focused widget has already declined it, which keeps Ctrl+arrows
+/// moving by word in the search entry.
 fn windowKeyPressed(
     _: ?*anyopaque,
     keyval: c_uint,
@@ -227,10 +225,6 @@ fn windowKeyPressed(
 ) callconv(.c) gtk.gboolean {
     const self = state(data);
     const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
-    if (keyval == gtk.KEY_space and held == 0) {
-        transport.toggle(self);
-        return gtk.true_;
-    }
     if (held == gtk.MODIFIER_CONTROL and keyval == gtk.KEY_Right) {
         transport.next(self);
         return gtk.true_;
@@ -240,6 +234,28 @@ fn windowKeyPressed(
         return gtk.true_;
     }
     return gtk.false_;
+}
+
+/// Runs in the capture phase so that focused buttons, rows and tiles cannot
+/// consume Space before it toggles playback.
+fn windowSpaceKeyPressed(
+    _: ?*anyopaque,
+    keyval: c_uint,
+    _: c_uint,
+    modifiers: c_uint,
+    data: ?*anyopaque,
+) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const held = modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT | gtk.MODIFIER_SHIFT);
+    if (keyval != gtk.KEY_space or held != 0) return gtk.false_;
+    const window = self.window orelse return gtk.false_;
+    if (adw.adw_application_window_get_visible_dialog(gtk.cast(adw.ApplicationWindow, window)) != null) return gtk.false_;
+    if (gtk.gtk_window_get_focus(window)) |focus| {
+        if (gtk.g_type_check_instance_is_a(focus, gtk.gtk_editable_get_type()) != 0) return gtk.false_;
+        if (gtk.gtk_widget_get_ancestor(focus, gtk.gtk_popover_get_type()) != null) return gtk.false_;
+    }
+    transport.toggle(self);
+    return gtk.true_;
 }
 
 /// Runs in the capture phase so that the navigation views' own Alt+Left pop
@@ -1091,6 +1107,10 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(history_keys, gtk.PHASE_CAPTURE);
     _ = gtk.signalConnect(history_keys, "key-pressed", gtk.callback(windowHistoryKeyPressed), self);
     gtk.gtk_widget_add_controller(window, history_keys);
+    const space_keys = gtk.gtk_event_controller_key_new();
+    gtk.gtk_event_controller_set_propagation_phase(space_keys, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(space_keys, "key-pressed", gtk.callback(windowSpaceKeyPressed), self);
+    gtk.gtk_widget_add_controller(window, space_keys);
     addMouseButton(window, mouse_back_button, gtk.callback(backPressed), self);
     addMouseButton(window, mouse_forward_button, gtk.callback(forwardPressed), self);
     gtk.gtk_window_set_title(self.window.?, "Orca");

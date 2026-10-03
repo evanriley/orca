@@ -612,6 +612,10 @@ pub extern fn gtk_widget_child_focus(widget: *Widget, direction: c_int) gboolean
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
 pub extern fn gtk_widget_is_ancestor(widget: *Widget, ancestor: *Widget) gboolean;
 pub extern fn gtk_window_get_focus(window: *Window) ?*Widget;
+pub extern fn gtk_widget_get_ancestor(widget: *Widget, widget_type: GType) ?*Widget;
+pub extern fn gtk_editable_get_type() GType;
+pub extern fn gtk_popover_get_type() GType;
+pub extern fn g_type_check_instance_is_a(instance: *anyopaque, iface_type: GType) gboolean;
 pub extern fn gtk_css_provider_new() *CssProvider;
 pub extern fn gtk_css_provider_load_from_string(provider: *CssProvider, string: [*:0]const u8) void;
 pub extern fn gdk_display_get_default() ?*GdkDisplay;

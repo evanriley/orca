@@ -114,6 +114,7 @@ pub const SIDEBAR_MODE_PAGE: c_int = 1;
 pub extern fn adw_application_new(application_id: [*:0]const u8, flags: c_uint) ?*Application;
 
 pub extern fn adw_application_window_new(application: *gtk.Application) *gtk.Widget;
+pub extern fn adw_application_window_get_visible_dialog(window: *ApplicationWindow) ?*gtk.Widget;
 pub extern fn adw_application_window_set_content(window: *ApplicationWindow, content: ?*gtk.Widget) void;
 pub extern fn adw_application_window_add_breakpoint(window: *ApplicationWindow, breakpoint: *Breakpoint) void;
 
