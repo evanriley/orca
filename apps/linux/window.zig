@@ -416,6 +416,18 @@ pub const History = struct {
     }
 };
 
+pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
+    const history = &self.history;
+    for (history.visits[0..history.len]) |*visit| {
+        const pushed = visit.pushed orelse continue;
+        if (std.meta.eql(pushed, Pushed{ .album = old_id })) visit.pushed = .{ .album = new_id };
+    }
+    var at: usize = 1;
+    while (at < history.len) {
+        if (history.visits[at].eql(history.visits[at - 1])) history.remove(at - 1) else at += 1;
+    }
+}
+
 pub fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     return switch (page) {
         .albums => self.albums_navigation,

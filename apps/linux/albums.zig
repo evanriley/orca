@@ -535,31 +535,40 @@ pub fn reloadKeepingScroll(self: *App) void {
     if (scroll) |kept| page_ui.restoreScroll(self, kept);
 }
 
-pub const RowRefresh = enum { not_listed, replaced, release_gone };
+pub const RowRefresh = enum { not_listed, replaced, release_gone, merged };
 
-pub fn refreshReleaseRow(self: *App, store: *gtk.ListStore, release_id: i64) RowRefresh {
+pub fn refreshReleaseRow(self: *App, store: *gtk.ListStore, listed_id: i64, release_id: i64) RowRefresh {
     const library = self.library orelse return .not_listed;
     const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return .release_gone;
     defer release.deinit(self.allocator);
     const model = gtk.cast(gtk.ListModel, store);
     const count = gtk.g_list_model_get_n_items(model);
+    var found: ?c_uint = null;
     var position: c_uint = 0;
     while (position < count) : (position += 1) {
-        if (releaseAt(store, position) != release_id) continue;
-        const row = newReleaseRow(&release) orelse return .not_listed;
-        var replacement: [1]?*anyopaque = .{row};
-        gtk.g_list_store_splice(store, position, 1, &replacement, 1);
-        gtk.g_object_unref(row);
-        return .replaced;
+        const id = releaseAt(store, position);
+        if (id != listed_id and id != release_id) continue;
+        if (found != null) return .merged;
+        found = position;
     }
-    return .not_listed;
+    const at = found orelse return .not_listed;
+    const row = newReleaseRow(&release) orelse return .not_listed;
+    var replacement: [1]?*anyopaque = .{row};
+    gtk.g_list_store_splice(store, at, 1, &replacement, 1);
+    gtk.g_object_unref(row);
+    return .replaced;
 }
 
 pub fn releaseChanged(self: *App, release_id: i64) void {
-    if (self.album_store) |store| {
-        if (refreshReleaseRow(self, store, release_id) == .release_gone) reloadKeepingScroll(self);
-    }
-    refreshPages(self, release_id);
+    releaseMoved(self, release_id, release_id);
+}
+
+pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
+    if (self.album_store) |store| switch (refreshReleaseRow(self, store, old_id, new_id)) {
+        .release_gone, .merged => reloadKeepingScroll(self),
+        .not_listed, .replaced => {},
+    };
+    refreshPages(self, old_id, new_id);
 }
 
 fn emptyText(self: *const App) struct { title: [*:0]const u8, description: [*:0]const u8 } {
@@ -1935,16 +1944,29 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
     return true;
 }
 
-fn refreshPages(self: *App, release_id: i64) void {
-    var targets: [app.open_album_page_limit]struct { navigation: *adw.NavigationView, pushed: *adw.NavigationPage } = undefined;
+fn refreshPages(self: *App, old_id: i64, new_id: i64) void {
+    var targets: [app.open_album_page_limit]struct {
+        navigation: *adw.NavigationView,
+        pushed: *adw.NavigationPage,
+        scroll: ?page_ui.Scroll,
+    } = undefined;
     var count: usize = 0;
     for (self.open_album_pages[0..self.open_album_page_count]) |page| {
-        if (page.release_id != release_id) continue;
-        targets[count] = .{ .navigation = page.navigation, .pushed = page.pushed orelse continue };
+        if (page.release_id != old_id) continue;
+        targets[count] = .{
+            .navigation = page.navigation,
+            .pushed = page.pushed orelse continue,
+            .scroll = if (old_id == new_id) null else if (page.scroller) |scroller| page_ui.scrollOf(scroller) else null,
+        };
         count += 1;
     }
     for (targets[0..count]) |target| {
-        if (showAlbum(self, target.navigation, release_id, target.pushed)) continue;
+        if (showAlbum(self, target.navigation, new_id, target.pushed)) {
+            const scroll = target.scroll orelse continue;
+            const scroller = adw.adw_navigation_page_get_child(target.pushed) orelse continue;
+            page_ui.restoreScroll(self, .{ .scroller = scroller, .value = scroll.value });
+            continue;
+        }
         if (adw.adw_navigation_view_get_previous_page(target.navigation, target.pushed)) |previous|
             window.popToPage(self, target.navigation, previous);
     }

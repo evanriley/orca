@@ -70,8 +70,12 @@ pub fn reload(self: *App) void {
 }
 
 pub fn releaseChanged(self: *App, release_id: i64) void {
-    if (self.loved.album_store) |store| {
-        if (albums.refreshReleaseRow(self, store, release_id) == .release_gone) {
+    releaseMoved(self, release_id, release_id);
+}
+
+pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
+    if (self.loved.album_store) |store| switch (albums.refreshReleaseRow(self, store, old_id, new_id)) {
+        .release_gone, .merged => {
             const scroll = page_ui.visibleScroll(self.loved.albums_body);
             const loaded = self.loved.albums_loaded;
             reloadAlbums(self);
@@ -81,9 +85,11 @@ pub fn releaseChanged(self: *App, release_id: i64) void {
                 if (self.loved.albums_loaded == before) break;
             }
             if (scroll) |kept| page_ui.restoreScroll(self, kept);
-        }
-    }
-    song_table.refreshRelease(&self.loved.songs, release_id);
+        },
+        .not_listed, .replaced => {},
+    };
+    song_table.refreshRelease(&self.loved.songs, old_id);
+    if (new_id != old_id) song_table.refreshRelease(&self.loved.songs, new_id);
     showMosaic(self);
 }
 

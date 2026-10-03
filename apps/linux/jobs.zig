@@ -26,6 +26,7 @@ const folders = @import("folders.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
 const song_table = @import("song_table.zig");
+const window = @import("window.zig");
 
 const App = app.App;
 
@@ -399,9 +400,34 @@ fn albumAccepted(self: *App, release_id: i64) void {
     self.folders.stale = true;
 }
 
-fn albumFinished(self: *App, release_id: i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+fn albumMoved(self: *App, old_id: i64, new_id: i64) void {
+    matches.reload(self);
+    health.reload(self);
+    self.shown_playing = .{};
+    if (self.now_playing.release_id) |shown| {
+        if (shown == old_id) self.now_playing.release_id = new_id;
+    }
+    window.releaseMoved(self, old_id, new_id);
+    details.releaseMoved(self, old_id, new_id);
+    albums.releaseMoved(self, old_id, new_id);
+    artists.reloadKeepingScroll(self);
+    loved.releaseMoved(self, old_id, new_id);
+    for ([_]i64{ old_id, new_id }) |release_id| {
+        song_table.refreshRelease(&self.songs, release_id);
+        song_table.refreshRelease(&self.playlists.songs, release_id);
+    }
+    albums.markPlaying(self, self.shown_track_id);
+    artists.markPlaying(self, self.shown_track_id);
+    self.genres.stale = true;
+    self.folders.stale = true;
+}
+
+fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
     art.refreshRelease(self, release_id);
-    if (stats) |result| {
+    if (moved_to) |new_id| {
+        art.refreshRelease(self, new_id);
+        albumMoved(self, release_id, new_id);
+    } else if (stats) |result| {
         if (result.accepted != 0) albumAccepted(self, release_id) else if (result.matched != 0) matches.reload(self);
     }
     details.invalidate(self);
@@ -482,7 +508,7 @@ fn reidentificationFinished(self: *App, state_value: liborca.JobState, stats: ?l
         strings.printZ(&buffer, "Found {f} matches to review", .{strings.grouped(result.matched)}) catch "Found matches to review");
 }
 
-fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats) void {
+fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats, match_release: ?i64) void {
     const mode = self.match_task_mode;
     self.match_task_mode = .search;
     if (mode != .search) {
@@ -498,7 +524,8 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
     }
     if (self.match_task_release) |release_id| {
         self.match_task_release = null;
-        return albumFinished(self, release_id, state_value, stats);
+        const moved_to = if (match_release) |found| (if (found != release_id) found else null) else null;
+        return albumFinished(self, release_id, moved_to, state_value, stats);
     }
     const searched = self.match_task_track;
     self.match_task_track = null;
@@ -544,10 +571,11 @@ fn finished(
     state_value: liborca.JobState,
     stats: ?liborca.ScanStats,
     match_stats: ?liborca.MatchStats,
+    match_release: ?i64,
     submission_stats: ?liborca.SubmissionStats,
     tag_write_failure: ?liborca.TagWriteFailure,
 ) void {
-    if (task == .matching) return matchingFinished(self, state_value, match_stats);
+    if (task == .matching) return matchingFinished(self, state_value, match_stats, match_release);
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
@@ -644,11 +672,12 @@ pub fn tick(self: *App) void {
         .succeeded, .failed, .cancelled => {},
         else => return,
     }
+    const match_release: ?i64 = if (task == .matching) self.runtime.jobMatchRelease(job) catch null else null;
     self.task = null;
     self.task_job = null;
     self.shown_matched = 0;
     showScanning(self, false);
-    finished(self, task, snapshot.state, stats, match_stats, submission_stats, tag_write_failure);
+    finished(self, task, snapshot.state, stats, match_stats, match_release, submission_stats, tag_write_failure);
     switch (task) {
         .analysis, .duplicates, .matching => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),

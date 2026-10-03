@@ -496,6 +496,14 @@ fn rememberChoice(panel: *Panel, page: ChoicePage, track_id: i64) void {
     panel.remembered_count += 1;
 }
 
+pub fn releaseMoved(self: *App, old_id: i64, new_id: i64) void {
+    const panel = self.inspector orelse return;
+    const index = rememberedIndex(panel, .{ .album = old_id }) orelse return;
+    const track_id = panel.remembered[index].track_id;
+    forgetChoice(panel, .{ .album = old_id });
+    rememberChoice(panel, .{ .album = new_id }, track_id);
+}
+
 fn recalledChoice(panel: *const Panel) ?i64 {
     const page = choicePage(panel) orelse return null;
     const track_id = panel.remembered[rememberedIndex(panel, page) orelse return null].track_id;

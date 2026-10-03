@@ -619,6 +619,10 @@
 
 ### Fixed
 
+- **Match Album stays on the album page.** In orca-gtk, when Match Album
+  gives an album a new release id, its open page rebuilds under the new
+  id instead of closing, Back and Forward follow it, and its grid tile is
+  replaced in place without the grid reloading.
 - **Swipe back keeps Back and Forward in step.** In orca-gtk, a swipe
   back, Escape or the breadcrumb's parent button on an album, artist,
   genre or playlist page now steps back in history like the Back button:
