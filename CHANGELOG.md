@@ -614,6 +614,9 @@
 
 ### Fixed
 
+- **The inspector remembers your track on each page.** Coming back to an
+  album, artist or genre page shows the track last chosen there again,
+  while it is still one of the page's tracks.
 - **Less redrawing while playing.** The seek slider moves only when its
   knob would move a pixel or the time shown changes, and the play button
   keeps its icon instead of resetting it every tick, so the window draws

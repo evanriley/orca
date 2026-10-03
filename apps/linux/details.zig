@@ -34,6 +34,7 @@ const separator = " · ";
 const minus = "−";
 
 const proposal_slots = 3;
+const remembered_choice_limit = 32;
 
 /// Where the inspector finds the Track it shows when nobody has chosen one.
 pub const Source = union(enum) {
@@ -71,6 +72,17 @@ pub const AlbumSource = struct {
 pub const ArtistSource = struct {
     ids: []const i64,
     artist_id: i64,
+};
+
+const ChoicePage = union(enum) {
+    album: i64,
+    artist: i64,
+    genre: i64,
+};
+
+const RememberedChoice = struct {
+    page: ChoicePage,
+    track_id: i64,
 };
 
 const Row = struct {
@@ -174,6 +186,8 @@ pub const Panel = struct {
     shown: ?i64 = null,
     stale: bool = false,
     chosen: ?i64 = null,
+    remembered: [remembered_choice_limit]RememberedChoice = undefined,
+    remembered_count: usize = 0,
     path: ?[:0]u8 = null,
     artist_view: Artist,
     /// Shows the Artist even while one of the page's Tracks plays, until a
@@ -396,13 +410,13 @@ pub fn trackChanged(self: *App) void {
     update(self.inspector orelse return);
 }
 
-/// Follows `source` from now on; a Track chosen in the previous one is
-/// forgotten.
+/// Follows `source` from now on, showing the Track last chosen on that
+/// album, artist or genre page while it is still one of its Tracks.
 pub fn setSource(self: *App, source: Source) void {
     const panel = self.inspector orelse return;
     if (std.meta.eql(panel.source, source)) return;
     panel.source = source;
-    panel.chosen = null;
+    panel.chosen = recalledChoice(panel);
     panel.artist_pinned = false;
     panel.stale = true;
     update(panel);
@@ -441,7 +455,52 @@ pub fn choose(self: *App, ids: []const i64, track_id: i64) void {
     if (followed.ptr != ids.ptr) return;
     panel.chosen = track_id;
     panel.artist_pinned = false;
+    if (choicePage(panel)) |page| rememberChoice(panel, page, track_id);
     update(panel);
+}
+
+fn choicePage(panel: *const Panel) ?ChoicePage {
+    return switch (panel.source) {
+        .album => |album| .{ .album = album.release_id },
+        .artist => |artist| .{ .artist = artist.artist_id },
+        .ids => |ids| {
+            const genres = &panel.self.genres;
+            if (ids.ptr != genres.song_ids[0..].ptr) return null;
+            return .{ .genre = (genres.current orelse return null).id };
+        },
+        .selection, .playlist, .playing => null,
+    };
+}
+
+fn rememberedIndex(panel: *const Panel, page: ChoicePage) ?usize {
+    for (panel.remembered[0..panel.remembered_count], 0..) |choice, index| {
+        if (std.meta.eql(choice.page, page)) return index;
+    }
+    return null;
+}
+
+fn forgetChoice(panel: *Panel, page: ChoicePage) void {
+    const index = rememberedIndex(panel, page) orelse return;
+    std.mem.copyForwards(
+        RememberedChoice,
+        panel.remembered[index .. panel.remembered_count - 1],
+        panel.remembered[index + 1 .. panel.remembered_count],
+    );
+    panel.remembered_count -= 1;
+}
+
+fn rememberChoice(panel: *Panel, page: ChoicePage, track_id: i64) void {
+    forgetChoice(panel, page);
+    if (panel.remembered_count == panel.remembered.len) forgetChoice(panel, panel.remembered[0].page);
+    panel.remembered[panel.remembered_count] = .{ .page = page, .track_id = track_id };
+    panel.remembered_count += 1;
+}
+
+fn recalledChoice(panel: *const Panel) ?i64 {
+    const page = choicePage(panel) orelse return null;
+    const track_id = panel.remembered[rememberedIndex(panel, page) orelse return null].track_id;
+    const ids = panel.source.trackIds() orelse return null;
+    return if (std.mem.indexOfScalar(i64, ids, track_id) != null) track_id else null;
 }
 
 fn wantedTrack(panel: *Panel) ?i64 {
@@ -749,6 +808,7 @@ pub fn revealArtist(self: *App, artist_id: i64) void {
     const panel = self.inspector orelse return;
     if (followedArtist(panel) != artist_id) return;
     panel.chosen = null;
+    forgetChoice(panel, .{ .artist = artist_id });
     panel.artist_pinned = true;
     panel.stale = true;
     showSidebar(self, .details);
