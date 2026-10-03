@@ -81,6 +81,9 @@ pub const TrackSortKey = enum(u8) {
     date_added = 6,
     rating = 7,
     loved = 8,
+    play_count = 9,
+    last_played = 10,
+    year = 11,
 };
 
 /// The POD form of `database.TrackQuery`. Negative ids mean "no filter",
@@ -96,6 +99,59 @@ pub const TrackQueryView = extern struct {
     limit: u32,
     offset: u32,
 };
+
+/// `TrackQueryView` with explicit `has_*` flags in place of negative ids, and
+/// room for a genre filter.
+pub const TrackQueryV2View = extern struct {
+    artist_id: i64,
+    release_id: i64,
+    genre_id: i64,
+    year_min: i32 = 0,
+    year_max: i32 = 0,
+    min_sample_rate: u32 = 0,
+    sort: u8,
+    descending: u8,
+    loved_only: u8,
+    has_artist_id: u8,
+    has_release_id: u8,
+    has_genre_id: u8,
+    has_year_min: u8 = 0,
+    has_year_max: u8 = 0,
+    format: u8 = @intFromEnum(TrackFormatFilter.any),
+    explicit_only: u8 = 0,
+    _reserved: [2]u8 = @splat(0),
+    limit: u32,
+    offset: u32,
+    text: StringInput = .{ .pointer = null, .length = 0 },
+};
+
+pub const TrackFormatFilter = enum(u8) {
+    any = 0,
+    lossless = 1,
+    lossy = 2,
+};
+
+pub const TrackFactsView = extern struct {
+    codec: StringView,
+    added_at: i64,
+    last_played_at: i64,
+    play_count: u64,
+    track_total: i64,
+    disc_total: i64,
+    sample_rate: u32,
+    bit_depth: u32,
+    year: i32,
+    lossy: u8,
+    explicit: u8,
+    has_added_at: u8,
+    has_last_played_at: u8,
+    has_track_total: u8,
+    has_disc_total: u8,
+    has_year: u8,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const TrackSummaryFactsCallback = *const fn (?*anyopaque, *const TrackSummaryView, *const TrackFactsView) callconv(.c) void;
 
 /// A string a host hands in, whose pointer may be null when it is empty.
 /// Outgoing views use `StringView`, which is never null.
@@ -114,6 +170,116 @@ pub const ArtistView = extern struct {
 
 pub const ArtistCallback = *const fn (?*anyopaque, *const ArtistView) callconv(.c) void;
 
+pub const ArtistViewV2 = extern struct {
+    base: ArtistView,
+    loved: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const ArtistV2Callback = *const fn (?*anyopaque, *const ArtistViewV2) callconv(.c) void;
+
+pub const ArtistInfoOptionsView = extern struct {
+    language: StringInput,
+    force: u8,
+    offline: u8,
+    include_releases: u8 = 0,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const ArtistInfoView = extern struct {
+    fetched_at: i64,
+    begin_year: i32,
+    end_year: i32,
+    has_begin_year: u8,
+    has_end_year: u8,
+    ended: u8,
+    has_photo: u8,
+    photo_source: u8,
+    has_biography: u8,
+    outcome: u8,
+    has_listeners: u8,
+    musicbrainz_artist_id: StringView,
+    wikidata_id: StringView,
+    artist_type: StringView,
+    biography: StringView,
+    biography_url: StringView,
+    biography_licence: StringView,
+    biography_language: StringView,
+    photo_url: StringView,
+    photo_licence: StringView,
+    photo_licence_url: StringView,
+    photo_credit: StringView,
+    listeners: i64,
+};
+
+pub const ArtistInfoCallback = *const fn (?*anyopaque, *const ArtistInfoView) callconv(.c) void;
+
+pub const RelatedArtistView = extern struct {
+    name: StringView,
+    mbid: StringView,
+    library_artist_id: i64,
+    has_library_artist_id: u8,
+    has_photo: u8,
+    _reserved: [2]u8 = @splat(0),
+    score: u32,
+};
+
+pub const RelatedArtistsCallback = *const fn (?*anyopaque, [*]const RelatedArtistView, usize) callconv(.c) void;
+
+pub const RelatedArtistPhotoInfoView = extern struct {
+    fetched_at: i64,
+    photo_source: u8,
+    _reserved: [7]u8 = @splat(0),
+    photo_url: StringView,
+    photo_licence: StringView,
+    photo_licence_url: StringView,
+    photo_credit: StringView,
+};
+
+pub const RelatedArtistPhotoInfoCallback = *const fn (?*anyopaque, *const RelatedArtistPhotoInfoView) callconv(.c) void;
+
+pub const ReleaseInfoOptionsView = extern struct {
+    language: StringInput,
+    force: u8,
+    offline: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const ReleaseInfoView = extern struct {
+    fetched_at: i64,
+    has_description: u8,
+    description_source: u8,
+    outcome: u8,
+    _reserved: [5]u8 = @splat(0),
+    description: StringView,
+    description_url: StringView,
+    description_licence: StringView,
+    description_language: StringView,
+    musicbrainz_release_id: StringView,
+    musicbrainz_release_group_id: StringView,
+};
+
+pub const ReleaseInfoCallback = *const fn (?*anyopaque, *const ReleaseInfoView) callconv(.c) void;
+
+pub const GenreFillView = extern struct {
+    musicbrainz: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const GenreFillOptionsView = extern struct {
+    limit: u32,
+    offline: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const ArtistLinkView = extern struct {
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+    url: StringView,
+};
+
+pub const ArtistLinksCallback = *const fn (?*anyopaque, [*]const ArtistLinkView, usize) callconv(.c) void;
+
 pub const ReleaseView = extern struct {
     id: i64,
     album_artist_id: i64,
@@ -124,7 +290,8 @@ pub const ReleaseView = extern struct {
     has_disc_count: u8,
     is_compilation: u8,
     loved: u8,
-    _reserved: [2]u8 = @splat(0),
+    explicit: u8,
+    _reserved: [1]u8 = @splat(0),
     title: StringView,
     album_artist: StringView,
     release_date: StringView,
@@ -146,6 +313,138 @@ pub const ArtistQueryView = extern struct {
     limit: u32,
     offset: u32,
 };
+
+pub const ReleaseQueryV2View = extern struct {
+    album_artist_id: i64,
+    genre_id: i64,
+    year_min: i32 = 0,
+    year_max: i32 = 0,
+    sort: u8,
+    loved_only: u8,
+    has_album_artist_id: u8,
+    has_genre_id: u8,
+    high_resolution_only: u8 = 0,
+    needs_review_only: u8 = 0,
+    lossless_only: u8 = 0,
+    has_year_min: u8 = 0,
+    has_year_max: u8 = 0,
+    artwork: u8 = @intFromEnum(ReleaseArtworkFilter.any),
+    kind: u8 = @intFromEnum(ReleaseKindFilter.any),
+    has_appearing_artist_id: u8 = 0,
+    own_releases_only: u8 = 0,
+    _reserved: [3]u8 = @splat(0),
+    limit: u32,
+    offset: u32,
+    text: StringInput = .{ .pointer = null, .length = 0 },
+    appearing_artist_id: i64 = 0,
+};
+
+pub const ReleaseArtworkFilter = enum(u8) {
+    any = 0,
+    present = 1,
+    absent = 2,
+};
+
+pub const ReleaseKindFilter = enum(u8) {
+    any = 0,
+    album = 1,
+    ep_or_single = 2,
+    other = 3,
+};
+
+pub const ArtistTotalsView = extern struct {
+    duration_ms: u64,
+    release_count: u32,
+    track_count: u32,
+    appearance_count: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const ReleaseFactsView = extern struct {
+    codec: StringView,
+    release_type: StringView,
+    max_sample_rate: u32,
+    max_bit_depth: u32,
+    pending_reviews: u32,
+    lossless: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const ReleaseFactsCallback = *const fn (?*anyopaque, *const ReleaseView, *const ReleaseFactsView) callconv(.c) void;
+
+pub const ArtistSortKey = enum(u8) {
+    name = 0,
+    track_count = 1,
+    recently_loved = 2,
+    recently_added = 3,
+};
+
+pub const ArtistQueryV2View = extern struct {
+    filter: StringInput,
+    genre_id: i64,
+    limit: u32,
+    offset: u32,
+    sort: u8,
+    has_genre_id: u8,
+    loved_only: u8,
+    _reserved: [5]u8 = @splat(0),
+};
+
+pub const GenreSortKey = enum(u8) {
+    name = 0,
+    track_count = 1,
+};
+
+pub const GenreQueryView = extern struct {
+    filter: StringInput,
+    limit: u32,
+    offset: u32,
+    sort: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const GenreView = extern struct {
+    id: i64,
+    total_duration_ms: i64,
+    track_count: u32,
+    release_count: u32,
+    artist_count: u32,
+    _reserved: [4]u8 = @splat(0),
+    name: StringView,
+};
+
+pub const GenreCallback = *const fn (?*anyopaque, *const GenreView) callconv(.c) void;
+
+pub const SearchLimitsView = extern struct {
+    artists: u8,
+    releases: u8,
+    tracks: u8,
+    playlists: u8,
+    genres: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const SearchHitView = extern struct {
+    id: i64,
+    title: StringView,
+    subtitle: StringView,
+    rank: f32,
+    kind: u8,
+    _reserved: [3]u8 = @splat(0),
+};
+
+pub const SearchHitCallback = *const fn (?*anyopaque, *const SearchHitView) callconv(.c) void;
+
+pub const GenreCountView = extern struct {
+    id: i64,
+    track_count: u32,
+    _reserved: [4]u8 = @splat(0),
+    name: StringView,
+};
+
+pub const GenreCountCallback = *const fn (?*anyopaque, *const GenreCountView) callconv(.c) void;
+
+pub const StringCallback = *const fn (?*anyopaque, *const StringView) callconv(.c) void;
 
 pub const TrackSummaryView = extern struct {
     track: TrackView,
@@ -223,6 +522,22 @@ pub const TrackDetailsView = extern struct {
 
 pub const TrackDetailsCallback = *const fn (?*anyopaque, *const TrackDetailsView) callconv(.c) void;
 
+pub const TrackDetailsExtraView = extern struct {
+    track_total: i64,
+    disc_total: i64,
+    added_at: i64,
+    modified_at: i64,
+    has_track_total: u8,
+    has_disc_total: u8,
+    has_added_at: u8,
+    has_modified_at: u8,
+    track_total_inferred: u8,
+    explicit: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const TrackDetailsV2Callback = *const fn (?*anyopaque, *const TrackDetailsView, *const TrackDetailsExtraView) callconv(.c) void;
+
 pub const ChangeCount = extern struct {
     updated: u32,
     skipped: u32,
@@ -256,6 +571,52 @@ pub const PlaylistImport = extern struct {
     matched_by_info: u32,
     unmatched: u32,
     _reserved: u32 = 0,
+};
+
+pub const PlaylistSortKey = enum(u8) {
+    name = 0,
+    recently_updated = 1,
+    created = 2,
+    entries = 3,
+};
+
+pub const PlaylistQueryView = extern struct {
+    filter: StringInput,
+    limit: u32,
+    offset: u32,
+    sort: u8,
+    has_kind: u8,
+    kind: u8,
+    pinned_only: u8,
+    has_creator: u8,
+    creator: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const PlaylistFactsView = extern struct {
+    description: StringView,
+    pinned: u8,
+    loved: u8,
+    kind: u8,
+    creator: u8,
+    mixed_artists: u8,
+    tag_count: u8,
+    _reserved: [2]u8 = @splat(0),
+};
+
+pub const PlaylistV2Callback = *const fn (?*anyopaque, *const PlaylistView, *const PlaylistFactsView) callconv(.c) void;
+
+pub const PlaylistUpdateView = extern struct {
+    description: StringInput,
+    tags: ?[*]const StringInput,
+    tag_count: usize,
+    has_description: u8,
+    has_pinned: u8,
+    pinned: u8,
+    has_loved: u8,
+    loved: u8,
+    has_tags: u8,
+    _reserved: [2]u8 = @splat(0),
 };
 
 pub const LineCallback = *const fn (?*anyopaque, StringView) callconv(.c) void;
@@ -338,6 +699,16 @@ pub const TagWriteFileView = extern struct {
     change_count: usize,
 };
 
+pub const TagWriteGenresView = extern struct {
+    file_id: i64,
+    before: [*]const StringView,
+    before_count: usize,
+    after: [*]const StringView,
+    after_count: usize,
+};
+
+pub const TagWriteGenresCallback = *const fn (?*anyopaque, *const TagWriteGenresView) callconv(.c) void;
+
 pub const TagWriteConflictView = extern struct {
     file_id: i64,
     field: u8,
@@ -419,6 +790,40 @@ pub const HealthKindSummaryView = extern struct {
 
 pub const HealthKindSummaryCallback = *const fn (?*anyopaque, *const HealthKindSummaryView) callconv(.c) void;
 
+pub const HealthKindSummaryViewV2 = extern struct {
+    base: HealthKindSummaryView,
+    files: u64,
+    bytes: u64,
+};
+
+pub const HealthKindSummaryV2Callback = *const fn (?*anyopaque, *const HealthKindSummaryViewV2) callconv(.c) void;
+
+pub const LibraryStatsView = extern struct {
+    artists: u64,
+    releases: u64,
+    tracks: u64,
+    files: u64,
+    total_bytes: u64,
+    total_duration_ms: u64,
+    last_scan_finished_at: i64,
+    last_analysis_at: i64,
+    has_last_scan_finished_at: u8,
+    has_last_analysis_at: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const ProviderSourceView = extern struct {
+    id: u8,
+    _reserved: [7]u8 = @splat(0),
+    name: StringView,
+    url: StringView,
+    supplies: StringView,
+    licence: StringView,
+    licence_url: StringView,
+};
+
+pub const ProviderSourceCallback = *const fn (?*anyopaque, *const ProviderSourceView) callconv(.c) void;
+
 pub const HealthFileView = extern struct {
     file_id: i64,
     size_bytes: i64,
@@ -450,12 +855,35 @@ pub const RootView = extern struct {
 
 pub const RootCallback = *const fn (?*anyopaque, *const RootView) callconv(.c) void;
 
+pub const FolderEntryView = extern struct {
+    track_id: i64,
+    file_id: i64,
+    total_duration_ms: i64,
+    file_count: u32,
+    track_count: u32,
+    kind: u8,
+    has_track_id: u8,
+    has_file_id: u8,
+    _reserved: [5]u8 = @splat(0),
+    name: StringView,
+};
+
+pub const FolderEntryCallback = *const fn (?*anyopaque, *const FolderEntryView) callconv(.c) void;
+
 pub const DeviceView = extern struct {
     id: u64,
     name: StringView,
 };
 
 pub const DeviceCallback = *const fn (?*anyopaque, *const DeviceView) callconv(.c) void;
+
+pub const DeviceViewV2 = extern struct {
+    base: DeviceView,
+    kind: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const DeviceV2Callback = *const fn (?*anyopaque, *const DeviceViewV2) callconv(.c) void;
 
 pub const QueueEntryView = extern struct {
     position: u32,
@@ -465,6 +893,8 @@ pub const QueueEntryView = extern struct {
 };
 
 pub const QueueEntryCallback = *const fn (?*anyopaque, *const QueueEntryView) callconv(.c) void;
+
+pub const QueueHistoryCallback = *const fn (?*anyopaque, *const TrackSummaryView, i64, u8) callconv(.c) void;
 
 pub const QueueStats = extern struct {
     entries_started: u64,
@@ -507,6 +937,22 @@ pub const EqualizerView = extern struct {
     preamp_db: f32,
 };
 
+pub const ParametricFilterView = extern struct {
+    kind: u8,
+    enabled: u8,
+    _reserved: [2]u8 = @splat(0),
+    frequency_hz: f32,
+    gain_db: f32,
+    q: f32,
+};
+
+pub const ParametricEqualizerView = extern struct {
+    filters: [audio.dsp.max_parametric_filters]ParametricFilterView,
+    count: u8,
+    _reserved: [3]u8 = @splat(0),
+    preamp_db: f32,
+};
+
 pub const PcmFormatView = extern struct {
     sample_rate: u32,
     channels: u16,
@@ -541,9 +987,21 @@ pub const SignalPathView = extern struct {
     has_device_rate: u8,
     bit_perfect_eligible: u8,
     widened_exactly: u8,
-    _reserved: [7]u8 = @splat(0),
+    output_kind: u8,
+    has_device_quantum: u8,
+    replay_gain_source: u8,
+    device_quantum_frames: u32,
     codec: StringView,
+    parametric: ParametricEqualizerView,
+    has_parametric: u8,
+    has_replay_gain_track: u8,
+    _reserved: [2]u8 = @splat(0),
+    replay_gain_track_db: f32,
 };
+
+comptime {
+    std.debug.assert(@sizeOf(SignalPathView) == 400);
+}
 
 pub const SignalPathCallback = *const fn (?*anyopaque, *const SignalPathView) callconv(.c) void;
 
@@ -1214,6 +1672,90 @@ pub export fn orca_library_health_summary(
     return .ok;
 }
 
+pub export fn orca_library_health_summary_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?HealthKindSummaryV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const summary = box.runtime.libraryHealthSummary(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    for (summary.items()) |entry| {
+        const view: HealthKindSummaryViewV2 = .{
+            .base = .{
+                .count = entry.count,
+                .kind = exportHealthIssueKind(entry.kind),
+                .severity = exportHealthSeverity(entry.severity),
+            },
+            .files = entry.files,
+            .bytes = entry.bytes,
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_stats(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*LibraryStatsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const stats = box.runtime.libraryStats(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .artists = stats.artists,
+        .releases = stats.releases,
+        .tracks = stats.tracks,
+        .files = stats.files,
+        .total_bytes = stats.total_bytes,
+        .total_duration_ms = stats.total_duration_ms,
+        .last_scan_finished_at = stats.last_scan_finished_at orelse 0,
+        .last_analysis_at = stats.last_analysis_at orelse 0,
+        .has_last_scan_finished_at = @intFromBool(stats.last_scan_finished_at != null),
+        .has_last_analysis_at = @intFromBool(stats.last_analysis_at != null),
+    };
+    return .ok;
+}
+
+pub export fn orca_provider_sources(
+    runtime: ?*Runtime,
+    context: ?*anyopaque,
+    callback: ?ProviderSourceCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    for (box.runtime.providerSources()) |source| {
+        const view: ProviderSourceView = .{
+            .id = exportProviderSourceId(source.id),
+            .name = stringView(source.name),
+            .url = stringView(source.url),
+            .supplies = stringView(source.supplies),
+            .licence = stringView(source.licence),
+            .licence_url = stringView(source.licence_url orelse ""),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub fn exportProviderSourceId(id: core.provider_sources.ProviderSourceId) u8 {
+    return switch (id) {
+        .musicbrainz => 0,
+        .musicbrainz_genres => 1,
+        .cover_art_archive => 2,
+        .acoustid => 3,
+        .listenbrainz => 4,
+        .lrclib => 5,
+        .wikidata => 6,
+        .wikimedia_commons => 7,
+        .wikipedia => 8,
+    };
+}
+
 pub export fn orca_library_dismiss_health_issue(
     runtime: ?*Runtime,
     library: Handle,
@@ -1330,6 +1872,26 @@ pub export fn orca_library_artist_get(
     return .ok;
 }
 
+pub export fn orca_library_artist_totals(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    output: ?*ArtistTotalsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const found = box.runtime.libraryArtistTotals(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err);
+    const totals = found orelse return box.reject(@src(), .not_found, "no such artist");
+    destination.* = .{
+        .duration_ms = totals.duration_ms,
+        .release_count = totals.release_count,
+        .track_count = totals.track_count,
+        .appearance_count = totals.appearance_count,
+    };
+    return .ok;
+}
+
 pub export fn orca_library_release_count(
     runtime: ?*Runtime,
     library: Handle,
@@ -1407,6 +1969,30 @@ pub export fn orca_library_browse_tracks(
     return .ok;
 }
 
+pub export fn orca_library_browse_tracks_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const TrackQueryV2View,
+    context: ?*anyopaque,
+    callback: ?TrackSummaryFactsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const view = query orelse return box.reject(@src(), .invalid_argument, "query is null");
+    const request = importTrackQueryV2(view) orelse
+        return box.reject(@src(), .invalid_argument, invalid_track_query_v2);
+    const text = stringInput(view.text.pointer, view.text.length).?;
+    var page = box.runtime.libraryTrackQuery(importLibrary(library), text, request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const summary = trackSummaryView(item);
+        const facts = trackFactsView(item);
+        visit(context, &summary, &facts);
+    }
+    return .ok;
+}
+
 pub export fn orca_library_track_match_count(
     runtime: ?*Runtime,
     library: Handle,
@@ -1418,6 +2004,23 @@ pub export fn orca_library_track_match_count(
     const request = importTrackQuery(query orelse
         return box.reject(@src(), .invalid_argument, "query is null")) orelse
         return box.reject(@src(), .invalid_argument, invalid_track_query);
+    destination.* = box.runtime.libraryTrackMatchCount(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_track_match_count_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const TrackQueryV2View,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const view = query orelse return box.reject(@src(), .invalid_argument, "query is null");
+    const request = importTrackQueryV2(view) orelse
+        return box.reject(@src(), .invalid_argument, invalid_track_query_v2);
+    if (view.text.length != 0) return box.reject(@src(), .invalid_argument, "a track search has no count; text must be empty");
     destination.* = box.runtime.libraryTrackMatchCount(importLibrary(library), request) catch |err|
         return box.fail(@src(), err);
     return .ok;
@@ -1499,6 +2102,274 @@ pub export fn orca_library_artist_count_matching(
     return .ok;
 }
 
+pub export fn orca_library_browse_releases_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ReleaseQueryV2View,
+    context: ?*anyopaque,
+    callback: ?ReleaseFactsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importReleaseQueryV2(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_release_query_v2);
+    var page = box.runtime.libraryReleasePage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = releaseView(item);
+        const facts = releaseFactsView(item);
+        visit(context, &view, &facts);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_release_count_matching_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ReleaseQueryV2View,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importReleaseQueryV2(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_release_query_v2);
+    destination.* = box.runtime.libraryReleaseCountMatching(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_artists_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ArtistQueryV2View,
+    context: ?*anyopaque,
+    callback: ?ArtistV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importArtistQueryV2(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_artist_query_v2);
+    var page = box.runtime.libraryArtistPage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: ArtistViewV2 = .{ .base = artistView(item), .loved = @intFromBool(item.loved) };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_artist_count_matching_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const ArtistQueryV2View,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importArtistQueryV2(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_artist_query_v2);
+    destination.* = box.runtime.libraryArtistCountMatching(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_query_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const GenreQueryView,
+    context: ?*anyopaque,
+    callback: ?GenreCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importGenreQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_genre_query);
+    var page = box.runtime.libraryGenrePage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = genreView(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_search(
+    runtime: ?*Runtime,
+    library: Handle,
+    text: ?[*]const u8,
+    text_length: usize,
+    limits: ?*const SearchLimitsView,
+    context: ?*anyopaque,
+    callback: ?SearchHitCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const words = stringInput(text, text_length) orelse
+        return box.reject(@src(), .invalid_argument, "text is null and text_length is not zero");
+    var results = box.runtime.librarySearch(importLibrary(library), words, importSearchLimits(limits)) catch |err|
+        return box.fail(@src(), err);
+    defer results.deinit();
+    for (results.hits) |hit| {
+        const view: SearchHitView = .{
+            .id = hit.id,
+            .title = stringView(hit.title),
+            .subtitle = stringView(hit.subtitle),
+            .rank = hit.rank,
+            .kind = exportSearchKind(hit.kind),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_genre_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    filter: ?[*]const u8,
+    filter_length: usize,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const text = stringInput(filter, filter_length) orelse
+        return box.reject(@src(), .invalid_argument, "filter is null and filter_length is not zero");
+    destination.* = box.runtime.libraryGenreCount(importLibrary(library), text) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_genre_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    genre_id: i64,
+    context: ?*anyopaque,
+    callback: ?GenreCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryGenre(importLibrary(library), genre_id) catch |err|
+        return box.fail(@src(), err);
+    const item = found orelse return box.reject(@src(), .not_found, "no Track carries that genre");
+    defer item.deinit(box.runtime.allocator);
+    const view = genreView(item);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_track_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?StringCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const names = box.runtime.libraryTrackGenres(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    defer names.deinit();
+    for (names.items) |item| {
+        const view = stringView(item.name);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_release_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    limit: u32,
+    context: ?*anyopaque,
+    callback: ?GenreCountCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const counts = box.runtime.libraryReleaseGenres(importLibrary(library), release_id, limit) catch |err|
+        return box.fail(@src(), err);
+    defer counts.deinit();
+    visitGenreCounts(counts, context, visit);
+    return .ok;
+}
+
+pub export fn orca_library_artist_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    limit: u32,
+    context: ?*anyopaque,
+    callback: ?GenreCountCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const counts = box.runtime.libraryArtistGenres(importLibrary(library), artist_id, limit) catch |err|
+        return box.fail(@src(), err);
+    defer counts.deinit();
+    visitGenreCounts(counts, context, visit);
+    return .ok;
+}
+
+fn visitGenreCounts(counts: database.GenreCounts, context: ?*anyopaque, visit: GenreCountCallback) void {
+    for (counts.items) |item| {
+        const view: GenreCountView = .{ .id = item.id, .track_count = item.track_count, .name = stringView(item.name) };
+        visit(context, &view);
+    }
+}
+
+pub export fn orca_library_set_track_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_ids: ?[*]const i64,
+    count: usize,
+    names: ?[*]const StringInput,
+    name_count: usize,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const list = editIdSlice(track_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    if (name_count > database.max_track_genres) return box.reject(@src(), .invalid_argument, "name_count exceeds 16");
+    var imported: [database.max_track_genres][]const u8 = undefined;
+    if (name_count != 0) {
+        const given = names orelse
+            return box.reject(@src(), .invalid_argument, "names is null and name_count is not zero");
+        for (imported[0..name_count], given[0..name_count]) |*name, view| {
+            name.* = stringInput(view.pointer, view.length) orelse
+                return box.reject(@src(), .invalid_argument, "a name is null and its length is not zero");
+        }
+    }
+    box.runtime.librarySetTrackGenres(importLibrary(library), list, imported[0..name_count]) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_genre_artwork(
+    runtime: ?*Runtime,
+    library: Handle,
+    genre_id: i64,
+    limit: u32,
+    context: ?*anyopaque,
+    callback: ?IdCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const releases = box.runtime.libraryGenreArtwork(importLibrary(library), genre_id, limit) catch |err|
+        return box.fail(@src(), err);
+    defer releases.deinit();
+    visit(context, releases.ids.ptr, releases.ids.len);
+    return .ok;
+}
+
 pub export fn orca_library_track_get(
     runtime: ?*Runtime,
     library: Handle,
@@ -1512,15 +2383,7 @@ pub export fn orca_library_track_get(
         return box.fail(@src(), err);
     const item = found orelse return box.reject(@src(), .not_found, "no such track");
     defer item.deinit(box.runtime.allocator);
-    const view: TrackSummaryView = .{
-        .track = trackView(item),
-        .release_id = item.release_id orelse 0,
-        .artist_id = item.artist_id orelse 0,
-        .recording_id = item.recording_id orelse 0,
-        .has_release_id = @intFromBool(item.release_id != null),
-        .has_artist_id = @intFromBool(item.artist_id != null),
-        .has_recording_id = @intFromBool(item.recording_id != null),
-    };
+    const view = trackSummaryView(item);
     visit(context, &view);
     return .ok;
 }
@@ -1540,6 +2403,36 @@ pub export fn orca_library_track_details(
     defer details.deinit();
     const view = trackDetailsView(&details);
     visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_track_details_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?TrackDetailsV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackDetails(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    const details = found orelse return box.reject(@src(), .not_found, "no such track");
+    defer details.deinit();
+    const view = trackDetailsView(&details);
+    const extra: TrackDetailsExtraView = .{
+        .track_total = details.track_total orelse 0,
+        .disc_total = details.disc_total orelse 0,
+        .added_at = details.added_at orelse 0,
+        .modified_at = details.modified_at orelse 0,
+        .has_track_total = @intFromBool(details.track_total != null),
+        .has_disc_total = @intFromBool(details.disc_total != null),
+        .has_added_at = @intFromBool(details.added_at != null),
+        .has_modified_at = @intFromBool(details.modified_at != null),
+        .track_total_inferred = @intFromBool(details.track_total_inferred),
+        .explicit = exportExplicit(details.explicit),
+    };
+    visit(context, &view, &extra);
     return .ok;
 }
 
@@ -1644,6 +2537,34 @@ pub export fn orca_library_set_release_love(
     return .ok;
 }
 
+pub export fn orca_library_set_artist_love(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_ids: ?[*]const i64,
+    count: usize,
+    loved: u8,
+    output: ?*ChangeCount,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    if (loved > 1) return box.reject(@src(), .invalid_argument, "loved must be 0 or 1");
+    const list = editIdSlice(artist_ids, count) orelse
+        return box.reject(@src(), .invalid_argument, invalid_edit_ids);
+    const change = box.runtime.librarySetArtistLove(importLibrary(library), list, loved == 1) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{ .updated = change.updated, .skipped = change.skipped };
+    return .ok;
+}
+
+pub export fn orca_library_artist_loved(runtime: ?*Runtime, library: Handle, artist_id: i64, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const loved = box.runtime.libraryArtistLoved(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = @intFromBool(loved);
+    return .ok;
+}
+
 pub export fn orca_library_unanalyzed_count(
     runtime: ?*Runtime,
     library: Handle,
@@ -1671,17 +2592,258 @@ pub export fn orca_library_query_playlists(
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view: PlaylistView = .{
-            .id = item.id,
-            .duration_ms = item.duration_ms,
-            .created_at = item.created_at,
-            .updated_at = item.updated_at,
-            .entries = item.entries,
-            .available = item.available,
-            .name = stringView(item.name),
-        };
+        const view = playlistView(item);
         visit(context, &view);
     }
+    return .ok;
+}
+
+fn playlistView(item: database.PlaylistSummary) PlaylistView {
+    return .{
+        .id = item.id,
+        .duration_ms = item.duration_ms,
+        .created_at = item.created_at,
+        .updated_at = item.updated_at,
+        .entries = item.entries,
+        .available = item.available,
+        .name = stringView(item.name),
+    };
+}
+
+fn playlistFactsView(item: database.PlaylistSummary) PlaylistFactsView {
+    return .{
+        .description = stringView(item.description),
+        .pinned = @intFromBool(item.pinned),
+        .loved = @intFromBool(item.loved),
+        .kind = @intFromEnum(item.kind),
+        .creator = @intFromEnum(item.creator),
+        .mixed_artists = @intFromBool(item.mixed_artists),
+        .tag_count = @intCast(item.tags.len),
+    };
+}
+
+const invalid_playlist_query = "query limit must be between 1 and 512, sort a known orca_playlist_sort, kind and creator known values, " ++
+    "flags 0 or 1, and filter not null unless empty";
+
+fn importPlaylistQuery(query: *const PlaylistQueryView) ?database.PlaylistQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    if (query.has_kind > 1 or query.pinned_only > 1 or query.has_creator > 1) return null;
+    const filter = stringInput(query.filter.pointer, query.filter.length) orelse return null;
+    const sort: database.PlaylistSort = switch (std.enums.fromInt(PlaylistSortKey, query.sort) orelse return null) {
+        .name => .name,
+        .recently_updated => .recently_updated,
+        .created => .created,
+        .entries => .entries,
+    };
+    return .{
+        .filter = filter,
+        .kind = if (query.has_kind == 1) std.enums.fromInt(database.PlaylistKind, query.kind) orelse return null else null,
+        .pinned_only = query.pinned_only == 1,
+        .created_by = if (query.has_creator == 1) std.enums.fromInt(database.PlaylistCreator, query.creator) orelse return null else null,
+        .sort = sort,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+pub export fn orca_library_query_playlists_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const PlaylistQueryView,
+    context: ?*anyopaque,
+    callback: ?PlaylistV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const request = importPlaylistQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_playlist_query);
+    var page = box.runtime.libraryPlaylistPage(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view = playlistView(item);
+        const facts = playlistFactsView(item);
+        visit(context, &view, &facts);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_playlist_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    query: ?*const PlaylistQueryView,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const request = importPlaylistQuery(query orelse
+        return box.reject(@src(), .invalid_argument, "query is null")) orelse
+        return box.reject(@src(), .invalid_argument, invalid_playlist_query);
+    destination.* = box.runtime.libraryPlaylistCount(importLibrary(library), request) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_playlist_get(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    context: ?*anyopaque,
+    callback: ?PlaylistV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const item = box.runtime.libraryPlaylist(importLibrary(library), playlist_id) catch |err|
+        return box.fail(@src(), err);
+    defer item.deinit(box.runtime.allocator);
+    const view = playlistView(item);
+    const facts = playlistFactsView(item);
+    visit(context, &view, &facts);
+    return .ok;
+}
+
+pub export fn orca_library_playlist_tags(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    context: ?*anyopaque,
+    callback: ?StringCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const tags = box.runtime.libraryPlaylistTags(importLibrary(library), playlist_id) catch |err|
+        return box.fail(@src(), err);
+    defer {
+        for (tags) |tag| box.runtime.allocator.free(tag);
+        box.runtime.allocator.free(tags);
+    }
+    for (tags) |tag| {
+        const view = stringView(tag);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_playlist_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    context: ?*anyopaque,
+    callback: ?StringCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const item = box.runtime.libraryPlaylist(importLibrary(library), playlist_id) catch |err|
+        return box.fail(@src(), err);
+    defer item.deinit(box.runtime.allocator);
+    for (item.top_genres) |genre| {
+        const view = stringView(genre);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_update_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    update: ?*const PlaylistUpdateView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const given = update orelse return box.reject(@src(), .invalid_argument, "update is null");
+    if (given.has_description > 1 or given.has_pinned > 1 or given.pinned > 1 or
+        given.has_loved > 1 or given.loved > 1 or given.has_tags > 1)
+        return box.reject(@src(), .invalid_argument, "update flags must be 0 or 1");
+    var change: database.PlaylistUpdate = .{};
+    if (given.has_description == 1) change.description = stringInput(given.description.pointer, given.description.length) orelse
+        return box.reject(@src(), .invalid_argument, "description is null and its length is not zero");
+    if (given.has_pinned == 1) change.pinned = given.pinned == 1;
+    if (given.has_loved == 1) change.loved = given.loved == 1;
+    var tags: [database.max_playlist_tags][]const u8 = undefined;
+    if (given.has_tags == 1) {
+        if (given.tag_count > database.max_playlist_tags) return box.reject(@src(), .invalid_argument, "tag_count exceeds 8");
+        if (given.tag_count != 0) {
+            const views = given.tags orelse
+                return box.reject(@src(), .invalid_argument, "tags is null and tag_count is not zero");
+            for (tags[0..given.tag_count], views[0..given.tag_count]) |*tag, view| {
+                tag.* = stringInput(view.pointer, view.length) orelse
+                    return box.reject(@src(), .invalid_argument, "a tag is null and its length is not zero");
+            }
+        }
+        change.tags = tags[0..given.tag_count];
+    }
+    box.runtime.libraryUpdatePlaylist(importLibrary(library), playlist_id, change) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_create_smart_playlist(
+    runtime: ?*Runtime,
+    library: Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    rules: ?[*]const u8,
+    rules_length: usize,
+    playlist_id: ?*i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = playlist_id orelse return box.reject(@src(), .invalid_argument, "playlist_id is null");
+    const text = stringInput(name, name_length) orelse
+        return box.reject(@src(), .invalid_argument, "name is null and name_length is not zero");
+    const rules_json = stringInput(rules, rules_length) orelse
+        return box.reject(@src(), .invalid_argument, "rules is null and rules_length is not zero");
+    destination.* = box.runtime.libraryCreateSmartPlaylist(importLibrary(library), text, rules_json) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_set_smart_playlist_rules(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    rules: ?[*]const u8,
+    rules_length: usize,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const rules_json = stringInput(rules, rules_length) orelse
+        return box.reject(@src(), .invalid_argument, "rules is null and rules_length is not zero");
+    box.runtime.librarySetSmartPlaylistRules(importLibrary(library), playlist_id, rules_json) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_smart_playlist_rules(
+    runtime: ?*Runtime,
+    library: Handle,
+    playlist_id: i64,
+    context: ?*anyopaque,
+    callback: ?StringCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const stored = box.runtime.librarySmartPlaylistRules(importLibrary(library), playlist_id) catch |err|
+        return box.fail(@src(), err);
+    const rules_json = stored orelse return box.reject(@src(), .invalid_state, "the playlist is not a smart playlist");
+    defer box.runtime.allocator.free(rules_json);
+    const view = stringView(rules_json);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_smart_playlist_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    rules: ?[*]const u8,
+    rules_length: usize,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const rules_json = stringInput(rules, rules_length) orelse
+        return box.reject(@src(), .invalid_argument, "rules is null and rules_length is not zero");
+    destination.* = box.runtime.librarySmartPlaylistCount(importLibrary(library), rules_json) catch |err|
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -2034,6 +3196,288 @@ pub export fn orca_job_lyrics(
     return .ok;
 }
 
+pub export fn orca_library_start_artist_info(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    options: ?*const ArtistInfoOptionsView,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const given = options orelse return box.reject(@src(), .invalid_argument, "options is null");
+    const language = stringInput(given.language.pointer, given.language.length) orelse
+        return box.reject(@src(), .invalid_argument, "language is null with a nonzero length");
+    if (given.force > 1 or given.offline > 1 or given.include_releases > 1)
+        return box.reject(@src(), .invalid_argument, "force, offline and include_releases must be 0 or 1");
+    const started = box.runtime.startArtistInfoFetch(importLibrary(library), artist_id, .{
+        .language = if (language.len == 0) "en" else language,
+        .force = given.force == 1,
+        .offline = given.offline == 1,
+        .include_releases = given.include_releases == 1,
+    }) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_artist_info_outcome(runtime: ?*Runtime, job_handle: Handle, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const outcome = box.runtime.jobArtistInfoOutcome(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = @intFromEnum(outcome);
+    return .ok;
+}
+
+pub export fn orca_library_artist_info(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    context: ?*anyopaque,
+    callback: ?ArtistInfoCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var found = (box.runtime.libraryArtistInfo(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .not_found, "no info was fetched for the artist");
+    defer found.deinit();
+    const record = &found.record;
+    const view: ArtistInfoView = .{
+        .fetched_at = record.fetched_at,
+        .begin_year = record.begin_year orelse 0,
+        .end_year = record.end_year orelse 0,
+        .has_begin_year = @intFromBool(record.begin_year != null),
+        .has_end_year = @intFromBool(record.end_year != null),
+        .ended = @intFromBool(record.ended),
+        .has_photo = @intFromBool(record.photo_source != null),
+        .photo_source = if (record.photo_source) |source| @intFromEnum(source) else 0,
+        .has_biography = @intFromBool(record.biography != null),
+        .outcome = record.outcome,
+        .musicbrainz_artist_id = stringView(record.musicbrainz_artist_id orelse ""),
+        .wikidata_id = stringView(record.wikidata_id orelse ""),
+        .artist_type = stringView(record.artist_type orelse ""),
+        .biography = stringView(record.biography orelse ""),
+        .biography_url = stringView(record.biography_url orelse ""),
+        .biography_licence = stringView(record.biography_licence orelse ""),
+        .biography_language = stringView(record.biography_language orelse ""),
+        .photo_url = stringView(record.photo_url orelse ""),
+        .photo_licence = stringView(record.photo_licence orelse ""),
+        .photo_licence_url = stringView(record.photo_licence_url orelse ""),
+        .photo_credit = stringView(record.photo_credit orelse ""),
+        .has_listeners = @intFromBool(record.listeners != null),
+        .listeners = if (record.listeners) |count| std.math.cast(i64, count) orelse std.math.maxInt(i64) else 0,
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_related_artists(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    context: ?*anyopaque,
+    callback: ?RelatedArtistsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var related = box.runtime.libraryRelatedArtists(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err);
+    defer related.deinit();
+    var views: [database.related_artists_max]RelatedArtistView = undefined;
+    for (views[0..related.items.len], related.items) |*view, artist| view.* = .{
+        .name = stringView(artist.name),
+        .mbid = stringView(artist.mbid),
+        .library_artist_id = artist.library_artist_id orelse 0,
+        .has_library_artist_id = @intFromBool(artist.library_artist_id != null),
+        .has_photo = @intFromBool(artist.has_photo),
+        .score = artist.score,
+    };
+    visit(context, &views, related.items.len);
+    return .ok;
+}
+
+pub export fn orca_library_related_artist_photo(
+    runtime: ?*Runtime,
+    library: Handle,
+    musicbrainz_artist_id: ?[*]const u8,
+    musicbrainz_artist_id_length: usize,
+    context: ?*anyopaque,
+    callback: ?ImageCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const mbid = stringInput(musicbrainz_artist_id, musicbrainz_artist_id_length) orelse
+        return box.reject(@src(), .invalid_argument, "musicbrainz_artist_id is null with a nonzero length");
+    const found = box.runtime.libraryRelatedArtistPhoto(importLibrary(library), mbid) catch |err|
+        return box.fail(@src(), err);
+    const image = found orelse return box.reject(@src(), .not_found, "the related artist has no photo");
+    defer image.deinit();
+    const view = imageView(image);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_related_artist_photo_info(
+    runtime: ?*Runtime,
+    library: Handle,
+    musicbrainz_artist_id: ?[*]const u8,
+    musicbrainz_artist_id_length: usize,
+    context: ?*anyopaque,
+    callback: ?RelatedArtistPhotoInfoCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const mbid = stringInput(musicbrainz_artist_id, musicbrainz_artist_id_length) orelse
+        return box.reject(@src(), .invalid_argument, "musicbrainz_artist_id is null with a nonzero length");
+    var found = (box.runtime.libraryRelatedArtistPhotoInfo(importLibrary(library), mbid) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .not_found, "the related artist has no photo");
+    defer found.deinit();
+    const record = &found.record;
+    const view: RelatedArtistPhotoInfoView = .{
+        .fetched_at = record.fetched_at,
+        .photo_source = @intFromEnum(record.source),
+        .photo_url = stringView(record.url orelse ""),
+        .photo_licence = stringView(record.licence orelse ""),
+        .photo_licence_url = stringView(record.licence_url orelse ""),
+        .photo_credit = stringView(record.credit orelse ""),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_start_release_info(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    options: ?*const ReleaseInfoOptionsView,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const given = options orelse return box.reject(@src(), .invalid_argument, "options is null");
+    const language = stringInput(given.language.pointer, given.language.length) orelse
+        return box.reject(@src(), .invalid_argument, "language is null with a nonzero length");
+    if (given.force > 1 or given.offline > 1)
+        return box.reject(@src(), .invalid_argument, "force and offline must be 0 or 1");
+    const started = box.runtime.startReleaseInfoFetch(importLibrary(library), release_id, .{
+        .language = if (language.len == 0) "en" else language,
+        .force = given.force == 1,
+        .offline = given.offline == 1,
+    }) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_job_release_info_outcome(runtime: ?*Runtime, job_handle: Handle, output: ?*u8) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const outcome = box.runtime.jobReleaseInfoOutcome(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    destination.* = @intFromEnum(outcome);
+    return .ok;
+}
+
+pub export fn orca_library_release_info(
+    runtime: ?*Runtime,
+    library: Handle,
+    release_id: i64,
+    context: ?*anyopaque,
+    callback: ?ReleaseInfoCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var found = (box.runtime.libraryReleaseInfo(importLibrary(library), release_id) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .not_found, "no info was fetched for the release");
+    defer found.deinit();
+    const record = &found.record;
+    const view: ReleaseInfoView = .{
+        .fetched_at = record.fetched_at,
+        .has_description = @intFromBool(record.description != null),
+        .description_source = if (record.description_source) |source| @intFromEnum(source) else 0,
+        .outcome = record.outcome,
+        .description = stringView(record.description orelse ""),
+        .description_url = stringView(record.description_url orelse ""),
+        .description_licence = stringView(record.description_licence orelse ""),
+        .description_language = stringView(record.description_language orelse ""),
+        .musicbrainz_release_id = stringView(record.musicbrainz_release_id orelse ""),
+        .musicbrainz_release_group_id = stringView(record.musicbrainz_release_group_id orelse ""),
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_set_genre_fill(runtime: ?*Runtime, library: Handle, fill: ?*const GenreFillView) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const given = fill orelse return box.reject(@src(), .invalid_argument, "fill is null");
+    if (given.musicbrainz > 1) return box.reject(@src(), .invalid_argument, "musicbrainz must be 0 or 1");
+    box.runtime.setGenreFill(importLibrary(library), .{ .musicbrainz = given.musicbrainz == 1 }) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_genre_fill(runtime: ?*Runtime, library: Handle, output: ?*GenreFillView) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const fill = box.runtime.libraryGenreFill(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    destination.* = .{ .musicbrainz = @intFromBool(fill.musicbrainz) };
+    return .ok;
+}
+
+pub export fn orca_library_start_genre_fill(
+    runtime: ?*Runtime,
+    library: Handle,
+    options: ?*const GenreFillOptionsView,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const given = options orelse return box.reject(@src(), .invalid_argument, "options is null");
+    if (given.offline > 1) return box.reject(@src(), .invalid_argument, "offline must be 0 or 1");
+    const started = box.runtime.startGenreFill(importLibrary(library), .{
+        .limit = given.limit,
+        .offline = given.offline == 1,
+    }) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
+pub export fn orca_library_artist_photo(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    context: ?*anyopaque,
+    callback: ?ImageCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryArtistPhoto(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err);
+    const image = found orelse return box.reject(@src(), .not_found, "the artist has no photo");
+    defer image.deinit();
+    const view = imageView(image);
+    visit(context, &view);
+    return .ok;
+}
+
+pub export fn orca_library_artist_links(
+    runtime: ?*Runtime,
+    library: Handle,
+    artist_id: i64,
+    context: ?*anyopaque,
+    callback: ?ArtistLinksCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var links = box.runtime.libraryArtistLinks(importLibrary(library), artist_id) catch |err|
+        return box.fail(@src(), err);
+    defer links.deinit();
+    var views: [database.artist_links_max]ArtistLinkView = undefined;
+    for (views[0..links.items.len], links.items) |*view, link| view.* = .{
+        .kind = @intFromEnum(link.kind),
+        .url = stringView(link.url),
+    };
+    visit(context, &views, links.items.len);
+    return .ok;
+}
+
 pub export fn orca_library_edit_tracks(
     runtime: ?*Runtime,
     library: Handle,
@@ -2155,6 +3599,40 @@ pub export fn orca_library_discard_tag_write(runtime: ?*Runtime, library: Handle
     const box = enter(runtime) orelse return refusal(runtime);
     box.runtime.discardTagWrite(importLibrary(library), plan_id) catch |err| return box.fail(@src(), err);
     return .ok;
+}
+
+pub export fn orca_library_query_tag_write_genres(
+    runtime: ?*Runtime,
+    library: Handle,
+    plan_id: u64,
+    file_id: i64,
+    context: ?*anyopaque,
+    callback: ?TagWriteGenresCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.tagWriteGenres(importLibrary(library), plan_id, file_id) catch |err|
+        return box.fail(@src(), err);
+    const genres = found orelse return box.reject(@src(), .not_found, "the plan leaves the file's genres alone");
+    var scratch: std.heap.ArenaAllocator = .init(box.runtime.allocator);
+    defer scratch.deinit();
+    const before = stringViews(scratch.allocator(), genres.before) catch |err| return box.fail(@src(), err);
+    const after = stringViews(scratch.allocator(), genres.after) catch |err| return box.fail(@src(), err);
+    const view: TagWriteGenresView = .{
+        .file_id = file_id,
+        .before = before.ptr,
+        .before_count = before.len,
+        .after = after.ptr,
+        .after_count = after.len,
+    };
+    visit(context, &view);
+    return .ok;
+}
+
+fn stringViews(allocator: std.mem.Allocator, values: []const []const u8) ![]const StringView {
+    const views = try allocator.alloc(StringView, values.len);
+    for (views, values) |*view, value| view.* = stringView(value);
+    return views;
 }
 
 pub export fn orca_library_undo_tag_write(runtime: ?*Runtime, library: Handle, group_id: u64) callconv(.c) Status {
@@ -2334,7 +3812,7 @@ pub export fn orca_runtime_pump_timeout(runtime: ?*Runtime, timeout_ms: ?*i64) c
 
 pub const credential_max_bytes = 1024;
 
-pub const ProviderService = enum { listenbrainz, musicbrainz, acoustid, cover_art_archive, lrclib };
+pub const ProviderService = enum { listenbrainz, musicbrainz, acoustid, cover_art_archive, lrclib, wikidata, wikimedia_commons, wikipedia, listenbrainz_labs };
 
 pub fn importProviderService(value: u8) ?ProviderService {
     return switch (value) {
@@ -2343,6 +3821,10 @@ pub fn importProviderService(value: u8) ?ProviderService {
         2 => .acoustid,
         3 => .cover_art_archive,
         4 => .lrclib,
+        5 => .wikidata,
+        6 => .wikimedia_commons,
+        7 => .wikipedia,
+        8 => .listenbrainz_labs,
         else => null,
     };
 }
@@ -2433,6 +3915,10 @@ pub export fn orca_runtime_set_provider_server(
         .acoustid => box.runtime.setAcoustIdServer(server),
         .cover_art_archive => box.runtime.setCoverArtArchiveServer(server),
         .lrclib => box.runtime.setLrclibServer(server),
+        .wikidata => box.runtime.setWikidataServer(server),
+        .wikimedia_commons => box.runtime.setWikimediaCommonsServer(server),
+        .wikipedia => box.runtime.setWikipediaServer(server),
+        .listenbrainz_labs => box.runtime.setListenBrainzLabsServer(server),
     };
     set catch |err| return box.fail(@src(), err);
     return .ok;
@@ -3086,6 +4572,42 @@ pub export fn orca_library_query_roots(
     return .ok;
 }
 
+pub export fn orca_library_query_folder(
+    runtime: ?*Runtime,
+    library: Handle,
+    root_id: i64,
+    path: ?[*]const u8,
+    path_length: usize,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?FolderEntryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const relative_path = stringInput(path, path_length) orelse
+        return box.reject(@src(), .invalid_argument, "path is null and path_length is not zero");
+    var page = box.runtime.libraryFolderPage(importLibrary(library), root_id, relative_path, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: FolderEntryView = .{
+            .track_id = item.track_id orelse 0,
+            .file_id = item.file_id orelse 0,
+            .total_duration_ms = item.total_duration_ms,
+            .file_count = item.file_count,
+            .track_count = item.track_count,
+            .kind = exportFolderEntryKind(item.kind),
+            .has_track_id = @intFromBool(item.track_id != null),
+            .has_file_id = @intFromBool(item.file_id != null),
+            .name = stringView(item.name),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
 pub export fn orca_library_start_scan(
     runtime: ?*Runtime,
     library: Handle,
@@ -3467,6 +4989,25 @@ pub export fn orca_player_play_playlist(
     return .ok;
 }
 
+pub export fn orca_player_play_folder(
+    runtime: ?*Runtime,
+    player: Handle,
+    root_id: i64,
+    path: ?[*]const u8,
+    path_length: usize,
+    shuffle: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    const relative_path = stringInput(path, path_length) orelse
+        return box.reject(@src(), .invalid_argument, "path is null and path_length is not zero");
+    box.runtime.playerPlayFolder(player_handle, library, box.io(), root_id, relative_path, shuffle != 0) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
 pub export fn orca_player_next(
     runtime: ?*Runtime,
     player: Handle,
@@ -3668,6 +5209,89 @@ pub export fn orca_player_signal_path(
     return .ok;
 }
 
+pub export fn orca_player_set_parametric_equalizer(
+    runtime: ?*Runtime,
+    player: Handle,
+    equalizer: ?*const ParametricEqualizerView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const setting: ?audio.dsp.ParametricEqualizer = if (equalizer) |value|
+        importParametricEqualizer(value) orelse
+            return box.reject(@src(), .invalid_argument, "unknown filter kind or too many filters")
+    else
+        null;
+    box.runtime.playerSetParametricEqualizer(importPlayer(player), setting) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_parametric_equalizer_get(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*ParametricEqualizerView,
+    has: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const has_destination = has orelse return box.reject(@src(), .invalid_argument, "has is null");
+    const setting = box.runtime.playerParametricEqualizer(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = if (setting) |*value| exportParametricEqualizer(value) else std.mem.zeroes(ParametricEqualizerView);
+    has_destination.* = @intFromBool(setting != null);
+    return .ok;
+}
+
+pub export fn orca_parametric_equalizer_response(
+    equalizer: ?*const ParametricEqualizerView,
+    sample_rate: u32,
+    frequencies_hz: ?[*]const f32,
+    gains_db: ?[*]f32,
+    count: usize,
+) callconv(.c) Status {
+    const view = equalizer orelse return .invalid_argument;
+    if (sample_rate == 0) return .invalid_argument;
+    const setting = importParametricEqualizer(view) orelse return .invalid_argument;
+    setting.validate() catch |err| return mapError(err);
+    if (count == 0) return .ok;
+    const frequencies = frequencies_hz orelse return .invalid_argument;
+    const gains = gains_db orelse return .invalid_argument;
+    setting.response(sample_rate, frequencies[0..count], gains[0..count]);
+    return .ok;
+}
+
+pub export fn orca_parametric_equalizer_parse_apo(
+    text: ?[*]const u8,
+    length: usize,
+    output: ?*ParametricEqualizerView,
+) callconv(.c) Status {
+    const destination = output orelse return .invalid_argument;
+    const bytes: []const u8 = if (length == 0) "" else (text orelse return .invalid_argument)[0..length];
+    const setting = audio.eq_text.parseEqualizerApo(bytes) catch |err| return mapError(err);
+    destination.* = exportParametricEqualizer(&setting);
+    return .ok;
+}
+
+pub export fn orca_parametric_equalizer_write_apo(
+    equalizer: ?*const ParametricEqualizerView,
+    buffer: ?[*]u8,
+    capacity: usize,
+    written: ?*usize,
+) callconv(.c) Status {
+    const view = equalizer orelse return .invalid_argument;
+    const written_destination = written orelse return .invalid_argument;
+    const setting = importParametricEqualizer(view) orelse return .invalid_argument;
+    setting.validate() catch |err| return mapError(err);
+    var scratch: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&scratch);
+    audio.eq_text.writeEqualizerApo(&writer, setting) catch return .internal;
+    const text = writer.buffered();
+    written_destination.* = text.len;
+    if (text.len > capacity) return .invalid_argument;
+    const destination = buffer orelse return .invalid_argument;
+    @memcpy(destination[0..text.len], text);
+    return .ok;
+}
+
 pub export fn orca_player_seek_ms(
     runtime: ?*Runtime,
     player: Handle,
@@ -3791,6 +5415,62 @@ pub export fn orca_player_query_queue_tracks(
     return .ok;
 }
 
+pub export fn orca_player_query_queue_history(
+    runtime: ?*Runtime,
+    player: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?QueueHistoryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var entries: [max_page]core.runtime.QueueHistoryEntry = undefined;
+    const count = box.runtime.playerQueueHistory(
+        importPlayer(player),
+        offset,
+        entries[0..limit],
+    ) catch |err| return box.fail(@src(), err);
+    for (entries[0..count]) |entry| {
+        const library_database = core.runtime.libraryDatabase(&box.runtime, entry.track.library) catch |err| switch (err) {
+            error.StaleHandle, error.LibraryHasNoDatabase => continue,
+            else => return box.fail(@src(), err),
+        };
+        const summary = (library_database.tracks.byId(box.runtime.allocator, entry.track.track_id) catch |err|
+            return box.fail(@src(), err)) orelse continue;
+        defer summary.deinit(box.runtime.allocator);
+        const view = trackSummaryView(summary);
+        visit(context, &view, entry.ended_at_ms, @intFromEnum(entry.reason));
+    }
+    return .ok;
+}
+
+pub export fn orca_player_clear_queue_history(runtime: ?*Runtime, player: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerClearQueueHistory(importPlayer(player)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_save_queue_as_playlist(
+    runtime: ?*Runtime,
+    player: Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    playlist_id: ?*i64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = playlist_id orelse return box.reject(@src(), .invalid_argument, "playlist_id is null");
+    const text = stringInput(name, name_length) orelse
+        return box.reject(@src(), .invalid_argument, "name is null and name_length is not zero");
+    const player_handle = importPlayer(player);
+    const library = (box.runtime.playerLibrary(player_handle) catch |err|
+        return box.fail(@src(), err)) orelse return box.reject(@src(), .invalid_state, "player has no library");
+    destination.* = box.runtime.playerSaveQueueAsPlaylist(player_handle, library, text) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
 pub export fn orca_player_queue_jump(
     runtime: ?*Runtime,
     player: Handle,
@@ -3830,6 +5510,18 @@ pub export fn orca_player_queue_remove(
     return .ok;
 }
 
+pub export fn orca_player_queue_move(
+    runtime: ?*Runtime,
+    player: Handle,
+    from: u32,
+    to: u32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerQueueMove(importPlayer(player), from, to) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
 pub export fn orca_player_queue_stats(
     runtime: ?*Runtime,
     player: Handle,
@@ -3861,6 +5553,26 @@ pub export fn orca_enumerate_output_devices(
         return box.fail(@src(), err);
     for (devices[0..count]) |*device| {
         const view: DeviceView = .{ .id = device.id, .name = stringView(device.nameSlice()) };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_enumerate_output_devices_v2(
+    runtime: ?*Runtime,
+    context: ?*anyopaque,
+    callback: ?DeviceV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var devices: [max_devices]audio.backend.Device = undefined;
+    const count = box.runtime.enumerateOutputDevices(&devices) catch |err|
+        return box.fail(@src(), err);
+    for (devices[0..count]) |*device| {
+        const view: DeviceViewV2 = .{
+            .base = .{ .id = device.id, .name = stringView(device.nameSlice()) },
+            .kind = exportDeviceKind(device.kind),
+        };
         visit(context, &view);
     }
     return .ok;
@@ -4048,26 +5760,75 @@ const invalid_track_query = "query limit must be between 1 and 512 and sort a kn
 /// rows.
 fn importTrackQuery(query: *const TrackQueryView) ?database.TrackQuery {
     if (query.limit == 0 or query.limit > max_page) return null;
-    const sort = std.enums.fromInt(TrackSortKey, query.sort) orelse return null;
     return .{
         .artist_id = optionalId(query.artist_id),
         .release_id = optionalId(query.release_id),
-        .sort = switch (sort) {
-            .id => .id,
-            .artist => .artist,
-            .album => .album,
-            .title => .title,
-            .track_number => .track_number,
-            .duration => .duration,
-            .date_added => .date_added,
-            .rating => .rating,
-            .loved => .loved,
-        },
+        .sort = importTrackSort(query.sort) orelse return null,
         .loved_only = query.loved_only != 0,
         .direction = if (query.descending != 0) .descending else .ascending,
         .limit = query.limit,
         .offset = query.offset,
     };
+}
+
+const invalid_track_query_v2 = "query limit must be between 1 and 512, sort a known orca_track_sort, format a known orca_track_format and text not null unless empty";
+
+fn importTrackQueryV2(query: *const TrackQueryV2View) ?database.TrackQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    _ = stringInput(query.text.pointer, query.text.length) orelse return null;
+    return .{
+        .artist_id = if (query.has_artist_id != 0) query.artist_id else null,
+        .release_id = if (query.has_release_id != 0) query.release_id else null,
+        .genre_id = if (query.has_genre_id != 0) query.genre_id else null,
+        .sort = importTrackSort(query.sort) orelse return null,
+        .loved_only = query.loved_only != 0,
+        .year_min = if (query.has_year_min != 0) query.year_min else null,
+        .year_max = if (query.has_year_max != 0) query.year_max else null,
+        .lossless = switch (importTrackFormatFilter(query.format) orelse return null) {
+            .any => null,
+            .lossless => true,
+            .lossy => false,
+        },
+        .min_sample_rate = if (query.min_sample_rate != 0) query.min_sample_rate else null,
+        .explicit_only = query.explicit_only != 0,
+        .direction = if (query.descending != 0) .descending else .ascending,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+pub fn importTrackFormatFilter(value: u8) ?TrackFormatFilter {
+    return std.enums.fromInt(TrackFormatFilter, value);
+}
+
+fn importTrackSort(sort: u8) ?database.TrackSort {
+    const key = std.enums.fromInt(TrackSortKey, sort) orelse return null;
+    return switch (key) {
+        .id => .id,
+        .artist => .artist,
+        .album => .album,
+        .title => .title,
+        .track_number => .track_number,
+        .duration => .duration,
+        .date_added => .date_added,
+        .rating => .rating,
+        .loved => .loved,
+        .play_count => .play_count,
+        .last_played => .last_played,
+        .year => .year,
+    };
+}
+
+pub fn exportSearchKind(kind: database.SearchKind) u8 {
+    return @intFromEnum(kind);
+}
+
+pub fn exportFolderEntryKind(kind: database.FolderEntryKind) u8 {
+    return @intFromEnum(kind);
+}
+
+pub fn exportExplicit(advisory: metadata.Explicit) u8 {
+    return @intFromEnum(advisory);
 }
 
 const invalid_release_query = "query limit must be between 1 and 512 and sort a known orca_release_sort";
@@ -4090,6 +5851,7 @@ pub fn importReleaseSort(sort: u8) ?database.ReleaseSort {
         2 => .year,
         3 => .recently_added,
         4 => .loved,
+        5 => .most_played,
         else => null,
     };
 }
@@ -4105,6 +5867,103 @@ fn importArtistQuery(query: *const ArtistQueryView) ?database.ArtistQuery {
     else
         return null;
     return .{ .filter = filter, .limit = query.limit, .offset = query.offset };
+}
+
+const invalid_release_query_v2 = "query limit must be between 1 and 512, sort a known orca_release_sort, artwork a known orca_release_artwork, kind a known orca_release_kind and text not null unless empty";
+
+fn importReleaseQueryV2(query: *const ReleaseQueryV2View) ?database.ReleaseQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    return .{
+        .album_artist_id = if (query.has_album_artist_id != 0) query.album_artist_id else null,
+        .own_releases_only = query.own_releases_only != 0,
+        .appearing_artist_id = if (query.has_appearing_artist_id != 0) query.appearing_artist_id else null,
+        .release_kind = switch (importReleaseKindFilter(query.kind) orelse return null) {
+            .any => null,
+            .album => .album,
+            .ep_or_single => .ep_or_single,
+            .other => .other,
+        },
+        .genre_id = if (query.has_genre_id != 0) query.genre_id else null,
+        .sort = importReleaseSort(query.sort) orelse return null,
+        .loved_only = query.loved_only != 0,
+        .high_resolution_only = query.high_resolution_only != 0,
+        .needs_review_only = query.needs_review_only != 0,
+        .lossless_only = query.lossless_only != 0,
+        .year_min = if (query.has_year_min != 0) query.year_min else null,
+        .year_max = if (query.has_year_max != 0) query.year_max else null,
+        .has_artwork = switch (importReleaseArtworkFilter(query.artwork) orelse return null) {
+            .any => null,
+            .present => true,
+            .absent => false,
+        },
+        .text = stringInput(query.text.pointer, query.text.length) orelse return null,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+pub fn importReleaseArtworkFilter(value: u8) ?ReleaseArtworkFilter {
+    return std.enums.fromInt(ReleaseArtworkFilter, value);
+}
+
+pub fn importReleaseKindFilter(value: u8) ?ReleaseKindFilter {
+    return std.enums.fromInt(ReleaseKindFilter, value);
+}
+
+fn importSearchLimits(limits: ?*const SearchLimitsView) database.SearchLimits {
+    const view = limits orelse return .{};
+    return .{
+        .artists = view.artists,
+        .releases = view.releases,
+        .tracks = view.tracks,
+        .playlists = view.playlists,
+        .genres = view.genres,
+    };
+}
+
+const invalid_artist_query_v2 = "query limit must be between 1 and 512, sort a known orca_artist_sort, loved_only 0 or 1, and filter not null unless empty";
+
+fn importArtistQueryV2(query: *const ArtistQueryV2View) ?database.ArtistQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    const filter = stringInput(query.filter.pointer, query.filter.length) orelse return null;
+    const sort: database.ArtistSort = switch (std.enums.fromInt(ArtistSortKey, query.sort) orelse return null) {
+        .name => .name,
+        .track_count => .track_count,
+        .recently_loved => .recently_loved,
+        .recently_added => .recently_added,
+    };
+    if (query.loved_only > 1) return null;
+    return .{
+        .filter = filter,
+        .genre_id = if (query.has_genre_id != 0) query.genre_id else null,
+        .loved_only = query.loved_only == 1,
+        .sort = sort,
+        .limit = query.limit,
+        .offset = query.offset,
+    };
+}
+
+const invalid_genre_query = "query limit must be between 1 and 512, sort a known orca_genre_sort, and filter not null unless empty";
+
+fn importGenreQuery(query: *const GenreQueryView) ?database.GenreQuery {
+    if (query.limit == 0 or query.limit > max_page) return null;
+    const filter = stringInput(query.filter.pointer, query.filter.length) orelse return null;
+    const sort: database.GenreSort = switch (std.enums.fromInt(GenreSortKey, query.sort) orelse return null) {
+        .name => .name,
+        .track_count => .track_count,
+    };
+    return .{ .filter = filter, .sort = sort, .limit = query.limit, .offset = query.offset };
+}
+
+fn genreView(item: database.GenreSummary) GenreView {
+    return .{
+        .id = item.id,
+        .total_duration_ms = item.total_duration_ms,
+        .track_count = item.track_count,
+        .release_count = item.release_count,
+        .artist_count = item.artist_count,
+        .name = stringView(item.name),
+    };
 }
 
 pub fn exportFeedback(feedback: database.Feedback) u8 {
@@ -4145,9 +6004,54 @@ fn releaseView(item: database.ReleaseSummary) ReleaseView {
         .has_disc_count = @intFromBool(item.disc_count != null),
         .is_compilation = @intFromBool(item.is_compilation),
         .loved = @intFromBool(item.loved),
+        .explicit = exportExplicit(item.explicit),
         .title = stringView(item.title),
         .album_artist = stringView(item.album_artist),
         .release_date = stringView(item.release_date orelse ""),
+    };
+}
+
+fn releaseFactsView(item: database.ReleaseSummary) ReleaseFactsView {
+    return .{
+        .codec = stringView(item.codec),
+        .release_type = stringView(item.release_type orelse ""),
+        .max_sample_rate = item.max_sample_rate orelse 0,
+        .max_bit_depth = item.max_bit_depth orelse 0,
+        .pending_reviews = item.pending_reviews,
+        .lossless = @intFromBool(item.lossless),
+    };
+}
+
+fn trackSummaryView(item: database.TrackSummary) TrackSummaryView {
+    return .{
+        .track = trackView(item),
+        .release_id = item.release_id orelse 0,
+        .artist_id = item.artist_id orelse 0,
+        .recording_id = item.recording_id orelse 0,
+        .has_release_id = @intFromBool(item.release_id != null),
+        .has_artist_id = @intFromBool(item.artist_id != null),
+        .has_recording_id = @intFromBool(item.recording_id != null),
+    };
+}
+
+fn trackFactsView(item: database.TrackSummary) TrackFactsView {
+    return .{
+        .codec = stringView(item.codec),
+        .added_at = item.added_at orelse 0,
+        .last_played_at = item.last_played_at orelse 0,
+        .play_count = item.play_count,
+        .track_total = item.track_total orelse 0,
+        .disc_total = item.disc_total orelse 0,
+        .sample_rate = item.sample_rate orelse 0,
+        .bit_depth = item.bit_depth orelse 0,
+        .year = item.year orelse 0,
+        .lossy = @intFromBool(item.lossy),
+        .explicit = exportExplicit(item.explicit),
+        .has_added_at = @intFromBool(item.added_at != null),
+        .has_last_played_at = @intFromBool(item.last_played_at != null),
+        .has_track_total = @intFromBool(item.track_total != null),
+        .has_disc_total = @intFromBool(item.disc_total != null),
+        .has_year = @intFromBool(item.year != null),
     };
 }
 
@@ -4262,6 +6166,7 @@ pub fn exportMetadataField(field: metadata.Field) u8 {
         .musicbrainz_release_group_id => 10,
         .musicbrainz_release_track_id => 11,
         .musicbrainz_album_artist_id => 12,
+        .explicit => 13,
     };
 }
 
@@ -4280,6 +6185,7 @@ pub fn importMetadataField(value: u8) ?metadata.Field {
         10 => .musicbrainz_release_group_id,
         11 => .musicbrainz_release_track_id,
         12 => .musicbrainz_album_artist_id,
+        13 => .explicit,
         else => null,
     };
 }
@@ -4397,7 +6303,17 @@ pub fn importReplayGainMode(mode: u8) ?audio.processing.ReplayGainMode {
     return switch (mode) {
         0 => .off,
         1 => .track,
+        2 => .album,
         else => null,
+    };
+}
+
+pub fn exportReplayGainSource(source: audio.processing.ReplayGainSource) u8 {
+    return switch (source) {
+        .none => 0,
+        .track => 1,
+        .album => 2,
+        .track_fallback => 3,
     };
 }
 
@@ -4441,6 +6357,60 @@ fn importEqualizer(equalizer: *const EqualizerView) audio.dsp.Equalizer {
     return .{ .gains_db = equalizer.gains_db, .preamp_db = equalizer.preamp_db };
 }
 
+pub fn importFilterKind(kind: u8) ?audio.dsp.FilterKind {
+    return switch (kind) {
+        0 => .peak,
+        1 => .low_shelf,
+        2 => .high_shelf,
+        3 => .low_pass,
+        4 => .high_pass,
+        5 => .notch,
+        else => null,
+    };
+}
+
+pub fn exportFilterKind(kind: audio.dsp.FilterKind) u8 {
+    return switch (kind) {
+        .peak => 0,
+        .low_shelf => 1,
+        .high_shelf => 2,
+        .low_pass => 3,
+        .high_pass => 4,
+        .notch => 5,
+    };
+}
+
+fn exportParametricEqualizer(equalizer: *const audio.dsp.ParametricEqualizer) ParametricEqualizerView {
+    var view = std.mem.zeroes(ParametricEqualizerView);
+    view.count = equalizer.count;
+    view.preamp_db = equalizer.preamp_db;
+    for (equalizer.filterList(), view.filters[0..equalizer.count]) |filter, *destination| destination.* = .{
+        .kind = exportFilterKind(filter.kind),
+        .enabled = @intFromBool(filter.enabled),
+        .frequency_hz = filter.frequency_hz,
+        .gain_db = filter.gain_db,
+        .q = filter.q,
+    };
+    return view;
+}
+
+fn importParametricEqualizer(view: *const ParametricEqualizerView) ?audio.dsp.ParametricEqualizer {
+    if (view.count > audio.dsp.max_parametric_filters) return null;
+    var equalizer: audio.dsp.ParametricEqualizer = .{
+        .filters = @splat(.{ .kind = .peak, .frequency_hz = 0, .q = 0, .enabled = false }),
+        .count = view.count,
+        .preamp_db = view.preamp_db,
+    };
+    for (view.filters[0..view.count], equalizer.filters[0..view.count]) |filter, *destination| destination.* = .{
+        .kind = importFilterKind(filter.kind) orelse return null,
+        .enabled = filter.enabled != 0,
+        .frequency_hz = filter.frequency_hz,
+        .gain_db = filter.gain_db,
+        .q = filter.q,
+    };
+    return equalizer;
+}
+
 fn exportPcmFormat(format: ?audio.pcm.Format) PcmFormatView {
     const value = format orelse return std.mem.zeroes(PcmFormatView);
     return .{
@@ -4472,10 +6442,29 @@ fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
         .has_device_rate = @intFromBool(path.device_rate != null),
         .bit_perfect_eligible = @intFromBool(path.bit_perfect_eligible),
         .widened_exactly = @intFromBool(path.widened_exactly),
+        .output_kind = exportDeviceKind(path.output_kind),
+        .has_device_quantum = @intFromBool(path.device_quantum_frames != null),
+        .replay_gain_source = exportReplayGainSource(path.replay_gain_source),
+        .device_quantum_frames = path.device_quantum_frames orelse 0,
         .codec = stringView(path.codec orelse ""),
+        .parametric = if (path.parametric) |*value| exportParametricEqualizer(value) else std.mem.zeroes(ParametricEqualizerView),
+        .has_parametric = @intFromBool(path.parametric != null),
+        .has_replay_gain_track = @intFromBool(path.replay_gain_track_db != null),
+        .replay_gain_track_db = path.replay_gain_track_db orelse 0,
     };
     for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
     return view;
+}
+
+pub fn exportDeviceKind(kind: audio.backend.DeviceKind) u8 {
+    return switch (kind) {
+        .unknown => 0,
+        .usb => 1,
+        .pci => 2,
+        .bluetooth => 3,
+        .hdmi => 4,
+        .virtual => 5,
+    };
 }
 
 pub fn importRenderPolicy(policy: u8) ?audio.zone.RenderPolicy {
@@ -4598,6 +6587,8 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .acoustid_submission => 7,
         .mutation => 8,
         .lyrics => 9,
+        .artist_info => 10,
+        .release_info => 11,
         .artwork, .conversion, .ripping, .dummy => 255,
     };
 }
@@ -4690,6 +6681,7 @@ fn mapError(err: anyerror) Status {
         error.PlayerHasNoLibrary,
         error.PlayerBoundToAnotherLibrary,
         error.QueueEntryInUse,
+        error.QueueEmpty,
         error.LibraryHasNoDatabase,
         error.ZoneOwnedByEngine,
         error.InvalidJobTransition,
@@ -4698,7 +6690,8 @@ fn mapError(err: anyerror) Status {
         error.ScrobblingEnabledElsewhere,
         => .invalid_state,
         error.AlreadyWatching => .invalid_state,
-        error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty => .invalid_state,
+        error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty, error.FolderEmpty => .invalid_state,
+        error.PlaylistIsSmart, error.PlaylistIsManual => .invalid_state,
         error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
         error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
         error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound => .not_found,
@@ -4706,7 +6699,7 @@ fn mapError(err: anyerror) Status {
         error.TooManyPendingTagWrites, error.TagWriteInProgress => .busy,
         error.MatchingAlreadyRunning, error.AcoustIdBusy => .busy,
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
-        error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup => .not_found,
+        error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
         error.MutationGroupAlreadyUndone => .already_done,
         error.MutationNeedsReconciliation => .needs_reconciliation,
         error.TagWriteBackupPruned => .gone,
@@ -4714,17 +6707,25 @@ fn mapError(err: anyerror) Status {
         error.UnsupportedAudioFormat,
         error.UnsupportedChannelCount,
         error.WatchingUnsupported,
+        error.UnsupportedFilterType,
         => .unsupported,
         error.InvalidVolume,
         error.InvalidBatchSize,
         error.InvalidLibraryRoot,
         error.InvalidWatchOptions,
         error.InvalidReconcileDirectory,
+        error.InvalidFolderPath,
         error.PositionOutOfRange,
         error.InvalidPlaylistName,
         error.PlaylistTooLarge,
         error.EqualizerGainOutOfRange,
         error.EqualizerPreampOutOfRange,
+        error.TooManyFilters,
+        error.ParametricPreampOutOfRange,
+        error.FilterFrequencyOutOfRange,
+        error.FilterGainOutOfRange,
+        error.FilterQOutOfRange,
+        error.InvalidEqualizerApo,
         error.CrossfeedAmountOutOfRange,
         error.InvalidTrackSelection,
         error.NoTrackEdits,
@@ -4738,8 +6739,26 @@ fn mapError(err: anyerror) Status {
         error.InvalidMinimumConfidence,
         error.InvalidMaintenanceOptions,
         error.PageOutOfRange,
+        error.TooManyGenres,
+        error.InvalidGenre,
+        error.SearchTextTooLong,
+        error.InvalidSearchLimits,
         error.NotATagWriteJob,
         error.NotALyricsJob,
+        error.NotAnArtistInfoJob,
+        error.NotAReleaseInfoJob,
+        error.InvalidLimit,
+        error.InvalidLanguage,
+        error.InvalidPlaylistTag,
+        error.TooManyPlaylistTags,
+        error.PlaylistDescriptionTooLong,
+        error.InvalidSmartPlaylistRules,
+        error.UnknownRuleField,
+        error.UnknownRuleOperator,
+        error.RuleOperatorMismatch,
+        error.InvalidRuleValue,
+        error.RuleNestingTooDeep,
+        error.TooManyRules,
         => .invalid_argument,
         else => .internal,
     };
@@ -4945,7 +6964,7 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     var visited: usize = 0;
     var count: u64 = 0;
 
-    var releases: ReleaseQueryView = .{ .album_artist_id = -1, .sort = 5, .loved_only = 0, .limit = 8, .offset = 0 };
+    var releases: ReleaseQueryView = .{ .album_artist_id = -1, .sort = 6, .loved_only = 0, .limit = 8, .offset = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases(runtime, library, &releases, &visited, countRelease));
     try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching(runtime, library, &releases, &count));
     releases.sort = 4;
@@ -4974,10 +6993,102 @@ test "browse queries refuse an unknown sort, an unbounded limit and null pointer
     artists.limit = 8;
     try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching(runtime, library, &artists, null));
 
-    var tracks: TrackQueryView = .{ .artist_id = -1, .release_id = -1, .sort = 9, .descending = 0, .loved_only = 1, .limit = 8, .offset = 0 };
+    var tracks: TrackQueryView = .{ .artist_id = -1, .release_id = -1, .sort = 12, .descending = 0, .loved_only = 1, .limit = 8, .offset = 0 };
     try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks(runtime, library, &tracks, &visited, countTrack));
     tracks.sort = @intFromEnum(TrackSortKey.loved);
     try std.testing.expectEqual(Status.ok, orca_library_track_match_count(runtime, library, &tracks, &count));
+
+    var tracks_v2: TrackQueryV2View = .{ .artist_id = 0, .release_id = 0, .genre_id = 0, .sort = 12, .descending = 0, .loved_only = 0, .has_artist_id = 0, .has_release_id = 0, .has_genre_id = 0, .limit = 8, .offset = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    tracks_v2.sort = @intFromEnum(TrackSortKey.year);
+    tracks_v2.has_genre_id = 1;
+    tracks_v2.genre_id = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    tracks_v2.has_genre_id = 0;
+    tracks_v2.limit = max_page + 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    tracks_v2.limit = 8;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, null, &visited, countSummaryFacts));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, null));
+    try std.testing.expectEqual(Status.ok, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    tracks_v2.format = @intFromEnum(TrackFormatFilter.lossless);
+    tracks_v2.has_year_min = 1;
+    tracks_v2.year_min = 1990;
+    tracks_v2.min_sample_rate = 44_100;
+    tracks_v2.explicit_only = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    try std.testing.expectEqual(Status.ok, orca_library_track_match_count_v2(runtime, library, &tracks_v2, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_match_count_v2(runtime, library, &tracks_v2, null));
+    tracks_v2.format = 3;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_tracks_v2(runtime, library, &tracks_v2, &visited, countSummaryFacts));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_track_match_count_v2(runtime, library, &tracks_v2, &count));
+    tracks_v2.format = @intFromEnum(TrackFormatFilter.any);
+
+    var releases_v2: ReleaseQueryV2View = .{ .album_artist_id = 0, .genre_id = 1, .sort = 6, .loved_only = 0, .has_album_artist_id = 0, .has_genre_id = 1, .limit = 8, .offset = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases_v2(runtime, library, &releases_v2, &visited, countReleaseFacts));
+    releases_v2.sort = 5;
+    try std.testing.expectEqual(Status.ok, orca_library_browse_releases_v2(runtime, library, &releases_v2, &visited, countReleaseFacts));
+    try std.testing.expectEqual(Status.ok, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    releases_v2.artwork = 3;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_browse_releases_v2(runtime, library, &releases_v2, &visited, countReleaseFacts));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    releases_v2.artwork = @intFromEnum(ReleaseArtworkFilter.absent);
+    releases_v2.kind = 4;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    releases_v2.kind = @intFromEnum(ReleaseKindFilter.ep_or_single);
+    releases_v2.has_appearing_artist_id = 1;
+    releases_v2.appearing_artist_id = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    releases_v2.has_album_artist_id = 1;
+    releases_v2.album_artist_id = 1;
+    releases_v2.own_releases_only = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    releases_v2.has_album_artist_id = 0;
+    releases_v2.own_releases_only = 0;
+    releases_v2.has_year_min = 1;
+    releases_v2.year_min = 2010;
+    releases_v2.high_resolution_only = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+    releases_v2.limit = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_count_matching_v2(runtime, library, &releases_v2, &count));
+
+    var artists_v2: ArtistQueryV2View = .{ .filter = .{ .pointer = null, .length = 0 }, .genre_id = 1, .limit = 8, .offset = 0, .sort = 4, .has_genre_id = 1, .loved_only = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
+    artists_v2.sort = @intFromEnum(ArtistSortKey.track_count);
+    try std.testing.expectEqual(Status.ok, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
+    artists_v2.loved_only = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching_v2(runtime, library, &artists_v2, &count));
+    artists_v2.loved_only = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_artist_count_matching_v2(runtime, library, &artists_v2, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    artists_v2.filter.length = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_count_matching_v2(runtime, library, &artists_v2, &count));
+    var totals: ArtistTotalsView = undefined;
+    try std.testing.expectEqual(Status.not_found, orca_library_artist_totals(runtime, library, 1, &totals));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_totals(runtime, library, 1, null));
+    artists_v2.filter.length = 0;
+    artists_v2.sort = @intFromEnum(ArtistSortKey.recently_added);
+    try std.testing.expectEqual(Status.ok, orca_library_query_artists_v2(runtime, library, &artists_v2, &visited, countArtistV2));
+
+    var genres: GenreQueryView = .{ .filter = .{ .pointer = null, .length = 0 }, .limit = 8, .offset = 0, .sort = 2 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_genres(runtime, library, &genres, &visited, countGenre));
+    genres.sort = @intFromEnum(GenreSortKey.track_count);
+    try std.testing.expectEqual(Status.ok, orca_library_query_genres(runtime, library, &genres, &visited, countGenre));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_genres(runtime, library, null, &visited, countGenre));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_genre_count(runtime, library, null, 3, &count));
+    try std.testing.expectEqual(Status.ok, orca_library_genre_count(runtime, library, null, 0, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    try std.testing.expectEqual(Status.not_found, orca_library_genre_get(runtime, library, 1, &visited, countGenre));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_genres(runtime, library, 1, 0, &visited, countGenreCount));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_genre_artwork(runtime, library, 1, max_page + 1, &visited, null));
+    const too_many: [database.max_track_genres + 1]StringInput = @splat(.{ .pointer = "Rock", .length = 4 });
+    const one_track = [_]i64{1};
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_track_genres(runtime, library, &one_track, 1, &too_many, too_many.len));
+    try std.testing.expectEqual(Status.not_found, orca_library_set_track_genres(runtime, library, &one_track, 1, &too_many, 1));
 
     try std.testing.expectEqual(@as(usize, 0), visited);
     try std.testing.expectEqual(Status.invalid_argument, orca_library_track_play_stats(runtime, library, 1, null));
@@ -5032,6 +7143,82 @@ test "health actions refuse an unknown kind, a missing file and a null callback,
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
+fn captureHealthSummaryV2(context: ?*anyopaque, view: *const HealthKindSummaryViewV2) callconv(.c) void {
+    const captured: *HealthKindSummaryViewV2 = @ptrCast(@alignCast(context.?));
+    captured.* = view.*;
+}
+
+test "library stats and the sized health summary reach the C ABI, and a null output or callback is refused" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(
+        runtime,
+        "file:orca-c-api-library-stats?mode=memory&cache=shared",
+        &library,
+    ));
+    var stats: LibraryStatsView = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_stats(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_stats(runtime, library, &stats));
+    try std.testing.expectEqual(@as(u64, 0), stats.files);
+    try std.testing.expectEqual(@as(u8, 0), stats.has_last_scan_finished_at);
+    try std.testing.expectEqual(@as(u8, 0), stats.has_last_analysis_at);
+
+    const box = runtimeBox(runtime).?;
+    const library_database = try core.runtime.databaseOf(&box.runtime, importLibrary(library));
+    const kept = try library_database.files.create(.{ .size_bytes = 3_000 });
+    const copy = try library_database.files.create(.{ .size_bytes = 3_000 });
+    for ([_]i64{ kept, copy }, [_][]const u8{ "music/kept.flac", "music/copy.flac" }) |file_id, uri|
+        _ = try library_database.locations.upsert(.{ .file_id = file_id, .volume_id = database.LibraryDatabase.null_volume, .uri = uri });
+    try library_database.health_issues.replaceFile(kept, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = copy }});
+    try library_database.health_issues.replaceFile(copy, &.{.{ .kind = .exact_duplicate, .severity = .warning, .related_file_id = kept }});
+
+    try std.testing.expectEqual(Status.ok, orca_library_stats(runtime, library, &stats));
+    try std.testing.expectEqual(@as(u64, 2), stats.files);
+    try std.testing.expectEqual(@as(u64, 6_000), stats.total_bytes);
+
+    var summary: HealthKindSummaryViewV2 = undefined;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_health_summary_v2(runtime, library, null, null));
+    try std.testing.expectEqual(Status.ok, orca_library_health_summary_v2(runtime, library, &summary, captureHealthSummaryV2));
+    try std.testing.expectEqual(exportHealthIssueKind(.exact_duplicate), summary.base.kind);
+    try std.testing.expectEqual(@as(u64, 2), summary.base.count);
+    try std.testing.expectEqual(@as(u64, 2), summary.files);
+    try std.testing.expectEqual(@as(u64, 3_000), summary.bytes);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+const ProviderSourceCapture = struct {
+    count: usize = 0,
+    first_id: u8 = 255,
+    first_name: [32]u8 = undefined,
+    first_name_length: usize = 0,
+    empty_licence_urls: usize = 0,
+};
+
+fn captureProviderSource(context: ?*anyopaque, view: *const ProviderSourceView) callconv(.c) void {
+    const capture: *ProviderSourceCapture = @ptrCast(@alignCast(context.?));
+    if (capture.count == 0) {
+        capture.first_id = view.id;
+        const name = view.name.pointer[0..view.name.length];
+        @memcpy(capture.first_name[0..name.len], name);
+        capture.first_name_length = name.len;
+    }
+    if (view.licence_url.length == 0) capture.empty_licence_urls += 1;
+    capture.count += 1;
+}
+
+test "provider sources reach the C ABI in id order, and a null callback is refused" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    try std.testing.expectEqual(Status.invalid_argument, orca_provider_sources(runtime, null, null));
+    var capture: ProviderSourceCapture = .{};
+    try std.testing.expectEqual(Status.ok, orca_provider_sources(runtime, &capture, captureProviderSource));
+    try std.testing.expectEqual(@as(usize, 9), capture.count);
+    try std.testing.expectEqual(@as(u8, 0), capture.first_id);
+    try std.testing.expectEqualStrings("MusicBrainz", capture.first_name[0..capture.first_name_length]);
+    try std.testing.expectEqual(@as(usize, 3), capture.empty_licence_urls);
+}
+
 test "a Track the Library does not hold is not found, and its callback never runs" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
@@ -5072,6 +7259,24 @@ fn countArtist(context: ?*anyopaque, artist: *const ArtistView) callconv(.c) voi
     count.* += 1;
 }
 
+fn countArtistV2(context: ?*anyopaque, artist: *const ArtistViewV2) callconv(.c) void {
+    _ = artist;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countGenre(context: ?*anyopaque, genre: *const GenreView) callconv(.c) void {
+    _ = genre;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countGenreCount(context: ?*anyopaque, genre: *const GenreCountView) callconv(.c) void {
+    _ = genre;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
 fn countSummary(context: ?*anyopaque, summary: *const TrackSummaryView) callconv(.c) void {
     const count: *usize = @ptrCast(@alignCast(context.?));
     count.* += 1;
@@ -5082,6 +7287,16 @@ fn countDetails(context: ?*anyopaque, details: *const TrackDetailsView) callconv
     const count: *usize = @ptrCast(@alignCast(context.?));
     count.* += 1;
     std.debug.assert(details.title.length != 0 and details.has_loudness == 0);
+}
+
+fn countReleaseFacts(context: ?*anyopaque, release: *const ReleaseView, facts: *const ReleaseFactsView) callconv(.c) void {
+    _ = facts;
+    countRelease(context, release);
+}
+
+fn countSummaryFacts(context: ?*anyopaque, summary: *const TrackSummaryView, facts: *const TrackFactsView) callconv(.c) void {
+    _ = facts;
+    countTrack(context, &summary.track);
 }
 
 fn countTrack(context: ?*anyopaque, track: *const TrackView) callconv(.c) void {
@@ -5170,12 +7385,51 @@ test "queue edits refuse a Player without a Library, null ids and positions past
         "orca_player_queue_remove: PositionOutOfRange",
         std.mem.span(orca_runtime_last_error(runtime)),
     );
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_queue_move(runtime, player, 0, 0));
+    try std.testing.expectEqualStrings(
+        "orca_player_queue_move: PositionOutOfRange",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
 
     try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, 0, 0, &visited, countTrack));
     try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, max_page + 1, 0, &visited, countTrack));
     try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, null));
     try std.testing.expectEqual(Status.ok, orca_player_query_queue_tracks(runtime, player, 8, 0, &visited, countTrack));
     try std.testing.expectEqual(@as(usize, 0), visited);
+}
+
+fn countHistoryEntry(context: ?*anyopaque, summary: *const TrackSummaryView, ended_at: i64, reason: u8) callconv(.c) void {
+    _ = summary;
+    _ = ended_at;
+    _ = reason;
+    const visited: *usize = @ptrCast(@alignCast(context.?));
+    visited.* += 1;
+}
+
+test "queue history starts empty and saving refuses a Player without a Library or a current entry" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+    var visited: usize = 0;
+    var playlist_id: i64 = 0;
+    try std.testing.expectEqual(Status.invalid_state, orca_player_save_queue_as_playlist(runtime, player, "queue", 5, &playlist_id));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_history(runtime, player, 0, 0, &visited, countHistoryEntry));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_history(runtime, player, max_page + 1, 0, &visited, countHistoryEntry));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_query_queue_history(runtime, player, 8, 0, &visited, null));
+    try std.testing.expectEqual(Status.ok, orca_player_query_queue_history(runtime, player, 8, 0, &visited, countHistoryEntry));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    try std.testing.expectEqual(Status.ok, orca_player_clear_queue_history(runtime, player));
+
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-queue-history?mode=memory&cache=shared", &library));
+    try std.testing.expectEqual(Status.ok, orca_player_set_library(runtime, player, library));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_save_queue_as_playlist(runtime, player, "queue", 5, null));
+    try std.testing.expectEqual(Status.invalid_state, orca_player_save_queue_as_playlist(runtime, player, "queue", 5, &playlist_id));
+    try std.testing.expectEqualStrings(
+        "orca_player_save_queue_as_playlist: QueueEmpty",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
 }
 
 fn countPlaylist(context: ?*anyopaque, playlist: *const PlaylistView) callconv(.c) void {
@@ -5283,6 +7537,146 @@ test "playlist edits refuse bad arguments, blank or taken names and unknown play
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
+const PlaylistFactsSeen = struct {
+    visited: usize = 0,
+    kind: u8 = 255,
+    pinned: u8 = 255,
+    tag_count: u8 = 255,
+    description_length: usize = 0,
+};
+
+fn recordPlaylistFacts(context: ?*anyopaque, playlist: *const PlaylistView, facts: *const PlaylistFactsView) callconv(.c) void {
+    _ = playlist;
+    const seen: *PlaylistFactsSeen = @ptrCast(@alignCast(context.?));
+    seen.visited += 1;
+    seen.kind = facts.kind;
+    seen.pinned = facts.pinned;
+    seen.tag_count = facts.tag_count;
+    seen.description_length = facts.description.length;
+}
+
+fn countStrings(context: ?*anyopaque, value: *const StringView) callconv(.c) void {
+    _ = value;
+    const visited: *usize = @ptrCast(@alignCast(context.?));
+    visited.* += 1;
+}
+
+test "playlist metadata and smart playlists reach the C ABI and refuse bad arguments" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-smart-playlists?mode=memory&cache=shared", &library));
+    var manual: i64 = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_create_playlist(runtime, library, "Mix", 3, &manual));
+
+    const tags = [_]StringInput{ .{ .pointer = "focus", .length = 5 }, .{ .pointer = "lofi", .length = 4 } };
+    var update: PlaylistUpdateView = .{
+        .description = .{ .pointer = "For work", .length = 8 },
+        .tags = &tags,
+        .tag_count = tags.len,
+        .has_description = 1,
+        .has_pinned = 1,
+        .pinned = 1,
+        .has_loved = 0,
+        .loved = 0,
+        .has_tags = 1,
+    };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_update_playlist(runtime, library, manual, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_update_playlist(runtime, library, manual + 1000, &update));
+    try std.testing.expectEqual(Status.ok, orca_library_update_playlist(runtime, library, manual, &update));
+    update.has_pinned = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_update_playlist(runtime, library, manual, &update));
+    update.has_pinned = 0;
+    update.tag_count = max_page;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_update_playlist(runtime, library, manual, &update));
+    update.tag_count = 1;
+    update.tags = null;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_update_playlist(runtime, library, manual, &update));
+
+    var visited: usize = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_tags(runtime, library, manual, &visited, countStrings));
+    try std.testing.expectEqual(@as(usize, 2), visited);
+    try std.testing.expectEqual(Status.not_found, orca_library_playlist_tags(runtime, library, manual + 1000, &visited, countStrings));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_tags(runtime, library, manual, &visited, null));
+
+    const bad_field = "{\"v\":1,\"match\":\"all\",\"rules\":[{\"field\":\"mood\",\"op\":\"is\",\"value\":\"x\"}]}";
+    const rules = "{\"v\":1,\"match\":\"all\",\"rules\":[{\"field\":\"year\",\"op\":\"gte\",\"value\":1990}]}";
+    var smart: i64 = 0;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_smart_playlist(runtime, library, "Nineties", 8, bad_field, bad_field.len, &smart));
+    try std.testing.expectEqualStrings(
+        "orca_library_create_smart_playlist: UnknownRuleField",
+        std.mem.span(orca_runtime_last_error(runtime)),
+    );
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_smart_playlist(runtime, library, "Nineties", 8, rules, rules.len, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_create_smart_playlist(runtime, library, "Nineties", 8, null, 4, &smart));
+    try std.testing.expectEqual(Status.ok, orca_library_create_smart_playlist(runtime, library, "Nineties", 8, rules, rules.len, &smart));
+
+    visited = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_smart_playlist_rules(runtime, library, smart, &visited, countStrings));
+    try std.testing.expectEqual(@as(usize, 1), visited);
+    try std.testing.expectEqual(Status.invalid_state, orca_library_smart_playlist_rules(runtime, library, manual, &visited, countStrings));
+    try std.testing.expectEqual(Status.ok, orca_library_set_smart_playlist_rules(runtime, library, smart, rules, rules.len));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_set_smart_playlist_rules(runtime, library, manual, rules, rules.len));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_smart_playlist_rules(runtime, library, smart, bad_field, bad_field.len));
+
+    const ids = [_]i64{1};
+    var change: ChangeCount = undefined;
+    try std.testing.expectEqual(Status.invalid_state, orca_library_playlist_insert(runtime, library, smart, &ids, 1, -1, &change));
+    try std.testing.expectEqual(Status.invalid_state, orca_library_playlist_move(runtime, library, smart, 0, 0));
+
+    var count: u64 = 99;
+    try std.testing.expectEqual(Status.ok, orca_library_smart_playlist_count(runtime, library, rules, rules.len, &count));
+    try std.testing.expectEqual(@as(u64, 0), count);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_smart_playlist_count(runtime, library, rules, rules.len, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_smart_playlist_count(runtime, library, "{", 1, &count));
+
+    var query: PlaylistQueryView = .{
+        .filter = .{ .pointer = null, .length = 0 },
+        .limit = 8,
+        .offset = 0,
+        .sort = @intFromEnum(PlaylistSortKey.name),
+        .has_kind = 1,
+        .kind = @intFromEnum(database.PlaylistKind.smart),
+        .pinned_only = 0,
+        .has_creator = 0,
+        .creator = 0,
+    };
+    var seen: PlaylistFactsSeen = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_playlists_v2(runtime, library, &query, &seen, recordPlaylistFacts));
+    try std.testing.expectEqual(@as(usize, 1), seen.visited);
+    try std.testing.expectEqual(@as(u8, 1), seen.kind);
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_count(runtime, library, &query, &count));
+    try std.testing.expectEqual(@as(u64, 1), count);
+
+    query.has_kind = 0;
+    query.pinned_only = 1;
+    seen = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_query_playlists_v2(runtime, library, &query, &seen, recordPlaylistFacts));
+    try std.testing.expectEqual(@as(usize, 1), seen.visited);
+    try std.testing.expectEqual(@as(u8, 1), seen.pinned);
+    try std.testing.expectEqual(@as(u8, 2), seen.tag_count);
+    try std.testing.expectEqual(@as(usize, 8), seen.description_length);
+
+    seen = .{};
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_get(runtime, library, smart, &seen, recordPlaylistFacts));
+    try std.testing.expectEqual(@as(u8, 1), seen.kind);
+    try std.testing.expectEqual(Status.not_found, orca_library_playlist_get(runtime, library, smart + 1000, &seen, recordPlaylistFacts));
+    visited = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_playlist_genres(runtime, library, manual, &visited, countStrings));
+    try std.testing.expectEqual(@as(usize, 0), visited);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists_v2(runtime, library, null, &seen, recordPlaylistFacts));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists_v2(runtime, library, &query, &seen, null));
+    query.sort = 9;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists_v2(runtime, library, &query, &seen, recordPlaylistFacts));
+    query.sort = 0;
+    query.limit = max_page + 1;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_playlist_count(runtime, library, &query, &count));
+    query.limit = 8;
+    query.has_creator = 1;
+    query.creator = 7;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_playlists_v2(runtime, library, &query, &seen, recordPlaylistFacts));
+}
 
 test "queue stats are all zero before a Player has played, and a destroyed Player has none" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
@@ -5388,6 +7782,10 @@ test "a Player with no output reports a signal path with no source, no output an
     try std.testing.expectEqual(@as(u32, 0), path.reason_count);
     try std.testing.expectEqual(@as(u8, 1), path.bit_perfect_eligible);
     try std.testing.expectEqual(@as(usize, 0), path.codec.length);
+    try std.testing.expectEqual(exportDeviceKind(.unknown), path.output_kind);
+    try std.testing.expectEqual(@as(u8, 0), path.has_device_quantum);
+    try std.testing.expectEqual(exportReplayGainSource(.none), path.replay_gain_source);
+    try std.testing.expectEqual(@as(u8, 0), path.has_replay_gain_track);
 
     try std.testing.expectEqual(Status.ok, orca_player_set_crossfeed(runtime, player, 1, 0.5));
     try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
@@ -5580,6 +7978,189 @@ test "lyrics calls refuse null outputs, unknown flags, fetching without an ident
     try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
 }
 
+const RelatedPhotoCredit = struct {
+    calls: usize = 0,
+    source: u8 = 0,
+    fetched_at: i64 = 0,
+    licence: [32]u8 = undefined,
+    licence_len: usize = 0,
+    credit: [32]u8 = undefined,
+    credit_len: usize = 0,
+};
+
+fn captureRelatedPhotoCredit(context: ?*anyopaque, view: *const RelatedArtistPhotoInfoView) callconv(.c) void {
+    const credit: *RelatedPhotoCredit = @ptrCast(@alignCast(context.?));
+    credit.calls += 1;
+    credit.source = view.photo_source;
+    credit.fetched_at = view.fetched_at;
+    credit.licence_len = view.photo_licence.length;
+    @memcpy(credit.licence[0..credit.licence_len], view.photo_licence.pointer[0..credit.licence_len]);
+    credit.credit_len = view.photo_credit.length;
+    @memcpy(credit.credit[0..credit.credit_len], view.photo_credit.pointer[0..credit.credit_len]);
+}
+
+fn countArtistInfo(context: ?*anyopaque, view: *const ArtistInfoView) callconv(.c) void {
+    _ = view;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countArtistLinks(context: ?*anyopaque, links: [*]const ArtistLinkView, count: usize) callconv(.c) void {
+    _ = links;
+    const total: *usize = @ptrCast(@alignCast(context.?));
+    total.* += count;
+}
+
+test "artist info and love calls refuse null outputs, out-of-range flags, bad languages, unknown artists and jobs of another kind" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-artist-info-arguments?mode=memory&cache=shared", &library));
+    var started: Handle = undefined;
+    var outcome: u8 = 255;
+    var calls: usize = 0;
+    var change: ChangeCount = undefined;
+    var loved: u8 = 255;
+    const ids = [_]i64{1};
+    var options: ArtistInfoOptionsView = .{ .language = .{ .pointer = null, .length = 0 }, .force = 0, .offline = 1 };
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(null, library, 1, &options, &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(runtime, library, 1, &options, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(runtime, library, 1, null, &started));
+    options.force = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(runtime, library, 1, &options, &started));
+    options.force = 0;
+    options.language = .{ .pointer = null, .length = 2 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(runtime, library, 1, &options, &started));
+    options.language = .{ .pointer = "en.evil.org", .length = 11 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_artist_info(runtime, library, 1, &options, &started));
+    try std.testing.expectEqualStrings("orca_library_start_artist_info: InvalidLanguage", std.mem.span(orca_runtime_last_error(runtime)));
+    options.language = .{ .pointer = null, .length = 0 };
+    try std.testing.expectEqual(Status.not_found, orca_library_start_artist_info(runtime, library, 1, &options, &started));
+    try std.testing.expectEqualStrings("orca_library_start_artist_info: UnknownArtist", std.mem.span(orca_runtime_last_error(runtime)));
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_artist_info_outcome(runtime, library, null));
+    const stale: Handle = .{ .index = 7, .generation = 3 };
+    try std.testing.expectEqual(Status.stale_handle, orca_job_artist_info_outcome(runtime, stale, &outcome));
+    var projection: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_projection(runtime, library, &projection));
+    _ = try core.runtime_tests.awaitJob(&runtimeBox(runtime).?.runtime, importJob(projection));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_artist_info_outcome(runtime, projection, &outcome));
+    try std.testing.expectEqualStrings("orca_job_artist_info_outcome: NotAnArtistInfoJob", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(@as(u8, 255), outcome);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_info(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_artist_info(runtime, library, 1, &calls, countArtistInfo));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_photo(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_artist_photo(runtime, library, 1, &calls, countImage));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_links(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.ok, orca_library_artist_links(runtime, library, 1, &calls, countArtistLinks));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_artist_love(runtime, library, &ids, 1, 1, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_artist_love(runtime, library, &ids, 1, 2, &change));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_artist_love(runtime, library, null, 1, 1, &change));
+    try std.testing.expectEqual(Status.ok, orca_library_set_artist_love(runtime, library, &ids, 1, 1, &change));
+    try std.testing.expectEqual(@as(u32, 0), change.updated);
+    try std.testing.expectEqual(@as(u32, 1), change.skipped);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_artist_loved(runtime, library, 1, null));
+    try std.testing.expectEqual(Status.ok, orca_library_artist_loved(runtime, library, 1, &loved));
+    try std.testing.expectEqual(@as(u8, 0), loved);
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
+fn countReleaseInfo(context: ?*anyopaque, view: *const ReleaseInfoView) callconv(.c) void {
+    _ = view;
+    const count: *usize = @ptrCast(@alignCast(context.?));
+    count.* += 1;
+}
+
+fn countRelatedArtists(context: ?*anyopaque, artists: [*]const RelatedArtistView, count: usize) callconv(.c) void {
+    _ = artists;
+    const total: *usize = @ptrCast(@alignCast(context.?));
+    total.* += count;
+}
+
+test "release info, related artist and genre fill calls refuse null outputs, out-of-range flags, unknown releases and jobs of another kind" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var library: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_open(runtime, "file:orca-c-api-release-info-arguments?mode=memory&cache=shared", &library));
+    var started: Handle = undefined;
+    var outcome: u8 = 255;
+    var calls: usize = 0;
+    var options: ReleaseInfoOptionsView = .{ .language = .{ .pointer = null, .length = 0 }, .force = 0, .offline = 1 };
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_release_info(runtime, library, 1, &options, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_release_info(runtime, library, 1, null, &started));
+    options.offline = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_release_info(runtime, library, 1, &options, &started));
+    options.offline = 1;
+    try std.testing.expectEqual(Status.not_found, orca_library_start_release_info(runtime, library, 1, &options, &started));
+    try std.testing.expectEqualStrings("orca_library_start_release_info: UnknownRelease", std.mem.span(orca_runtime_last_error(runtime)));
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_release_info_outcome(runtime, library, null));
+    var projection: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_library_start_projection(runtime, library, &projection));
+    _ = try core.runtime_tests.awaitJob(&runtimeBox(runtime).?.runtime, importJob(projection));
+    try std.testing.expectEqual(Status.invalid_argument, orca_job_release_info_outcome(runtime, projection, &outcome));
+    try std.testing.expectEqualStrings("orca_job_release_info_outcome: NotAReleaseInfoJob", std.mem.span(orca_runtime_last_error(runtime)));
+    try std.testing.expectEqual(@as(u8, 255), outcome);
+
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_release_info(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_release_info(runtime, library, 1, &calls, countReleaseInfo));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_related_artists(runtime, library, 1, &calls, null));
+    try std.testing.expectEqual(Status.ok, orca_library_related_artists(runtime, library, 1, &calls, countRelatedArtists));
+    try std.testing.expectEqual(@as(usize, 0), calls);
+
+    const related_mbid = "cccccccc-0000-4000-8000-000000000003";
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_related_artist_photo(runtime, library, related_mbid, related_mbid.len, &calls, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_related_artist_photo(runtime, library, null, 4, &calls, countImage));
+    try std.testing.expectEqual(Status.not_found, orca_library_related_artist_photo(runtime, library, related_mbid, related_mbid.len, &calls, countImage));
+    var credit: RelatedPhotoCredit = .{};
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_related_artist_photo_info(runtime, library, related_mbid, related_mbid.len, &credit, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_related_artist_photo_info(runtime, library, null, 4, &credit, captureRelatedPhotoCredit));
+    try std.testing.expectEqual(Status.not_found, orca_library_related_artist_photo_info(runtime, library, related_mbid, related_mbid.len, &credit, captureRelatedPhotoCredit));
+    const library_database = try core.runtime.libraryDatabase(&runtimeBox(runtime).?.runtime, importLibrary(library));
+    const png = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0 };
+    try library_database.artist_info.storeRelatedPhoto(related_mbid, &.{
+        .image = .{ .bytes = &png, .mime_type = "image/png" },
+        .record = .{ .licence = "CC BY 4.0", .credit = "A. Photographer" },
+    }, 10);
+    try std.testing.expectEqual(Status.ok, orca_library_related_artist_photo(runtime, library, "CCCCCCCC-0000-4000-8000-000000000003", related_mbid.len, &calls, countImage));
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    calls = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_related_artist_photo_info(runtime, library, related_mbid, related_mbid.len, &credit, captureRelatedPhotoCredit));
+    try std.testing.expectEqual(@as(usize, 1), credit.calls);
+    try std.testing.expectEqual(@as(u8, 1), credit.source);
+    try std.testing.expectEqual(@as(i64, 10), credit.fetched_at);
+    try std.testing.expectEqualStrings("CC BY 4.0", credit.licence[0..credit.licence_len]);
+    try std.testing.expectEqualStrings("A. Photographer", credit.credit[0..credit.credit_len]);
+
+    var fill: GenreFillView = .{ .musicbrainz = 0 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_genre_fill(runtime, library, null));
+    try std.testing.expectEqual(Status.ok, orca_library_genre_fill(runtime, library, &fill));
+    try std.testing.expectEqual(@as(u8, 1), fill.musicbrainz);
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_genre_fill(runtime, library, null));
+    fill.musicbrainz = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_set_genre_fill(runtime, library, &fill));
+    fill.musicbrainz = 0;
+    try std.testing.expectEqual(Status.ok, orca_library_set_genre_fill(runtime, library, &fill));
+    fill.musicbrainz = 1;
+    try std.testing.expectEqual(Status.ok, orca_library_genre_fill(runtime, library, &fill));
+    try std.testing.expectEqual(@as(u8, 0), fill.musicbrainz);
+
+    var fill_options: GenreFillOptionsView = .{ .limit = 0, .offline = 1 };
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_genre_fill(runtime, library, &fill_options, null));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_genre_fill(runtime, library, null, &started));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_genre_fill(runtime, library, &fill_options, &started));
+    try std.testing.expectEqualStrings("orca_library_start_genre_fill: InvalidLimit", std.mem.span(orca_runtime_last_error(runtime)));
+    fill_options.limit = 1;
+    fill_options.offline = 2;
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_start_genre_fill(runtime, library, &fill_options, &started));
+    try std.testing.expectEqual(Status.ok, orca_library_close(runtime, library));
+}
+
 test "artwork requests past 64 outstanding are busy until a result is taken, and a coverless subject arrives without an image" {
     const runtime = orca_runtime_create() orelse return error.OutOfMemory;
     defer orca_runtime_destroy(runtime);
@@ -5673,6 +8254,9 @@ test "tag edits and writes refuse bad arguments, unknown Tracks and plans, and a
     try std.testing.expectEqual(Status.invalid_argument, orca_library_start_tag_write(runtime, library, 1, &digest, null));
     try std.testing.expectEqual(Status.not_found, orca_library_start_tag_write(runtime, library, 1, &digest, &started));
     try std.testing.expectEqual(Status.not_found, orca_library_discard_tag_write(runtime, library, 1));
+    try std.testing.expectEqual(Status.invalid_argument, orca_library_query_tag_write_genres(runtime, library, 1, 1, &calls, null));
+    try std.testing.expectEqual(Status.not_found, orca_library_query_tag_write_genres(runtime, library, 1, 1, &calls, countGenres));
+    try std.testing.expectEqual(@as(usize, 0), calls);
 
     var backups: u64 = 7;
     var bytes: u64 = 7;
@@ -5686,6 +8270,7 @@ test "tag edits and writes refuse bad arguments, unknown Tracks and plans, and a
     try std.testing.expectEqual(Status.stale_handle, orca_library_edit_tracks(runtime, library, &ids, 1, &.{edit}, 1, &calls, countIds));
     try std.testing.expectEqual(Status.stale_handle, orca_library_query_track_edits(runtime, library, 1, &calls, countFieldValue));
     try std.testing.expectEqual(Status.stale_handle, orca_library_plan_tag_write(runtime, library, &ids, 1, &calls, countPlan));
+    try std.testing.expectEqual(Status.stale_handle, orca_library_query_tag_write_genres(runtime, library, 1, 1, &calls, countGenres));
     try std.testing.expectEqual(Status.stale_handle, orca_library_undo_tag_write(runtime, library, 1));
     try std.testing.expectEqual(Status.stale_handle, orca_library_prune_tag_write_backups(runtime, library, 0, &backups, &bytes));
 }
@@ -5733,6 +8318,9 @@ test "an edit is held locked as the user's, and a Library with no database file 
     try std.testing.expectEqual(@as(usize, 1), plan.skip_count);
     try std.testing.expectEqual(exportTagWriteSkipReason(.format_not_writable), plan.skip_reason);
     try std.testing.expectEqual(@as(usize, 0), plan.conflict_count);
+    var genre_calls: usize = 0;
+    try std.testing.expectEqual(Status.not_found, orca_library_query_tag_write_genres(runtime, library, plan.plan_id, plan.first_file_id, &genre_calls, countGenres));
+    try std.testing.expectEqual(@as(usize, 0), genre_calls);
 
     var started: Handle = undefined;
     try std.testing.expectEqual(Status.invalid_state, orca_library_start_tag_write(runtime, library, plan.plan_id, &plan.digest, &started));
@@ -5891,6 +8479,12 @@ fn countPlan(context: ?*anyopaque, plan: *const TagWritePlanView) callconv(.c) v
     calls.* += 1;
 }
 
+fn countGenres(context: ?*anyopaque, genres: *const TagWriteGenresView) callconv(.c) void {
+    _ = genres;
+    const calls: *usize = @ptrCast(@alignCast(context.?));
+    calls.* += 1;
+}
+
 const FakeKeyring = struct {
     result: c_int = 0,
     secret: []const u8 = "host-secret",
@@ -6028,7 +8622,7 @@ test "a provider server is copied out of the caller's buffer, refused unless htt
     var long: [providers.url.max_server_bytes + 1:0]u8 = @splat('a');
     @memcpy(long[0.."https://".len], "https://");
     try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 1, &long));
-    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 5, "https://example.org"));
+    try std.testing.expectEqual(Status.invalid_argument, orca_runtime_set_provider_server(runtime, 99, "https://example.org"));
     try std.testing.expectEqualStrings(
         "orca_runtime_set_provider_server: unknown provider service",
         std.mem.span(orca_runtime_last_error(runtime)),
@@ -6992,6 +9586,7 @@ const ScrobbleRig = struct {
         try std.testing.expectEqual(Status.ok, orca_player_set_library(self.runtime, player, self.library));
         const object_value = try box.runtime.players.get(importPlayer(player));
         try object_value.queue.replace(&.{.{ .library = importLibrary(self.library), .track_id = self.track_id }}, 0);
+        object_value.queue.noteEntrySerial(7, 0);
         object_value.player.published_sample_rate.store(1000, .release);
         object_value.player.published_frame_count.store(180_000, .release);
         object_value.player.audible_entry_serial.store(7, .release);

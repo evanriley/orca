@@ -275,6 +275,60 @@ static void capture_details(void *context, const orca_track_details_view *detail
     capture->file_missing = details->file_missing;
 }
 
+struct facts_capture {
+    uint32_t count;
+    uint32_t with_facts;
+    uint32_t played;
+    uint32_t explicit_count;
+    int64_t explicit_id;
+    uint32_t lossless;
+    uint32_t lossy;
+    uint32_t with_rate;
+};
+
+static int codec_is(orca_string_view codec, const char *name) {
+    return codec.length == strlen(name) && memcmp(codec.pointer, name, codec.length) == 0;
+}
+
+static void capture_facts(void *context, const orca_track_summary_view *summary,
+                          const orca_track_facts_view *facts) {
+    struct facts_capture *capture = context;
+    capture->count += 1;
+    if (codec_is(facts->codec, "flac") || codec_is(facts->codec, "alac") ||
+        codec_is(facts->codec, "pcm") || codec_is(facts->codec, "pcm_float"))
+        capture->lossless += 1;
+    else if (facts->codec.length > 0)
+        capture->lossy += 1;
+    if (facts->sample_rate > 0) capture->with_rate += 1;
+    if (facts->codec.length > 0 && facts->sample_rate > 0 && facts->has_added_at &&
+        facts->has_track_total && facts->track_total > 0 && facts->has_disc_total)
+        capture->with_facts += 1;
+    if (facts->play_count != 0 || facts->has_last_played_at) capture->played += 1;
+    if (facts->explicit == ORCA_EXPLICIT_EXPLICIT) {
+        capture->explicit_count += 1;
+        capture->explicit_id = summary->track.id;
+    }
+}
+
+struct extra_capture {
+    uint32_t count;
+    uint8_t explicit;
+    uint8_t has_track_total;
+    uint8_t has_added_at;
+    uint8_t has_modified_at;
+};
+
+static void capture_extra(void *context, const orca_track_details_view *details,
+                          const orca_track_details_extra_view *extra) {
+    (void)details;
+    struct extra_capture *capture = context;
+    capture->count += 1;
+    capture->explicit = extra->explicit;
+    capture->has_track_total = extra->has_track_total;
+    capture->has_added_at = extra->has_added_at;
+    capture->has_modified_at = extra->has_modified_at;
+}
+
 /* Records the disc/track pair of every row, in arrival order, so the album
  * order the repository promises can be checked rather than assumed. */
 struct order_capture {
@@ -314,6 +368,21 @@ static void count_device(void *context, const orca_device_view *device) {
     uint32_t *count = context;
     (void)device;
     *count += 1;
+}
+
+struct device_kind_search {
+    uint64_t id;
+    uint32_t count;
+    uint8_t kind;
+    int found;
+};
+
+static void find_device_kind(void *context, const orca_device_view_v2 *device) {
+    struct device_kind_search *search = context;
+    search->count += 1;
+    if (device->base.id != search->id) return;
+    search->found = device->base.name.length != 0;
+    search->kind = device->kind;
 }
 
 struct queue_capture {
@@ -538,6 +607,371 @@ static int library_edits_smoke(orca_runtime *runtime, orca_handle library, int64
     return 0;
 }
 
+struct genre_capture {
+    uint32_t count;
+    int64_t id;
+    uint32_t track_count;
+    int64_t wanted;
+    int found;
+    char names[4][32];
+    orca_release_facts_view facts;
+};
+
+static void capture_genre(void *context, const orca_genre_view *genre) {
+    struct genre_capture *capture = context;
+    capture->count += 1;
+    capture->id = genre->id;
+    capture->track_count = genre->track_count;
+}
+
+static void capture_genre_name(void *context, const orca_string_view *name) {
+    struct genre_capture *capture = context;
+    if (capture->count < 4 && name->length < sizeof capture->names[0]) {
+        memcpy(capture->names[capture->count], name->pointer, name->length);
+        capture->names[capture->count][name->length] = 0;
+    }
+    capture->count += 1;
+}
+
+static void capture_genre_count(void *context, const orca_genre_count_view *genre) {
+    struct genre_capture *capture = context;
+    capture->count += 1;
+    if (genre->id == capture->wanted && genre->track_count >= 1) capture->found = 1;
+}
+
+static void capture_genre_track(void *context, const orca_track_summary_view *summary,
+                                const orca_track_facts_view *facts) {
+    (void)facts;
+    struct genre_capture *capture = context;
+    capture->count += 1;
+    if (summary->track.id == capture->wanted) capture->found = 1;
+}
+
+static void capture_genre_release(void *context, const orca_release_view *release,
+                                  const orca_release_facts_view *facts) {
+    struct genre_capture *capture = context;
+    capture->count += 1;
+    if (release->id == capture->wanted) {
+        capture->found = 1;
+        capture->facts = *facts;
+        capture->facts.codec.pointer = 0;
+        capture->facts.release_type.pointer = 0;
+    }
+}
+
+struct search_capture {
+    uint32_t count;
+    uint32_t genres;
+    int64_t genre_id;
+    int ordered;
+    int last_kind;
+    char title[32];
+};
+
+static void capture_search_hit(void *context, const orca_search_hit_view *hit) {
+    struct search_capture *capture = context;
+    capture->count += 1;
+    if ((int)hit->kind < capture->last_kind) capture->ordered = 0;
+    capture->last_kind = hit->kind;
+    if (hit->kind == ORCA_SEARCH_KIND_GENRE) {
+        capture->genres += 1;
+        capture->genre_id = hit->id;
+        if (hit->title.length < sizeof capture->title) {
+            memcpy(capture->title, hit->title.pointer, hit->title.length);
+            capture->title[hit->title.length] = 0;
+        }
+    }
+}
+
+static uint64_t count_releases(orca_runtime *runtime, orca_handle library,
+                               const orca_release_query_v2 *query) {
+    uint64_t total = UINT64_MAX;
+    if (orca_library_release_count_matching_v2(runtime, library, query, &total) !=
+        ORCA_STATUS_OK)
+        return UINT64_MAX;
+    return total;
+}
+
+static void capture_genre_artist(void *context, const orca_artist_view_v2 *artist) {
+    (void)artist;
+    struct genre_capture *capture = context;
+    capture->count += 1;
+}
+
+static void capture_first_artist(void *context, const orca_artist_view_v2 *artist) {
+    orca_artist_view *first = context;
+    if (first->id == 0) *first = artist->base;
+}
+
+static void capture_genre_artwork(void *context, const int64_t *ids, size_t count) {
+    struct genre_capture *capture = context;
+    capture->count += (uint32_t)count;
+    for (size_t index = 0; index < count; index += 1)
+        if (ids[index] == capture->wanted) capture->found = 1;
+}
+
+static void capture_summary_release(void *context, const orca_track_summary_view *summary) {
+    int64_t *release_id = context;
+    *release_id = summary->has_release_id ? summary->release_id : -1;
+}
+
+static int find_genre(orca_runtime *runtime, orca_handle library, const char *filter,
+                      struct genre_capture *found) {
+    orca_genre_query query;
+    memset(&query, 0, sizeof query);
+    query.filter.pointer = filter;
+    query.filter.length = strlen(filter);
+    query.sort = ORCA_GENRE_SORT_TRACK_COUNT;
+    query.limit = 512;
+    memset(found, 0, sizeof *found);
+    SMOKE_CHECK(orca_library_query_genres(runtime, library, &query, found, capture_genre) ==
+                ORCA_STATUS_OK);
+    return 0;
+}
+
+/* Genres a user sets through the boundary fold the way a file's do, reach every
+ * genre listing and filter, and clearing them restores the Track's own. */
+static int genre_smoke(orca_runtime *runtime, orca_handle library, int64_t track_id) {
+    const int64_t tracks[1] = {track_id};
+    const orca_string_view names[3] = {
+        {"Hip-Hop", 7},
+        {"hip hop", 7},
+        {"Orca Smoke Genre", 16},
+    };
+    struct genre_capture capture;
+
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, tracks, 1, names, 3) ==
+                ORCA_STATUS_OK);
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_library_track_genres(runtime, library, track_id, &capture,
+                                          capture_genre_name) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 2);
+    SMOKE_CHECK(strcmp(capture.names[0], "Hip Hop") == 0);
+    SMOKE_CHECK(strcmp(capture.names[1], "Orca Smoke Genre") == 0);
+
+    struct genre_capture genre;
+    SMOKE_CHECK(find_genre(runtime, library, "orca smoke", &genre) == 0);
+    SMOKE_CHECK(genre.count == 1 && genre.track_count == 1);
+    uint64_t total = 0;
+    SMOKE_CHECK(orca_library_genre_count(runtime, library, "orca-smoke", 10, &total) ==
+                    ORCA_STATUS_OK &&
+                total == 1);
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_library_genre_get(runtime, library, genre.id, &capture, capture_genre) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 1 && capture.id == genre.id);
+
+    orca_track_query_v2 track_query;
+    memset(&track_query, 0, sizeof track_query);
+    track_query.genre_id = genre.id;
+    track_query.has_genre_id = 1;
+    track_query.sort = ORCA_TRACK_SORT_TITLE;
+    track_query.limit = 512;
+    memset(&capture, 0, sizeof capture);
+    capture.wanted = track_id;
+    SMOKE_CHECK(orca_library_browse_tracks_v2(runtime, library, &track_query, &capture,
+                                              capture_genre_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 1 && capture.found);
+    track_query.text.pointer = "\"(*";
+    track_query.text.length = 3;
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_library_browse_tracks_v2(runtime, library, &track_query, &capture,
+                                              capture_genre_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 0);
+    track_query.text.pointer = "zzzqqq NEAR";
+    track_query.text.length = 11;
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_library_browse_tracks_v2(runtime, library, &track_query, &capture,
+                                              capture_genre_track) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 0);
+    SMOKE_CHECK(orca_library_track_match_count_v2(runtime, library, &track_query, &total) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    struct search_capture search;
+    memset(&search, 0, sizeof search);
+    search.ordered = 1;
+    SMOKE_CHECK(orca_library_search(runtime, library, "orca SMOKE", 10, NULL, &search,
+                                    capture_search_hit) == ORCA_STATUS_OK);
+    SMOKE_CHECK(search.ordered && search.genres == 1 && search.genre_id == genre.id);
+    SMOKE_CHECK(strcmp(search.title, "Orca Smoke Genre") == 0);
+    orca_search_limits limits;
+    memset(&limits, 0, sizeof limits);
+    limits.genres = 1;
+    memset(&search, 0, sizeof search);
+    SMOKE_CHECK(orca_library_search(runtime, library, "smok", 4, &limits, &search,
+                                    capture_search_hit) == ORCA_STATUS_OK);
+    SMOKE_CHECK(search.count == 1 && search.genre_id == genre.id);
+    memset(&search, 0, sizeof search);
+    SMOKE_CHECK(orca_library_search(runtime, library, "\"NEAR\" OR (*", 12, NULL, &search,
+                                    capture_search_hit) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_search(runtime, library, NULL, 0, NULL, &search,
+                                    capture_search_hit) == ORCA_STATUS_OK);
+    limits.tracks = 51;
+    SMOKE_CHECK(orca_library_search(runtime, library, "smoke", 5, &limits, &search,
+                                    capture_search_hit) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_search(runtime, library, NULL, 1, NULL, &search,
+                                    capture_search_hit) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    int64_t release_id = -1;
+    SMOKE_CHECK(orca_library_track_get(runtime, library, track_id, &release_id,
+                                       capture_summary_release) == ORCA_STATUS_OK);
+    if (release_id >= 0) {
+        orca_release_query_v2 release_query;
+        memset(&release_query, 0, sizeof release_query);
+        release_query.genre_id = genre.id;
+        release_query.has_genre_id = 1;
+        release_query.limit = 512;
+        memset(&capture, 0, sizeof capture);
+        capture.wanted = release_id;
+        SMOKE_CHECK(orca_library_browse_releases_v2(runtime, library, &release_query, &capture,
+                                                    capture_genre_release) == ORCA_STATUS_OK);
+        SMOKE_CHECK(capture.count == 1 && capture.found);
+        uint64_t releases = 0;
+        SMOKE_CHECK(orca_library_release_count_matching_v2(runtime, library, &release_query,
+                                                           &releases) == ORCA_STATUS_OK &&
+                    releases == 1);
+        SMOKE_CHECK(capture.facts.codec.length > 0 && capture.facts.max_sample_rate > 0);
+
+        orca_release_query_v2 filtered = release_query;
+        filtered.lossless_only = 1;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) == capture.facts.lossless);
+        filtered = release_query;
+        filtered.high_resolution_only = 1;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) ==
+                    (capture.facts.max_sample_rate > 48000 || capture.facts.max_bit_depth > 16));
+        filtered = release_query;
+        filtered.needs_review_only = 1;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) ==
+                    (capture.facts.pending_reviews > 0));
+        filtered = release_query;
+        filtered.has_year_min = 1;
+        filtered.year_min = 9999;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) == 0);
+        filtered = release_query;
+        filtered.artwork = ORCA_RELEASE_ARTWORK_PRESENT;
+        uint64_t with_cover = count_releases(runtime, library, &filtered);
+        filtered.artwork = ORCA_RELEASE_ARTWORK_ABSENT;
+        uint64_t without_cover = count_releases(runtime, library, &filtered);
+        SMOKE_CHECK(with_cover <= 1 && without_cover <= 1 && with_cover + without_cover == 1);
+        filtered.artwork = 3;
+        SMOKE_CHECK(orca_library_release_count_matching_v2(runtime, library, &filtered,
+                                                           &releases) ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        filtered = release_query;
+        uint64_t kinds = 0;
+        for (uint8_t kind = ORCA_RELEASE_KIND_ALBUM; kind <= ORCA_RELEASE_KIND_OTHER; kind += 1) {
+            filtered.kind = kind;
+            kinds += count_releases(runtime, library, &filtered);
+        }
+        SMOKE_CHECK(kinds == 1);
+        filtered.kind = ORCA_RELEASE_KIND_ALBUM;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) ==
+                    (capture.facts.release_type.length == 0 ||
+                     (capture.facts.release_type.length == 5 &&
+                      memcmp(capture.facts.release_type.pointer, "album", 5) == 0)));
+        filtered.kind = ORCA_RELEASE_KIND_OTHER + 1;
+        SMOKE_CHECK(orca_library_release_count_matching_v2(runtime, library, &filtered,
+                                                           &releases) ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        filtered = release_query;
+        filtered.text.pointer = "zzzqqq";
+        filtered.text.length = 6;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) == 0);
+        filtered.text.pointer = "- (";
+        filtered.text.length = 3;
+        SMOKE_CHECK(count_releases(runtime, library, &filtered) == 1);
+        filtered.text.pointer = NULL;
+        SMOKE_CHECK(orca_library_release_count_matching_v2(runtime, library, &filtered,
+                                                           &releases) ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        filtered = release_query;
+        filtered.sort = ORCA_RELEASE_SORT_MOST_PLAYED;
+        memset(&capture, 0, sizeof capture);
+        capture.wanted = release_id;
+        SMOKE_CHECK(orca_library_browse_releases_v2(runtime, library, &filtered, &capture,
+                                                    capture_genre_release) == ORCA_STATUS_OK);
+        SMOKE_CHECK(capture.count == 1 && capture.found);
+
+        memset(&capture, 0, sizeof capture);
+        capture.wanted = genre.id;
+        SMOKE_CHECK(orca_library_release_genres(runtime, library, release_id, 16, &capture,
+                                                capture_genre_count) == ORCA_STATUS_OK);
+        SMOKE_CHECK(capture.found);
+
+        filtered = release_query;
+        filtered.artwork = ORCA_RELEASE_ARTWORK_PRESENT;
+        struct genre_capture covered;
+        memset(&covered, 0, sizeof covered);
+        covered.wanted = release_id;
+        SMOKE_CHECK(orca_library_browse_releases_v2(runtime, library, &filtered, &covered,
+                                                    capture_genre_release) == ORCA_STATUS_OK);
+        memset(&capture, 0, sizeof capture);
+        capture.wanted = release_id;
+        SMOKE_CHECK(orca_library_genre_artwork(runtime, library, genre.id, 4, &capture,
+                                               capture_genre_artwork) == ORCA_STATUS_OK);
+        SMOKE_CHECK(capture.count == covered.count && capture.found == covered.found);
+    }
+
+    orca_artist_query_v2 artist_query;
+    memset(&artist_query, 0, sizeof artist_query);
+    artist_query.genre_id = genre.id;
+    artist_query.has_genre_id = 1;
+    artist_query.sort = ORCA_ARTIST_SORT_TRACK_COUNT;
+    artist_query.limit = 512;
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_library_query_artists_v2(runtime, library, &artist_query, &capture,
+                                              capture_genre_artist) == ORCA_STATUS_OK);
+    uint64_t artists = 0;
+    SMOKE_CHECK(orca_library_artist_count_matching_v2(runtime, library, &artist_query,
+                                                      &artists) == ORCA_STATUS_OK &&
+                artists == capture.count);
+
+    orca_artist_view newest;
+    memset(&newest, 0, sizeof newest);
+    artist_query.sort = ORCA_ARTIST_SORT_RECENTLY_ADDED;
+    SMOKE_CHECK(orca_library_query_artists_v2(runtime, library, &artist_query, &newest,
+                                              capture_first_artist) == ORCA_STATUS_OK);
+    SMOKE_CHECK(newest.id != 0);
+    orca_artist_totals totals;
+    memset(&totals, 0xff, sizeof totals);
+    SMOKE_CHECK(orca_library_artist_totals(runtime, library, newest.id, &totals) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(totals.release_count + totals.appearance_count == newest.release_count &&
+                totals.track_count == newest.track_count && totals.duration_ms > 0);
+    orca_release_query_v2 appearances;
+    memset(&appearances, 0, sizeof appearances);
+    appearances.appearing_artist_id = newest.id;
+    appearances.has_appearing_artist_id = 1;
+    appearances.limit = 512;
+    SMOKE_CHECK(count_releases(runtime, library, &appearances) == totals.appearance_count);
+    orca_release_query_v2 own;
+    memset(&own, 0, sizeof own);
+    own.album_artist_id = newest.id;
+    own.has_album_artist_id = 1;
+    own.own_releases_only = 1;
+    own.limit = 512;
+    SMOKE_CHECK(count_releases(runtime, library, &own) == totals.release_count);
+    own.own_releases_only = 0;
+    SMOKE_CHECK(count_releases(runtime, library, &own) == newest.release_count);
+    SMOKE_CHECK(orca_library_artist_totals(runtime, library, 999999999, &totals) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_artist_totals(runtime, library, newest.id, NULL) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    const orca_string_view blank[1] = {{" - ", 3}};
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, tracks, 1, blank, 1) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    const int64_t missing[1] = {999999999};
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, missing, 1, names, 1) ==
+                ORCA_STATUS_NOT_FOUND);
+
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, tracks, 1, 0, 0) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(find_genre(runtime, library, "orca smoke", &genre) == 0);
+    SMOKE_CHECK(genre.count == 0);
+    return 0;
+}
+
 struct queued_tracks {
     uint32_t count;
     int64_t ids[8];
@@ -591,6 +1025,35 @@ static const char *title_of(const struct queued_tracks *library_tracks, int64_t 
     return "";
 }
 
+struct history_capture {
+    uint32_t count;
+    int64_t ids[8];
+    int64_t ended_at[8];
+    uint8_t reasons[8];
+};
+
+static void capture_history(void *context, const orca_track_summary_view *summary,
+                            int64_t ended_at, uint8_t reason) {
+    struct history_capture *capture = context;
+    if (capture->count < 8) {
+        capture->ids[capture->count] = summary->track.id;
+        capture->ended_at[capture->count] = ended_at;
+        capture->reasons[capture->count] = reason;
+    }
+    capture->count += 1;
+}
+
+struct saved_entries {
+    uint32_t count;
+    int64_t ids[8];
+};
+
+static void capture_saved_entry(void *context, const orca_playlist_entry_view *entry) {
+    struct saved_entries *capture = context;
+    if (capture->count < 8) capture->ids[capture->count] = entry->has_track ? entry->track.id : 0;
+    capture->count += 1;
+}
+
 static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
     struct queued_tracks playable;
     memset(&playable, 0, sizeof playable);
@@ -608,6 +1071,15 @@ static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle p
     SMOKE_CHECK(orca_player_queue_insert_next(runtime, player, &ids[3], 1) == ORCA_STATUS_OK);
     int64_t inserted[4] = {ids[0], ids[3], ids[1], ids[2]};
     SMOKE_CHECK(queue_order_is(runtime, player, inserted, 4, 0) == 0);
+
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 3, 1) == ORCA_STATUS_OK);
+    int64_t moved_order[4] = {ids[0], ids[2], ids[3], ids[1]};
+    SMOKE_CHECK(queue_order_is(runtime, player, moved_order, 4, 0) == 0);
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 1, 3) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 2, 2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(queue_order_is(runtime, player, inserted, 4, 0) == 0);
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 0, 4) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 4, 0) == ORCA_STATUS_INVALID_ARGUMENT);
 
     struct queued_tracks listed;
     memset(&listed, 0, sizeof listed);
@@ -651,6 +1123,7 @@ static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle p
     }
     SMOKE_CHECK(reflected);
     SMOKE_CHECK(orca_player_queue_remove(runtime, player, 1) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_player_queue_move(runtime, player, 1, 0) == ORCA_STATUS_INVALID_STATE);
     SMOKE_CHECK(queue_order_is(runtime, player, removed, 3, 1) == 0);
 
     orca_queue_stats stats;
@@ -666,6 +1139,44 @@ static int queue_smoke(orca_runtime *runtime, orca_handle library, orca_handle p
     SMOKE_CHECK(orca_player_queue_stats(runtime, player, 0) == ORCA_STATUS_INVALID_ARGUMENT);
 
     SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+
+    uint8_t moved = 0;
+    SMOKE_CHECK(orca_player_next(runtime, player, &moved) == ORCA_STATUS_OK && moved == 1);
+    struct history_capture history;
+    memset(&history, 0, sizeof history);
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 512, 0, &history,
+                                                capture_history) == ORCA_STATUS_OK);
+    SMOKE_CHECK(history.count >= 1);
+    SMOKE_CHECK(history.ids[0] == ids[3]);
+    SMOKE_CHECK(history.reasons[0] == ORCA_QUEUE_HISTORY_REASON_SKIPPED);
+    SMOKE_CHECK(history.ended_at[0] > 0);
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 0, 0, &history,
+                                                capture_history) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 8, 0, &history, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    int64_t saved_id = 0;
+    SMOKE_CHECK(orca_player_save_queue_as_playlist(runtime, player, "smoke queue", 11, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_save_queue_as_playlist(runtime, player, 0, 3, &saved_id) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_save_queue_as_playlist(runtime, player, "smoke queue", 11,
+                                                   &saved_id) == ORCA_STATUS_OK);
+    struct saved_entries saved;
+    memset(&saved, 0, sizeof saved);
+    SMOKE_CHECK(orca_library_query_playlist_entries(runtime, library, saved_id, 512, 0, &saved,
+                                                    capture_saved_entry) == ORCA_STATUS_OK);
+    SMOKE_CHECK(saved.count == 1 && saved.ids[0] == ids[2]);
+    SMOKE_CHECK(orca_player_save_queue_as_playlist(runtime, player, "smoke queue", 11,
+                                                   &saved_id) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, saved_id) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_player_clear_queue_history(runtime, player) == ORCA_STATUS_OK);
+    memset(&history, 0, sizeof history);
+    SMOKE_CHECK(orca_player_query_queue_history(runtime, player, 512, 0, &history,
+                                                capture_history) == ORCA_STATUS_OK);
+    SMOKE_CHECK(history.count == 0);
     return 0;
 }
 
@@ -764,9 +1275,12 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
         SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
         SMOKE_CHECK(drain_events(runtime) == 0);
         SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
-        heard = path.view.has_source && path.view.has_output && strcmp(path.codec, "flac") == 0;
+        heard = path.view.has_source && path.view.has_output && path.view.has_device_quantum &&
+                strcmp(path.codec, "flac") == 0;
     }
     SMOKE_CHECK(heard);
+    SMOKE_CHECK(path.view.device_quantum_frames != 0);
+    SMOKE_CHECK(path.view.output_kind == ORCA_DEVICE_KIND_VIRTUAL);
     SMOKE_CHECK(path.view.has_equalizer == 1);
     SMOKE_CHECK(memcmp(&path.view.equalizer, &bass, sizeof bass) == 0);
     SMOKE_CHECK(path.view.has_crossfeed == 1 && path.view.crossfeed == 0.5f);
@@ -794,9 +1308,144 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
     SMOKE_CHECK(unprocessed);
     SMOKE_CHECK(path.view.has_equalizer == 0 && path.view.has_crossfeed == 0);
     SMOKE_CHECK(path.view.has_replay_gain == 0 && path.view.volume == 1.0f);
+    SMOKE_CHECK(path.view.replay_gain_source == ORCA_GAIN_SOURCE_NONE);
+    SMOKE_CHECK(path.view.has_replay_gain_track == 0);
     SMOKE_CHECK(strcmp(path.codec, "flac") == 0);
 
     SMOKE_CHECK(orca_player_set_volume(runtime, player, 0.25f) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
+    return 0;
+}
+
+static const char parametric_apo[] =
+    "# a correction\r\n"
+    "Preamp: -3 dB\r\n"
+    "Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.71\r\n"
+    "Filter 2: ON PK Fc 1000 Hz Gain -2.0 dB Q 1.41\r\n"
+    "Filter 3: ON PK Fc 3000 Hz Gain 2.5 dB Q 2.0\r\n"
+    "Filter 4: ON HSC Fc 10000 Hz Gain -1.5 dB Q 0.71\r\n";
+
+static const char parametric_apo_written[] =
+    "Preamp: -3 dB\n"
+    "Filter 1: ON LSC Fc 105 Hz Gain 3 dB Q 0.71\n"
+    "Filter 2: ON PK Fc 1000 Hz Gain -2 dB Q 1.41\n"
+    "Filter 3: ON PK Fc 3000 Hz Gain 2.5 dB Q 2\n"
+    "Filter 4: ON HSC Fc 10000 Hz Gain -1.5 dB Q 0.71\n";
+
+static int parametric_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
+    orca_parametric_equalizer correction;
+    memset(&correction, 0xff, sizeof correction);
+    SMOKE_CHECK(orca_parametric_equalizer_parse_apo(parametric_apo, sizeof parametric_apo - 1,
+                                                    &correction) == ORCA_STATUS_OK);
+    SMOKE_CHECK(correction.count == 4 && correction.preamp_db == -3.0f);
+    SMOKE_CHECK(correction.filters[0].kind == ORCA_PARAMETRIC_FILTER_LOW_SHELF);
+    SMOKE_CHECK(correction.filters[1].kind == ORCA_PARAMETRIC_FILTER_PEAK);
+    SMOKE_CHECK(correction.filters[3].kind == ORCA_PARAMETRIC_FILTER_HIGH_SHELF);
+    SMOKE_CHECK(correction.filters[1].enabled == 1 && correction.filters[1].frequency_hz == 1000.0f);
+    SMOKE_CHECK(correction.filters[1].gain_db == -2.0f && correction.filters[1].q == 1.41f);
+    SMOKE_CHECK(correction.filters[4].kind == 0 && correction.filters[4].frequency_hz == 0.0f);
+
+    orca_parametric_equalizer untouched = correction;
+    const char unsupported[] = "Filter 1: ON BP Fc 1000 Hz Q 1";
+    SMOKE_CHECK(orca_parametric_equalizer_parse_apo(unsupported, sizeof unsupported - 1,
+                                                    &untouched) == ORCA_STATUS_UNSUPPORTED);
+    const char malformed[] = "Filter 1: ON PK Fc 1000 Hz Gain 30 dB Q 1";
+    SMOKE_CHECK(orca_parametric_equalizer_parse_apo(malformed, sizeof malformed - 1,
+                                                    &untouched) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(memcmp(&untouched, &correction, sizeof correction) == 0);
+
+    size_t written = 0;
+    SMOKE_CHECK(orca_parametric_equalizer_write_apo(&correction, 0, 0, &written) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(written == sizeof parametric_apo_written - 1);
+    char text[512];
+    SMOKE_CHECK(orca_parametric_equalizer_write_apo(&correction, text, sizeof text, &written) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(written == sizeof parametric_apo_written - 1);
+    SMOKE_CHECK(memcmp(text, parametric_apo_written, written) == 0);
+    orca_parametric_equalizer reread;
+    SMOKE_CHECK(orca_parametric_equalizer_parse_apo(text, written, &reread) == ORCA_STATUS_OK);
+    SMOKE_CHECK(memcmp(&reread, &correction, sizeof correction) == 0);
+
+    const float frequencies[3] = {1000.0f, 105.0f, 10000.0f};
+    float gains[3] = {0, 0, 0};
+    SMOKE_CHECK(orca_parametric_equalizer_response(&correction, 44100, frequencies, gains, 3) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(gains[0] > -4.97f && gains[0] < -4.87f);
+    SMOKE_CHECK(gains[1] > -1.56f && gains[1] < -1.46f);
+    SMOKE_CHECK(gains[2] > -3.76f && gains[2] < -3.66f);
+    SMOKE_CHECK(orca_parametric_equalizer_response(&correction, 0, frequencies, gains, 3) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    struct track_ids playable;
+    memset(&playable, 0, sizeof playable);
+    SMOKE_CHECK(orca_library_query_tracks(runtime, library, 0, 0, 512, 0, &playable,
+                                          collect_playable_ids) == ORCA_STATUS_OK);
+    int64_t flac_id = 0;
+    for (uint32_t i = 0; i < playable.count && flac_id == 0; i += 1) {
+        int is_flac = 0;
+        SMOKE_CHECK(orca_library_track_details(runtime, library, playable.ids[i], &is_flac,
+                                               capture_is_flac) == ORCA_STATUS_OK);
+        if (is_flac) flac_id = playable.ids[i];
+    }
+    SMOKE_CHECK(flac_id != 0);
+
+    orca_equalizer bass;
+    SMOKE_CHECK(orca_equalizer_preset_get(ORCA_EQUALIZER_PRESET_BASS, &bass) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, &bass) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, &correction) ==
+                ORCA_STATUS_OK);
+    orca_parametric_equalizer read_back;
+    uint8_t has = 0;
+    SMOKE_CHECK(orca_player_parametric_equalizer_get(runtime, player, &read_back, &has) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(has == 1 && memcmp(&read_back, &correction, sizeof correction) == 0);
+    orca_equalizer graphic;
+    uint8_t enabled = 1;
+    SMOKE_CHECK(orca_player_equalizer(runtime, player, &graphic, &enabled) == ORCA_STATUS_OK);
+    SMOKE_CHECK(enabled == 0);
+
+    orca_parametric_equalizer rejected = correction;
+    rejected.filters[2].q = 0.0f;
+    SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, &rejected) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    rejected = correction;
+    rejected.filters[2].kind = 9;
+    SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, &rejected) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    rejected = correction;
+    rejected.count = ORCA_PARAMETRIC_MAX_FILTERS + 1;
+    SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, &rejected) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_parametric_equalizer_get(runtime, player, &read_back, &has) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(has == 1 && memcmp(&read_back, &correction, sizeof correction) == 0);
+
+    SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_ONE) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_play_tracks(runtime, player, &flac_id, 1, 0) == ORCA_STATUS_OK);
+    struct signal_path_capture path;
+    long deadline = now_ms() + 3000;
+    int heard = 0;
+    while (!heard && now_ms() < deadline) {
+        SMOKE_CHECK(wait_for_runtime(runtime, now_ms() + 10) >= 0);
+        SMOKE_CHECK(drain_events(runtime) == 0);
+        SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
+        heard = path.view.has_source && path.view.has_output && strcmp(path.codec, "flac") == 0;
+    }
+    SMOKE_CHECK(heard);
+    SMOKE_CHECK(path.view.has_parametric == 1 && path.view.has_equalizer == 0);
+    SMOKE_CHECK(memcmp(&path.view.parametric, &correction, sizeof correction) == 0);
+    SMOKE_CHECK(has_reason(&path.view, ORCA_SIGNAL_REASON_SAMPLE_PROCESSING));
+
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, &bass) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_parametric_equalizer_get(runtime, player, &read_back, &has) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(has == 0 && read_back.count == 0 && read_back.preamp_db == 0.0f);
+    SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
+    SMOKE_CHECK(path.view.has_parametric == 0 && path.view.has_equalizer == 1);
+
+    SMOKE_CHECK(orca_player_set_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_parametric_equalizer(runtime, player, 0) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
     return 0;
 }
@@ -1009,6 +1658,197 @@ static void collect_titled(void *context, const orca_track_view *track) {
     capture->count += 1;
 }
 
+struct playlist_facts_capture {
+    uint32_t count;
+    int64_t id;
+    uint32_t entries;
+    uint8_t pinned;
+    uint8_t loved;
+    uint8_t kind;
+    uint8_t tag_count;
+    char description[64];
+};
+
+static void capture_playlist_facts(void *context, const orca_playlist_view *playlist,
+                                   const orca_playlist_facts_view *facts) {
+    struct playlist_facts_capture *capture = context;
+    capture->count += 1;
+    capture->id = playlist->id;
+    capture->entries = playlist->entries;
+    capture->pinned = facts->pinned;
+    capture->loved = facts->loved;
+    capture->kind = facts->kind;
+    capture->tag_count = facts->tag_count;
+    size_t length = facts->description.length;
+    if (length >= sizeof capture->description) length = sizeof capture->description - 1;
+    memcpy(capture->description, facts->description.pointer, length);
+    capture->description[length] = 0;
+}
+
+struct text_capture {
+    uint32_t count;
+    char values[8][64];
+};
+
+static void capture_text(void *context, const orca_string_view *value) {
+    struct text_capture *capture = context;
+    if (capture->count < 8 && value->length < sizeof capture->values[0]) {
+        memcpy(capture->values[capture->count], value->pointer, value->length);
+        capture->values[capture->count][value->length] = 0;
+    }
+    capture->count += 1;
+}
+
+static int playlist_metadata_smoke(orca_runtime *runtime, orca_handle library, int64_t playlist_id) {
+    orca_string_view tags[2] = {{"focus", 5}, {"lofi", 4}};
+    orca_playlist_update update;
+    memset(&update, 0, sizeof update);
+    update.description = (orca_string_view){"For work", 8};
+    update.tags = tags;
+    update.tag_count = 2;
+    update.has_description = 1;
+    update.has_pinned = 1;
+    update.pinned = 1;
+    update.has_loved = 1;
+    update.loved = 1;
+    update.has_tags = 1;
+    SMOKE_CHECK(orca_library_update_playlist(runtime, library, playlist_id, &update) ==
+                ORCA_STATUS_OK);
+
+    orca_playlist_query query;
+    memset(&query, 0, sizeof query);
+    query.limit = 512;
+    query.sort = ORCA_PLAYLIST_SORT_RECENTLY_UPDATED;
+    query.pinned_only = 1;
+    struct playlist_facts_capture listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_playlists_v2(runtime, library, &query, &listed,
+                                                capture_playlist_facts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.id == playlist_id && listed.pinned == 1);
+    SMOKE_CHECK(listed.loved == 1 && listed.kind == ORCA_PLAYLIST_KIND_MANUAL);
+    SMOKE_CHECK(listed.tag_count == 2 && strcmp(listed.description, "For work") == 0);
+    uint64_t count = 0;
+    SMOKE_CHECK(orca_library_playlist_count(runtime, library, &query, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 1);
+
+    struct text_capture texts;
+    memset(&texts, 0, sizeof texts);
+    SMOKE_CHECK(orca_library_playlist_tags(runtime, library, playlist_id, &texts, capture_text) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(texts.count == 2 && strcmp(texts.values[0], "focus") == 0 &&
+                strcmp(texts.values[1], "lofi") == 0);
+    memset(&texts, 0, sizeof texts);
+    SMOKE_CHECK(orca_library_playlist_genres(runtime, library, playlist_id, &texts, capture_text) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(texts.count <= 3);
+
+    const char *rules = "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"is_set\"}],"
+                        "\"sort\":{\"field\":\"title\"},\"limit\":3}";
+    SMOKE_CHECK(orca_library_smart_playlist_count(runtime, library, rules, strlen(rules), &count) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 3);
+    const char *unknown = "{\"v\":1,\"rules\":[{\"field\":\"mood\",\"op\":\"is_set\"}]}";
+    int64_t smart_id = 0;
+    SMOKE_CHECK(orca_library_create_smart_playlist(runtime, library, "Smart smoke", 11, unknown,
+                                                   strlen(unknown), &smart_id) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_create_smart_playlist(runtime, library, "Smart smoke", 11, rules,
+                                                   strlen(rules), &smart_id) == ORCA_STATUS_OK);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_playlist_get(runtime, library, smart_id, &listed,
+                                          capture_playlist_facts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.kind == ORCA_PLAYLIST_KIND_SMART && listed.entries == 3);
+    struct entry_capture entries;
+    memset(&entries, 0, sizeof entries);
+    SMOKE_CHECK(orca_library_query_playlist_entries(runtime, library, smart_id, 8, 0, &entries,
+                                                    capture_playlist_entry) == ORCA_STATUS_OK);
+    SMOKE_CHECK(entries.count == 3 && entries.has_track[0] && entries.has_track[2]);
+    memset(&texts, 0, sizeof texts);
+    SMOKE_CHECK(orca_library_smart_playlist_rules(runtime, library, smart_id, &texts,
+                                                  capture_text) == ORCA_STATUS_OK);
+    SMOKE_CHECK(texts.count == 1);
+    SMOKE_CHECK(orca_library_smart_playlist_rules(runtime, library, playlist_id, &texts,
+                                                  capture_text) == ORCA_STATUS_INVALID_STATE);
+    const char *all = "{\"v\":1,\"rules\":[{\"field\":\"title\",\"op\":\"is_set\"}],\"limit\":1}";
+    SMOKE_CHECK(orca_library_set_smart_playlist_rules(runtime, library, smart_id, all,
+                                                      strlen(all)) == ORCA_STATUS_OK);
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_playlist_get(runtime, library, smart_id, &listed,
+                                          capture_playlist_facts) == ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.entries == 1);
+    int64_t one = entries.track_ids[0];
+    orca_change_count change;
+    SMOKE_CHECK(orca_library_playlist_insert(runtime, library, smart_id, &one, 1, -1, &change) ==
+                ORCA_STATUS_INVALID_STATE);
+
+    query.pinned_only = 0;
+    query.has_kind = 1;
+    query.kind = ORCA_PLAYLIST_KIND_SMART;
+    SMOKE_CHECK(orca_library_playlist_count(runtime, library, &query, &count) == ORCA_STATUS_OK);
+    SMOKE_CHECK(count == 1);
+    SMOKE_CHECK(orca_library_delete_playlist(runtime, library, smart_id) == ORCA_STATUS_OK);
+    return 0;
+}
+struct folder_capture {
+    uint32_t count;
+    uint32_t folders;
+    uint32_t tracks;
+    int64_t track_ids[512];
+    char first_name[64];
+};
+
+static void capture_folder_entry(void *context, const orca_folder_entry_view *entry) {
+    struct folder_capture *capture = context;
+    if (capture->count == 0) {
+        size_t length = entry->name.length < 63 ? entry->name.length : 63;
+        memcpy(capture->first_name, entry->name.pointer, length);
+        capture->first_name[length] = 0;
+    }
+    capture->count += 1;
+    if (entry->kind == ORCA_FOLDER_ENTRY_KIND_FOLDER) capture->folders += 1;
+    if (entry->kind != ORCA_FOLDER_ENTRY_KIND_FILE || !entry->has_file_id || entry->file_count != 1)
+        return;
+    if (!entry->has_track_id) return;
+    for (uint32_t i = 0; i < capture->tracks; i += 1)
+        if (capture->track_ids[i] == entry->track_id) return;
+    if (capture->tracks < 512) capture->track_ids[capture->tracks++] = entry->track_id;
+}
+
+static int folder_smoke(orca_runtime *runtime, orca_handle library, orca_handle player,
+                        int64_t root_id) {
+    static struct folder_capture root;
+    memset(&root, 0, sizeof root);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, "", 0, 512, 0, &root,
+                                          capture_folder_entry) == ORCA_STATUS_OK);
+    SMOKE_CHECK(root.count > 2 && root.folders == 0 && root.tracks > 2);
+    SMOKE_CHECK(strcmp(root.first_name, "cbr-noxing-reference.mp3") == 0);
+
+    static struct folder_capture paged;
+    memset(&paged, 0, sizeof paged);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, 0, 0, 1, 1, &paged,
+                                          capture_folder_entry) == ORCA_STATUS_OK);
+    SMOKE_CHECK(paged.count == 1 && strcmp(paged.first_name, "cbr-noxing-reference.mp3") != 0);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, "", 0, 0, 0, &paged,
+                                          capture_folder_entry) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, "../x", 4, 512, 0, &paged,
+                                          capture_folder_entry) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, 999999, "", 0, 512, 0, &paged,
+                                          capture_folder_entry) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_query_folder(runtime, library, root_id, "", 0, 512, 0, &paged, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    SMOKE_CHECK(orca_player_play_folder(runtime, player, root_id, "none", 4, 0) ==
+                ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_player_play_folder(runtime, player, root_id, "/abs", 4, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_play_folder(runtime, player, root_id, "", 0, 0) == ORCA_STATUS_OK);
+    orca_player_status status;
+    SMOKE_CHECK(orca_player_status_get(runtime, player, &status) == ORCA_STATUS_OK);
+    SMOKE_CHECK(status.queue_length == root.tracks);
+    SMOKE_CHECK(orca_player_clear_queue(runtime, player) == ORCA_STATUS_OK);
+    return 0;
+}
+
 static int playlist_smoke(orca_runtime *runtime, orca_handle library, orca_handle player) {
     static struct titled_tracks playable;
     memset(&playable, 0, sizeof playable);
@@ -1077,6 +1917,7 @@ static int playlist_smoke(orca_runtime *runtime, orca_handle library, orca_handl
                 ORCA_STATUS_OK);
     SMOKE_CHECK(listed.count == 1 && strcmp(listed.name, "Smoke renamed") == 0);
     SMOKE_CHECK(listed.entries == 4 && listed.available == 4);
+    SMOKE_CHECK(playlist_metadata_smoke(runtime, library, playlist_id) == 0);
 
     char directory[] = ".zig-cache/tmp/orca-c-smoke-playlist-XXXXXX";
     SMOKE_CHECK(mkdir(".zig-cache/tmp", 0700) == 0 || errno == EEXIST);
@@ -1264,6 +2105,75 @@ static int health_summary_collect(orca_runtime *runtime, orca_handle library,
     return 0;
 }
 
+struct health_summary_v2_capture {
+    uint64_t total;
+    uint64_t files;
+    uint32_t consistent;
+    uint32_t kinds;
+};
+
+static void collect_health_summary_v2(void *context,
+                                      const orca_health_kind_summary_view_v2 *summary) {
+    struct health_summary_v2_capture *capture = context;
+    if (summary->files == summary->base.count) capture->consistent += 1;
+    capture->total += summary->base.count;
+    capture->files += summary->files;
+    capture->kinds += 1;
+}
+
+static int health_summary_v2_smoke(orca_runtime *runtime, orca_handle library,
+                                   const struct health_summary_capture *summary) {
+    struct health_summary_v2_capture sized;
+    memset(&sized, 0, sizeof sized);
+    SMOKE_CHECK(orca_library_health_summary_v2(runtime, library, &sized,
+                                               collect_health_summary_v2) == ORCA_STATUS_OK);
+    SMOKE_CHECK(sized.kinds == summary->kinds && sized.total == summary->total);
+    SMOKE_CHECK(sized.files == summary->total && sized.consistent == sized.kinds);
+    SMOKE_CHECK(orca_library_health_summary_v2(runtime, library, &sized, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    return 0;
+}
+
+static int library_stats_smoke(orca_runtime *runtime, orca_handle library) {
+    orca_library_stats_view stats;
+    SMOKE_CHECK(orca_library_stats(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_stats(runtime, library, &stats) == ORCA_STATUS_OK);
+    uint64_t artists = 0, releases = 0, tracks = 0;
+    SMOKE_CHECK(orca_library_artist_count(runtime, library, &artists) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_release_count(runtime, library, &releases) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_track_count(runtime, library, &tracks) == ORCA_STATUS_OK);
+    SMOKE_CHECK(stats.artists == artists && stats.releases == releases && stats.tracks == tracks);
+    SMOKE_CHECK(stats.files > 0 && stats.total_bytes > 0 && stats.total_duration_ms > 0);
+    SMOKE_CHECK(stats.has_last_scan_finished_at == 1 && stats.last_scan_finished_at > 0);
+    SMOKE_CHECK(stats.has_last_analysis_at == 1 || stats.last_analysis_at == 0);
+    return 0;
+}
+
+struct provider_source_capture {
+    size_t count;
+    int first_is_musicbrainz;
+};
+
+static void collect_provider_source(void *context, const orca_provider_source_view *source) {
+    struct provider_source_capture *capture = context;
+    if (capture->count == 0) {
+        static const char expected[] = "MusicBrainz";
+        capture->first_is_musicbrainz = source->id == ORCA_PROVIDER_SOURCE_MUSICBRAINZ &&
+                                        source->name.length == sizeof expected - 1 &&
+                                        memcmp(source->name.pointer, expected, sizeof expected - 1) == 0;
+    }
+    capture->count += 1;
+}
+
+static int provider_sources_smoke(orca_runtime *runtime) {
+    struct provider_source_capture capture;
+    memset(&capture, 0, sizeof capture);
+    SMOKE_CHECK(orca_provider_sources(runtime, &capture, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_provider_sources(runtime, &capture, collect_provider_source) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture.count == 9 && capture.first_is_musicbrainz);
+    return 0;
+}
+
 static int health_kind_collect(orca_runtime *runtime, orca_handle library,
                                struct health_capture *capture, uint8_t kind,
                                int64_t watch_file_id) {
@@ -1280,6 +2190,7 @@ static int health_kind_smoke(orca_runtime *runtime, orca_handle library, uint64_
     struct health_summary_capture summary;
     SMOKE_CHECK(health_summary_collect(runtime, library, &summary, kind) == 0);
     SMOKE_CHECK(summary.total == total && summary.kinds > 0 && summary.watch_count > 0);
+    SMOKE_CHECK(health_summary_v2_smoke(runtime, library, &summary) == 0);
     uint64_t of_kind = summary.watch_count;
 
     struct health_capture items;
@@ -1524,6 +2435,176 @@ static int lyrics_smoke(orca_runtime *runtime, orca_handle library) {
     return 0;
 }
 
+struct artist_smoke_capture {
+    uint32_t count;
+    int64_t first_id;
+    uint8_t loved;
+    uint8_t outcome;
+    uint8_t has_info;
+    uint8_t has_listeners;
+    size_t link_count;
+    size_t related_count;
+    uint8_t has_release_info;
+};
+
+static void capture_smoke_artist(void *context, const orca_artist_view_v2 *artist) {
+    struct artist_smoke_capture *capture = context;
+    if (capture->count == 0) {
+        capture->first_id = artist->base.id;
+        capture->loved = artist->loved;
+    }
+    capture->count += 1;
+}
+
+static void capture_smoke_artist_info(void *context, const orca_artist_info_view *info) {
+    struct artist_smoke_capture *capture = context;
+    capture->has_info = 1;
+    capture->outcome = info->outcome;
+    capture->has_listeners = info->has_listeners;
+}
+
+static void capture_smoke_related_artists(void *context, const orca_related_artist_view *artists, size_t count) {
+    (void)artists;
+    struct artist_smoke_capture *capture = context;
+    capture->related_count = count;
+}
+
+static void capture_smoke_related_photo_info(void *context, const orca_related_artist_photo_info_view *info) {
+    (void)info;
+    int *calls = context;
+    *calls += 1;
+}
+
+static void capture_smoke_release_info(void *context, const orca_release_info_view *info) {
+    (void)info;
+    struct artist_smoke_capture *capture = context;
+    capture->has_release_info = 1;
+}
+
+static void capture_smoke_artist_links(void *context, const orca_artist_link_view *links, size_t count) {
+    (void)links;
+    struct artist_smoke_capture *capture = context;
+    capture->link_count = count;
+}
+
+static int artist_smoke(orca_runtime *runtime, orca_handle library) {
+    orca_artist_query_v2 query;
+    memset(&query, 0, sizeof query);
+    query.limit = 512;
+    struct artist_smoke_capture all;
+    memset(&all, 0, sizeof all);
+    SMOKE_CHECK(orca_library_query_artists_v2(runtime, library, &query, &all, capture_smoke_artist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(all.count > 0 && all.loved == 0);
+    int64_t artist = all.first_id;
+
+    const int64_t artists[2] = {artist, 999999999};
+    orca_change_count change;
+    SMOKE_CHECK(orca_library_set_artist_love(runtime, library, artists, 2, 1, &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1 && change.skipped == 1);
+    uint8_t loved = 0;
+    SMOKE_CHECK(orca_library_artist_loved(runtime, library, artist, &loved) == ORCA_STATUS_OK && loved == 1);
+    query.loved_only = 1;
+    query.sort = ORCA_ARTIST_SORT_RECENTLY_LOVED;
+    struct artist_smoke_capture listed;
+    memset(&listed, 0, sizeof listed);
+    SMOKE_CHECK(orca_library_query_artists_v2(runtime, library, &query, &listed, capture_smoke_artist) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(listed.count == 1 && listed.first_id == artist && listed.loved == 1);
+    uint64_t matching = 0;
+    SMOKE_CHECK(orca_library_artist_count_matching_v2(runtime, library, &query, &matching) == ORCA_STATUS_OK &&
+                matching == 1);
+    query.loved_only = 2;
+    SMOKE_CHECK(orca_library_query_artists_v2(runtime, library, &query, &listed, capture_smoke_artist) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_set_artist_love(runtime, library, artists, 1, 0, &change) == ORCA_STATUS_OK);
+    SMOKE_CHECK(change.updated == 1);
+
+    struct artist_smoke_capture info;
+    memset(&info, 0, sizeof info);
+    SMOKE_CHECK(orca_library_artist_info(runtime, library, artist, &info, capture_smoke_artist_info) ==
+                    ORCA_STATUS_NOT_FOUND &&
+                info.has_info == 0);
+
+    orca_artist_info_options options;
+    memset(&options, 0, sizeof options);
+    options.offline = 1;
+    orca_handle job;
+    SMOKE_CHECK(orca_runtime_set_client_identity(runtime, "Orca C Smoke", "1.0", "https://orca.invalid") ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_start_artist_info(runtime, library, 999999999, &options, &job) ==
+                ORCA_STATUS_NOT_FOUND);
+    options.language.pointer = "EN";
+    options.language.length = 2;
+    SMOKE_CHECK(orca_library_start_artist_info(runtime, library, artist, &options, &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    options.language.pointer = "de";
+    SMOKE_CHECK(orca_library_start_artist_info(runtime, library, artist, &options, &job) == ORCA_STATUS_OK);
+    uint8_t state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    uint8_t outcome = ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED;
+    SMOKE_CHECK(orca_job_artist_info_outcome(runtime, job, &outcome) == ORCA_STATUS_OK);
+    SMOKE_CHECK(outcome == ORCA_ARTIST_INFO_OUTCOME_NO_MUSICBRAINZ_ID);
+    SMOKE_CHECK(orca_job_lyrics_outcome(runtime, job, &outcome) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_artist_info(runtime, library, artist, &info, capture_smoke_artist_info) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(info.has_info == 1 && info.outcome == ORCA_ARTIST_INFO_OUTCOME_NO_MUSICBRAINZ_ID);
+    SMOKE_CHECK(info.has_listeners == 0);
+    info.link_count = 99;
+    SMOKE_CHECK(orca_library_artist_links(runtime, library, artist, &info, capture_smoke_artist_links) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(info.link_count == 0);
+    info.related_count = 99;
+    SMOKE_CHECK(orca_library_related_artists(runtime, library, artist, &info, capture_smoke_related_artists) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(info.related_count == 0);
+    struct image_capture related_photo;
+    memset(&related_photo, 0, sizeof related_photo);
+    static const char related_mbid[] = "cccccccc-0000-4000-8000-000000000003";
+    SMOKE_CHECK(orca_library_related_artist_photo(runtime, library, related_mbid, sizeof related_mbid - 1,
+                                                  &related_photo, capture_image) == ORCA_STATUS_NOT_FOUND &&
+                related_photo.count == 0);
+    SMOKE_CHECK(orca_library_related_artist_photo(runtime, library, NULL, 1, &related_photo, capture_image) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    int related_photo_info_calls = 0;
+    SMOKE_CHECK(orca_library_related_artist_photo_info(runtime, library, related_mbid, sizeof related_mbid - 1,
+                                                       &related_photo_info_calls, capture_smoke_related_photo_info) ==
+                    ORCA_STATUS_NOT_FOUND &&
+                related_photo_info_calls == 0);
+    SMOKE_CHECK(orca_library_related_artist_photo_info(runtime, library, related_mbid, sizeof related_mbid - 1,
+                                                       &related_photo_info_calls, NULL) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    orca_release_info_options release_options;
+    memset(&release_options, 0, sizeof release_options);
+    release_options.offline = 1;
+    SMOKE_CHECK(orca_library_start_release_info(runtime, library, 999999999, &release_options, &job) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_release_info(runtime, library, 999999999, &info, capture_smoke_release_info) ==
+                    ORCA_STATUS_NOT_FOUND &&
+                info.has_release_info == 0);
+
+    orca_genre_fill fill;
+    memset(&fill, 0, sizeof fill);
+    SMOKE_CHECK(orca_library_genre_fill(runtime, library, &fill) == ORCA_STATUS_OK && fill.musicbrainz == 1);
+    fill.musicbrainz = 0;
+    SMOKE_CHECK(orca_library_set_genre_fill(runtime, library, &fill) == ORCA_STATUS_OK);
+    fill.musicbrainz = 1;
+    SMOKE_CHECK(orca_library_genre_fill(runtime, library, &fill) == ORCA_STATUS_OK && fill.musicbrainz == 0);
+    orca_genre_fill_options fill_options;
+    memset(&fill_options, 0, sizeof fill_options);
+    fill_options.limit = 1;
+    fill_options.offline = 1;
+    SMOKE_CHECK(orca_library_start_genre_fill(runtime, library, &fill_options, &job) == ORCA_STATUS_OK);
+    state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    outcome = ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED;
+    SMOKE_CHECK(orca_job_release_info_outcome(runtime, job, &outcome) == ORCA_STATUS_OK);
+    SMOKE_CHECK(outcome != ORCA_ARTIST_INFO_OUTCOME_NOT_REQUESTED);
+    fill.musicbrainz = 1;
+    SMOKE_CHECK(orca_library_set_genre_fill(runtime, library, &fill) == ORCA_STATUS_OK);
+    return 0;
+}
+
 /* Watches a root in a temporary directory, adds an album to it, and waits
  * for the Library to change without any scan being started. */
 static int watch_smoke(orca_runtime *runtime) {
@@ -1738,6 +2819,7 @@ struct tag_plan_capture {
     uint32_t calls;
     uint64_t plan_id;
     orca_tag_write_digest digest;
+    int64_t file_id;
     size_t file_count;
     size_t change_count;
     size_t conflict_count;
@@ -1767,6 +2849,7 @@ static void capture_tag_plan(void *context, const orca_tag_write_plan_view *plan
     capture->change_count = 0;
     for (size_t i = 0; i < plan->file_count; i += 1)
         capture->change_count += plan->files[i].change_count;
+    if (plan->file_count != 0) capture->file_id = plan->files[0].file_id;
     if (plan->file_count == 0 || plan->files[0].change_count == 0) return;
     const orca_tag_write_change_view *change = &plan->files[0].changes[0];
     capture->field = change->field;
@@ -1784,6 +2867,62 @@ static int plan_tags(orca_runtime *runtime, orca_handle library, int64_t track_i
                                             capture_tag_plan) == ORCA_STATUS_OK);
     SMOKE_CHECK(plan->calls == 1);
     SMOKE_CHECK(plan->conflict_count == 0 && plan->skip_count == 0);
+    return 0;
+}
+
+struct tag_genres_capture {
+    uint32_t calls;
+    int64_t file_id;
+    size_t before_count;
+    size_t after_count;
+    char after[2][64];
+};
+
+static void capture_tag_genres(void *context, const orca_tag_write_genres_view *genres) {
+    struct tag_genres_capture *capture = context;
+    capture->calls += 1;
+    capture->file_id = genres->file_id;
+    capture->before_count = genres->before_count;
+    capture->after_count = genres->after_count;
+    for (size_t i = 0; i < genres->after_count && i < 2; i += 1)
+        copy_view(capture->after[i], sizeof capture->after[i], genres->after[i]);
+}
+
+static int tag_write_genre_steps(orca_runtime *runtime, orca_handle library, int64_t track_id) {
+    static const char listed[] = "Smoke Shoegaze; Smoke Dream Pop";
+    const orca_string_view names[1] = {{listed, sizeof listed - 1}};
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, &track_id, 1, names, 1) ==
+                ORCA_STATUS_OK);
+    struct tag_plan_capture plan;
+    if (plan_tags(runtime, library, track_id, &plan) != 0) return 1;
+    SMOKE_CHECK(plan.plan_id != 0 && plan.file_count == 1 && plan.change_count == 0);
+
+    struct tag_genres_capture genres;
+    memset(&genres, 0, sizeof genres);
+    SMOKE_CHECK(orca_library_query_tag_write_genres(runtime, library, plan.plan_id, plan.file_id,
+                                                    &genres, capture_tag_genres) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(genres.calls == 1 && genres.file_id == plan.file_id);
+    SMOKE_CHECK(genres.before_count == 0 && genres.after_count == 2);
+    SMOKE_CHECK(strcmp(genres.after[0], "Smoke Shoegaze") == 0);
+    SMOKE_CHECK(strcmp(genres.after[1], "Smoke Dream Pop") == 0);
+    SMOKE_CHECK(orca_library_query_tag_write_genres(runtime, library, plan.plan_id,
+                                                    plan.file_id + 1000, &genres,
+                                                    capture_tag_genres) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_query_tag_write_genres(runtime, library, plan.plan_id, plan.file_id,
+                                                    &genres, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(genres.calls == 1);
+
+    SMOKE_CHECK(orca_library_discard_tag_write(runtime, library, plan.plan_id) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_query_tag_write_genres(runtime, library, plan.plan_id, plan.file_id,
+                                                    &genres, capture_tag_genres) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(genres.calls == 1);
+    SMOKE_CHECK(orca_library_set_track_genres(runtime, library, &track_id, 1, 0, 0) ==
+                ORCA_STATUS_OK);
+    struct tag_plan_capture cleared;
+    if (plan_tags(runtime, library, track_id, &cleared) != 0) return 1;
+    SMOKE_CHECK(cleared.plan_id == 0 && cleared.file_count == 0);
     return 0;
 }
 
@@ -2028,6 +3167,7 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
     SMOKE_CHECK(file_is(song, original, original_length) == 0);
 
     if (tag_track(runtime, *library, &track) != 0) return 1;
+    if (tag_write_genre_steps(runtime, *library, track.id) != 0) return 1;
     if (set_title(runtime, *library, track.id, "Smoke Discarded Title", &track_id) != 0) return 1;
     struct tag_plan_capture discarded;
     if (plan_tags(runtime, *library, track_id, &discarded) != 0) return 1;
@@ -2120,6 +3260,12 @@ static int provider_settings_steps(orca_runtime *runtime) {
         SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://127.0.0.1@example.org") ==
                     ORCA_STATUS_INVALID_ARGUMENT);
         SMOKE_CHECK(strcmp(orca_runtime_last_error(runtime), "orca_runtime_set_provider_server: InvalidServerUrl") == 0);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://example.org") ==
+                    ORCA_STATUS_INVALID_ARGUMENT);
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, 0) == ORCA_STATUS_OK);
+    }
+    for (uint8_t service = ORCA_PROVIDER_SERVICE_WIKIDATA; service <= ORCA_PROVIDER_SERVICE_WIKIPEDIA; service++) {
+        SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://127.0.0.1:8080") == ORCA_STATUS_OK);
         SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, "http://example.org") ==
                     ORCA_STATUS_INVALID_ARGUMENT);
         SMOKE_CHECK(orca_runtime_set_provider_server(runtime, service, 0) == ORCA_STATUS_OK);
@@ -2733,6 +3879,8 @@ int main(int argc, char **argv) {
     uint64_t release_count = 0;
     if (orca_library_release_count(runtime, library, &release_count) != ORCA_STATUS_OK) return 102;
     if (release_count == 0) return 103;
+    if (library_stats_smoke(runtime, library) != 0) return 1;
+    if (provider_sources_smoke(runtime) != 0) return 1;
 
     /* Bounds are part of the contract here too. */
     if (orca_library_query_artists(runtime, library, 0, 0, 0, capture_artist) !=
@@ -3008,8 +4156,101 @@ int main(int argc, char **argv) {
         track_matches != 0)
         return 251;
 
+    /* Every Track carries its file's facts; nothing is played, and the two
+     * explicit fixtures say so. */
+    orca_track_query_v2 facts_query;
+    memset(&facts_query, 0, sizeof facts_query);
+    facts_query.sort = ORCA_TRACK_SORT_PLAY_COUNT;
+    facts_query.descending = 1;
+    facts_query.limit = 512;
+    struct facts_capture facts;
+    memset(&facts, 0, sizeof facts);
+    if (orca_library_browse_tracks_v2(runtime, library, &facts_query, &facts, capture_facts) !=
+            ORCA_STATUS_OK ||
+        facts.count != capture.count || facts.with_facts == 0 || facts.played != 0 ||
+        facts.explicit_count != 2)
+        return 252;
+    for (uint8_t sort = ORCA_TRACK_SORT_LAST_PLAYED; sort <= ORCA_TRACK_SORT_YEAR; sort += 1) {
+        facts_query.sort = sort;
+        struct facts_capture sorted_facts;
+        memset(&sorted_facts, 0, sizeof sorted_facts);
+        if (orca_library_browse_tracks_v2(runtime, library, &facts_query, &sorted_facts,
+                                          capture_facts) != ORCA_STATUS_OK ||
+            sorted_facts.count != capture.count)
+            return 253;
+    }
+    facts_query.has_genre_id = 1;
+    facts_query.genre_id = 999999999;
+    struct facts_capture genre_facts;
+    memset(&genre_facts, 0, sizeof genre_facts);
+    if (orca_library_browse_tracks_v2(runtime, library, &facts_query, &genre_facts,
+                                      capture_facts) != ORCA_STATUS_OK ||
+        genre_facts.count != 0 ||
+        orca_library_browse_tracks_v2(runtime, library, 0, &facts, capture_facts) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 254;
+
+    /* Each filter keeps the Tracks the unfiltered facts say it should, and
+     * the v2 count agrees with the listing. */
+    struct {
+        uint8_t format;
+        uint8_t explicit_only;
+        uint32_t min_sample_rate;
+        uint8_t has_year_min;
+        int32_t year_min;
+        uint32_t expected;
+    } filters[] = {
+        {ORCA_TRACK_FORMAT_LOSSLESS, 0, 0, 0, 0, facts.lossless},
+        {ORCA_TRACK_FORMAT_LOSSY, 0, 0, 0, 0, facts.lossy},
+        {ORCA_TRACK_FORMAT_ANY, 1, 0, 0, 0, 2},
+        {ORCA_TRACK_FORMAT_ANY, 0, 1, 0, 0, facts.with_rate},
+        {ORCA_TRACK_FORMAT_ANY, 0, 0, 1, 10000, 0},
+    };
+    if (facts.lossless == 0 || facts.lossy == 0) return 257;
+    for (size_t index = 0; index < sizeof filters / sizeof filters[0]; index += 1) {
+        memset(&facts_query, 0, sizeof facts_query);
+        facts_query.sort = ORCA_TRACK_SORT_TITLE;
+        facts_query.limit = 512;
+        facts_query.format = filters[index].format;
+        facts_query.explicit_only = filters[index].explicit_only;
+        facts_query.min_sample_rate = filters[index].min_sample_rate;
+        facts_query.has_year_min = filters[index].has_year_min;
+        facts_query.year_min = filters[index].year_min;
+        struct facts_capture filtered;
+        memset(&filtered, 0, sizeof filtered);
+        uint64_t filtered_count = 0;
+        if (orca_library_browse_tracks_v2(runtime, library, &facts_query, &filtered,
+                                          capture_facts) != ORCA_STATUS_OK ||
+            orca_library_track_match_count_v2(runtime, library, &facts_query, &filtered_count) !=
+                ORCA_STATUS_OK ||
+            filtered_count != filtered.count || filtered.count != filters[index].expected)
+            return 257;
+    }
+    facts_query.format = 3;
+    uint64_t rejected_count = 0;
+    if (orca_library_browse_tracks_v2(runtime, library, &facts_query, &facts, capture_facts) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_track_match_count_v2(runtime, library, &facts_query, &rejected_count) !=
+            ORCA_STATUS_INVALID_ARGUMENT ||
+        orca_library_track_match_count_v2(runtime, library, 0, &rejected_count) !=
+            ORCA_STATUS_INVALID_ARGUMENT)
+        return 258;
+    struct extra_capture extra;
+    memset(&extra, 0, sizeof extra);
+    if (orca_library_track_details_v2(runtime, library, facts.explicit_id, &extra,
+                                      capture_extra) != ORCA_STATUS_OK ||
+        extra.count != 1 || extra.explicit != ORCA_EXPLICIT_EXPLICIT ||
+        !extra.has_track_total || !extra.has_added_at || !extra.has_modified_at)
+        return 255;
+    memset(&extra, 0, sizeof extra);
+    if (orca_library_track_details_v2(runtime, library, 999999999, &extra, capture_extra) !=
+            ORCA_STATUS_NOT_FOUND ||
+        extra.count != 0)
+        return 256;
+
     if (library_edits_smoke(runtime, library, capture.first_playable_id, releases.first_id) != 0)
         return 1;
+    if (genre_smoke(runtime, library, capture.first_playable_id) != 0) return 1;
 
     orca_handle player;
     if (orca_player_create(runtime, &player) != ORCA_STATUS_OK) return 2;
@@ -3031,6 +4272,13 @@ int main(int argc, char **argv) {
     uint32_t devices = 0;
     if (orca_enumerate_output_devices(runtime, &devices, count_device) != ORCA_STATUS_OK)
         return 41;
+    struct device_kind_search kind_search = {.id = device_id};
+    if (orca_enumerate_output_devices_v2(runtime, &kind_search, find_device_kind) !=
+            ORCA_STATUS_OK ||
+        orca_enumerate_output_devices_v2(runtime, 0, 0) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 259;
+    if (device_id != 0 && (!kind_search.found || kind_search.kind != ORCA_DEVICE_KIND_VIRTUAL))
+        return 260;
 
     orca_handle zone;
     if (orca_player_open_default_output(runtime, player, device_id, &zone) !=
@@ -3041,15 +4289,21 @@ int main(int argc, char **argv) {
     float volume = 0;
     if (orca_player_volume(runtime, player, &volume) != ORCA_STATUS_OK) return 44;
     if (volume < 0.24f || volume > 0.26f) return 45;
-    /* Loudness correction is on by default and a host can turn it off. An
-     * unrecognized mode is refused rather than silently taken for one of the
-     * two that exist. */
+    /* Loudness correction is on by default and a host can switch it to album
+     * or off. An unrecognized mode is refused rather than silently taken for
+     * one of the three that exist. */
     uint8_t replay_gain_mode = 255;
     if (orca_player_replay_gain_mode(runtime, player, &replay_gain_mode) != ORCA_STATUS_OK)
         return 165;
     if (replay_gain_mode != ORCA_REPLAY_GAIN_TRACK) return 166;
     if (orca_player_set_replay_gain_mode(runtime, player, 7) != ORCA_STATUS_INVALID_ARGUMENT)
         return 167;
+    if (orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_ALBUM) !=
+        ORCA_STATUS_OK)
+        return 261;
+    if (orca_player_replay_gain_mode(runtime, player, &replay_gain_mode) != ORCA_STATUS_OK)
+        return 262;
+    if (replay_gain_mode != ORCA_REPLAY_GAIN_ALBUM) return 263;
     if (orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_OFF) !=
         ORCA_STATUS_OK)
         return 168;
@@ -3233,7 +4487,9 @@ int main(int argc, char **argv) {
 
     if (queue_smoke(runtime, library, player) != 0) return 1;
     if (dsp_smoke(runtime, library, player) != 0) return 1;
+    if (parametric_smoke(runtime, library, player) != 0) return 1;
     if (playlist_smoke(runtime, library, player) != 0) return 1;
+    if (folder_smoke(runtime, library, player, root_id) != 0) return 1;
     if (artwork_smoke(runtime, library) != 0) return 1;
     if (lyrics_smoke(runtime, library) != 0) return 1;
     if (coverless_release_smoke(runtime) != 0) return 1;
@@ -3244,6 +4500,7 @@ int main(int argc, char **argv) {
     if (acoustid_submission_smoke(runtime, library) != 0) return 1;
     if (scrobbling_smoke(runtime, library) != 0) return 1;
     if (maintenance_smoke(runtime, library, root_id) != 0) return 1;
+    if (artist_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 86;

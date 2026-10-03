@@ -13,15 +13,40 @@ const struct_pairs = .{
     .{ c_api.StringView, c.orca_string_view },
     .{ c_api.TrackView, c.orca_track_view },
     .{ c_api.TrackQueryView, c.orca_track_query },
+    .{ c_api.TrackQueryV2View, c.orca_track_query_v2 },
+    .{ c_api.TrackFactsView, c.orca_track_facts_view },
+    .{ c_api.TrackDetailsExtraView, c.orca_track_details_extra_view },
     .{ c_api.ArtistView, c.orca_artist_view },
+    .{ c_api.ArtistViewV2, c.orca_artist_view_v2 },
+    .{ c_api.ArtistInfoOptionsView, c.orca_artist_info_options },
+    .{ c_api.ArtistInfoView, c.orca_artist_info_view },
+    .{ c_api.ArtistLinkView, c.orca_artist_link_view },
+    .{ c_api.RelatedArtistView, c.orca_related_artist_view },
+    .{ c_api.RelatedArtistPhotoInfoView, c.orca_related_artist_photo_info_view },
+    .{ c_api.ReleaseInfoOptionsView, c.orca_release_info_options },
+    .{ c_api.ReleaseInfoView, c.orca_release_info_view },
+    .{ c_api.GenreFillView, c.orca_genre_fill },
+    .{ c_api.GenreFillOptionsView, c.orca_genre_fill_options },
     .{ c_api.ReleaseView, c.orca_release_view },
     .{ c_api.ReleaseQueryView, c.orca_release_query },
     .{ c_api.ArtistQueryView, c.orca_artist_query },
+    .{ c_api.ReleaseQueryV2View, c.orca_release_query_v2 },
+    .{ c_api.ReleaseFactsView, c.orca_release_facts_view },
+    .{ c_api.ArtistQueryV2View, c.orca_artist_query_v2 },
+    .{ c_api.GenreQueryView, c.orca_genre_query },
+    .{ c_api.GenreView, c.orca_genre_view },
+    .{ c_api.SearchLimitsView, c.orca_search_limits },
+    .{ c_api.SearchHitView, c.orca_search_hit_view },
+    .{ c_api.GenreCountView, c.orca_genre_count_view },
     .{ c_api.TrackSummaryView, c.orca_track_summary_view },
     .{ c_api.TrackDetailsView, c.orca_track_details_view },
     .{ c_api.PlayStatsView, c.orca_play_stats },
+    .{ c_api.ArtistTotalsView, c.orca_artist_totals },
     .{ c_api.ChangeCount, c.orca_change_count },
     .{ c_api.PlaylistView, c.orca_playlist_view },
+    .{ c_api.PlaylistQueryView, c.orca_playlist_query },
+    .{ c_api.PlaylistFactsView, c.orca_playlist_facts_view },
+    .{ c_api.PlaylistUpdateView, c.orca_playlist_update },
     .{ c_api.PlaylistEntryView, c.orca_playlist_entry_view },
     .{ c_api.PlaylistImport, c.orca_playlist_import },
     .{ c_api.ImageView, c.orca_image_view },
@@ -37,18 +62,26 @@ const struct_pairs = .{
     .{ c_api.TagWriteSkipView, c.orca_tag_write_skip_view },
     .{ c_api.TagWritePlanView, c.orca_tag_write_plan_view },
     .{ c_api.TagWriteFailureView, c.orca_tag_write_failure },
+    .{ c_api.TagWriteGenresView, c.orca_tag_write_genres_view },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.HealthItemView, c.orca_health_item_view },
     .{ c_api.HealthKindSummaryView, c.orca_health_kind_summary_view },
+    .{ c_api.HealthKindSummaryViewV2, c.orca_health_kind_summary_view_v2 },
+    .{ c_api.LibraryStatsView, c.orca_library_stats_view },
+    .{ c_api.ProviderSourceView, c.orca_provider_source_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
     .{ c_api.RootView, c.orca_root_view },
+    .{ c_api.FolderEntryView, c.orca_folder_entry_view },
     .{ c_api.DeviceView, c.orca_device_view },
+    .{ c_api.DeviceViewV2, c.orca_device_view_v2 },
     .{ c_api.QueueEntryView, c.orca_queue_entry_view },
     .{ c_api.QueueStats, c.orca_queue_stats },
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
     .{ c_api.PlayerStatus, c.orca_player_status },
     .{ c_api.ZoneStatus, c.orca_zone_status },
     .{ c_api.EqualizerView, c.orca_equalizer },
+    .{ c_api.ParametricFilterView, c.orca_parametric_filter },
+    .{ c_api.ParametricEqualizerView, c.orca_parametric_equalizer },
     .{ c_api.PcmFormatView, c.orca_pcm_format },
     .{ c_api.SignalPathView, c.orca_signal_path_view },
     .{ c_api.JobSnapshot, c.orca_job_snapshot },
@@ -113,6 +146,34 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_ARTIST_INFO_OUTCOME_";
+        pub const Tag = core.runtime.ArtistInfoOutcome;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ARTIST_PHOTO_SOURCE_";
+        pub const Tag = database.ArtistPhotoSource;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_DESCRIPTION_SOURCE_";
+        pub const Tag = database.ReleaseDescriptionSource;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ARTIST_LINK_KIND_";
+        pub const Tag = database.ArtistLinkKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_LYRICS_SOURCE_";
         pub const Tag = metadata.lyrics.Source;
         pub fn produce(tag: Tag) ?i64 {
@@ -162,6 +223,48 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_PLAYLIST_SORT_";
+        pub const Tag = c_api.PlaylistSortKey;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PLAYLIST_KIND_";
+        pub const Tag = database.PlaylistKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PLAYLIST_CREATOR_";
+        pub const Tag = database.PlaylistCreator;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_EXPLICIT_";
+        pub const Tag = metadata.Explicit;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportExplicit(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_SEARCH_KIND_";
+        pub const Tag = database.SearchKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportSearchKind(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_FOLDER_ENTRY_KIND_";
+        pub const Tag = database.FolderEntryKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportFolderEntryKind(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_FEEDBACK_";
         pub const Tag = database.Feedback;
         pub fn produce(tag: Tag) ?i64 {
@@ -197,6 +300,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_QUEUE_HISTORY_REASON_";
+        pub const Tag = core.runtime.QueueHistoryReason;
+        pub fn produce(tag: Tag) ?i64 {
+            return @intFromEnum(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_OUTPUT_";
         pub const Tag = audio.zone.OutputState;
         pub fn produce(tag: Tag) ?i64 {
@@ -211,6 +321,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_GAIN_SOURCE_";
+        pub const Tag = audio.processing.ReplayGainSource;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportReplayGainSource(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_SAMPLE_FORMAT_";
         pub const Tag = audio.pcm.SampleFormat;
         pub fn produce(tag: Tag) ?i64 {
@@ -222,6 +339,13 @@ const export_mappings = .{
         pub const Tag = audio.signal_path.Reason;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportSignalReason(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_PARAMETRIC_FILTER_";
+        pub const Tag = audio.dsp.FilterKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportFilterKind(tag);
         }
     },
     struct {
@@ -292,6 +416,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_PROVIDER_SOURCE_";
+        pub const Tag = core.provider_sources.ProviderSourceId;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportProviderSourceId(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_HEALTH_SEVERITY_";
         pub const fallback = "ORCA_HEALTH_SEVERITY_ERROR";
         pub const Tag = database.HealthSeverity;
@@ -304,6 +435,13 @@ const export_mappings = .{
         pub const Tag = database.HealthAction;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportHealthAction(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_DEVICE_KIND_";
+        pub const Tag = audio.backend.DeviceKind;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportDeviceKind(tag);
         }
     },
     struct {
@@ -362,6 +500,13 @@ const import_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_PARAMETRIC_FILTER_";
+        pub const Tag = audio.dsp.FilterKind;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importFilterKind(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_REPLAY_GAIN_";
         pub const Tag = audio.processing.ReplayGainMode;
         pub fn consume(value: u8) ?Tag {
@@ -386,6 +531,20 @@ const import_mappings = .{
     struct {
         pub const prefix = "ORCA_TRACK_SORT_";
         pub const Tag = c_api.TrackSortKey;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_ARTIST_SORT_";
+        pub const Tag = c_api.ArtistSortKey;
+        pub fn consume(value: u8) ?Tag {
+            return std.enums.fromInt(Tag, value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_GENRE_SORT_";
+        pub const Tag = c_api.GenreSortKey;
         pub fn consume(value: u8) ?Tag {
             return std.enums.fromInt(Tag, value);
         }
@@ -426,6 +585,27 @@ const import_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_RELEASE_ARTWORK_";
+        pub const Tag = c_api.ReleaseArtworkFilter;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReleaseArtworkFilter(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_RELEASE_KIND_";
+        pub const Tag = c_api.ReleaseKindFilter;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importReleaseKindFilter(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TRACK_FORMAT_";
+        pub const Tag = c_api.TrackFormatFilter;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importTrackFormatFilter(value);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_MATCH_MODE_";
         pub const Tag = core.runtime.MatchMode;
         pub fn consume(value: u8) ?Tag {
@@ -455,6 +635,12 @@ const non_enum_constants = [_][]const u8{
     "ORCA_EQUALIZER_MAX_GAIN_DB",
     "ORCA_EQUALIZER_MIN_PREAMP_DB",
     "ORCA_EQUALIZER_MAX_PREAMP_DB",
+    "ORCA_PARAMETRIC_MAX_FILTERS",
+    "ORCA_PARAMETRIC_MIN_FREQUENCY_HZ",
+    "ORCA_PARAMETRIC_MAX_FREQUENCY_HZ",
+    "ORCA_PARAMETRIC_MAX_GAIN_DB",
+    "ORCA_PARAMETRIC_MIN_PREAMP_DB",
+    "ORCA_PARAMETRIC_MAX_PREAMP_DB",
     "ORCA_SIGNAL_MAX_REASONS",
     "ORCA_TAG_WRITE_DIGEST_BYTES",
     "ORCA_CREDENTIAL_MAX_BYTES",
@@ -525,6 +711,7 @@ fn sameKind(comptime A: type, comptime B: type) bool {
         .int => |int| b == .int and b.int.signedness == int.signedness and b.int.bits == int.bits,
         .float => |float| b == .float and b.float.bits == float.bits,
         .pointer => b == .pointer,
+        .optional => |optional| @typeInfo(optional.child) == .pointer and b == .pointer,
         .array => |array| b == .array and b.array.len == array.len and sameKind(array.child, b.array.child),
         .@"struct", .@"union" => std.meta.activeTag(a) == std.meta.activeTag(b) and @sizeOf(A) == @sizeOf(B),
         else => false,
@@ -660,7 +847,7 @@ test "every value the C API produces equals the orca.h constant of the same name
 }
 
 test "every orca.h constant the C API accepts imports as the Zig value of the same name" {
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(1_000_000);
     var mismatches: usize = 0;
     inline for (import_mappings) |mapping| {
         inline for (@typeInfo(c).@"struct".decls) |decl| {
@@ -706,6 +893,20 @@ test "the equalizer and signal path limits orca.h declares are liborca's" {
     try std.testing.expectEqual(audio.dsp.max_preamp_db, @as(f32, c.ORCA_EQUALIZER_MAX_PREAMP_DB));
     try std.testing.expect(audio.dsp.SignalPath.max_reasons <= c.ORCA_SIGNAL_MAX_REASONS);
     try std.testing.expectEqual(@as(usize, c.ORCA_SIGNAL_MAX_REASONS), @typeInfo(@FieldType(c_api.SignalPathView, "reasons")).array.len);
+}
+
+test "the parametric equalizer limits orca.h declares are liborca's" {
+    try std.testing.expectEqual(audio.dsp.max_parametric_filters, c.ORCA_PARAMETRIC_MAX_FILTERS);
+    try std.testing.expectEqual(@as(usize, c.ORCA_PARAMETRIC_MAX_FILTERS), @typeInfo(@FieldType(c_api.ParametricEqualizerView, "filters")).array.len);
+    try std.testing.expectEqual(audio.dsp.min_filter_frequency_hz, @as(f32, c.ORCA_PARAMETRIC_MIN_FREQUENCY_HZ));
+    try std.testing.expectEqual(audio.dsp.max_filter_frequency_hz, @as(f32, c.ORCA_PARAMETRIC_MAX_FREQUENCY_HZ));
+    try std.testing.expectEqual(audio.dsp.max_filter_gain_db, @as(f32, c.ORCA_PARAMETRIC_MAX_GAIN_DB));
+    try std.testing.expectEqual(audio.dsp.min_filter_q, @as(f32, c.ORCA_PARAMETRIC_MIN_Q));
+    try std.testing.expectEqual(audio.dsp.max_filter_q, @as(f32, c.ORCA_PARAMETRIC_MAX_Q));
+    try std.testing.expectEqual(audio.dsp.min_shelf_q, @as(f32, c.ORCA_PARAMETRIC_MIN_SHELF_Q));
+    try std.testing.expectEqual(audio.dsp.max_shelf_q, @as(f32, c.ORCA_PARAMETRIC_MAX_SHELF_Q));
+    try std.testing.expectEqual(audio.dsp.min_parametric_preamp_db, @as(f32, c.ORCA_PARAMETRIC_MIN_PREAMP_DB));
+    try std.testing.expectEqual(audio.dsp.max_parametric_preamp_db, @as(f32, c.ORCA_PARAMETRIC_MAX_PREAMP_DB));
 }
 
 test "the tag-write digest orca.h declares is as long as liborca's" {
