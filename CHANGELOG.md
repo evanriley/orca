@@ -619,6 +619,12 @@
 
 ### Fixed
 
+- **A Track keeps its id when its file moves.** When an edit, a retag,
+  an accepted match or Match Album puts a file on another album or
+  position that no Track holds, liborca moves its Track there instead of
+  deleting it and adding a new one. The play queue, pending listens,
+  lyrics and frontends holding the id keep working, and orca-gtk still
+  marks the playing track after Match Album.
 - **Match Album stays on the album page.** In orca-gtk, when Match Album
   gives an album a new release id, its open page rebuilds under the new
   id instead of closing, Back and Forward follow it, and its grid tile is

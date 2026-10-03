@@ -166,8 +166,9 @@ defer page.deinit();
   `error.InvalidGenre` for a blank name, or `error.TrackNotFound`. See
   [database.md](database.md#genres).
 - `libraryEditTracks` returns `EditedTracks`: the Tracks the edited files
-  back afterwards. An edit that moves a track to another album or position
-  reprojects it under a new id.
+  back afterwards. An edit that moves a track to another album or a free
+  position keeps its id; one that moves it onto a position another Track
+  holds takes that Track's id.
 - `planTagWrite` returns a `TagWritePlan`: each file's `TagWriteChange`s with
   the `Provenance` of Orca's value, its `TagWriteGenres` when the user's
   genres replace the file's, the `TagWriteConflict`s it leaves out

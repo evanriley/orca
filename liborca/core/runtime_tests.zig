@@ -3483,7 +3483,7 @@ test "a rating and a playlist entry follow a track that a library edit moves to 
     const moved = try runtime.libraryEditTracks(library, &.{track_id}, &.{.{ .field = .album, .value = "Other Album" }});
     defer moved.deinit();
     try std.testing.expectEqual(@as(usize, 1), moved.ids.len);
-    try std.testing.expect(moved.ids[0] != track_id);
+    try std.testing.expectEqual(track_id, moved.ids[0]);
 
     const details = (try runtime.libraryTrackDetails(library, moved.ids[0])).?;
     defer details.deinit();
