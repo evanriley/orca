@@ -596,6 +596,9 @@
 
 ### Fixed
 
+- **Headless test audio.** `scripts/headless-audio.sh` no longer times
+  out waiting for WirePlumber: under `pipefail`, `pw-dump | grep -q`
+  failed whenever `grep` exited before `pw-dump` finished writing.
 - **A ten-band equalizer band turned back on no longer rings.** Turning
   bands off shortened the filter cascade but kept the history of the slots
   past its end, and a band turned on again later started from that stale

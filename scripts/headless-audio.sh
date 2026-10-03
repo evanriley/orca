@@ -76,7 +76,7 @@ done
     || fail "pipewire did not create its socket within 5 s; its log ends:" "$runtime/pipewire.log"
 
 wireplumber_connected() {
-    pw-dump 2>/dev/null | grep -q '"application.name": "WirePlumber"'
+    pw-dump 2>/dev/null | grep '"application.name": "WirePlumber"' >/dev/null
 }
 
 wireplumber >"$runtime/wireplumber.log" 2>&1 &
