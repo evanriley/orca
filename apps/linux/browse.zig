@@ -210,7 +210,7 @@ fn selectedRow(selection: ?*gtk.SingleSelection) ?*BrowseObject {
 
 /// A search and a browse scope are alternatives — liborca refuses to combine a
 /// full-text match with a relational filter — so entering one leaves the other.
-fn clearSearch(self: *App) void {
+pub fn clearSearch(self: *App) void {
     if (self.query.value.len == 0) return;
     self.query.clear(self.allocator);
     const entry = self.search_entry orelse return;

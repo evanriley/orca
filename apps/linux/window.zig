@@ -22,8 +22,11 @@ const health = @import("health.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const genres = @import("genres.zig");
+const folders = @import("folders.zig");
 const page_ui = @import("page.zig");
 const song_table = @import("song_table.zig");
+const song_filters = @import("song_filters.zig");
 const preferences = @import("preferences.zig");
 
 const App = app.App;
@@ -59,10 +62,13 @@ const sort_choices = [_]SortChoice{
     .{ .label = "Artist", .sort = .artist, .direction = .ascending },
     .{ .label = "Album", .sort = .album, .direction = .ascending },
     .{ .label = "Track Number", .sort = .track_number, .direction = .ascending },
-    .{ .label = "Loved", .sort = .loved, .direction = .ascending },
-    .{ .label = "Rating", .sort = .rating, .direction = .descending },
-    .{ .label = "Duration", .sort = .duration, .direction = .ascending },
     .{ .label = "Date Added", .sort = .date_added, .direction = .descending },
+    .{ .label = "Last Played", .sort = .last_played, .direction = .descending },
+    .{ .label = "Play Count", .sort = .play_count, .direction = .descending },
+    .{ .label = "Rating", .sort = .rating, .direction = .descending },
+    .{ .label = "Loved", .sort = .loved, .direction = .ascending },
+    .{ .label = "Year", .sort = .year, .direction = .descending },
+    .{ .label = "Duration", .sort = .duration, .direction = .ascending },
 };
 
 fn sortChoiceIndex(sort: liborca.TrackSort) c_uint {
@@ -72,6 +78,13 @@ fn sortChoiceIndex(sort: liborca.TrackSort) c_uint {
     return 0;
 }
 
+/// Numbers the rows by disc and track only where the order is the album's,
+/// and highlights the sorted column's title.
+fn showSortedColumn(self: *App) void {
+    self.songs.positions = self.browse.sort != .track_number and self.browse.sort != .album;
+    song_table.markSorted(&self.songs, if (self.browse.sort == .id) null else self.browse.sort);
+}
+
 pub fn showSort(self: *App) void {
     // Sorting the view or choosing an entry is indistinguishable from a user's
     // click to GTK, and their signals would arrive back as one.
@@ -79,6 +92,7 @@ pub fn showSort(self: *App) void {
     self.suppress_browse_signals = true;
     defer self.suppress_browse_signals = previous;
     if (self.sort_dropdown) |dropdown| gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
+    showSortedColumn(self);
     const view = self.songs.view orelse return;
     var chosen: ?*gtk.ColumnViewColumn = null;
     for (Column.all) |column| {
@@ -130,6 +144,7 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
         defer self.suppress_browse_signals = false;
         gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
     }
+    showSortedColumn(self);
     self.reload();
 }
 
@@ -197,6 +212,8 @@ pub const Page = enum(c_uint) {
     albums,
     artists,
     tracks,
+    genres,
+    folders,
     loved,
     health,
     matches,
@@ -205,11 +222,13 @@ pub const Page = enum(c_uint) {
     playlists,
     settings,
 
-    fn name(self: Page) [*:0]const u8 {
+    pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
             .albums => "albums",
             .artists => "artists",
             .tracks => "tracks",
+            .genres => genres.navigation_tag,
+            .folders => "folders",
             .loved => loved.navigation_tag,
             .health => "health",
             .matches => "matches",
@@ -220,11 +239,13 @@ pub const Page = enum(c_uint) {
         };
     }
 
-    fn title(self: Page) [*:0]const u8 {
+    pub fn title(self: Page) [*:0]const u8 {
         return switch (self) {
             .albums => "Albums",
             .artists => "Artists",
             .tracks => "Songs",
+            .genres => "Genres",
+            .folders => "Folders",
             .loved => "Loved",
             .health => "Health",
             .matches => "Matches",
@@ -253,6 +274,7 @@ fn pageNavigation(self: *App, page: Page) ?*adw.NavigationView {
     return switch (page) {
         .albums => self.albums_navigation,
         .artists => self.artists_navigation,
+        .genres => self.genres.navigation,
         .loved => self.loved.navigation,
         .playlists => self.playlists.navigation,
         else => null,
@@ -283,7 +305,7 @@ fn backPressed(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque
 
 /// `AdwSidebar` numbers items across sections, in the order `buildSidebar`
 /// appends them.
-const sidebar_pages = [_]Page{ .albums, .artists, .tracks, .loved, .playlists, .now_playing, .queue, .health, .matches };
+const sidebar_pages = [_]Page{ .albums, .artists, .tracks, .genres, .folders, .loved, .playlists, .now_playing, .queue, .health, .matches };
 
 fn sidebarIndex(page: Page) c_uint {
     const position = std.mem.indexOfScalar(Page, &sidebar_pages, page) orelse return gtk.INVALID_LIST_POSITION;
@@ -312,6 +334,8 @@ fn switchTo(self: *App, page: Page, remember_previous: bool) void {
     if (self.content_page) |content| adw.adw_navigation_page_set_title(content, page.title());
     syncSidebarSelection(self);
     if (page == .loved) loved.reload(self);
+    if (page == .genres) genres.shown(self);
+    if (page == .folders) folders.shown(self);
     if (page == .settings) preferences.show(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
@@ -335,11 +359,13 @@ pub fn showArtist(self: *App, artist_id: i64) void {
     artists.openArtist(self, navigation, artist_id);
 }
 
-fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const page = sidebarPage(index) orelse return;
+pub fn goTo(self: *App, page: Page) void {
     if (pageNavigation(self, page)) |navigation| _ = adw.adw_navigation_view_pop_to_tag(navigation, page.name());
     showPage(self, page);
+}
+
+fn sidebarActivated(_: ?*anyopaque, index: c_uint, data: ?*anyopaque) callconv(.c) void {
+    goTo(state(data), sidebarPage(index) orelse return);
 }
 
 fn sidebarItem(section: *adw.SidebarSection, title: [*:0]const u8, icon: [*:0]const u8) *adw.SidebarItem {
@@ -415,6 +441,8 @@ fn buildSidebar(self: *App) *gtk.Widget {
     _ = sidebarItem(library, "Albums", "media-optical-symbolic");
     _ = sidebarItem(library, "Artists", "avatar-default-symbolic");
     _ = sidebarItem(library, "Songs", "audio-x-generic-symbolic");
+    _ = sidebarItem(library, "Genres", "applications-multimedia-symbolic");
+    _ = sidebarItem(library, "Folders", "folder-symbolic");
     _ = sidebarItem(library, "Loved", feedback.filled_icon);
     adw.adw_sidebar_append(self.sidebar.?, library);
 
@@ -462,8 +490,20 @@ pub fn focusSearch(self: *App) void {
     _ = gtk.gtk_widget_grab_focus(gtk.cast(gtk.Widget, entry));
 }
 
+pub fn focusPageSearch(self: *App) void {
+    const entry: ?*gtk.Widget = switch (self.current_page) {
+        .albums => if (self.album_search_entry) |editable| gtk.cast(gtk.Widget, editable) else null,
+        .artists => self.artist_list_search,
+        .playlists => self.playlists.overview_search,
+        else => null,
+    };
+    const found = entry orelse return focusSearch(self);
+    goTo(self, self.current_page);
+    _ = gtk.gtk_widget_grab_focus(found);
+}
+
 fn buildTrackList(self: *App) *gtk.Widget {
-    const view = song_table.build(&self.songs, self, .{ .multiple = true, .sortable = true });
+    const view = song_table.build(&self.songs, self, .{ .multiple = true, .sortable = true, .config = &self.song_columns });
     _ = gtk.signalConnect(
         gtk.gtk_column_view_get_sorter(self.songs.view.?),
         "changed",
@@ -473,6 +513,7 @@ fn buildTrackList(self: *App) *gtk.Widget {
 
     const scroller = gtk.gtk_scrolled_window_new();
     self.scroller = scroller;
+    gtk.gtk_widget_add_css_class(scroller, "songs-tracks");
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
@@ -542,42 +583,62 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, buildWelcome(self), "welcome");
     _ = gtk.gtk_stack_add_named(self.tracks_body.?, no_results, "no-results");
 
-    const header = page_ui.header();
+    const search = gtk.gtk_search_entry_new();
+    self.search_entry = gtk.cast(gtk.Editable, search);
+    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search songs, artists, albums…");
+    gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, search), app.search_delay_ms);
+    gtk.gtk_widget_set_size_request(search, wide_search_width, -1);
+    gtk.gtk_widget_set_hexpand(search, gtk.true_);
+    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
+    _ = gtk.signalConnect(search, "activate", gtk.callback(searchActivated), self);
+    const search_field = page_ui.searchField(search, "Ctrl F");
+    gtk.gtk_widget_add_css_class(search_field, "songs-search");
+    gtk.gtk_widget_set_valign(search_field, gtk.ALIGN_CENTER);
+    const header = page_ui.headerWith(search_field);
+    header.add(song_filters.build(self));
+
     const title = page_ui.title("Songs");
+    gtk.gtk_widget_add_css_class(title.widget, "songs-title");
     self.tracks_meta = title.meta;
 
+    const list_toggle = gtk.gtk_toggle_button_new();
+    self.list_toggle = list_toggle;
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, list_toggle), "view-list-symbolic");
+    gtk.gtk_widget_set_tooltip_text(list_toggle, "Songs only");
+    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, list_toggle), gtk.true_);
     const browse_toggle = gtk.gtk_toggle_button_new();
     self.browse_toggle = browse_toggle;
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, browse_toggle), "view-dual-symbolic");
     gtk.gtk_widget_set_tooltip_text(browse_toggle, "Show artists and albums");
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.false_);
+    gtk.gtk_toggle_button_set_group(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.cast(gtk.ToggleButton, list_toggle));
     gtk.gtk_widget_set_visible(panes, gtk.false_);
     _ = gtk.signalConnect(browse_toggle, "toggled", gtk.callback(browseToggled), self);
-    gtk.gtk_widget_add_css_class(browse_toggle, "flat");
+    const view_switch = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_add_css_class(view_switch, "linked");
+    gtk.gtk_widget_add_css_class(view_switch, "view-switch");
+    gtk.gtk_widget_set_valign(view_switch, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, view_switch), list_toggle);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, view_switch), browse_toggle);
     const sort_label = gtk.gtk_label_new("Sort by");
     gtk.gtk_widget_add_css_class(sort_label, "meta");
     gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
     title.add(sort_label);
     title.add(buildSortDropdown(self));
-    title.add(browse_toggle);
-
-    const search = gtk.gtk_search_entry_new();
-    self.search_entry = gtk.cast(gtk.Editable, search);
-    gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, search), "Search songs");
-    gtk.gtk_widget_set_size_request(search, 260, -1);
-    _ = gtk.signalConnect(search, "search-changed", gtk.callback(searchChanged), self);
-    _ = gtk.signalConnect(search, "activate", gtk.callback(searchActivated), self);
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), search);
+    title.add(view_switch);
 
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), details.besideContent(self, header, page_ui.withTitle(title, body), .{ .selection = self.songs.selection.? }).widget);
     return view;
 }
 
-/// Below this width the sidebar folds away behind a back button, the browse
-/// panes give their room to the list, and the player bar tightens.
+/// Below this width the sidebar folds away behind a back button and the
+/// browse panes give their room to the list.
 const collapse_condition = "max-width: 760sp";
+const compact_condition = "max-width: 900sp";
+const crowded_condition = "max-width: 1100sp";
+const wide_search_width = 330;
+const narrow_search_width = 120;
 
 fn setBoolean(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const u8, value: bool) void {
     var boxed: gtk.GValue = .{};
@@ -595,52 +656,119 @@ fn setInt(breakpoint: *adw.Breakpoint, object: *anyopaque, property: [*:0]const 
     gtk.g_value_unset(&boxed);
 }
 
-fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
-    const condition = adw.adw_breakpoint_condition_parse(collapse_condition) orelse return;
-    const breakpoint = adw.adw_breakpoint_new(condition);
-    setBoolean(breakpoint, split, "collapsed", true);
-    if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
+/// Libadwaita applies only the last breakpoint that matches, so both carry
+/// these.
+fn tightenPlayerBar(self: *App, breakpoint: *adw.Breakpoint) void {
     if (self.now_playing_box) |box| setInt(breakpoint, box, "width-request", 0);
-    for (&self.transport_controls.values) |*controls| {
-        if (controls.scale) |scale| setInt(breakpoint, scale, "width-request", 120);
-    }
     if (self.format_slot) |slot| setBoolean(breakpoint, slot, "visible", false);
+    if (self.adjustments_label) |label| setBoolean(breakpoint, label, "visible", false);
     if (self.device_label) |label| setBoolean(breakpoint, label, "visible", false);
     if (self.device_icon) |icon| setBoolean(breakpoint, icon, "visible", true);
     if (self.volume_icon) |icon| setBoolean(breakpoint, icon, "visible", false);
     if (self.volume_scale) |scale| setBoolean(breakpoint, scale, "visible", false);
     if (self.volume_menu) |button| setBoolean(breakpoint, button, "visible", true);
-    if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", 120);
+}
+
+fn shortenSongsSearch(self: *App, breakpoint: *adw.Breakpoint) void {
+    if (self.search_entry) |entry| setInt(breakpoint, entry, "width-request", narrow_search_width);
+}
+
+fn overlayInspectorWhenCrowded(self: *App, window: *gtk.Widget) void {
+    const condition = adw.adw_breakpoint_condition_parse(crowded_condition) orelse return;
+    const breakpoint = adw.adw_breakpoint_new(condition);
+    _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(crowded), self);
+    _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(uncrowded), self);
+    adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
+}
+
+fn crowded(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.inspector_crowded = true;
+    details.refit(self);
+}
+
+fn uncrowded(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.inspector_crowded = false;
+    details.refit(self);
+}
+
+fn compactWhenNarrow(self: *App, window: *gtk.Widget) void {
+    const condition = adw.adw_breakpoint_condition_parse(compact_condition) orelse return;
+    const breakpoint = adw.adw_breakpoint_new(condition);
+    tightenPlayerBar(self, breakpoint);
+    shortenSongsSearch(self, breakpoint);
+    if (self.folders.pane) |pane| setBoolean(breakpoint, pane, "visible", false);
+    _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(compacted), self);
+    _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(uncompacted), self);
+    adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
+}
+
+fn compacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    page_ui.setCompact(self, true);
+    details.refit(self);
+    narrowTables(self, true);
+    albums.setNarrow(self);
+    artists.setNarrow(self);
+    playlists.setNarrow(self);
+    preferences.setNarrow(self);
+}
+
+fn uncompacted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    page_ui.setCompact(self, false);
+    details.refit(self);
+    narrowTables(self, false);
+    albums.setNarrow(self);
+    artists.setNarrow(self);
+    playlists.setNarrow(self);
+    preferences.setNarrow(self);
+}
+
+fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
+    const condition = adw.adw_breakpoint_condition_parse(collapse_condition) orelse return;
+    const breakpoint = adw.adw_breakpoint_new(condition);
+    setBoolean(breakpoint, split, "collapsed", true);
+    if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
+    if (self.list_toggle) |toggle| setBoolean(breakpoint, toggle, "active", true);
+    tightenPlayerBar(self, breakpoint);
+    shortenSongsSearch(self, breakpoint);
+    if (self.playlists.overview_search) |entry| setInt(breakpoint, entry, "width-request", 120);
     if (self.loved.stats) |stats| setBoolean(breakpoint, stats, "visible", false);
-    for ([_]*song_table.Table{ &self.songs, &self.loved.songs, &self.playlists.songs }) |table| {
-        for ([_]Column{ .album, .rating }) |column| {
-            if (table.header(column)) |header| setBoolean(breakpoint, header, "visible", false);
-        }
-    }
+    if (self.folders.pane) |pane| setBoolean(breakpoint, pane, "visible", false);
     _ = gtk.signalConnect(breakpoint, "apply", gtk.callback(narrowed), self);
     _ = gtk.signalConnect(breakpoint, "unapply", gtk.callback(widened), self);
     adw.adw_application_window_add_breakpoint(gtk.cast(adw.ApplicationWindow, window), breakpoint);
 }
 
+/// Done here rather than with breakpoint setters, which would put back the
+/// columns as they were when the window narrowed and undo a choice made since.
+fn narrowTables(self: *App, narrow: bool) void {
+    for ([_]*song_table.Table{ &self.songs, &self.loved.songs, &self.playlists.songs }) |table| song_table.setNarrow(table, narrow);
+}
+
 fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.window) |w| gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    page_ui.setCompact(self, true);
     details.setNarrow(self, true);
+    narrowTables(self, true);
     albums.setNarrow(self);
     artists.setNarrow(self);
     playlists.setNarrow(self);
-    nowplaying.setNarrow(self);
     preferences.setNarrow(self);
 }
 
 fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.window) |w| gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, w), "narrow");
+    page_ui.setCompact(self, false);
     details.setNarrow(self, false);
+    narrowTables(self, false);
     albums.setNarrow(self);
     artists.setNarrow(self);
     playlists.setNarrow(self);
-    nowplaying.setNarrow(self);
     preferences.setNarrow(self);
     syncSidebarSelection(self);
 }
@@ -667,6 +795,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, albums.build(self), Page.albums.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artists.build(self), Page.artists.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, buildTracksPage(self), Page.tracks.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, genres.build(self), Page.genres.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, folders.build(self), Page.folders.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, loved.build(self), Page.loved.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
@@ -695,6 +825,8 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     self.toasts = gtk.cast(adw.ToastOverlay, overlay);
     adw.adw_toast_overlay_set_child(self.toasts.?, root);
     adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), overlay);
+    overlayInspectorWhenCrowded(self, window);
+    compactWhenNarrow(self, window);
     adaptWhenNarrow(self, window, split);
     return window;
 }

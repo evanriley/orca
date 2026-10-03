@@ -19,18 +19,22 @@ const signal_path = @import("signal_path.zig");
 const song_table = @import("song_table.zig");
 const matches = @import("matches.zig");
 const jobs = @import("jobs.zig");
-const ratings = @import("ratings.zig");
 const lyrics = @import("lyrics.zig");
 const transport = @import("transport.zig");
+const page_ui = @import("page.zig");
+const nowplaying = @import("nowplaying.zig");
+const albums = @import("albums.zig");
+const artists = @import("artists.zig");
 
 const App = app.App;
 
-const panel_min_width: f64 = 300;
-const panel_max_width: f64 = 320;
+const details_width: f64 = 370;
+const signal_path_width: f64 = 420;
+const key_width = 98;
 const separator = " · ";
 const minus = "−";
 
-pub const panel_limit = app.open_album_page_limit + app.open_artist_page_limit + 3;
+pub const panel_limit = app.open_album_page_limit + app.open_artist_page_limit + 5;
 const proposal_slots = 3;
 
 /// Where a panel finds the Track it shows when nobody has chosen one.
@@ -39,11 +43,19 @@ pub const Source = union(enum) {
     /// An album page: the row last chosen, else the playing Track if it is one
     /// of these.
     ids: []const i64,
+    playing,
 };
 
 const Row = struct {
     root: *gtk.Widget,
     value: *gtk.Label,
+};
+
+const LinkRow = struct {
+    root: *gtk.Widget,
+    value: *gtk.Label,
+    link: *gtk.Widget,
+    link_label: *gtk.Label,
 };
 
 const Proposal = struct {
@@ -54,12 +66,21 @@ const Proposal = struct {
     dismiss: *gtk.Widget,
 };
 
+const StageView = struct {
+    tag: *gtk.Label,
+    lines: *gtk.Label,
+    tech: *gtk.Label,
+    revealer: *gtk.Widget,
+    chevron: *gtk.Widget,
+};
+
 pub const Panel = struct {
     self: *App,
     source: Source,
     split: *gtk.Widget,
     root: *gtk.Widget,
     toggles: *gtk.Widget,
+    overflow: *gtk.Widget,
     details_toggle: *gtk.Widget,
     lyrics_toggle: *gtk.Widget,
     signal_path_toggle: *gtk.Widget,
@@ -70,53 +91,150 @@ pub const Panel = struct {
     artist: *gtk.Widget,
     album: *gtk.Widget,
     audio_section: *gtk.Widget,
-    codec_line: Row,
-    format_line: Row,
-    bitrate_line: Row,
-    duration_line: Row,
+    format_row: Row,
+    sample_rate_row: Row,
+    channels_row: Row,
+    bitrate_row: Row,
+    duration_row: Row,
     loudness_missing: Row,
     integrated_row: Row,
     peak_row: Row,
     replay_gain_row: Row,
-    musicbrainz_row: Row,
-    recording_row: Row,
-    match_status: Row,
+    musicbrainz_row: LinkRow,
     acoustid_row: Row,
+    match_status: Row,
+    identifiers_button: *gtk.Widget,
+    identifiers: *gtk.Widget,
+    recording_row: Row,
     release_id_row: Row,
     release_group_id_row: Row,
     release_track_id_row: Row,
     album_artist_id_row: Row,
     proposals: [proposal_slots]Proposal,
     proposal_ids: [proposal_slots]i64 = @splat(0),
-    recording_link: *gtk.Widget,
     review_button: *gtk.Widget,
     find_button: *gtk.Widget,
     verify_button: *gtk.Widget,
     metadata_section: *gtk.Widget,
     album_artist_row: Row,
+    album_row: Row,
     date_row: Row,
+    genre_row: Row,
     track_row: Row,
     disc_row: Row,
     compilation_row: Row,
-    feedback_row: Row,
-    rating_stars: *gtk.Widget,
+    explicit_row: Row,
     plays_row: Row,
     last_played_row: Row,
-    size_line: Row,
-    path_label: *gtk.Label,
+    folder_row: Row,
+    file_row: Row,
+    size_row: Row,
+    modified_row: Row,
+    added_row: Row,
     copy_button: *gtk.Widget,
+    album_view: Album,
     signal_status: *gtk.Label,
-    signal_verdict: *gtk.Widget,
+    signal_content: *gtk.Widget,
     signal_dot: *gtk.Widget,
     signal_verdict_label: *gtk.Label,
-    signal_flow: *gtk.Widget,
-    signal_note: *gtk.Widget,
+    signal_chain_label: *gtk.Label,
+    signal_stages: [signal_path.all_stages.len]StageView,
+    signal_footer_label: *gtk.Label,
+    signal_block_frames: ?u32 = null,
     /// The Track on screen, and whether that is stale since the library changed.
     shown: ?i64 = null,
     stale: bool = false,
     chosen: ?i64 = null,
     path: ?[:0]u8 = null,
+    /// The album page's Release, shown while no Track is.
+    album_release: ?i64 = null,
+    artist_view: Artist,
+    artist_id: ?i64 = null,
+    /// Shows the Artist even while one of the page's Tracks plays, until a
+    /// Track is chosen.
+    artist_pinned: bool = false,
+    playlist_view: PlaylistView,
+    playlist_id: ?i64 = null,
 };
+
+const PlaylistView = struct {
+    content: *gtk.Widget,
+    title: *gtk.Widget,
+    subtitle: *gtk.Widget,
+    creator: *gtk.Widget,
+    tracks_row: Row,
+    unavailable_row: Row,
+    duration_row: Row,
+    mixed_row: Row,
+    genre_row: Row,
+    created_row: Row,
+    updated_row: Row,
+    description_section: *gtk.Widget,
+    description: *gtk.Widget,
+    tags_section: *gtk.Widget,
+    tags: *gtk.Widget,
+};
+
+const Album = struct {
+    content: *gtk.Widget,
+    title: *gtk.Widget,
+    artist_row: Row,
+    date_row: Row,
+    genre_row: Row,
+    tracks_row: Row,
+    duration_row: Row,
+    format_row: Row,
+    identity_section: *gtk.Widget,
+    musicbrainz_row: Row,
+    description_section: *gtk.Widget,
+    description: *gtk.Widget,
+};
+
+const Artist = struct {
+    content: *gtk.Widget,
+    title: *gtk.Widget,
+    genre_row: Row,
+    years_row: Row,
+    albums_row: Row,
+    tracks_row: Row,
+    library_row: Row,
+    biography_section: *gtk.Widget,
+    biography: *gtk.Widget,
+    biography_link: *gtk.Widget,
+    biography_licence: *gtk.Widget,
+    links_section: *gtk.Widget,
+    links: *gtk.Widget,
+    fetch: *gtk.Widget,
+};
+
+const link_order = [_]liborca.ArtistLinkKind{
+    .official, .wikipedia, .musicbrainz, .discogs,  .bandcamp, .soundcloud,
+    .youtube,  .spotify,   .apple_music, .tidal,    .deezer,   .instagram,
+    .x,        .facebook,  .tiktok,      .wikidata, .lastfm,
+};
+
+fn linkName(kind: liborca.ArtistLinkKind) [*:0]const u8 {
+    return switch (kind) {
+        .official => "Official Website",
+        .wikipedia => "Wikipedia",
+        .wikidata => "Wikidata",
+        .musicbrainz => "MusicBrainz",
+        .discogs => "Discogs",
+        .lastfm => "Last.fm",
+        .bandcamp => "Bandcamp",
+        .soundcloud => "SoundCloud",
+        .youtube => "YouTube",
+        .spotify => "Spotify",
+        .apple_music => "Apple Music",
+        .tidal => "TIDAL",
+        .deezer => "Deezer",
+        .instagram => "Instagram",
+        .x => "X (Twitter)",
+        .facebook => "Facebook",
+        .tiktok => "TikTok",
+        .other => "Website",
+    };
+}
 
 fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
@@ -126,8 +244,12 @@ fn panelData(data: ?*anyopaque) *Panel {
     return @ptrCast(@alignCast(data.?));
 }
 
+fn overlays(self: *const App) bool {
+    return self.window_narrow or self.header_compact or self.inspector_crowded;
+}
+
 pub fn shownMode(self: *const App) app.Sidebar {
-    if (self.window_narrow and !self.inspector_overlaid) return .hidden;
+    if (overlays(self) and !self.inspector_overlaid) return .hidden;
     return self.sidebar_page;
 }
 
@@ -137,13 +259,22 @@ pub fn setNarrow(self: *App, narrow: bool) void {
     applyVisibility(self);
 }
 
+pub fn refit(self: *App) void {
+    self.inspector_overlaid = false;
+    applyVisibility(self);
+}
+
 pub fn toggle(self: *App) void {
     showSidebar(self, if (shownMode(self) == .details) .hidden else .details);
 }
 
+pub fn toggleSignalPath(self: *App) void {
+    showSidebar(self, if (shownMode(self) == .signal_path) .hidden else .signal_path);
+}
+
 pub fn showSidebar(self: *App, sidebar: app.Sidebar) void {
     if (sidebar == shownMode(self)) return;
-    if (sidebar == .hidden and self.window_narrow) {
+    if (sidebar == .hidden and overlays(self)) {
         self.inspector_overlaid = false;
     } else {
         self.inspector_overlaid = true;
@@ -180,6 +311,7 @@ pub fn applyVisibility(self: *App) void {
         showMode(panel, mode);
         update(panel);
     }
+    nowplaying.placePanel(self);
     lyrics.sync(self);
     if (mode == .signal_path) transport.refreshSignalPath(self);
 }
@@ -187,11 +319,17 @@ pub fn applyVisibility(self: *App) void {
 fn showMode(panel: *Panel, mode: app.Sidebar) void {
     const split = gtk.cast(adw.OverlaySplitView, panel.split);
     if (mode != .hidden) gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, panel.root), pageName(mode));
-    adw.adw_overlay_split_view_set_collapsed(split, boolean(panel.self.window_narrow));
+    const overlaid = overlays(panel.self);
+    const width = if (mode == .signal_path) signal_path_width else details_width;
+    adw.adw_overlay_split_view_set_min_sidebar_width(split, width);
+    adw.adw_overlay_split_view_set_max_sidebar_width(split, width);
+    adw.adw_overlay_split_view_set_collapsed(split, boolean(overlaid));
     adw.adw_overlay_split_view_set_show_sidebar(split, boolean(mode != .hidden));
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.details_toggle), boolean(mode == .details));
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.lyrics_toggle), boolean(mode == .lyrics));
     gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, panel.signal_path_toggle), boolean(mode == .signal_path));
+    gtk.gtk_widget_set_visible(panel.toggles, boolean(!panel.self.window_narrow));
+    gtk.gtk_widget_set_visible(panel.overflow, boolean(panel.self.window_narrow));
 }
 
 fn detailsToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -245,26 +383,33 @@ pub fn selectionChanged(model: ?*anyopaque, _: c_uint, _: c_uint, data: ?*anyopa
         const panel = maybe orelse continue;
         switch (panel.source) {
             .selection => |selection| if (@as(?*anyopaque, selection) == model) update(panel),
-            .ids => {},
+            .ids, .playing => {},
         }
     }
 }
 
 pub fn choose(panel: *Panel, track_id: i64) void {
     panel.chosen = track_id;
+    panel.artist_pinned = false;
     update(panel);
 }
 
 fn wantedTrack(panel: *Panel) ?i64 {
     const self = panel.self;
     switch (panel.source) {
-        .selection => |selection| return song_table.firstSelected(selection) orelse self.shown_track_id,
+        .selection => |selection| {
+            const selected = song_table.firstSelected(selection);
+            if (panel.playlist_id != null) return selected;
+            return selected orelse self.shown_track_id;
+        },
         .ids => |ids| {
             if (panel.chosen) |chosen| return chosen;
+            if (panel.artist_pinned) return null;
             const playing = self.shown_track_id orelse return null;
             for (ids) |id| if (id == playing) return playing;
             return null;
         },
+        .playing => return self.shown_track_id,
     }
 }
 
@@ -280,19 +425,297 @@ fn update(panel: *Panel) void {
 fn show(panel: *Panel, track_id: ?i64) void {
     const self = panel.self;
     const library = self.library orelse return showPlaceholder(panel);
-    const id = track_id orelse return showPlaceholder(panel);
+    const id = track_id orelse return showAlbumOrPlaceholder(panel);
     const details = (self.runtime.libraryTrackDetails(library, id) catch null) orelse
         return showPlaceholder(panel);
     defer details.deinit();
     populate(panel, details);
-    gtk.gtk_widget_set_visible(panel.placeholder, gtk.false_);
-    gtk.gtk_widget_set_visible(panel.content, gtk.true_);
+    showOnly(panel, panel.content);
+}
+
+fn showOnly(panel: *Panel, shown: *gtk.Widget) void {
+    for ([_]*gtk.Widget{ panel.placeholder, panel.content, panel.album_view.content, panel.artist_view.content, panel.playlist_view.content }) |view|
+        gtk.gtk_widget_set_visible(view, boolean(view == shown));
 }
 
 fn showPlaceholder(panel: *Panel) void {
-    gtk.gtk_widget_set_visible(panel.placeholder, gtk.true_);
-    gtk.gtk_widget_set_visible(panel.content, gtk.false_);
+    showOnly(panel, panel.placeholder);
     setPath(panel, null);
+}
+
+fn showAlbumOrPlaceholder(panel: *Panel) void {
+    if (panel.playlist_id != null) {
+        if (!populatePlaylist(panel)) return showPlaceholder(panel);
+        showOnly(panel, panel.playlist_view.content);
+    } else if (panel.artist_id != null) {
+        if (!populateArtist(panel)) return showPlaceholder(panel);
+        showOnly(panel, panel.artist_view.content);
+    } else {
+        if (!populateAlbum(panel)) return showPlaceholder(panel);
+        showOnly(panel, panel.album_view.content);
+    }
+    setPath(panel, null);
+}
+
+fn populateAlbum(panel: *Panel) bool {
+    const self = panel.self;
+    const release_id = panel.album_release orelse return false;
+    const library = self.library orelse return false;
+    const release = (self.runtime.libraryRelease(library, release_id) catch null) orelse return false;
+    defer release.deinit(self.allocator);
+    const album = panel.album_view;
+    var buffer: [1024]u8 = undefined;
+    const title = if (release.title.len != 0) release.title else "Unknown album";
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, album.title), strings.terminated(&buffer, title).ptr);
+
+    _ = setRow(album.artist_row, if (release.album_artist.len != 0) strings.terminated(&buffer, release.album_artist) else null);
+    var date_buffer: [64]u8 = undefined;
+    _ = setRow(album.date_row, if (release.release_date) |date| (if (date.len != 0) strings.terminated(&date_buffer, date) else null) else null);
+    var genre_buffer: [256]u8 = undefined;
+    _ = setRow(album.genre_row, albumGenres(panel, release_id, &genre_buffer));
+    var tracks_buffer: [32]u8 = undefined;
+    _ = setRow(album.tracks_row, strings.format(&tracks_buffer, "{d}", .{release.track_count}));
+    var duration_buffer: [32]u8 = undefined;
+    _ = setRow(album.duration_row, if (release.total_duration_ms > 0)
+        strings.format(&duration_buffer, "{d} min", .{albums.minutesOf(release.total_duration_ms)})
+    else
+        null);
+    var format_buffer: [64]u8 = undefined;
+    const format = albums.releaseFormat(&format_buffer, &release);
+    _ = setRow(album.format_row, if (format.len != 0) format else null);
+
+    var stored = self.runtime.libraryReleaseInfo(library, release_id) catch null;
+    defer if (stored) |*info| info.deinit();
+    const record = if (stored) |info| info.record else null;
+    gtk.gtk_widget_set_visible(album.identity_section, boolean(record != null));
+    if (record) |found| _ = setRow(album.musicbrainz_row, if (found.musicbrainz_release_id != null) "Matched" else "Not matched");
+    const description: []const u8 = if (record) |found| found.description orelse "" else "";
+    gtk.gtk_widget_set_visible(album.description_section, boolean(description.len != 0));
+    var description_buffer: [4096]u8 = undefined;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, album.description), strings.terminated(&description_buffer, description).ptr);
+    return true;
+}
+
+fn albumGenres(panel: *Panel, release_id: i64, buffer: []u8) ?[:0]const u8 {
+    const self = panel.self;
+    const library = self.library orelse return null;
+    const genres = self.runtime.libraryReleaseGenres(library, release_id, 2) catch return null;
+    defer genres.deinit();
+    if (genres.items.len == 0) return null;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    for (genres.items, 0..) |genre, index| {
+        if (index != 0) writer.writeAll(" / ") catch {};
+        writer.writeAll(genre.name) catch {};
+    }
+    return finish(buffer, &writer);
+}
+
+/// Shows `release_id` while the panel shows no Track.
+pub fn showAlbum(panel: *Panel, release_id: i64) void {
+    panel.album_release = release_id;
+    panel.stale = true;
+    update(panel);
+}
+
+pub fn showPlaylist(panel: *Panel, playlist_id: i64) void {
+    panel.playlist_id = playlist_id;
+    panel.stale = true;
+    update(panel);
+}
+
+fn populatePlaylist(panel: *Panel) bool {
+    const self = panel.self;
+    const playlist_id = panel.playlist_id orelse return false;
+    const library = self.library orelse return false;
+    const summary = self.runtime.libraryPlaylist(library, playlist_id) catch return false;
+    defer summary.deinit(self.runtime.allocator);
+    const view = panel.playlist_view;
+    var buffer: [1024]u8 = undefined;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.title), strings.terminated(&buffer, summary.name).ptr);
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.subtitle), if (summary.kind == .smart) "Smart Playlist" else "Playlist");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.creator), switch (summary.creator) {
+        .user => "You",
+        .imported => "Imported from a file",
+    });
+
+    var tracks_buffer: [32]u8 = undefined;
+    _ = setRow(view.tracks_row, strings.format(&tracks_buffer, "{d}", .{summary.entries}));
+    var unavailable_buffer: [32]u8 = undefined;
+    const missing = summary.entries -| summary.available;
+    _ = setRow(view.unavailable_row, if (missing != 0) strings.format(&unavailable_buffer, "{d}", .{missing}) else null);
+    var duration_buffer: [32]u8 = undefined;
+    var duration_text: [40]u8 = undefined;
+    _ = setRow(view.duration_row, if (summary.duration_ms > 0)
+        strings.terminated(&duration_text, strings.totalDuration(&duration_buffer, summary.duration_ms))
+    else
+        null);
+    _ = setRow(view.mixed_row, if (summary.entries == 0) null else if (summary.mixed_artists) "Yes" else "No");
+    var genre_buffer: [256]u8 = undefined;
+    _ = setRow(view.genre_row, genresText(&genre_buffer, summary.top_genres));
+    var created_buffer: [64]u8 = undefined;
+    _ = setRow(view.created_row, dateText(&created_buffer, summary.created_at));
+    var updated_buffer: [64]u8 = undefined;
+    _ = setRow(view.updated_row, dateText(&updated_buffer, summary.updated_at));
+
+    gtk.gtk_widget_set_visible(view.description_section, boolean(summary.description.len != 0));
+    var description_buffer: [4096]u8 = undefined;
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.description), strings.terminated(&description_buffer, summary.description).ptr);
+
+    const tags = gtk.cast(adw.WrapBox, view.tags);
+    adw.adw_wrap_box_remove_all(tags);
+    for (summary.tags) |tag| {
+        var tag_buffer: [256]u8 = undefined;
+        const chip = gtk.gtk_label_new(strings.terminated(&tag_buffer, tag).ptr);
+        gtk.gtk_widget_add_css_class(chip, "tag-chip");
+        adw.adw_wrap_box_append(tags, chip);
+    }
+    gtk.gtk_widget_set_visible(view.tags_section, boolean(summary.tags.len != 0));
+    return true;
+}
+
+fn dateText(buffer: []u8, unix_seconds: i64) ?[:0]const u8 {
+    if (unix_seconds <= 0) return null;
+    const moment = gtk.g_date_time_new_from_unix_local(unix_seconds) orelse return null;
+    defer gtk.g_date_time_unref(moment);
+    const text = gtk.g_date_time_format(moment, "%-d %b %Y") orelse return null;
+    defer gtk.g_free(text);
+    return strings.terminated(buffer, std.mem.span(text));
+}
+
+/// Redraws the panels showing `release_id` now that its info is stored.
+pub fn albumInfoChanged(self: *App, release_id: i64) void {
+    for (self.details_panels) |maybe| {
+        const panel = maybe orelse continue;
+        if (panel.album_release != release_id or panel.shown != null) continue;
+        panel.stale = true;
+        update(panel);
+    }
+}
+
+fn populateArtist(panel: *Panel) bool {
+    const self = panel.self;
+    const artist_id = panel.artist_id orelse return false;
+    const library = self.library orelse return false;
+    const artist = (self.runtime.libraryArtist(library, artist_id) catch null) orelse return false;
+    defer artist.deinit(self.allocator);
+    const view = panel.artist_view;
+    var buffer: [1024]u8 = undefined;
+    const name = if (artist.name.len != 0) artist.name else "Unknown Artist";
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.title), strings.terminated(&buffer, name).ptr);
+
+    var genre_buffer: [512]u8 = undefined;
+    _ = setRow(view.genre_row, artistGenres(panel, artist_id, &genre_buffer));
+    var albums_buffer: [32]u8 = undefined;
+    _ = setRow(view.albums_row, strings.format(&albums_buffer, "{d}", .{artist.release_count}));
+    var tracks_buffer: [32]u8 = undefined;
+    _ = setRow(view.tracks_row, strings.format(&tracks_buffer, "{d}", .{artist.track_count}));
+    var library_buffer: [48]u8 = undefined;
+    _ = setRow(view.library_row, strings.format(&library_buffer, "{d} {s}", .{
+        artist.track_count,
+        if (artist.track_count == 1) "track" else "tracks",
+    }));
+
+    var stored = self.runtime.libraryArtistInfo(library, artist_id) catch null;
+    defer if (stored) |*info| info.deinit();
+    const record = if (stored) |info| info.record else null;
+    var years_buffer: [48]u8 = undefined;
+    _ = setRow(view.years_row, if (record) |found| yearsText(&years_buffer, found) else null);
+
+    const biography = std.mem.trim(u8, if (record) |found| found.biography orelse "" else "", " \n");
+    gtk.gtk_widget_set_visible(view.biography_section, boolean(biography.len != 0));
+    if (biography.len != 0) {
+        const owned = self.allocator.dupeZ(u8, biography) catch null;
+        defer if (owned) |text| self.allocator.free(text);
+        gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.biography), if (owned) |text| text.ptr else "");
+        const url = record.?.biography_url orelse "";
+        gtk.gtk_widget_set_visible(view.biography_link, boolean(url.len != 0));
+        if (url.len != 0) gtk.gtk_link_button_set_uri(gtk.cast(gtk.LinkButton, view.biography_link), strings.terminated(&buffer, url).ptr);
+        const licence = record.?.biography_licence orelse "";
+        gtk.gtk_widget_set_visible(view.biography_licence, boolean(licence.len != 0));
+        gtk.gtk_label_set_text(gtk.cast(gtk.Label, view.biography_licence), strings.terminated(&buffer, licence).ptr);
+    }
+
+    while (gtk.gtk_widget_get_first_child(view.links)) |child| gtk.gtk_box_remove(gtk.cast(gtk.Box, view.links), child);
+    var shown_links: usize = 0;
+    if (record != null) {
+        var links = self.runtime.libraryArtistLinks(library, artist_id) catch null;
+        defer if (links) |*found| found.deinit();
+        if (links) |found| for (link_order) |kind| {
+            for (found.items) |link| {
+                if (link.kind != kind or link.url.len == 0) continue;
+                gtk.gtk_box_append(gtk.cast(gtk.Box, view.links), newExternalLink(strings.terminated(&buffer, link.url).ptr, linkName(kind)));
+                shown_links += 1;
+                break;
+            }
+        };
+    }
+    gtk.gtk_widget_set_visible(view.links_section, boolean(shown_links != 0));
+    gtk.gtk_widget_set_visible(view.fetch, boolean(record == null));
+    gtk.gtk_widget_set_sensitive(view.fetch, boolean(!artists.infoPending(self, artist_id)));
+    return true;
+}
+
+fn artistGenres(panel: *Panel, artist_id: i64, buffer: []u8) ?[:0]const u8 {
+    const self = panel.self;
+    const library = self.library orelse return null;
+    const genres = self.runtime.libraryArtistGenres(library, artist_id, 3) catch return null;
+    defer genres.deinit();
+    if (genres.items.len == 0) return null;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    for (genres.items, 0..) |genre, index| {
+        if (index != 0) writer.writeAll("\n") catch {};
+        writer.writeAll(genre.name) catch {};
+    }
+    return finish(buffer, &writer);
+}
+
+fn yearsText(buffer: []u8, record: liborca.ArtistInfoRecord) ?[:0]const u8 {
+    const begin: u32 = @intCast(@max(record.begin_year orelse return null, 0));
+    if (!record.ended) return strings.format(buffer, "{d} – present", .{begin});
+    const end: u32 = @intCast(@max(record.end_year orelse return strings.format(buffer, "{d}", .{begin}), 0));
+    return strings.format(buffer, "{d} – {d}", .{ begin, end });
+}
+
+fn newExternalLink(uri: [*:0]const u8, name: [*:0]const u8) *gtk.Widget {
+    const link = gtk.gtk_link_button_new_with_label(uri, name);
+    const inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
+    const label = gtk.gtk_label_new(name);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), gtk.gtk_image_new_from_icon_name("adw-external-link-symbolic"));
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, link), inner);
+    gtk.gtk_widget_add_css_class(link, "inspector-link");
+    gtk.gtk_widget_set_halign(link, gtk.ALIGN_START);
+    return link;
+}
+
+pub fn showArtist(panel: *Panel, artist_id: i64) void {
+    panel.artist_id = artist_id;
+    panel.stale = true;
+    update(panel);
+}
+
+pub fn revealArtist(panel: *Panel) void {
+    panel.chosen = null;
+    panel.artist_pinned = true;
+    panel.stale = true;
+    showSidebar(panel.self, .details);
+    update(panel);
+}
+
+pub fn artistInfoChanged(self: *App, artist_id: i64) void {
+    for (self.details_panels) |maybe| {
+        const panel = maybe orelse continue;
+        if (panel.artist_id != artist_id or panel.shown != null) continue;
+        panel.stale = true;
+        update(panel);
+    }
+}
+
+fn fetchArtistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    const artist_id = panel.artist_id orelse return;
+    artists.requestInfo(panel.self, artist_id, true);
+    gtk.gtk_widget_set_sensitive(panel.artist_view.fetch, boolean(!artists.infoPending(panel.self, artist_id)));
 }
 
 /// Draws `path`, as `transport.refreshSignalPath` read it, in every panel;
@@ -300,148 +723,272 @@ fn showPlaceholder(panel: *Panel) void {
 /// briefly, so the panels never read it themselves.
 pub fn showSignalPath(self: *App, path: ?liborca.SignalPath) void {
     if (shownMode(self) != .signal_path) return;
-    for (self.details_panels) |maybe| drawSignalPath(maybe orelse continue, path);
+    const context: signal_path.Context = .{
+        .title = labelText(self.now_playing_title),
+        .subtitle = labelText(self.now_playing_detail),
+        .device = transport.deviceName(self),
+        .replay_gain_mode = self.runtime.playerReplayGainMode(self.player) catch .off,
+    };
+    for (self.details_panels) |maybe| drawSignalPath(maybe orelse continue, path, context);
 }
 
-fn drawSignalPath(panel: *Panel, maybe_path: ?liborca.SignalPath) void {
-    const flow = gtk.cast(gtk.Box, panel.signal_flow);
-    while (gtk.gtk_widget_get_first_child(panel.signal_flow)) |child| gtk.gtk_box_remove(flow, child);
-    const path = maybe_path orelse return showSignalStatus(panel, "Signal path unavailable");
-    var stage_buffer: [signal_path.max_stages]signal_path.Stage = undefined;
-    const stages = signal_path.stages(path, &stage_buffer);
-    if (stages.len == 0) return showSignalStatus(panel, signal_path.nothing_playing);
-    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, panel.signal_status), gtk.false_);
-    gtk.gtk_widget_set_visible(panel.signal_note, gtk.true_);
+fn labelText(label: ?*gtk.Label) []const u8 {
+    return std.mem.span(gtk.gtk_label_get_text(label orelse return ""));
+}
 
-    var buffer: [256]u8 = undefined;
+fn drawSignalPath(panel: *Panel, maybe_path: ?liborca.SignalPath, context: signal_path.Context) void {
+    const path = maybe_path orelse return showSignalStatus(panel, "Signal path unavailable");
+    if (path.source == null) return showSignalStatus(panel, signal_path.nothing_playing);
+    panel.signal_block_frames = path.device_quantum_frames;
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, panel.signal_status), gtk.false_);
+    gtk.gtk_widget_set_visible(panel.signal_content, gtk.true_);
+
+    var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
     signal_path.writeVerdict(&writer, path) catch {};
-    const verdict = finish(&buffer, &writer);
-    gtk.gtk_label_set_text(panel.signal_verdict_label, verdict.ptr);
-    gtk.gtk_widget_set_visible(panel.signal_verdict, boolean(verdict.len != 0));
-    if (path.bit_perfect_eligible)
-        gtk.gtk_widget_add_css_class(panel.signal_dot, "bit-perfect")
+    if (writer.end == 0) writer.writeAll("No output open") catch {};
+    gtk.gtk_label_set_text(panel.signal_verdict_label, finish(&buffer, &writer).ptr);
+    writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeChain(&writer, path, context.device) catch {};
+    gtk.gtk_label_set_text(panel.signal_chain_label, finish(&buffer, &writer).ptr);
+    if (signal_path.native(path))
+        gtk.gtk_widget_add_css_class(panel.signal_dot, "native")
     else
-        gtk.gtk_widget_remove_css_class(panel.signal_dot, "bit-perfect");
+        gtk.gtk_widget_remove_css_class(panel.signal_dot, "native");
 
-    for (stages, 0..) |stage, index| {
+    for (signal_path.all_stages, panel.signal_stages) |stage, view| {
         writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-        signal_path.writeStage(&writer, path, stage) catch {};
-        gtk.gtk_box_append(flow, stageRow(stage, finish(&buffer, &writer), index + 1 < stages.len));
+        signal_path.writeTag(&writer, path, stage) catch {};
+        gtk.gtk_label_set_text(view.tag, finish(&buffer, &writer).ptr);
+        writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+        signal_path.writeLines(&writer, path, stage, context) catch {};
+        gtk.gtk_label_set_text(view.lines, finish(&buffer, &writer).ptr);
+        if (signal_path.isLive(stage)) {
+            writeLiveTech(panel, stage, view);
+        } else {
+            writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+            signal_path.writeTech(&writer, path, stage) catch {};
+            gtk.gtk_label_set_text(view.tech, finish(&buffer, &writer).ptr);
+        }
     }
+
+    writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeFooter(&writer, path) catch {};
+    gtk.gtk_label_set_text(panel.signal_footer_label, finish(&buffer, &writer).ptr);
+}
+
+fn writeLiveTech(panel: *Panel, stage: signal_path.Stage, view: StageView) void {
+    const self = panel.self;
+    const snapshot = self.runtime.playerSnapshot(self.player) catch null;
+    const stats = if (self.zone) |zone| self.runtime.zoneStats(zone) catch null else null;
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeLiveTech(&writer, stage, panel.signal_block_frames, snapshot, stats) catch {};
+    gtk.gtk_label_set_text(view.tech, finish(&buffer, &writer).ptr);
 }
 
 fn showSignalStatus(panel: *Panel, text: [*:0]const u8) void {
     gtk.gtk_label_set_text(panel.signal_status, text);
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, panel.signal_status), gtk.true_);
-    gtk.gtk_widget_set_visible(panel.signal_verdict, gtk.false_);
-    gtk.gtk_widget_set_visible(panel.signal_note, gtk.false_);
+    gtk.gtk_widget_set_visible(panel.signal_content, gtk.false_);
 }
 
 fn stageIcon(stage: signal_path.Stage) [*:0]const u8 {
     return switch (stage) {
-        .source => "audio-x-generic-symbolic",
-        .replay_gain => "multimedia-volume-control-symbolic",
-        .equalizer => "emblem-system-symbolic",
-        .crossfeed => "audio-headphones-symbolic",
-        .volume => "audio-volume-high-symbolic",
-        .output => "audio-card-symbolic",
-        .device => "audio-speakers-symbolic",
+        .source => "x-office-document-symbolic",
+        .gain => "multimedia-volume-control-symbolic",
+        .dsp => "orca-pulse-symbolic",
+        .engine => "emblem-system-symbolic",
+        .output => "audio-headphones-symbolic",
     };
 }
 
-fn stageRow(stage: signal_path.Stage, detail: [:0]const u8, followed: bool) *gtk.Widget {
+fn expandStage(panel: *Panel, index: usize, expanded: bool) void {
+    const view = panel.signal_stages[index];
+    const stage = signal_path.all_stages[index];
+    if (expanded and signal_path.isLive(stage)) writeLiveTech(panel, stage, view);
+    gtk.gtk_revealer_set_reveal_child(gtk.cast(gtk.Revealer, view.revealer), boolean(expanded));
+    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, view.chevron), if (expanded) "pan-down-symbolic" else "go-next-symbolic");
+    gtk.gtk_widget_set_tooltip_text(view.chevron, if (expanded) "Hide details" else "Show details");
+    gtk.gtk_accessible_update_state(gtk.cast(gtk.Accessible, view.chevron), gtk.ACCESSIBLE_STATE_EXPANDED, @as(c_int, boolean(expanded)), @as(c_int, -1));
+}
+
+fn stageExpanded(panel: *Panel, index: usize) bool {
+    return gtk.gtk_revealer_get_reveal_child(gtk.cast(gtk.Revealer, panel.signal_stages[index].revealer)) != 0;
+}
+
+fn stageChevronClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    const index = slotOf(button);
+    expandStage(panel, index, !stageExpanded(panel, index));
+}
+
+fn verdictClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const panel = panelData(data);
+    var all = true;
+    for (0..panel.signal_stages.len) |index| all = all and stageExpanded(panel, index);
+    for (0..panel.signal_stages.len) |index| expandStage(panel, index, !all);
+}
+
+fn closeClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    showSidebar(panelData(data).self, .hidden);
+}
+
+fn newStage(panel: *Panel, index: usize, flow: *gtk.Box) StageView {
+    const stage = signal_path.all_stages[index];
     const icon = gtk.gtk_image_new_from_icon_name(stageIcon(stage));
-    gtk.gtk_widget_add_css_class(icon, "signal-node");
-    gtk.gtk_widget_set_halign(icon, gtk.ALIGN_CENTER);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, icon), 20);
+    const node = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(node, "signal-node");
+    gtk.gtk_widget_set_halign(node, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_hexpand(node, gtk.false_);
+    gtk.gtk_widget_set_vexpand(node, gtk.false_);
+    gtk.gtk_widget_set_hexpand(icon, gtk.true_);
+    gtk.gtk_widget_set_vexpand(icon, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, node), icon);
     const rail = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(rail, "signal-rail");
     gtk.gtk_widget_set_halign(rail, gtk.ALIGN_CENTER);
     gtk.gtk_widget_set_vexpand(rail, gtk.true_);
-    gtk.gtk_widget_set_visible(rail, boolean(followed));
+    gtk.gtk_widget_set_visible(rail, boolean(index + 1 < signal_path.all_stages.len));
     const track = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, track), icon);
+    gtk.gtk_widget_set_hexpand(track, gtk.false_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, track), node);
     gtk.gtk_box_append(gtk.cast(gtk.Box, track), rail);
 
     const title = gtk.gtk_label_new(signal_path.stageTitle(stage).ptr);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
+    gtk.gtk_widget_set_hexpand(title, gtk.true_);
     gtk.gtk_widget_add_css_class(title, "signal-stage");
-    const value = gtk.gtk_label_new(detail.ptr);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 0.0);
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, value), gtk.true_);
-    gtk.gtk_widget_add_css_class(value, "meta");
-    gtk.gtk_widget_add_css_class(value, "numeric");
-    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    const tag = newLabel("signal-tag");
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, tag), gtk.false_);
+    const head = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, head), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, head), tag);
+
+    const lines = newLabel("signal-lines");
+    gtk.gtk_widget_set_hexpand(lines, gtk.true_);
+    const chevron = gtk.gtk_button_new_from_icon_name("go-next-symbolic");
+    gtk.gtk_widget_add_css_class(chevron, "flat");
+    gtk.gtk_widget_add_css_class(chevron, "signal-chevron");
+    gtk.gtk_widget_set_valign(chevron, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(chevron, "Show details");
+    gtk.g_object_set_data(chevron, "orca-slot", @ptrFromInt(index));
+    _ = gtk.signalConnect(chevron, "clicked", gtk.callback(stageChevronClicked), panel);
+    const body = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), lines);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), chevron);
+
+    const tech = newLabel("signal-tech");
+    gtk.gtk_widget_add_css_class(tech, "numeric");
+    gtk.gtk_label_set_selectable(gtk.cast(gtk.Label, tech), gtk.true_);
+    const revealer = gtk.gtk_revealer_new();
+    gtk.gtk_revealer_set_transition_type(gtk.cast(gtk.Revealer, revealer), gtk.REVEALER_TRANSITION_SLIDE_DOWN);
+    gtk.gtk_revealer_set_child(gtk.cast(gtk.Revealer, revealer), tech);
+
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
     gtk.gtk_widget_add_css_class(text, "signal-text");
     gtk.gtk_widget_set_hexpand(text, gtk.true_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, text), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, text), value);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), head);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), body);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), revealer);
 
-    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_set_vexpand(row, gtk.false_);
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+    gtk.gtk_widget_add_css_class(row, "signal-stage-row");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), track);
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), text);
-    return row;
+    gtk.gtk_box_append(flow, row);
+    return .{
+        .tag = gtk.cast(gtk.Label, tag),
+        .lines = gtk.cast(gtk.Label, lines),
+        .tech = gtk.cast(gtk.Label, tech),
+        .revealer = revealer,
+        .chevron = chevron,
+    };
 }
 
 fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     var buffer: [1024]u8 = undefined;
 
-    setLabel(panel.title, if (details.title.len != 0) details.title else "Unknown title", &buffer);
+    const title = if (details.title.len != 0) details.title else "Unknown title";
+    const heading = if (details.track_number) |number|
+        strings.format(&buffer, "{d}. {s}", .{ number, title })
+    else
+        strings.terminated(&buffer, title);
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, panel.title), heading.ptr);
     setLabel(panel.artist, details.artist, &buffer);
     setLabel(panel.album, details.album, &buffer);
 
     var any_audio = false;
-    any_audio = setRow(panel.codec_line, codecText(&buffer, details.codec)) or any_audio;
-    any_audio = setRow(panel.format_line, formatText(&buffer, details)) or any_audio;
-    any_audio = setRow(panel.bitrate_line, bitrateText(&buffer, details.bitrate_kbps)) or any_audio;
+    any_audio = setRow(panel.format_row, formatText(&buffer, details)) or any_audio;
+    var rate_buffer: [32]u8 = undefined;
+    any_audio = setRow(panel.sample_rate_row, if (details.sample_rate) |rate| rateText(&rate_buffer, rate) else null) or any_audio;
+    var channels_buffer: [32]u8 = undefined;
+    any_audio = setRow(panel.channels_row, if (details.channels) |channels| channelsText(&channels_buffer, channels) else null) or any_audio;
+    var bitrate_buffer: [32]u8 = undefined;
+    any_audio = setRow(panel.bitrate_row, bitrateText(&bitrate_buffer, details.bitrate_kbps)) or any_audio;
+    var duration_buffer: [32]u8 = undefined;
     const duration_text: ?[:0]const u8 = if (details.duration_ms) |ms|
-        (if (ms >= 0) strings.formatMs(&buffer, @intCast(ms)) else null)
+        (if (ms >= 0) strings.formatMs(&duration_buffer, @intCast(ms)) else null)
     else
         null;
-    any_audio = setRow(panel.duration_line, duration_text) or any_audio;
+    any_audio = setRow(panel.duration_row, duration_text) or any_audio;
     gtk.gtk_widget_set_visible(panel.audio_section, boolean(any_audio));
 
     populateLoudness(panel, details.loudness);
+    populateRecording(panel, details);
 
-    var size_buffer: [64]u8 = undefined;
-    const size_text: ?[:0]const u8 = if (details.size_bytes) |bytes| sizeText(&size_buffer, bytes) else null;
-    _ = setRow(panel.size_line, size_text);
+    _ = setRow(panel.album_artist_row, optionalText(&buffer, details.album_artist));
+    _ = setRow(panel.album_row, optionalText(&buffer, details.album));
+    _ = setRow(panel.date_row, if (details.date) |date| optionalText(&buffer, date) else null);
+    _ = setRow(panel.genre_row, genresText(&buffer, details.genres));
+    var track_buffer: [48]u8 = undefined;
+    _ = setRow(panel.track_row, ofText(&track_buffer, details.track_number, details.track_total));
+    gtk.gtk_widget_set_tooltip_text(
+        panel.track_row.root,
+        if (details.track_total != null and details.track_total_inferred) "Total counted from the album's tracks" else null,
+    );
+    var disc_buffer: [48]u8 = undefined;
+    _ = setRow(panel.disc_row, ofText(&disc_buffer, details.disc_number, details.disc_total));
+    const compilation: ?[:0]const u8 = if (details.compilation) |flag| (if (flag) "Yes" else "No") else null;
+    _ = setRow(panel.compilation_row, compilation);
+    _ = setRow(panel.explicit_row, switch (details.explicit) {
+        .unknown => null,
+        .none => "No",
+        .explicit => "Yes",
+        .clean => "Clean",
+    });
+    var plays_buffer: [24]u8 = undefined;
+    _ = setRow(panel.plays_row, strings.printZ(&plays_buffer, "{d}", .{details.play_count}) catch null);
+    var played_buffer: [64]u8 = undefined;
+    _ = setRow(panel.last_played_row, recentMomentText(&played_buffer, details.last_played_at));
+
     if (details.path) |path| {
-        const text = strings.terminated(&buffer, path);
-        gtk.gtk_label_set_text(panel.path_label, text.ptr);
-        gtk.gtk_widget_set_tooltip_text(gtk.cast(gtk.Widget, panel.path_label), text.ptr);
+        const split = std.mem.lastIndexOfScalar(u8, path, '/');
+        const folder = if (split) |index| path[0..@max(index, 1)] else "";
+        const name = if (split) |index| path[index + 1 ..] else path;
+        setPathRow(panel.folder_row, folder, &buffer);
+        setPathRow(panel.file_row, name, &buffer);
         setPath(panel, path);
     } else {
-        gtk.gtk_label_set_text(panel.path_label, "File missing");
-        gtk.gtk_widget_set_tooltip_text(gtk.cast(gtk.Widget, panel.path_label), null);
+        _ = setRow(panel.folder_row, null);
+        _ = setRow(panel.file_row, "File missing");
+        gtk.gtk_widget_set_tooltip_text(panel.file_row.root, null);
         setPath(panel, null);
     }
     gtk.gtk_widget_set_visible(panel.copy_button, boolean(panel.path != null));
+    var size_buffer: [64]u8 = undefined;
+    _ = setRow(panel.size_row, if (details.size_bytes) |bytes| sizeText(&size_buffer, bytes) else null);
+    var modified_buffer: [64]u8 = undefined;
+    _ = setRow(panel.modified_row, momentText(&modified_buffer, details.modified_at));
+    var added_buffer: [64]u8 = undefined;
+    _ = setRow(panel.added_row, momentText(&added_buffer, details.added_at));
+}
 
-    _ = setRow(panel.feedback_row, feedbackText(&buffer, details));
-    ratings.show(panel.rating_stars, details.rating);
-
-    var plays_buffer: [24]u8 = undefined;
-    _ = setRow(panel.plays_row, strings.printZ(&plays_buffer, "{d}", .{details.play_count}) catch null);
-    _ = setRow(panel.last_played_row, lastPlayedText(&buffer, details.last_played_at));
-
-    var any_tag = false;
-    any_tag = setRow(panel.album_artist_row, optionalText(&buffer, details.album_artist)) or any_tag;
-    any_tag = setRow(panel.date_row, if (details.date) |date| optionalText(&buffer, date) else null) or any_tag;
-    var track_buffer: [24]u8 = undefined;
-    var disc_buffer: [24]u8 = undefined;
-    any_tag = setRow(panel.track_row, numberText(&track_buffer, details.track_number)) or any_tag;
-    any_tag = setRow(panel.disc_row, numberText(&disc_buffer, details.disc_number)) or any_tag;
-    const compilation: ?[:0]const u8 = if (details.compilation) |flag| (if (flag) "Yes" else "No") else null;
-    any_tag = setRow(panel.compilation_row, compilation) or any_tag;
-    gtk.gtk_widget_set_visible(panel.metadata_section, boolean(any_tag));
-
-    setIdRow(panel.release_id_row, details.musicbrainz_release_id, details.musicbrainz_release_id_source);
-    setIdRow(panel.release_group_id_row, details.musicbrainz_release_group_id, details.musicbrainz_release_group_id_source);
-    setIdRow(panel.release_track_id_row, details.musicbrainz_release_track_id, details.musicbrainz_release_track_id_source);
-    setIdRow(panel.album_artist_id_row, details.musicbrainz_album_artist_id, details.musicbrainz_album_artist_id_source);
-    populateRecording(panel, details);
+fn setPathRow(row: Row, text: []const u8, buffer: []u8) void {
+    const value = optionalText(buffer, text);
+    _ = setRow(row, value);
+    gtk.gtk_widget_set_tooltip_text(row.root, if (value) |shown| shown.ptr else null);
 }
 
 fn populateLoudness(panel: *Panel, loudness: ?liborca.TrackLoudness) void {
@@ -461,11 +1008,12 @@ fn populateLoudness(panel: *Panel, loudness: ?liborca.TrackLoudness) void {
     _ = setRow(panel.replay_gain_row, decibelText(&buffer, measured.replay_gain_db, true, " dB"));
 }
 
-fn setIdRow(row: Row, id: ?[]const u8, source: ?liborca.RecordingIdSource) void {
+fn setIdRow(row: Row, id: ?[]const u8, source: ?liborca.RecordingIdSource) bool {
     var buffer: [64]u8 = undefined;
-    if (!setRow(row, if (id) |text| strings.terminated(&buffer, text) else null)) return;
+    if (!setRow(row, if (id) |text| strings.terminated(&buffer, text) else null)) return false;
     var tooltip_buffer: [128]u8 = undefined;
     gtk.gtk_widget_set_tooltip_text(row.root, strings.format(&tooltip_buffer, "{s}\n{s}", .{ id.?, sourceText(source) }).ptr);
+    return true;
 }
 
 fn sourceText(source: ?liborca.RecordingIdSource) [:0]const u8 {
@@ -476,27 +1024,42 @@ fn sourceText(source: ?liborca.RecordingIdSource) [:0]const u8 {
     };
 }
 
+fn populateIdentifiers(panel: *Panel, details: liborca.TrackDetails) void {
+    var any = false;
+    any = setIdRow(panel.recording_row, details.musicbrainz_recording_id, details.musicbrainz_recording_id_source) or any;
+    any = setIdRow(panel.release_id_row, details.musicbrainz_release_id, details.musicbrainz_release_id_source) or any;
+    any = setIdRow(panel.release_group_id_row, details.musicbrainz_release_group_id, details.musicbrainz_release_group_id_source) or any;
+    any = setIdRow(panel.release_track_id_row, details.musicbrainz_release_track_id, details.musicbrainz_release_track_id_source) or any;
+    any = setIdRow(panel.album_artist_id_row, details.musicbrainz_album_artist_id, details.musicbrainz_album_artist_id_source) or any;
+    gtk.gtk_widget_set_visible(panel.identifiers_button, boolean(any));
+    if (!any) showIdentifiers(panel, false);
+}
+
+fn showIdentifiers(panel: *Panel, shown: bool) void {
+    gtk.gtk_widget_set_visible(panel.identifiers, boolean(shown));
+    gtk.gtk_button_set_label(gtk.cast(gtk.Button, panel.identifiers_button), if (shown) "Hide identifiers" else "Show identifiers");
+}
+
 fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
+    populateIdentifiers(panel, details);
     for (panel.proposals) |proposal| gtk.gtk_widget_set_visible(proposal.root, gtk.false_);
     for ([_]*gtk.Widget{ panel.review_button, panel.find_button, panel.verify_button }) |button|
         gtk.gtk_widget_set_visible(button, gtk.false_);
-    _ = setRow(panel.acoustid_row, null);
-    var buffer: [256]u8 = undefined;
+    _ = setRow(panel.acoustid_row, "Not checked");
+    const link = panel.musicbrainz_row;
     if (details.musicbrainz_recording_id) |recording_mbid| {
         const source = sourceText(details.musicbrainz_recording_id_source);
-        _ = setRow(panel.musicbrainz_row, if (source.len != 0) source else "Identified");
-        const text = strings.terminated(&buffer, recording_mbid);
-        _ = setRow(panel.recording_row, text);
-        gtk.gtk_widget_set_tooltip_text(panel.recording_row.root, text.ptr);
+        gtk.gtk_label_set_text(link.link_label, if (source.len != 0) source.ptr else "Identified");
+        matches.setRecording(link.link, recording_mbid);
+        gtk.gtk_widget_set_visible(link.link, gtk.true_);
+        gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, link.value), gtk.false_);
         _ = setRow(panel.match_status, null);
-        matches.setRecording(panel.recording_link, recording_mbid);
-        gtk.gtk_widget_set_visible(panel.recording_link, gtk.true_);
         populateVerification(panel, details.track_id);
         return;
     }
-    _ = setRow(panel.musicbrainz_row, "Not identified");
-    _ = setRow(panel.recording_row, null);
-    gtk.gtk_widget_set_visible(panel.recording_link, gtk.false_);
+    gtk.gtk_label_set_text(link.value, "Not matched");
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, link.value), gtk.true_);
+    gtk.gtk_widget_set_visible(link.link, gtk.false_);
     const self = panel.self;
     const searching = self.task == .matching and self.match_task_mode != .verify and self.match_task_track == details.track_id;
     const library = self.library orelse return;
@@ -534,7 +1097,7 @@ fn populateVerification(panel: *Panel, track_id: i64) void {
     var buffer: [128]u8 = undefined;
     _ = setRow(panel.acoustid_row, strings.format(&buffer, "{s}{s}{s}", .{
         switch (verification.outcome) {
-            .agrees => "Verified",
+            .agrees => "Matched",
             .disagrees => "Hears a different recording",
             .unconfirmed => "Could not confirm",
             .no_fingerprint => "Could not fingerprint",
@@ -591,9 +1154,20 @@ fn optionalText(buffer: []u8, text: []const u8) ?[:0]const u8 {
     return if (text.len == 0) null else strings.terminated(buffer, text);
 }
 
-fn numberText(buffer: []u8, value: ?i64) ?[:0]const u8 {
+fn ofText(buffer: []u8, value: ?i64, total: ?i64) ?[:0]const u8 {
     const number = value orelse return null;
+    if (total) |count| return strings.printZ(buffer, "{d} of {d}", .{ number, count }) catch null;
     return strings.printZ(buffer, "{d}", .{number}) catch null;
+}
+
+pub fn genresText(buffer: []u8, genres: []const []const u8) ?[:0]const u8 {
+    if (genres.len == 0) return null;
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    for (genres, 0..) |genre, index| {
+        if (index != 0) writer.writeAll(", ") catch {};
+        writer.writeAll(genre) catch {};
+    }
+    return finish(buffer, &writer);
 }
 
 fn sizeText(buffer: []u8, bytes: i64) ?[:0]const u8 {
@@ -607,39 +1181,26 @@ fn finish(buffer: []u8, writer: *const std.Io.Writer) [:0]const u8 {
     return buffer[0..writer.end :0];
 }
 
-fn codecText(buffer: []u8, codec: []const u8) ?[:0]const u8 {
-    if (codec.len == 0) return null;
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    signal_path.writeCodecName(&writer, codec) catch {};
-    return finish(buffer, &writer);
-}
-
 fn formatText(buffer: []u8, details: liborca.TrackDetails) ?[:0]const u8 {
+    if (details.codec.len == 0) return null;
     var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writeFormat(&writer, details) catch {};
-    if (writer.end == 0) return null;
+    signal_path.writeCodecName(&writer, details.codec) catch {};
+    if (!details.lossy) if (details.bit_depth) |depth| writer.print(" ({d}-bit)", .{depth}) catch {};
     return finish(buffer, &writer);
 }
 
-fn writeFormat(writer: *std.Io.Writer, details: liborca.TrackDetails) std.Io.Writer.Error!void {
-    var first = true;
-    if (!details.lossy) if (details.bit_depth) |depth| {
-        try writer.print("{d}-bit", .{depth});
-        first = false;
+fn rateText(buffer: []u8, rate: u32) [:0]const u8 {
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeRate(&writer, rate) catch {};
+    return finish(buffer, &writer);
+}
+
+fn channelsText(buffer: []u8, channels: u32) [:0]const u8 {
+    return switch (channels) {
+        1 => "1 (mono)",
+        2 => "2 (stereo)",
+        else => strings.format(buffer, "{d}", .{channels}),
     };
-    if (details.sample_rate) |rate| {
-        if (!first) try writer.writeAll(separator);
-        try signal_path.writeRate(writer, rate);
-        first = false;
-    }
-    if (details.channels) |channels| {
-        if (!first) try writer.writeAll(separator);
-        switch (channels) {
-            1 => try writer.writeAll("Mono"),
-            2 => try writer.writeAll("Stereo"),
-            else => try writer.print("{d} channels", .{channels}),
-        }
-    }
 }
 
 fn bitrateText(buffer: []u8, bitrate_kbps: ?u32) ?[:0]const u8 {
@@ -650,36 +1211,56 @@ fn bitrateText(buffer: []u8, bitrate_kbps: ?u32) ?[:0]const u8 {
     return finish(buffer, &writer);
 }
 
-fn feedbackText(buffer: []u8, details: liborca.TrackDetails) [:0]const u8 {
-    const word: []const u8 = switch (details.feedback) {
-        .none => return "None",
-        .loved => "Loved",
-        .hated => "Disliked",
-    };
-    if (details.feedback_syncable) return strings.terminated(buffer, word);
-    return strings.format(buffer, "{s}\nWon't sync to ListenBrainz: no recording ID", .{word});
-}
-
-fn lastPlayedText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
+pub fn recentMomentText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
     const seconds = unix_seconds orelse return "Never";
     const played = gtk.g_date_time_new_from_unix_local(seconds) orelse return "Never";
     defer gtk.g_date_time_unref(played);
-    const now = gtk.g_date_time_new_now_local() orelse return "Recently";
-    defer gtk.g_date_time_unref(now);
-    const yesterday = gtk.g_date_time_add_days(now, -1);
-    defer if (yesterday) |value| gtk.g_date_time_unref(value);
-
-    const day = formatted(played, "%F") orelse return "Recently";
-    defer gtk.g_free(day);
     const clock = formatted(played, "%R") orelse return "Recently";
     defer gtk.g_free(clock);
-    if (sameDay(day, now)) return strings.format(buffer, "Today, {s}", .{std.mem.span(clock)});
-    if (yesterday) |value| {
-        if (sameDay(day, value)) return strings.format(buffer, "Yesterday, {s}", .{std.mem.span(clock)});
-    }
+    if (daysAgo(played)) |days| switch (days) {
+        0 => return strings.format(buffer, "Today, {s}", .{std.mem.span(clock)}),
+        1 => return strings.format(buffer, "Yesterday, {s}", .{std.mem.span(clock)}),
+        else => {},
+    };
     const date = formatted(played, "%-d %b %Y") orelse return "Recently";
     defer gtk.g_free(date);
     return strings.format(buffer, "{s}, {s}", .{ std.mem.span(date), std.mem.span(clock) });
+}
+
+pub fn recentDayText(buffer: []u8, unix_seconds: i64) [:0]const u8 {
+    const played = gtk.g_date_time_new_from_unix_local(unix_seconds) orelse return "";
+    defer gtk.g_date_time_unref(played);
+    if (daysAgo(played)) |days| return switch (days) {
+        0 => "Today",
+        1 => "Yesterday",
+        else => strings.format(buffer, "{d} days ago", .{days}),
+    };
+    const date = formatted(played, "%-d %b %Y") orelse return "";
+    defer gtk.g_free(date);
+    return strings.format(buffer, "{s}", .{std.mem.span(date)});
+}
+
+fn daysAgo(moment: *gtk.GDateTime) ?c_int {
+    const now = gtk.g_date_time_new_now_local() orelse return null;
+    defer gtk.g_date_time_unref(now);
+    const day = formatted(moment, "%F") orelse return null;
+    defer gtk.g_free(day);
+    var days: c_int = 0;
+    while (days < 7) : (days += 1) {
+        const earlier = gtk.g_date_time_add_days(now, -days) orelse return null;
+        defer gtk.g_date_time_unref(earlier);
+        if (sameDay(day, earlier)) return days;
+    }
+    return null;
+}
+
+fn momentText(buffer: []u8, unix_seconds: ?i64) ?[:0]const u8 {
+    const seconds = unix_seconds orelse return null;
+    const moment = gtk.g_date_time_new_from_unix_local(seconds) orelse return null;
+    defer gtk.g_date_time_unref(moment);
+    const text = formatted(moment, "%F %R") orelse return null;
+    defer gtk.g_free(text);
+    return strings.terminated(buffer, std.mem.span(text));
 }
 
 fn formatted(moment: *gtk.GDateTime, pattern: [*:0]const u8) ?[*:0]u8 {
@@ -726,29 +1307,67 @@ fn newKey(key: [*:0]const u8) *gtk.Widget {
     const label = gtk.gtk_label_new(key);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, label), 0.0);
     gtk.gtk_widget_set_valign(label, gtk.ALIGN_START);
+    gtk.gtk_widget_set_size_request(label, key_width, -1);
     gtk.gtk_widget_add_css_class(label, "inspector-key");
     return label;
 }
 
-fn newRow(key: [*:0]const u8) Row {
-    const value = gtk.gtk_label_new("");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 1.0);
-    gtk.gtk_label_set_justify(gtk.cast(gtk.Label, value), gtk.JUSTIFY_RIGHT);
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, value), gtk.true_);
-    gtk.gtk_widget_set_hexpand(value, gtk.true_);
-    gtk.gtk_widget_add_css_class(value, "inspector-value");
-    gtk.gtk_widget_add_css_class(value, "numeric");
+fn newRowWith(key: [*:0]const u8, value: *gtk.Widget) *gtk.Widget {
     const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_add_css_class(row, "inspector-row");
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), newKey(key));
     gtk.gtk_box_append(gtk.cast(gtk.Box, row), value);
-    return .{ .root = row, .value = gtk.cast(gtk.Label, value) };
+    return row;
+}
+
+fn newValue() *gtk.Widget {
+    const value = gtk.gtk_label_new("");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 0.0);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, value), gtk.true_);
+    gtk.gtk_widget_set_hexpand(value, gtk.true_);
+    gtk.gtk_widget_add_css_class(value, "inspector-value");
+    return value;
+}
+
+fn newRow(key: [*:0]const u8) Row {
+    const value = newValue();
+    return .{ .root = newRowWith(key, value), .value = gtk.cast(gtk.Label, value) };
+}
+
+fn newPathRow(key: [*:0]const u8, ellipsize: c_int) Row {
+    const row = newRow(key);
+    gtk.gtk_label_set_wrap(row.value, gtk.false_);
+    gtk.gtk_label_set_ellipsize(row.value, ellipsize);
+    return row;
+}
+
+fn newLinkRow(key: [*:0]const u8) LinkRow {
+    const value = newValue();
+    const link_label = gtk.gtk_label_new("");
+    const icon = gtk.gtk_image_new_from_icon_name("adw-external-link-symbolic");
+    const inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), link_label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, inner), icon);
+    const link = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, link), inner);
+    gtk.gtk_widget_add_css_class(link, "flat");
+    gtk.gtk_widget_add_css_class(link, "inspector-link");
+    gtk.gtk_widget_set_halign(link, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(link, "Open this recording on MusicBrainz");
+    const values = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_widget_set_hexpand(values, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, values), value);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, values), link);
+    return .{
+        .root = newRowWith(key, values),
+        .value = gtk.cast(gtk.Label, value),
+        .link = link,
+        .link_label = gtk.cast(gtk.Label, link_label),
+    };
 }
 
 fn newIdRow(key: [*:0]const u8) Row {
-    const row = newRow(key);
-    gtk.gtk_label_set_wrap(row.value, gtk.false_);
-    gtk.gtk_label_set_ellipsize(row.value, gtk.ELLIPSIZE_MIDDLE);
+    const row = newPathRow(key, gtk.ELLIPSIZE_MIDDLE);
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, row.value), "tech");
     gtk.gtk_widget_set_visible(row.root, gtk.false_);
     return row;
@@ -760,13 +1379,22 @@ fn newLine(css_class: ?[*:0]const u8) Row {
     return .{ .root = label, .value = gtk.cast(gtk.Label, label) };
 }
 
-fn newSection(heading: [*:0]const u8, children: []const *gtk.Widget) *gtk.Widget {
-    const section = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 6);
-    gtk.gtk_widget_add_css_class(section, "inspector-section");
+fn newSection(icon: [*:0]const u8, heading: [*:0]const u8, children: []const *gtk.Widget, trailing: ?*gtk.Widget) *gtk.Widget {
+    const image = gtk.gtk_image_new_from_icon_name(icon);
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, image), 20);
+    gtk.gtk_widget_add_css_class(image, "inspector-icon");
     const title = gtk.gtk_label_new(heading);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, title), 0.0);
+    gtk.gtk_widget_set_hexpand(title, gtk.true_);
     gtk.gtk_widget_add_css_class(title, "inspector-heading");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, section), title);
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(header, "inspector-section-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), image);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), title);
+    if (trailing) |widget| gtk.gtk_box_append(gtk.cast(gtk.Box, header), widget);
+    const section = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(section, "inspector-section");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, section), header);
     for (children) |child| gtk.gtk_box_append(gtk.cast(gtk.Box, section), child);
     return section;
 }
@@ -778,7 +1406,6 @@ fn newLabel(css_class: ?[*:0]const u8) *gtk.Widget {
     if (css_class) |name| gtk.gtk_widget_add_css_class(label, name);
     return label;
 }
-
 fn copyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
     const path = panel.path orelse return;
@@ -819,9 +1446,9 @@ fn findMatchClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startTrackMatching(panel.self, panel.shown orelse return);
 }
 
-fn starClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn identifiersClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const panel = panelData(data);
-    ratings.changeTrack(panel.self, panel.shown orelse return, ratings.chosen(button));
+    showIdentifiers(panel, gtk.gtk_widget_get_visible(panel.identifiers) == 0);
 }
 
 fn iconButton(icon: [*:0]const u8, tooltip: [*:0]const u8, slot: usize) *gtk.Widget {
@@ -878,10 +1505,26 @@ fn modeToggle(icon: [*:0]const u8, tooltip: [*:0]const u8, handler: gtk.GCallbac
     return button;
 }
 
+fn overflowMenu() *gtk.Widget {
+    const model = gtk.g_menu_new();
+    gtk.g_menu_append(model, "Track Inspector", "app.details");
+    gtk.g_menu_append(model, "Lyrics", "app.lyrics");
+    gtk.g_menu_append(model, "Signal Path", "app.signal-path");
+    const button = gtk.gtk_menu_button_new();
+    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "view-more-symbolic");
+    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
+    gtk.gtk_widget_set_tooltip_text(button, "Panels");
+    gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.g_object_unref(model);
+    return button;
+}
+
 fn scrolled(child: *gtk.Widget) *gtk.Widget {
     const scroller = gtk.gtk_scrolled_window_new();
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), child);
+    gtk.gtk_widget_set_focusable(scroller, gtk.false_);
     return scroller;
 }
 
@@ -894,6 +1537,178 @@ fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     setPath(panel, null);
     panel.lyrics.deinit();
     self.allocator.destroy(panel);
+}
+
+fn newAlbum() Album {
+    const title = newLabel("inspector-title");
+    const subtitle = newLabel("inspector-subtitle");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, subtitle), "Album");
+    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_add_css_class(heading, "inspector-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+
+    const artist_row = newRow("Artist");
+    const date_row = newRow("Date");
+    const genre_row = newRow("Genre");
+    const tracks_row = newRow("Tracks");
+    const duration_row = newRow("Duration");
+    const format_row = newRow("Format");
+    const overview = newSection("x-office-document-symbolic", "Overview", &.{
+        artist_row.root,
+        date_row.root,
+        genre_row.root,
+        tracks_row.root,
+        duration_row.root,
+        format_row.root,
+    }, null);
+    const musicbrainz_row = newRow("MusicBrainz");
+    const identity_section = newSection("auth-fingerprint-symbolic", "Identity", &.{musicbrainz_row.root}, null);
+    const description = newLabel("inspector-description");
+    const description_section = newSection("format-justify-left-symbolic", "Description", &.{description}, null);
+
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_set_visible(content, gtk.false_);
+    for ([_]*gtk.Widget{ heading, overview, identity_section, description_section }) |section|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
+    return .{
+        .content = content,
+        .title = title,
+        .artist_row = artist_row,
+        .date_row = date_row,
+        .genre_row = genre_row,
+        .tracks_row = tracks_row,
+        .duration_row = duration_row,
+        .format_row = format_row,
+        .identity_section = identity_section,
+        .musicbrainz_row = musicbrainz_row,
+        .description_section = description_section,
+        .description = description,
+    };
+}
+
+fn newPlaylistView() PlaylistView {
+    const title = newLabel("inspector-title");
+    gtk.gtk_widget_add_css_class(title, "inspector-title-upper");
+    const subtitle = newLabel("inspector-subtitle");
+    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_add_css_class(heading, "inspector-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+
+    const avatar = gtk.gtk_image_new_from_icon_name("avatar-default-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, avatar), 20);
+    gtk.gtk_widget_add_css_class(avatar, "playlist-creator-avatar");
+    const creator = newLabel("inspector-value");
+    const creator_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
+    gtk.gtk_widget_add_css_class(creator_row, "inspector-row");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, creator_row), avatar);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, creator_row), creator);
+    const creator_section = newSection("avatar-default-symbolic", "Created by", &.{creator_row}, null);
+
+    const tracks_row = newRow("Tracks");
+    const unavailable_row = newRow("Unavailable");
+    const duration_row = newRow("Duration");
+    const mixed_row = newRow("Mixed artists");
+    const genre_row = newRow("Genre");
+    const created_row = newRow("Created");
+    const updated_row = newRow("Last updated");
+    const overview = newSection("x-office-document-symbolic", "Details", &.{
+        tracks_row.root,
+        unavailable_row.root,
+        duration_row.root,
+        mixed_row.root,
+        genre_row.root,
+        created_row.root,
+        updated_row.root,
+    }, null);
+    const description = newLabel("inspector-description");
+    const description_section = newSection("format-justify-left-symbolic", "Description", &.{description}, null);
+    const tags = adw.adw_wrap_box_new();
+    adw.adw_wrap_box_set_child_spacing(gtk.cast(adw.WrapBox, tags), 8);
+    adw.adw_wrap_box_set_line_spacing(gtk.cast(adw.WrapBox, tags), 8);
+    gtk.gtk_widget_add_css_class(tags, "inspector-tags");
+    const tags_section = newSection("tag-symbolic", "Tags", &.{tags}, null);
+
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_set_visible(content, gtk.false_);
+    for ([_]*gtk.Widget{ heading, creator_section, overview, description_section, tags_section }) |section|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
+    return .{
+        .content = content,
+        .title = title,
+        .subtitle = subtitle,
+        .creator = creator,
+        .tracks_row = tracks_row,
+        .unavailable_row = unavailable_row,
+        .duration_row = duration_row,
+        .mixed_row = mixed_row,
+        .genre_row = genre_row,
+        .created_row = created_row,
+        .updated_row = updated_row,
+        .description_section = description_section,
+        .description = description,
+        .tags_section = tags_section,
+        .tags = tags,
+    };
+}
+
+fn newArtistView() Artist {
+    const title = newLabel("inspector-title");
+    const subtitle = newLabel("inspector-subtitle");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, subtitle), "Artist");
+    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_add_css_class(heading, "inspector-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+
+    const genre_row = newRow("Genres");
+    const years_row = newRow("Years active");
+    const albums_row = newRow("Total albums");
+    const tracks_row = newRow("Total tracks");
+    const library_row = newRow("In your library");
+    const fetch = gtk.gtk_button_new_with_label("Fetch artist info");
+    gtk.gtk_widget_add_css_class(fetch, "inspector-action");
+    gtk.gtk_widget_set_halign(fetch, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(fetch, "Look this artist up on MusicBrainz, Wikidata, Wikipedia and ListenBrainz");
+    const overview = newSection("x-office-document-symbolic", "Overview", &.{
+        genre_row.root,
+        years_row.root,
+        albums_row.root,
+        tracks_row.root,
+        library_row.root,
+        fetch,
+    }, null);
+
+    const biography = newLabel("inspector-description");
+    const biography_link = newExternalLink("https://wikipedia.org/", "Read more on Wikipedia");
+    const biography_licence = newLabel("inspector-licence");
+    const biography_section = newSection("format-justify-left-symbolic", "Biography", &.{ biography, biography_link, biography_licence }, null);
+
+    const links = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(links, "inspector-links");
+    const links_section = newSection("insert-link-symbolic", "Links", &.{links}, null);
+
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_set_visible(content, gtk.false_);
+    for ([_]*gtk.Widget{ heading, overview, biography_section, links_section }) |section|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
+    return .{
+        .content = content,
+        .title = title,
+        .genre_row = genre_row,
+        .years_row = years_row,
+        .albums_row = albums_row,
+        .tracks_row = tracks_row,
+        .library_row = library_row,
+        .biography_section = biography_section,
+        .biography = biography,
+        .biography_link = biography_link,
+        .biography_licence = biography_licence,
+        .links_section = links_section,
+        .links = links,
+        .fetch = fetch,
+    };
 }
 
 fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
@@ -910,102 +1725,120 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     gtk.gtk_widget_add_css_class(toggles, "inspector-toggles");
     for ([_]*gtk.Widget{ details_toggle, lyrics_toggle, signal_path_toggle }) |button|
         gtk.gtk_box_append(gtk.cast(gtk.Box, toggles), button);
+    const overflow = overflowMenu();
 
     const title = newLabel("inspector-title");
-    const artist = newLabel("meta");
-    const album = newLabel("meta");
+    const artist = newLabel("inspector-subtitle");
+    const album = newLabel("inspector-subtitle");
     const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
     gtk.gtk_widget_add_css_class(heading, "inspector-header");
     for ([_]*gtk.Widget{ title, artist, album }) |label| gtk.gtk_box_append(gtk.cast(gtk.Box, heading), label);
 
-    const codec_line = newLine("inspector-value");
-    const format_line = newLine("inspector-value");
-    gtk.gtk_widget_add_css_class(format_line.root, "numeric");
-    const bitrate_line = newLine("inspector-value");
-    gtk.gtk_widget_add_css_class(bitrate_line.root, "numeric");
-    const duration_line = newLine("inspector-value");
-    gtk.gtk_widget_add_css_class(duration_line.root, "numeric");
+    const format_row = newRow("Format");
+    const sample_rate_row = newRow("Sample rate");
+    const channels_row = newRow("Channels");
+    const bitrate_row = newRow("Bitrate");
+    const duration_row = newRow("Duration");
     const loudness_missing = newLine("inspector-key");
     const integrated_row = newRow("Integrated");
-    const peak_row = newRow("Sample peak");
+    const peak_row = newRow("Peak");
     const replay_gain_row = newRow("ReplayGain");
 
-    const musicbrainz_row = newRow("MusicBrainz");
-    const recording_row = newIdRow("Recording");
-    const match_status = newLine("meta");
+    const musicbrainz_row = newLinkRow("MusicBrainz");
     const acoustid_row = newRow("AcoustID");
-    gtk.gtk_widget_set_visible(acoustid_row.root, gtk.false_);
+    const match_status = newLine("meta");
+    const recording_row = newIdRow("Recording");
     const release_id_row = newIdRow("Release");
     const release_group_id_row = newIdRow("Release group");
     const release_track_id_row = newIdRow("Release track");
     const album_artist_id_row = newIdRow("Album artist");
+    const identifiers = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    for ([_]Row{ recording_row, release_id_row, release_group_id_row, release_track_id_row, album_artist_id_row }) |row|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, identifiers), row.root);
+    gtk.gtk_widget_set_visible(identifiers, gtk.false_);
     var proposals: [proposal_slots]Proposal = undefined;
     for (&proposals, 0..) |*proposal, index| proposal.* = newProposal(index);
-    const recording_link = matches.linkButton("");
-    gtk.gtk_widget_add_css_class(recording_link, "inspector-action");
+    const identifiers_button = actionButton("Show identifiers");
     const review_button = actionButton("Review All");
     const find_button = actionButton("Find Match");
     const verify_button = actionButton("Verify");
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
     gtk.gtk_widget_add_css_class(actions, "inspector-actions");
-    for ([_]*gtk.Widget{ recording_link, review_button, find_button, verify_button }) |button|
+    for ([_]*gtk.Widget{ identifiers_button, review_button, find_button, verify_button }) |button|
         gtk.gtk_box_append(gtk.cast(gtk.Box, actions), button);
 
     const album_artist_row = newRow("Album artist");
+    const album_row = newRow("Album");
     const date_row = newRow("Date");
-    const track_row = newRow("Track");
-    const disc_row = newRow("Disc");
+    const genre_row = newRow("Genre");
+    const track_row = newRow("Track number");
+    const disc_row = newRow("Disc number");
     const compilation_row = newRow("Compilation");
-
-    const feedback_row = newRow("Feedback");
-    const rating_stars = ratings.newStars(gtk.callback(starClicked), panel);
-    gtk.gtk_widget_set_hexpand(rating_stars, gtk.true_);
-    gtk.gtk_widget_set_halign(rating_stars, gtk.ALIGN_END);
-    const rating_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-    gtk.gtk_widget_add_css_class(rating_row, "inspector-row");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, rating_row), newKey("Rating"));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, rating_row), rating_stars);
+    const explicit_row = newRow("Explicit");
     const plays_row = newRow("Plays");
     const last_played_row = newRow("Last played");
 
-    const size_line = newLine("inspector-value");
-    gtk.gtk_widget_add_css_class(size_line.root, "numeric");
-    const path_label = gtk.gtk_label_new("");
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, path_label), 0.0);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, path_label), gtk.ELLIPSIZE_MIDDLE);
-    gtk.gtk_widget_set_hexpand(path_label, gtk.true_);
-    gtk.gtk_widget_add_css_class(path_label, "tech");
+    const folder_row = newPathRow("Path", gtk.ELLIPSIZE_START);
+    const file_row = newPathRow("File", gtk.ELLIPSIZE_MIDDLE);
+    const size_row = newRow("Size");
+    const modified_row = newRow("Modified");
+    const added_row = newRow("Date added");
     const copy_button = gtk.gtk_button_new_from_icon_name("edit-copy-symbolic");
     gtk.gtk_widget_set_valign(copy_button, gtk.ALIGN_CENTER);
     gtk.gtk_widget_add_css_class(copy_button, "flat");
+    gtk.gtk_widget_add_css_class(copy_button, "inspector-copy");
     gtk.gtk_widget_set_tooltip_text(copy_button, "Copy path");
-    const path_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 4);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, path_row), path_label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, path_row), copy_button);
 
-    const audio_section = newSection("Audio", &.{ codec_line.root, format_line.root, bitrate_line.root, duration_line.root });
-    const loudness_section = newSection("Loudness", &.{ loudness_missing.root, integrated_row.root, peak_row.root, replay_gain_row.root });
-    const identity_section = newSection("Identity", &.{
+    const audio_section = newSection("audio-x-generic-symbolic", "Audio", &.{
+        format_row.root,
+        sample_rate_row.root,
+        channels_row.root,
+        bitrate_row.root,
+        duration_row.root,
+    }, null);
+    const loudness_section = newSection("multimedia-volume-control-symbolic", "Loudness", &.{
+        loudness_missing.root,
+        integrated_row.root,
+        peak_row.root,
+        replay_gain_row.root,
+    }, null);
+    const identity_section = newSection("auth-fingerprint-symbolic", "Identity", &.{
         musicbrainz_row.root,
-        recording_row.root,
-        match_status.root,
         acoustid_row.root,
-        release_id_row.root,
-        release_group_id_row.root,
-        release_track_id_row.root,
-        album_artist_id_row.root,
+        match_status.root,
         proposals[0].root,
         proposals[1].root,
         proposals[2].root,
         actions,
-    });
-    const metadata_section = newSection("Metadata", &.{ album_artist_row.root, date_row.root, track_row.root, disc_row.root, compilation_row.root });
-    const history_section = newSection("History", &.{ feedback_row.root, rating_row, plays_row.root, last_played_row.root });
-    const file_section = newSection("File", &.{ size_line.root, path_row });
+        identifiers,
+    }, null);
+    const metadata_section = newSection("x-office-document-symbolic", "Metadata", &.{
+        album_artist_row.root,
+        album_row.root,
+        date_row.root,
+        genre_row.root,
+        track_row.root,
+        disc_row.root,
+        compilation_row.root,
+        explicit_row.root,
+        plays_row.root,
+        last_played_row.root,
+    }, null);
+    const file_section = newSection("folder-symbolic", "File", &.{
+        folder_row.root,
+        file_row.root,
+        size_row.root,
+        modified_row.root,
+        added_row.root,
+    }, copy_button);
+
+    const album_view = newAlbum();
+    const artist_view = newArtistView();
+    const playlist_view = newPlaylistView();
 
     const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_visible(content, gtk.false_);
-    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, history_section, file_section }) |section|
+    for ([_]*gtk.Widget{ heading, audio_section, loudness_section, identity_section, metadata_section, file_section }) |section|
         gtk.gtk_box_append(gtk.cast(gtk.Box, content), section);
 
     const placeholder = gtk.gtk_label_new("Select a song to see its details.");
@@ -1017,27 +1850,81 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     gtk.gtk_widget_add_css_class(body, "inspector-body");
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), placeholder);
     gtk.gtk_box_append(gtk.cast(gtk.Box, body), content);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), album_view.content);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), artist_view.content);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, body), playlist_view.content);
 
-    const signal_title = newLabel("inspector-title");
+    const signal_icon = gtk.gtk_image_new_from_icon_name("network-cellular-signal-excellent-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, signal_icon), 24);
+    gtk.gtk_widget_set_valign(signal_icon, gtk.ALIGN_START);
+    gtk.gtk_widget_add_css_class(signal_icon, "signal-header-icon");
+    const signal_title = newLabel("signal-title");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_title), "Signal Path");
+    const signal_subtitle = newLabel("signal-subtitle");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_subtitle), "See how your audio is processed from source to output.");
+    const signal_titles = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(signal_titles, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_title);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_titles), signal_subtitle);
+    const signal_close = gtk.gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk.gtk_widget_add_css_class(signal_close, "flat");
+    gtk.gtk_widget_set_valign(signal_close, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(signal_close, "Close");
+    const signal_header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(signal_header, "signal-header");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_titles);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_header), signal_close);
+
     const signal_status = newLabel("dim-label");
     gtk.gtk_widget_set_margin_top(signal_status, 12);
+
     const signal_dot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(signal_dot, "signal-dot");
-    gtk.gtk_widget_set_valign(signal_dot, gtk.ALIGN_START);
-    const signal_verdict_label = newLabel("inspector-value");
-    gtk.gtk_widget_set_hexpand(signal_verdict_label, gtk.true_);
-    const signal_verdict = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
+    gtk.gtk_widget_set_valign(signal_dot, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_halign(signal_dot, gtk.ALIGN_CENTER);
+    const signal_verdict_label = newLabel("signal-verdict-title");
+    const signal_chain_label = newLabel("signal-chain");
+    const verdict_text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(verdict_text, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_text), signal_verdict_label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_text), signal_chain_label);
+    const verdict_chevron = gtk.gtk_image_new_from_icon_name("go-next-symbolic");
+    gtk.gtk_widget_add_css_class(verdict_chevron, "signal-chevron");
+    const verdict_inner = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), signal_dot);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), verdict_text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, verdict_inner), verdict_chevron);
+    const signal_verdict = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, signal_verdict), verdict_inner);
     gtk.gtk_widget_add_css_class(signal_verdict, "signal-verdict");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_verdict), signal_dot);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_verdict), signal_verdict_label);
+    gtk.gtk_widget_set_tooltip_text(signal_verdict, "Show every stage's details");
+
     const signal_flow = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_add_css_class(signal_flow, "signal-flow");
-    const signal_note = newLabel("tech");
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, signal_note), signal_path.pipewire_hedge);
+    var signal_stages: [signal_path.all_stages.len]StageView = undefined;
+    for (&signal_stages, 0..) |*view, index| view.* = newStage(panel, index, gtk.cast(gtk.Box, signal_flow));
+
+    const footer_icon = gtk.gtk_image_new_from_icon_name("dialog-information-symbolic");
+    gtk.gtk_widget_set_valign(footer_icon, gtk.ALIGN_START);
+    const signal_footer_label = newLabel("signal-footer-title");
+    const footer_detail = newLabel("signal-footer-detail");
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, footer_detail), signal_path.pipewire_hedge);
+    const footer_text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(footer_text, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer_text), signal_footer_label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, footer_text), footer_detail);
+    const signal_footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(signal_footer, "signal-footer");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), footer_icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, signal_footer), footer_text);
+
+    const signal_content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    for ([_]*gtk.Widget{ signal_verdict, signal_flow, signal_footer }) |widget|
+        gtk.gtk_box_append(gtk.cast(gtk.Box, signal_content), widget);
     const signal_body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(signal_body, "inspector-body");
-    for ([_]*gtk.Widget{ signal_title, signal_status, signal_verdict, signal_flow, signal_note }) |widget|
+    gtk.gtk_widget_add_css_class(signal_body, "signal-body");
+    for ([_]*gtk.Widget{ signal_header, signal_status, signal_content }) |widget|
         gtk.gtk_box_append(gtk.cast(gtk.Box, signal_body), widget);
 
     const root = gtk.gtk_stack_new();
@@ -1050,8 +1937,6 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     adw.adw_overlay_split_view_set_sidebar_position(split_view, gtk.PACK_END);
     adw.adw_overlay_split_view_set_pin_sidebar(split_view, gtk.true_);
     adw.adw_overlay_split_view_set_enable_show_gesture(split_view, gtk.false_);
-    adw.adw_overlay_split_view_set_min_sidebar_width(split_view, panel_min_width);
-    adw.adw_overlay_split_view_set_max_sidebar_width(split_view, panel_max_width);
     gtk.gtk_widget_set_hexpand(page_content, gtk.true_);
     adw.adw_overlay_split_view_set_content(split_view, page_content);
     adw.adw_overlay_split_view_set_sidebar(split_view, root);
@@ -1062,6 +1947,7 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
         .split = split,
         .root = root,
         .toggles = toggles,
+        .overflow = overflow,
         .details_toggle = details_toggle,
         .lyrics_toggle = lyrics_toggle,
         .signal_path_toggle = signal_path_toggle,
@@ -1071,56 +1957,70 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
         .artist = artist,
         .album = album,
         .audio_section = audio_section,
-        .codec_line = codec_line,
-        .format_line = format_line,
-        .bitrate_line = bitrate_line,
-        .duration_line = duration_line,
+        .format_row = format_row,
+        .sample_rate_row = sample_rate_row,
+        .channels_row = channels_row,
+        .bitrate_row = bitrate_row,
+        .duration_row = duration_row,
         .loudness_missing = loudness_missing,
         .integrated_row = integrated_row,
         .peak_row = peak_row,
         .replay_gain_row = replay_gain_row,
         .musicbrainz_row = musicbrainz_row,
-        .recording_row = recording_row,
-        .match_status = match_status,
         .acoustid_row = acoustid_row,
+        .match_status = match_status,
+        .identifiers_button = identifiers_button,
+        .identifiers = identifiers,
+        .recording_row = recording_row,
         .release_id_row = release_id_row,
         .release_group_id_row = release_group_id_row,
         .release_track_id_row = release_track_id_row,
         .album_artist_id_row = album_artist_id_row,
         .proposals = proposals,
-        .recording_link = recording_link,
         .review_button = review_button,
         .find_button = find_button,
         .verify_button = verify_button,
         .metadata_section = metadata_section,
         .album_artist_row = album_artist_row,
+        .album_row = album_row,
         .date_row = date_row,
+        .genre_row = genre_row,
         .track_row = track_row,
         .disc_row = disc_row,
         .compilation_row = compilation_row,
-        .feedback_row = feedback_row,
-        .rating_stars = rating_stars,
+        .explicit_row = explicit_row,
         .plays_row = plays_row,
         .last_played_row = last_played_row,
-        .size_line = size_line,
-        .path_label = gtk.cast(gtk.Label, path_label),
+        .folder_row = folder_row,
+        .file_row = file_row,
+        .size_row = size_row,
+        .modified_row = modified_row,
+        .added_row = added_row,
         .copy_button = copy_button,
+        .album_view = album_view,
+        .artist_view = artist_view,
+        .playlist_view = playlist_view,
         .signal_status = gtk.cast(gtk.Label, signal_status),
-        .signal_verdict = signal_verdict,
+        .signal_content = signal_content,
         .signal_dot = signal_dot,
         .signal_verdict_label = gtk.cast(gtk.Label, signal_verdict_label),
-        .signal_flow = signal_flow,
-        .signal_note = signal_note,
+        .signal_chain_label = gtk.cast(gtk.Label, signal_chain_label),
+        .signal_stages = signal_stages,
+        .signal_footer_label = gtk.cast(gtk.Label, signal_footer_label),
     };
     _ = gtk.signalConnect(copy_button, "clicked", gtk.callback(copyClicked), panel);
-    _ = gtk.signalConnect(recording_link, "clicked", gtk.callback(recordingLinkClicked), panel);
+    _ = gtk.signalConnect(artist_view.fetch, "clicked", gtk.callback(fetchArtistClicked), panel);
+    _ = gtk.signalConnect(musicbrainz_row.link, "clicked", gtk.callback(recordingLinkClicked), panel);
     for (proposals) |proposal| {
         _ = gtk.signalConnect(proposal.accept, "clicked", gtk.callback(proposalAcceptClicked), panel);
         _ = gtk.signalConnect(proposal.dismiss, "clicked", gtk.callback(proposalDismissClicked), panel);
     }
+    _ = gtk.signalConnect(identifiers_button, "clicked", gtk.callback(identifiersClicked), panel);
     _ = gtk.signalConnect(review_button, "clicked", gtk.callback(reviewAllClicked), panel);
     _ = gtk.signalConnect(find_button, "clicked", gtk.callback(findMatchClicked), panel);
     _ = gtk.signalConnect(verify_button, "clicked", gtk.callback(verifyClicked), panel);
+    _ = gtk.signalConnect(signal_close, "clicked", gtk.callback(closeClicked), panel);
+    _ = gtk.signalConnect(signal_verdict, "clicked", gtk.callback(verdictClicked), panel);
     panel.lyrics.init(self);
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), panel.lyrics.root, "lyrics");
     _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, root), scrolled(signal_body), "signal_path");
@@ -1134,7 +2034,6 @@ fn newPanel(self: *App, source: Source, page_content: *gtk.Widget) ?*Panel {
     if (mode == .signal_path) transport.refreshSignalPath(self);
     return panel;
 }
-
 pub const Placed = struct {
     widget: *gtk.Widget,
     panel: ?*Panel,
@@ -1142,8 +2041,10 @@ pub const Placed = struct {
 
 /// `content` with an inspector at its end, and the inspector's mode toggles at
 /// the end of `header`. Without a free panel slot, `content` alone.
-pub fn besideContent(self: *App, header: *gtk.Widget, content: *gtk.Widget, source: Source) Placed {
+pub fn besideContent(self: *App, header: page_ui.Header, content: *gtk.Widget, source: Source) Placed {
     const panel = newPanel(self, source, content) orelse return .{ .widget = content, .panel = null };
-    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, header), panel.toggles);
+    gtk.gtk_widget_set_valign(panel.toggles, gtk.ALIGN_CENTER);
+    header.add(panel.toggles);
+    header.add(panel.overflow);
     return .{ .widget = panel.split, .panel = panel };
 }

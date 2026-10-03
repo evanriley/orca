@@ -1,6 +1,6 @@
 //! The Now Playing page: the audible track's cover over a blurred backdrop of
-//! itself, the transport, the synced lyric line being heard, and beside it
-//! what comes next and the track's facts.
+//! itself, the transport, the lyric lines around the one being heard, and
+//! beside it what comes next and the track's facts.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -18,14 +18,18 @@ const transport = @import("transport.zig");
 const window = @import("window.zig");
 const track_model = @import("track_model.zig");
 const page_ui = @import("page.zig");
+const inspector = @import("details.zig");
+const signal_path = @import("signal_path.zig");
 
 const App = app.App;
 
 const cover_pixels: c_int = 380;
-const up_next_rows = 10;
+const up_next_rows = 5;
 const panel_width: c_int = 340;
+const info_key_width: c_int = 110;
+const lyrics_width: c_int = 640;
 
-const InfoRow = enum { title, artist, album, date, track, disc };
+const InfoRow = enum { title, artist, album, date, genre, track, disc, format };
 
 pub const State = struct {
     content: ?*gtk.Stack = null,
@@ -79,7 +83,9 @@ pub fn build(self: *App) *gtk.Widget {
     const empty = adw.adw_status_page_new();
     adw.adw_status_page_set_icon_name(gtk.cast(adw.StatusPage, empty), "audio-x-generic-symbolic");
     adw.adw_status_page_set_title(gtk.cast(adw.StatusPage, empty), "Nothing playing");
-    adw.adw_status_page_set_description(gtk.cast(adw.StatusPage, empty), "Play a song from Songs, Albums or a playlist and it shows here.");
+    adw.adw_status_page_set_description(gtk.cast(adw.StatusPage, empty), "Pick an album or press Play");
+    gtk.gtk_widget_add_css_class(empty, "now-empty");
+    gtk.gtk_widget_set_can_focus(empty, gtk.false_);
     _ = gtk.gtk_stack_add_named(page.content.?, empty, "empty");
 
     const playing = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
@@ -94,12 +100,13 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), content);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), content, gtk.true_);
 
+    const header = page_ui.header(self);
     const view = adw.adw_toolbar_view_new();
     gtk.gtk_widget_add_css_class(view, "now-playing-page");
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), header.bar);
     adw.adw_toolbar_view_set_extend_content_to_top_edge(gtk.cast(adw.ToolbarView, view), gtk.true_);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), layers);
-    setNarrow(self);
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), inspector.besideContent(self, header, layers, .playing).widget);
+    placePanel(self);
     return view;
 }
 
@@ -154,6 +161,10 @@ fn buildCentre(self: *App) *gtk.Widget {
     gtk.gtk_label_set_ellipsize(page.title.?, gtk.ELLIPSIZE_END);
     gtk.gtk_label_set_max_width_chars(page.title.?, 28);
     menu.onSecondaryClick(title, menu.playingMenu, self);
+    gtk.gtk_widget_set_cursor_from_name(title, "pointer");
+    const title_click = gtk.gtk_gesture_click_new();
+    _ = gtk.signalConnect(title_click, "released", gtk.callback(titleClicked), self);
+    gtk.gtk_widget_add_controller(title, title_click);
     append(facts, title);
     page.artist = linkLabel(facts, "now-artist", artistClicked, self);
     page.album = linkLabel(facts, "now-album", albumClicked, self);
@@ -184,19 +195,34 @@ fn buildCentre(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_halign(buttons, gtk.ALIGN_CENTER);
     append(body, buttons);
 
-    const quote_slot = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(quote_slot, "now-quote-slot");
-    const quote = label("", "now-quote");
-    gtk.gtk_label_set_justify(gtk.cast(gtk.Label, quote), gtk.JUSTIFY_CENTER);
-    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, quote), gtk.true_);
-    gtk.gtk_label_set_lines(gtk.cast(gtk.Label, quote), 2);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, quote), gtk.ELLIPSIZE_END);
-    gtk.gtk_label_set_max_width_chars(gtk.cast(gtk.Label, quote), 48);
-    append(quote_slot, quote);
-    append(body, quote_slot);
-    letterSpace(quote, 1.8);
-    lyrics.watchQuote(self, quote_slot, quote);
+    append(body, buildLyrics(self));
     return column;
+}
+
+/// The slot stays mapped while the page is shown, so that `lyrics.zig` looks
+/// the Track's lyrics up; only the lines inside it are hidden without lyrics.
+fn buildLyrics(self: *App) *gtk.Widget {
+    const lines = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 4);
+    gtk.gtk_widget_add_css_class(lines, "now-lyrics");
+    gtk.gtk_widget_set_tooltip_text(lines, "Show Lyrics");
+    gtk.gtk_widget_set_cursor_from_name(lines, "pointer");
+    const click = gtk.gtk_gesture_click_new();
+    _ = gtk.signalConnect(click, "released", gtk.callback(lyricsClicked), self);
+    gtk.gtk_widget_add_controller(lines, click);
+    var labels: [3]*gtk.Widget = undefined;
+    for (&labels, [_][*:0]const u8{ "now-lyric-previous", "now-lyric-current", "now-lyric-next" }) |*line, class| {
+        line.* = label("", "now-lyric");
+        gtk.gtk_widget_add_css_class(line.*, class);
+        gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, line.*), gtk.ELLIPSIZE_END);
+        append(lines, line.*);
+    }
+    const clamp = adw.adw_clamp_new();
+    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), lyrics_width);
+    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), lines);
+    const slot = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    append(slot, clamp);
+    lyrics.watchQuote(self, slot, lines, labels);
+    return slot;
 }
 
 fn linkLabel(parent: *gtk.Widget, class: [*:0]const u8, handler: anytype, self: *App) *gtk.Label {
@@ -242,32 +268,48 @@ fn buildPanel(self: *App) *gtk.Widget {
     page.up_next_empty = nothing;
     append(panel, nothing);
 
-    const full = gtk.gtk_button_new_with_label("View Full Queue");
-    gtk.gtk_widget_add_css_class(full, "pill");
+    const full_label = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_widget_set_halign(full_label, gtk.ALIGN_CENTER);
+    append(full_label, gtk.gtk_label_new("View Full Queue"));
+    append(full_label, gtk.gtk_image_new_from_icon_name("go-next-symbolic"));
+    const full = gtk.gtk_button_new();
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, full), full_label);
+    gtk.gtk_widget_add_css_class(full, "flat");
     gtk.gtk_widget_add_css_class(full, "now-full-queue");
-    gtk.gtk_widget_set_halign(full, gtk.ALIGN_START);
     gtk.gtk_actionable_set_action_name(gtk.cast(gtk.Actionable, full), "app.show-queue");
     append(panel, full);
 
+    const info_heading = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_widget_add_css_class(info_heading, "now-info-title");
     const info_title = label("Track Info", "now-panel-title");
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, info_title), 0.0);
-    gtk.gtk_widget_add_css_class(info_title, "now-info-title");
-    append(panel, info_title);
+    gtk.gtk_widget_set_hexpand(info_title, gtk.true_);
+    append(info_heading, info_title);
+    const info_more = gtk.gtk_button_new_from_icon_name("view-more-horizontal-symbolic");
+    gtk.gtk_widget_add_css_class(info_more, "flat");
+    gtk.gtk_widget_add_css_class(info_more, "now-panel-action");
+    gtk.gtk_widget_set_tooltip_text(info_more, "Track Inspector");
+    _ = gtk.signalConnect(info_more, "clicked", gtk.callback(inspectorClicked), self);
+    append(info_heading, info_more);
+    append(panel, info_heading);
     const names = std.EnumArray(InfoRow, [*:0]const u8).init(.{
         .title = "Title",
         .artist = "Artist",
         .album = "Album",
         .date = "Date",
-        .track = "Track",
-        .disc = "Disc",
+        .genre = "Genre",
+        .track = "Track number",
+        .disc = "Disc number",
+        .format = "Format",
     });
     for (std.enums.values(InfoRow)) |row| {
-        const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 16);
+        const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
         gtk.gtk_widget_add_css_class(line, "now-info-row");
         const key = label(names.get(row), "now-info-key");
         gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, key), 0.0);
+        gtk.gtk_widget_set_size_request(key, info_key_width, -1);
         const value = label("", "now-info-value");
-        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 1.0);
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 0.0);
         gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, value), gtk.ELLIPSIZE_END);
         gtk.gtk_widget_set_hexpand(value, gtk.true_);
         append(line, key);
@@ -281,14 +323,17 @@ fn buildPanel(self: *App) *gtk.Widget {
     gtk.gtk_scrolled_window_set_policy(gtk.cast(gtk.ScrolledWindow, scroller), gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), panel);
     gtk.gtk_widget_set_size_request(scroller, panel_width, -1);
+    gtk.gtk_widget_set_hexpand(scroller, gtk.false_);
+    gtk.gtk_widget_set_focusable(scroller, gtk.false_);
     gtk.gtk_widget_add_css_class(scroller, "now-panel-scroller");
     page.panel = scroller;
     return scroller;
 }
 
-pub fn setNarrow(self: *App) void {
+pub fn placePanel(self: *App) void {
     const panel = self.now_playing.panel orelse return;
-    gtk.gtk_widget_set_visible(panel, boolean(!self.window_narrow));
+    const shown = !self.header_compact and inspector.shownMode(self) == .hidden;
+    gtk.gtk_widget_set_visible(panel, boolean(shown));
 }
 
 fn coverPainted(image: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -311,6 +356,19 @@ fn moreClicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.context.release_id = current.summary.release_id;
     self.context.artist_id = current.summary.artist_id;
     albums.popupBelow(self, gtk.cast(gtk.Widget, button.?));
+}
+
+fn titleClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    window.showAlbum(self, self.now_playing.release_id orelse return);
+}
+
+fn lyricsClicked(_: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    inspector.showSidebar(state(data), .lyrics);
+}
+
+fn inspectorClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    inspector.showSidebar(state(data), .details);
 }
 
 fn artistClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -371,7 +429,7 @@ fn letterSpace(target: *gtk.Widget, pixels: f32) void {
     gtk.gtk_label_set_attributes(gtk.cast(gtk.Label, target), attributes);
 }
 
-pub fn setUppercase(target: *gtk.Label, text: []const u8) void {
+fn setUppercase(target: *gtk.Label, text: []const u8) void {
     const upper = gtk.g_utf8_strup(text.ptr, @intCast(text.len)) orelse return gtk.gtk_label_set_text(target, "");
     defer gtk.g_free(upper);
     gtk.gtk_label_set_text(target, upper);
@@ -426,10 +484,33 @@ fn showFacts(self: *App, summary: liborca.TrackSummary) void {
     setInfo(page, .artist, artist);
     setInfo(page, .album, summary.album);
     setInfo(page, .date, date);
-    var number_buffer: [24]u8 = undefined;
-    setInfo(page, .track, if (summary.track_number) |number| strings.format(&number_buffer, "{d}", .{number}) else "");
-    const disc = summary.disc_number orelse 0;
-    setInfo(page, .disc, if (disc > 1) strings.format(&number_buffer, "{d}", .{disc}) else "");
+    var genre_buffer: [512]u8 = undefined;
+    setInfo(page, .genre, if (details) |value| inspector.genresText(&genre_buffer, value.genres) orelse "" else "");
+    var number_buffer: [48]u8 = undefined;
+    const track_total = if (details) |value| value.track_total else null;
+    setInfo(page, .track, ofText(&number_buffer, summary.track_number, track_total));
+    const disc_total = if (details) |value| value.disc_total orelse 0 else 0;
+    setInfo(page, .disc, if (disc_total > 1) ofText(&number_buffer, summary.disc_number, disc_total) else "");
+    var format_buffer: [64]u8 = undefined;
+    setInfo(page, .format, if (details) |value| formatText(&format_buffer, value) else "");
+}
+
+fn ofText(buffer: []u8, number: ?i64, total: ?i64) []const u8 {
+    const value = number orelse return "";
+    if (total) |count| return strings.format(buffer, "{d} of {d}", .{ value, count });
+    return strings.format(buffer, "{d}", .{value});
+}
+
+fn formatText(buffer: []u8, details: liborca.TrackDetails) []const u8 {
+    if (details.codec.len == 0) return "";
+    var writer = std.Io.Writer.fixed(buffer);
+    signal_path.writeCodecName(&writer, details.codec) catch {};
+    if (!details.lossy) if (details.bit_depth) |depth| writer.print(" {d}-bit", .{depth}) catch {};
+    if (details.sample_rate) |rate| {
+        writer.writeAll(" / ") catch {};
+        signal_path.writeRate(&writer, rate) catch {};
+    }
+    return writer.buffered();
 }
 
 pub fn refreshUpNext(self: *App) void {

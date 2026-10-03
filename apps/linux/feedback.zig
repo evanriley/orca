@@ -12,11 +12,11 @@ const track_model = @import("track_model.zig");
 const song_table = @import("song_table.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
-const details = @import("details.zig");
 const queue = @import("queue.zig");
 const nowplaying = @import("nowplaying.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const genres = @import("genres.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
@@ -51,6 +51,10 @@ pub fn newAlbumButton(handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
 
 pub fn showAlbumButton(button: *gtk.Widget, album_loved: bool) void {
     showHeart(button, album_loved, if (album_loved) "Remove Album Love" else "Love Album");
+}
+
+pub fn showArtistButton(button: *gtk.Widget, artist_loved: bool) void {
+    showHeart(button, artist_loved, if (artist_loved) "Remove Artist Love" else "Love Artist");
 }
 
 pub fn newButton(self: *App, handler: gtk.GCallback) *gtk.Widget {
@@ -189,7 +193,7 @@ pub fn repaintLists(self: *App, changed: *const Recordings, change_value: track_
     nowplaying.repaint(changed, change_value);
     playlists.repaint(self, changed, change_value);
     loved.repaint(self, changed, change_value);
-    details.invalidate(self);
+    genres.repaint(self, changed, change_value);
 }
 
 /// Replaces, in place, each row of `store` whose recording changed, with a copy

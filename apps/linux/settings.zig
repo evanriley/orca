@@ -1,12 +1,17 @@
 //! The frontend's own preferences, in `$XDG_CONFIG_HOME/orca/settings.ini`.
 //!
 //! Only choices a host keeps for itself live here: which output to open, the
-//! ReplayGain mode, equalizer and crossfeed to hand the Player at launch, and
+//! ReplayGain mode, which equalizer runs, the graphic and parametric curves,
+//! the saved parametric presets and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
 //! files Measure Loudness decodes at once, whether lyrics are fetched from
-//! LRCLIB, and what the inspector shows. Nothing about the library does, and never the ListenBrainz token
+//! LRCLIB, whether artist info is fetched, whether the queue shows what it
+//! played, what the inspector shows, how albums and artists are sorted and
+//! laid out, which columns an album's tracks show, the volume, and the
+//! Appearance tab's choices.
+//! Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
 const std = @import("std");
@@ -14,6 +19,10 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
+const song_table = @import("song_table.zig");
+const albums = @import("albums.zig");
+const playlists = @import("playlists.zig");
+const parametric = @import("parametric.zig");
 
 const App = app.App;
 
@@ -56,11 +65,77 @@ fn parseCrossfeed(text: []const u8) ?f32 {
     return std.fmt.parseFloat(f32, std.mem.trim(u8, text, " ")) catch null;
 }
 
-fn loadEqualizer(self: *App, text: []const u8, enabled: ?[]const u8) void {
-    const curve = parseEqualizer(text) orelse return;
-    self.equalizer_curve = curve;
-    if (!isEnabled(enabled)) return;
-    self.runtime.playerSetEqualizer(self.player, curve) catch {};
+/// The equalizer that runs: `equalizer_mode`, or for a file written before
+/// there was one, `equalizer_enabled`, which meant the graphic equalizer.
+fn loadEqualizerMode(keys: *gtk.GKeyFile, has_curve: bool) parametric.Mode {
+    if (getString(keys, "sound", "equalizer_mode")) |value| {
+        defer gtk.g_free(value);
+        return std.meta.stringToEnum(parametric.Mode, std.mem.span(value)) orelse .off;
+    }
+    if (!has_curve) return .off;
+    const enabled = getString(keys, "sound", "equalizer_enabled");
+    defer if (enabled) |flag| gtk.g_free(flag);
+    return if (isEnabled(if (enabled) |flag| std.mem.span(flag) else null)) .graphic else .off;
+}
+
+fn loadPresets(self: *App, keys: *gtk.GKeyFile) void {
+    var count: usize = 0;
+    var err: ?*gtk.GError = null;
+    const list = gtk.g_key_file_get_string_list(keys, "sound", "parametric_presets", &count, &err) orelse {
+        gtk.g_clear_error(&err);
+        return;
+    };
+    defer gtk.g_strfreev(list);
+    for (list[0..count]) |maybe_entry| {
+        const entry = std.mem.span(maybe_entry orelse continue);
+        const split = std.mem.indexOfScalar(u8, entry, '\n') orelse continue;
+        const curve = liborca.parseEqualizerApo(entry[split + 1 ..]) catch continue;
+        _ = parametric.storePreset(self, entry[0..split], curve);
+    }
+}
+
+fn loadEqualizers(self: *App, keys: *gtk.GKeyFile) void {
+    var has_curve = false;
+    if (getString(keys, "sound", "equalizer")) |value| {
+        defer gtk.g_free(value);
+        if (parseEqualizer(std.mem.span(value))) |curve| {
+            self.equalizer_curve = curve;
+            has_curve = true;
+        }
+    }
+    if (getString(keys, "sound", "parametric")) |value| {
+        defer gtk.g_free(value);
+        if (liborca.parseEqualizerApo(std.mem.span(value))) |curve| {
+            self.parametric.curve = curve;
+        } else |_| {}
+    }
+    loadPresets(self, keys);
+    const mode = loadEqualizerMode(keys, has_curve);
+    switch (mode) {
+        .off => {},
+        .graphic => self.runtime.playerSetEqualizer(self.player, self.equalizer_curve) catch {},
+        .parametric => self.runtime.playerSetParametricEqualizer(self.player, self.parametric.curve) catch {},
+    }
+    if (mode == .parametric) self.parametric.view = .parametric;
+}
+
+fn savePresets(self: *App, keys: *gtk.GKeyFile) void {
+    const editor = &self.parametric;
+    if (editor.preset_count == 0) return;
+    var storage: [parametric.max_presets][parametric.max_name_bytes + 1 + parametric.curve_text_bytes]u8 = undefined;
+    var entries: [parametric.max_presets][*:0]const u8 = undefined;
+    var count: usize = 0;
+    for (editor.presets[0..editor.preset_count]) |*preset| {
+        const buffer = &storage[count];
+        const name = preset.name();
+        @memcpy(buffer[0..name.len], name);
+        buffer[name.len] = '\n';
+        const text = parametric.writeCurve(buffer[name.len + 1 ..], preset.curve) orelse continue;
+        buffer[name.len + 1 + text.len] = 0;
+        entries[count] = @ptrCast(buffer);
+        count += 1;
+    }
+    gtk.g_key_file_set_string_list(keys, "sound", "parametric_presets", &entries, count);
 }
 
 fn loadCrossfeed(self: *App, text: []const u8, enabled: ?[]const u8) void {
@@ -123,12 +198,7 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.preferred_output.set(self.allocator, std.mem.span(value));
     } else gtk.g_clear_error(&err);
-    if (getString(keys, "sound", "equalizer")) |value| {
-        defer gtk.g_free(value);
-        const enabled = getString(keys, "sound", "equalizer_enabled");
-        defer if (enabled) |flag| gtk.g_free(flag);
-        loadEqualizer(self, std.mem.span(value), if (enabled) |flag| std.mem.span(flag) else null);
-    }
+    loadEqualizers(self, keys);
     if (getString(keys, "sound", "crossfeed")) |value| {
         defer gtk.g_free(value);
         const enabled = getString(keys, "sound", "crossfeed_enabled");
@@ -163,9 +233,17 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.analysis_threads = parseThreads(std.mem.span(value));
     }
+    if (getString(keys, "library", "fetch_artist_info")) |value| {
+        defer gtk.g_free(value);
+        self.fetch_artist_info = isEnabled(std.mem.span(value));
+    }
     if (getString(keys, "lyrics", "fetch")) |value| {
         defer gtk.g_free(value);
         self.lyrics.fetch = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "view", "queue_history")) |value| {
+        defer gtk.g_free(value);
+        self.queue.history_shown = std.mem.eql(u8, std.mem.span(value), "true");
     }
     if (getString(keys, "view", "lyrics")) |value| {
         defer gtk.g_free(value);
@@ -179,6 +257,96 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .signal_path;
     }
+    loadAppearance(self, keys);
+    if (getString(keys, "view", "album_sort")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.ReleaseSort, std.mem.span(value))) |sort| {
+            self.album_sort = sort;
+            if (sort != .recently_added) self.album_shelf_sort = sort;
+        }
+    }
+    if (getString(keys, "view", "albums_layout")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(albums.Layout, std.mem.span(value))) |layout| self.album_layout = layout;
+    }
+    if (getString(keys, "view", "playlists_tab")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(playlists.Tab, std.mem.span(value))) |tab| self.playlists.tab = tab;
+    }
+    if (getString(keys, "view", "playlists_sort")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.PlaylistSort, std.mem.span(value))) |sort| self.playlists.sort = sort;
+    }
+    if (getString(keys, "view", "playlists_layout")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(albums.Layout, std.mem.span(value))) |layout| self.playlists.layout = layout;
+    }
+    if (getString(keys, "view", "artist_sort")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.ArtistSort, std.mem.span(value))) |sort| self.artist_sort = sort;
+    }
+    if (getString(keys, "view", "artists_layout")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(albums.Layout, std.mem.span(value))) |layout| self.artist_layout = layout;
+    }
+    if (getString(keys, "view", "genre")) |value| {
+        defer gtk.g_free(value);
+        self.genres.selected = std.fmt.parseInt(i64, std.mem.span(value), 10) catch null;
+    }
+    if (getString(keys, "view", "album_columns")) |value| {
+        defer gtk.g_free(value);
+        self.album_columns = albums.parseColumns(std.mem.span(value));
+    }
+    if (getString(keys, "view", "song_columns")) |value| {
+        defer gtk.g_free(value);
+        self.song_columns.columns = song_table.parseColumns(std.mem.span(value));
+    }
+    if (getString(keys, "view", "song_column_widths")) |value| {
+        defer gtk.g_free(value);
+        song_table.parseWidths(std.mem.span(value), &self.song_columns.widths);
+    }
+    if (getString(keys, "playback", "volume")) |value| {
+        defer gtk.g_free(value);
+        if (parseVolume(std.mem.span(value))) |level|
+            self.runtime.playerSetVolume(self.player, level) catch {};
+    }
+}
+
+fn parseTile(text: []const u8) ?c_int {
+    const pixels = std.fmt.parseInt(c_int, std.mem.trim(u8, text, " "), 10) catch return null;
+    if (pixels < app.album_tile_range[0] or pixels > app.album_tile_range[1]) return null;
+    return pixels;
+}
+
+fn loadAppearance(self: *App, keys: *gtk.GKeyFile) void {
+    const appearance = &self.appearance;
+    if (getString(keys, "appearance", "artwork")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(app.ArtworkInfluence, std.mem.span(value))) |artwork| appearance.artwork = artwork;
+    }
+    if (getString(keys, "appearance", "album_tile")) |value| {
+        defer gtk.g_free(value);
+        if (parseTile(std.mem.span(value))) |pixels| appearance.album_grid_tile = pixels;
+    }
+    if (getString(keys, "appearance", "density")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(app.Density, std.mem.span(value))) |density| appearance.density = density;
+    }
+    if (getString(keys, "appearance", "inspector_open")) |value| {
+        defer gtk.g_free(value);
+        appearance.inspector_open = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "appearance", "reduce_animation")) |value| {
+        defer gtk.g_free(value);
+        appearance.reduce_animation = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (appearance.inspector_open and self.sidebar_page == .hidden) self.sidebar_page = .details;
+}
+
+fn parseVolume(text: []const u8) ?f32 {
+    const level = std.fmt.parseFloat(f32, std.mem.trim(u8, text, " ")) catch return null;
+    if (!(level >= 0 and level <= 1)) return null;
+    return level;
 }
 
 pub fn save(self: *App) void {
@@ -189,11 +357,18 @@ pub fn save(self: *App) void {
     const mode = self.runtime.playerReplayGainMode(self.player) catch .off;
     gtk.g_key_file_set_string(keys, "playback", "replay_gain", @tagName(mode));
     gtk.g_key_file_set_string(keys, "playback", "output_device", self.preferred_output.value.ptr);
+    if (self.runtime.playerVolume(self.player)) |level| {
+        var volume_buffer: [32]u8 = undefined;
+        gtk.g_key_file_set_string(keys, "playback", "volume", strings.format(&volume_buffer, "{d}", .{level}).ptr);
+    } else |_| {}
     var equalizer_buffer: [256]u8 = undefined;
     if (formatEqualizer(&equalizer_buffer, self.equalizer_curve)) |curve|
         gtk.g_key_file_set_string(keys, "sound", "equalizer", curve.ptr);
-    const equalizer_on = (self.runtime.playerEqualizer(self.player) catch null) != null;
-    gtk.g_key_file_set_string(keys, "sound", "equalizer_enabled", if (equalizer_on) "true" else "false");
+    gtk.g_key_file_set_string(keys, "sound", "equalizer_mode", @tagName(parametric.currentMode(self)));
+    var parametric_buffer: [parametric.curve_text_bytes]u8 = undefined;
+    if (parametric.writeCurve(&parametric_buffer, self.parametric.curve)) |curve|
+        gtk.g_key_file_set_string(keys, "sound", "parametric", curve.ptr);
+    savePresets(self, keys);
     var crossfeed_buffer: [32]u8 = undefined;
     gtk.g_key_file_set_string(keys, "sound", "crossfeed", strings.format(&crossfeed_buffer, "{d}", .{self.crossfeed_amount}).ptr);
     const crossfeed_on = (self.runtime.playerCrossfeed(self.player) catch null) != null;
@@ -208,11 +383,37 @@ pub fn save(self: *App) void {
         var threads_buffer: [8]u8 = undefined;
         gtk.g_key_file_set_string(keys, "library", "analysis_threads", strings.format(&threads_buffer, "{d}", .{threads}).ptr);
     }
+    gtk.g_key_file_set_string(keys, "library", "fetch_artist_info", if (self.fetch_artist_info) "true" else "false");
     gtk.g_key_file_set_string(keys, "maintenance", "enabled", if (self.idle_maintenance) "true" else "false");
     gtk.g_key_file_set_string(keys, "lyrics", "fetch", if (self.lyrics.fetch) "true" else "false");
+    gtk.g_key_file_set_string(keys, "view", "queue_history", if (self.queue.history_shown) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "details", if (self.sidebar_page == .details) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "lyrics", if (self.sidebar_page == .lyrics) "true" else "false");
     gtk.g_key_file_set_string(keys, "view", "signal_path", if (self.sidebar_page == .signal_path) "true" else "false");
+    gtk.g_key_file_set_string(keys, "view", "album_sort", @tagName(self.album_sort));
+    gtk.g_key_file_set_string(keys, "view", "albums_layout", @tagName(self.album_layout));
+    gtk.g_key_file_set_string(keys, "view", "playlists_tab", @tagName(self.playlists.tab));
+    gtk.g_key_file_set_string(keys, "view", "playlists_sort", @tagName(self.playlists.sort));
+    gtk.g_key_file_set_string(keys, "view", "playlists_layout", @tagName(self.playlists.layout));
+    gtk.g_key_file_set_string(keys, "view", "artist_sort", @tagName(self.artist_sort));
+    gtk.g_key_file_set_string(keys, "view", "artists_layout", @tagName(self.artist_layout));
+    if (self.genres.selected) |genre| {
+        var genre_buffer: [24]u8 = undefined;
+        gtk.g_key_file_set_string(keys, "view", "genre", strings.format(&genre_buffer, "{d}", .{genre}).ptr);
+    }
+    const appearance = self.appearance;
+    gtk.g_key_file_set_string(keys, "appearance", "artwork", @tagName(appearance.artwork));
+    var tile_buffer: [16]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "appearance", "album_tile", strings.format(&tile_buffer, "{d}", .{appearance.album_grid_tile}).ptr);
+    gtk.g_key_file_set_string(keys, "appearance", "density", @tagName(appearance.density));
+    gtk.g_key_file_set_string(keys, "appearance", "inspector_open", if (appearance.inspector_open) "true" else "false");
+    gtk.g_key_file_set_string(keys, "appearance", "reduce_animation", if (appearance.reduce_animation) "true" else "false");
+    var album_columns_buffer: [64]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "view", "album_columns", albums.formatColumns(&album_columns_buffer, self.album_columns).ptr);
+    var columns_buffer: [256]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "view", "song_columns", song_table.formatColumns(&columns_buffer, self.song_columns.columns).ptr);
+    var widths_buffer: [256]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "view", "song_column_widths", song_table.formatWidths(&widths_buffer, &self.song_columns.widths).ptr);
     var err: ?*gtk.GError = null;
     if (gtk.g_key_file_save_to_file(keys, file.ptr, &err) == 0) {
         gtk.g_clear_error(&err);

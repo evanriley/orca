@@ -1,4 +1,5 @@
 const std = @import("std");
+const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const app = @import("app.zig");
 const track_model = @import("track_model.zig");
@@ -9,18 +10,143 @@ const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
 const strings = @import("strings.zig");
 const playlists = @import("playlists.zig");
+const settings = @import("settings.zig");
+const signal_path = @import("signal_path.zig");
 
 const App = app.App;
 const TrackObject = track_model.TrackObject;
 pub const Column = track_model.Column;
+pub const ColumnSet = std.EnumSet(Column);
 
 const loved_title = "Loved";
+const duration_title = "Duration";
+const chooser_title = "Columns";
+
+const fixed_columns = ColumnSet.initMany(&.{ .number, .title, .artist, .album, .loved, .rating, .duration, .more });
+const default_song_columns = ColumnSet.initMany(&.{ .number, .title, .artist, .album, .loved, .date_added, .duration, .format, .more });
+const always_shown = ColumnSet.initMany(&.{ .number, .title, .more });
+const dropped_when_narrow = ColumnSet.initMany(&.{ .album, .rating, .date_added, .year, .last_played, .plays, .format, .codec, .bit_depth, .sample_rate });
+
+/// What the column chooser offers, in its order.
+const optional_columns = [_]Column{ .artist, .album, .loved, .rating, .date_added, .year, .last_played, .plays, .duration, .format, .codec, .bit_depth, .sample_rate };
+
+/// The columns a configurable table shows and the widths they were dragged
+/// to; `[view] song_columns` and `song_column_widths` keep them.
+pub const Config = struct {
+    columns: ColumnSet = default_song_columns,
+    widths: [Column.all.len]c_int = @splat(0),
+};
 
 pub const Options = struct {
     multiple: bool,
     sortable: bool,
     playlist: bool = false,
+    config: ?*Config = null,
+    columns: ColumnSet = fixed_columns,
+    duration_icon: bool = false,
+    relative_dates: bool = false,
 };
+
+fn heading(column: Column) [*:0]const u8 {
+    return switch (column) {
+        .number => "#",
+        .title => "Title",
+        .artist => "Artist",
+        .album => "Album",
+        .loved => loved_title,
+        .rating => "Rating",
+        .date_added => "Date Added",
+        .year => "Year",
+        .last_played => "Last Played",
+        .plays => "Plays",
+        .duration => duration_title,
+        .format => "Format",
+        .codec => "Codec",
+        .bit_depth => "Bit Depth",
+        .sample_rate => "Sample Rate",
+        .more => "",
+    };
+}
+
+fn defaultWidth(column: Column) c_int {
+    return switch (column) {
+        .number => 48,
+        .title => 220,
+        .artist, .album => 160,
+        .loved => 44,
+        .rating => 116,
+        .date_added, .last_played => 110,
+        .year, .plays => 64,
+        .duration => 80,
+        .format => 130,
+        .codec, .bit_depth => 80,
+        .sample_rate => 100,
+        .more => 40,
+    };
+}
+
+fn narrowWidth(column: Column) ?c_int {
+    return switch (column) {
+        .title => 120,
+        .artist => 90,
+        else => null,
+    };
+}
+
+fn isNumeric(column: Column) bool {
+    return switch (column) {
+        .number, .duration, .year, .plays, .bit_depth, .sample_rate => true,
+        else => false,
+    };
+}
+
+/// `artist,album,...` as settings keep it. Names it does not know are
+/// skipped; the columns that are always shown are always in the result.
+pub fn parseColumns(text: []const u8) ColumnSet {
+    var result = always_shown;
+    var names = std.mem.splitScalar(u8, text, ',');
+    while (names.next()) |name| {
+        const column = std.meta.stringToEnum(Column, std.mem.trim(u8, name, " ")) orelse continue;
+        result.insert(column);
+    }
+    return result;
+}
+
+pub fn formatColumns(buffer: []u8, columns: ColumnSet) [:0]const u8 {
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    var first = true;
+    for (optional_columns) |column| {
+        if (!columns.contains(column)) continue;
+        writer.print("{s}{s}", .{ if (first) "" else ",", @tagName(column) }) catch return "";
+        first = false;
+    }
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+/// `title:240,artist:180`; a width outside 1 to 2000 is ignored.
+pub fn parseWidths(text: []const u8, widths: *[Column.all.len]c_int) void {
+    var pairs = std.mem.splitScalar(u8, text, ',');
+    while (pairs.next()) |pair| {
+        const split = std.mem.indexOfScalar(u8, pair, ':') orelse continue;
+        const column = std.meta.stringToEnum(Column, std.mem.trim(u8, pair[0..split], " ")) orelse continue;
+        const width = std.fmt.parseInt(c_int, std.mem.trim(u8, pair[split + 1 ..], " "), 10) catch continue;
+        if (width > 0 and width <= 2000) widths[@intFromEnum(column)] = width;
+    }
+}
+
+pub fn formatWidths(buffer: []u8, widths: *const [Column.all.len]c_int) [:0]const u8 {
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    var first = true;
+    for (Column.all) |column| {
+        const width = widths[@intFromEnum(column)];
+        if (width <= 0) continue;
+        writer.print("{s}{s}:{d}", .{ if (first) "" else ",", @tagName(column), width }) catch return "";
+        first = false;
+    }
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
 
 const Cell = struct {
     table: *Table,
@@ -35,9 +161,37 @@ pub const Table = struct {
     playlist: bool = false,
     columns: [Column.all.len]?*gtk.ColumnViewColumn = @splat(null),
     cells: [Column.all.len]Cell = undefined,
+    config: ?*Config = null,
+    fixed: ColumnSet = fixed_columns,
+    duration_icon: bool = false,
+    relative_dates: bool = false,
+    narrow: bool = false,
+    /// Set while the table itself changes column widths, so they are not
+    /// saved as though dragged.
+    resizing: bool = false,
+    /// Numbers the rows by their place in the listing instead of disc.track.
+    positions: bool = false,
+    sorted: ?Column = null,
+    chooser: ?*gtk.GMenuModel = null,
+    save_source: c_uint = 0,
 
     pub fn header(self: *const Table, column: Column) ?*gtk.ColumnViewColumn {
         return self.columns[@intFromEnum(column)];
+    }
+
+    fn chosen(self: *const Table) ColumnSet {
+        const config = self.config orelse return self.fixed;
+        return config.columns;
+    }
+
+    pub fn deinit(self: *Table) void {
+        if (self.save_source != 0) {
+            _ = gtk.g_source_remove(self.save_source);
+            self.save_source = 0;
+            settings.save(self.app);
+        }
+        if (self.chooser) |model| gtk.g_object_unref(model);
+        self.chooser = null;
     }
 };
 
@@ -198,16 +352,28 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
             break :number stack;
         },
         .title => title: {
+            const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
             const label = textLabel(false);
             gtk.gtk_widget_add_css_class(label, "song-title");
-            break :title label;
+            const badge = gtk.gtk_label_new("E");
+            gtk.gtk_widget_add_css_class(badge, "explicit-badge");
+            gtk.gtk_widget_set_valign(badge, gtk.ALIGN_CENTER);
+            gtk.gtk_widget_set_tooltip_text(badge, "Explicit");
+            gtk.gtk_box_append(gtk.cast(gtk.Box, box), label);
+            gtk.gtk_box_append(gtk.cast(gtk.Box, box), badge);
+            break :title box;
         },
-        .artist, .album => textLabel(false),
         .duration => duration: {
             const label = textLabel(true);
             gtk.gtk_widget_add_css_class(label, "song-duration");
             break :duration label;
         },
+        .format => format: {
+            const label = textLabel(false);
+            gtk.gtk_widget_add_css_class(label, "song-format");
+            break :format label;
+        },
+        .artist, .album, .date_added, .year, .last_played, .plays, .codec, .bit_depth, .sample_rate => textLabel(isNumeric(cell.column)),
         .loved => heart: {
             const button = feedback.newRowButton(gtk.callback(heartClicked), cell);
             gtk.gtk_widget_set_halign(button, gtk.ALIGN_CENTER);
@@ -220,7 +386,7 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
             break :stars stars;
         },
         .more => more: {
-            const button = gtk.gtk_button_new_from_icon_name("view-more-symbolic");
+            const button = gtk.gtk_button_new_from_icon_name("view-more-horizontal-symbolic");
             gtk.gtk_widget_add_css_class(button, "flat");
             gtk.gtk_widget_add_css_class(button, "row-more");
             gtk.gtk_widget_set_halign(button, gtk.ALIGN_CENTER);
@@ -235,6 +401,56 @@ fn setupCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) 
     menu.onSecondaryClick(child, cellMenu, cell);
 }
 
+fn dateText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
+    const seconds = unix_seconds orelse return "";
+    const moment = gtk.g_date_time_new_from_unix_local(seconds) orelse return "";
+    defer gtk.g_date_time_unref(moment);
+    const text = gtk.g_date_time_format(moment, "%Y-%m-%d") orelse return "";
+    defer gtk.g_free(text);
+    return strings.format(buffer, "{s}", .{std.mem.span(text)});
+}
+
+/// `FLAC · 44.1 kHz`, or only the codec when the rate is unknown.
+fn formatText(buffer: []u8, values: *const track_model.Fields) [:0]const u8 {
+    if (values.codec.len == 0) return "";
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeCodecName(&writer, values.codec) catch return "";
+    if (values.sample_rate) |rate| {
+        writer.writeAll(" · ") catch return "";
+        signal_path.writeRate(&writer, rate) catch return "";
+    }
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+fn codecText(buffer: []u8, codec: []const u8) [:0]const u8 {
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeCodecName(&writer, codec) catch return "";
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+fn rateText(buffer: []u8, hertz: ?u32) [:0]const u8 {
+    const rate = hertz orelse return "";
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    signal_path.writeRate(&writer, rate) catch return "";
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+fn momentText(buffer: []u8, unix_seconds: ?i64) [:0]const u8 {
+    const seconds = unix_seconds orelse return "";
+    const moment = gtk.g_date_time_new_from_unix_local(seconds) orelse return "";
+    defer gtk.g_date_time_unref(moment);
+    const text = gtk.g_date_time_format(moment, "%-d %B %Y, %R") orelse return "";
+    defer gtk.g_free(text);
+    return strings.format(buffer, "{s}", .{std.mem.span(text)});
+}
+
+fn setText(widget: *gtk.Widget, text: [:0]const u8) void {
+    gtk.gtk_label_set_text(gtk.cast(gtk.Label, widget), text.ptr);
+}
+
 fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const list_item = gtk.cast(gtk.ListItem, item);
     const object = gtk.gtk_list_item_get_item(list_item) orelse return;
@@ -242,22 +458,41 @@ fn bindCell(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     const child = gtk.gtk_list_item_get_child(list_item) orelse return;
     const cell = cellData(data);
     const playing = isPlaying(row);
-    var buffer: [32]u8 = undefined;
+    const values = row.fields();
+    var buffer: [64]u8 = undefined;
     switch (cell.column) {
         .number => {
             const stack = gtk.cast(gtk.Stack, child);
             gtk.gtk_stack_set_visible_child_name(stack, if (playing) "playing" else "number");
             const label = gtk.gtk_stack_get_child_by_name(stack, "number") orelse return;
-            const text = if (cell.table.playlist)
+            const text = if (cell.table.playlist or cell.table.positions)
                 strings.format(&buffer, "{d}", .{gtk.gtk_list_item_get_position(list_item) + 1})
             else
                 row.numberText(&buffer);
-            gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), text.ptr);
+            setText(label, text);
         },
-        .title => gtk.gtk_label_set_text(gtk.cast(gtk.Label, child), row.title().ptr),
-        .artist => gtk.gtk_label_set_text(gtk.cast(gtk.Label, child), row.artist().ptr),
-        .album => gtk.gtk_label_set_text(gtk.cast(gtk.Label, child), row.album().ptr),
-        .duration => gtk.gtk_label_set_text(gtk.cast(gtk.Label, child), row.durationText(&buffer).ptr),
+        .title => {
+            const label = gtk.gtk_widget_get_first_child(child) orelse return;
+            setText(label, row.title());
+            const badge = gtk.gtk_widget_get_next_sibling(label) orelse return;
+            gtk.gtk_widget_set_visible(badge, if (values.explicit) gtk.true_ else gtk.false_);
+        },
+        .artist => setText(child, row.artist()),
+        .album => setText(child, row.album()),
+        .duration => setText(child, row.durationText(&buffer)),
+        .date_added => setText(child, dateText(&buffer, values.added_at)),
+        .last_played => if (cell.table.relative_dates) {
+            setText(child, if (values.last_played_at) |seconds| details.recentDayText(&buffer, seconds) else "");
+            var tooltip_buffer: [64]u8 = undefined;
+            const tooltip = momentText(&tooltip_buffer, values.last_played_at);
+            gtk.gtk_widget_set_tooltip_text(child, if (tooltip.len != 0) tooltip.ptr else null);
+        } else setText(child, dateText(&buffer, values.last_played_at)),
+        .year => setText(child, if (values.year) |year| strings.format(&buffer, "{d}", .{year}) else ""),
+        .plays => setText(child, if (values.play_count != 0) strings.format(&buffer, "{d}", .{values.play_count}) else ""),
+        .format => setText(child, formatText(&buffer, values)),
+        .codec => setText(child, codecText(&buffer, values.codec)),
+        .bit_depth => setText(child, if (values.bit_depth) |bits| strings.format(&buffer, "{d}-bit", .{bits}) else ""),
+        .sample_rate => setText(child, rateText(&buffer, values.sample_rate)),
         .loved => {
             feedback.showRowButton(child, row.feedback());
             gtk.gtk_widget_set_visible(child, if (row.inLibrary()) gtk.true_ else gtk.false_);
@@ -387,27 +622,63 @@ fn findLabel(widget: *gtk.Widget) ?*gtk.Widget {
     return null;
 }
 
-fn showHeartHeader(table: *Table) void {
-    const view = gtk.cast(gtk.Widget, table.view orelse return);
+fn labelIs(label: *gtk.Widget, text: [*:0]const u8) bool {
+    return std.mem.eql(u8, std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, label))), std.mem.span(text));
+}
+
+fn headerRow(table: *Table) ?*gtk.Widget {
+    const view = gtk.cast(gtk.Widget, table.view orelse return null);
     var part = gtk.gtk_widget_get_first_child(view);
-    while (part) |header| : (part = gtk.gtk_widget_get_next_sibling(header)) {
-        if (!hasCssName(header, "header")) continue;
-        var title = gtk.gtk_widget_get_first_child(header);
-        while (title) |button| : (title = gtk.gtk_widget_get_next_sibling(button)) {
-            if (gtk.gtk_widget_has_css_class(button, "heart-header") != 0) continue;
-            const label = findLabel(button) orelse continue;
-            if (!std.mem.eql(u8, std.mem.span(gtk.gtk_label_get_text(gtk.cast(gtk.Label, label))), loved_title)) continue;
-            const box = gtk.gtk_widget_get_parent(label) orelse continue;
+    while (part) |child| : (part = gtk.gtk_widget_get_next_sibling(child)) {
+        if (hasCssName(child, "header")) return child;
+    }
+    return null;
+}
+
+/// Swaps the Loved title for a heart, the Duration title for a clock where
+/// the table asks for one and the Columns title for the chooser's button,
+/// and marks the title of the column the rows are sorted by.
+fn decorateHeader(table: *Table) void {
+    const row = headerRow(table) orelse return;
+    var title = gtk.gtk_widget_get_first_child(row);
+    while (title) |button| : (title = gtk.gtk_widget_get_next_sibling(button)) {
+        const label = findLabel(button) orelse continue;
+        const sorted = if (table.sorted) |column| labelIs(label, heading(column)) else false;
+        if (sorted)
+            gtk.gtk_widget_add_css_class(button, "sorted")
+        else
+            gtk.gtk_widget_remove_css_class(button, "sorted");
+        if (gtk.gtk_widget_has_css_class(button, "heart-header") != 0) continue;
+        if (gtk.gtk_widget_has_css_class(button, "clock-header") != 0) continue;
+        if (gtk.gtk_widget_has_css_class(button, "column-chooser") != 0) continue;
+        const box = gtk.gtk_widget_get_parent(label) orelse continue;
+        if (labelIs(label, loved_title)) {
             gtk.gtk_widget_add_css_class(button, "heart-header");
             gtk.gtk_widget_set_tooltip_text(button, loved_title);
             gtk.gtk_widget_set_visible(label, gtk.false_);
             gtk.gtk_box_prepend(gtk.cast(gtk.Box, box), gtk.gtk_image_new_from_icon_name(feedback.filled_icon));
+        } else if (table.duration_icon and labelIs(label, duration_title)) {
+            gtk.gtk_widget_add_css_class(button, "clock-header");
+            gtk.gtk_widget_set_tooltip_text(button, duration_title);
+            gtk.gtk_widget_set_visible(label, gtk.false_);
+            const clock = gtk.gtk_image_new_from_icon_name("preferences-system-time-symbolic");
+            gtk.gtk_widget_set_hexpand(clock, gtk.true_);
+            gtk.gtk_widget_set_halign(clock, gtk.ALIGN_END);
+            gtk.gtk_box_prepend(gtk.cast(gtk.Box, box), clock);
+        } else if (table.config != null and labelIs(label, chooser_title)) {
+            gtk.gtk_widget_add_css_class(button, "column-chooser");
+            gtk.gtk_widget_set_tooltip_text(button, "Choose Columns");
+            gtk.gtk_widget_set_visible(label, gtk.false_);
+            gtk.gtk_box_prepend(gtk.cast(gtk.Box, box), gtk.gtk_image_new_from_icon_name("view-more-horizontal-symbolic"));
+            const click = gtk.gtk_gesture_click_new();
+            _ = gtk.signalConnect(click, "pressed", gtk.callback(chooserClicked), table);
+            gtk.gtk_widget_add_controller(button, click);
         }
     }
 }
 
 fn headerRebuilt(data: ?*anyopaque) callconv(.c) gtk.gboolean {
-    showHeartHeader(tableData(data));
+    decorateHeader(tableData(data));
     return gtk.false_;
 }
 
@@ -415,28 +686,129 @@ fn columnsChanged(_: ?*anyopaque, _: c_uint, _: c_uint, _: c_uint, data: ?*anyop
     _ = gtk.g_idle_add(headerRebuilt, data);
 }
 
-fn makeColumn(table: *Table, title: [*:0]const u8, column: Column, width: c_int, expand: bool, sortable: bool) *gtk.ColumnViewColumn {
+/// Highlights the title of the column the rows are sorted by, if it is shown.
+pub fn markSorted(table: *Table, sort: ?liborca.TrackSort) void {
+    table.sorted = null;
+    if (sort) |key| {
+        for (Column.all) |column| {
+            if (column.sortKey() == key and table.header(column) != null) table.sorted = column;
+        }
+    }
+    decorateHeader(table);
+}
+
+fn columnWidth(table: *const Table, column: Column) c_int {
+    if (table.narrow) if (narrowWidth(column)) |width| return width;
+    if (column == .loved or column == .more) return defaultWidth(column);
+    const saved = if (table.config) |config| config.widths[@intFromEnum(column)] else 0;
+    return if (saved > 0) saved else defaultWidth(column);
+}
+
+fn applyVisibility(table: *Table) void {
+    const shown = table.chosen();
+    table.resizing = true;
+    defer table.resizing = false;
+    for (Column.all) |column| {
+        const header = table.header(column) orelse continue;
+        const visible = shown.contains(column) and !(table.narrow and dropped_when_narrow.contains(column));
+        gtk.gtk_column_view_column_set_visible(header, if (visible) gtk.true_ else gtk.false_);
+        if (narrowWidth(column) != null) gtk.gtk_column_view_column_set_fixed_width(header, columnWidth(table, column));
+    }
+}
+
+/// Drops the columns a narrow window has no room for and narrows Title and
+/// Artist, without forgetting which columns were chosen or their widths.
+pub fn setNarrow(table: *Table, narrow: bool) void {
+    table.narrow = narrow;
+    applyVisibility(table);
+}
+
+fn chooserClicked(gesture: ?*anyopaque, _: c_int, _: f64, _: f64, data: ?*anyopaque) callconv(.c) void {
+    const table = tableData(data);
+    const model = table.chooser orelse return;
+    const widget = menu.gestureWidget(gesture);
+    const x: f64 = @floatFromInt(@divTrunc(gtk.gtk_widget_get_width(widget), 2));
+    const y: f64 = @floatFromInt(gtk.gtk_widget_get_height(widget));
+    menu.popupModel(widget, model, x, y);
+}
+
+fn choiceActivated(action: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const cell = cellData(data);
+    const table = cell.table;
+    const config = table.config orelse return;
+    config.columns.toggle(cell.column);
+    const shown = config.columns.contains(cell.column);
+    gtk.g_simple_action_set_state(gtk.cast(gtk.GSimpleAction, action), gtk.g_variant_new_boolean(if (shown) gtk.true_ else gtk.false_));
+    applyVisibility(table);
+    markSorted(table, if (table.sorted) |column| column.sortKey() else null);
+    settings.save(table.app);
+}
+
+fn buildChooser(table: *Table, view: *gtk.Widget) void {
+    const config = table.config orelse return;
+    const group = gtk.g_simple_action_group_new();
+    defer gtk.g_object_unref(group);
+    const items = gtk.g_menu_new();
+    for (optional_columns) |column| {
+        const shown = config.columns.contains(column);
+        const action = gtk.g_simple_action_new_stateful(@tagName(column), null, gtk.g_variant_new_boolean(if (shown) gtk.true_ else gtk.false_)) orelse continue;
+        _ = gtk.signalConnect(action, "activate", gtk.callback(choiceActivated), &table.cells[@intFromEnum(column)]);
+        gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
+        gtk.g_object_unref(action);
+        var name: [48]u8 = undefined;
+        gtk.g_menu_append(items, heading(column), strings.format(&name, "columns.{s}", .{@tagName(column)}).ptr);
+    }
+    gtk.gtk_widget_insert_action_group(view, "columns", gtk.cast(gtk.GActionGroup, group));
+    table.chooser = gtk.cast(gtk.GMenuModel, items);
+}
+
+fn saveLater(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const table = tableData(data);
+    table.save_source = 0;
+    settings.save(table.app);
+    return gtk.SOURCE_REMOVE;
+}
+
+fn widthChanged(header: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const cell = cellData(data);
+    const table = cell.table;
+    const config = table.config orelse return;
+    if (table.resizing or table.narrow) return;
+    config.widths[@intFromEnum(cell.column)] = gtk.gtk_column_view_column_get_fixed_width(gtk.cast(gtk.ColumnViewColumn, header));
+    if (table.save_source == 0) table.save_source = gtk.g_timeout_add(500, saveLater, table);
+}
+
+fn makeColumn(table: *Table, column: Column, sortable: bool) *gtk.ColumnViewColumn {
     const cell = &table.cells[@intFromEnum(column)];
     cell.* = .{ .table = table, .column = column };
     const factory = gtk.gtk_signal_list_item_factory_new();
     _ = gtk.signalConnect(factory, "setup", gtk.callback(setupCell), cell);
     _ = gtk.signalConnect(factory, "bind", gtk.callback(bindCell), cell);
+    const title = if (column == .more and table.config != null) chooser_title else heading(column);
     const result = gtk.gtk_column_view_column_new(title, factory);
     const fixed = column == .loved or column == .more;
     gtk.gtk_column_view_column_set_resizable(result, if (fixed) gtk.false_ else gtk.true_);
+    const expand = column == .title or column == .artist or column == .album;
     gtk.gtk_column_view_column_set_expand(result, if (expand) gtk.true_ else gtk.false_);
-    if (width > 0) gtk.gtk_column_view_column_set_fixed_width(result, width);
+    gtk.gtk_column_view_column_set_fixed_width(result, columnWidth(table, column));
     if (sortable and column.sortKey() != null) {
         const sorter = track_model.headerSorter();
         gtk.gtk_column_view_column_set_sorter(result, sorter);
         gtk.g_object_unref(sorter);
     }
+    if (table.chooser) |model| gtk.gtk_column_view_column_set_header_menu(result, model);
+    if (table.config != null and !fixed)
+        _ = gtk.signalConnect(result, "notify::fixed-width", gtk.callback(widthChanged), cell);
     return result;
 }
 
 pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
     table.app = self;
     table.playlist = options.playlist;
+    table.config = options.config;
+    table.fixed = options.columns;
+    table.duration_icon = options.duration_icon;
+    table.relative_dates = options.relative_dates;
     const store = gtk.g_list_store_new(track_model.getType()).?;
     table.store = store;
     const model = gtk.cast(gtk.ListModel, gtk.g_object_ref(store));
@@ -454,23 +826,17 @@ pub fn build(table: *Table, self: *App, options: Options) *gtk.Widget {
     gtk.gtk_column_view_set_tab_behavior(table.view.?, gtk.LIST_TAB_ITEM);
     _ = gtk.signalConnect(view, "activate", gtk.callback(rowActivated), table);
     _ = gtk.signalConnect(table.selection.?, "selection-changed", gtk.callback(details.selectionChanged), self);
+    buildChooser(table, view);
 
-    const columns: [Column.all.len]*gtk.ColumnViewColumn = .{
-        makeColumn(table, "#", .number, 56, false, options.sortable),
-        makeColumn(table, "Title", .title, 220, true, options.sortable),
-        makeColumn(table, "Artist", .artist, 160, true, options.sortable),
-        makeColumn(table, "Album", .album, 160, true, options.sortable),
-        makeColumn(table, loved_title, .loved, 44, false, options.sortable),
-        makeColumn(table, "Rating", .rating, 104, false, options.sortable),
-        makeColumn(table, "Duration", .duration, 80, false, options.sortable),
-        makeColumn(table, "", .more, 40, false, options.sortable),
-    };
-    for (columns, 0..) |column, index| {
-        gtk.gtk_column_view_append_column(table.view.?, column);
-        table.columns[index] = column;
-        gtk.g_object_unref(column);
+    for (Column.all) |column| {
+        if (table.config == null and !table.fixed.contains(column)) continue;
+        const header = makeColumn(table, column, options.sortable);
+        gtk.gtk_column_view_append_column(table.view.?, header);
+        table.columns[@intFromEnum(column)] = header;
+        gtk.g_object_unref(header);
     }
-    showHeartHeader(table);
+    applyVisibility(table);
+    decorateHeader(table);
     _ = gtk.signalConnect(gtk.gtk_column_view_get_columns(table.view.?), "items-changed", gtk.callback(columnsChanged), table);
     return view;
 }

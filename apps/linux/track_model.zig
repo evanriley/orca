@@ -39,6 +39,15 @@ pub const Fields = struct {
     title: [:0]u8 = &empty,
     artist: [:0]u8 = &empty,
     album: [:0]u8 = &empty,
+    codec: [:0]u8 = &empty,
+    sample_rate: ?u32 = null,
+    bit_depth: ?u32 = null,
+    lossy: bool = false,
+    added_at: ?i64 = null,
+    play_count: u64 = 0,
+    last_played_at: ?i64 = null,
+    explicit: bool = false,
+    year: ?i32 = null,
 };
 
 var empty: [0:0]u8 = .{};
@@ -154,6 +163,7 @@ fn finalize(object: *gtk.GObject) callconv(.c) void {
     freeText(values.title);
     freeText(values.artist);
     freeText(values.album);
+    freeText(values.codec);
     values.* = .{};
     if (parent_class) |parent| {
         if (parent.finalize) |chain| chain(object);
@@ -190,6 +200,15 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     // Track artist first; the release artist is the fallback a browser wants.
     values.artist = dupe(if (summary.artist.len != 0) summary.artist else summary.album_artist);
     values.album = dupe(summary.album);
+    values.codec = dupe(summary.codec);
+    values.sample_rate = summary.sample_rate;
+    values.bit_depth = summary.bit_depth;
+    values.lossy = summary.lossy;
+    values.added_at = summary.added_at;
+    values.play_count = summary.play_count;
+    values.last_played_at = summary.last_played_at;
+    values.explicit = summary.explicit == .explicit;
+    values.year = summary.year;
     return self;
 }
 
@@ -235,6 +254,7 @@ pub fn clone(source: *TrackObject) ?*TrackObject {
     self.fields().title = dupe(from.title);
     self.fields().artist = dupe(from.artist);
     self.fields().album = dupe(from.album);
+    self.fields().codec = dupe(from.codec);
     return self;
 }
 
@@ -251,10 +271,18 @@ pub const Column = enum {
     album,
     loved,
     rating,
+    date_added,
+    year,
+    last_played,
+    plays,
     duration,
+    format,
+    codec,
+    bit_depth,
+    sample_rate,
     more,
 
-    pub const all = [_]Column{ .number, .title, .artist, .album, .loved, .rating, .duration, .more };
+    pub const all = [_]Column{ .number, .title, .artist, .album, .loved, .rating, .date_added, .year, .last_played, .plays, .duration, .format, .codec, .bit_depth, .sample_rate, .more };
 
     pub fn sortKey(self: Column) ?liborca.TrackSort {
         return switch (self) {
@@ -264,8 +292,12 @@ pub const Column = enum {
             .album => .album,
             .loved => .loved,
             .rating => .rating,
+            .date_added => .date_added,
+            .year => .year,
+            .last_played => .last_played,
+            .plays => .play_count,
             .duration => .duration,
-            .more => null,
+            .format, .codec, .bit_depth, .sample_rate, .more => null,
         };
     }
 };

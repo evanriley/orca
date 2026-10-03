@@ -1,9 +1,10 @@
 //! The lyrics page of the details sidebar: the audible Track's lyrics, which
 //! liborca resolves on a job, followed line by line while they are synced.
 //!
-//! Every details panel carries a `View`; they all draw the one `State`. A
-//! Track's lyrics are asked for only while a view is on screen, and a view
-//! that was off screen when they arrived is drawn when it is shown.
+//! Every details panel carries a `View`; they all draw the one `State`, as
+//! does the Now Playing page's three-line quote. A Track's lyrics are asked
+//! for only while a view or the quote is on screen, and a view that was off
+//! screen when they arrived is drawn when it is shown.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -13,7 +14,6 @@ const app = @import("app.zig");
 const settings = @import("settings.zig");
 const details = @import("details.zig");
 const strings = @import("strings.zig");
-const nowplaying = @import("nowplaying.zig");
 
 const App = app.App;
 
@@ -40,7 +40,9 @@ pub const State = struct {
     follow_timer: c_uint = 0,
     quote_slot: ?*gtk.Widget = null,
     quote: ?*gtk.Widget = null,
+    quote_lines: [3]?*gtk.Widget = @splat(null),
     quote_line: ?usize = null,
+    quote_drawn: bool = false,
     /// Set at shutdown, after which widgets torn down later start nothing.
     closed: bool = false,
 };
@@ -106,12 +108,14 @@ pub const View = struct {
     }
 };
 
-/// Shows the synced line being heard in `label` while `slot` is mapped, using
-/// only lyrics a lyrics view loaded: it never starts a lookup or a fetch.
-pub fn watchQuote(self: *App, slot: *gtk.Widget, label: *gtk.Widget) void {
+/// Shows, in `lines`, the synced line being heard between the lines before
+/// and after it, or a plain text's first three lines, while `slot` is mapped.
+/// `quote` is hidden while there is nothing to show.
+pub fn watchQuote(self: *App, slot: *gtk.Widget, quote: *gtk.Widget, lines: [3]*gtk.Widget) void {
     self.lyrics.quote_slot = slot;
-    self.lyrics.quote = label;
-    gtk.gtk_widget_set_visible(label, gtk.false_);
+    self.lyrics.quote = quote;
+    for (&self.lyrics.quote_lines, lines) |*target, line| target.* = line;
+    gtk.gtk_widget_set_visible(quote, gtk.false_);
     _ = gtk.signalConnect(slot, "map", gtk.callback(quoteMappedChanged), self);
     _ = gtk.signalConnect(slot, "unmap", gtk.callback(quoteMappedChanged), self);
 }
@@ -146,7 +150,7 @@ pub fn shutdown(self: *App) void {
 pub fn sync(self: *App) void {
     const state = &self.lyrics;
     if (state.closed) return;
-    if (anyViewMapped(self) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
+    if ((anyViewMapped(self) or quoteMapped(self)) and (state.stale or !optionalEql(state.track_id, self.shown_track_id))) {
         resolve(self, self.shown_track_id);
         redraw(self);
     }
@@ -206,7 +210,7 @@ fn finishJob(self: *App) void {
 
 fn redraw(self: *App) void {
     self.lyrics.generation +%= 1;
-    showQuote(self, null, null);
+    drawQuote(self);
     forEachMappedView(self, render);
 }
 
@@ -244,19 +248,81 @@ fn quoteMapped(self: *const App) bool {
 fn quoteMappedChanged(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self: *App = @ptrCast(@alignCast(data.?));
     if (self.lyrics.closed) return;
-    follow(self);
+    sync(self);
 }
 
-fn showQuote(self: *App, lyrics: ?liborca.Lyrics, line: ?usize) void {
+fn foundLyrics(self: *const App) ?liborca.Lyrics {
+    const found = switch (self.lyrics.resolution) {
+        .found => |value| value,
+        else => return null,
+    };
+    return found.lyrics;
+}
+
+fn drawQuote(self: *App) void {
+    const state = &self.lyrics;
+    state.quote_drawn = false;
+    const quote = state.quote orelse return;
+    const lyrics = foundLyrics(self) orelse return gtk.gtk_widget_set_visible(quote, gtk.false_);
+    switch (lyrics.kind) {
+        .synced => gtk.gtk_widget_set_visible(quote, gtk.false_),
+        .instrumental => gtk.gtk_widget_set_visible(quote, gtk.false_),
+        .plain => {
+            var texts: [3][]const u8 = @splat("");
+            var count: usize = 0;
+            for (lyrics.lines) |line| {
+                if (count == texts.len) break;
+                if (std.mem.trim(u8, line.text, " \t").len == 0) continue;
+                texts[count] = line.text;
+                count += 1;
+            }
+            setQuoteLines(self, texts);
+            setClass(state.quote_lines[1].?, "now-lyric-current", false);
+            gtk.gtk_widget_set_visible(quote, boolean(count != 0));
+        },
+    }
+}
+
+fn showQuote(self: *App, lyrics: liborca.Lyrics, line: ?usize) void {
     const state = &self.lyrics;
     const quote = state.quote orelse return;
-    if (lyrics != null and optionalEql(line, state.quote_line)) return;
+    if (state.quote_drawn and optionalEql(line, state.quote_line)) return;
+    state.quote_drawn = true;
     state.quote_line = line;
-    const text = if (lyrics) |value| (if (line) |index| value.lines[index].text else "") else "";
+    var texts: [3][]const u8 = @splat("");
+    if (line) |index| {
+        if (index > 0) texts[0] = lyricText(lyrics.lines[index - 1].text);
+        texts[1] = lyricText(lyrics.lines[index].text);
+        if (index + 1 < lyrics.lines.len) texts[2] = lyricText(lyrics.lines[index + 1].text);
+    } else {
+        texts[1] = lyricText("");
+        if (lyrics.lines.len != 0) texts[2] = lyricText(lyrics.lines[0].text);
+    }
+    setQuoteLines(self, texts);
+    setClass(state.quote_lines[1].?, "now-lyric-current", true);
+    gtk.gtk_widget_set_visible(quote, gtk.true_);
+}
+
+fn hideQuote(self: *App) void {
+    const state = &self.lyrics;
+    state.quote_drawn = false;
+    if (state.quote) |quote| gtk.gtk_widget_set_visible(quote, gtk.false_);
+}
+
+fn lyricText(text: []const u8) []const u8 {
+    return if (text.len != 0) text else "♪";
+}
+
+fn setQuoteLines(self: *App, texts: [3][]const u8) void {
     var buffer: [512]u8 = undefined;
-    const shown = if (text.len != 0) strings.format(&buffer, "“{s}”", .{text}) else "";
-    nowplaying.setUppercase(gtk.cast(gtk.Label, quote), shown);
-    gtk.gtk_widget_set_visible(quote, if (shown.len != 0) gtk.true_ else gtk.false_);
+    for (self.lyrics.quote_lines, texts) |maybe, text| {
+        const line = maybe orelse continue;
+        gtk.gtk_label_set_text(gtk.cast(gtk.Label, line), strings.terminated(&buffer, text).ptr);
+    }
+}
+
+fn boolean(value: bool) gtk.gboolean {
+    return if (value) gtk.true_ else gtk.false_;
 }
 
 fn adjustmentChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -271,11 +337,7 @@ fn adjustmentChanged(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) vo
 }
 
 fn syncedLyrics(self: *const App) ?liborca.Lyrics {
-    const found = switch (self.lyrics.resolution) {
-        .found => |value| value,
-        else => return null,
-    };
-    const lyrics = found.lyrics orelse return null;
+    const lyrics = foundLyrics(self) orelse return null;
     return if (lyrics.kind == .synced) lyrics else null;
 }
 
@@ -285,7 +347,7 @@ fn step(self: *App) bool {
     if (!quote_mapped and !anyViewMapped(self)) return false;
     const status = self.runtime.playerStatus(self.player) catch return false;
     if (!optionalEql(status.track_id, self.lyrics.track_id)) {
-        showQuote(self, null, null);
+        hideQuote(self);
         return false;
     }
     const line = lyrics.lineAt(status.position_ms);

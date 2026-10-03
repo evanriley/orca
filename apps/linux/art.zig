@@ -35,12 +35,13 @@ pub const Size = enum(u8) {
     }
 };
 
-pub const Kind = enum(u8) { track, release };
+pub const Kind = enum(u8) { track, release, artist, related };
 
 pub const Key = struct {
     kind: Kind,
     id: i64,
     size: Size,
+    mbid: [36]u8 = @splat(0),
 
     pub fn release(id: i64, size: Size) Key {
         return .{ .kind = .release, .id = id, .size = size };
@@ -50,10 +51,22 @@ pub const Key = struct {
         return .{ .kind = .track, .id = id, .size = size };
     }
 
-    fn subject(self: Key) liborca.ArtworkSubject {
+    pub fn artist(id: i64, size: Size) Key {
+        return .{ .kind = .artist, .id = id, .size = size };
+    }
+
+    pub fn related(mbid: []const u8, size: Size) Key {
+        var key: Key = .{ .kind = .related, .id = 0, .size = size };
+        const length = @min(mbid.len, key.mbid.len);
+        @memcpy(key.mbid[0..length], mbid[0..length]);
+        return key;
+    }
+
+    fn subject(self: Key) ?liborca.ArtworkSubject {
         return switch (self.kind) {
             .track => .{ .track = self.id },
             .release => .{ .release = self.id },
+            .artist, .related => null,
         };
     }
 };
@@ -209,6 +222,21 @@ pub fn newCover(self: *App, placeholder: *gtk.Widget, pixels: c_int) *gtk.Widget
     return stack;
 }
 
+pub fn newFillingCover(self: *App, placeholder: *gtk.Widget) *gtk.Widget {
+    const stack = gtk.gtk_stack_new();
+    _ = gtk.signalConnect(stack, "destroy", gtk.callback(coverDestroyed), self);
+    gtk.gtk_widget_set_overflow(stack, gtk.OVERFLOW_HIDDEN);
+    const picture = gtk.gtk_picture_new();
+    gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
+    gtk.gtk_picture_set_content_fit(gtk.cast(gtk.Picture, picture), gtk.CONTENT_FIT_COVER);
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), placeholder, "placeholder");
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), picture, "art");
+    gtk.g_object_set_data(stack, picture_key, picture);
+    return stack;
+}
+
+const picture_key = "orca-picture";
+
 /// A placeholder icon for covers of tracks.
 pub fn iconPlaceholder(pixels: c_int) *gtk.Widget {
     const icon = gtk.gtk_image_new_from_icon_name("audio-x-generic-symbolic");
@@ -244,6 +272,11 @@ pub fn setInitials(stack_widget: *gtk.Widget, title: []const u8) void {
 }
 
 fn paint(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
+    if (gtk.g_object_get_data(stack, picture_key)) |picture| {
+        gtk.gtk_picture_set_paintable(gtk.cast(gtk.Picture, picture), if (texture) |present| gtk.cast(gtk.GdkPaintable, present) else null);
+        gtk.gtk_stack_set_visible_child_name(stack, if (texture != null) "art" else "placeholder");
+        return;
+    }
     const image = gtk.gtk_stack_get_child_by_name(stack, "art") orelse return;
     if (texture) |present| {
         gtk.gtk_image_set_from_paintable(gtk.cast(gtk.Image, image), gtk.cast(gtk.GdkPaintable, present));
@@ -310,6 +343,31 @@ pub fn refreshRelease(self: *App, release_id: i64) void {
     }
 }
 
+pub fn showArtist(self: *App, stack_widget: *gtk.Widget, artist_id: i64, size: Size) bool {
+    const key = Key.artist(artist_id, size);
+    show(self, stack_widget, key);
+    const entry = self.art.entries.get(key) orelse return true;
+    return entry.texture != null;
+}
+
+pub fn showRelated(self: *App, stack_widget: *gtk.Widget, mbid: []const u8, size: Size) bool {
+    const key = Key.related(mbid, size);
+    show(self, stack_widget, key);
+    const entry = self.art.entries.get(key) orelse return true;
+    return entry.texture != null;
+}
+
+pub fn refreshArtist(self: *App, artist_id: i64) void {
+    const cache = &self.art;
+    inline for (comptime std.enums.values(Size)) |size| {
+        const key = Key.artist(artist_id, size);
+        if (cache.entries.fetchRemove(key)) |removed| {
+            if (removed.value.texture) |texture| gtk.g_object_unref(texture);
+        }
+        if (isWanted(cache, key)) want(self, key);
+    }
+}
+
 fn isWanted(cache: *const Cache, key: Key) bool {
     for (cache.bindings.items) |binding| {
         if (std.meta.eql(binding.key, key)) return true;
@@ -322,12 +380,25 @@ fn want(self: *App, key: Key) void {
     if (cache.pending.contains(key) or cache.decoding.contains(key)) return;
     for (cache.backlog.items) |queued| if (std.meta.eql(queued, key)) return;
     const library = self.library orelse return;
-    const request = self.runtime.libraryRequestArtwork(library, self.io, key.subject()) catch {
+    const subject = key.subject() orelse return wantPhoto(self, library, key);
+    const request = self.runtime.libraryRequestArtwork(library, self.io, subject) catch {
         cache.backlog.append(self.allocator, key) catch {};
         return;
     };
     cache.pending.put(self.allocator, key, request) catch return;
     cache.requests.put(self.allocator, request, key) catch {};
+}
+
+fn wantPhoto(self: *App, library: liborca.LibraryHandle, key: Key) void {
+    const cache = &self.art;
+    for (cache.waiting.items) |job| if (std.meta.eql(job.key, key)) return;
+    const photo = switch (key.kind) {
+        .related => self.runtime.libraryRelatedArtistPhoto(library, std.mem.sliceTo(&key.mbid, 0)) catch null,
+        else => self.runtime.libraryArtistPhoto(library, key.id) catch null,
+    };
+    const image = photo orelse return remember(self, key, null);
+    cache.waiting.append(self.allocator, .{ .key = key, .image = image }) catch return image.deinit();
+    startDecodes(self);
 }
 
 fn abandon(self: *App, key: Key) void {
@@ -428,11 +499,31 @@ fn decodeInThread(task: *gtk.GTask, _: ?*anyopaque, data: ?*anyopaque, _: ?*gtk.
     defer gtk.g_object_unref(stream);
     var err: ?*gtk.GError = null;
     const pixels = job.key.size.pixels();
-    if (gtk.gdk_pixbuf_new_from_stream_at_scale(stream, pixels, pixels, gtk.true_, null, &err)) |pixbuf| {
+    if (job.key.kind == .artist or job.key.kind == .related) {
+        job.texture = squareTexture(stream, pixels);
+    } else if (gtk.gdk_pixbuf_new_from_stream_at_scale(stream, pixels, pixels, gtk.true_, null, &err)) |pixbuf| {
         defer gtk.g_object_unref(pixbuf);
         job.texture = gtk.gdk_texture_new_for_pixbuf(pixbuf);
     } else gtk.g_clear_error(&err);
     gtk.g_task_return_pointer(task, job, null);
+}
+
+fn squareTexture(stream: *gtk.GInputStream, pixels: c_int) ?*gtk.GdkTexture {
+    var err: ?*gtk.GError = null;
+    const bound = pixels * 3;
+    const pixbuf = gtk.gdk_pixbuf_new_from_stream_at_scale(stream, bound, bound, gtk.true_, null, &err) orelse {
+        gtk.g_clear_error(&err);
+        return null;
+    };
+    defer gtk.g_object_unref(pixbuf);
+    const width = gtk.gdk_pixbuf_get_width(pixbuf);
+    const height = gtk.gdk_pixbuf_get_height(pixbuf);
+    const side = @min(width, height);
+    const square = gtk.gdk_pixbuf_new_subpixbuf(pixbuf, @divTrunc(width - side, 2), @divTrunc(height - side, 2), side, side);
+    defer gtk.g_object_unref(square);
+    const scaled = gtk.gdk_pixbuf_scale_simple(square, pixels, pixels, gtk.INTERP_BILINEAR) orelse return null;
+    defer gtk.g_object_unref(scaled);
+    return gtk.gdk_texture_new_for_pixbuf(scaled);
 }
 
 fn decoded(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {

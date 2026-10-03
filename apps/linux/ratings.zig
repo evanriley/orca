@@ -1,4 +1,4 @@
-//! Star ratings: five stars on every song row and in the details panel, and the
+//! Star ratings: five stars on every song row, and the
 //! one place a rating change is applied and shown.
 //!
 //! The rating belongs to liborca and is kept per recording; this only asks for
@@ -135,13 +135,4 @@ pub fn change(self: *App, targets: []const feedback.Target, value: ?u8) void {
         return;
     }
     feedback.repaintLists(self, &changed, .{ .rating = value });
-}
-
-/// Rates one Track known only by its id, as the details panel knows it.
-pub fn changeTrack(self: *App, track_id: i64, value: ?u8) void {
-    const library = self.library orelse return;
-    const summary = (self.runtime.libraryTrackSummary(library, track_id) catch null) orelse
-        return self.toast("Could not save that rating");
-    defer summary.deinit(self.allocator);
-    change(self, &.{.{ .track_id = track_id, .recording_id = summary.recording_id, .feedback = summary.feedback }}, value);
 }

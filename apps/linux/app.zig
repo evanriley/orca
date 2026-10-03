@@ -16,19 +16,27 @@ const art = @import("art.zig");
 const menu = @import("menu.zig");
 const track_model = @import("track_model.zig");
 const song_table = @import("song_table.zig");
+const song_filters = @import("song_filters.zig");
+const album_filters = @import("album_filters.zig");
 const window = @import("window.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const details = @import("details.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const genres = @import("genres.zig");
+const folders = @import("folders.zig");
 const health = @import("health.zig");
 const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
+const queue = @import("queue.zig");
+const palette = @import("palette.zig");
+const parametric = @import("parametric.zig");
 
 /// The list is filled a page at a time as the user scrolls, so a large
 /// library stays virtualized.
 pub const page_size: u32 = 512;
+pub const search_delay_ms: c_uint = 200;
 pub const page_history_depth = 16;
 pub const open_album_page_limit = 32;
 pub const open_artist_page_limit = 8;
@@ -93,20 +101,62 @@ pub const SoundControls = struct {
     band_scales: [equalizer_band_count]?*gtk.Widget = @splat(null),
     preamp_row: ?*gtk.Widget = null,
     crossfeed_amount_row: ?*gtk.Widget = null,
+    equalizer_title: ?*gtk.Widget = null,
+    equalizer_meta: ?*gtk.Widget = null,
+    equalizer_menu: ?*gtk.Widget = null,
+    equalizer_header: ?*gtk.Widget = null,
+    graphic: ?*gtk.Widget = null,
 };
 
-pub const SettingsTab = enum { library, playback, sound, listening };
+pub const SettingsTab = enum { general, library, playback, sound, listening, appearance, advanced };
+
+pub const settings_tab_count = @typeInfo(SettingsTab).@"enum".fields.len;
+
+pub const AudioFact = enum { output_format, sample_rate, bit_depth, channels };
+
+pub const SettingsFit = enum { wide, stacked, icons };
 
 pub const SettingsPage = struct {
     host: ?*gtk.Box = null,
     body: ?*gtk.Widget = null,
     tabs: ?*adw.ViewStack = null,
-    columns: [@typeInfo(SettingsTab).@"enum".fields.len]?*gtk.Widget = @splat(null),
+    tab_buttons: [settings_tab_count]?*gtk.ToggleButton = @splat(null),
+    tab_labels: [settings_tab_count]?*gtk.Widget = @splat(null),
+    columns: [settings_tab_count]?*gtk.Widget = @splat(null),
     folder_slot: ?*gtk.Box = null,
     measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
+    device_row: ?*gtk.Widget = null,
+    device_row_names: ?*gtk.StringList = null,
+    device_drop_down: ?*gtk.DropDown = null,
+    device_drop_down_names: ?*gtk.StringList = null,
+    sources: ?*gtk.Box = null,
+    genre_source_row: ?*gtk.Widget = null,
+    tile_save_timer: c_uint = 0,
+    audio_card: ?*gtk.Widget = null,
+    audio_values: std.EnumArray(AudioFact, ?*gtk.Label) = .initFill(null),
+    audio_idle: ?*gtk.Widget = null,
+    audio_rows: ?*gtk.Widget = null,
+    /// Set while the tab buttons and device lists are brought in line with
+    /// state that has already changed, so their signals do not re-enter.
+    syncing: bool = false,
     tab: SettingsTab = .library,
+    fit: SettingsFit = .wide,
 };
+
+pub const ArtworkInfluence = enum { off, subtle };
+pub const Density = enum { comfortable, compact };
+
+pub const Appearance = struct {
+    artwork: ArtworkInfluence = .subtle,
+    album_grid_tile: c_int = default_album_tile_pixels,
+    density: Density = .comfortable,
+    inspector_open: bool = false,
+    reduce_animation: bool = false,
+};
+
+pub const default_album_tile_pixels: c_int = 148;
+pub const album_tile_range = [2]c_int{ 112, 220 };
 
 pub const TransportSurface = enum { bar, now_playing };
 
@@ -123,6 +173,8 @@ pub const TransportControls = struct {
 
 pub const CredentialControls = struct {
     entry_row: ?*gtk.Widget = null,
+    entry_title: ?*gtk.Label = null,
+    reveal_button: ?*gtk.Widget = null,
     save_button: ?*gtk.Widget = null,
     stored_row: ?*gtk.Widget = null,
     remove_button: ?*gtk.Widget = null,
@@ -184,6 +236,9 @@ pub const App = struct {
     pending_play_request: u64 = 0,
 
     songs: song_table.Table = .{},
+    song_columns: song_table.Config = .{},
+    song_filters: song_filters.Filters = .{},
+    song_filters_ui: song_filters.Ui = .{},
     scroller: ?*gtk.Widget = null,
     query: OwnedText = .{},
     loaded_rows: u32 = 0,
@@ -237,6 +292,7 @@ pub const App = struct {
     welcome_spinner: ?*gtk.Widget = null,
     browse_panes: ?*gtk.Widget = null,
     browse_toggle: ?*gtk.Widget = null,
+    list_toggle: ?*gtk.Widget = null,
 
     /// What the details panels show, restored from settings.
     sidebar_page: Sidebar = .hidden,
@@ -245,6 +301,9 @@ pub const App = struct {
     window_narrow: bool = false,
     inspector_overlaid: bool = false,
     details_panels: [details.panel_limit]?*details.Panel = @splat(null),
+    header_searches: [std.meta.fields(window.Page).len + details.panel_limit]?*gtk.Stack = @splat(null),
+    header_compact: bool = false,
+    inspector_crowded: bool = false,
     lyrics: lyrics.State = .{},
     seen_recorded_listens: u64 = 0,
 
@@ -256,9 +315,23 @@ pub const App = struct {
     albums_navigation: ?*adw.NavigationView = null,
     album_sort: liborca.ReleaseSort = .artist,
     album_shelf_sort: liborca.ReleaseSort = .artist,
-    album_loved_only: bool = false,
+    album_shelf: albums.Shelf = .all,
     album_sort_control: ?*gtk.DropDown = null,
-    album_chips: [3]?*gtk.ToggleButton = @splat(null),
+    album_chips: [std.meta.fields(albums.Chip).len]?*gtk.ToggleButton = @splat(null),
+    album_filters: album_filters.Filters = .{},
+    album_filters_ui: album_filters.Ui = .{},
+    album_search: OwnedText = .{},
+    album_search_entry: ?*gtk.Editable = null,
+    album_artist_filter: ?albums.ArtistFilter = null,
+    album_artist_name: OwnedText = .{},
+    album_artist_chip: ?*gtk.Widget = null,
+    album_layout: albums.Layout = .grid,
+    album_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
+    album_grid: ?*gtk.GridView = null,
+    album_grid_columns: c_uint = 0,
+    album_tile_pixels: c_int = default_album_tile_pixels,
+    album_columns: albums.ColumnSet = .initEmpty(),
+    album_info: albums.Info = .{},
     albums_empty: ?*adw.StatusPage = null,
     albums_syncing_controls: bool = false,
     open_album_pages: [open_album_page_limit]*albums.AlbumPage = undefined,
@@ -273,6 +346,9 @@ pub const App = struct {
     context: menu.Context = .{},
     playlists: playlists.State = .{},
     loved: loved.State = .{},
+    genres: genres.State = .{},
+    folders: folders.State = .{},
+    palette: palette.State = .{},
 
     health: health.State = .{},
 
@@ -299,6 +375,7 @@ pub const App = struct {
     acoustid_controls: CredentialControls = .{},
 
     settings_page: SettingsPage = .{},
+    appearance: Appearance = .{},
 
     /// Files Measure Loudness decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,
@@ -327,14 +404,30 @@ pub const App = struct {
     /// Set while the Sound page's widgets are being brought in line with state
     /// that has already changed, so their signals do not re-enter as edits.
     suppress_sound_signals: bool = false,
+    parametric: parametric.State = .{},
 
     artist_list_store: ?*gtk.ListStore = null,
     artist_list_loaded: u32 = 0,
     artist_list_exhausted: bool = false,
     artist_list_filter: OwnedText = .{},
+    artist_list_genre: ?i64 = null,
+    artist_list_genre_name: OwnedText = .{},
+    artist_genre_chip: ?*gtk.Widget = null,
     artist_list_meta: ?*gtk.Label = null,
     artist_list_search: ?*gtk.Widget = null,
     artists_navigation: ?*adw.NavigationView = null,
+    artist_sort: liborca.ArtistSort = .name,
+    artist_sort_control: ?*gtk.DropDown = null,
+    artist_layout: albums.Layout = .grid,
+    artist_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
+    artist_grid: ?*gtk.GridView = null,
+    artist_grid_columns: c_uint = 0,
+    artist_tile_pixels: c_int = 150,
+    artists_body: ?*gtk.Stack = null,
+    artists_empty: ?*adw.StatusPage = null,
+    artists_syncing_controls: bool = false,
+    artist_info: artists.Info = .{},
+    fetch_artist_info: bool = true,
 
     scan_revealer: ?*gtk.Revealer = null,
     scan_label: ?*gtk.Label = null,
@@ -364,6 +457,7 @@ pub const App = struct {
     format_slot: ?*gtk.Widget = null,
     format_button: ?*gtk.Widget = null,
     format_label: ?*gtk.Label = null,
+    adjustments_label: ?*gtk.Label = null,
     signal_path_popover: ?*gtk.Popover = null,
     signal_path_has_output: bool = false,
     volume_settle_timer: c_uint = 0,
@@ -388,16 +482,8 @@ pub const App = struct {
     shown_transport: liborca.TransportState = .stopped,
     repeat_mode: liborca.RepeatMode = .off,
 
-    queue_store: ?*gtk.ListStore = null,
-    queue_meta: ?*gtk.Label = null,
-    queue_body: ?*gtk.Stack = null,
+    queue: queue.State = .{},
     queue_count: ?*gtk.Label = null,
-    /// What the queue page last showed, so it is rebuilt only when the queue
-    /// or its position actually moved.
-    shown_queue_length: u32 = std.math.maxInt(u32),
-    shown_queue_index: u32 = std.math.maxInt(u32),
-    shown_queue_shuffle: ?bool = null,
-    shown_queue_serial: u32 = std.math.maxInt(u32),
     queue_visible: bool = false,
 
     mpris: mpris.Mpris = .{},
@@ -419,11 +505,9 @@ pub const App = struct {
 
     /// The one place the track listing is described to liborca.
     ///
-    /// A full-text search and a relational filter are alternatives to the
-    /// engine, not a combination, and asking for both is refused rather than
-    /// half-honoured. Searching therefore leaves the scope out: the panes are
-    /// reset to "All" when a search starts, and this keeps that true even if a
-    /// caller forgets.
+    /// A search keeps the Filters popover's filters but leaves the scope out:
+    /// the panes are reset to "All" when a search starts, and this keeps that
+    /// true even if a caller forgets.
     ///
     /// The Artist pane's filter is *not* part of this. It narrows which Artists
     /// are listed and never reaches a `TrackQuery`, so it and a track search are
@@ -433,6 +517,17 @@ pub const App = struct {
         return .{
             .artist_id = if (searching) null else self.browse.artist_id,
             .release_id = if (searching) null else self.browse.release_id,
+            .genre_id = self.song_filters.genre_id,
+            .loved_only = self.song_filters.loved_only,
+            .year_min = self.song_filters.year_from,
+            .year_max = self.song_filters.year_to,
+            .lossless = switch (self.song_filters.format) {
+                .any => null,
+                .lossless => true,
+                .lossy => false,
+            },
+            .min_sample_rate = self.song_filters.min_sample_rate,
+            .explicit_only = self.song_filters.explicit_only,
             .sort = self.browse.sort,
             .direction = self.browse.direction,
             .limit = page_size,
@@ -501,7 +596,7 @@ pub const App = struct {
         const scoped = self.browse.artist_id != null or self.browse.release_id != null;
         if (self.loaded_rows != 0 or scoped) {
             gtk.gtk_stack_set_visible_child_name(body, "list");
-        } else if (searching) {
+        } else if (searching or self.song_filters.active()) {
             gtk.gtk_stack_set_visible_child_name(body, "no-results");
         } else {
             self.updateWelcome();
@@ -606,8 +701,14 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
+        parametric.deinit(self);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);
         if (self.volume_settle_timer != 0) _ = gtk.g_source_remove(self.volume_settle_timer);
+        self.songs.deinit();
+        self.song_filters_ui.deinit(self.allocator);
+        self.album_filters_ui.deinit(self.allocator);
+        self.album_info.deinit(self.allocator);
+        self.artist_info.deinit(self.allocator);
         self.query.clear(self.allocator);
         self.artist_filter.clear(self.allocator);
         self.artist_scope_name.clear(self.allocator);
@@ -619,6 +720,12 @@ pub const App = struct {
         self.context.deinit(self.allocator);
         self.playlists.deinit(self.allocator);
         self.artist_list_filter.clear(self.allocator);
+        self.artist_list_genre_name.clear(self.allocator);
+        self.album_search.clear(self.allocator);
+        self.album_artist_name.clear(self.allocator);
+        self.genres.deinit(self.allocator);
+        self.folders.deinit(self.allocator);
+        self.palette.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }

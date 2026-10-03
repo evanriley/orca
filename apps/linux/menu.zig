@@ -94,11 +94,11 @@ fn playlistMenu(self: *App) *gtk.GMenu {
     const create = gtk.g_menu_new();
     gtk.g_menu_append(create, "New Playlist…", "app.ctx-add-to-new-playlist");
     const existing = gtk.g_menu_new();
-    for (playlists.cards(self)) |card| {
+    for (playlists.choices(self)) |choice| {
         var label_buffer: [512]u8 = undefined;
         var action_buffer: [64]u8 = undefined;
-        const action = strings.printZ(&action_buffer, "app.ctx-add-to-playlist(int64 {d})", .{card.id}) catch continue;
-        gtk.g_menu_append(existing, playlists.menuLabel(&label_buffer, card.name).ptr, action.ptr);
+        const action = strings.printZ(&action_buffer, "app.ctx-add-to-playlist(int64 {d})", .{choice.id}) catch continue;
+        gtk.g_menu_append(existing, playlists.menuLabel(&label_buffer, choice.name).ptr, action.ptr);
     }
     const choices = gtk.g_menu_new();
     gtk.g_menu_append_section(choices, null, gtk.cast(gtk.GMenuModel, create));
@@ -119,7 +119,9 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
             gtk.g_menu_append(playback, "Add to Queue", "app.ctx-enqueue");
         },
         .queue => {
-            gtk.g_menu_append(playback, "Play", "app.ctx-play");
+            gtk.g_menu_append(playback, "Play Now", "app.ctx-play");
+            gtk.g_menu_append(playback, "Play Next", "queue.play-next");
+            gtk.g_menu_append(playback, "Play Later", "queue.play-later");
             gtk.g_menu_append(playback, "Remove from Queue", "app.ctx-remove");
         },
         .playlist => if (songs) {
@@ -136,7 +138,13 @@ fn model(self: *App, context: *const Context, counts: FeedbackCounts) *gtk.GMenu
     const menu = gtk.g_menu_new();
     if (gtk.g_menu_model_get_n_items(gtk.cast(gtk.GMenuModel, playback)) != 0)
         gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, playback));
-    if (context.kind == .playlist) if (context.playlist_position) |position| {
+    if (context.kind == .queue) {
+        const saving = gtk.g_menu_new();
+        gtk.g_menu_append(saving, "Save Queue as Playlist…", "queue.save");
+        gtk.g_menu_append_section(menu, null, gtk.cast(gtk.GMenuModel, saving));
+        gtk.g_object_unref(saving);
+    }
+    if (context.kind == .playlist and !playlists.openIsSmart(self)) if (context.playlist_position) |position| {
         const arranging = gtk.g_menu_new();
         gtk.g_menu_append(arranging, "Remove from Playlist", "app.ctx-playlist-remove");
         if (position > 0) gtk.g_menu_append(arranging, "Move Up", "app.ctx-playlist-up");

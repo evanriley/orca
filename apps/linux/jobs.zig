@@ -21,6 +21,8 @@ const details = @import("details.zig");
 const tags = @import("tags.zig");
 const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
+const genres = @import("genres.zig");
+const folders = @import("folders.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
 
@@ -73,6 +75,8 @@ pub fn reloadLibraryViews(self: *App) void {
     playlists.refresh(self);
     playlists.reloadPage(self, true);
     loved.reload(self);
+    genres.invalidate(self);
+    folders.invalidate(self);
     preferences.refreshLibrary(self);
 }
 
@@ -136,6 +140,11 @@ pub fn rescan(self: *App) void {
     startScan(self, null);
 }
 
+pub fn rescanRoot(self: *App, root_id: i64) void {
+    if (self.library == null or !idle(self)) return;
+    startScan(self, root_id);
+}
+
 /// Measures the loudness ReplayGain plays by, and the fingerprints duplicate
 /// finding compares. Hours on a large library, and stopping it keeps what is
 /// done.
@@ -178,7 +187,11 @@ fn startMatchingJob(self: *App, track_id: ?i64) void {
     if (track_id != null) details.invalidate(self);
 }
 
-const MatchTarget = union(enum) { track: i64, release: i64 };
+const MatchTarget = union(enum) { track: i64, release: i64, library };
+
+pub fn startLibraryVerification(self: *App) void {
+    startIdentificationJob(self, .verify, .library);
+}
 
 pub fn startTrackVerification(self: *App, track_id: i64) void {
     startIdentificationJob(self, .verify, .{ .track = track_id });
@@ -201,13 +214,13 @@ fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarg
     if (!idle(self)) return;
     const track_id: ?i64 = switch (target) {
         .track => |id| id,
-        .release => null,
+        .release, .library => null,
     };
     const job = self.runtime.startLibraryMatching(library, .{
         .mode = mode,
         .track_id = track_id,
         .release_id = switch (target) {
-            .track => null,
+            .track, .library => null,
             .release => |id| id,
         },
         .fingerprints = self.match_fingerprints,
@@ -584,6 +597,7 @@ pub fn tick(self: *App) void {
         self.match_task_release = null;
         self.match_task_mode = .search;
         self.shown_matched = 0;
+        self.health.then_duplicates = false;
         showScanning(self, false);
         health.updateBanner(self);
         return;
@@ -621,5 +635,6 @@ pub fn tick(self: *App) void {
         .analysis, .duplicates, .matching => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),
     }
+    if (task == .analysis) health.analysisEnded(self, snapshot.state);
     self.updateTracksBody();
 }

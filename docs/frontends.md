@@ -29,6 +29,15 @@ The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root
   add/remove/query.
+- **Folders.** `orca_library_query_folder` pages one folder of a root as
+  `orca_folder_entry_view` values: subfolders first, with file and Track
+  counts and duration counted through every folder below, then files with
+  their file id and, when `has_track_id` is set, the Track. The path is
+  relative to the root and empty for the root itself; one with a `.`, `..`
+  or empty component, a leading `/` or a NUL is
+  `ORCA_STATUS_INVALID_ARGUMENT`. `orca_player_play_folder` plays every
+  Track below the folder, recursively in path order, from the Player's
+  bound Library, returning `ORCA_STATUS_INVALID_STATE` when there is none.
 - **Health.** `orca_library_query_health_items` pages the issues in the order
   of `orca_library_query_health_issues`, which stays for hosts that only
   list them, with each issue's file, Track, Release and related file ids and
@@ -42,24 +51,77 @@ The boundary covers the whole engine, not a fragment of it:
   with an issue, with an `orca_health_kind_summary_view` of its count and
   highest severity, and `orca_library_query_health_items_of_kind` pages one
   kind's items in the same order; neither lists dismissed issues.
+  `orca_library_health_summary_v2` calls back with an
+  `orca_health_kind_summary_view_v2`, which adds each kind's `files` and
+  `bytes`.
+- **Library stats.** `orca_library_stats` fills an
+  `orca_library_stats_view`: the Artist, Release, Track and present-file
+  counts, total bytes and duration, and the last completed scan and
+  analysis times, each with a `has_*` flag.
+- **Provider sources.** `orca_provider_sources` calls back once per
+  provider, in `orca_provider_source_id` order, with an
+  `orca_provider_source_view`: its id, name, URL, what it supplies, its
+  licence and the licence's URL, empty when there is none. A null callback
+  is `ORCA_STATUS_INVALID_ARGUMENT`.
 - **Browsing.** `orca_library_browse_artists`, `orca_library_browse_releases`
   and `orca_library_browse_tracks` take a query struct: an artist name filter,
   a release sort including `ORCA_RELEASE_SORT_LOVED`, track sorts by rating
   and love, and `loved_only` for releases and tracks. Each has a
   `*_count_matching` (`orca_library_track_match_count` for tracks) that
   ignores paging. Track views carry the recording's `orca_feedback` and
-  rating, and release views whether the album is loved.
+  rating, and release views whether the album is loved and its
+  `orca_explicit` advisory. `orca_library_query_artists_v2` takes an
+  `orca_artist_query_v2` with `loved_only` and `ORCA_ARTIST_SORT_RECENTLY_LOVED`
+  and calls back with an `orca_artist_view_v2`, which adds whether the
+  Artist is loved. `orca_library_browse_tracks_v2` takes an
+  `orca_track_query_v2`, with `has_*` flags in place of negative ids, and
+  calls back with each Track's summary and an `orca_track_facts_view`: codec,
+  sample rate, bit depth, date added, the recording's play count and last
+  play, the advisory, track and disc totals and year. Track sorts include
+  `ORCA_TRACK_SORT_PLAY_COUNT`, `LAST_PLAYED` and `YEAR`. The v2 query also
+  filters by a year range (`has_year_min`, `has_year_max`), an
+  `orca_track_format` (lossless or lossy play file), `min_sample_rate` and
+  `explicit_only`, and `orca_library_track_match_count_v2` counts what it
+  lists. Its `text` searches the Tracks under every other filter, most
+  relevant first; a track search has no count, so the count call rejects a
+  non-empty `text` with `ORCA_STATUS_INVALID_ARGUMENT`. `text` in
+  `orca_release_query_v2` keeps the Releases whose title or album artist has
+  a word beginning with each word of it, under every filter and sort, and
+  `orca_library_release_count_matching_v2` honours it. Its `kind`, an
+  `orca_release_kind`, keeps albums (a Release of unknown type counts as
+  one), EPs and singles, or other types; a nonzero
+  `has_appearing_artist_id` keeps the Releases `appearing_artist_id` is
+  credited on without being their album artist. A nonzero
+  `own_releases_only` with `has_album_artist_id` keeps only the Releases
+  filed under that album artist, leaving out appearances.
+  `ORCA_ARTIST_SORT_RECENTLY_ADDED` orders Artists by their newest Release.
+  `orca_library_artist_totals` fills an `orca_artist_totals` with an
+  Artist's own Release, Track and appearance counts and summed duration, or
+  returns `ORCA_STATUS_NOT_FOUND`.
+- **Search.** `orca_library_search` calls back once per hit with an
+  `orca_search_hit_view`: an `orca_search_kind`, the id, a title, a subtitle
+  and a rank (lower is more relevant: for a Track 0, 1 or 2 as every word
+  is whole in the title, begins a title word, or matches elsewhere; bm25
+  for any other kind). Hits come grouped by kind (Artists, Releases,
+  Tracks, Playlists, genres), most relevant first, at
+  most as many of each as the `orca_search_limits` caps allow (NULL for 5,
+  5, 8, 4, 3; each at most 50). Text is at most 256 bytes and every word of
+  it must begin a word of the title or subtitle, ignoring case and
+  diacritics; no character is query syntax.
   `orca_library_track_get` adds the release, artist and recording ids;
   `orca_library_track_details` is a details view of the Track and its file,
-  read from the database alone. `orca_library_track_play_stats`,
+  read from the database alone, and `orca_library_track_details_v2` adds an
+  `orca_track_details_extra_view` of the totals, whether the track total was
+  counted, the advisory, and the dates the file was added and modified. `orca_library_track_play_stats`,
   `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
   plain reads.
 - **Love and ratings.** `orca_library_set_feedback` loves, hates or clears
   feedback on Tracks' recordings, kept locally and queued for ListenBrainz;
   `orca_library_track_feedback` reads it. `orca_library_set_rating` stores a
   rating of 1 to 100 (N stars as N * 20) or clears it with 0, and
-  `orca_library_set_release_love` loves whole Releases, never sent anywhere.
-  Each edit takes at most 512 ids and returns an `orca_change_count`.
+  `orca_library_set_release_love` loves whole Releases and
+  `orca_library_set_artist_love` whole Artists, neither sent anywhere;
+  `orca_library_artist_loved` reads one Artist's. Each edit takes at most 512 ids and returns an `orca_change_count`.
 - **Playlists.** `orca_library_query_playlists` pages playlists by name
   with entry counts, duration and unix-second timestamps;
   `orca_library_create_playlist`, `orca_library_rename_playlist` and
@@ -94,6 +156,24 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_job_lyrics` hands an `orca_lyrics_view` of the lines, each with its
   start in milliseconds or -1 when plain. The lyrics are taken once; a
   second call, or a Job that found none, is `ORCA_STATUS_NOT_FOUND`.
+- **Artist info.** `orca_library_start_artist_info` starts an
+  `ORCA_JOB_KIND_ARTIST_INFO` Job for one Artist from an
+  `orca_artist_info_options` (biography language, `force`, `offline`); it
+  needs a client identity. Once it finishes, `orca_job_artist_info_outcome`
+  reports an `orca_artist_info_outcome`. `orca_library_artist_info` calls back
+  with an `orca_artist_info_view` of what the Library keeps: years active,
+  type, IDs, the biography with its URL, licence and language, and the
+  photo's source, Commons page, licence and credit, which a host shows with
+  the photo. `orca_library_artist_photo` hands the photo as an
+  `orca_image_view`, and `orca_library_artist_links` the links as
+  `orca_artist_link_view`s. For a related artist outside the Library,
+  `orca_library_related_artist_photo` hands its kept photo by MusicBrainz
+  artist ID and `orca_library_related_artist_photo_info` that photo's
+  source, Commons page, licence and credit as an
+  `orca_related_artist_photo_info_view`. `ORCA_PROVIDER_SERVICE_WIKIDATA`,
+  `ORCA_PROVIDER_SERVICE_WIKIMEDIA_COMMONS` and
+  `ORCA_PROVIDER_SERVICE_WIKIPEDIA` select other servers for it. See
+  [providers.md](providers.md#artist-info).
 - **Tag edits and writes.** `orca_library_edit_tracks` sets or clears Orca's
   own values for up to 64 `orca_metadata_field`s of up to 512 Tracks, locked
   as the user's, and returns the ids of the Tracks the edited files back
@@ -101,7 +181,11 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_provenance`. Neither writes a file. `orca_library_plan_tag_write`
   reads the files and shows an `orca_tag_write_plan_view` of each change,
   conflict and skipped file, with an approval digest; plan id 0 means nothing
-  to write. `orca_library_start_tag_write` writes a held plan only with that
+  to write. A file's genres are not among its changes:
+  `orca_library_query_tag_write_genres` hands the genres a held plan replaces
+  in one file and the user's it writes, or `ORCA_STATUS_NOT_FOUND` when the
+  plan leaves them alone, so a client asks it for every file it shows.
+  `orca_library_start_tag_write` writes a held plan only with that
   digest, as an `ORCA_JOB_KIND_MUTATION` job that cannot be cancelled and
   keeps a journaled backup of every original;
   `orca_library_discard_tag_write` drops a plan. `orca_library_undo_tag_write`
@@ -150,10 +234,20 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_player_queue_insert_next` queues Tracks after the current entry (or
   after the one the engine has already lined up), and
   `orca_player_queue_remove` removes an entry other than those two, which it
-  refuses with `ORCA_STATUS_INVALID_STATE`. `orca_player_query_queue_tracks`
+  refuses with `ORCA_STATUS_INVALID_STATE`. `orca_player_queue_move` moves
+  an entry to another position in playback order; it refuses the same
+  entries, and a position between the current entry and the one lined up,
+  with `ORCA_STATUS_INVALID_STATE`. `orca_player_query_queue_tracks`
   lists the queue as track views in playback order, and
   `orca_player_queue_stats` reads the engine's counters, stopping it to do
   so, for diagnostics rather than UI polling.
+- **Queue history.** `orca_player_query_queue_history` lists the last 100
+  entries that stopped playing, newest first, as `orca_track_summary_view`s
+  with `ended_at` in Unix milliseconds and an `orca_queue_history_reason`
+  (`ORCA_QUEUE_HISTORY_REASON_FINISHED`, `_SKIPPED`, `_REPLACED`).
+  `orca_player_clear_queue_history` empties it. It is held in memory only.
+  `orca_player_save_queue_as_playlist` saves the current entry and those
+  after it as a playlist in the Player's Library.
 - **Equalizer, crossfeed and signal path.** `orca_player_set_equalizer`
   turns the ten-band equalizer on with an `orca_equalizer` of band gains and
   a preamp, or off with NULL; `orca_equalizer_preset_get` fills one from an
@@ -161,12 +255,27 @@ The boundary covers the whole engine, not a fragment of it:
   stereo crossfeed, and `orca_player_equalizer` and `orca_player_crossfeed`
   read both back. `orca_player_signal_path` reports the audible entry's source
   format and codec, the output and device formats, the processing applied and
-  each `orca_signal_reason` the path is not bit-perfect.
-- **Devices and Zones.** Enumeration, Zone create/attach/open/close/status, and
+  each `orca_signal_reason` the path is not bit-perfect, with the device's
+  period in `device_quantum_frames` (valid when `has_device_quantum`) and how
+  it is attached in `output_kind`, an `orca_device_kind`.
+- **Parametric equalizer.** `orca_player_set_parametric_equalizer` turns it
+  on with an `orca_parametric_equalizer` of up to 16 `orca_parametric_filter`s
+  and a preamp, turning the ten-band equalizer off, or off with NULL;
+  `orca_player_parametric_equalizer_get` reads it back, and the signal path
+  carries it as `parametric` with `has_parametric`. The `ORCA_PARAMETRIC_*`
+  defines state the ranges. Three calls take no runtime and work from any
+  thread: `orca_parametric_equalizer_response` fills the gain in dB at a
+  caller's frequencies for a curve view, `orca_parametric_equalizer_parse_apo`
+  reads EqualizerAPO text, and `orca_parametric_equalizer_write_apo` writes it
+  (called with capacity 0 first to learn the length).
+- **Devices and Zones.** Enumeration (`orca_enumerate_output_devices_v2`
+  adds each device's `orca_device_kind`: USB, PCI, Bluetooth, HDMI, virtual
+  or unknown), Zone create/attach/open/close/status, and
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.
 - **Providers and credentials.** `orca_runtime_set_client_identity` names the
-  host to MusicBrainz, AcoustID, ListenBrainz and LRCLIB.
+  host to MusicBrainz, AcoustID, ListenBrainz, LRCLIB, Wikidata, Wikimedia
+  Commons and Wikipedia.
   `orca_runtime_set_provider_server` points one `orca_provider_service` at
   another server: `https`, or `http` to `127.0.0.1`, `[::1]` or `localhost`
   only, copied, and `NULL` restores the public one.
@@ -410,111 +519,311 @@ ORCA_LIBRARY=/path/to/library.db zig build run-linux  # another library
 The window is an `AdwNavigationSplitView`:
 
 - The sidebar (`AdwSidebar`) opens with the Orca wordmark and the main menu,
-  then lists the pages in sections: Library (Albums, Artists, Songs, Loved),
+  then lists the pages in sections: Library (Albums, Artists, Songs, Genres, Folders, Loved),
   Collection (Playlists), Playback
   (Now Playing, and Queue with its length) and Library Tools (Health and
   Matches, each with its count). Settings is pinned at its foot, above the
   scan progress shown while a scan runs.
 - **Albums** is a grid of covers with each album's title, artist and year,
-  paged 512 Releases at a time. Its title row shows the count and a Sort by
-  menu (artist, title, year or recently added); chips under it choose All
-  Albums, Recently Added (the newest Releases first) or Loved (only loved
-  albums, in the chosen sort). An album without a cover shows its initials.
-  Hovering or focusing a tile shows a play button on the cover, which plays
-  the album, and a more button after the artist, which opens the album menu.
-  Activating a tile opens the album's page: the cover beside an Album
-  overline, the title, the artist as a link and a line of year, song count
-  and length, then Play, Shuffle, a heart that loves the album (Love Album,
-  Remove Album Love) and a more button with the album menu; the page opens
-  with focus on Play. Behind them the cover is drawn blurred and darkened,
-  fading into the page; an album without a cover has no backdrop. Its tracks follow by disc under a # / Title /
-  duration header, one thin-ruled row each: the playing track shows a play
-  mark in place of its number and an accent title, and hovering a row shows
-  its rating stars (always shown once rated) and a more button with the
-  track menu. A narrow window shrinks the grid and stacks the album page's
-  cover above its title.
-- **Artists** is every Artist in flush rows, searchable, each with a round
-  thumbnail of their first album's cover (loaded as the row is shown;
-  initials without one) and their album and song counts. An artist opens a
-  page whose hero shows their newest album's cover over a blurred copy of
-  it, an Artist overline, their name, the years their albums span, Play,
-  Shuffle and a more button, and beside it their album and song counts and
-  the time their songs fill in the library. Below sit Songs, their five
-  highest-rated songs, with See All opening Songs scoped to the artist, and
-  Albums, a wrapping grid of their albums; an album there opens its page in
-  place. Activating a song plays the artist's songs in album order from it,
-  and the inspector shows the selected song. A narrow window hides the
-  counts and stacks the hero and the two sections.
-- **Songs** is the song list, searched from the entry in its header
-  (Ctrl+F), with the Artist and Album browse panes behind the toggle in its
-  title row. The title row shows the count and a Sort by menu: Default,
-  Title, Artist, Album, Track Number, Loved, Rating (highest first),
-  Duration and Date Added (newest first), kept in step with the column
-  headers and not saved. The list pages 512 rows at a time from liborca as
-  it scrolls, and a header click re-queries in the engine's order rather
-  than sorting loaded rows. Under an uppercase # / Title / Artist / Album /
-  heart / Rating / Duration header each song is one thin-ruled row: the
-  playing song shows a play mark in place of its number and an accent
-  title, its heart sits in its own column, its rating stars show on hover
-  and once rated, and hovering a row shows a more button with the track
-  menu. A narrow window drops the Album and Rating columns. A library with
-  no tracks shows a welcome page with Add Music Folder; a scan in progress
-  shows there too.
-- **Loved** opens with a large Loved title, Play and Shuffle, and the
-  counts of loved songs and loved albums, which a narrow window hides. Play
-  queues every playable loved song, most recently loved first, and Shuffle
-  does the same with shuffle on. Two tabs follow: Loved Songs, the Songs
-  list's table of loved songs, most recently loved first and paged 512 at a
-  time, with the inspector for the selected song; and Loved Albums, the
-  Albums grid of loved albums. An album opens its page in place; a song
-  plays on activation. The page is read again each time it is shown, so a
-  heart cleared on it leaves its row in place until then.
-- **Playlists** is a grid of every playlist, read again after any change
-  to one. Its title row shows the count and a Sort by menu: Recently Updated
-  (the default), Name or Recently Created; the header holds a Search
-  playlists entry, matched case-insensitively against the names, Import…
-  and New Playlist. Each card shows a mosaic of the first four distinct
-  album covers among the playlist's songs (one cover when there are fewer
-  than four, the playlist icon when there are none), the name, the song
-  count and length, when it was last updated (relative within 30 days, a
-  date after that) and how many of its songs are no longer in the library.
-  Hovering or focusing a card shows a play button on the mosaic, which plays
-  the playlist, and a more button with Play, Shuffle, Rename…, Export… and
-  Delete…; right-clicking a card opens the same menu. Activating a card
-  opens the playlist's page. With no playlists the page offers Import… and
-  New Playlist.
+  paged 512 Releases at a time. Its title row shows `N albums`, a Sort by
+  menu (artist, title, year or recently added, saved as `[view] album_sort`),
+  a Filters button and a Grid / List switch (saved as `[view] albums_layout`).
+  A Search albums field under the title sets `ReleaseQuery.text`, so the
+  search combines with the chip and the filters, and the count is
+  `libraryReleaseCountMatching` of the whole query. Chips under it choose All Albums, Recently Added (the newest Releases
+  first), Loved, High Resolution (above 48 kHz or 16 bits) or Needs Review
+  (a pending match or correction); they are radio buttons and one Tab stop,
+  Left and Right moving between them. The Filters popover sets a genre (every
+  genre, listed 512 at a time), a year range, Any or Lossless only, and
+  whether the album has artwork, applied with Apply and reset with Clear;
+  the button reads `Filters • N` while N are set. Every chip and filter is a
+  field of `ReleaseQuery`, so liborca filters and counts. The grid takes the
+  column count whose covers come nearest the chosen tile size (177 px by
+  default) and grows or shrinks the covers so the columns fill the row,
+  never fewer than two or more than sixteen. An
+  album without a cover shows its initials, and an explicit album an E
+  badge at the cover's bottom-left. Hovering or focusing a tile
+  shows a play button on the cover, which plays the album, and a more button
+  after the artist, which opens the album menu; the selected tile is
+  outlined. The list shows 44 px rows of a small cover, title, artist, year,
+  song count, minutes, format (`FLAC 16/44.1`, or `Mixed`), a heart that
+  loves the album and a more button.
+  Activating an album opens its page: the cover beside an overline naming
+  the release type, else COMPILATION for a compilation and ALBUM otherwise,
+  the title, the artist as a link and a line of year, its top one or two genres joined by ` / `,
+  song count and minutes, then the album's description from
+  `Runtime.libraryReleaseInfo`, at most 520 px wide and three lines, with a
+  More link, shown when the text wraps past three lines at the width it is
+  given, that shows the rest, and under it its source and licence. With no
+  description stored the page starts `Runtime.startReleaseInfoFetch` once per album per session and
+  shows the description when the job ends. Then come Play, Shuffle, a heart
+  in the love colour that loves the album (Love Album, Remove Album Love)
+  and a more button with the album menu; the page opens with focus on Play.
+  Behind them the cover is drawn blurred and darkened, fading into the page;
+  an album without a cover has no backdrop. Its tracks follow by disc under
+  a # / Title / clock header, one thin-ruled row each: the playing track
+  shows a play mark in place of its number and an accent title, and the more
+  button with the track menu shows on the hovered, selected and playing row.
+  A button in the header chooses extra columns, Rating, Format and Sample
+  rate, saved as `[view] album_columns`. A narrow window shrinks the grid and
+  stacks the album page's cover above its title.
+- **Artists** is every Artist as a grid of round 150 px photos or as flush
+  rows, chosen by a grid and list switch saved as `[view] artists_layout`.
+  Each shows the Artist's photo when artist info stored one, otherwise their
+  first album's cover, otherwise their initials, then their name and
+  `N albums • N tracks`. A Sort by menu orders them by Name, Most tracks,
+  Recently loved or Recently added, the Artist whose newest release, filed
+  under them or appeared on, came latest first (`ArtistSort`, saved as
+  `[view] artist_sort`); a Search
+  artists field under the title filters by name through the query, and an
+  empty library or search shows a status page. Opened from a genre's Top
+  Artists, the page also shows a `Genre: Name` chip beside the search that
+  scopes the query to that genre (`ArtistQuery.genre_id`) until its × is
+  clicked. The grid keeps at least two
+  columns and shrinks its tiles to fit a 560 px window. An artist opens a
+  page whose hero lays a 300 by 330 px photo, fading right and down, over a
+  blurred copy of it: the Artist's photo, otherwise their most played
+  album's cover, otherwise their initials. Beside it sit an Artist overline,
+  their name, their top three genres joined by accent dots
+  (`libraryArtistGenres`), the first four lines of the stored biography,
+  which open the inspector, then Play, Shuffle, a heart that loves the
+  Artist (`librarySetArtistLove`) and a more button. A column at the end
+  shows their ListenBrainz listener count, when known, as `9.0K` or `3.2M`,
+  then their release and track counts and the time their tracks fill in the
+  library, all from `libraryArtistTotals`. A `Photo: credit • licence` line under the hero links to the
+  photo's page. Below sit Top Tracks, their five most played tracks, or by
+  rating while none has been played, each with its cover, an E badge when
+  explicit, a heart, duration and more button, with See All opening Songs
+  scoped to the artist sorted by plays; Albums, EPs & Singles and
+  Appearances, each a wrapping grid of up to eight releases, newest first,
+  under a heading with its count, whose release opens its page in place.
+  Albums are the releases filed under the Artist, which
+  `ReleaseQuery.album_artist_id` with `own_releases_only` selects, whose type is
+  album or compilation or unknown (`ReleaseQuery.release_kind` `.album`), EPs &
+  Singles those of type EP or single (`.ep_or_single`), and Appearances the
+  releases with a track credited to them that are filed under another
+  artist (`ReleaseQuery.appearing_artist_id`); a row with nothing in it is
+  left out. The hero's cover falls back to their most played or first
+  release, taken from their own releases before any they appear on. Each
+  row's See All opens Albums scoped to the Artist and that kind, under the
+  same query, shown as a `Name • Albums` (or `EPs & Singles`, `Appearances`) chip
+  beside the Albums search that combines with the search, shelves and
+  filters in the query until its × is clicked. Related Artists shows up to
+  six round tiles from `libraryRelatedArtists`, each name under the photo,
+  wrapping between words onto at most two lines and then ellipsized. A related artist in the library
+  opens their page; one outside it shows initials and opens their
+  MusicBrainz page in the browser. Opening an Artist without stored info
+  starts an artist info Job (`startArtistInfoFetch`) once a session while
+  Preferences' Fetch artist info switch, saved as
+  `[library] fetch_artist_info`, is on; when it finishes the photo,
+  biography, listeners, credit and related artists refresh in place.
+  Activating a song plays the artist's tracks in album order from it, and
+  the inspector shows the selected song, otherwise the Artist. A window too
+  narrow for the full header stacks the hero and the two sections and lays
+  the stats out in a row; a narrow window hides the stats.
+- **Songs** is the song list. Its header carries its own search,
+  `Search songs, artists, albums…` with a Ctrl F hint, in place of the
+  library search, and a Filters menu: Genre, a Year range, Format (Any,
+  Lossless, Lossy), a minimum sample rate, Loved only and Explicit only,
+  with Clear Filters. Every filter is part of the liborca query, with or
+  without search text, and the Genre list holds every genre, read 512 at a
+  time each time the menu opens. The Filters button turns accent while any
+  filter is set, and filters are not saved. The title row shows the exact
+  count from liborca, or while searching `N matching`, the loaded rows with
+  a `+` while more remain, then a Sort by menu (Default, Title, Artist, Album, Track Number, Date
+  Added, Last Played, Play Count, Rating, Loved, Year, Duration; dates,
+  counts, ratings and years newest or highest first), kept in step with the
+  column headers and not saved, and a linked List / Browse switch, Browse
+  showing the Artist and Album panes. The list pages 512 rows at a time from
+  liborca as it scrolls, and a header click re-queries in the engine's order
+  rather than sorting loaded rows; the sorted column's title is
+  highlighted. Under an uppercase header each song is one thin-ruled row:
+  the playing song shows a play mark in place of its number and an accent
+  title, an explicit song shows an E badge after its title, its heart sits
+  in its own column, its rating stars show on hover and once rated, and
+  hovering a row shows a ••• button with the track menu. The ••• at the
+  header's end, and every column title's menu, choose the columns: Artist,
+  Album, Loved, Rating, Date Added, Year, Last Played, Plays, Duration,
+  Format, Codec, Bit Depth and Sample Rate; # and Title always show. The
+  default is Artist, Album, Loved, Date Added, Duration and Format. The
+  choice is saved as `[view] song_columns` (a comma list of those names in
+  snake case) and dragged widths as `[view] song_column_widths`
+  (`name:pixels` pairs); column order is not saved. A narrow window drops
+  every chosen column except Artist, Loved and Duration without forgetting
+  the choice and narrows Title and Artist, which ellipsize, so that Title,
+  Artist, the heart and Duration fit a 560 px window without saving those
+  widths; the table scrolls sideways inside its own area when the rest does
+  not fit. Below the 900sp breakpoint the Songs, Loved and playlist tables
+  narrow this way and the search shrinks. The tables sit inside the page's
+  side margins. The Songs,
+  Artists and Albums searches query 200 ms after the last keystroke. A
+  library with no tracks shows a welcome page with Add Music Folder; a scan
+  in progress shows there too.
+- **Genres** opens with a large Genres title and a tagline, then a strip of
+  165 by 128 px genre tiles, most tracks first, read from
+  `libraryGenrePage` 512 at a time as the strip scrolls. Each tile's
+  backdrop is a darkened two by two mosaic of covers from
+  `libraryGenreArtwork` (one cover when the genre has fewer than four), with
+  the name and track count at its bottom-left; the selected tile has an
+  accent outline. The strip scrolls sideways, also with a vertical wheel,
+  and is one Tab stop, Left and Right moving the selection. The selected
+  genre is saved as `[view] genre`; the genre with the most tracks is shown
+  when none is saved. Below it a GENRE overline, the genre's name and a line of
+  its track, album and artist counts and total time from `libraryGenre`,
+  then Play, Shuffle and a more button whose Create Smart Playlist saves a
+  smart playlist of the rule `genre is Name`. Play and Shuffle queue the
+  genre's playable tracks in Top Tracks order, at most
+  `max_playlist_entries`.
+  Three cards follow: Albums, the genre's four most played albums, each
+  opening its album page in place; Top Artists, the five of its artists with
+  the most tracks in the whole library; and Top Tracks, its five most played tracks, or by rating
+  while none has been played, each with a cover, a heart and duration, a
+  song playing the genre in that order from it. Each card's See All opens the matching
+  page scoped to the genre: Albums through its genre filter, Artists through
+  its genre chip, Songs through its Genre filter in the card's sort. The
+  cards stack below 1300 px and the artist and track cards stack too below
+  720 px, so the page fits a 560 px window. A library with no genres shows a
+  status page whose Fill missing genres from MusicBrainz opens Settings ›
+  Library.
+- **Folders** browses the library as it lies on disk. The header's
+  breadcrumb reads `Folders › root › folder › …`, the root named by the last
+  component of its path, and every segment but the last opens that level.
+  A 280 px pane on the left lists the roots, each expanding lazily into its
+  folders (`libraryFolderPage`, folders only), with the open folder
+  selected; selecting a folder opens it. A window narrower than 900 px hides
+  the pane. Above the content sit a Files / Library switch, Play and Shuffle,
+  which play the folder and every folder under it
+  (`playerPlayFolder`), and a count such as `12 folders • 148 files`, the
+  files counting those in subfolders. Files lists 36 px rows, 512 at a time
+  as it scrolls: folders first with their file count and total duration,
+  activated to open them, then files with the file name, the song's title
+  beside it when it differs, the format and the duration; below 700 px of
+  content width the format (and a folder's file count) is hidden and the
+  name takes the row's width before the title beside it. Activating a file
+  plays this folder's songs, without subfolders, in file order from it. A
+  file's more button, or a right click, offers Show in Files, Play, Add to
+  Queue and Edit Metadata…. Library shows the songs of files directly in
+  this folder, not in its subfolders, grouped by album under a 48 px cover,
+  album title and artist and year, in disc and track order, as the album
+  page lists them. A folder without audio shows `No audio files here.`, and
+  a library without roots shows the welcome page. Each list is one Tab
+  stop, and Backspace or Alt+Up opens the parent folder.
+- **Loved** opens with a large Loved title, a tagline and a short
+  description, Play, Shuffle and a more button, then a mosaic of up to four
+  loved album covers (taken from loved albums first, then from the albums of
+  loved songs; one cover when there are fewer than four) and the counts of
+  loved songs, albums and artists. The mosaic goes first as the page narrows,
+  then the counts. Play queues every playable loved song, most recently loved
+  first, Shuffle does the same with shuffle on, and the more button opens the
+  track menu for those songs. Three underlined tabs follow: Loved Songs, the
+  Songs list's table of loved songs, most recently loved first and paged 512
+  at a time, with the inspector for the selected song. Its columns are the
+  row's position (#), a small cover, Title, Artist, Album, Duration under a
+  clock, the heart, Rating, Last Played and a ••• button with the track menu
+  on every row; the covers go when the table is narrow, and Album, Rating and
+  Last Played as on Songs. Last Played reads Today, Yesterday or
+  `3 days ago` up to six days, then the date, with the full date and
+  time in its tooltip; Loved Albums, the Albums grid of loved albums; and Loved
+  Artists, a grid of round artist tiles, most recently loved first, each with
+  the Artist's stored photo or its initials, its name and its album and song
+  counts. The page never fetches a photo; `orca-cli artist-info --fetch`
+  stores one. An album or Artist opens its page in place, a right click on an
+  Artist opens the artist menu, and a song plays on activation. The page is
+  read again each time it is shown, so a heart cleared on it leaves its row
+  in place until then.
+- **Playlists** opens with its title block, New Smart Playlist and
+  Import… beside it, and the header's Search playlists entry and New
+  Playlist. Tabs (All Playlists, Created by Me, Smart Playlists; one Tab
+  stop, Left and Right move between them) choose which playlists both
+  sections show. Pinned shows the four most recently updated pinned
+  playlists, with Show all when there are more. All Playlists shows the
+  count, a type menu (All Types, Playlists, Smart Playlists), a Sort by menu
+  (Recently Updated, Name, Recently Created, Most Tracks) and a Grid or List
+  switch; the tab, sort and layout are kept in the settings file. liborca
+  filters, sorts and counts every section (`libraryPlaylistPage`,
+  `libraryPlaylistCount`); the search matches names case-insensitively.
+  A card shows a mosaic of the first four distinct album covers among the
+  playlist's songs, or for a smart playlist a tile whose icon follows the
+  field its first rule tests (loved, dates, rating, play count), then the
+  name with a pin when pinned, Smart Playlist, By You or Imported, the
+  track count and length with how many tracks are unavailable, and when it
+  was last updated (relative within 30 days, a date after that). The list
+  shows the same in rows. Hovering or focusing a card shows a play button;
+  its more button and right click open Play, Shuffle, Pin or Unpin, Love or
+  Remove Love, Edit Rules… (smart) or Edit Details…, Rename…, Export… and
+  Delete…. Edit Details… sets the description and up to eight
+  comma-separated tags through `libraryUpdatePlaylist`. With no playlists
+  the page offers Import…, New Smart Playlist and New Playlist.
 
-  A playlist's page shows its mosaic beside a Playlist overline, the name,
-  and a line of song count, length and how many songs are unavailable, then
-  Play, Shuffle and a more button with Rename…, Export… and Delete…. Behind
-  them the first cover is drawn blurred and darkened, as on an album page,
-  and a narrow window stacks the mosaic above the name. The songs follow in
-  the Songs list's table, numbered by their position in the playlist, with
-  the inspector for the selected song. Activating a song plays the playlist
-  from it; its menu adds Remove from Playlist, Move Up and Move Down. An
+  A playlist's page shows its mosaic or smart tile beside a Playlist or
+  Smart Playlist overline, the name in capitals, a line of who made it, the
+  track count, length and how many tracks are unavailable, and the
+  description, then Play, Shuffle, a heart for playlist love, Edit Rules
+  for a smart playlist and the playlist menu. Below 900sp the heading
+  stacks the art above the name. The songs follow in the Songs list's
+  table, numbered by their position in the playlist; below 900sp it drops
+  its album and the other columns a narrow window drops on Songs. Activating a song plays the
+  playlist from it; its menu adds Remove from Playlist, Move Up and Move
+  Down on a manual playlist. An
   entry whose recording has no song left reads Not in your library, is
-  dimmed and does not play.
+  dimmed and does not play. While no song is selected the inspector shows
+  the playlist: its name, Created by, Details (tracks, unavailable,
+  duration, mixed artists, top genres, created, last updated), the
+  description and the tags.
+
+  The **Smart Playlist editor** (New Smart Playlist, Edit Rules) is a dialog
+  with the name, a root group (Match all or any of the following rules),
+  its rules and nested groups, each with Add Rule and Add Group, down to
+  four levels, then Order by, Descending and Limit to. A rule is a field, a
+  comparison fitting the field's type and a value: text, a number, a
+  `YYYY-MM-DD` date, or Yes or No. The editor writes version 1 rules JSON
+  (`docs/playlists.md`) and, a quarter of a second after the last change,
+  asks `librarySmartPlaylistCount` how many songs match; when liborca rejects
+  the rules, the line shows its reason instead. Create saves with
+  `libraryCreateSmartPlaylist` and opens the new playlist; Save on an
+  existing one uses `librarySetSmartPlaylistRules`. Opening it on a smart
+  playlist reads `librarySmartPlaylistRules` back into the groups.
 - **Now Playing** is the audible song's cover, large, over a blurred and
   darkened copy of it, with a Now Playing overline, the title in serif, the
   artist and the album with its year as links, a heart, a more button with
-  the track menu, a seek bar and the transport. Its transport and seek bar
-  are a second set of the player bar's, refreshed from the same tick, so
-  both show the same state and either can drive playback. When a lyrics view
-  has loaded synced lyrics for the song, the line being heard shows under
-  the title; the page never looks lyrics up itself. A wide window adds a
-  column with Up Next, the next ten queue entries with Clear and View Full
-  Queue, and Track Info (title, artist, album, date, track and disc number,
-  the disc only when above one); a narrow one shows only the centre column.
-  With nothing playing it says so. Clicking the cover in the player bar
-  opens it.
-- **Queue** is the Player's queue as the engine resolves it, in flush rows
-  under the page title, the song count and length and a Clear button: the
-  entry's position or a play mark for the audible one, a thumbnail, the
-  title over the artist, the heart, rating stars on hover or once rated, the
-  duration and, on hover, a remove button. Activating an entry plays it.
+  the track menu, a seek bar and the transport. Clicking the title opens its
+  album. Its transport and seek bar are a second set of the player bar's,
+  refreshed from the same tick, so both show the same state and either can
+  drive playback. Under the transport sit three centred lyric lines: the
+  previous line dimmed, the line being heard, and the next. Plain lyrics
+  show their first three lines, the page looks lyrics up itself when the
+  song changes, the space collapses when the song has none, and clicking
+  the lines opens the Lyrics inspector. A 340 px column at the end holds
+  Up Next, five queue entries from the audible one with Clear and View Full
+  Queue, and Track Info (title, artist, album, date, genre, track number as
+  "1 of 16", disc number only when the disc total is above one, and format
+  as "FLAC 16-bit / 44.1 kHz"), whose more button opens the track
+  inspector. An inspector mode replaces that column; below 900sp the page
+  shows only the centre column. With nothing playing it shows a large
+  glyph, Nothing playing and Pick an album or press Play. Clicking the
+  cover in the player bar opens it.
+- **Queue** is the Player's queue as the engine resolves it, under the page
+  title, the song count (and length when the whole queue is shown) and Save
+  as Playlist… and Clear buttons, in three sections. Now Playing is the
+  audible entry on an accent tint: cover, title in the accent colour, artist
+  and album, heart and duration. Up Next lists the entries after it with
+  their count and length: on hover a drag handle, then the number, a
+  thumbnail, the title and artist on one line, the heart, the duration and,
+  on hover, a remove button. Activating an entry plays it, and Delete
+  removes the focused one. Dragging an entry onto another, or Play Next
+  and Play Later in its menu, moves it with `playerQueueMove`; when the
+  engine refuses with `QueueEntryInUse`, because the entry or the target is
+  already lined up, a toast says so and the page reloads unchanged.
+  Previously Played lists `playerQueueHistoryTracks`, newest first, with
+  when each was played; it is shown until Hide, which `settings.ini`
+  remembers, and Clear History calls
+  `playerClearQueueHistory`. Save as Playlist… asks for a name, calls
+  `playerSaveQueueAsPlaylist` (the audible entry and everything after it)
+  and opens the new playlist.
 
 - **Health** lists what liborca found wrong with the library, with a count in
   the sidebar. The page, titled Library Health, opens with the issue count,
+  the same `libraryHealthIssueCount` as the sidebar badge,
   a Find Duplicates button and the library's album, song and artist counts
   (`libraryReleaseCount`, `libraryTrackCount`, `libraryArtistCount`), then a
   card per kind of issue in `libraryHealthSummary`'s order: a symbolic icon
@@ -581,7 +890,8 @@ Right-clicking a track, an album (tile, cover or title), an artist (row or
 avatar), a queue entry, or the playing track's cover in Now Playing and the
 player bar opens a menu: Play, Play Next, Add to Queue, Love, Dislike, Edit
 Tags…, Show Album and Show Artist, as far as they apply; queue entries offer
-Play and Remove. A single song in the track list, an album page, the queue or
+Play Now, Play Next, Play Later, Remove from Queue and Save Queue as
+Playlist…. A single song in the track list, an album page, the queue or
 a playlist also offers Verify and Re-identify, and an album Match Album,
 Verify Album, Re-identify Album and Fetch Cover Art. Verify needs Match by
 audio fingerprint on in Settings. Re-identify Album accepts nothing and
@@ -603,13 +913,22 @@ pulled out from under the output.
 - The player bar spans the window in three parts. On the left: the cover, the
   title, and the artist and album on one line. In the centre: shuffle,
   previous, play, next and repeat over the seek bar, with elapsed and total
-  time in tabular figures. On the right: the source format (such as
-  `FLAC · 16-bit · 44.1 kHz`, hidden while nothing plays), which opens the
-  signal path; the output device's name, which opens the device list; a
-  volume slider; and the queue. A heart beside the title loves the audible
+  time in tabular figures. On the right: a button with the codec, the source
+  rate and whether the output runs at that rate (such as
+  `FLAC • 44.1 kHz • Native`, or `Resampled`; hidden while nothing plays),
+  which opens the signal path; under it, what changes the samples, read from
+  the same signal path (`RG −3.1 dB •` while ReplayGain is applied, `DSP •`
+  while the equalizer or crossfeed changes the signal), then the output
+  device's name, which opens the device list; a
+  volume slider, whose level is saved as `[playback] volume` once it settles;
+  and the queue. Each control is built once and only made insensitive or
+  hidden as the state changes, and the three groups fill the bar's height,
+  so Tab visits the left group, then the centre, then the right, whether or
+  not anything plays. A heart beside the title loves the audible
   song and, pressed again, removes the love; it is read when the audible song
-  changes and after any change. Below the 760sp breakpoint the format line
-  is hidden, the device name becomes an icon that opens the same device list,
+  changes and after any change. Below the 900sp breakpoint the format line
+  and what changes the samples are hidden, the device name becomes an icon
+  that opens the same device list,
   and the volume slider moves into a popover behind the speaker button.
 
 **Love and dislike** are kept by liborca per recording (`librarySetFeedback`);
@@ -620,22 +939,23 @@ up next. A loved song shows a filled heart in the accent colour; any other song 
 heart, dimmed until the row is hovered or selected. Pressing the button loves
 the song, or removes the love, and a disliked song becomes loved. The button
 does not play the song or change the selection. The player bar's heart does the
-same for the audible song. Disliked songs have no marker on their row, and the
-inspector's Feedback row says Loved, Disliked or None. A song without a
-MusicBrainz recording ID is saved on this computer only, and the Feedback row
-says it won't sync to ListenBrainz.
+same for the audible song. Disliked songs have no marker on their row. The
+love or dislike of a song without a MusicBrainz recording ID is saved on this
+computer only.
 
-The inspector's **Identity** section shows the recording ID in effect
-and where it came from (From tags, Matched or Set by you), with a MusicBrainz
-button, and the release, release-group, release-track and album-artist IDs
-when known, each with its source as a tooltip. A song without one shows its top three proposals with Accept and
+The inspector's **Identity** section has two rows. MusicBrainz shows where
+the recording ID in effect came from (From tags, Matched or Set by you) as a
+link that opens the recording on MusicBrainz, or Not matched. AcoustID shows
+the verification (`libraryTrackVerification`): Not checked, Matched, Hears a
+different recording, Could not confirm or Could not fingerprint, with
+"out of date" and "suggestion dismissed" appended when they apply. Show
+identifiers reveals the recording, release, release-group, release-track and
+album-artist IDs that are known, each with its source as a tooltip. A song
+without a recording ID shows its top three proposals with Accept and
 Dismiss, each naming its source and AcoustID score in its tooltip, and Review all when there are more, which opens the Matches page at
 that song; with no proposals it offers Find Match, which searches for that
-song alone. A song with a recording ID shows its verification under it
-(`libraryTrackVerification`): Verified by AcoustID, AcoustID hears a
-different recording, AcoustID could not confirm, or Could not fingerprint,
-with "out of date" and "suggestion dismissed" appended when they apply, and
-offers Verify while it is unverified or out of date. A change made in one place repaints the others, by recording and
+song alone. A song with a recording ID offers Verify while it is unverified
+or out of date. A change made in one place repaints the others, by recording and
 without a query per row: rows carry `TrackSummary.recording_id` and `feedback`,
 and only those whose recording changed are replaced. The list factories connect
 each button once, in setup, and read the row's song when the button is pressed.
@@ -643,13 +963,40 @@ each button once, in setup, and read the row's song when the button is pressed.
 Each page's header bar is flat and carries no title. A page pushed onto
 another, such as an album or artist page, shows a breadcrumb at its start
 whose first part returns to the page it was opened from (Albums › ABBA); a
-playlist's reads Playlists › its name. Its controls sit at the end. Below
+playlist's reads Playlists › its name. The breadcrumb is the only back
+control; Alt+← and the mouse back button also return. At the end of every
+header sits the library search, `Search your library…` with a Ctrl K hint,
+followed by the page's inspector toggles. Below the 900sp breakpoint the
+entry becomes a search button that does the same as Ctrl+K. Ctrl+F focuses
+the current page's own search (Albums, Artists, Playlists), and on any other
+page opens Songs and focuses its search.
+
+**Command palette.** Focusing the library search, or Ctrl+K, opens a
+popover up to 640 × 480 px under it, kept inside the window. Where the header
+shows a search button, or on Songs and the Playlists overview, the popover
+carries its own entry. Typed
+text goes to `Runtime.librarySearch` (`orca-cli search`) 120 ms after the last
+keystroke, and the hits are shown in groups, Tracks, Albums, Artists,
+Playlists and Genres, in liborca's order within each; the frontend filters
+nothing itself. Text starting with `>` lists only commands; other text also
+lists, under Commands, every command whose words each query word begins: Go
+to each sidebar page, Open Settings › each tab, Scan library, Analyze
+library, Find duplicates, the three inspector toggles, Play/Pause, Next,
+Previous, Shuffle on/off, Repeat mode and Save queue as playlist, each with its
+shortcut. Each command calls the handler its button or menu item uses. Empty
+text shows the last five opened results, kept in memory only. The first row
+is selected; Up and Down move, Enter opens (a track plays; an album, artist
+or playlist opens its page; a genre opens on Genres), Shift+Enter plays
+instead of opening (an artist still opens), and Escape closes. Below
 the header, the sidebar's pages open with a title block: the page name in
 Source Serif 4, its count beneath it, and the page's own actions at the end
 of that row. Album, artist and playlist pages have their own heading instead.
 
-Below 760sp the sidebar collapses behind a back button, the browse panes hide,
-page titles shrink and the player bar tightens. Messages are toasts. Shortcuts are listed in the
+Below 900sp the album, artist and playlist headings and the Settings columns
+stack vertically, the player bar tightens, and a header's actions wrap onto a
+second line when they do not fit. Below 760sp the sidebar collapses behind a
+back button, the browse panes hide, page titles shrink, and the player bar
+stays tightened. Every page fits a 560 px window. Messages are toasts. Shortcuts are listed in the
 shortcuts dialog (Ctrl+?); Space and Ctrl+←/→ are handled by a bubble-phase key
 controller rather than application accelerators, so a focused search box keeps
 them.
@@ -664,15 +1011,45 @@ files back afterwards, because an edit that moves a track to another album
 gives it a new id.
 
 **Settings** is a page, opened from the sidebar's foot, the main menu or
-Ctrl+,. A segmented tab bar under its title switches between four tabs, each
-a scrolling set of cards in two columns, one below the 760sp breakpoint:
-Library (Music Folders with Add Folder, Remove and Rescan All Folders;
-Maintenance with loudness measurement, analysis threads, duplicate finding and
-idle maintenance; AcoustID), Playback (ReplayGain and the output device),
-Sound (equalizer and crossfeed) and Listening (ListenBrainz, and Fetch lyrics
-from LRCLIB, saved as `[lyrics] fetch=true|false`). The tabs are built each
-time the page is shown and destroyed when it is left; the open tab is kept
-for the session.
+Ctrl+,. Under its title a pill tab bar switches between seven tabs; it is one
+Tab stop, Left and Right move between tabs, and it shows icons only when the
+page is narrower than 1040sp or the window narrower than 900sp. Each tab is a
+scrolling set of cards in two columns, which stack into one when the page is
+narrower than 1260sp or the window narrower than 900sp:
+
+- General: Artist Info, with Fetch artist info (`[library] fetch_artist_info`).
+- Library: Music Folders, a list of roots that scrolls past six, each with a
+  menu of Rescan (a scan of that root), Show in Files and Remove, then Add
+  Folder, Rescan All Folders and Watch folders for changes; Maintenance with
+  loudness measurement, analysis threads, duplicate finding, idle maintenance
+  and Fill missing genres from MusicBrainz (`setGenreFill`, kept in the
+  Library); AcoustID.
+- Playback: ReplayGain (Off, Track or Album, saved as `[playback]
+  replay_gain`), a note that gapless playback is always on, and the output
+  device.
+- Sound: the equalizer, graphic or parametric, and beside it Output Device,
+  Crossfeed and Audio Information. Output Device re-reads the outputs each
+  time the tab is shown, as the player bar's menu does when it opens, and
+  both lists stay in step.
+- Listening: ListenBrainz, and Fetch lyrics from LRCLIB, saved as
+  `[lyrics] fetch=true|false`.
+- Appearance: presentation only, saved in `[appearance]`. Artwork influence
+  (`artwork=subtle|off`; off hides the cover tint behind album pages), Album
+  grid size (`album_tile`, 112 to 220 px, saved 400 ms after the slider
+  stops, on leaving Settings, or on quitting, whichever comes first), Density (`density=comfortable|compact`; compact shortens queue and
+  album list rows), Inspector open by default (`inspector_open`, opens the
+  details panel at launch) and Reduce animation (`reduce_animation`, which
+  turns off `gtk-enable-animations`).
+- Advanced: a full-width Data sources card, one row per
+  `Runtime.providerSources()` entry (what it supplies, its licence as a link
+  when it has a licence page, and a link to the site); the MusicBrainz genres
+  row shows only while Fill missing genres from MusicBrainz is on, and follows
+  that switch at once. Below it, the library database path with Copy, About
+  (Orca's version and the audio backend) and Copy diagnostics, which copies
+  Orca's version, the library's totals and the signal path as text.
+
+The tabs are built each time the page is shown and destroyed when it is left;
+the open tab is kept for the session.
 
 **Watch folders for changes**, on by default and saved in `settings.ini`,
 calls `libraryWatch` with the default `WatchOptions` once the library opens
@@ -702,38 +1079,84 @@ settings below. Removing a folder asks first, then forgets its tracks; the
 files on disk are not touched, and it is refused while a job is running.
 
 The **Sound** tab drives the Player's DSP chain through
-`Runtime.playerSetEqualizer` and `playerSetCrossfeed`. The equalizer has ten
-bands from -12 to +12 dB, a preamp and presets (Flat, Bass, Treble, Vocal,
-Loudness); a curve that matches no preset reads Custom, and switching the
-equalizer off and on restores the last curve. Crossfeed has three amounts.
+`Runtime.playerSetEqualizer`, `playerSetParametricEqualizer` and
+`playerSetCrossfeed`. The equalizer card's header has an Off, Graphic and
+Parametric control; the two equalizers never run together, and Off keeps the
+last editor showing, insensitive. The graphic equalizer has ten bands from
+-12 to +12 dB, a preamp and presets (Flat, Bass, Treble, Vocal, Loudness); a
+curve that matches no preset reads Custom. Crossfeed has three amounts.
 Slider drags are coalesced into one apply about 60 ms after the last move,
-because applying pauses the engine briefly. Both are saved in `[sound]`
-(`equalizer=G1,...,G10:PREAMP`, `equalizer_enabled=true|false`,
-`crossfeed=AMOUNT`, `crossfeed_enabled=true|false`), so the curve and amount
-survive while the effect is off, and applied at launch when enabled. A file
-that predates the `*_enabled` keys and holds `off` leaves the effect off with
-the default curve or amount.
+because applying pauses the engine briefly. An edit still settling when the
+app quits, to either equalizer or the volume, is saved to `settings.ini`
+without being applied, so it holds at the next launch. Beside the equalizer, Output
+Device is a drop-down over the same list and selection as the player bar's
+output menu; choosing in either updates the other. Audio Information shows
+the playing Track's format, sample rate, bit depth and channels from the
+signal path, or Nothing playing.
+
+The **Parametric Equalizer** edits up to 16 filters (`max_parametric_filters`)
+and a preamp:
+
+- Preset: Flat, Custom, the presets saved with the card menu's Save as
+  Preset…, then HD 650 (sample). A curve that matches none reads Custom.
+- Preamp: -24 to +6 dB in 0.5 dB steps, with − and + buttons, and Auto, which
+  lowers it by the largest boost so the curve cannot clip.
+- Import Preset… reads an EqualizerAPO file through `parseEqualizerApo`; a
+  file Orca cannot run is refused with a toast naming the line. The card
+  menu's Export… writes the curve as EqualizerAPO text, which `orca-cli
+  peq-check` accepts. Reset returns to Flat.
+- The graph plots the filters' combined response from 20 Hz to 20 kHz on a
+  log axis over ±12 dB, at the output's sample rate, without the preamp, with
+  one coloured dot per enabled filter: a peak's dot at its gain, any other
+  filter's on the curve at its frequency. Dragging a dot moves its frequency
+  with the pointer and its gain by the pointer's vertical travel, applied on
+  release; scrolling over it changes its Q.
+- The filter table is one Tab stop of 28 px rows: number, colour, name, Type,
+  Freq, Gain and Q, an Enabled switch, and a menu of Duplicate, Move Up, Move
+  Down and Remove. Negative gains and preamps are written with a minus sign
+  (U+2212); typing either `-` or `−` is accepted. Spin edits are applied after
+  the same 60 ms settle.
+  Add Filter adds a peak at 1 kHz and is insensitive at 16 filters.
+
+The card's icon is a pulse. Where the Settings tabs show icons only, the
+card's mode switch and menu move under its title. Below 900 sp the card's
+controls stack, and the filter table scrolls sideways inside the card rather
+than the page.
+
+Sound settings are saved in `[sound]`: `equalizer=G1,...,G10:PREAMP`,
+`equalizer_mode=off|graphic|parametric`, `parametric` (the curve as
+EqualizerAPO text), `parametric_presets` (a list of `NAME` and newline then
+EqualizerAPO text), `crossfeed=AMOUNT` and `crossfeed_enabled=true|false`.
+Curves and amount survive while the effect is off and are applied at launch.
+A file with no `equalizer_mode` reads `equalizer_enabled=true` as the graphic
+equalizer; one that predates the `*_enabled` keys and holds `off` leaves the
+effect off with the default curve or amount.
 
 The Library tab's **AcoustID** card holds Match by audio fingerprint, on
 by default, which is `MatchRequest.fingerprints` for Find Matches and Find
-Match and is saved as `[matching] fingerprints=true|false`. Below it, the
-user's AcoustID key has the same password row, Save, stored row, Remove and
-Unlock as the ListenBrainz token below, stored under
-`acoustid_credential_service` / `acoustid_user_key_account`. Its stored
+Match and is saved as `[matching] fingerprints=true|false`. Below it, Your
+AcoustID key always shows, reading "Saved in your keyring" with Remove or "No
+key saved"; under it the key field, titled Add key or Replace key, has a
+show-key toggle and Save. A successful save clears the field and turns the
+toggle off, hiding the field again. It has the same Unlock and storage rules as the
+ListenBrainz token below, stored under `acoustid_credential_service` /
+`acoustid_user_key_account`. Its stored
 state is found without unlocking the keyring, so opening Settings never
 prompts; a locked keyring reads "Keyring locked" until Unlock is chosen.
-Get a key opens AcoustID's API key page in the browser. The Matches page
+Get your token links to AcoustID's API key page. The Matches page
 finds whether a key is saved the same way at startup, and again after each
 save and remove.
 
-The **Listening** tab holds the ListenBrainz settings. Submit listens calls
-`Runtime.librarySetScrobbling`. The user token is a password row with a Save
-button, enabled while the field has text; Enter in the field saves too. It is
-stored in the Secret Service through libsecret (`apps/linux/secret.zig`) and
-never in `settings.ini` or the Library. Saving clears the field and calls
-`libraryScrobblerCredentialsChanged`. When a token is stored, a row above the
-field reads "Saved in your keyring" with a Remove button, and the field is
-titled Replace token; Remove deletes the token and calls
+The **Listening** tab holds the ListenBrainz settings, laid out like the
+AcoustID card. Submit listens calls `Runtime.librarySetScrobbling`. User token
+always shows, reading "Saved in your keyring" with Remove or "No token saved";
+under it the token field, titled Add token or Replace token, has a show-token
+toggle and a Save button, enabled while the field has text; Enter in the
+field saves too. Get your token links to https://listenbrainz.org/settings/.
+The token is stored in the Secret Service through libsecret
+(`apps/linux/secret.zig`) and never in `settings.ini` or the Library. Saving
+clears the field, turns the toggle off and calls
+`libraryScrobblerCredentialsChanged`; Remove deletes the token and calls
 `libraryScrobblerCredentialsChanged`. The stored state is found the first time the
 tab is shown after Settings opens, and again after each save and remove, by an asynchronous search
 that reads no secret; it may prompt to unlock the keyring. A keyring that stays
@@ -752,44 +1175,73 @@ launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
 instance or a local mock; `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` do
 the same for matching and submission.
 
-The **signal path** shows the source format, then ReplayGain, equalizer,
-crossfeed, volume, the output format and the device rate as they apply, and
-whether the path is bit-perfect, with the reasons when it is not. An eligible
-path reads "Bit-perfect up to PipeWire", and a note says that PipeWire's own
-volume and resampling are not visible to Orca. The player bar's format line
-opens it in the inspector's Signal Path mode on a page with an inspector, and
-in a popover on any other page. It comes from `Runtime.playerSignalPath`,
-which pauses the engine briefly, so one read serves the format line, the
-popover and the inspector, and it is read only when the audible track,
+The **signal path** sheet opens with a verdict card: Bit-perfect, Native
+sample rate or Resampled 44.1 → 96 kHz, then what changes the samples (gain
+adjusted, DSP active, volume), over the chain from the source format through
+the 32-bit float engine to the output device. Five stages follow on a rail,
+each with an icon, a short tag and two or three lines: Source (title, artist
+and album, format), ReplayGain / Gain (Track or Album ReplayGain by the
+correction applied, the applied gain, `−3.1 dB (from −6.2 dB)` when an album
+gain replaced a different track gain, `No album gain for this Track` on a
+fallback, and the volume), DSP (the equalizer and crossfeed, or No processing), Engine / System
+(32-bit float, and whether Orca resamples) and Output (the device, its rate
+and format). Output's tag says how the device is attached: USB, PCI,
+Bluetooth, HDMI or Virtual, and nothing when liborca does not know. Each
+stage's chevron reveals its technical detail; the Engine and Output details
+carry the transport and stream counters (`playerSnapshot`, `zoneStats`),
+read when the sheet is drawn and when the detail is revealed, and the
+Engine's leads with the device's block size from the signal path
+(`Block size 256 frames`) once the stream has run. Clicking the verdict card shows or hides every stage's
+detail. A footer says "Everything is working as intended." or names the
+reasons the path is not bit-perfect, and adds that PipeWire's own volume and
+resampling are not visible to Orca. The player bar's format button opens it
+in the inspector's Signal Path mode on a page with an inspector, and in a
+popover on any other page. It comes from `Runtime.playerSignalPath`,
+which pauses the engine briefly, so one read serves the format line, what
+changes the samples, the popover and the inspector, and it is read only when the audible track,
 ReplayGain, the equalizer, crossfeed, the volume (once the slider settles) or
 the output device change, and when the popover or the Signal Path mode opens;
 never on the tick.
 
-The **inspector** sits at the end of the Songs list, the Loved page and each
-album page.
+The **inspector** sits at the end of the Songs list, the Loved page, each
+album page and playlist, and Now Playing, where it takes the place of the
+Up Next column and shows the playing song.
 Three linked toggles at the end of the header show it in one of three modes,
 or hide it: the track inspector (`Ctrl+I`), lyrics (`Ctrl+Shift+L`) and the
-signal path. The mode is shared by every page and saved as `[view] details`,
-`lyrics` or `signal_path`; it starts hidden. Below the 760sp breakpoint the
+signal path (`Ctrl+Shift+S`). The mode is shared by every page and saved as `[view] details`,
+`lyrics` or `signal_path`; it starts hidden. Below the 1100sp breakpoint the
 inspector is laid over the page instead of beside it and starts closed; a
-toggle opens it, and clicking beside it or Escape closes it without changing
-the saved mode. The Songs inspector shows the first selected track, otherwise
+mode opens it, and clicking beside it or Escape closes it without changing
+the saved mode. Below 760sp the toggles also become one Panels menu with the
+same three modes. The inspector's scrolling area is not a Tab stop. The Songs inspector shows the first selected track, otherwise
 the playing one, and the Loved inspector the selected loved song, otherwise
 the playing one; an album page's inspector shows its selected track, otherwise
-the playing track when it belongs to the album. On an album page a click or
+the playing track when it belongs to the album, otherwise the album: its
+title, an Album subtitle, an Overview (artist, date, genres, tracks, duration
+and format), Identity (whether a MusicBrainz release is matched, once release
+info is stored) and its Description. An artist page's inspector shows the
+Artist until a song is selected or the biography is clicked: their name, an
+Artist subtitle, an Overview (genres one per line, years active, total
+albums and tracks, and how many tracks are in the library), the full Biography with its
+licence and a Read more link, Links from `libraryArtistLinks`, each opening
+in the browser, and a button that fetches the info again. On an album page a click or
 the arrow keys select a row, one per page, and double-click or Enter plays
 from it. The Songs table and the Albums, Artists, Playlists and Queue lists
 each take one Tab stop: Tab visits the focused row's buttons and then leaves
 the list, and the arrow keys move between rows. The track inspector is filled from `Runtime.libraryTrackDetails` when
-the shown track changes and when the library changes. It opens with the title,
-artist and album, then flat sections, each hidden when it has nothing to
-show: Audio (codec, format, bitrate, duration), Loudness (integrated
-loudness, sample peak, ReplayGain), Identity (the MusicBrainz and AcoustID
-state and IDs, with the matching actions below), Metadata (album artist,
-date, track, disc, compilation), History (feedback, rating, play count and
-last play in local time, read again whenever
-`Runtime.libraryListensRecorded` reports a newly recorded listen) and File
-(size, and the path with a copy button).
+the shown track changes and when the library changes. It opens with the
+track number and title, the artist and the album, then sections divided by
+rules, each under an icon and a heading and hidden when it has nothing to
+show: Audio (format with bit depth, sample rate, channels, bitrate,
+duration), Loudness (integrated loudness, sample peak, ReplayGain), Identity
+(the MusicBrainz and AcoustID rows, with the matching actions below),
+Metadata (album artist, album, date, genre, track and disc number as "1 of 13",
+compilation, explicit when known, play count and last play in local time,
+read again whenever `Runtime.libraryListensRecorded` reports a newly
+recorded listen) and File (folder, file name, size, modified and added in
+local time, with a copy button for the path in its heading). A track total
+counted from the album's tracks rather than read from a tag says so in a
+tooltip.
 
 The output is opened on first play, not at launch. `ORCA_OUTPUT_DEVICE` pins it
 to an orca device id, overriding the device list; see
@@ -849,7 +1301,7 @@ A host that wants listening history and scrobbling calls, on the Zig API:
   `libraryScrobblerStatus` for presentation.
 - `Runtime.librarySetFeedback` and `libraryTrackFeedback` for love and hate,
   which `TrackSummary.feedback` and `TrackDetails.feedback` also report.
-  `orca-gtk` repaints the heart, the rows and the inspector after each
+  `orca-gtk` repaints the heart and the rows after each
   change rather than waiting for a reload.
 - `Runtime.librarySetReleaseLove` for album love, which
   `ReleaseSummary.loved` reports; `ReleaseQuery.loved_only` with

@@ -638,7 +638,7 @@ pub fn build(self: *App) *gtk.Widget {
     checkAcoustIdKey(self);
 
     const view = adw.adw_toolbar_view_new();
-    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header());
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, view), page_ui.header(self).bar);
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, view), page_ui.withTitle(title, body));
     return view;
 }

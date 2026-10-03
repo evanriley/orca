@@ -19,6 +19,7 @@ pub const SidebarSection = opaque {};
 pub const SidebarItem = opaque {};
 pub const Breakpoint = opaque {};
 pub const BreakpointCondition = opaque {};
+pub const BreakpointBin = opaque {};
 pub const Dialog = opaque {};
 pub const AboutDialog = opaque {};
 pub const ShortcutsDialog = opaque {};
@@ -26,6 +27,7 @@ pub const ShortcutsSection = opaque {};
 pub const ShortcutsItem = opaque {};
 pub const NavigationView = opaque {};
 pub const Clamp = opaque {};
+pub const WrapBox = opaque {};
 pub const Avatar = opaque {};
 pub const PreferencesGroup = opaque {};
 pub const PreferencesRow = opaque {};
@@ -40,6 +42,7 @@ pub const Banner = opaque {};
 pub const ViewStack = opaque {};
 pub const ViewSwitcher = opaque {};
 pub const StyleManager = opaque {};
+pub const SplitButton = opaque {};
 
 pub const RESPONSE_DEFAULT: c_int = 0;
 pub const RESPONSE_SUGGESTED: c_int = 1;
@@ -72,8 +75,6 @@ pub extern fn adw_expander_row_set_title_lines(row: *ExpanderRow, lines: c_int) 
 pub extern fn adw_expander_row_set_subtitle_lines(row: *ExpanderRow, lines: c_int) void;
 pub extern fn adw_entry_row_new() *gtk.Widget;
 pub extern fn adw_entry_row_set_show_apply_button(row: *EntryRow, show_apply_button: gtk.gboolean) void;
-pub extern fn adw_entry_row_add_suffix(row: *EntryRow, widget: *gtk.Widget) void;
-pub extern fn adw_password_entry_row_new() *gtk.Widget;
 pub extern fn adw_action_row_set_activatable_widget(row: *ActionRow, widget: ?*gtk.Widget) void;
 pub extern fn adw_switch_row_new() *gtk.Widget;
 pub extern fn adw_switch_row_get_active(row: *SwitchRow) gtk.gboolean;
@@ -98,6 +99,7 @@ pub extern fn adw_header_bar_set_show_start_title_buttons(bar: *HeaderBar, show:
 pub extern fn adw_dialog_set_child(dialog: *Dialog, child: ?*gtk.Widget) void;
 pub extern fn adw_dialog_set_title(dialog: *Dialog, title: [*:0]const u8) void;
 pub extern fn adw_dialog_set_content_width(dialog: *Dialog, width: c_int) void;
+pub extern fn adw_dialog_set_content_height(dialog: *Dialog, height: c_int) void;
 pub extern fn adw_dialog_close(dialog: *Dialog) gtk.gboolean;
 pub extern fn adw_toast_set_button_label(toast: *Toast, label: ?[*:0]const u8) void;
 pub extern fn adw_toast_set_action_name(toast: *Toast, action_name: ?[*:0]const u8) void;
@@ -123,6 +125,10 @@ pub extern fn adw_breakpoint_add_setter(
     property: [*:0]const u8,
     value: *const gtk.GValue,
 ) void;
+
+pub extern fn adw_breakpoint_bin_new() *gtk.Widget;
+pub extern fn adw_breakpoint_bin_set_child(bin: *BreakpointBin, child: ?*gtk.Widget) void;
+pub extern fn adw_breakpoint_bin_add_breakpoint(bin: *BreakpointBin, breakpoint: *Breakpoint) void;
 
 pub extern fn adw_navigation_split_view_new() *gtk.Widget;
 pub extern fn adw_navigation_split_view_set_sidebar(view: *NavigationSplitView, sidebar: ?*NavigationPage) void;
@@ -163,7 +169,6 @@ pub extern fn adw_view_stack_add_titled_with_icon(
     icon_name: [*:0]const u8,
 ) ?*anyopaque;
 pub extern fn adw_view_stack_set_visible_child_name(stack: *ViewStack, name: [*:0]const u8) void;
-pub extern fn adw_view_stack_get_visible_child_name(stack: *ViewStack) ?[*:0]const u8;
 pub extern fn adw_view_switcher_new() *gtk.Widget;
 pub extern fn adw_view_switcher_set_stack(switcher: *ViewSwitcher, stack: ?*ViewStack) void;
 pub extern fn adw_view_switcher_set_policy(switcher: *ViewSwitcher, policy: c_int) void;
@@ -172,6 +177,20 @@ pub extern fn adw_clamp_new() *gtk.Widget;
 pub extern fn adw_clamp_set_maximum_size(clamp: *Clamp, size: c_int) void;
 pub extern fn adw_clamp_set_child(clamp: *Clamp, child: ?*gtk.Widget) void;
 pub extern fn adw_clamp_set_tightening_threshold(clamp: *Clamp, threshold: c_int) void;
+
+pub extern fn adw_wrap_box_new() *gtk.Widget;
+pub extern fn adw_wrap_box_append(box: *WrapBox, child: *gtk.Widget) void;
+pub extern fn adw_wrap_box_remove_all(box: *WrapBox) void;
+pub extern fn adw_wrap_box_set_child_spacing(box: *WrapBox, spacing: c_int) void;
+pub extern fn adw_wrap_box_set_line_spacing(box: *WrapBox, spacing: c_int) void;
+pub extern fn adw_wrap_box_set_align(box: *WrapBox, alignment: f32) void;
+pub extern fn adw_wrap_box_set_justify(box: *WrapBox, justify: c_int) void;
+pub const JUSTIFY_SPREAD: c_int = 2;
+
+pub extern fn adw_split_button_new() *gtk.Widget;
+pub extern fn adw_split_button_set_child(button: *SplitButton, child: ?*gtk.Widget) void;
+pub extern fn adw_split_button_set_menu_model(button: *SplitButton, menu_model: ?*gtk.GMenuModel) void;
+pub extern fn adw_split_button_set_dropdown_tooltip(button: *SplitButton, tooltip: [*:0]const u8) void;
 
 pub extern fn adw_navigation_page_new(child: *gtk.Widget, title: [*:0]const u8) *NavigationPage;
 pub extern fn adw_navigation_page_set_title(page: *NavigationPage, title: [*:0]const u8) void;
@@ -189,6 +208,7 @@ pub extern fn adw_header_bar_new() *gtk.Widget;
 pub extern fn adw_header_bar_pack_start(bar: *HeaderBar, child: *gtk.Widget) void;
 pub extern fn adw_header_bar_pack_end(bar: *HeaderBar, child: *gtk.Widget) void;
 pub extern fn adw_header_bar_set_show_title(bar: *HeaderBar, show_title: gtk.gboolean) void;
+pub extern fn adw_header_bar_set_show_back_button(bar: *HeaderBar, show_back_button: gtk.gboolean) void;
 
 pub extern fn adw_toast_new(title: [*:0]const u8) *Toast;
 pub extern fn adw_toast_set_timeout(toast: *Toast, seconds: c_uint) void;

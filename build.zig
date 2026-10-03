@@ -254,6 +254,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "build_options", .module = app_options_module },
             },
         });
+        linux_app_module.addAnonymousImport("hd650.txt", .{ .root_source_file = b.path("fixtures/eq/hd650.txt") });
         linux_app_module.linkSystemLibrary("gtk-4", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("libadwaita-1", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("libsecret-1", .{ .use_pkg_config = .yes });
@@ -262,6 +263,7 @@ pub fn build(b: *std.Build) void {
         // directly, so it has to be linked directly.
         linux_app_module.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .yes });
+        linux_app_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("pango", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .yes });
         linux_app_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .yes });
@@ -271,9 +273,16 @@ pub fn build(b: *std.Build) void {
             .root_module = linux_app_module,
         });
         b.installArtifact(linux_app);
+        const signal_path_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/signal_path.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }) });
+        test_step.dependOn(&b.addRunArtifact(signal_path_tests).step);
         b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
         b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
-        for ([_][]const u8{ "orca-heart-filled-symbolic", "orca-heart-outline-symbolic" }) |icon| {
+        for ([_][]const u8{ "orca-heart-filled-symbolic", "orca-heart-outline-symbolic", "orca-pulse-symbolic" }) |icon| {
             b.installFile(
                 b.fmt("apps/linux/data/{s}.svg", .{icon}),
                 b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),

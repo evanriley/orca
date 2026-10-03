@@ -16,12 +16,14 @@ const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
+const genres = @import("genres.zig");
 const menu = @import("menu.zig");
 const settings = @import("settings.zig");
 const signal_path = @import("signal_path.zig");
 const details = @import("details.zig");
 const lyrics = @import("lyrics.zig");
 const feedback = @import("feedback.zig");
+const preferences = @import("preferences.zig");
 
 const App = app.App;
 
@@ -79,14 +81,17 @@ fn deviceRow(self: *App, name: [:0]const u8) void {
     self.device_checks.append(self.allocator, check) catch {};
 }
 
+pub fn deviceName(self: *const App) [:0]const u8 {
+    if (self.device_index < self.device_names.items.len) return self.device_names.items[self.device_index];
+    return "Output";
+}
+
 fn showSelectedDevice(self: *App) void {
     for (self.device_checks.items, 0..) |check, index|
         gtk.gtk_widget_set_opacity(check, if (index == self.device_index) 1.0 else 0.0);
+    preferences.showOutputDevice(self);
     const label = self.device_label orelse return;
-    const name: [:0]const u8 = if (self.device_index < self.device_names.items.len)
-        self.device_names.items[self.device_index]
-    else
-        "Output";
+    const name = deviceName(self);
     gtk.gtk_label_set_text(label, name.ptr);
     gtk.gtk_widget_set_tooltip_text(gtk.cast(gtk.Widget, label), name.ptr);
     if (self.device_icon) |icon| gtk.gtk_widget_set_tooltip_text(icon, name.ptr);
@@ -240,6 +245,15 @@ fn nextClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     next(state(data));
 }
 
+pub fn toggleShuffle(self: *App) void {
+    for (&self.transport_controls.values) |*controls| {
+        const button = controls.shuffle orelse continue;
+        const shuffle = gtk.cast(gtk.ToggleButton, button);
+        gtk.gtk_toggle_button_set_active(shuffle, if (gtk.gtk_toggle_button_get_active(shuffle) != 0) gtk.false_ else gtk.true_);
+        return;
+    }
+}
+
 fn shuffleToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.suppress_widget_writeback) return;
@@ -249,7 +263,10 @@ fn shuffleToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn repeatClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
+    cycleRepeat(state(data));
+}
+
+pub fn cycleRepeat(self: *App) void {
     self.repeat_mode = switch (self.repeat_mode) {
         .off => .all,
         .all => .one,
@@ -288,6 +305,7 @@ const volume_settle_ms: c_uint = 250;
 fn volumeSettled(data: ?*anyopaque) callconv(.c) gtk.gboolean {
     const self = state(data);
     self.volume_settle_timer = 0;
+    settings.save(self);
     if (details.shownMode(self) == .signal_path) refreshSignalPath(self);
     return gtk.SOURCE_REMOVE;
 }
@@ -470,7 +488,7 @@ pub fn newSeek(self: *App, surface: app.TransportSurface) *gtk.Widget {
     controls.scale = scale;
     gtk.gtk_scale_set_draw_value(gtk.cast(gtk.Scale, scale), gtk.false_);
     gtk.gtk_widget_add_css_class(scale, "seek");
-    gtk.gtk_widget_set_size_request(scale, 420, -1);
+    gtk.gtk_widget_set_size_request(scale, 120, -1);
     gtk.gtk_widget_set_hexpand(scale, gtk.true_);
     _ = gtk.signalConnect(scale, "change-value", gtk.callback(seekChangeValue), self);
     gtk.gtk_box_append(gtk.cast(gtk.Box, seek), elapsed);
@@ -481,9 +499,14 @@ pub fn newSeek(self: *App, surface: app.TransportSurface) *gtk.Widget {
 
 fn buildControls(self: *App) *gtk.Widget {
     const column = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_set_valign(column, gtk.ALIGN_CENTER);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), newButtons(self, .bar));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, column), newSeek(self, .bar));
+    const buttons = newButtons(self, .bar);
+    gtk.gtk_widget_set_vexpand(buttons, gtk.true_);
+    gtk.gtk_widget_set_valign(buttons, gtk.ALIGN_END);
+    const seek = newSeek(self, .bar);
+    gtk.gtk_widget_set_vexpand(seek, gtk.true_);
+    gtk.gtk_widget_set_valign(seek, gtk.ALIGN_START);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), buttons);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), seek);
     return column;
 }
 
@@ -521,11 +544,15 @@ fn buildFormat(self: *App) *gtk.Widget {
     self.format_label = gtk.cast(gtk.Label, label);
     gtk.gtk_label_set_xalign(self.format_label.?, 0.0);
     gtk.gtk_label_set_ellipsize(self.format_label.?, gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(label, "tech");
     gtk.gtk_widget_add_css_class(label, "numeric");
+    const icon = gtk.gtk_image_new_from_icon_name("network-cellular-signal-excellent-symbolic");
+    gtk.gtk_widget_add_css_class(icon, "bar-format-icon");
+    const child = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, child), icon);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, child), label);
     const button = gtk.gtk_button_new();
     self.format_button = button;
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), label);
+    gtk.gtk_button_set_child(gtk.cast(gtk.Button, button), child);
     gtk.gtk_widget_set_parent(popover, button);
     _ = gtk.signalConnect(button, "clicked", gtk.callback(formatClicked), self);
     _ = gtk.signalConnect(button, "destroy", gtk.callback(formatDestroyed), self);
@@ -588,6 +615,17 @@ fn buildDevice(self: *App) *gtk.Widget {
     return button;
 }
 
+fn buildDeviceLine(self: *App) *gtk.Widget {
+    const label = gtk.gtk_label_new("");
+    self.adjustments_label = gtk.cast(gtk.Label, label);
+    gtk.gtk_widget_add_css_class(label, "bar-adjustments");
+    gtk.gtk_widget_add_css_class(label, "numeric");
+    const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, line), label);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, line), buildDevice(self));
+    return line;
+}
+
 fn volumeSlider(adjustment: *gtk.Adjustment, orientation: c_int) *gtk.Widget {
     const scale = gtk.gtk_scale_new(orientation, adjustment);
     gtk.gtk_scale_set_draw_value(gtk.cast(gtk.Scale, scale), gtk.false_);
@@ -633,13 +671,12 @@ fn buildVolume(self: *App) *gtk.Widget {
 fn buildOutputs(self: *App) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
     gtk.gtk_widget_set_halign(box, gtk.ALIGN_END);
-    gtk.gtk_widget_set_valign(box, gtk.ALIGN_CENTER);
 
     const output = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_widget_set_valign(output, gtk.ALIGN_CENTER);
     gtk.gtk_widget_add_css_class(output, "bar-output");
     gtk.gtk_box_append(gtk.cast(gtk.Box, output), buildFormat(self));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, output), buildDevice(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, output), buildDeviceLine(self));
 
     const queue = iconButton("view-list-symbolic", "Queue");
     gtk.gtk_actionable_set_action_name(gtk.cast(gtk.Actionable, queue), "app.show-queue");
@@ -661,7 +698,7 @@ pub fn refreshSignalPath(self: *App) void {
     const path = self.runtime.playerSignalPath(self.player) catch null;
     self.signal_path_has_output = ready;
     if (self.signal_path_label) |label| {
-        const text = if (path) |value| signal_path.render(&buffer, value) else "Signal path unavailable";
+        const text = if (path) |value| signal_path.render(&buffer, value, deviceName(self)) else "Signal path unavailable";
         gtk.gtk_label_set_text(label, text.ptr);
     }
     if (self.format_label) |label| {
@@ -669,7 +706,12 @@ pub fn refreshSignalPath(self: *App) void {
         gtk.gtk_label_set_text(label, text.ptr);
         if (self.format_button) |button| gtk.gtk_widget_set_visible(button, boolean(text.len != 0));
     }
+    if (self.adjustments_label) |label| {
+        const text = if (path) |value| signal_path.renderAdjustments(&buffer, value) else "";
+        gtk.gtk_label_set_text(label, text.ptr);
+    }
     details.showSignalPath(self, path);
+    preferences.showAudioInformation(self, path);
 }
 
 fn outputReady(self: *App) bool {
@@ -680,6 +722,7 @@ fn outputReady(self: *App) bool {
 
 fn signalPathVisible(self: *App) bool {
     if (details.shownMode(self) == .signal_path) return true;
+    if (preferences.audioInformationShown(self)) return true;
     if (self.signal_path_popover) |popover| {
         if (gtk.gtk_widget_get_visible(gtk.cast(gtk.Widget, popover)) != 0) return true;
     }
@@ -716,6 +759,10 @@ fn outputsShown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     showSelectedDevice(self);
 }
 
+/// GTK orders Tab focus by each child's vertical centre before its x, so the
+/// three groups fill the bar's height and centre their own contents: centred
+/// groups of different heights differ by half a pixel, which put the outputs
+/// before the transport whenever the format line was hidden.
 pub fn build(self: *App) *gtk.Widget {
     const bar = gtk.gtk_center_box_new();
     gtk.gtk_widget_add_css_class(bar, "player-bar");
@@ -799,6 +846,7 @@ pub fn tick(self: *App) void {
         window.markPlaying(self, status.track_id);
         albums.markPlaying(self, status.track_id);
         artists.markPlaying(self, status.track_id);
+        genres.markPlaying(self, status.track_id);
         nowplaying.update(self, status.track_id);
         details.trackChanged(self);
         lyrics.trackChanged(self);

@@ -268,6 +268,7 @@ fn fieldLabel(field: liborca.MetadataField) []const u8 {
         .musicbrainz_release_group_id => "MusicBrainz Release Group",
         .musicbrainz_release_track_id => "MusicBrainz Release Track",
         .musicbrainz_album_artist_id => "MusicBrainz Album Artist",
+        .explicit => "Explicit",
         .title, .artist, .album, .album_artist, .date, .track_number, .disc_number, .musicbrainz_recording_id => @tagName(field),
     };
 }
@@ -278,6 +279,29 @@ fn sourceLabel(provenance: liborca.Provenance) []const u8 {
         .provider => "match",
         else => @tagName(provenance),
     };
+}
+
+fn genreLine(allocator: std.mem.Allocator, genres: liborca.TagWriteGenres) std.mem.Allocator.Error![:0]u8 {
+    var line: std.Io.Writer.Allocating = .init(allocator);
+    defer line.deinit();
+    writeGenreLine(&line.writer, genres) catch return error.OutOfMemory;
+    return line.toOwnedSliceSentinel(0);
+}
+
+fn writeGenreLine(writer: *std.Io.Writer, genres: liborca.TagWriteGenres) std.Io.Writer.Error!void {
+    try writer.writeAll("Genres: ");
+    try writeGenreNames(writer, genres.before);
+    try writer.writeAll(" → ");
+    try writeGenreNames(writer, genres.after);
+    try writer.print(" ({s})", .{sourceLabel(.user)});
+}
+
+fn writeGenreNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
+    if (names.len == 0) return writer.writeAll("(none)");
+    for (names, 0..) |name, index| {
+        if (index != 0) try writer.writeAll("; ");
+        try writer.writeAll(name);
+    }
 }
 
 fn appendLine(list: *gtk.Widget, text: [:0]const u8, css_class: [*:0]const u8) void {
@@ -353,6 +377,11 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
                 sourceLabel(change.provenance),
             }) catch continue;
             appendLine(list, line, "dim-label");
+        }
+        if (file.genres) |genres| {
+            const line = genreLine(self.allocator, genres) catch null;
+            defer if (line) |owned| self.allocator.free(owned);
+            appendLine(list, line orelse "Genres: changed (your edit)", "dim-label");
         }
     }
     if (plan.files.len > 6) {

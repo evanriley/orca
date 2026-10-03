@@ -4,6 +4,7 @@
 const std = @import("std");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
+const app = @import("app.zig");
 
 const stylesheet = @embedFile("style.css");
 
@@ -28,6 +29,24 @@ pub fn apply(io: std.Io, display: *gtk.GdkDisplay) void {
     gtk.gtk_css_provider_load_from_string(provider, stylesheet);
     gtk.gtk_style_context_add_provider_for_display(display, provider, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
     gtk.g_object_unref(provider);
+}
+
+fn setClass(widget: *gtk.Widget, name: [*:0]const u8, present: bool) void {
+    if (present) gtk.gtk_widget_add_css_class(widget, name) else gtk.gtk_widget_remove_css_class(widget, name);
+}
+
+pub fn applyChoices(self: *app.App) void {
+    const choices = self.appearance;
+    if (self.window) |window| {
+        const widget = gtk.cast(gtk.Widget, window);
+        setClass(widget, "artwork-off", choices.artwork == .off);
+        setClass(widget, "density-compact", choices.density == .compact);
+    }
+    const settings = gtk.gtk_settings_get_default() orelse return;
+    if (choices.reduce_animation)
+        gtk.g_object_set(settings, "gtk-enable-animations", gtk.false_, @as(?*anyopaque, null))
+    else
+        gtk.gtk_settings_reset_property(settings, "gtk-enable-animations");
 }
 
 fn registerFonts(exe_dir: []const u8) void {

@@ -26,6 +26,16 @@ pub const Fields = struct {
     name: [:0]u8 = &empty,
     detail: [:0]u8 = &empty,
     caption: [:0]u8 = &empty,
+    release: Release = .{},
+};
+
+/// What an Albums list row or tile shows beyond its name, artist and year.
+pub const Release = struct {
+    format: [:0]u8 = &empty,
+    track_count: u32 = 0,
+    duration_ms: i64 = 0,
+    loved: bool = false,
+    explicit: bool = false,
 };
 
 var empty: [0:0]u8 = .{};
@@ -52,6 +62,10 @@ pub const BrowseObject = extern struct {
 
     pub fn caption(self: *BrowseObject) [:0]const u8 {
         return self.fields().caption;
+    }
+
+    pub fn release(self: *BrowseObject) *const Release {
+        return &self.fields().release;
     }
 };
 
@@ -92,6 +106,7 @@ fn finalize(object: *gtk.GObject) callconv(.c) void {
     freeText(values.name);
     freeText(values.detail);
     freeText(values.caption);
+    freeText(values.release.format);
     values.* = .{};
     if (parent_class) |parent| {
         if (parent.finalize) |chain| chain(object);
@@ -122,5 +137,14 @@ pub fn newWithCaption(id: ?i64, name: []const u8, detail: []const u8, caption: [
     values.name = dupe(name);
     values.detail = dupe(detail);
     values.caption = dupe(caption);
+    return self;
+}
+
+/// `format` is copied like the other strings and replaces `release.format`.
+pub fn newRelease(id: i64, name: []const u8, detail: []const u8, caption: []const u8, format: []const u8, release: Release) ?*BrowseObject {
+    const self = newWithCaption(id, name, detail, caption) orelse return null;
+    const values = self.fields();
+    values.release = release;
+    values.release.format = dupe(format);
     return self;
 }

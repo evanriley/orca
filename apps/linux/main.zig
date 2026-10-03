@@ -24,6 +24,7 @@ const details = @import("details.zig");
 const lyrics = @import("lyrics.zig");
 const queue = @import("queue.zig");
 const window = @import("window.zig");
+const palette = @import("palette.zig");
 const albums = @import("albums.zig");
 const artists = @import("artists.zig");
 const menu = @import("menu.zig");
@@ -88,6 +89,8 @@ fn tick(self: *App) void {
     preferences.tick(self);
     details.tick(self);
     lyrics.tick(self);
+    albums.tick(self);
+    artists.tick(self);
     armTimeout(self);
 }
 
@@ -134,6 +137,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     }
     if (gtk.gdk_display_get_default()) |display| appearance.apply(self.io, display);
     _ = window.build(self, gtk.cast(gtk.Application, application));
+    appearance.applyChoices(self);
     transport.refreshDevices(self);
     // The output is opened on first play, not here: an idle window must not
     // hold the user's default sink.
@@ -162,7 +166,11 @@ fn activateRescan(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c
 }
 
 fn activateSearch(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    window.focusSearch(@ptrCast(@alignCast(data.?)));
+    palette.summon(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateFind(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.focusPageSearch(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateShowQueue(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -175,6 +183,10 @@ fn activateDetails(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
 
 fn activateLyrics(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     lyrics.toggle(@ptrCast(@alignCast(data.?)));
+}
+
+fn activateSignalPath(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    details.toggleSignalPath(@ptrCast(@alignCast(data.?)));
 }
 
 fn activateBack(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -263,6 +275,18 @@ fn activateContextAddToPlaylist(_: ?*anyopaque, parameter: ?*gtk.GVariant, data:
     menu.addToPlaylist(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
 }
 
+fn activateSettingsFolderRescan(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    preferences.rescanFolder(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activateSettingsFolderReveal(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    preferences.revealFolder(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activateSettingsFolderRemove(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    preferences.confirmRemoveFolder(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
 fn activateContextAddToNewPlaylist(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     menu.addToNewPlaylist(@ptrCast(@alignCast(data.?)));
 }
@@ -297,6 +321,22 @@ fn activatePlaylistExport(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*any
 
 fn activatePlaylistDelete(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
     playlists.confirmDelete(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistPin(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.togglePin(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistLove(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.toggleLove(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistEdit(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.askDetails(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
+}
+
+fn activatePlaylistRules(_: ?*anyopaque, parameter: ?*gtk.GVariant, data: ?*anyopaque) callconv(.c) void {
+    playlists.editRules(@ptrCast(@alignCast(data.?)), gtk.g_variant_get_int64(parameter orelse return));
 }
 
 fn activatePreferences(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -356,10 +396,12 @@ fn activateShortcuts(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
             .{ "Previous Song", "<Control>Left" },
         } },
         .{ .title = "Library", .items = &.{
-            .{ "Search", "<Control>f" },
+            .{ "Search and Commands", "<Control>k" },
+            .{ "Search This Page", "<Control>f" },
             .{ "Show Queue", "<Control>l" },
             .{ "Lyrics", "<Control><Shift>l" },
             .{ "Inspector", "<Control>i" },
+            .{ "Signal Path", "<Control><Shift>s" },
             .{ "Back", "<Alt>Left" },
             .{ "Add Music Folder", "<Control>o" },
         } },
@@ -529,10 +571,12 @@ pub fn main(init: std.process.Init) !u8 {
     addAction(application, "play-pause", activatePlayPause, null, &self);
     addAction(application, "add-folder", activateAddFolder, "<Control>o", &self);
     addAction(application, "rescan", activateRescan, null, &self);
-    addAction(application, "search", activateSearch, "<Control>f", &self);
+    addAction(application, "search", activateSearch, "<Control>k", &self);
+    addAction(application, "find", activateFind, "<Control>f", &self);
     addAction(application, "show-queue", activateShowQueue, "<Control>l", &self);
     addAction(application, "details", activateDetails, "<Control>i", &self);
     addAction(application, "lyrics", activateLyrics, "<Control><Shift>l", &self);
+    addAction(application, "signal-path", activateSignalPath, "<Control><Shift>s", &self);
     addAction(application, "back", activateBack, null, &self);
     addAction(application, "shortcuts", activateShortcuts, "<Control>question", &self);
     addAction(application, "about", activateAbout, null, &self);
@@ -570,6 +614,13 @@ pub fn main(init: std.process.Init) !u8 {
     addIntegerAction(application, "playlist-rename", activatePlaylistRename, &self);
     addIntegerAction(application, "playlist-export", activatePlaylistExport, &self);
     addIntegerAction(application, "playlist-delete", activatePlaylistDelete, &self);
+    addIntegerAction(application, "playlist-pin", activatePlaylistPin, &self);
+    addIntegerAction(application, "playlist-love", activatePlaylistLove, &self);
+    addIntegerAction(application, "playlist-edit", activatePlaylistEdit, &self);
+    addIntegerAction(application, "playlist-rules", activatePlaylistRules, &self);
+    addIntegerAction(application, "settings-folder-rescan", activateSettingsFolderRescan, &self);
+    addIntegerAction(application, "settings-folder-reveal", activateSettingsFolderReveal, &self);
+    addIntegerAction(application, "settings-folder-remove", activateSettingsFolderRemove, &self);
 
     self.mpris.init(&runtime, self.player, g_application, self.io, self.waker());
     _ = gtk.signalConnect(application, "activate", gtk.callback(activate), &self);
@@ -586,7 +637,11 @@ pub fn main(init: std.process.Init) !u8 {
     _ = gtk.g_source_remove(wake_source);
     if (self.timeout_source != 0) _ = gtk.g_source_remove(self.timeout_source);
     self.timeout_source = 0;
+    self.toasts = null;
+    preferences.shutdown(&self);
     lyrics.shutdown(&self);
+    albums.shutdown(&self);
+    artists.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};
