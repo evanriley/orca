@@ -272,7 +272,10 @@ The boundary covers the whole engine, not a fragment of it:
   (called with capacity 0 first to learn the length).
 - **Devices and Zones.** Enumeration (`orca_enumerate_output_devices_v2`
   adds each device's `orca_device_kind`: USB, PCI, Bluetooth, HDMI, virtual
-  or unknown), Zone create/attach/open/close/status, and
+  or unknown; `orca_enumerate_output_devices_v3` adds its capabilities,
+  `has_capabilities` being zero when they are unknown: lowest and highest
+  rate, `ORCA_DEVICE_BIT_DEPTH_*` bits, most channels and an
+  `orca_device_state`), Zone create/attach/open/close/status, and
   `orca_player_open_default_output`, which creates, attaches and opens in one
   call so a single-output frontend never has to know Zones exist.
 - **Providers and credentials.** `orca_runtime_set_client_identity` names the

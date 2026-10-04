@@ -329,6 +329,7 @@ pub const PlayerEngine = struct {
         self.serviceOutputs(zones, format, since_last_pass_ns);
         self.publishPosition(zones);
         self.publishDrained(zones);
+        self.serviceStopAfterCurrent();
     }
 
     /// Engine thread, after a pass: whether the next pass would do nothing
@@ -409,6 +410,7 @@ pub const PlayerEngine = struct {
             self.noteOpenFailure(queue, position);
             return;
         };
+        session.replay_gain.shares_release = queue.sharesRelease(position, opener);
         // A held format-switch successor describes a transition that is no
         // longer happening.
         self.releasePending();
@@ -456,6 +458,7 @@ pub const PlayerEngine = struct {
                 if (queue.followingPosition()) |next| queue.seekTo(next);
                 return;
             };
+            session.replay_gain.shares_release = queue.sharesRelease(position, opener);
             loadQueueEntry(self.player, queue, session, position);
             session = undefined;
             self.consecutive_open_failures = 0;
@@ -465,12 +468,14 @@ pub const PlayerEngine = struct {
 
         const sources = &self.player.sources.?;
         if (!sources.current.eof or sources.next != null) return;
+        if (self.player.stop_after_current.load(.acquire)) return;
         const position = queue.followingPosition() orelse return;
         const ref = queue.refAt(position) orelse return;
         var session = opener.open(ref) catch {
             self.noteOpenFailure(queue, position);
             return;
         };
+        session.replay_gain.shares_release = queue.sharesRelease(position, opener);
         self.player.primeNextSource(session) catch |err| {
             if (err == error.GaplessFormatMismatch) {
                 // Not fatal, and not something to resample around: hold the
@@ -510,6 +515,67 @@ pub const PlayerEngine = struct {
         self.consecutive_open_failures = 0;
         self.entries_started += 1;
         self.format_switch_transitions += 1;
+    }
+
+    /// Control lane, under `quiesce`, after the queue order changed: an entry
+    /// already opened re-reads whether a neighbour shares its Release. Audio
+    /// already decoded keeps the gain it was decoded with, as it does after a
+    /// settings change.
+    pub fn refreshSharedRelease(self: *PlayerEngine) void {
+        const queue = self.queue orelse return;
+        const opener = self.opener orelse return;
+        if (self.player.sources) |*sources| {
+            if (queue.positionForSerial(sources.current_entry_serial)) |position|
+                sources.current.replay_gain.shares_release = queue.sharesRelease(position, opener);
+            if (sources.next) |*next| {
+                if (queue.positionForSerial(sources.next_entry_serial)) |position|
+                    next.replay_gain.shares_release = queue.sharesRelease(position, opener);
+            }
+        }
+        if (self.pending_source) |*pending|
+            pending.replay_gain.shares_release = queue.sharesRelease(self.pending_position, opener);
+        self.player.publishSourceInfo();
+    }
+
+    /// Control lane, under `quiesce`. Arms or disarms stopping when the entry
+    /// being heard ends.
+    ///
+    /// The successor is never primed while armed, so arming has to take back
+    /// one the engine already lined up. A primed successor that has not
+    /// started decoding is dropped and the decode position returns to the
+    /// audible entry. When decoding has already crossed into it, the audible
+    /// entry is re-opened at the heard position through the deferred seek,
+    /// whose epoch bump discards the successor's prepared audio: a short gap
+    /// in exchange for never playing a note past the stop.
+    pub fn setStopAfterCurrent(self: *PlayerEngine, enabled: bool) void {
+        self.player.stop_after_current.store(enabled, .release);
+        if (!enabled) return;
+        self.releasePending();
+        const sources = if (self.player.sources) |*value| value else return;
+        const audible = self.player.audible_entry_serial.load(.acquire);
+        if (audible != 0 and audible != sources.current_entry_serial) {
+            _ = self.player.seek(self.player.position_frames.load(.acquire)) catch {};
+            return;
+        }
+        if (sources.next) |*next| {
+            next.deinit();
+            sources.next = null;
+            if (self.queue) |queue| {
+                if (queue.positionForSerial(sources.current_entry_serial)) |position|
+                    queue.advanceDecodeTo(position);
+            }
+        }
+    }
+
+    /// Engine thread, once the audible entry has played out with
+    /// stop-after-current armed. The sources stay loaded, so the entry counts
+    /// as finished and a later play starts the following one.
+    fn serviceStopAfterCurrent(self: *PlayerEngine) void {
+        if (!self.player.drained.load(.acquire)) return;
+        if (self.player.state.load(.acquire) != .playing) return;
+        if (!self.player.stop_after_current.swap(false, .acq_rel)) return;
+        self.player.stop();
+        self.raiseHost();
     }
 
     fn noteOpenFailure(
@@ -1647,6 +1713,7 @@ const TrackPlan = struct {
     frames: u64,
     channels: u16 = 1,
     sample_rate: u32 = 48_000,
+    release_id: ?i64 = null,
 };
 
 const TestOpener = struct {
@@ -1685,7 +1752,15 @@ const TestOpener = struct {
     };
 
     fn opener(self: *TestOpener) playback_queue.TrackOpener {
-        return .{ .context = self, .open_fn = open };
+        return .{ .context = self, .open_fn = open, .release_fn = releaseOf };
+    }
+
+    fn releaseOf(context: *anyopaque, ref: playback_queue.TrackRef) ?i64 {
+        const self: *TestOpener = @ptrCast(@alignCast(context));
+        for (self.plans) |plan| {
+            if (plan.track_id == ref.track_id) return plan.release_id;
+        }
+        return null;
     }
 
     fn open(
@@ -2426,4 +2501,212 @@ test "a host reading the audible serial while entries hard-load always finds tha
     reader.stop.store(true, .release);
     thread.join();
     try std.testing.expectEqual(@as(u32, 0), reader.unrecorded.load(.monotonic));
+}
+
+fn audibleSharesRelease(harness: *QueueHarness) bool {
+    return harness.player.audibleReplayGain().shares_release;
+}
+
+fn expectedSharesRelease(harness: *QueueHarness, position: u32) bool {
+    const opener = harness.test_opener.opener();
+    const release = opener.releaseOf(harness.queue.refAt(position).?).?;
+    if (position > 0 and opener.releaseOf(harness.queue.refAt(position - 1).?) == release) return true;
+    const after = harness.queue.refAt(position + 1) orelse return false;
+    return opener.releaseOf(after) == release;
+}
+
+test "smart ReplayGain re-decides at each gapless transition, by the neighbours of the entry heard" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block, .release_id = 1 },
+        .{ .track_id = 11, .frames = 4 * frames_per_block, .release_id = 1 },
+        .{ .track_id = 12, .frames = 4 * frames_per_block, .release_id = 2 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+
+    var heard: [3]?bool = @splat(null);
+    for (0..400) |_| {
+        harness.step(128);
+        const position = harness.queue.cursorPosition();
+        if (heard[position] == null and harness.player.audible_entry_serial.load(.acquire) != 0)
+            heard[position] = audibleSharesRelease(harness);
+    }
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.gapless_transitions);
+    try std.testing.expectEqual([3]?bool{ true, true, false }, heard);
+}
+
+test "smart ReplayGain is decided again for an entry a seek re-opens" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 64 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames, .release_id = 1 },
+        .{ .track_id = 11, .frames = entry_frames, .release_id = 1 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    var pass: usize = 0;
+    while (pass < 512) : (pass += 1) {
+        harness.step(32);
+        if (harness.player.entrySerial() != harness.player.audible_entry_serial.load(.acquire)) break;
+    }
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+
+    _ = try harness.player.seek(8 * frames_per_block);
+    harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
+    try std.testing.expectEqual(@as(usize, 2), harness.test_opener.opensOf(10));
+    try std.testing.expect(harness.player.sources.?.current.replay_gain.shares_release);
+    harness.step(128);
+    try std.testing.expect(audibleSharesRelease(harness));
+}
+
+test "smart ReplayGain follows a queue move that brings an entry of the same Release beside the one heard" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 400 * frames_per_block, .release_id = 1 },
+        .{ .track_id = 11, .frames = 400 * frames_per_block, .release_id = 2 },
+        .{ .track_id = 12, .frames = 400 * frames_per_block, .release_id = 1 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+    harness.run(8, 128);
+    try std.testing.expect(!audibleSharesRelease(harness));
+
+    harness.engine.quiesce();
+    try harness.queue.move(2, 1, null);
+    harness.engine.refreshSharedRelease();
+    harness.engine.release();
+    try std.testing.expect(harness.player.sources.?.current.replay_gain.shares_release);
+    try std.testing.expect(audibleSharesRelease(harness));
+
+    harness.engine.quiesce();
+    try harness.queue.move(1, 2, null);
+    harness.engine.refreshSharedRelease();
+    harness.engine.release();
+    try std.testing.expect(!audibleSharesRelease(harness));
+}
+
+test "smart ReplayGain follows shuffle order, not list order" {
+    const allocator = std.testing.allocator;
+    const plans = [_]TrackPlan{
+        .{ .track_id = 10, .frames = 400 * frames_per_block, .release_id = 1 },
+        .{ .track_id = 11, .frames = 400 * frames_per_block, .release_id = 2 },
+        .{ .track_id = 12, .frames = 400 * frames_per_block, .release_id = 3 },
+        .{ .track_id = 13, .frames = 400 * frames_per_block, .release_id = 4 },
+        .{ .track_id = 14, .frames = 400 * frames_per_block, .release_id = 1 },
+        .{ .track_id = 15, .frames = 400 * frames_per_block, .release_id = 1 },
+    };
+    var harness = try QueueHarness.init(allocator, &plans);
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11, 12, 13, 14, 15 });
+    harness.player.play();
+    harness.run(8, 128);
+    try std.testing.expect(!audibleSharesRelease(harness));
+
+    var changed = false;
+    for (0..8) |_| {
+        harness.engine.quiesce();
+        try harness.queue.setShuffle(true);
+        harness.engine.refreshSharedRelease();
+        harness.engine.release();
+        const expected = expectedSharesRelease(harness, harness.queue.cursorPosition());
+        try std.testing.expectEqual(expected, audibleSharesRelease(harness));
+        changed = changed or expected;
+
+        harness.engine.quiesce();
+        try harness.queue.setShuffle(false);
+        harness.engine.refreshSharedRelease();
+        harness.engine.release();
+        try std.testing.expect(!audibleSharesRelease(harness));
+    }
+    try std.testing.expect(changed);
+}
+
+test "stop after current stops at the end of the entry heard without opening its successor" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block },
+        .{ .track_id = 11, .frames = 4 * frames_per_block },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.engine.setStopAfterCurrent(true);
+    harness.player.play();
+
+    harness.run(200, 128);
+    try std.testing.expectEqual(player_api.TransportState.stopped, harness.player.state.load(.acquire));
+    try std.testing.expect(!harness.player.stop_after_current.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), harness.test_opener.opensOf(11));
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+
+    harness.player.play();
+    harness.run(200, 128);
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(11));
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.cursorPosition());
+}
+
+test "arming stop after current takes back a successor primed but not yet decoded" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 4 * frames_per_block },
+        .{ .track_id = 11, .frames = 8192 },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    var pass: usize = 0;
+    while (pass < 64 and (harness.player.sources == null or harness.player.sources.?.next == null)) : (pass += 1)
+        harness.step(0);
+    try std.testing.expect(harness.player.sources.?.next != null);
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+
+    harness.engine.quiesce();
+    harness.engine.setStopAfterCurrent(true);
+    harness.engine.release();
+    try std.testing.expect(harness.player.sources.?.next == null);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+
+    for (0..200) |_| {
+        harness.step(128);
+        try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    }
+    try std.testing.expectEqual(player_api.TransportState.stopped, harness.player.state.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(11));
+}
+
+test "arming stop after current once decoding has crossed into the successor re-opens the entry heard" {
+    const allocator = std.testing.allocator;
+    const entry_frames: u64 = 64 * frames_per_block;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = entry_frames },
+        .{ .track_id = 11, .frames = entry_frames },
+    });
+    defer harness.deinit();
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+    var pass: usize = 0;
+    while (pass < 512) : (pass += 1) {
+        harness.step(32);
+        if (harness.player.entrySerial() != harness.player.audible_entry_serial.load(.acquire)) break;
+    }
+    try std.testing.expectEqual(@as(u32, 1), harness.queue.decodePosition());
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+
+    harness.engine.quiesce();
+    harness.engine.setStopAfterCurrent(true);
+    harness.engine.release();
+    harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.seek_reopens);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.decodePosition());
+
+    for (0..400) |_| {
+        harness.step(128);
+        try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    }
+    try std.testing.expectEqual(player_api.TransportState.stopped, harness.player.state.load(.acquire));
+    try std.testing.expect(!harness.player.stop_after_current.load(.acquire));
 }

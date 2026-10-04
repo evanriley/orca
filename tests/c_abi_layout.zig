@@ -74,6 +74,7 @@ const struct_pairs = .{
     .{ c_api.FolderEntryView, c.orca_folder_entry_view },
     .{ c_api.DeviceView, c.orca_device_view },
     .{ c_api.DeviceViewV2, c.orca_device_view_v2 },
+    .{ c_api.DeviceViewV3, c.orca_device_view_v3 },
     .{ c_api.QueueEntryView, c.orca_queue_entry_view },
     .{ c_api.QueueStats, c.orca_queue_stats },
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
@@ -84,6 +85,7 @@ const struct_pairs = .{
     .{ c_api.ParametricEqualizerView, c.orca_parametric_equalizer },
     .{ c_api.PcmFormatView, c.orca_pcm_format },
     .{ c_api.SignalPathView, c.orca_signal_path_view },
+    .{ c_api.ReplayGainSettingsView, c.orca_replay_gain_settings },
     .{ c_api.JobSnapshot, c.orca_job_snapshot },
     .{ c_api.ScanStats, c.orca_scan_stats },
     .{ c_api.ScanOptions, c.orca_scan_options },
@@ -328,6 +330,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_UNTAGGED_";
+        pub const Tag = audio.processing.UntaggedFallback;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportUntaggedFallback(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_SAMPLE_FORMAT_";
         pub const Tag = audio.pcm.SampleFormat;
         pub fn produce(tag: Tag) ?i64 {
@@ -447,6 +456,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_DEVICE_STATE_";
+        pub const Tag = audio.backend.DeviceState;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportDeviceState(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_WATCH_STATE_";
         pub const Tag = core.runtime.WatchState;
         pub fn produce(tag: Tag) ?i64 {
@@ -513,6 +529,13 @@ const import_mappings = .{
         pub const Tag = audio.processing.ReplayGainMode;
         pub fn consume(value: u8) ?Tag {
             return c_api.importReplayGainMode(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_UNTAGGED_";
+        pub const Tag = audio.processing.UntaggedFallback;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importUntaggedFallback(value);
         }
     },
     struct {
@@ -647,6 +670,10 @@ const non_enum_constants = [_][]const u8{
     "ORCA_TAG_WRITE_DIGEST_BYTES",
     "ORCA_CREDENTIAL_MAX_BYTES",
     "ORCA_LYRICS_FETCH",
+    "ORCA_DEVICE_BIT_DEPTH_16",
+    "ORCA_DEVICE_BIT_DEPTH_24",
+    "ORCA_DEVICE_BIT_DEPTH_32",
+    "ORCA_MAX_WAITING_JOBS",
 };
 
 fn sampleOutcome(tag: std.meta.Tag(core.control.Outcome)) core.control.Outcome {
@@ -918,6 +945,13 @@ test "the tag-write digest orca.h declares is as long as liborca's" {
 
 test "the lyrics fetch flag orca.h declares is liborca's" {
     try std.testing.expectEqual(@as(u8, c.ORCA_LYRICS_FETCH), c_api.lyrics_fetch_flag);
+}
+
+test "the device bit depths orca.h declares are liborca's" {
+    const Capabilities = audio.backend.DeviceCapabilities;
+    try std.testing.expectEqual(@as(u8, c.ORCA_DEVICE_BIT_DEPTH_16), Capabilities.bit_depth_16);
+    try std.testing.expectEqual(@as(u8, c.ORCA_DEVICE_BIT_DEPTH_24), Capabilities.bit_depth_24);
+    try std.testing.expectEqual(@as(u8, c.ORCA_DEVICE_BIT_DEPTH_32), Capabilities.bit_depth_32);
 }
 
 test "the credential limit and names orca.h declares are liborca's" {

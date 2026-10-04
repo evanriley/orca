@@ -39,8 +39,10 @@ pub const SourceSession = struct {
     /// correction by construction rather than by remembering to publish one.
     ///
     /// Whether it is *applied* is not recorded here: that is
-    /// `ReplayGainMode`, a property of the Player, and conflating the two
-    /// would leave sessions carrying a stale answer after a mode change.
+    /// `ReplayGainSettings`, a property of the Player, and conflating the two
+    /// would leave sessions carrying a stale answer after a settings change.
+    /// `shares_release` is the one exception, because it depends on the queue
+    /// around the entry; the lane that reorders the queue refreshes it.
     replay_gain: processing.EntryReplayGain = .{},
 
     pub fn init(decoder: decoder_api.Decoder) SourceSession {
@@ -67,8 +69,8 @@ pub const SourceSession = struct {
         self.eof = if (self.decoder.frame_count) |count| target == count else false;
     }
 
-    /// Decodes into `samples`, scaled by the correction `mode` picks from this
-    /// entry's own.
+    /// Decodes into `samples`, scaled by the correction `settings` pick from
+    /// this entry's own.
     ///
     /// This is the single place the correction is applied, and it is applied to
     /// exactly the frames this decoder produced. That is what makes a gapless
@@ -76,10 +78,10 @@ pub const SourceSession = struct {
     /// across the boundary, so a value chosen per block would be wrong for part
     /// of it, while a value applied per decode never can be.
     ///
-    /// `mode` is read from the Player on every call rather than baked in at
-    /// open, so changing it takes effect as soon as the already-decoded
+    /// `settings` are read from the Player on every call rather than baked in
+    /// at open, so changing it takes effect as soon as the already-decoded
     /// render-ahead drains instead of at the next track.
-    pub fn readFrames(self: *SourceSession, samples: []f32, mode: processing.ReplayGainMode) !usize {
+    pub fn readFrames(self: *SourceSession, samples: []f32, settings: processing.ReplayGainSettings) !usize {
         if (self.eof) return 0;
         const frames = try self.decoder.readFrames(samples);
         self.next_frame += frames;
@@ -90,7 +92,7 @@ pub const SourceSession = struct {
         }
         // Exactly unity is left alone, so `off` and an unmeasured entry cost no
         // arithmetic and cannot round the audio they pass through.
-        const multiplier = self.replay_gain.applied(mode).multiplier;
+        const multiplier = self.replay_gain.applied(settings).multiplier;
         if (multiplier != 1)
             kernels.gain(samples[0 .. frames * self.decoder.format.channels], multiplier);
         return frames;
@@ -105,7 +107,7 @@ pub const SourceSession = struct {
         pool: *buffer.BlockPool,
         epoch: u32,
         entry_serial: u32,
-        mode: processing.ReplayGainMode,
+        settings: processing.ReplayGainSettings,
     ) !usize {
         pipe.reclaim(pool);
         if (self.eof) return 0;
@@ -116,7 +118,7 @@ pub const SourceSession = struct {
                 pool.release(index);
                 return error.ChannelMismatch;
             }
-            const frames = self.readFrames(samples, mode) catch |err| {
+            const frames = self.readFrames(samples, settings) catch |err| {
                 pool.release(index);
                 return err;
             };
@@ -205,13 +207,13 @@ pub const SourceQueue = struct {
     /// Decode canonical PCM without assigning it to an output. The control
     /// lane can process this Player-scoped block once, then copy it into each
     /// independently owned Zone pipeline.
-    pub fn readFrames(self: *SourceQueue, samples: []f32, mode: processing.ReplayGainMode) !usize {
+    pub fn readFrames(self: *SourceQueue, samples: []f32, settings: processing.ReplayGainSettings) !usize {
         const channels = self.current.decoder.format.channels;
         if (samples.len % channels != 0) return error.ChannelMismatch;
         var total_frames: usize = 0;
         while (total_frames < samples.len / channels) {
             const offset = total_frames * channels;
-            const frames = try self.current.readFrames(samples[offset..], mode);
+            const frames = try self.current.readFrames(samples[offset..], settings);
             total_frames += frames;
             if (!self.current.eof) break;
             if (!self.advance()) break;
@@ -225,7 +227,7 @@ pub const SourceQueue = struct {
         pipe: *render.RenderPipe(queue_capacity),
         pool: *buffer.BlockPool,
         epoch: u32,
-        mode: processing.ReplayGainMode,
+        settings: processing.ReplayGainSettings,
     ) !usize {
         var prepared = try self.current.prime(
             queue_capacity,
@@ -233,7 +235,7 @@ pub const SourceQueue = struct {
             pool,
             epoch,
             self.current_entry_serial,
-            mode,
+            settings,
         );
         if (self.current.eof and self.advance()) {
             prepared += try self.current.prime(
@@ -242,7 +244,7 @@ pub const SourceQueue = struct {
                 pool,
                 epoch,
                 self.current_entry_serial,
-                mode,
+                settings,
             );
         }
         return prepared;
@@ -306,7 +308,7 @@ test "WAV source session primes bounded canonical blocks" {
     var pool = try buffer.BlockPool.init(std.testing.allocator, 2, 2, 1);
     defer pool.deinit();
     var pipe: render.RenderPipe(2) = .{};
-    try std.testing.expectEqual(@as(usize, 2), try session.prime(2, &pipe, &pool, 3, 1, .track));
+    try std.testing.expectEqual(@as(usize, 2), try session.prime(2, &pipe, &pool, 3, 1, .{ .mode = .track }));
     try std.testing.expect(session.eof);
 
     var output: [4]f32 = undefined;
@@ -362,7 +364,7 @@ test "next source is queued before current prepared audio is consumed" {
     var pool = try buffer.BlockPool.init(std.testing.allocator, 4, 2, 1);
     defer pool.deinit();
     var pipe: render.RenderPipe(4) = .{};
-    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 1, .track));
+    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 1, .{ .mode = .track }));
     try std.testing.expectEqual(@as(u64, 1), sources.transitions_queued);
     try std.testing.expect(sources.finishedDecoding());
 
@@ -422,7 +424,7 @@ test "a gapless transition keeps the epoch and only changes the entry serial" {
     var pipe: render.RenderPipe(4) = .{};
     // Both tracks are prepared under one epoch, so the callback never discards
     // the successor's audio and the transition stays gapless.
-    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 6, .track));
+    try std.testing.expectEqual(@as(usize, 2), try sources.prime(4, &pipe, &pool, 6, .{ .mode = .track }));
     const second_serial = sources.current_entry_serial;
     try std.testing.expect(first_serial != second_serial);
 
@@ -446,13 +448,13 @@ test "each entry's frames are scaled by that entry's own correction across a tra
     var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
     defer sources.deinit();
-    sources.current.replay_gain = .{ .track = 0.25 };
+    sources.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
     var successor = SourceSession.init(second_decoder.decoder());
-    successor.replay_gain = .{ .track = 2 };
+    successor.replay_gain = .{ .track = .{ .gain = 2 } };
     try sources.primeNext(successor);
 
     var samples: [4]f32 = @splat(0);
-    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .track));
+    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .{ .mode = .track }));
     try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.25, 2, 2 }, &samples);
 }
 
@@ -461,12 +463,12 @@ test "an entry with no measurement plays at unity rather than its predecessor's 
     var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
     defer sources.deinit();
-    sources.current.replay_gain = .{ .track = 0.25 };
+    sources.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
     // Default: nothing the Library could vouch for, so nothing is applied.
     try sources.primeNext(SourceSession.init(second_decoder.decoder()));
 
     var samples: [4]f32 = @splat(0);
-    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .track));
+    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .{ .mode = .track }));
     try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.25, 1, 1 }, &samples);
 }
 
@@ -475,13 +477,13 @@ test "replay gain off leaves every entry at exactly unity" {
     var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
     defer sources.deinit();
-    sources.current.replay_gain = .{ .track = 0.25 };
+    sources.current.replay_gain = .{ .track = .{ .gain = 0.25 } };
     var successor = SourceSession.init(second_decoder.decoder());
-    successor.replay_gain = .{ .track = 2 };
+    successor.replay_gain = .{ .track = .{ .gain = 2 } };
     try sources.primeNext(successor);
 
     var samples: [4]f32 = @splat(0);
-    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .off));
+    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .{ .mode = .off }));
     // Exact equality, not approximate: `off` means the samples are untouched.
     try std.testing.expectEqualSlices(f32, &.{ 1, 1, 1, 1 }, &samples);
 }
@@ -491,12 +493,12 @@ test "album mode scales an entry by its album correction, or by its own when it 
     var second_decoder: ConstantDecoder = .{ .value = 1, .remaining = 2 };
     var sources = SourceQueue.init(SourceSession.init(first_decoder.decoder()));
     defer sources.deinit();
-    sources.current.replay_gain = .{ .track = 0.25, .album = 0.5 };
+    sources.current.replay_gain = .{ .track = .{ .gain = 0.25 }, .album = .{ .gain = 0.5 } };
     var successor = SourceSession.init(second_decoder.decoder());
-    successor.replay_gain = .{ .track = 2 };
+    successor.replay_gain = .{ .track = .{ .gain = 2 } };
     try sources.primeNext(successor);
 
     var samples: [4]f32 = @splat(0);
-    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .album));
+    try std.testing.expectEqual(@as(usize, 4), try sources.readFrames(&samples, .{ .mode = .album }));
     try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.5, 2, 2 }, &samples);
 }

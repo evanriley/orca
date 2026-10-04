@@ -231,6 +231,7 @@ pub fn playerEnqueueTracksBound(
     const was_idle = object_value.player.sources == null;
     const first_new = object_value.queue.len();
     try object_value.queue.enqueue(refs);
+    if (!was_idle) engine.refreshSharedRelease();
     if (!was_idle or refs.len == 0) return;
     engine.discardPending();
     object_value.queue.seekTo(first_new);
@@ -271,6 +272,7 @@ pub fn playerQueueInsertNext(
     const committed = if (engine.pending_source != null) engine.pending_position else queue.decodePosition();
     const pending: ?*u32 = if (engine.pending_source != null) &engine.pending_position else null;
     try queue.insertAfter(committed, refs, pending);
+    engine.refreshSharedRelease();
 }
 
 pub fn playerQueueRemove(self: *OrcaRuntime, player: PlayerHandle, position: u32) !void {
@@ -290,6 +292,7 @@ pub fn playerQueueRemove(self: *OrcaRuntime, player: PlayerHandle, position: u32
         return error.QueueEntryInUse;
     if (pending) |value| if (value.* == position) return error.QueueEntryInUse;
     try queue.removeAt(position, pending);
+    if (engine) |value| value.refreshSharedRelease();
 }
 
 pub fn playerQueueMove(self: *OrcaRuntime, player: PlayerHandle, from: u32, to: u32) !void {
@@ -321,6 +324,7 @@ pub fn playerQueueMove(self: *OrcaRuntime, player: PlayerHandle, from: u32, to: 
             return error.QueueEntryInUse;
     }
     try queue.move(from, to, pending);
+    if (engine) |value| value.refreshSharedRelease();
 }
 
 fn withoutEntry(position: u32, removed: u32) u32 {
@@ -401,7 +405,9 @@ pub fn playerSetShuffle(
     if (object_value.engine) |engine| {
         engine.quiesce();
         defer engine.release();
-        return object_value.queue.setShuffle(enabled);
+        try object_value.queue.setShuffle(enabled);
+        engine.refreshSharedRelease();
+        return;
     }
     return object_value.queue.setShuffle(enabled);
 }
@@ -608,6 +614,7 @@ fn loadCursor(object_value: *PlayerObject) !void {
         session.deinit();
         return error.UnsupportedChannelCount;
     }
+    session.replay_gain.shares_release = object_value.queue.sharesRelease(cursor, opener.opener());
     audio.engine.loadQueueEntry(object_value.player, object_value.queue, session, cursor);
 }
 

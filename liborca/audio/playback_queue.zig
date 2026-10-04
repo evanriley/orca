@@ -40,9 +40,17 @@ pub const RepeatMode = enum(u8) { off, all, one };
 pub const TrackOpener = struct {
     context: *anyopaque,
     open_fn: *const fn (context: *anyopaque, ref: TrackRef) anyerror!source_session.SourceSession,
+    /// The Release an entry's Track is filed under, for smart ReplayGain.
+    /// Null, or a null answer, means "no Release", which never matches.
+    release_fn: ?*const fn (context: *anyopaque, ref: TrackRef) ?i64 = null,
 
     pub fn open(self: TrackOpener, ref: TrackRef) anyerror!source_session.SourceSession {
         return self.open_fn(self.context, ref);
+    }
+
+    pub fn releaseOf(self: TrackOpener, ref: TrackRef) ?i64 {
+        const release_fn = self.release_fn orelse return null;
+        return release_fn(self.context, ref);
     }
 };
 
@@ -170,6 +178,19 @@ pub const PlaybackQueue = struct {
     pub fn refAt(self: *const PlaybackQueue, position: u32) ?TrackRef {
         const index = self.entryIndex(position) orelse return null;
         return self.entries.items[index];
+    }
+
+    /// Whether the entry before or after `position` in playback order is
+    /// filed under the same Release as it. What smart ReplayGain keys on, so
+    /// it follows shuffle and every reorder rather than entry order.
+    pub fn sharesRelease(self: *const PlaybackQueue, position: u32, opener: TrackOpener) bool {
+        const ref = self.refAt(position) orelse return false;
+        const release = opener.releaseOf(ref) orelse return false;
+        if (position > 0) {
+            if (self.refAt(position - 1)) |before| if (opener.releaseOf(before) == release) return true;
+        }
+        if (self.refAt(position + 1)) |after| if (opener.releaseOf(after) == release) return true;
+        return false;
     }
 
     pub fn current(self: *const PlaybackQueue) ?TrackRef {

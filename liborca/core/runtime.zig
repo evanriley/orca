@@ -1681,11 +1681,15 @@ pub const OrcaRuntime = struct {
     }
 
     /// Bounded, Orca-owned device snapshots. No backend type crosses this API.
+    /// `.identity` returns ids, names and kinds without asking any device;
+    /// `.capabilities` also waits for each device's formats, which can take
+    /// hundreds of milliseconds when one does not answer.
     pub fn enumerateOutputDevices(
         self: *OrcaRuntime,
         devices: []audio.backend.Device,
+        detail: audio.backend.DiscoveryDetail,
     ) !usize {
-        return runtime_zones.enumerateOutputDevices(self, devices);
+        return runtime_zones.enumerateOutputDevices(self, devices, detail);
     }
 
     pub fn setZonePolicy(
@@ -2581,6 +2585,48 @@ pub const OrcaRuntime = struct {
         player: PlayerHandle,
     ) !audio.processing.ReplayGainMode {
         return runtime_status.playerReplayGainMode(self, player);
+    }
+
+    /// Adds `decibels` to every measured correction, before the peak cap.
+    /// Clamped to ±15 dB. Takes effect as promptly as a mode change.
+    pub fn playerSetReplayGainPreamp(self: *OrcaRuntime, player: PlayerHandle, decibels: f32) !void {
+        return runtime_status.playerSetReplayGainPreamp(self, player, decibels);
+    }
+
+    /// What an entry with no usable measurement plays at while correction is
+    /// on. The preamp does not apply to it.
+    pub fn playerSetReplayGainFallback(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+        fallback: audio.processing.UntaggedFallback,
+    ) !void {
+        return runtime_status.playerSetReplayGainFallback(self, player, fallback);
+    }
+
+    /// Whether corrections are capped at `1 / peak`, so a boost never drives
+    /// an entry's measured peak past full scale. On by default.
+    pub fn playerSetPeakProtection(self: *OrcaRuntime, player: PlayerHandle, enabled: bool) !void {
+        return runtime_status.playerSetPeakProtection(self, player, enabled);
+    }
+
+    /// Mode, preamp, untagged fallback and peak protection as one value.
+    pub fn playerReplayGainSettings(
+        self: *OrcaRuntime,
+        player: PlayerHandle,
+    ) !audio.processing.ReplayGainSettings {
+        return runtime_status.playerReplayGainSettings(self, player);
+    }
+
+    /// Stops the transport when the entry being heard ends, then clears
+    /// itself. The following entry is not started; a later play starts it.
+    /// Arming during a gapless transition that has already begun decoding the
+    /// following entry re-opens the audible one, with a short gap.
+    pub fn playerSetStopAfterCurrent(self: *OrcaRuntime, player: PlayerHandle, enabled: bool) !void {
+        return runtime_status.playerSetStopAfterCurrent(self, player, enabled);
+    }
+
+    pub fn playerStopAfterCurrent(self: *OrcaRuntime, player: PlayerHandle) !bool {
+        return runtime_status.playerStopAfterCurrent(self, player);
     }
 
     /// What the audio currently audible is being multiplied by: user volume

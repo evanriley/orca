@@ -4,6 +4,23 @@
 
 ### Added
 
+- **Smart ReplayGain, preamp, untagged fallback and stop after current.**
+  `ReplayGainMode.smart` applies the album correction while the entry before
+  or after the one heard, in playback order, belongs to the same Release, and
+  the track correction otherwise; it is decided again on every open, seek
+  re-open, reorder and shuffle. `playerSetReplayGainPreamp` (±15 dB),
+  `playerSetReplayGainFallback` (`UntaggedFallback`: `minus_6_db` or
+  `as_is`), `playerSetPeakProtection` (the `1 / peak` cap, on by default) and
+  `playerReplayGainSettings` cover the rest, and `SignalPath` reports
+  `preamp_db`, `peak_protection`, `fallback` and `peak_limited`.
+  `playerSetStopAfterCurrent` stops the transport when the entry being heard
+  ends, without decoding any of the next one, then clears itself.
+  `orca-cli play-tracks` takes `--replay-gain=smart`, `--preamp=DB`,
+  `--untagged=-6|as-is`, `--no-peak-protection` and `--stop-after-current`,
+  and its `signal:` line ends with `replay_gain_source=` and the settings.
+  The C ABI adds `ORCA_REPLAY_GAIN_SMART`, `orca_untagged_fallback`,
+  `orca_replay_gain_settings`, the matching `orca_player_*` setters and
+  getters, and the new `orca_signal_path_view` fields at its end.
 - **Folder covers.** A Release whose files carry no cover shows the front
   image in its folder (`cover`, then `front`, then `folder`, then the
   largest), before the Cover Art Archive's, in `libraryTrackArtwork`,
@@ -16,6 +33,16 @@
   (`ORCA_COVER_ART_OUTCOME_FOLDER`, `orca-cli cover-art` `source=folder`).
   `TrackDetails.has_artwork` now also counts a fetched cover. Migration 46
   stores the flag as `releases.has_folder_cover`.
+- **Output device capabilities and state.** `enumerateOutputDevices` fills
+  each `Device`'s `capabilities` from PipeWire's `SPA_PARAM_EnumFormat`: the
+  lowest and highest sample rate, the 16, 24 and 32-bit depths, the most
+  channels, the state (`active`, `suspended` or `unavailable`) and the bus, as
+  a `DeviceCapabilities`. Sinks that do not answer within 500 ms report it
+  null. `orca-cli devices` appends `rates= depths= channels= state=` to each
+  line, and the C ABI adds `orca_enumerate_output_devices_v3` with
+  `orca_device_view_v3`, `orca_device_state` and the `ORCA_DEVICE_BIT_DEPTH_*`
+  bits. `OutputFactory.discover` and its vtable now take a `DiscoveryDetail`,
+  so a Zone's kind lookup skips the format round.
 - **Folder entries with images, status and last scan.** Scans record the
   PNG, JPEG, GIF, WebP and BMP files beside the music in `folder_images`
   (schema version 45), never as Tracks, with a role from the file name

@@ -32,7 +32,7 @@ test "registered lossless and lossy codecs share SourceSession pipeline" {
         );
         defer pool.deinit();
         var pipe: liborca.internal.audio.render.RenderPipe(2) = .{};
-        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, .track));
+        try std.testing.expectEqual(@as(usize, 1), try source.prime(2, &pipe, &pool, 1, 1, .{ .mode = .track }));
         const output = try std.testing.allocator.alloc(f32, frames * channels);
         defer std.testing.allocator.free(output);
         try std.testing.expectEqual(frames, pipe.render(&pool, channels, 1, output));

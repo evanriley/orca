@@ -1076,6 +1076,40 @@ typedef struct orca_device_view_v2 {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_device_v2_callback)(void *context, const orca_device_view_v2 *device);
 
+/* Whether an output is ready, as the platform's audio server says. */
+typedef enum orca_device_state {
+    /* Running, or idle and open. */
+    ORCA_DEVICE_STATE_ACTIVE = 0,
+    /* Suspended: the device may stay closed until something plays to it. */
+    ORCA_DEVICE_STATE_SUSPENDED = 1,
+    /* In error, or reporting no state. */
+    ORCA_DEVICE_STATE_UNAVAILABLE = 2,
+} orca_device_state;
+
+/* Bits of orca_device_view_v3.bit_depths. Float32 counts as 32. */
+#define ORCA_DEVICE_BIT_DEPTH_16 1
+#define ORCA_DEVICE_BIT_DEPTH_24 2
+#define ORCA_DEVICE_BIT_DEPTH_32 4
+
+typedef struct orca_device_view_v3 {
+    orca_device_view_v2 base;
+    /* Zero when the audio server did not report the output's capabilities
+     * within 500 ms; the fields below are then zero. */
+    uint8_t has_capabilities;
+    /* An orca_device_state value. */
+    uint8_t state;
+    /* ORCA_DEVICE_BIT_DEPTH_* bits. */
+    uint8_t bit_depths;
+    uint8_t channels_max;
+    /* The lowest and highest sample rates the output accepts. */
+    uint32_t rate_min_hz;
+    uint32_t rate_max_hz;
+    uint8_t reserved[4];
+} orca_device_view_v3;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_device_v3_callback)(void *context, const orca_device_view_v3 *device);
+
 typedef struct orca_queue_entry_view {
     /* Position in playback order, so a shuffled queue reads in the order it
      * will actually be heard. */
@@ -4583,24 +4617,46 @@ typedef enum orca_replay_gain_mode {
      * Tracks, or that has no Release, falls back to its own track correction,
      * and the signal path reports ORCA_GAIN_SOURCE_TRACK_FALLBACK. */
     ORCA_REPLAY_GAIN_ALBUM = 2,
+    /* ALBUM while the entry before or after it in playback order is filed
+     * under the same Release, TRACK otherwise: an album played through keeps
+     * its levels, a shuffled mix is evened out per track. Decided per entry
+     * as it opens and again whenever the queue is reordered or shuffled. */
+    ORCA_REPLAY_GAIN_SMART = 3,
 } orca_replay_gain_mode;
+
+/* What an entry with no usable measurement plays at while correction is on. */
+typedef enum orca_untagged_fallback {
+    ORCA_UNTAGGED_MINUS_6_DB = 0,
+    ORCA_UNTAGGED_AS_IS = 1,
+} orca_untagged_fallback;
+
+/* Every ReplayGain choice of a Player. */
+typedef struct orca_replay_gain_settings {
+    /* Added to every measured correction before peak protection. */
+    float preamp_db;
+    uint8_t mode;             /* orca_replay_gain_mode */
+    uint8_t fallback;         /* orca_untagged_fallback */
+    uint8_t peak_protection;  /* 1 caps each correction at 1 / peak */
+    uint8_t reserved[1];
+} orca_replay_gain_settings;
 
 /* Which correction orca_signal_path_view.replay_gain_db is. */
 typedef enum orca_gain_source {
-    /* No correction applies: ReplayGain is off, or the entry is unmeasured. */
+    /* No measured correction applies: ReplayGain is off, or the entry is
+     * unmeasured and plays at the untagged fallback. */
     ORCA_GAIN_SOURCE_NONE = 0,
     /* The entry's own, under ORCA_REPLAY_GAIN_TRACK. */
     ORCA_GAIN_SOURCE_TRACK = 1,
-    /* The entry's Release's, under ORCA_REPLAY_GAIN_ALBUM. */
+    /* The entry's Release's, under ORCA_REPLAY_GAIN_ALBUM or SMART. */
     ORCA_GAIN_SOURCE_ALBUM = 2,
-    /* The entry's own, under ORCA_REPLAY_GAIN_ALBUM, because its Release has
-     * no album figure. */
+    /* The entry's own, under ORCA_REPLAY_GAIN_ALBUM or SMART, because its
+     * Release has no album figure. */
     ORCA_GAIN_SOURCE_TRACK_FALLBACK = 3,
 } orca_gain_source;
 
 /* Takes effect as soon as the audio already decoded ahead of the listener
- * drains -- a fraction of a second, not the rest of the track, in either
- * mode. The level steps rather than ramping when it does, which is the answer
+ * drains -- a fraction of a second, not the rest of the track, in every
+ * mode, as do the preamp, fallback and peak protection below. The level steps rather than ramping when it does, which is the answer
  * to an explicit request. Defaults to TRACK. */
 orca_status orca_player_set_replay_gain_mode(
     orca_runtime *runtime,
@@ -4608,6 +4664,45 @@ orca_status orca_player_set_replay_gain_mode(
     uint8_t mode
 );
 orca_status orca_player_replay_gain_mode(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t *output
+);
+/* Clamped to -15..15 dB; NaN is 0. Not applied to the untagged fallback.
+ * Defaults to 0. */
+orca_status orca_player_set_replay_gain_preamp(
+    orca_runtime *runtime,
+    orca_handle player,
+    float decibels
+);
+/* An orca_untagged_fallback value. Defaults to ORCA_UNTAGGED_AS_IS. */
+orca_status orca_player_set_replay_gain_fallback(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t fallback
+);
+/* 1 caps every correction at 1 / the measured peak, so a boost never drives
+ * the entry past full scale; 0 lets the boost through. Defaults to 1. */
+orca_status orca_player_set_peak_protection(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t enabled
+);
+orca_status orca_player_replay_gain_settings(
+    orca_runtime *runtime,
+    orca_handle player,
+    orca_replay_gain_settings *output
+);
+/* 1 stops the transport when the entry being heard ends, then reads 0 again;
+ * the following entry is not started until the next play. Arming it after
+ * the engine has begun decoding the following entry re-opens the audible one
+ * at the heard position, with a short gap. */
+orca_status orca_player_set_stop_after_current(
+    orca_runtime *runtime,
+    orca_handle player,
+    uint8_t enabled
+);
+orca_status orca_player_stop_after_current(
     orca_runtime *runtime,
     orca_handle player,
     uint8_t *output
@@ -4923,6 +5018,13 @@ typedef struct orca_signal_path_view {
      * `replay_gain_source` is ORCA_GAIN_SOURCE_ALBUM and the entry is
      * measured. */
     float replay_gain_track_db;
+    /* The ReplayGain settings the correction was worked out with. */
+    float preamp_db;
+    uint8_t peak_protection;
+    uint8_t fallback;  /* orca_untagged_fallback */
+    /* 1 when peak protection lowered the audible entry's correction. */
+    uint8_t peak_limited;
+    uint8_t reserved2[1];
 } orca_signal_path_view;
 
 /* String views are valid only for the duration of this callback. */
@@ -5080,6 +5182,12 @@ orca_status orca_enumerate_output_devices_v2(
     orca_runtime *runtime,
     void *context,
     orca_device_v2_callback callback
+);
+/* orca_enumerate_output_devices_v2 with each device's capabilities and state. */
+orca_status orca_enumerate_output_devices_v3(
+    orca_runtime *runtime,
+    void *context,
+    orca_device_v3_callback callback
 );
 
 orca_status orca_zone_create(orca_runtime *runtime, orca_handle *output);

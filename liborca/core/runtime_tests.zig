@@ -820,6 +820,30 @@ test "the equalizer and crossfeed reject out-of-range values and keep the last v
     try std.testing.expectEqual(@as(?f32, null), try runtime.playerCrossfeed(player));
 }
 
+test "enumerated output devices carry the capabilities their backend reports" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var devices: [4]audio.backend.Device = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try runtime.enumerateOutputDevices(&devices, .capabilities));
+    try std.testing.expectEqual(audio.output.TestBackend.test_capabilities, devices[0].capabilities.?);
+}
+
+test "identity enumeration leaves device capabilities unknown" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+
+    var devices: [4]audio.backend.Device = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try runtime.enumerateOutputDevices(&devices, .identity));
+    try std.testing.expectEqual(@as(?audio.backend.DeviceCapabilities, null), devices[0].capabilities);
+}
+
 fn hasReason(path: audio.dsp.SignalPath, reason: audio.signal_path.Reason) bool {
     return std.mem.indexOfScalar(audio.signal_path.Reason, path.reasonList(), reason) != null;
 }

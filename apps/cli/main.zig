@@ -495,9 +495,16 @@ const help_details =
     \\                     position FROM to position TO and print a `move` line
     \\                     with result=ok|in_use|out_of_range; repeatable, at
     \\                     most 8 times
-    \\  --replay-gain=off|track|album   loudness correction per entry (default
-    \\                     track); album uses the Release's, or the track's
-    \\                     when the Release is not fully measured
+    \\  --replay-gain=off|track|album|smart   loudness correction per entry
+    \\                     (default track); album uses the Release's, or the
+    \\                     track's when the Release is not fully measured;
+    \\                     smart uses album while the entry before or after
+    \\                     it in playback order has the same Release
+    \\  --preamp=DB        added to every measured correction, -15 to 15
+    \\  --untagged=-6|as-is  level of an entry with no measurement (default
+    \\                     as-is)
+    \\  --no-peak-protection  let a correction push a peak past full scale
+    \\  --stop-after-current  stop when the first entry heard ends
     \\  --eq=PRESET        equalizer preset: flat|bass|treble|vocal|loudness
     \\  --eq=G1,...,G10[:PREAMP]   ten band gains in dB (31 Hz to 16 kHz, each
     \\                     within 12) and a preamp in dB (default: minus the
@@ -521,8 +528,10 @@ const help_details =
     \\                     it as playlist NAME and print its id and entry count
     \\
     \\play-tracks prints one `signal:` line once playback is a second in: the
-    \\source, each stage that changes the samples, the output stream, and
-    \\whether the path could be bit-perfect. It records listens in the
+    \\source, each stage that changes the samples, the output stream,
+    \\whether the path could be bit-perfect, and the ReplayGain source and
+    \\settings as replay_gain_source=none|track|album|track_fallback
+    \\preamp_db= peak_protection= untagged= peak_limited=. It records listens in the
     \\Library's play history and never sends them anywhere.
     \\
     \\play-folder plays every Track below PATH (relative to root ROOT_ID; ""
@@ -1470,9 +1479,37 @@ fn listDevices(context: Context) !void {
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     var devices: [32]liborca.Device = undefined;
-    const count = try runtime.enumerateOutputDevices(&devices);
-    for (devices[0..count]) |device|
-        try context.stdout.print("{d}\t{s}\t{t}\n", .{ device.id, device.nameSlice(), device.kind });
+    const count = try runtime.enumerateOutputDevices(&devices, .capabilities);
+    for (devices[0..count]) |device| {
+        try context.stdout.print("{d}\t{s}\t{t}\t", .{ device.id, device.nameSlice(), device.kind });
+        try writeDeviceCapabilities(context.stdout, device.capabilities);
+        try context.stdout.writeAll("\n");
+    }
+}
+
+fn writeDeviceCapabilities(stdout: *std.Io.Writer, known: ?liborca.DeviceCapabilities) !void {
+    const capabilities = known orelse
+        return stdout.writeAll("rates=- depths=- channels=- state=unknown");
+    try stdout.print("rates={d}-{d} depths=", .{ capabilities.rate_min, capabilities.rate_max });
+    const depths = [_]struct { bit: u8, bits: u8 }{
+        .{ .bit = liborca.DeviceCapabilities.bit_depth_16, .bits = 16 },
+        .{ .bit = liborca.DeviceCapabilities.bit_depth_24, .bits = 24 },
+        .{ .bit = liborca.DeviceCapabilities.bit_depth_32, .bits = 32 },
+    };
+    var written: usize = 0;
+    for (depths) |depth| {
+        if (capabilities.bit_depths & depth.bit == 0) continue;
+        if (written != 0) try stdout.writeAll(",");
+        try stdout.print("{d}", .{depth.bits});
+        written += 1;
+    }
+    if (written == 0) try stdout.writeAll("-");
+    try stdout.writeAll(" channels=");
+    if (capabilities.channels_max == 0)
+        try stdout.writeAll("-")
+    else
+        try stdout.print("{d}", .{capabilities.channels_max});
+    try stdout.print(" state={t}", .{capabilities.state});
 }
 
 /// The one object graph: a runtime Player owns the source and the single
@@ -1579,6 +1616,10 @@ const PlayTracksOptions = struct {
     moves: [max_scheduled_moves]ScheduledMove = undefined,
     move_count: usize = 0,
     replay_gain: liborca.ReplayGainMode = .track,
+    preamp_db: f32 = 0,
+    untagged: liborca.UntaggedFallback = .as_is,
+    peak_protection: bool = true,
+    stop_after_current: bool = false,
     equalizer: ?liborca.Equalizer = null,
     parametric_path: ?[]const u8 = null,
     crossfeed: ?f32 = null,
@@ -1606,6 +1647,14 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
     }
     if (std.mem.eql(u8, argument, "--print-history")) {
         options.print_history = true;
+        return;
+    }
+    if (std.mem.eql(u8, argument, "--no-peak-protection")) {
+        options.peak_protection = false;
+        return;
+    }
+    if (std.mem.eql(u8, argument, "--stop-after-current")) {
+        options.stop_after_current = true;
         return;
     }
     const split = std.mem.indexOfScalar(u8, argument, '=') orelse return error.UnknownOption;
@@ -1644,8 +1693,19 @@ fn parseOption(options: *PlayTracksOptions, argument: []const u8) !void {
             .track
         else if (std.mem.eql(u8, value, "album"))
             .album
+        else if (std.mem.eql(u8, value, "smart"))
+            .smart
         else
             return error.UnknownReplayGainMode;
+    } else if (std.mem.eql(u8, name, "--preamp")) {
+        options.preamp_db = try std.fmt.parseFloat(f32, value);
+    } else if (std.mem.eql(u8, name, "--untagged")) {
+        options.untagged = if (std.mem.eql(u8, value, "-6"))
+            .minus_6_db
+        else if (std.mem.eql(u8, value, "as-is"))
+            .as_is
+        else
+            return error.UnknownUntaggedFallback;
     } else if (std.mem.eql(u8, name, "--eq")) {
         options.equalizer = try parseEqualizer(value);
     } else if (std.mem.eql(u8, name, "--peq")) {
@@ -1780,7 +1840,19 @@ fn printSignalPath(stdout: *std.Io.Writer, path: liborca.SignalPath) !void {
             try stdout.writeByte(if (character == '_') ' ' else character);
     }
     if (path.reasonList().len > 0) try stdout.writeByte(')');
-    try stdout.writeByte('\n');
+    try stdout.print(
+        "; replay_gain_source={s} preamp_db={d:.1} peak_protection={s} untagged={s} peak_limited={s}\n",
+        .{
+            @tagName(path.replay_gain_source),
+            path.preamp_db,
+            if (path.peak_protection) "on" else "off",
+            switch (path.fallback) {
+                .minus_6_db => "-6",
+                .as_is => "as-is",
+            },
+            if (path.peak_limited) "yes" else "no",
+        },
+    );
 }
 
 fn formatName(sample_format: liborca.SampleFormat) []const u8 {
@@ -1829,6 +1901,10 @@ fn playTracks(context: Context) !void {
 
     try runtime.playerSetVolume(player, options.volume);
     try runtime.playerSetReplayGainMode(player, options.replay_gain);
+    try runtime.playerSetReplayGainPreamp(player, options.preamp_db);
+    try runtime.playerSetReplayGainFallback(player, options.untagged);
+    try runtime.playerSetPeakProtection(player, options.peak_protection);
+    try runtime.playerSetStopAfterCurrent(player, options.stop_after_current);
     try runtime.playerSetEqualizer(player, options.equalizer);
     try runtime.playerSetParametricEqualizer(player, parametric);
     try runtime.playerSetCrossfeed(player, options.crossfeed);

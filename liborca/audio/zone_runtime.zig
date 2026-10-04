@@ -30,7 +30,7 @@ pub const Sink = fanout.ZoneSink(block_count);
 fn discoverDeviceKind(factory: output_api.Factory, device_id: u64) contract.DeviceKind {
     if (device_id == 0) return .unknown;
     var devices: [64]contract.Device = undefined;
-    const count = factory.discover(&devices) catch return .unknown;
+    const count = factory.discover(&devices, .identity) catch return .unknown;
     for (devices[0..count]) |device| {
         if (device.id == device_id) return device.kind;
     }

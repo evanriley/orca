@@ -405,6 +405,14 @@ pub const SignalPath = struct {
     /// The audible entry's own track correction in dB when its album
     /// correction replaced it; null otherwise.
     replay_gain_track_db: ?f32 = null,
+    /// Added to every measured correction before the peak cap.
+    preamp_db: f32 = 0,
+    /// Whether corrections are capped at `1 / peak`.
+    peak_protection: bool = true,
+    /// What an entry with no usable measurement plays at.
+    fallback: processing.UntaggedFallback = .as_is,
+    /// The peak cap lowered the audible entry's correction.
+    peak_limited: bool = false,
     equalizer: ?Equalizer = null,
     parametric: ?ParametricEqualizer = null,
     crossfeed: ?f32 = null,
@@ -445,6 +453,8 @@ pub const SignalPath = struct {
         replay_gain: f32,
         replay_gain_source: processing.ReplayGainSource = .none,
         replay_gain_track: ?f32 = null,
+        replay_gain_settings: processing.ReplayGainSettings = .{},
+        replay_gain_limited: bool = false,
         equalizer: ?Equalizer,
         parametric: ?ParametricEqualizer = null,
         crossfeed: ?f32,
@@ -466,6 +476,10 @@ pub const SignalPath = struct {
                 if (inputs.replay_gain_track) |track| 20 * std.math.log10(track) else null
             else
                 null,
+            .preamp_db = inputs.replay_gain_settings.preamp_db,
+            .peak_protection = inputs.replay_gain_settings.peak_protection,
+            .fallback = inputs.replay_gain_settings.fallback,
+            .peak_limited = inputs.replay_gain_limited,
             .equalizer = inputs.equalizer,
             .parametric = inputs.parametric,
             .crossfeed = inputs.crossfeed,

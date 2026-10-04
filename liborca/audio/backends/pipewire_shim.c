@@ -28,17 +28,35 @@ struct bound_object {
     uint8_t kind;
 };
 
-struct discovery {
-    struct pw_main_loop *loop;
+struct bound_node {
+    struct bound_object object;
+    int params_sequence;
+    uint8_t params_complete;
+    uint8_t has_state;
+    uint8_t has_rates;
+    uint8_t bit_depths;
+    uint8_t channels_max;
+    enum pw_node_state state;
+    uint32_t rate_min;
+    uint32_t rate_max;
+};
+
+struct orca_pw_discovery {
+    struct pw_loop *loop;
+    struct pw_context *context;
     struct pw_core *core;
     struct pw_registry *registry;
+    struct spa_hook core_listener;
+    struct spa_hook registry_listener;
     struct orca_pw_device *devices;
     uint32_t capacity;
     uint32_t count;
     int sequence;
     int bound_synced;
     int result;
-    struct bound_object nodes[DISCOVERY_BOUND];
+    uint8_t with_capabilities;
+    enum orca_pw_discovery_phase phase;
+    struct bound_node nodes[DISCOVERY_BOUND];
     struct bound_object audio_devices[DISCOVERY_BOUND];
     uint32_t audio_device_count;
 };
@@ -83,14 +101,136 @@ uint8_t orca_pw_properties_kind(const struct spa_dict *props) {
 }
 
 static void discovery_node_info(void *userdata, const struct pw_node_info *info) {
-    struct bound_object *node = userdata;
+    struct bound_node *node = userdata;
     if ((info->change_mask & PW_NODE_CHANGE_MASK_PROPS) && info->props != NULL)
-        node->kind = orca_pw_properties_kind(info->props);
+        node->object.kind = orca_pw_properties_kind(info->props);
+    if (info->change_mask & PW_NODE_CHANGE_MASK_STATE) {
+        node->state = info->state;
+        node->has_state = 1;
+    }
+}
+
+static uint8_t format_bit_depth(uint32_t format) {
+    switch (format) {
+    case SPA_AUDIO_FORMAT_S16_LE:
+    case SPA_AUDIO_FORMAT_S16_BE:
+    case SPA_AUDIO_FORMAT_U16_LE:
+    case SPA_AUDIO_FORMAT_U16_BE:
+    case SPA_AUDIO_FORMAT_S16P:
+        return ORCA_PW_BIT_DEPTH_16;
+    case SPA_AUDIO_FORMAT_S24_32_LE:
+    case SPA_AUDIO_FORMAT_S24_32_BE:
+    case SPA_AUDIO_FORMAT_U24_32_LE:
+    case SPA_AUDIO_FORMAT_U24_32_BE:
+    case SPA_AUDIO_FORMAT_S24_LE:
+    case SPA_AUDIO_FORMAT_S24_BE:
+    case SPA_AUDIO_FORMAT_U24_LE:
+    case SPA_AUDIO_FORMAT_U24_BE:
+    case SPA_AUDIO_FORMAT_S24_32P:
+    case SPA_AUDIO_FORMAT_S24P:
+        return ORCA_PW_BIT_DEPTH_24;
+    case SPA_AUDIO_FORMAT_S32_LE:
+    case SPA_AUDIO_FORMAT_S32_BE:
+    case SPA_AUDIO_FORMAT_U32_LE:
+    case SPA_AUDIO_FORMAT_U32_BE:
+    case SPA_AUDIO_FORMAT_F32_LE:
+    case SPA_AUDIO_FORMAT_F32_BE:
+    case SPA_AUDIO_FORMAT_S32P:
+    case SPA_AUDIO_FORMAT_F32P:
+        return ORCA_PW_BIT_DEPTH_32;
+    default:
+        return 0;
+    }
+}
+
+static const void *format_values(const struct spa_pod_object *format,
+                                 uint32_t key, uint32_t type, uint32_t *count,
+                                 uint32_t *choice) {
+    const struct spa_pod_prop *prop =
+        spa_pod_object_find_prop(format, NULL, key);
+    if (prop == NULL)
+        return NULL;
+    const struct spa_pod *values = spa_pod_get_values(&prop->value, count, choice);
+    if (values->type != type || *count == 0)
+        return NULL;
+    return SPA_POD_BODY_CONST(values);
+}
+
+static int choice_is_range(uint32_t choice, uint32_t count) {
+    return (choice == SPA_CHOICE_Range || choice == SPA_CHOICE_Step) && count >= 3;
+}
+
+static int choice_is_list(uint32_t choice) {
+    return choice == SPA_CHOICE_None || choice == SPA_CHOICE_Enum;
+}
+
+static void fold_rates(struct bound_node *node, int32_t low, int32_t high) {
+    if (low <= 0 || high < low)
+        return;
+    if (!node->has_rates || (uint32_t)low < node->rate_min)
+        node->rate_min = (uint32_t)low;
+    if (!node->has_rates || (uint32_t)high > node->rate_max)
+        node->rate_max = (uint32_t)high;
+    node->has_rates = 1;
+}
+
+static void fold_channels(struct bound_node *node, int32_t channels) {
+    if (channels <= 0)
+        return;
+    const uint8_t clamped = channels > UINT8_MAX ? UINT8_MAX : (uint8_t)channels;
+    if (clamped > node->channels_max)
+        node->channels_max = clamped;
+}
+
+static void discovery_fold_format(struct bound_node *node,
+                                  const struct spa_pod *param) {
+    uint32_t media_type = 0;
+    uint32_t media_subtype = 0;
+    if (!spa_pod_is_object_type(param, SPA_TYPE_OBJECT_Format) ||
+        spa_format_parse(param, &media_type, &media_subtype) < 0 ||
+        media_type != SPA_MEDIA_TYPE_audio || media_subtype != SPA_MEDIA_SUBTYPE_raw)
+        return;
+    const struct spa_pod_object *format = (const struct spa_pod_object *)param;
+    uint32_t count = 0;
+    uint32_t choice = 0;
+
+    const int32_t *rates = format_values(format, SPA_FORMAT_AUDIO_rate,
+                                         SPA_TYPE_Int, &count, &choice);
+    if (rates != NULL && choice_is_range(choice, count))
+        fold_rates(node, rates[1], rates[2]);
+    else if (rates != NULL && choice_is_list(choice))
+        for (uint32_t index = 0; index < count; index++)
+            fold_rates(node, rates[index], rates[index]);
+
+    const uint32_t *formats = format_values(format, SPA_FORMAT_AUDIO_format,
+                                            SPA_TYPE_Id, &count, &choice);
+    if (formats != NULL && choice_is_list(choice))
+        for (uint32_t index = 0; index < count; index++)
+            node->bit_depths |= format_bit_depth(formats[index]);
+
+    const int32_t *channels = format_values(format, SPA_FORMAT_AUDIO_channels,
+                                            SPA_TYPE_Int, &count, &choice);
+    if (channels != NULL && choice_is_range(choice, count))
+        fold_channels(node, channels[2]);
+    else if (channels != NULL && choice_is_list(choice))
+        for (uint32_t index = 0; index < count; index++)
+            fold_channels(node, channels[index]);
+}
+
+static void discovery_node_param(void *userdata, int sequence, uint32_t id,
+                                 uint32_t index, uint32_t next,
+                                 const struct spa_pod *param) {
+    (void)sequence;
+    (void)index;
+    (void)next;
+    if (id == SPA_PARAM_EnumFormat && param != NULL)
+        discovery_fold_format(userdata, param);
 }
 
 static const struct pw_node_events discovery_node_events = {
     PW_VERSION_NODE_EVENTS,
     .info = discovery_node_info,
+    .param = discovery_node_param,
 };
 
 static void discovery_device_info(void *userdata,
@@ -107,23 +247,24 @@ static const struct pw_device_events discovery_device_events = {
 
 /* Registry globals carry only a filtered set of properties; the bus, the
  * ALSA path and the factory name arrive in the info of a bound proxy. */
-static void discovery_bind_node(struct discovery *discovery,
-                                struct bound_object *entry, uint32_t id,
+static void discovery_bind_node(struct orca_pw_discovery *discovery,
+                                struct bound_node *entry, uint32_t id,
                                 const struct spa_dict *props) {
     const char *device_object = spa_dict_lookup(props, PW_KEY_DEVICE_ID);
-    entry->global_id = id;
-    entry->device_object = device_object != NULL
-                               ? (uint32_t)strtoul(device_object, NULL, 10)
-                               : SPA_ID_INVALID;
+    entry->object.global_id = id;
+    entry->object.device_object = device_object != NULL
+                                      ? (uint32_t)strtoul(device_object, NULL, 10)
+                                      : SPA_ID_INVALID;
     struct pw_node *node = pw_registry_bind(
         discovery->registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0);
     if (node == NULL)
         return;
-    entry->proxy = (struct pw_proxy *)node;
-    pw_node_add_listener(node, &entry->listener, &discovery_node_events, entry);
+    entry->object.proxy = (struct pw_proxy *)node;
+    pw_node_add_listener(node, &entry->object.listener, &discovery_node_events,
+                         entry);
 }
 
-static void discovery_bind_device(struct discovery *discovery, uint32_t id,
+static void discovery_bind_device(struct orca_pw_discovery *discovery, uint32_t id,
                                   const struct spa_dict *props) {
     if (!equals(spa_dict_lookup(props, PW_KEY_MEDIA_CLASS), "Audio/Device") ||
         discovery->audio_device_count >= DISCOVERY_BOUND)
@@ -153,7 +294,7 @@ static void discovery_global(void *userdata, uint32_t id,
                              uint32_t version, const struct spa_dict *props) {
     (void)permissions;
     (void)version;
-    struct discovery *discovery = userdata;
+    struct orca_pw_discovery *discovery = userdata;
     if (props == NULL)
         return;
     if (strcmp(type, PW_TYPE_INTERFACE_Device) == 0) {
@@ -187,10 +328,10 @@ static void discovery_global(void *userdata, uint32_t id,
     device->name_len = name_len;
 }
 
-static void discovery_resolve_kinds(struct discovery *discovery) {
+static void discovery_resolve_kinds(struct orca_pw_discovery *discovery) {
     for (uint32_t index = 0; index < discovery->count && index < DISCOVERY_BOUND;
          index++) {
-        const struct bound_object *node = &discovery->nodes[index];
+        const struct bound_object *node = &discovery->nodes[index].object;
         uint8_t kind = node->kind;
         for (uint32_t entry = 0;
              kind == ORCA_PW_DEVICE_UNKNOWN && entry < discovery->audio_device_count;
@@ -202,33 +343,101 @@ static void discovery_resolve_kinds(struct discovery *discovery) {
     }
 }
 
+static uint8_t node_device_state(const struct bound_node *node) {
+    if (!node->has_state)
+        return ORCA_PW_DEVICE_UNAVAILABLE;
+    switch (node->state) {
+    case PW_NODE_STATE_RUNNING:
+    case PW_NODE_STATE_IDLE:
+        return ORCA_PW_DEVICE_ACTIVE;
+    case PW_NODE_STATE_SUSPENDED:
+        return ORCA_PW_DEVICE_SUSPENDED;
+    default:
+        return ORCA_PW_DEVICE_UNAVAILABLE;
+    }
+}
+
+static void discovery_resolve_capabilities(struct orca_pw_discovery *discovery) {
+    for (uint32_t index = 0; index < discovery->count && index < DISCOVERY_BOUND;
+         index++) {
+        const struct bound_node *node = &discovery->nodes[index];
+        if (!node->params_complete || !node->has_rates)
+            continue;
+        struct orca_pw_device *device = &discovery->devices[index];
+        device->has_capabilities = 1;
+        device->state = node_device_state(node);
+        device->bit_depths = node->bit_depths;
+        device->channels_max = node->channels_max;
+        device->rate_min = node->rate_min;
+        device->rate_max = node->rate_max;
+    }
+}
+
+static void discovery_request_formats(struct orca_pw_discovery *discovery) {
+    for (uint32_t index = 0; index < discovery->count && index < DISCOVERY_BOUND;
+         index++) {
+        struct bound_node *node = &discovery->nodes[index];
+        if (node->object.proxy == NULL)
+            continue;
+        pw_node_enum_params((struct pw_node *)node->object.proxy, 0,
+                            SPA_PARAM_EnumFormat, 0, UINT32_MAX, NULL);
+        node->params_sequence = pw_proxy_sync(node->object.proxy, 0);
+    }
+}
+
+static void discovery_formats_done(struct orca_pw_discovery *discovery,
+                                   uint32_t proxy_id, int sequence) {
+    for (uint32_t index = 0; index < discovery->count && index < DISCOVERY_BOUND;
+         index++) {
+        struct bound_node *node = &discovery->nodes[index];
+        if (node->object.proxy != NULL &&
+            pw_proxy_get_id(node->object.proxy) == proxy_id &&
+            node->params_sequence == sequence)
+            node->params_complete = 1;
+    }
+}
+
 static const struct pw_registry_events discovery_registry_events = {
     PW_VERSION_REGISTRY_EVENTS,
     .global = discovery_global,
 };
 
 /* The first round trip delivers the globals, which bind proxies; the second
- * delivers those proxies' info. */
+ * delivers those proxies' info; the third, when asked for, each sink's
+ * EnumFormat params. A node's own sync is answered only after its params,
+ * because the server holds back this client's later requests while an
+ * asynchronous enumeration is pending. */
 static void discovery_done(void *userdata, uint32_t id, int sequence) {
-    struct discovery *discovery = userdata;
-    if (id != PW_ID_CORE || sequence != discovery->sequence)
+    struct orca_pw_discovery *discovery = userdata;
+    if (id != PW_ID_CORE) {
+        discovery_formats_done(discovery, id, sequence);
+        return;
+    }
+    if (sequence != discovery->sequence)
         return;
     if (!discovery->bound_synced) {
         discovery->bound_synced = 1;
         discovery->sequence = pw_core_sync(discovery->core, PW_ID_CORE, 0);
         return;
     }
-    pw_main_loop_quit(discovery->loop);
+    if (discovery->phase == ORCA_PW_DISCOVERY_LISTING &&
+        discovery->with_capabilities) {
+        discovery_request_formats(discovery);
+        discovery->sequence = pw_core_sync(discovery->core, PW_ID_CORE, 0);
+        discovery->phase = ORCA_PW_DISCOVERY_CAPABILITIES;
+        return;
+    }
+    discovery->phase = ORCA_PW_DISCOVERY_COMPLETE;
 }
 
 static void discovery_error(void *userdata, uint32_t id, int sequence,
                             int result, const char *message) {
     (void)sequence;
     (void)message;
-    struct discovery *discovery = userdata;
+    struct orca_pw_discovery *discovery = userdata;
     if (id == PW_ID_CORE) {
-        discovery->result = result;
-        pw_main_loop_quit(discovery->loop);
+        discovery->result = result < 0 ? result : -EIO;
+        discovery->phase = ORCA_PW_DISCOVERY_COMPLETE;
     }
 }
 
@@ -319,65 +528,88 @@ void orca_pw_deinitialize(void) {
     pw_deinit();
 }
 
-int orca_pw_discover(struct orca_pw_device *devices, uint32_t capacity,
-                     uint32_t *count) {
-    if (count == NULL || (capacity > 0 && devices == NULL))
+static void discovery_destroy(struct orca_pw_discovery *discovery) {
+    if (discovery->registry != NULL)
+        pw_proxy_destroy((struct pw_proxy *)discovery->registry);
+    if (discovery->core != NULL)
+        pw_core_disconnect(discovery->core);
+    if (discovery->context != NULL)
+        pw_context_destroy(discovery->context);
+    if (discovery->loop != NULL)
+        pw_loop_destroy(discovery->loop);
+    free(discovery);
+}
+
+int orca_pw_discovery_begin(struct orca_pw_device *devices, uint32_t capacity,
+                            uint8_t with_capabilities,
+                            struct orca_pw_discovery **out) {
+    if (out == NULL || (capacity > 0 && devices == NULL))
         return -EINVAL;
-    *count = 0;
-    struct discovery discovery = {
-        .devices = devices,
-        .capacity = capacity,
-    };
-    struct spa_hook registry_listener = {0};
-    struct spa_hook core_listener = {0};
-    struct pw_context *context = NULL;
-    struct pw_core *core = NULL;
-    struct pw_registry *registry = NULL;
+    *out = NULL;
+    struct orca_pw_discovery *discovery = calloc(1, sizeof(*discovery));
+    if (discovery == NULL)
+        return -ENOMEM;
+    discovery->devices = devices;
+    discovery->capacity = capacity;
+    discovery->with_capabilities = with_capabilities != 0;
 
-    discovery.loop = pw_main_loop_new(NULL);
-    if (discovery.loop == NULL)
-        return -errno;
-    context = pw_context_new(pw_main_loop_get_loop(discovery.loop), NULL, 0);
-    if (context == NULL)
+    discovery->loop = pw_loop_new(NULL);
+    if (discovery->loop == NULL)
         goto fail;
-    core = pw_context_connect(context, NULL, 0);
-    if (core == NULL)
+    discovery->context = pw_context_new(discovery->loop, NULL, 0);
+    if (discovery->context == NULL)
         goto fail;
-    registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
-    if (registry == NULL)
+    discovery->core = pw_context_connect(discovery->context, NULL, 0);
+    if (discovery->core == NULL)
         goto fail;
-    discovery.core = core;
-    discovery.registry = registry;
-    pw_registry_add_listener(registry, &registry_listener,
-                             &discovery_registry_events, &discovery);
-    pw_core_add_listener(core, &core_listener, &discovery_core_events,
-                         &discovery);
-    discovery.sequence = pw_core_sync(core, PW_ID_CORE, 0);
-    discovery.result = pw_main_loop_run(discovery.loop);
+    discovery->registry =
+        pw_core_get_registry(discovery->core, PW_VERSION_REGISTRY, 0);
+    if (discovery->registry == NULL)
+        goto fail;
+    pw_registry_add_listener(discovery->registry, &discovery->registry_listener,
+                             &discovery_registry_events, discovery);
+    pw_core_add_listener(discovery->core, &discovery->core_listener,
+                         &discovery_core_events, discovery);
+    discovery->sequence = pw_core_sync(discovery->core, PW_ID_CORE, 0);
+    pw_loop_enter(discovery->loop);
+    *out = discovery;
+    return 0;
 
-    for (uint32_t index = 0; index < DISCOVERY_BOUND; index++) {
-        discovery_unbind(&discovery.nodes[index]);
-        discovery_unbind(&discovery.audio_devices[index]);
+fail:;
+    const int result = errno != 0 ? -errno : -EIO;
+    discovery_destroy(discovery);
+    return result;
+}
+
+int orca_pw_discovery_iterate(struct orca_pw_discovery *discovery,
+                              int timeout_ms) {
+    if (discovery == NULL)
+        return -EINVAL;
+    if (discovery->phase != ORCA_PW_DISCOVERY_COMPLETE) {
+        const int result = pw_loop_iterate(discovery->loop, timeout_ms);
+        if (result < 0 && result != -EINTR)
+            return result;
     }
-    spa_hook_remove(&core_listener);
-    spa_hook_remove(&registry_listener);
-    pw_proxy_destroy((struct pw_proxy *)registry);
-    pw_core_disconnect(core);
-    pw_context_destroy(context);
-    pw_main_loop_destroy(discovery.loop);
-    discovery_resolve_kinds(&discovery);
-    *count = discovery.count;
-    return discovery.result;
+    if (discovery->result < 0)
+        return discovery->result;
+    return discovery->phase;
+}
 
-fail:
-    if (registry != NULL)
-        pw_proxy_destroy((struct pw_proxy *)registry);
-    if (core != NULL)
-        pw_core_disconnect(core);
-    if (context != NULL)
-        pw_context_destroy(context);
-    pw_main_loop_destroy(discovery.loop);
-    return errno != 0 ? -errno : -EIO;
+uint32_t orca_pw_discovery_finish(struct orca_pw_discovery *discovery) {
+    if (discovery == NULL)
+        return 0;
+    pw_loop_leave(discovery->loop);
+    for (uint32_t index = 0; index < DISCOVERY_BOUND; index++) {
+        discovery_unbind(&discovery->nodes[index].object);
+        discovery_unbind(&discovery->audio_devices[index]);
+    }
+    spa_hook_remove(&discovery->core_listener);
+    spa_hook_remove(&discovery->registry_listener);
+    discovery_resolve_kinds(discovery);
+    discovery_resolve_capabilities(discovery);
+    const uint32_t count = discovery->count;
+    discovery_destroy(discovery);
+    return count;
 }
 
 struct orca_pw_output *orca_pw_output_create(uint64_t device_id,

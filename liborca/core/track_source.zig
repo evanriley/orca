@@ -75,7 +75,13 @@ pub const TrackSourceOpener = struct {
     }
 
     pub fn opener(self: *TrackSourceOpener) audio.playback_queue.TrackOpener {
-        return .{ .context = self, .open_fn = openRef };
+        return .{ .context = self, .open_fn = openRef, .release_fn = releaseOfRef };
+    }
+
+    fn releaseOfRef(context: *anyopaque, ref: TrackRef) ?i64 {
+        const self: *TrackSourceOpener = @ptrCast(@alignCast(context));
+        if (!ref.library.eql(self.library)) return null;
+        return self.tracks.releaseId(ref.track_id) catch null;
     }
 
     fn openRef(
@@ -184,7 +190,7 @@ pub const TrackSourceOpener = struct {
     /// member's is keyed on the identity the Library recorded for its file,
     /// because opening every file of the album to hash it would cost a disc's
     /// worth of reads per track.
-    fn albumGain(self: *const TrackSourceOpener, track_id: i64, entry: Measurement) !?f32 {
+    fn albumGain(self: *const TrackSourceOpener, track_id: i64, entry: Measurement) !?audio.processing.Correction {
         var album: AlbumLoudness = .{ .entry_track_id = track_id, .entry = entry };
         const selector = analysis.service.diagnosticsSelector(.{});
         return switch (try self.analysis_cache.visitReleaseMembers(track_id, &selector, &album)) {
@@ -208,15 +214,18 @@ const Measurement = struct {
         };
     }
 
-    fn trackGain(self: Measurement) ?f32 {
+    fn trackGain(self: Measurement) ?audio.processing.Correction {
         const loudness = self.loudness orelse return null;
-        return audio.processing.replayGainMultiplier(loudness.replay_gain_db, loudness.sample_peak);
+        return .{
+            .gain = audio.processing.replayGainLinear(loudness.replay_gain_db),
+            .peak = positivePeak(loudness.sample_peak),
+        };
     }
 };
 
 /// The loudness of a Release as one programme: the duration-weighted mean of
 /// its Tracks' integrated loudness in the energy domain, toward the canonical
-/// target, capped against the loudest Track's peak.
+/// target, with the loudest Track's peak to cap it against.
 ///
 /// BS.1770 gating over the album's merged blocks would be exact, but the
 /// stored result keeps only each file's gated loudness. A Track with no gated
@@ -254,13 +263,20 @@ const AlbumLoudness = struct {
         self.weighted_seconds += seconds;
     }
 
-    fn gain(self: *const AlbumLoudness) ?f32 {
+    fn gain(self: *const AlbumLoudness) ?audio.processing.Correction {
         if (!self.complete or self.weighted_seconds == 0) return null;
         const lufs = 10 * std.math.log10(self.weighted_energy / self.weighted_seconds);
         const target: f64 = (analysis.diagnostics.Parameters{}).replay_gain_target_lufs;
-        return audio.processing.replayGainMultiplier(@floatCast(target - lufs), self.peak);
+        return .{
+            .gain = audio.processing.replayGainLinear(@floatCast(target - lufs)),
+            .peak = positivePeak(self.peak),
+        };
     }
 };
+
+fn positivePeak(peak: f32) ?f32 {
+    return if (peak > 0) peak else null;
+}
 
 /// The quick hash of a file that has just been opened for playback.
 ///
@@ -323,7 +339,7 @@ test "a track id resolves to a self-contained decodable session" {
     // Self-contained: nothing backing the decoder lives in this frame.
     try testing.expect(session.owned_source != null);
     var samples: [64]f32 = undefined;
-    try testing.expect(try session.readFrames(&samples, .track) > 0);
+    try testing.expect(try session.readFrames(&samples, .{ .mode = .track }) > 0);
 }
 
 test "a track whose file has gone marks its location missing and fails typed" {

@@ -94,13 +94,20 @@ pub const Player = struct {
     /// `EntryReplayGain.pack` and republished alongside its timeline shape.
     /// Reporting only: the correction is applied by the session that decodes
     /// the entry, so this is what a host may display rather than what any lane
-    /// multiplies by.
-    published_replay_gain: std.atomic.Value(u64) = .init(0),
-    /// Which correction entries are decoded with. An atomic because the decode
-    /// lane reads it on every canonical block, which is what makes a change
-    /// take effect as the already-decoded render-ahead drains rather than at
-    /// the next track.
-    replay_gain_mode: std.atomic.Value(processing.ReplayGainMode) = .init(.track),
+    /// multiplies by. The words are read under `published_replay_gain_sequence`
+    /// so a host never sees one entry's track figure beside another's album
+    /// figure.
+    published_replay_gain: [3]std.atomic.Value(u64) = @splat(.init(0)),
+    published_replay_gain_sequence: std.atomic.Value(u32) = .init(0),
+    /// Which correction entries are decoded with, as `ReplayGainSettings.pack`.
+    /// An atomic because the decode lane reads it on every canonical block,
+    /// which is what makes a change take effect as the already-decoded
+    /// render-ahead drains rather than at the next track.
+    replay_gain_settings: std.atomic.Value(u64) = .init((processing.ReplayGainSettings{}).pack()),
+    /// Set by the control lane: the transport stops when the entry being
+    /// heard ends. The engine primes no successor while it is set and clears
+    /// it when it stops.
+    stop_after_current: std.atomic.Value(bool) = .init(false),
     /// Timeline shape per entry serial. Plain state, written by whichever lane
     /// owns `sources` — the control lane under `quiesce`, or the engine thread.
     entry_info: [entry_info_len]EntryInfo = @splat(.{}),
@@ -186,15 +193,49 @@ pub const Player = struct {
         const audible = self.audibleEntryInfo();
         self.published_sample_rate.store(audible.sample_rate, .release);
         self.published_frame_count.store(audible.frame_count, .release);
-        self.published_replay_gain.store(audible.replay_gain.pack(), .release);
+        self.publishReplayGain(audible.replay_gain);
+    }
+
+    /// Only the lane that owns `sources` writes, so there is one writer.
+    fn publishReplayGain(self: *Player, corrections: processing.EntryReplayGain) void {
+        const words = corrections.pack();
+        const sequence = self.published_replay_gain_sequence.load(.monotonic);
+        self.published_replay_gain_sequence.store(sequence +% 1, .monotonic);
+        for (&self.published_replay_gain, words) |*slot, word| slot.store(word, .release);
+        self.published_replay_gain_sequence.store(sequence +% 2, .release);
+    }
+
+    pub fn replayGainSettings(self: *const Player) processing.ReplayGainSettings {
+        return .unpack(self.replay_gain_settings.load(.acquire));
+    }
+
+    /// Replaces one field of the settings word, leaving the others as they are.
+    pub fn updateReplayGainSettings(
+        self: *Player,
+        comptime field: std.meta.FieldEnum(processing.ReplayGainSettings),
+        value: @FieldType(processing.ReplayGainSettings, @tagName(field)),
+    ) void {
+        var bits = self.replay_gain_settings.load(.acquire);
+        while (true) {
+            var settings: processing.ReplayGainSettings = .unpack(bits);
+            @field(settings, @tagName(field)) = value;
+            bits = self.replay_gain_settings.cmpxchgWeak(bits, settings.pack(), .acq_rel, .acquire) orelse return;
+        }
     }
 
     pub fn replayGainMode(self: *const Player) processing.ReplayGainMode {
-        return self.replay_gain_mode.load(.acquire);
+        return self.replayGainSettings().mode;
     }
 
     pub fn audibleReplayGain(self: *const Player) processing.EntryReplayGain {
-        return .unpack(self.published_replay_gain.load(.acquire));
+        while (true) {
+            const before = self.published_replay_gain_sequence.load(.acquire);
+            var words: processing.EntryReplayGain.Packed = undefined;
+            for (&words, &self.published_replay_gain) |*word, *slot| word.* = slot.load(.acquire);
+            const after = self.published_replay_gain_sequence.load(.acquire);
+            if (before == after and before % 2 == 0) return .unpack(words);
+            std.atomic.spinLoopHint();
+        }
     }
 
     /// The correction in force on the audio currently audible and where it
@@ -203,7 +244,7 @@ pub const Player = struct {
     /// Resolved at read rather than at publication so a mode change is
     /// reflected here as promptly as it is reflected in the audio.
     pub fn appliedReplayGain(self: *const Player) processing.EntryReplayGain.Applied {
-        return self.audibleReplayGain().applied(self.replayGainMode());
+        return self.audibleReplayGain().applied(self.replayGainSettings());
     }
 
     pub fn effectiveReplayGain(self: *const Player) f32 {
@@ -295,7 +336,7 @@ pub const Player = struct {
                 pipe,
                 pool,
                 self.epoch.load(.acquire),
-                self.replayGainMode(),
+                self.replayGainSettings(),
             );
         }
         return error.PlayerHasNoSource;
@@ -304,7 +345,7 @@ pub const Player = struct {
     /// Producer/control-lane decode used by multi-Zone fanout. Decoder and
     /// source I/O never run on an output callback.
     pub fn decodeFrames(self: *Player, samples: []f32) !usize {
-        if (self.sources) |*sources| return sources.readFrames(samples, self.replayGainMode());
+        if (self.sources) |*sources| return sources.readFrames(samples, self.replayGainSettings());
         return error.PlayerHasNoSource;
     }
 

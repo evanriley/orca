@@ -886,6 +886,19 @@ pub const DeviceViewV2 = extern struct {
 
 pub const DeviceV2Callback = *const fn (?*anyopaque, *const DeviceViewV2) callconv(.c) void;
 
+pub const DeviceViewV3 = extern struct {
+    base: DeviceViewV2,
+    has_capabilities: u8,
+    state: u8,
+    bit_depths: u8,
+    channels_max: u8,
+    rate_min_hz: u32,
+    rate_max_hz: u32,
+    _reserved: [4]u8 = @splat(0),
+};
+
+pub const DeviceV3Callback = *const fn (?*anyopaque, *const DeviceViewV3) callconv(.c) void;
+
 pub const QueueEntryView = extern struct {
     position: u32,
     is_current: u8,
@@ -998,11 +1011,24 @@ pub const SignalPathView = extern struct {
     has_replay_gain_track: u8,
     _reserved: [2]u8 = @splat(0),
     replay_gain_track_db: f32,
+    preamp_db: f32,
+    peak_protection: u8,
+    fallback: u8,
+    peak_limited: u8,
+    _reserved2: [1]u8 = @splat(0),
 };
 
 comptime {
-    std.debug.assert(@sizeOf(SignalPathView) == 400);
+    std.debug.assert(@sizeOf(SignalPathView) == 408);
 }
+
+pub const ReplayGainSettingsView = extern struct {
+    preamp_db: f32,
+    mode: u8,
+    fallback: u8,
+    peak_protection: u8,
+    _reserved: [1]u8 = @splat(0),
+};
 
 pub const SignalPathCallback = *const fn (?*anyopaque, *const SignalPathView) callconv(.c) void;
 
@@ -5111,9 +5137,9 @@ pub export fn orca_player_volume(
     return .ok;
 }
 
-/// 0 turns loudness correction off, 1 corrects each entry by its own measured
-/// loudness. Any other value is refused rather than treated as one of those.
-/// Takes effect once the audio decoded ahead of the listener drains.
+/// An orca_replay_gain_mode value. Any other value is refused rather than
+/// treated as one of those. Takes effect once the audio decoded ahead of the
+/// listener drains.
 pub export fn orca_player_set_replay_gain_mode(
     runtime: ?*Runtime,
     player: Handle,
@@ -5121,7 +5147,7 @@ pub export fn orca_player_set_replay_gain_mode(
 ) callconv(.c) Status {
     const box = enter(runtime) orelse return refusal(runtime);
     const resolved = importReplayGainMode(mode) orelse
-        return box.reject(@src(), .invalid_argument, "mode must be 0 or 1");
+        return box.reject(@src(), .invalid_argument, "mode must be 0 to 3");
     box.runtime.playerSetReplayGainMode(importPlayer(player), resolved) catch |err|
         return box.fail(@src(), err);
     return .ok;
@@ -5137,6 +5163,83 @@ pub export fn orca_player_replay_gain_mode(
     const mode = box.runtime.playerReplayGainMode(importPlayer(player)) catch |err|
         return box.fail(@src(), err);
     destination.* = @intFromEnum(mode);
+    return .ok;
+}
+
+pub export fn orca_player_set_replay_gain_preamp(
+    runtime: ?*Runtime,
+    player: Handle,
+    decibels: f32,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerSetReplayGainPreamp(importPlayer(player), decibels) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_set_replay_gain_fallback(
+    runtime: ?*Runtime,
+    player: Handle,
+    fallback: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const resolved = importUntaggedFallback(fallback) orelse
+        return box.reject(@src(), .invalid_argument, "fallback must be 0 or 1");
+    box.runtime.playerSetReplayGainFallback(importPlayer(player), resolved) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_set_peak_protection(
+    runtime: ?*Runtime,
+    player: Handle,
+    enabled: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerSetPeakProtection(importPlayer(player), enabled != 0) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_replay_gain_settings(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*ReplayGainSettingsView,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const settings = box.runtime.playerReplayGainSettings(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = .{
+        .preamp_db = settings.preamp_db,
+        .mode = @intFromEnum(settings.mode),
+        .fallback = exportUntaggedFallback(settings.fallback),
+        .peak_protection = @intFromBool(settings.peak_protection),
+    };
+    return .ok;
+}
+
+pub export fn orca_player_set_stop_after_current(
+    runtime: ?*Runtime,
+    player: Handle,
+    enabled: u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.playerSetStopAfterCurrent(importPlayer(player), enabled != 0) catch |err|
+        return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_player_stop_after_current(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const enabled = box.runtime.playerStopAfterCurrent(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
+    destination.* = @intFromBool(enabled);
     return .ok;
 }
 
@@ -5574,7 +5677,7 @@ pub export fn orca_enumerate_output_devices(
     const box = enter(runtime) orelse return refusal(runtime);
     const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     var devices: [max_devices]audio.backend.Device = undefined;
-    const count = box.runtime.enumerateOutputDevices(&devices) catch |err|
+    const count = box.runtime.enumerateOutputDevices(&devices, .identity) catch |err|
         return box.fail(@src(), err);
     for (devices[0..count]) |*device| {
         const view: DeviceView = .{ .id = device.id, .name = stringView(device.nameSlice()) };
@@ -5591,13 +5694,49 @@ pub export fn orca_enumerate_output_devices_v2(
     const box = enter(runtime) orelse return refusal(runtime);
     const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
     var devices: [max_devices]audio.backend.Device = undefined;
-    const count = box.runtime.enumerateOutputDevices(&devices) catch |err|
+    const count = box.runtime.enumerateOutputDevices(&devices, .identity) catch |err|
         return box.fail(@src(), err);
     for (devices[0..count]) |*device| {
         const view: DeviceViewV2 = .{
             .base = .{ .id = device.id, .name = stringView(device.nameSlice()) },
             .kind = exportDeviceKind(device.kind),
         };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_enumerate_output_devices_v3(
+    runtime: ?*Runtime,
+    context: ?*anyopaque,
+    callback: ?DeviceV3Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    var devices: [max_devices]audio.backend.Device = undefined;
+    const count = box.runtime.enumerateOutputDevices(&devices, .capabilities) catch |err|
+        return box.fail(@src(), err);
+    for (devices[0..count]) |*device| {
+        var view: DeviceViewV3 = .{
+            .base = .{
+                .base = .{ .id = device.id, .name = stringView(device.nameSlice()) },
+                .kind = exportDeviceKind(device.kind),
+            },
+            .has_capabilities = 0,
+            .state = 0,
+            .bit_depths = 0,
+            .channels_max = 0,
+            .rate_min_hz = 0,
+            .rate_max_hz = 0,
+        };
+        if (device.capabilities) |capabilities| {
+            view.has_capabilities = 1;
+            view.state = exportDeviceState(capabilities.state);
+            view.bit_depths = capabilities.bit_depths;
+            view.channels_max = capabilities.channels_max;
+            view.rate_min_hz = capabilities.rate_min;
+            view.rate_max_hz = capabilities.rate_max;
+        }
         visit(context, &view);
     }
     return .ok;
@@ -6332,7 +6471,23 @@ pub fn importReplayGainMode(mode: u8) ?audio.processing.ReplayGainMode {
         0 => .off,
         1 => .track,
         2 => .album,
+        3 => .smart,
         else => null,
+    };
+}
+
+pub fn importUntaggedFallback(value: u8) ?audio.processing.UntaggedFallback {
+    return switch (value) {
+        0 => .minus_6_db,
+        1 => .as_is,
+        else => null,
+    };
+}
+
+pub fn exportUntaggedFallback(fallback: audio.processing.UntaggedFallback) u8 {
+    return switch (fallback) {
+        .minus_6_db => 0,
+        .as_is => 1,
     };
 }
 
@@ -6479,6 +6634,10 @@ fn exportSignalPath(path: *const audio.dsp.SignalPath) SignalPathView {
         .has_parametric = @intFromBool(path.parametric != null),
         .has_replay_gain_track = @intFromBool(path.replay_gain_track_db != null),
         .replay_gain_track_db = path.replay_gain_track_db orelse 0,
+        .preamp_db = path.preamp_db,
+        .peak_protection = @intFromBool(path.peak_protection),
+        .fallback = exportUntaggedFallback(path.fallback),
+        .peak_limited = @intFromBool(path.peak_limited),
     };
     for (path.reasonList(), 0..) |reason, index| view.reasons[index] = exportSignalReason(reason);
     return view;
@@ -6492,6 +6651,14 @@ pub fn exportDeviceKind(kind: audio.backend.DeviceKind) u8 {
         .bluetooth => 3,
         .hdmi => 4,
         .virtual => 5,
+    };
+}
+
+pub fn exportDeviceState(state: audio.backend.DeviceState) u8 {
+    return switch (state) {
+        .active => 0,
+        .suspended => 1,
+        .unavailable => 2,
     };
 }
 
@@ -7826,6 +7993,42 @@ test "a Player with no output reports a signal path with no source, no output an
 
     try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
     try std.testing.expectEqual(Status.stale_handle, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+}
+
+test "ReplayGain settings read back clamped, refuse unknown values and reach the signal path" {
+    const runtime = orca_runtime_create() orelse return error.OutOfMemory;
+    defer orca_runtime_destroy(runtime);
+    var player: Handle = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_create(runtime, &player));
+
+    try std.testing.expectEqual(Status.ok, orca_player_set_replay_gain_mode(runtime, player, 3));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_replay_gain_mode(runtime, player, 4));
+    try std.testing.expectEqual(Status.ok, orca_player_set_replay_gain_preamp(runtime, player, 40));
+    try std.testing.expectEqual(Status.ok, orca_player_set_replay_gain_fallback(runtime, player, 0));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_set_replay_gain_fallback(runtime, player, 2));
+    try std.testing.expectEqual(Status.ok, orca_player_set_peak_protection(runtime, player, 0));
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_replay_gain_settings(runtime, player, null));
+
+    var settings: ReplayGainSettingsView = undefined;
+    try std.testing.expectEqual(Status.ok, orca_player_replay_gain_settings(runtime, player, &settings));
+    try std.testing.expectEqual(ReplayGainSettingsView{ .preamp_db = 15, .mode = 3, .fallback = 0, .peak_protection = 0 }, settings);
+
+    var path: SignalPathView = std.mem.zeroes(SignalPathView);
+    try std.testing.expectEqual(Status.ok, orca_player_signal_path(runtime, player, &path, captureSignalPath));
+    try std.testing.expectEqual(@as(f32, 15), path.preamp_db);
+    try std.testing.expectEqual(@as(u8, 0), path.peak_protection);
+    try std.testing.expectEqual(exportUntaggedFallback(.minus_6_db), path.fallback);
+    try std.testing.expectEqual(@as(u8, 0), path.peak_limited);
+
+    var armed: u8 = 9;
+    try std.testing.expectEqual(Status.ok, orca_player_set_stop_after_current(runtime, player, 1));
+    try std.testing.expectEqual(Status.ok, orca_player_stop_after_current(runtime, player, &armed));
+    try std.testing.expectEqual(@as(u8, 1), armed);
+    try std.testing.expectEqual(Status.invalid_argument, orca_player_stop_after_current(runtime, player, null));
+
+    try std.testing.expectEqual(Status.ok, orca_player_destroy(runtime, player));
+    try std.testing.expectEqual(Status.stale_handle, orca_player_set_replay_gain_preamp(runtime, player, 0));
+    try std.testing.expectEqual(Status.stale_handle, orca_player_set_stop_after_current(runtime, player, 0));
 }
 
 fn countImage(context: ?*anyopaque, image: *const ImageView) callconv(.c) void {

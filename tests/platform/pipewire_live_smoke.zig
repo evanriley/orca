@@ -16,7 +16,7 @@ pub fn main() !void {
     defer backend.deinit();
 
     var devices: [16]liborca.internal.audio.backend.Device = undefined;
-    const device_count = try backend.discover(&devices);
+    const device_count = try backend.discover(&devices, .capabilities);
     if (device_count == 0) return error.NoPipeWireOutputs;
     for (devices[0..device_count]) |*device| {
         std.debug.print("PipeWire output {d}: {s}\n", .{ device.id, device.nameSlice() });

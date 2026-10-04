@@ -385,6 +385,19 @@ static void find_device_kind(void *context, const orca_device_view_v2 *device) {
     search->kind = device->kind;
 }
 
+struct device_capability_search {
+    uint64_t id;
+    int found;
+    orca_device_view_v3 device;
+};
+
+static void find_device_capabilities(void *context, const orca_device_view_v3 *device) {
+    struct device_capability_search *search = context;
+    if (device->base.base.id != search->id) return;
+    search->found = 1;
+    search->device = *device;
+}
+
 struct queue_capture {
     uint32_t count;
     uint32_t current_seen;
@@ -1311,6 +1324,33 @@ static int dsp_smoke(orca_runtime *runtime, orca_handle library, orca_handle pla
     SMOKE_CHECK(path.view.replay_gain_source == ORCA_GAIN_SOURCE_NONE);
     SMOKE_CHECK(path.view.has_replay_gain_track == 0);
     SMOKE_CHECK(strcmp(path.codec, "flac") == 0);
+    SMOKE_CHECK(path.view.preamp_db == 0.0f && path.view.peak_protection == 1);
+    SMOKE_CHECK(path.view.fallback == ORCA_UNTAGGED_AS_IS && path.view.peak_limited == 0);
+
+    SMOKE_CHECK(orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_SMART) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_preamp(runtime, player, -20.0f) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_fallback(runtime, player, ORCA_UNTAGGED_MINUS_6_DB) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_fallback(runtime, player, 2) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_set_peak_protection(runtime, player, 0) == ORCA_STATUS_OK);
+    orca_replay_gain_settings settings;
+    SMOKE_CHECK(orca_player_replay_gain_settings(runtime, player, &settings) == ORCA_STATUS_OK);
+    SMOKE_CHECK(settings.mode == ORCA_REPLAY_GAIN_SMART && settings.preamp_db == -15.0f);
+    SMOKE_CHECK(settings.fallback == ORCA_UNTAGGED_MINUS_6_DB && settings.peak_protection == 0);
+    SMOKE_CHECK(read_signal_path(runtime, player, &path) == 0);
+    SMOKE_CHECK(path.view.preamp_db == -15.0f && path.view.peak_protection == 0);
+    SMOKE_CHECK(path.view.fallback == ORCA_UNTAGGED_MINUS_6_DB);
+    uint8_t armed = 1;
+    SMOKE_CHECK(orca_player_stop_after_current(runtime, player, &armed) == ORCA_STATUS_OK);
+    SMOKE_CHECK(armed == 0);
+    SMOKE_CHECK(orca_player_set_replay_gain_mode(runtime, player, ORCA_REPLAY_GAIN_OFF) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_preamp(runtime, player, 0) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_replay_gain_fallback(runtime, player, ORCA_UNTAGGED_AS_IS) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_player_set_peak_protection(runtime, player, 1) == ORCA_STATUS_OK);
 
     SMOKE_CHECK(orca_player_set_volume(runtime, player, 0.25f) == ORCA_STATUS_OK);
     SMOKE_CHECK(orca_player_set_repeat(runtime, player, ORCA_REPEAT_OFF) == ORCA_STATUS_OK);
@@ -4309,6 +4349,19 @@ int main(int argc, char **argv) {
         return 259;
     if (device_id != 0 && (!kind_search.found || kind_search.kind != ORCA_DEVICE_KIND_VIRTUAL))
         return 260;
+    struct device_capability_search capability_search = {.id = device_id};
+    if (orca_enumerate_output_devices_v3(runtime, &capability_search,
+                                         find_device_capabilities) != ORCA_STATUS_OK ||
+        orca_enumerate_output_devices_v3(runtime, 0, 0) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 264;
+    const orca_device_view_v3 *silent = &capability_search.device;
+    if (device_id != 0 &&
+        (!capability_search.found || !silent->has_capabilities ||
+         silent->base.kind != ORCA_DEVICE_KIND_VIRTUAL || silent->rate_min_hz == 0 ||
+         silent->rate_max_hz < silent->rate_min_hz ||
+         !(silent->bit_depths & ORCA_DEVICE_BIT_DEPTH_32) || silent->channels_max < 2 ||
+         silent->state == ORCA_DEVICE_STATE_UNAVAILABLE))
+        return 265;
 
     orca_handle zone;
     if (orca_player_open_default_output(runtime, player, device_id, &zone) !=

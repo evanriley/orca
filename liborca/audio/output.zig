@@ -70,7 +70,7 @@ pub const Factory = struct {
             RenderFn,
             ?*anyopaque,
         ) anyerror!Output,
-        discover: *const fn (?*anyopaque, []contract.Device) anyerror!usize,
+        discover: *const fn (?*anyopaque, []contract.Device, contract.DiscoveryDetail) anyerror!usize,
     };
 
     pub fn open(
@@ -82,8 +82,12 @@ pub const Factory = struct {
         return self.vtable.open(self.context, request, render, userdata);
     }
 
-    pub fn discover(self: Factory, devices: []contract.Device) anyerror!usize {
-        return self.vtable.discover(self.context, devices);
+    pub fn discover(
+        self: Factory,
+        devices: []contract.Device,
+        detail: contract.DiscoveryDetail,
+    ) anyerror!usize {
+        return self.vtable.discover(self.context, devices, detail);
     }
 };
 
@@ -180,11 +184,33 @@ pub const TestBackend = struct {
         return .{ .context = stream, .vtable = &output_vtable };
     }
 
-    fn discover(context: ?*anyopaque, devices: []contract.Device) anyerror!usize {
+    pub const test_capabilities: contract.DeviceCapabilities = .{
+        .rate_min = 44_100,
+        .rate_max = 192_000,
+        .bit_depths = contract.DeviceCapabilities.bit_depth_32,
+        .channels_max = 2,
+        .state = .active,
+        .bus = .virtual,
+    };
+
+    fn discover(
+        context: ?*anyopaque,
+        devices: []contract.Device,
+        detail: contract.DiscoveryDetail,
+    ) anyerror!usize {
         const self: *TestBackend = @ptrCast(@alignCast(context.?));
         _ = self.discoveries.fetchAdd(1, .monotonic);
         if (devices.len == 0) return 0;
-        var device: contract.Device = .{ .id = 1, .name = undefined, .name_len = 0, .kind = .virtual };
+        var device: contract.Device = .{
+            .id = 1,
+            .name = undefined,
+            .name_len = 0,
+            .kind = .virtual,
+            .capabilities = switch (detail) {
+                .identity => null,
+                .capabilities => test_capabilities,
+            },
+        };
         const name = "Test Output";
         @memcpy(device.name[0..name.len], name);
         device.name_len = name.len;
@@ -242,9 +268,12 @@ test "the test backend hands out independently closable streams" {
     const factory = backend.factory();
 
     var devices: [4]contract.Device = undefined;
-    try std.testing.expectEqual(@as(usize, 1), try factory.discover(&devices));
+    try std.testing.expectEqual(@as(usize, 1), try factory.discover(&devices, .identity));
     try std.testing.expectEqualStrings("Test Output", devices[0].nameSlice());
     try std.testing.expectEqual(contract.DeviceKind.virtual, devices[0].kind);
+    try std.testing.expectEqual(null, devices[0].capabilities);
+    _ = try factory.discover(&devices, .capabilities);
+    try std.testing.expectEqual(TestBackend.test_capabilities, devices[0].capabilities.?);
 
     const request: contract.OpenRequest = .{
         .device_id = 0,

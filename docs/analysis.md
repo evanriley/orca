@@ -217,11 +217,22 @@ the figure.
 - **A boost is capped at `1 / peak`.** Bringing a quiet track up only as far as
   its headroom allows is a deliberate quietening of the correction rather than
   a limiter, because a limiter would change the audio rather than its level.
-- **`ReplayGainMode` is `off`, `track` or `album`.** Album correction is
-  described below.
+  The session keeps the uncapped gain and the peak, and the cap is applied at
+  decode while `ReplayGainSettings.peak_protection` is on (the default);
+  `SignalPath.peak_limited` says when it lowered the audible correction.
+- **`ReplayGainMode` is `off`, `track`, `album` or `smart`.** Album correction
+  is described below. `smart` takes the album correction while the entry
+  before or after it in playback order belongs to the same Release, and the
+  track correction otherwise, so an album played through keeps its levels and
+  a shuffled mix is levelled per track.
+- **Preamp and fallback.** `ReplayGainSettings.preamp_db` (clamped to ±15 dB)
+  is added to every measured correction before the peak cap.
+  `ReplayGainSettings.fallback` sets the level of an entry with no usable
+  measurement: `as_is` (unity, the default) or `minus_6_db`. The preamp does
+  not apply to the fallback.
 - **Only Orca's own measurements are used.** No reader observes a file's
-  `REPLAYGAIN_*` tags, so a file Orca has not analysed plays at unity in
-  either mode.
+  `REPLAYGAIN_*` tags, so a file Orca has not analysed plays at the untagged
+  fallback in every mode.
 
 ### Album ReplayGain
 

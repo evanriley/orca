@@ -97,6 +97,26 @@ hard load, an auto-advance, a format switch and a seek re-open all carry the
 right correction without any of them republishing anything. See
 `docs/analysis.md`.
 
+The Player's ReplayGain choices — mode, preamp, untagged fallback and peak
+protection — are one packed 64-bit `ReplayGainSettings` word. The decode lane
+loads it once per block and passes it to `SourceSession.readFrames`, so it
+always sees a consistent set; the setters replace the word with a
+compare-and-swap and need no quiesce, and a change takes effect a render-ahead
+later, as a mode change always has. Each session keeps its corrections
+uncapped (`EntryReplayGain`: track and album gain, each with its peak) and
+`EntryReplayGain.applied` resolves mode, preamp, peak cap and fallback per
+decode. Host reads of the audible entry's corrections go through a seqlock the
+engine thread writes when the audible entry changes.
+
+`smart` needs to know whether a neighbour in playback order shares the
+entry's Release. That is `EntryReplayGain.shares_release`, decided by
+`PlaybackQueue.sharesRelease` through the opener's `release_fn` wherever an
+entry is opened: a hard load, a cursor start, a gapless prime and a seek
+re-open. A reorder (enqueue, insert, remove, move, shuffle) changes neighbours
+without opening anything, so the control lane calls
+`PlayerEngine.refreshSharedRelease` under its quiesce to re-decide every
+opened session; audio already decoded keeps the gain it was decoded with.
+
 **Playback never resamples.** Each stream opens at the entry's source rate, and
 a format change between entries reopens the output (see below). The only
 resampler is `resampler.SampleRate`, libsamplerate behind
@@ -281,6 +301,24 @@ zero, report `unknown`. A Zone resolves its device's kind with one
 discovery when the engine thread opens its output, never in the render
 callback, and keeps it beside the open device ID; `playerSignalPath` only reads
 it, so a signal path query never round-trips to the server.
+
+`enumerateOutputDevices` also fills each snapshot's `DeviceCapabilities`: the
+lowest and highest sample rate, the bit depths (16, 24 and 32, float32
+counting as 32), the most channels, the state and the bus (the `DeviceKind`).
+After the bound sinks' info arrives, discovery asks each one for its
+`SPA_PARAM_EnumFormat` params and then syncs that node; the server answers a
+node's later requests only after its pending enumeration, so the node's sync
+reply means its formats are in. Only `audio/raw` formats count, and a range or
+step choice gives its bounds. This round is bounded at 500 ms from its start;
+a node that has not answered by then, or answered with no rate, reports
+`capabilities` null. Node state `running` and `idle` are `active`,
+`suspended` is `suspended`, and `error`, `creating` or no state are
+`unavailable`. Every sink reports what PipeWire answers, virtual ones too: a
+`support.null-audio-sink` accepts rates 1 to 2147483647 and float32 only.
+Discovery runs on the caller's thread with its own `pw_loop`, so listeners fire
+only inside its iterations and allocate nothing; every listener is removed and
+every proxy destroyed before discovery returns, on the timeout path as well.
+A Zone's kind lookup skips the format round.
 Output requests validate the negotiated float32 contract and translate robust,
 interactive, custom, or explicit latency targets into PipeWire node latency.
 Timing snapshots report sample time, monotonic host time, callback quantum,
@@ -392,6 +430,60 @@ cannot be opened is stepped over, with consecutive failures bounded.
 
 Gapless transitions append compatible successor PCM directly; there is no
 crossfade.
+
+### Stop after current
+
+`Runtime.playerSetStopAfterCurrent` arms a one-shot stop at the end of the
+entry being heard. While it is armed the engine never primes a successor, so
+nothing past the stop is decoded. Arming under the quiesce takes back what the
+engine may already have lined up: a held format-switch successor is released;
+a primed successor not yet decoded is dropped and the decode position returns
+to the audible entry; and when decoding has already crossed into the
+successor, the audible entry is re-opened at the heard position through the
+deferred seek, whose epoch bump discards the successor's audio at the cost of
+a short gap. Gating priming, rather than letting the successor play and
+stopping once it is heard, is what keeps a single note of the next entry from
+reaching the device. When the Player has drained with the flag set, the engine
+clears it and stops the transport. The sources stay loaded, so the queue
+history records the entry as finished and a later play starts the entry after
+it.
+
+## Playback failures
+
+`PlayerStatus.last_failure` names the last queue entry that could not be
+opened, as a `PlaybackFailure`: its Track id and a reason (`file_missing`,
+`folder_unavailable`, `codec_unavailable`, `decode_error` or
+`unsupported_channels`). `folder_unavailable` means the Track's root or volume
+is gone, so its files are not marked missing. `file_missing` means the root is
+there but the file is not.
+
+The failure lives in `Player.open_failure`, an `OpenFailureSlot`. Three rules
+make it safe to read from any host thread without attributing it to the wrong
+Track:
+
+- **One writer at a time, never the callback.** The slot is written only by
+  the lane that owns `sources`: the engine thread inside `pass`, or the control
+  lane under `quiesce`, or before an engine exists. `quiesce` proves the engine
+  is outside its pass, so the two writers never overlap. The render callback
+  neither reads nor writes the slot.
+- **Track and error are recorded together.** The Track id and the error are
+  written as one pair at the failure site, under a sequence counter that
+  readers retry on. The failure is never derived from `open_failures`, the
+  cursor or the decode position, which have moved on to the next entry by the
+  time a host looks. A stale failure therefore always names the Track that
+  failed, never a later one.
+- **A clear never overtakes a newer failure.** A successful open clears the
+  failure only once that entry becomes audible. A hard load is audible at
+  once, so `loadQueueEntry` clears the slot directly. A gapless prime is heard
+  only after the entry before it drains, so the engine stores the primed
+  entry's serial as a pending clear. `publishPosition` clears the slot, on the
+  engine thread, once the serial the callback rendered reaches that serial.
+  The comparison wraps, because serials wrap and skip 0. Recording a failure
+  resets the pending clear, so an older entry becoming audible cannot clear a
+  failure recorded after it.
+
+Status snapshots read the slot through `playerStatus`, as they read every other
+Player figure.
 
 ## Queue history
 

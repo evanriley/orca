@@ -132,9 +132,35 @@ defer page.deinit();
   and output stream, the device's period in frames (`device_quantum_frames`)
   and how it is attached (`output_kind`, a `DeviceKind`), and why the path is
   or is not bit-perfect. `equalizer_band_frequencies_hz` holds the ten bands'
-  centre frequencies, in `Equalizer.gains_db` order.
-- `enumerateOutputDevices` fills `Device` snapshots: id, name and `DeviceKind`
-  (`usb`, `pci`, `bluetooth`, `hdmi`, `virtual` or `unknown`).
+  centre frequencies, in `Equalizer.gains_db` order. `SignalPath` also
+  reports the ReplayGain settings (`preamp_db`, `peak_protection`,
+  `fallback`) and `peak_limited`, true when peak protection lowered the
+  audible entry's correction.
+- `playerSetReplayGainMode` takes a `ReplayGainMode`: `off`, `track`, `album`,
+  or `smart` (album while a neighbour in playback order shares the Release,
+  track otherwise). `playerSetReplayGainPreamp` (dB, clamped to ±15),
+  `playerSetReplayGainFallback` (an `UntaggedFallback`: `minus_6_db` or
+  `as_is`, the default) and `playerSetPeakProtection` (default on) set the
+  rest; `playerReplayGainSettings` reads them back as a `ReplayGainSettings`.
+  `playerSetStopAfterCurrent` arms a one-shot stop at the end of the entry
+  being heard; `playerStopAfterCurrent` reads it, false again once it fired.
+  In the C ABI these are `orca_player_set_replay_gain_preamp`,
+  `orca_player_set_replay_gain_fallback`, `orca_player_set_peak_protection`,
+  `orca_player_replay_gain_settings`, `orca_player_set_stop_after_current` and
+  `orca_player_stop_after_current`, with `ORCA_REPLAY_GAIN_SMART` (3).
+- `enumerateOutputDevices` fills `Device` snapshots: id, name, `DeviceKind`
+  (`usb`, `pci`, `bluetooth`, `hdmi`, `virtual` or `unknown`) and
+  `capabilities`, a `DeviceCapabilities` or null when the audio server did not
+  report them within 500 ms. `DeviceCapabilities` holds `rate_min` and
+  `rate_max` in Hz, `bit_depths` (the `bit_depth_16`, `bit_depth_24` and
+  `bit_depth_32` bits; float32 counts as 32), `channels_max`, a `DeviceState`
+  (`active`, `suspended` or `unavailable`) and `bus`, the `DeviceKind`. See
+  [audio-engine.md](audio-engine.md) for how PipeWire's answers map onto them.
+  Its `detail` parameter, a `DiscoveryDetail`, sets the cost: `.identity`
+  fills id, name and kind and leaves `capabilities` null without asking any
+  device for its formats; `.capabilities` also waits up to 500 ms for those
+  formats. Ask for `.identity` to list or resolve outputs, and for
+  `.capabilities` only where they are shown.
 - `playerSetParametricEqualizer` sets a Player's `ParametricEqualizer`: up to
   `max_parametric_filters` (16) `ParametricFilter`s, each a
   `ParametricFilterKind` (peak, low or high shelf, low or high pass, notch)

@@ -87,10 +87,11 @@ pub fn zoneCloseOutput(self: *OrcaRuntime, zone: ZoneHandle) !void {
 pub fn enumerateOutputDevices(
     self: *OrcaRuntime,
     devices: []audio.backend.Device,
+    detail: audio.backend.DiscoveryDetail,
 ) !usize {
     try runtime.requireRunning(self);
     const factory = runtime.outputFactory(self) orelse return 0;
-    return factory.discover(devices);
+    return factory.discover(devices, detail);
 }
 
 pub fn setZonePolicy(

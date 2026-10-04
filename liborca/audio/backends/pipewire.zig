@@ -6,6 +6,7 @@ const pcm = @import("../pcm.zig");
 const output = @import("../output.zig");
 const render_pipe = @import("../render.zig");
 const zone = @import("../zone.zig");
+const network = @import("../../network/root.zig");
 
 extern fn orca_pw_library_version() [*:0]const u8;
 extern fn orca_pw_initialize() void;
@@ -15,8 +16,17 @@ const NativeDevice = extern struct {
     name_len: u16,
     name: [256]u8,
     kind: u8,
+    has_capabilities: u8 = 0,
+    state: u8 = 0,
+    bit_depths: u8 = 0,
+    channels_max: u8 = 0,
+    rate_min: u32 = 0,
+    rate_max: u32 = 0,
 };
-extern fn orca_pw_discover([*]NativeDevice, u32, *u32) c_int;
+const NativeDiscovery = opaque {};
+extern fn orca_pw_discovery_begin([*]NativeDevice, u32, u8, *?*NativeDiscovery) c_int;
+extern fn orca_pw_discovery_iterate(*NativeDiscovery, c_int) c_int;
+extern fn orca_pw_discovery_finish(*NativeDiscovery) u32;
 pub const RenderFn = *const fn (?*anyopaque, [*]f32, u32, u32) callconv(.c) void;
 extern fn orca_pw_output_create(u64, u32, u32, u32, RenderFn, ?*anyopaque) ?*anyopaque;
 extern fn orca_pw_output_destroy(?*anyopaque) void;
@@ -56,23 +66,90 @@ pub const Backend = struct {
         return std.mem.span(orca_pw_library_version());
     }
 
-    pub fn discover(_: *Backend, devices: []contract.Device) !usize {
+    pub fn discover(
+        _: *Backend,
+        devices: []contract.Device,
+        detail: contract.DiscoveryDetail,
+    ) !usize {
         var native: [64]NativeDevice = undefined;
         const limit = @min(devices.len, native.len);
-        var count: u32 = 0;
-        if (orca_pw_discover(&native, @intCast(limit), &count) < 0)
+        var handle: ?*NativeDiscovery = null;
+        const with_capabilities = @intFromBool(detail == .capabilities);
+        if (orca_pw_discovery_begin(&native, @intCast(limit), with_capabilities, &handle) < 0)
             return error.PipeWireDiscoveryFailed;
-        for (native[0..count], devices[0..count]) |source, *destination| {
-            destination.* = .{
-                .id = source.id,
-                .name = source.name,
-                .name_len = source.name_len,
-                .kind = std.enums.fromInt(contract.DeviceKind, source.kind) orelse .unknown,
-            };
-        }
-        return count;
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        defer threaded.deinit();
+        var system_clock: network.SystemClock = .{ .io = threaded.io() };
+        return collect(nativeDiscovery(handle.?), system_clock.clock(), &native, devices);
     }
 };
+
+const capability_bound_ms = 500;
+
+const DiscoveryPhase = enum(c_int) { listing = 0, capabilities = 1, complete = 2 };
+
+const Discovery = struct {
+    context: *anyopaque,
+    iterate_fn: *const fn (*anyopaque, timeout_ms: i32) anyerror!DiscoveryPhase,
+    finish_fn: *const fn (*anyopaque) u32,
+};
+
+fn nativeDiscovery(handle: *NativeDiscovery) Discovery {
+    return .{ .context = handle, .iterate_fn = iterateNative, .finish_fn = finishNative };
+}
+
+fn iterateNative(context: *anyopaque, timeout_ms: i32) anyerror!DiscoveryPhase {
+    const result = orca_pw_discovery_iterate(@ptrCast(context), timeout_ms);
+    if (result < 0) return error.PipeWireDiscoveryFailed;
+    return std.enums.fromInt(DiscoveryPhase, result) orelse error.PipeWireDiscoveryFailed;
+}
+
+fn finishNative(context: *anyopaque) u32 {
+    return orca_pw_discovery_finish(@ptrCast(context));
+}
+
+fn collect(
+    discovery: Discovery,
+    clock: network.client.Clock,
+    native: []const NativeDevice,
+    devices: []contract.Device,
+) !usize {
+    const awaited = awaitReplies(discovery, clock);
+    const count = discovery.finish_fn(discovery.context);
+    awaited catch return error.PipeWireDiscoveryFailed;
+    for (native[0..count], devices[0..count]) |source, *destination|
+        destination.* = deviceFrom(source);
+    return count;
+}
+
+fn awaitReplies(discovery: Discovery, clock: network.client.Clock) !void {
+    var phase: DiscoveryPhase = .listing;
+    while (phase == .listing) phase = try discovery.iterate_fn(discovery.context, -1);
+    const deadline = clock.nowMs() + capability_bound_ms;
+    while (phase == .capabilities) {
+        const remaining = deadline - clock.nowMs();
+        if (remaining <= 0) return;
+        phase = try discovery.iterate_fn(discovery.context, @intCast(remaining));
+    }
+}
+
+fn deviceFrom(source: NativeDevice) contract.Device {
+    const kind = std.enums.fromInt(contract.DeviceKind, source.kind) orelse .unknown;
+    return .{
+        .id = source.id,
+        .name = source.name,
+        .name_len = source.name_len,
+        .kind = kind,
+        .capabilities = if (source.has_capabilities != 0) .{
+            .rate_min = source.rate_min,
+            .rate_max = source.rate_max,
+            .bit_depths = source.bit_depths,
+            .channels_max = source.channels_max,
+            .state = std.enums.fromInt(contract.DeviceState, source.state) orelse .unavailable,
+            .bus = kind,
+        } else null,
+    };
+}
 
 /// Owns one autoconnected float32 PipeWire playback stream. The render
 /// function is called directly on PipeWire's real-time process thread.
@@ -218,10 +295,14 @@ pub const OutputFactory = struct {
         return .{ .context = owned, .vtable = &output_vtable };
     }
 
-    fn discover(context: ?*anyopaque, devices: []contract.Device) anyerror!usize {
+    fn discover(
+        context: ?*anyopaque,
+        devices: []contract.Device,
+        detail: contract.DiscoveryDetail,
+    ) anyerror!usize {
         const self: *OutputFactory = @ptrCast(@alignCast(context.?));
         self.backend.init();
-        return self.backend.discover(devices);
+        return self.backend.discover(devices, detail);
     }
 
     fn closeOutput(context: ?*anyopaque) void {
@@ -337,6 +418,157 @@ test "a PipeWire output's kind comes from its bus, Bluetooth and HDMI hints, or 
     }));
     try std.testing.expectEqual(.unknown, kindOf(&.{}));
     try std.testing.expectEqual(@as(u8, 0), orca_pw_properties_kind(null));
+}
+
+const ScriptedDiscovery = struct {
+    clock: *network.testing.TestClock,
+    native: []NativeDevice,
+    listing_ms: i64,
+    reply_after_ms: []const ?i64,
+    fail: bool = false,
+    listed_at_ms: ?i64 = null,
+    delivered: [4]bool = @splat(false),
+    timeouts: [8]i32 = undefined,
+    iterations: usize = 0,
+    finished: bool = false,
+
+    fn discovery(self: *ScriptedDiscovery) Discovery {
+        return .{ .context = self, .iterate_fn = iterate, .finish_fn = finish };
+    }
+
+    fn pending(self: *const ScriptedDiscovery) bool {
+        for (self.delivered[0..self.reply_after_ms.len]) |delivered| {
+            if (!delivered) return true;
+        }
+        return false;
+    }
+
+    fn iterate(context: *anyopaque, timeout_ms: i32) anyerror!DiscoveryPhase {
+        const self: *ScriptedDiscovery = @ptrCast(@alignCast(context));
+        self.timeouts[self.iterations] = timeout_ms;
+        self.iterations += 1;
+        if (self.fail) return error.PipeWireDiscoveryFailed;
+        const listed_at = self.listed_at_ms orelse {
+            self.clock.advance(self.listing_ms);
+            self.listed_at_ms = self.clock.now();
+            return .capabilities;
+        };
+        if (!self.pending()) return .complete;
+        const elapsed = self.clock.now() - listed_at;
+        var next: ?usize = null;
+        for (self.reply_after_ms, 0..) |reply, index| {
+            const at = reply orelse continue;
+            if (self.delivered[index]) continue;
+            if (next == null or at < self.reply_after_ms[next.?].?) next = index;
+        }
+        std.debug.assert(timeout_ms >= 0);
+        const index = next orelse {
+            self.clock.advance(timeout_ms);
+            return .capabilities;
+        };
+        const wait = self.reply_after_ms[index].? - elapsed;
+        if (wait > timeout_ms) {
+            self.clock.advance(timeout_ms);
+            return .capabilities;
+        }
+        self.clock.advance(wait);
+        self.delivered[index] = true;
+        return if (self.pending()) .capabilities else .complete;
+    }
+
+    fn finish(context: *anyopaque) u32 {
+        const self: *ScriptedDiscovery = @ptrCast(@alignCast(context));
+        self.finished = true;
+        for (self.native, self.delivered[0..self.native.len]) |*device, delivered|
+            device.has_capabilities = @intFromBool(delivered);
+        return @intCast(self.native.len);
+    }
+};
+
+fn scriptedDevice(id: u64, state: contract.DeviceState) NativeDevice {
+    return .{
+        .id = id,
+        .name = @splat(0),
+        .name_len = 0,
+        .kind = @intFromEnum(contract.DeviceKind.usb),
+        .state = @intFromEnum(state),
+        .bit_depths = contract.DeviceCapabilities.bit_depth_16 | contract.DeviceCapabilities.bit_depth_24,
+        .channels_max = 2,
+        .rate_min = 44_100,
+        .rate_max = 384_000,
+    };
+}
+
+test "outputs whose capability replies are still missing 500 ms after listing ends report capabilities unknown" {
+    var clock: network.testing.TestClock = .startingAt(1_000);
+    var native = [_]NativeDevice{
+        scriptedDevice(10, .active),
+        scriptedDevice(11, .suspended),
+        scriptedDevice(12, .active),
+    };
+    var scripted: ScriptedDiscovery = .{
+        .clock = &clock,
+        .native = &native,
+        .listing_ms = 3_000,
+        .reply_after_ms = &.{ 100, 900, null },
+    };
+    var devices: [3]contract.Device = undefined;
+
+    try std.testing.expectEqual(@as(usize, 3), try collect(scripted.discovery(), clock.clock(), &native, &devices));
+
+    try std.testing.expect(scripted.finished);
+    try std.testing.expectEqual(@as(i64, 1_000 + 3_000 + capability_bound_ms), clock.now());
+    try std.testing.expectEqualSlices(i32, &.{ -1, 500, 400 }, scripted.timeouts[0..scripted.iterations]);
+    try std.testing.expectEqual(contract.DeviceCapabilities{
+        .rate_min = 44_100,
+        .rate_max = 384_000,
+        .bit_depths = contract.DeviceCapabilities.bit_depth_16 | contract.DeviceCapabilities.bit_depth_24,
+        .channels_max = 2,
+        .state = .active,
+        .bus = .usb,
+    }, devices[0].capabilities.?);
+    try std.testing.expectEqual(null, devices[1].capabilities);
+    try std.testing.expectEqual(null, devices[2].capabilities);
+    try std.testing.expectEqual(@as(u64, 12), devices[2].id);
+    try std.testing.expectEqual(contract.DeviceKind.usb, devices[2].kind);
+}
+
+test "capability replies that all arrive within the bound end the wait without running out the bound" {
+    var clock: network.testing.TestClock = .startingAt(0);
+    var native = [_]NativeDevice{ scriptedDevice(20, .suspended), scriptedDevice(21, .unavailable) };
+    var scripted: ScriptedDiscovery = .{
+        .clock = &clock,
+        .native = &native,
+        .listing_ms = 5,
+        .reply_after_ms = &.{ 20, 40 },
+    };
+    var devices: [2]contract.Device = undefined;
+
+    try std.testing.expectEqual(@as(usize, 2), try collect(scripted.discovery(), clock.clock(), &native, &devices));
+
+    try std.testing.expectEqual(@as(i64, 5 + 40), clock.now());
+    try std.testing.expectEqualSlices(i32, &.{ -1, 500, 480 }, scripted.timeouts[0..scripted.iterations]);
+    try std.testing.expectEqual(contract.DeviceState.suspended, devices[0].capabilities.?.state);
+    try std.testing.expectEqual(contract.DeviceState.unavailable, devices[1].capabilities.?.state);
+}
+
+test "a discovery that fails while waiting is still finished before the error returns" {
+    var clock: network.testing.TestClock = .startingAt(0);
+    var native = [_]NativeDevice{scriptedDevice(30, .active)};
+    var scripted: ScriptedDiscovery = .{
+        .clock = &clock,
+        .native = &native,
+        .listing_ms = 0,
+        .reply_after_ms = &.{10},
+        .fail = true,
+    };
+    var devices: [1]contract.Device = undefined;
+
+    try std.testing.expectError(
+        error.PipeWireDiscoveryFailed,
+        collect(scripted.discovery(), clock.clock(), &native, &devices),
+    );
+    try std.testing.expect(scripted.finished);
 }
 
 test "PipeWire callback consumes Orca prepared blocks without allocation" {

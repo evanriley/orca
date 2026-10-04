@@ -156,7 +156,7 @@ pub fn playerSetReplayGainMode(
     mode: audio.processing.ReplayGainMode,
 ) !void {
     try runtime.requireRunning(self);
-    (try self.players.get(player)).player.replay_gain_mode.store(mode, .release);
+    (try self.players.get(player)).player.updateReplayGainSettings(.mode, mode);
 }
 
 pub fn playerReplayGainMode(
@@ -164,7 +164,54 @@ pub fn playerReplayGainMode(
     player: PlayerHandle,
 ) !audio.processing.ReplayGainMode {
     try runtime.requireRunning(self);
-    return (try self.players.get(player)).player.replay_gain_mode.load(.acquire);
+    return (try self.players.get(player)).player.replayGainMode();
+}
+
+pub fn playerSetReplayGainPreamp(self: *OrcaRuntime, player: PlayerHandle, decibels: f32) !void {
+    try runtime.requireRunning(self);
+    (try self.players.get(player)).player.updateReplayGainSettings(
+        .preamp_db,
+        audio.processing.ReplayGainSettings.clampPreamp(decibels),
+    );
+}
+
+pub fn playerSetReplayGainFallback(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+    fallback: audio.processing.UntaggedFallback,
+) !void {
+    try runtime.requireRunning(self);
+    (try self.players.get(player)).player.updateReplayGainSettings(.fallback, fallback);
+}
+
+pub fn playerSetPeakProtection(self: *OrcaRuntime, player: PlayerHandle, enabled: bool) !void {
+    try runtime.requireRunning(self);
+    (try self.players.get(player)).player.updateReplayGainSettings(.peak_protection, enabled);
+}
+
+pub fn playerReplayGainSettings(
+    self: *OrcaRuntime,
+    player: PlayerHandle,
+) !audio.processing.ReplayGainSettings {
+    try runtime.requireRunning(self);
+    return (try self.players.get(player)).player.replayGainSettings();
+}
+
+pub fn playerSetStopAfterCurrent(self: *OrcaRuntime, player: PlayerHandle, enabled: bool) !void {
+    try runtime.requireRunning(self);
+    const object_value = try self.players.get(player);
+    const engine = object_value.engine orelse {
+        object_value.player.stop_after_current.store(enabled, .release);
+        return;
+    };
+    engine.quiesce();
+    defer engine.release();
+    engine.setStopAfterCurrent(enabled);
+}
+
+pub fn playerStopAfterCurrent(self: *OrcaRuntime, player: PlayerHandle) !bool {
+    try runtime.requireRunning(self);
+    return (try self.players.get(player)).player.stop_after_current.load(.acquire);
 }
 
 pub fn playerEffectiveGain(self: *OrcaRuntime, player: PlayerHandle) !f32 {
@@ -236,14 +283,21 @@ pub fn playerSignalPath(self: *OrcaRuntime, player: PlayerHandle) !audio.dsp.Sig
     defer if (engine) |value| value.release();
     const audible = object_value.player.audibleSource();
     const corrections = object_value.player.audibleReplayGain();
-    const applied = corrections.applied(object_value.player.replayGainMode());
+    const settings = object_value.player.replayGainSettings();
+    const applied = corrections.applied(settings);
     var path = audio.dsp.SignalPath.describe(.{
         .source = if (audible) |value| value.format else null,
         .source_declared = if (audible) |value| value.declared else false,
         .codec = if (audible) |value| value.codec else null,
         .replay_gain = applied.multiplier,
         .replay_gain_source = applied.source,
-        .replay_gain_track = corrections.track,
+        .replay_gain_track = if (corrections.track != null) track: {
+            var track_settings = settings;
+            track_settings.mode = .track;
+            break :track corrections.applied(track_settings).multiplier;
+        } else null,
+        .replay_gain_settings = settings,
+        .replay_gain_limited = applied.limited,
         .equalizer = object_value.dsp.settings.equalizer,
         .parametric = object_value.dsp.settings.parametric,
         .crossfeed = object_value.dsp.settings.crossfeed,

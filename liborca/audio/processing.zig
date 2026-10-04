@@ -118,10 +118,58 @@ pub const ReplayGainMode = enum(u8) {
     /// album's own dynamics survive. An entry whose Release cannot be measured
     /// as a whole plays at its track correction instead, and says so.
     album,
+    /// Album correction while the entry sits next to another entry of its
+    /// Release in playback order, track correction otherwise: an album played
+    /// through keeps its dynamics, a shuffled mix is levelled per track.
+    smart,
+};
+
+/// What an entry with no usable measurement plays at while correction is on.
+pub const UntaggedFallback = enum(u8) {
+    /// Six decibels down, close to where measured modern masters land.
+    minus_6_db,
+    /// Unity: the entry plays as it is.
+    as_is,
+
+    pub fn multiplier(self: UntaggedFallback) f32 {
+        return switch (self) {
+            .minus_6_db => 0.5011872,
+            .as_is => 1,
+        };
+    }
+};
+
+pub const max_preamp_db: f32 = 15;
+
+/// Every Player-level ReplayGain choice in one word, so the decode lane reads
+/// a consistent set with a single atomic load on every block.
+pub const ReplayGainSettings = packed struct(u64) {
+    mode: ReplayGainMode = .track,
+    fallback: UntaggedFallback = .as_is,
+    /// Caps each correction at `1 / peak` so a boost never drives the
+    /// entry's measured peak past full scale.
+    peak_protection: bool = true,
+    reserved: u15 = 0,
+    /// Added to every measured correction, before the peak cap.
+    preamp_db: f32 = 0,
+
+    pub fn clampPreamp(decibels: f32) f32 {
+        if (std.math.isNan(decibels)) return 0;
+        return std.math.clamp(decibels, -max_preamp_db, max_preamp_db);
+    }
+
+    pub fn pack(self: ReplayGainSettings) u64 {
+        return @bitCast(self);
+    }
+
+    pub fn unpack(bits: u64) ReplayGainSettings {
+        return @bitCast(bits);
+    }
 };
 
 pub const ReplayGainSource = enum(u8) {
-    /// None: correction is off, or the entry has no usable measurement.
+    /// None: correction is off, or the entry has no usable measurement and
+    /// plays at the untagged fallback.
     none,
     track,
     album,
@@ -130,50 +178,88 @@ pub const ReplayGainSource = enum(u8) {
     track_fallback,
 };
 
-/// The corrections one entry carries, as linear multipliers already capped
-/// against their peaks. Null is "no usable measurement".
+/// One measured correction: the uncapped linear gain toward the target and
+/// the sample peak it would be capped against.
+pub const Correction = struct {
+    gain: f32,
+    peak: ?f32 = null,
+};
+
+/// The corrections one entry carries. Null is "no usable measurement".
 pub const EntryReplayGain = struct {
-    track: ?f32 = null,
-    album: ?f32 = null,
+    track: ?Correction = null,
+    album: ?Correction = null,
+    /// An entry beside this one in playback order belongs to the same
+    /// Release. Only `smart` reads it.
+    shares_release: bool = false,
 
     pub const Applied = struct {
         multiplier: f32,
         source: ReplayGainSource,
+        /// The peak cap lowered the correction below what was asked for.
+        limited: bool = false,
     };
 
-    pub fn applied(self: EntryReplayGain, mode: ReplayGainMode) Applied {
-        const none: Applied = .{ .multiplier = 1, .source = .none };
-        return switch (mode) {
-            .off => none,
-            .track => if (self.track) |track| .{ .multiplier = track, .source = .track } else none,
-            .album => if (self.album) |album|
-                .{ .multiplier = album, .source = .album }
-            else if (self.track) |track|
-                .{ .multiplier = track, .source = .track_fallback }
-            else
-                none,
+    pub fn applied(self: EntryReplayGain, settings: ReplayGainSettings) Applied {
+        const album_first = switch (settings.mode) {
+            .off => return .{ .multiplier = 1, .source = .none },
+            .track => false,
+            .album => true,
+            .smart => self.shares_release,
         };
+        const correction: Correction, const source: ReplayGainSource = if (album_first and self.album != null)
+            .{ self.album.?, .album }
+        else if (self.track) |track|
+            .{ track, if (album_first) .track_fallback else .track }
+        else
+            return .{ .multiplier = settings.fallback.multiplier(), .source = .none };
+        var linear = correction.gain * replayGainLinear(settings.preamp_db);
+        var limited = false;
+        if (settings.peak_protection) if (correction.peak) |peak| if (peak > 0 and linear > 1 / peak) {
+            linear = 1 / peak;
+            limited = true;
+        };
+        return .{ .multiplier = linear, .source = source, .limited = limited };
     }
 
-    /// Both corrections in one word, so a reader on another lane never sees
-    /// one entry's track figure beside another entry's album figure. A
-    /// multiplier is always positive, so zero bits stand for null.
-    pub fn pack(self: EntryReplayGain) u64 {
-        const track: u64 = if (self.track) |value| @as(u32, @bitCast(value)) else 0;
-        const album: u64 = if (self.album) |value| @as(u32, @bitCast(value)) else 0;
-        return track | album << 32;
-    }
+    pub const Packed = [3]u64;
 
-    pub fn unpack(bits: u64) EntryReplayGain {
-        const track: u32 = @truncate(bits);
-        const album: u32 = @truncate(bits >> 32);
+    /// A gain and a peak are always positive, so zero bits stand for null.
+    pub fn pack(self: EntryReplayGain) Packed {
         return .{
-            .track = if (track == 0) null else @bitCast(track),
-            .album = if (album == 0) null else @bitCast(album),
+            packCorrection(self.track),
+            packCorrection(self.album),
+            @intFromBool(self.shares_release),
         };
+    }
+
+    pub fn unpack(words: Packed) EntryReplayGain {
+        return .{
+            .track = unpackCorrection(words[0]),
+            .album = unpackCorrection(words[1]),
+            .shares_release = words[2] != 0,
+        };
+    }
+
+    fn packCorrection(correction: ?Correction) u64 {
+        const value = correction orelse return 0;
+        const gain: u64 = @as(u32, @bitCast(value.gain));
+        const peak: u64 = if (value.peak) |peak| @as(u32, @bitCast(peak)) else 0;
+        return gain | peak << 32;
+    }
+
+    fn unpackCorrection(bits: u64) ?Correction {
+        const gain: u32 = @truncate(bits);
+        if (gain == 0) return null;
+        const peak: u32 = @truncate(bits >> 32);
+        return .{ .gain = @bitCast(gain), .peak = if (peak == 0) null else @bitCast(peak) };
     }
 };
 
+/// The linear gain a stored ReplayGain figure asks for, before any peak cap.
+pub fn replayGainLinear(decibels: f32) f32 {
+    return std.math.pow(f32, 10, decibels / 20);
+}
 /// The linear multiplier a stored ReplayGain figure asks for.
 ///
 /// `peak` is the entry's measured sample peak. Boosting a track whose peak is
@@ -182,7 +268,7 @@ pub const EntryReplayGain = struct {
 /// deliberate quietening of the correction rather than a limiter, because a
 /// limiter would change the audio rather than its level.
 pub fn replayGainMultiplier(decibels: f32, peak: ?f32) f32 {
-    var linear = std.math.pow(f32, 10, decibels / 20);
+    var linear = replayGainLinear(decibels);
     if (peak) |value| {
         if (value > 0) linear = @min(linear, 1 / value);
     }
@@ -395,4 +481,65 @@ test "a boost is capped by the peak it would clip" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5012), replayGainMultiplier(-6, 0.9), 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 1.9953), replayGainMultiplier(6, null), 0.001);
     try std.testing.expectEqual(@as(f32, 1), replayGainMultiplier(0, null));
+}
+
+test "the preamp is clamped to fifteen decibels either way" {
+    try std.testing.expectEqual(@as(f32, 15), ReplayGainSettings.clampPreamp(40));
+    try std.testing.expectEqual(@as(f32, -15), ReplayGainSettings.clampPreamp(-40));
+    try std.testing.expectEqual(@as(f32, 3.5), ReplayGainSettings.clampPreamp(3.5));
+    try std.testing.expectEqual(@as(f32, 0), ReplayGainSettings.clampPreamp(std.math.nan(f32)));
+}
+
+test "the preamp scales a measured correction but not the untagged fallback" {
+    const measured: EntryReplayGain = .{ .track = .{ .gain = 0.5 } };
+    const settings: ReplayGainSettings = .{ .preamp_db = 6 };
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5 * 1.9953), measured.applied(settings).multiplier, 0.001);
+
+    const untagged: EntryReplayGain = .{};
+    try std.testing.expectEqual(@as(f32, 1), untagged.applied(settings).multiplier);
+    const minus_six = untagged.applied(.{ .preamp_db = 6, .fallback = .minus_6_db });
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5012), minus_six.multiplier, 0.0001);
+    try std.testing.expectEqual(ReplayGainSource.none, minus_six.source);
+    try std.testing.expectEqual(@as(f32, 1), untagged.applied(.{ .mode = .off, .fallback = .minus_6_db }).multiplier);
+}
+
+test "turning peak protection off lets a boost pass the peak cap" {
+    const entry: EntryReplayGain = .{ .track = .{ .gain = 2, .peak = 0.8 } };
+    const capped = entry.applied(.{});
+    try std.testing.expectApproxEqAbs(@as(f32, 1.25), capped.multiplier, 0.0001);
+    try std.testing.expect(capped.limited);
+
+    const uncapped = entry.applied(.{ .peak_protection = false });
+    try std.testing.expectEqual(@as(f32, 2), uncapped.multiplier);
+    try std.testing.expect(!uncapped.limited);
+
+    const headroom: EntryReplayGain = .{ .track = .{ .gain = 1.1, .peak = 0.5 } };
+    try std.testing.expect(!headroom.applied(.{}).limited);
+}
+
+test "smart mode takes album gain only while a neighbour shares the Release" {
+    var entry: EntryReplayGain = .{ .track = .{ .gain = 0.25 }, .album = .{ .gain = 0.5 } };
+    const smart: ReplayGainSettings = .{ .mode = .smart };
+    try std.testing.expectEqual(ReplayGainSource.track, entry.applied(smart).source);
+    try std.testing.expectEqual(@as(f32, 0.25), entry.applied(smart).multiplier);
+    entry.shares_release = true;
+    try std.testing.expectEqual(ReplayGainSource.album, entry.applied(smart).source);
+    try std.testing.expectEqual(@as(f32, 0.5), entry.applied(smart).multiplier);
+    entry.album = null;
+    try std.testing.expectEqual(ReplayGainSource.track_fallback, entry.applied(smart).source);
+}
+
+test "an entry's corrections survive packing for another lane" {
+    const entry: EntryReplayGain = .{
+        .track = .{ .gain = 0.25, .peak = 0.9 },
+        .album = .{ .gain = 0.5 },
+        .shares_release = true,
+    };
+    const round_trip = EntryReplayGain.unpack(entry.pack());
+    try std.testing.expectEqual(entry.track.?.gain, round_trip.track.?.gain);
+    try std.testing.expectEqual(entry.track.?.peak, round_trip.track.?.peak);
+    try std.testing.expectEqual(entry.album.?.gain, round_trip.album.?.gain);
+    try std.testing.expectEqual(@as(?f32, null), round_trip.album.?.peak);
+    try std.testing.expect(round_trip.shares_release);
+    try std.testing.expectEqual(@as(?Correction, null), EntryReplayGain.unpack((EntryReplayGain{}).pack()).track);
 }

@@ -120,7 +120,7 @@ zig build -Doptimize=ReleaseFast dsp-bench   # scalar vs SIMD DSP kernels
 
 ```sh
 zig build run -- demo
-zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown); the silent sink is virtual
+zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown), then `rates=44100-384000 depths=16,24,32 channels=2 state=active|suspended|unavailable`, or `rates=- depths=- channels=- state=unknown` when PipeWire did not answer within 500 ms; the silent sink is virtual
 
 # library
 zig build run -- scan DATABASE ROOT
@@ -181,7 +181,9 @@ zig build run -- smart-playlist-count DATABASE RULES_FILE [--sample=N]   # count
 # playback -- pass a device from scripts/silent-sink.sh, never the default
 zig build run -- play AUDIO [DEVICE_ID]
 zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start=N] [--repeat=off|one|all] [--shuffle]
-    [--replay-gain=off|track|album] [--volume=LINEAR] [--set-volume=MS:LINEAR]
+    [--replay-gain=off|track|album|smart] [--preamp=DB] [--untagged=-6|as-is] [--no-peak-protection]
+    [--stop-after-current]   # stops when the first entry heard ends; the signal line ends `replay_gain_source= preamp_db= peak_protection= untagged= peak_limited=`
+    [--volume=LINEAR] [--set-volume=MS:LINEAR]
     [--eq=PRESET|G1,...,G10[:PREAMP] | --peq=FILE] [--crossfeed=0..1]   # prints a `signal:` line; FILE is EqualizerAPO text
     [--skip-after=MS] [--previous-after=MS] [--tail=MS] [--limit=MS]   # --limit defaults to 10 min
     [--lyrics]   # prints a `lyric at=` line as each synced line is heard
