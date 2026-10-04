@@ -98,7 +98,7 @@ window,
 popover,
 dialog,
 tooltip {
-  font-family: "Inter Variable", Inter, sans-serif;
+  font-family: Geist, sans-serif;
 }
 
 .display-hero,
@@ -106,7 +106,7 @@ tooltip {
 .section-title,
 .album-title,
 .section-heading {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-weight: 600;
   color: var(--orca-text);
 }
@@ -202,7 +202,7 @@ gridview > child:selected {
 /* Sidebar */
 
 .wordmark {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 20px;
   font-weight: 600;
   margin-left: 6px;
@@ -913,7 +913,7 @@ button.tile-more {
 }
 
 .cover-initials {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 2.4em;
   font-weight: 500;
   color: var(--orca-text-tertiary);
@@ -1319,7 +1319,7 @@ button.now-album {
 }
 
 .now-empty .title {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 20px;
   font-weight: 400;
 }
@@ -1999,7 +1999,7 @@ row:selected .row-stars,
 }
 
 .loved-title {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 64px;
   font-weight: 600;
   line-height: 1.05;
@@ -2042,7 +2042,7 @@ row:selected .row-stars,
 }
 
 .loved-stat-number {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 30px;
   font-weight: 600;
   line-height: 1;
@@ -2152,7 +2152,7 @@ button.playlist-tab:focus-visible {
 }
 
 .playlist-section-title {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 22px;
   font-weight: 500;
   color: var(--orca-text);
@@ -3362,7 +3362,7 @@ button.filters-button,
 }
 
 .genre-hero-name {
-  font-family: "Source Serif 4 Variable", "Source Serif 4", serif;
+  font-family: Newsreader, serif;
   font-size: 56px;
   font-weight: 600;
   line-height: 1.1;

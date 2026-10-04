@@ -992,7 +992,7 @@ is selected; Up and Down move, Enter opens (a track plays; an album, artist
 or playlist opens its page; a genre opens on Genres), Shift+Enter plays
 instead of opening (an artist still opens), and Escape closes. Below
 the header, the sidebar's pages open with a title block: the page name in
-Source Serif 4, its count beneath it, and the page's own actions at the end
+Newsreader, its count beneath it, and the page's own actions at the end
 of that row. Album, artist and playlist pages have their own heading instead.
 
 Below 900sp the album, artist and playlist headings and the Settings columns
@@ -1274,9 +1274,9 @@ runs directly, without `XDG_DATA_DIRS`.
 The app has its own look rather than the system's: it forces libadwaita's dark
 scheme, and `apps/linux/style.css` defines Orca's palette as CSS variables and
 maps libadwaita's colour variables onto them, so stock widgets match. The
-interface is set in Inter and display titles in Source Serif 4. Both are
-bundled under the SIL Open Font License, installed with their licences to
-`share/orca/fonts`, and registered with Pango from
+interface is set in Geist and display titles in Newsreader; Geist Mono is
+bundled for monospace text. All are under the SIL Open Font License,
+installed with their licences to `share/orca/fonts`, and registered with Pango from
 `<exe dir>/../share/orca/fonts` before the window is built; if they are
 missing, `orca-gtk` logs a warning and uses system fonts.
 

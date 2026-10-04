@@ -288,7 +288,7 @@ pub fn build(b: *std.Build) void {
                 b.fmt("share/icons/hicolor/scalable/actions/{s}.svg", .{icon}),
             );
         }
-        for ([_][]const u8{ "SourceSerif4Variable-Roman.ttf", "SourceSerif4-OFL.txt", "InterVariable.ttf", "Inter-OFL.txt" }) |font_file| {
+        for ([_][]const u8{ "Newsreader[opsz,wght].ttf", "Newsreader-Italic[opsz,wght].ttf", "Geist[wght].ttf", "GeistMono[wght].ttf", "Newsreader-OFL.txt", "Geist-OFL.txt", "GeistMono-OFL.txt" }) |font_file| {
             b.installFile(b.fmt("apps/linux/data/fonts/{s}", .{font_file}), b.fmt("share/orca/fonts/{s}", .{font_file}));
         }
         const run_linux_app = b.addRunArtifact(linux_app);

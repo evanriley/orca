@@ -397,6 +397,10 @@
 
 ### Changed
 
+- **Newsreader, Geist and Geist Mono replace Inter and Source Serif 4.**
+  `orca-gtk` sets display titles in Newsreader and the interface in Geist,
+  and bundles Geist Mono, all under the SIL Open Font License and
+  installed with their licences to `share/orca/fonts`.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the

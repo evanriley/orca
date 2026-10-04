@@ -8,7 +8,7 @@ const app = @import("app.zig");
 
 const stylesheet = @embedFile("style.css");
 
-const font_files = [_][]const u8{ "SourceSerif4Variable-Roman.ttf", "InterVariable.ttf" };
+const font_files = [_][]const u8{ "Newsreader[opsz,wght].ttf", "Newsreader-Italic[opsz,wght].ttf", "Geist[wght].ttf", "GeistMono[wght].ttf" };
 
 pub fn apply(io: std.Io, display: *gtk.GdkDisplay) void {
     adw.adw_style_manager_set_color_scheme(adw.adw_style_manager_get_default(), adw.COLOR_SCHEME_FORCE_DARK);
