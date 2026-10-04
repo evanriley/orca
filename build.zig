@@ -280,20 +280,37 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "liborca", .module = liborca_module }},
         }) });
         test_step.dependOn(&b.addRunArtifact(signal_path_tests).step);
+        const browse_model_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/linux/browse_model.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "liborca", .module = liborca_module }},
+        }) });
+        test_step.dependOn(&b.addRunArtifact(browse_model_tests).step);
         b.installFile("apps/linux/data/org.orca_music.Orca.desktop", "share/applications/org.orca_music.Orca.desktop");
         b.installFile("apps/linux/data/org.orca_music.Orca.svg", "share/icons/hicolor/scalable/apps/org.orca_music.Orca.svg");
         for ([_][]const u8{
-            "orca-heart-filled-symbolic", "orca-heart-outline-symbolic", "orca-pulse-symbolic",
-            "orca-albums-symbolic",       "orca-artists-symbolic",       "orca-tracks-symbolic",
-            "orca-genres-symbolic",       "orca-folders-symbolic",       "orca-loved-symbolic",
-            "orca-playlists-symbolic",    "orca-now-playing-symbolic",   "orca-queue-symbolic",
-            "orca-health-symbolic",       "orca-matches-symbolic",       "orca-settings-symbolic",
-            "orca-signal-symbolic",       "orca-search-symbolic",        "orca-back-symbolic",
-            "orca-forward-symbolic",      "orca-chevron-down-symbolic",  "orca-shuffle-symbolic",
-            "orca-repeat-symbolic",       "orca-repeat-one-symbolic",    "orca-previous-symbolic",
-            "orca-next-symbolic",         "orca-play-symbolic",          "orca-pause-symbolic",
-            "orca-volume-high-symbolic",  "orca-volume-low-symbolic",    "orca-volume-muted-symbolic",
-            "orca-filter-symbolic",       "orca-grid-symbolic",          "orca-list-symbolic",
+            "orca-heart-filled-symbolic", "orca-heart-outline-symbolic",    "orca-pulse-symbolic",
+            "orca-albums-symbolic",       "orca-artists-symbolic",          "orca-tracks-symbolic",
+            "orca-genres-symbolic",       "orca-folders-symbolic",          "orca-loved-symbolic",
+            "orca-playlists-symbolic",    "orca-now-playing-symbolic",      "orca-queue-symbolic",
+            "orca-health-symbolic",       "orca-matches-symbolic",          "orca-settings-symbolic",
+            "orca-signal-symbolic",       "orca-search-symbolic",           "orca-back-symbolic",
+            "orca-forward-symbolic",      "orca-chevron-down-symbolic",     "orca-shuffle-symbolic",
+            "orca-repeat-symbolic",       "orca-repeat-one-symbolic",       "orca-previous-symbolic",
+            "orca-next-symbolic",         "orca-play-symbolic",             "orca-pause-symbolic",
+            "orca-volume-high-symbolic",  "orca-volume-low-symbolic",       "orca-volume-muted-symbolic",
+            "orca-filter-symbolic",       "orca-grid-symbolic",             "orca-list-symbolic",
+            "orca-star-symbolic",         "orca-more-symbolic",             "orca-columns-symbolic",
+            "orca-arrow-down-symbolic",   "orca-arrow-up-symbolic",         "orca-close-symbolic",
+            "orca-plus-symbolic",         "orca-grip-symbolic",             "orca-sparkle-symbolic",
+            "orca-pin-symbolic",          "orca-minus-symbolic",            "orca-chevron-right-symbolic",
+            "orca-file-symbolic",         "orca-image-symbolic",            "orca-external-link-symbolic",
+            "orca-check-symbolic",        "orca-device-dac-symbolic",       "orca-device-speaker-symbolic",
+            "orca-device-tv-symbolic",    "orca-device-bluetooth-symbolic", "orca-refresh-symbolic",
+            "orca-gain-symbolic",         "orca-engine-symbolic",           "orca-system-symbolic",
+            "orca-info-symbolic",
         }) |icon| {
             b.installFile(
                 b.fmt("apps/linux/data/{s}.svg", .{icon}),

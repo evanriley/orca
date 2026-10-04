@@ -22,7 +22,7 @@ const App = app.App;
 const TrackObject = track_model.TrackObject;
 
 pub const filled_icon = "orca-heart-filled-symbolic";
-const outline_icon = "orca-heart-outline-symbolic";
+pub const outline_icon = "orca-heart-outline-symbolic";
 const heart_pixels: c_int = 14;
 const album_heart_pixels: c_int = 16;
 const change_batch = 512;

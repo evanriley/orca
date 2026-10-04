@@ -38,6 +38,7 @@ const parametric = @import("parametric.zig");
 /// library stays virtualized.
 pub const page_size: u32 = 512;
 pub const search_delay_ms: c_uint = 200;
+const browse_retry_ms: c_uint = 25;
 pub const open_album_page_limit = 32;
 pub const open_artist_page_limit = 8;
 
@@ -83,8 +84,8 @@ const marked_view_limit = 8;
 pub const Browse = struct {
     artist_id: ?i64 = null,
     release_id: ?i64 = null,
-    sort: liborca.TrackSort = .id,
-    direction: liborca.SortDirection = .ascending,
+    sort: liborca.TrackSort = .date_added,
+    direction: liborca.SortDirection = .descending,
 
     /// The order a newly entered scope is listed in. An album is listened to in
     /// disc-then-track order, an artist's shelf reads album by album, and an
@@ -92,7 +93,11 @@ pub const Browse = struct {
     pub fn defaultSort(self: Browse) liborca.TrackSort {
         if (self.release_id != null) return .track_number;
         if (self.artist_id != null) return .album;
-        return .id;
+        return .date_added;
+    }
+
+    pub fn defaultDirection(self: Browse) liborca.SortDirection {
+        return if (self.defaultSort() == .date_added) .descending else .ascending;
     }
 };
 
@@ -222,6 +227,15 @@ pub const ListeningControls = struct {
     status_len: usize = 0,
 };
 
+pub const TotalsRequest = union(enum) {
+    idle,
+    /// The browse loader was full; asked for again by the retry timer.
+    waiting,
+    pending: u64,
+};
+
+pub const Failure = enum { none, unreported, reported };
+
 pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission };
 
 pub const default_match_threshold_percent: u8 = 90;
@@ -263,6 +277,7 @@ pub const App = struct {
     /// somebody's speakers.
     pinned_output_device: ?u64 = null,
     debug_frames: bool = false,
+    debug_reveal: bool = false,
     frame_started_us: i64 = 0,
     slowest_frame_us: i64 = 0,
     /// Correlates the last `play_track` submission with its completion event, so
@@ -271,13 +286,28 @@ pub const App = struct {
 
     tracks: track_table.Table = .{},
     track_columns: track_table.Config = .{},
+    track_columns_large: track_table.Config = .initial(.large),
     track_filters: track_filters.Filters = .{},
     track_filters_ui: track_filters.Ui = .{},
     scroller: ?*gtk.Widget = null,
     query: OwnedText = .{},
-    loaded_rows: u32 = 0,
-    page_exhausted: bool = false,
-    track_total: u64 = 0,
+    /// The listing's length and summed duration, as the engine counts them.
+    track_count: u32 = 0,
+    track_duration_ms: u64 = 0,
+    /// Every Track in the library, measured when the listing is unfiltered
+    /// or the Tracks page needs it, and forgotten when the library changes.
+    track_library_total: ?u64 = null,
+    tracks_totals: TotalsRequest = .idle,
+    tracks_failure: Failure = .none,
+    /// GLib source that asks again for what the browse loader refused;
+    /// zero when none is pending.
+    browse_retry_source: c_uint = 0,
+    /// Set while the Tracks page uses its large form.
+    tracks_large: bool = false,
+    tracks_title_end: ?*gtk.Widget = null,
+    tracks_title_text: ?*gtk.Widget = null,
+    tracks_columns_corner: ?*gtk.Widget = null,
+    tracks_page: ?*gtk.Widget = null,
     browse: Browse = .{},
     sort_dropdown: ?*gtk.DropDown = null,
 
@@ -325,8 +355,9 @@ pub const App = struct {
     welcome_button: ?*gtk.Widget = null,
     welcome_spinner: ?*gtk.Widget = null,
     browse_panes: ?*gtk.Widget = null,
-    browse_toggle: ?*gtk.Widget = null,
-    list_toggle: ?*gtk.Widget = null,
+    browse_chosen: bool = false,
+    browse_collapsed: bool = false,
+    browse_action: ?*gtk.GSimpleAction = null,
 
     /// What the inspector shows, restored from settings.
     sidebar_page: Sidebar = .hidden,
@@ -468,7 +499,7 @@ pub const App = struct {
     scan_label: ?*gtk.Label = null,
     scan_detail: ?*gtk.Label = null,
 
-    transport_controls: std.EnumArray(TransportSurface, TransportControls) = .initFill(.{}),
+    transport_controls: TransportControls = .{},
     seek_adjustment: ?*gtk.Adjustment = null,
     now_playing_title: ?*gtk.Label = null,
     now_playing_detail: ?*gtk.Label = null,
@@ -586,7 +617,9 @@ pub const App = struct {
                 .lossless => true,
                 .lossy => false,
             },
-            .min_sample_rate = self.track_filters.min_sample_rate,
+            .min_sample_rate = if (self.track_filters.rate_above) |rate| rate + 1 else null,
+            .codec = if (self.track_filters.codec) |codec| @tagName(codec) else null,
+            .added_after = self.track_filters.added.after,
             .explicit_only = self.track_filters.explicit_only,
             .sort = self.browse.sort,
             .direction = self.browse.direction,
@@ -625,7 +658,7 @@ pub const App = struct {
     /// column headers so the view and the query cannot disagree.
     pub fn applyScopeDefaultSort(self: *App) void {
         self.browse.sort = self.browse.defaultSort();
-        self.browse.direction = .ascending;
+        self.browse.direction = self.browse.defaultDirection();
         window.showSort(self);
     }
 
@@ -636,16 +669,16 @@ pub const App = struct {
             return;
         }
         var buffer: [96]u8 = undefined;
-        const text = if (self.query.value.len != 0)
-            strings.printZ(&buffer, "{d}{s} matching", .{
-                self.loaded_rows,
-                if (self.page_exhausted) "" else "+",
-            }) catch ""
-        else if (self.track_total == 1)
+        const text = if (self.tracks_large)
+            strings.printZ(&buffer, "{f}", .{strings.grouped(self.track_library_total orelse self.track_count)}) catch ""
+        else if (self.query.value.len != 0)
+            strings.printZ(&buffer, "{f} matching", .{strings.grouped(self.track_count)}) catch ""
+        else if (self.track_count == 1)
             "1 track"
         else
-            strings.printZ(&buffer, "{d} tracks", .{self.track_total}) catch "";
+            strings.printZ(&buffer, "{f} tracks", .{strings.grouped(self.track_count)}) catch "";
         gtk.gtk_label_set_text(meta, text.ptr);
+        track_filters.showTotals(self);
     }
 
     /// Chooses what the Tracks page shows: the listing, a welcome for a library
@@ -654,7 +687,7 @@ pub const App = struct {
         const body = self.tracks_body orelse return;
         const searching = self.query.value.len != 0;
         const scoped = self.browse.artist_id != null or self.browse.release_id != null;
-        if (self.loaded_rows != 0 or scoped) {
+        if (self.track_count != 0 or scoped) {
             gtk.gtk_stack_set_visible_child_name(body, "list");
         } else if (searching or self.track_filters.active()) {
             gtk.gtk_stack_set_visible_child_name(body, "no-results");
@@ -684,83 +717,219 @@ pub const App = struct {
         if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (self.task == .scan) gtk.true_ else gtk.false_);
     }
 
-    /// Fetches exactly one bounded page and appends it. The page is caller-owned
-    /// and released here; the rows copy everything they keep.
-    pub fn loadNextPage(self: *App) void {
-        const library = self.library orelse return;
-        if (self.page_exhausted) return;
-        const store = self.tracks.store orelse return;
-        var page = self.runtime.libraryTrackQuery(
-            library,
-            self.query.value,
-            self.trackRequest(self.loaded_rows),
-        ) catch {
-            self.page_exhausted = true;
-            self.toast("Unable to query the library");
-            return;
-        };
-        defer page.deinit();
-        if (page.items.len < page_size) self.page_exhausted = true;
-        if (page.items.len == 0) {
-            self.updateCountLabel();
-            return;
-        }
-        var additions = std.ArrayList(?*anyopaque).initCapacity(
-            self.allocator,
-            page.items.len,
-        ) catch {
-            self.toast("Out of memory building the track list");
-            return;
-        };
-        defer additions.deinit(self.allocator);
-        for (page.items) |item| {
-            const row = track_model.new(item) orelse continue;
-            additions.appendAssumeCapacity(row);
-        }
-        if (additions.items.len != 0) {
-            gtk.g_list_store_splice(
-                store,
-                gtk.g_list_model_get_n_items(gtk.cast(gtk.ListModel, store)),
-                0,
-                additions.items.ptr,
-                @intCast(additions.items.len),
-            );
-            self.loaded_rows += @intCast(additions.items.len);
-            for (additions.items) |row| gtk.g_object_unref(row);
-        }
-        self.updateCountLabel();
+    fn trackListing(self: *App, offset: u32, limit: u32) liborca.BrowseTrackListing {
+        var query = self.trackRequest(offset);
+        query.limit = limit;
+        return .{ .text = self.query.value, .query = query };
     }
 
-    pub fn reload(self: *App) void {
-        const store = self.tracks.store orelse return;
-        gtk.g_list_store_remove_all(store);
-        self.loaded_rows = 0;
-        self.page_exhausted = false;
-        self.track_total = 0;
+    /// Asks the browse loader for one page of rows for the paged track model.
+    fn requestTracks(context: *anyopaque, offset: u32, limit: u32) track_model.Requested {
+        const self: *App = @ptrCast(@alignCast(context));
+        const library = self.library orelse return .failed;
+        const id = self.runtime.libraryRequestBrowse(library, self.io, .{ .track_page = self.trackListing(offset, limit) }) catch |err| {
+            if (err == error.BrowseQueueFull) {
+                self.scheduleBrowseRetry();
+                return .busy;
+            }
+            self.noteTracksFailure();
+            return .failed;
+        };
+        return .{ .issued = id };
+    }
+
+    fn cancelTracks(context: *anyopaque, request: u64) void {
+        const self: *App = @ptrCast(@alignCast(context));
+        const library = self.library orelse return;
+        self.runtime.libraryCancelBrowse(library, request);
+    }
+
+    /// Toasts from the retry timer rather than here: a page is asked for
+    /// while GTK lays the list out.
+    fn noteTracksFailure(self: *App) void {
+        if (self.tracks_failure == .none) self.tracks_failure = .unreported;
+        self.scheduleBrowseRetry();
+    }
+
+    pub fn noteAlbumsFailure(self: *App) void {
+        if (self.albums_failure == .none) self.albums_failure = .unreported;
+        self.scheduleBrowseRetry();
+    }
+
+    pub fn scheduleBrowseRetry(self: *App) void {
+        if (self.browse_retry_source == 0) self.browse_retry_source = gtk.g_timeout_add(browse_retry_ms, browseRetryFired, self);
+    }
+
+    fn browseRetryFired(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+        const self: *App = @ptrCast(@alignCast(data.?));
+        self.browse_retry_source = 0;
+        self.retryBrowse();
+        return gtk.SOURCE_REMOVE;
+    }
+
+    /// Asks again for what the browse loader was too full to take, and
+    /// reports a failure once per listing.
+    fn retryBrowse(self: *App) void {
+        if (self.tracks_failure == .unreported or self.albums_failure == .unreported) {
+            if (self.tracks_failure == .unreported) self.tracks_failure = .reported;
+            if (self.albums_failure == .unreported) self.albums_failure = .reported;
+            self.toast("Unable to query the library");
+        }
+        var waiting = albums.retryWaiting(self);
+        if (self.tracks_totals == .waiting) {
+            self.requestTotals();
+            switch (self.tracks_totals) {
+                .waiting => waiting = true,
+                .idle => self.totalsFailed(),
+                .pending => {},
+            }
+        }
+        if (self.tracks.paged) |paged| {
+            if (paged.retryWaiting()) waiting = true;
+        }
+        if (waiting) self.scheduleBrowseRetry();
+    }
+
+    /// Takes every finished browse result and hands it to what asked for
+    /// it. Results nothing waits for any more are dropped.
+    pub fn takeBrowseResults(self: *App) void {
+        const library = self.library orelse return;
+        var took = false;
+        while (self.runtime.libraryTakeBrowse(library)) |result| {
+            defer result.deinit();
+            took = true;
+            const payload = result.payload catch {
+                if (self.isTotalsRequest(result.request)) {
+                    self.totalsFailed();
+                } else if (albums.isCountRequest(self, result.request)) {
+                    albums.countFailed(self);
+                } else if (albums.pageFailed(self, result.request)) {
+                    self.noteAlbumsFailure();
+                } else if (self.tracks.paged) |paged| {
+                    if (paged.pageFailed(result.request)) self.noteTracksFailure();
+                }
+                continue;
+            };
+            switch (payload) {
+                .track_page => |page| if (self.tracks.paged) |paged| {
+                    const started = gtk.g_get_monotonic_time();
+                    paged.pageArrived(result.request, page);
+                    if (self.debug_frames) std.debug.print("orca-gtk frames: page {d} us\n", .{gtk.g_get_monotonic_time() - started});
+                },
+                .track_totals => |totals| if (self.isTotalsRequest(result.request)) self.totalsArrived(totals),
+                .release_page => |page| albums.pageArrived(self, result.request, page),
+                .release_count => |count| if (albums.isCountRequest(self, result.request)) albums.countArrived(self, count),
+            }
+        }
+        if (took) self.retryBrowse();
+    }
+
+    fn requestTotals(self: *App) void {
         const library = self.library orelse {
-            self.updateCountLabel();
-            self.updateTracksBody();
+            self.tracks_totals = .idle;
             return;
         };
-        // A full-text match has no cheap total — FTS5 ranks rather than counts —
-        // so a search reports what it has loaded and nothing it has not.
-        self.track_total = if (self.query.value.len != 0)
-            0
-        else
-            self.runtime.libraryTrackMatchCount(library, self.trackRequest(0)) catch 0;
-        // A scroller left deep in the previous listing would page from the
-        // bottom of a list that is now one page long.
-        if (self.scroller) |scroller| gtk.gtk_adjustment_set_value(
-            gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
-            0.0,
-        );
-        self.loadNextPage();
+        const id = self.runtime.libraryRequestBrowse(library, self.io, .{ .track_totals = self.trackListing(0, page_size) }) catch |err| {
+            if (err == error.BrowseQueueFull) {
+                self.tracks_totals = .waiting;
+                self.scheduleBrowseRetry();
+                return;
+            }
+            self.tracks_totals = .idle;
+            self.noteTracksFailure();
+            return;
+        };
+        self.tracks_totals = .{ .pending = id };
+    }
+
+    fn cancelTotals(self: *App) void {
+        switch (self.tracks_totals) {
+            .pending => |id| if (self.library) |library| self.runtime.libraryCancelBrowse(library, id),
+            else => {},
+        }
+        self.tracks_totals = .idle;
+    }
+
+    fn isTotalsRequest(self: *const App, request: u64) bool {
+        return switch (self.tracks_totals) {
+            .pending => |id| id == request,
+            else => false,
+        };
+    }
+
+    fn totalsFailed(self: *App) void {
+        self.tracks_totals = .idle;
+        self.noteTracksFailure();
+        self.track_count = 0;
+        self.track_duration_ms = 0;
+        if (self.tracks.paged) |paged| paged.resize(0);
+        self.showListing();
+    }
+
+    fn totalsArrived(self: *App, totals: liborca.TrackTotals) void {
+        const started = gtk.g_get_monotonic_time();
+        self.tracks_totals = .idle;
+        self.track_count = @intCast(@min(totals.count, std.math.maxInt(u32)));
+        self.track_duration_ms = totals.duration_ms;
+        const unfiltered = self.query.value.len == 0 and !self.track_filters.active() and
+            self.browse.artist_id == null and self.browse.release_id == null;
+        if (unfiltered) self.track_library_total = self.track_count;
+        if (self.tracks.paged) |paged| paged.resize(self.track_count);
+        self.showListing();
+        if (self.debug_frames) {
+            std.debug.print("orca-gtk frames: totals {d} us\n", .{gtk.g_get_monotonic_time() - started});
+        }
+    }
+
+    fn showListing(self: *App) void {
+        window.applyTracksForm(self);
+        self.updateCountLabel();
         self.updateTracksBody();
         details.invalidate(self);
     }
 
+    pub fn reload(self: *App) void {
+        self.relist(true);
+    }
+
+    /// Lists the same tracks in the order `browse` now names, keeping the
+    /// count and duration, which a sort cannot change.
+    pub fn resort(self: *App) void {
+        self.relist(false);
+    }
+
+    /// Asks for the listing again. The rows on screen become placeholders
+    /// until their pages arrive; a recount keeps the old length, and what
+    /// the page says about it, until the new totals arrive.
+    fn relist(self: *App, recount: bool) void {
+        const paged = self.tracks.paged orelse return;
+        const started = gtk.g_get_monotonic_time();
+        paged.setSource(.{ .context = self, .request = requestTracks, .cancel = cancelTracks });
+        self.tracks_failure = .none;
+        if (recount) {
+            self.cancelTotals();
+            self.requestTotals();
+            if (self.tracks_totals == .idle) {
+                self.track_count = 0;
+                self.track_duration_ms = 0;
+            }
+        }
+        // A scroller left deep in the previous listing would show rows far
+        // below a listing that may now be short.
+        if (self.scroller) |scroller| gtk.gtk_adjustment_set_value(
+            gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
+            0.0,
+        );
+        paged.reset(self.track_count);
+        if (self.tracks_totals == .idle) self.showListing();
+        if (self.debug_frames) {
+            std.debug.print("orca-gtk frames: reload {d} us\n", .{gtk.g_get_monotonic_time() - started});
+        }
+    }
+
     pub fn deinit(self: *App) void {
         self.history.deinit();
+        if (self.browse_retry_source != 0) _ = gtk.g_source_remove(self.browse_retry_source);
         if (self.equalizer_apply_timer != 0) _ = gtk.g_source_remove(self.equalizer_apply_timer);
         parametric.deinit(self);
         if (self.seek_settle_timer != 0) _ = gtk.g_source_remove(self.seek_settle_timer);

@@ -20,6 +20,7 @@ const ratings = @import("ratings.zig");
 const playlists = @import("playlists.zig");
 const albums = @import("albums.zig");
 const window = @import("window.zig");
+const health = @import("health.zig");
 
 const App = app.App;
 
@@ -266,16 +267,28 @@ pub fn popup(self: *App, widget: *gtk.Widget, x: f64, y: f64) void {
 }
 
 pub fn popupModel(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, x: f64, y: f64) void {
+    _ = present(widget, menu_model, pointAt(x, y), null);
+}
+
+fn pointAt(x: f64, y: f64) gtk.Rectangle {
+    return .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .width = 1, .height = 1 };
+}
+
+fn present(widget: *gtk.Widget, menu_model: *gtk.GMenuModel, anchor: gtk.Rectangle, halign: ?c_int) *gtk.Widget {
     const popover = gtk.gtk_popover_menu_new_from_model(menu_model);
     gtk.gtk_widget_set_parent(popover, widget);
     _ = gtk.g_signal_connect_object(widget, "destroy", gtk.callback(unparentWithParent), popover, 0);
     gtk.gtk_popover_set_has_arrow(gtk.cast(gtk.Popover, popover), gtk.false_);
-    const point: gtk.Rectangle = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .width = 1, .height = 1 };
-    gtk.gtk_popover_set_pointing_to(gtk.cast(gtk.Popover, popover), &point);
+    gtk.gtk_popover_set_pointing_to(gtk.cast(gtk.Popover, popover), &anchor);
+    if (halign) |alignment| {
+        gtk.gtk_popover_set_position(gtk.cast(gtk.Popover, popover), gtk.POS_BOTTOM);
+        gtk.gtk_widget_set_halign(popover, alignment);
+    }
     _ = gtk.signalConnect(popover, "closed", gtk.callback(closed), null);
     gtk.gtk_popover_popup(gtk.cast(gtk.Popover, popover));
     unsized_popover = gtk.cast(gtk.Popover, popover);
     _ = gtk.g_idle_add(presentUnsized, gtk.g_object_ref(popover));
+    return popover;
 }
 
 /// A right-button click gesture on `widget`, calling `handler` with the

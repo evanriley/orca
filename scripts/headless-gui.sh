@@ -16,7 +16,7 @@
 #   shot:PATH    saves a screenshot to PATH at once, without waiting to settle
 #   tree:PATH    saves sway's window tree, with window titles, to PATH as JSON
 #   log:PATH     copies orca-gtk's output so far to PATH; set ORCA_GTK_DEBUG
-#                (art, frames) to add its debug reports
+#                (art, frames, reveal) to add its debug reports
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
 # scripts/design-fixture.sh when missing; the app gets a copy. Settings
@@ -30,7 +30,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '5,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -58,7 +58,7 @@ case "$page" in
 esac
 for step in "${steps[@]}"; do
     case "$step" in
-        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | rclick:*,* | shot:?*.png | tree:?* | log:?*) ;;
+        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | dclick:*,* | rclick:*,* | drag:*,*,*,* | shot:?*.png | tree:?* | log:?*) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
     esac
 done
@@ -274,6 +274,11 @@ while True:
         pointer.frame()
     elif words[0] == "click":
         button(0x110)
+    elif words[0] == "dclick":
+        button(0x110)
+        display.flush()
+        time.sleep(0.05)
+        button(0x110)
     elif words[0] == "rclick":
         button(0x111)
     elif words[0] == "scroll":
@@ -409,6 +414,7 @@ run_step() {
         click:*) pointer_command move "${value%,*}" "${value#*,}" && sleep 0.1 && pointer_command click ;;
         rclick:*) pointer_command move "${value%,*}" "${value#*,}" && sleep 0.1 && pointer_command rclick ;;
         scroll:*) pointer_command scroll "$value" ;;
+        drag:*) drag ${value//,/ } ;;
     esac
     sleep 0.6
 }
@@ -428,7 +434,7 @@ show_page() {
         *) title="${1^}" ;;
     esac
     run_step key:ctrl+k
-    run_step "type:>Go to $title"
+    run_step "type:>Show $title"
     run_step key:Return
 }
 

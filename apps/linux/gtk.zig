@@ -148,6 +148,7 @@ pub const ALIGN_FILL: c_int = 0;
 pub const ALIGN_START: c_int = 1;
 pub const ALIGN_END: c_int = 2;
 pub const ALIGN_CENTER: c_int = 3;
+pub const ALIGN_BASELINE_FILL: c_int = 4;
 
 pub const PACK_END: c_int = 1;
 
@@ -212,11 +213,15 @@ pub const KEY_Delete: c_uint = 0xffff;
 pub const KEY_Up: c_uint = 0xff52;
 pub const KEY_BackSpace: c_uint = 0xff08;
 pub const KEY_Down: c_uint = 0xff54;
+pub const KEY_Home: c_uint = 0xff50;
+pub const KEY_End: c_uint = 0xff57;
 pub const KEY_Return: c_uint = 0xff0d;
 pub const KEY_KP_Enter: c_uint = 0xff8d;
 pub const KEY_ISO_Enter: c_uint = 0xfe34;
 pub const KEY_Escape: c_uint = 0xff1b;
 pub const KEY_KP_Delete: c_uint = 0xff9f;
+pub const KEY_Menu: c_uint = 0xff67;
+pub const KEY_F10: c_uint = 0xffc7;
 pub const ACTION_MOVE: c_int = 1 << 1;
 pub const EVENT_SEQUENCE_CLAIMED: c_int = 1;
 pub const EVENT_SEQUENCE_DENIED: c_int = 2;
@@ -278,6 +283,23 @@ pub extern fn g_type_register_static(
     flags: c_uint,
 ) GType;
 pub extern fn g_type_class_peek_parent(g_class: *anyopaque) ?*anyopaque;
+pub const GInterfaceInfo = extern struct {
+    interface_init: ?*const fn (*anyopaque, ?*anyopaque) callconv(.c) void = null,
+    interface_finalize: ?*anyopaque = null,
+    interface_data: ?*anyopaque = null,
+};
+pub extern fn g_type_add_interface_static(instance_type: GType, interface_type: GType, info: *const GInterfaceInfo) void;
+
+/// `struct _GListModelInterface`: the `GTypeInterface` header, then the three
+/// methods a list model implements.
+pub const ListModelInterface = extern struct {
+    g_type: GType,
+    g_instance_type: GType,
+    get_item_type: ?*const fn (*ListModel) callconv(.c) GType,
+    get_n_items: ?*const fn (*ListModel) callconv(.c) c_uint,
+    get_item: ?*const fn (*ListModel, c_uint) callconv(.c) ?*anyopaque,
+};
+pub extern fn g_list_model_get_type() GType;
 pub extern fn g_object_new_with_properties(
     object_type: GType,
     n_properties: c_uint,
@@ -350,6 +372,8 @@ pub extern fn g_file_set_contents(
     err: *?*GError,
 ) c_int;
 pub extern fn g_unlink(filename: [*:0]const u8) c_int;
+pub extern fn g_filename_to_uri(filename: [*:0]const u8, hostname: ?[*:0]const u8, err: ?*?*GError) ?[*:0]u8;
+pub extern fn g_app_info_launch_default_for_uri(uri: [*:0]const u8, context: ?*anyopaque, err: ?*?*GError) c_int;
 pub extern fn g_get_monotonic_time() i64;
 
 pub const GDateTime = opaque {};
@@ -401,6 +425,7 @@ pub extern fn g_simple_action_new_stateful(name: [*:0]const u8, parameter_type: 
 pub extern fn g_simple_action_set_enabled(action: *GSimpleAction, enabled: gboolean) void;
 pub extern fn g_simple_action_set_state(action: *GSimpleAction, value: *GVariant) void;
 pub extern fn g_action_map_add_action(action_map: *GActionMap, action: *GAction) void;
+pub extern fn g_action_map_lookup_action(action_map: *GActionMap, action_name: [*:0]const u8) ?*GAction;
 pub extern fn g_simple_action_group_new() *GSimpleActionGroup;
 pub extern fn gtk_widget_insert_action_group(widget: *Widget, name: [*:0]const u8, group: ?*GActionGroup) void;
 pub extern fn g_application_run(application: *GApplication, argc: c_int, argv: ?[*]const ?[*:0]const u8) c_int;
@@ -618,6 +643,7 @@ pub extern fn gtk_widget_grab_focus(widget: *Widget) gboolean;
 pub const DIR_TAB_FORWARD: c_int = 0;
 pub extern fn gtk_widget_child_focus(widget: *Widget, direction: c_int) gboolean;
 pub extern fn gtk_widget_get_root(widget: *Widget) ?*Widget;
+pub extern fn gtk_widget_get_scale_factor(widget: *Widget) c_int;
 pub extern fn gtk_widget_is_ancestor(widget: *Widget, ancestor: *Widget) gboolean;
 pub extern fn gtk_window_get_focus(window: *Window) ?*Widget;
 pub extern fn gtk_widget_get_ancestor(widget: *Widget, widget_type: GType) ?*Widget;
@@ -648,6 +674,12 @@ pub const PangoLayout = opaque {};
 pub extern fn gtk_widget_create_pango_layout(widget: *Widget, text: ?[*:0]const u8) *PangoLayout;
 pub extern fn pango_layout_set_width(layout: *PangoLayout, width: c_int) void;
 pub extern fn pango_layout_get_line_count(layout: *PangoLayout) c_int;
+pub const PANGO_WRAP_WORD: c_int = 0;
+pub extern fn pango_layout_set_height(layout: *PangoLayout, height: c_int) void;
+pub extern fn pango_layout_set_wrap(layout: *PangoLayout, wrap: c_int) void;
+pub extern fn pango_layout_set_ellipsize(layout: *PangoLayout, ellipsize: c_int) void;
+pub extern fn pango_layout_set_text(layout: *PangoLayout, text: [*]const u8, length: c_int) void;
+pub extern fn pango_layout_is_ellipsized(layout: *PangoLayout) gboolean;
 pub extern fn gtk_widget_add_tick_callback(
     widget: *Widget,
     callback: *const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) gboolean,
@@ -691,6 +723,8 @@ pub extern fn gtk_list_box_set_selection_mode(box: *ListBox, mode: c_int) void;
 pub extern fn gtk_list_box_row_get_index(row: *ListBoxRow) c_int;
 pub extern fn gtk_list_box_set_activate_on_single_click(box: *ListBox, single: gboolean) void;
 pub extern fn gtk_list_box_unselect_all(box: *ListBox) void;
+pub extern fn gtk_list_box_select_row(box: *ListBox, row: ?*ListBoxRow) void;
+pub extern fn gtk_list_box_get_row_at_index(box: *ListBox, index: c_int) ?*ListBoxRow;
 pub extern fn gtk_list_box_set_tab_behavior(box: *ListBox, behavior: c_int) void;
 pub extern fn gtk_revealer_new() *Widget;
 pub extern fn gtk_revealer_set_child(revealer: *Revealer, child: ?*Widget) void;
@@ -725,6 +759,7 @@ pub extern fn gtk_popover_popup(popover: *Popover) void;
 pub extern fn gtk_popover_present(popover: *Popover) void;
 pub extern fn gtk_popover_set_autohide(popover: *Popover, autohide: gboolean) void;
 pub extern fn gtk_popover_set_position(popover: *Popover, position: c_int) void;
+pub extern fn gtk_popover_set_offset(popover: *Popover, x_offset: c_int, y_offset: c_int) void;
 pub extern fn gtk_widget_has_focus(widget: *Widget) gboolean;
 pub extern fn gtk_widget_queue_resize(widget: *Widget) void;
 pub extern fn gtk_widget_set_parent(widget: *Widget, parent: *Widget) void;
@@ -810,6 +845,7 @@ pub extern fn gtk_toggle_button_set_group(button: *ToggleButton, group: ?*Toggle
 pub extern fn gtk_check_button_new_with_label(label: ?[*:0]const u8) *Widget;
 pub extern fn gtk_check_button_get_active(button: *CheckButton) gboolean;
 pub extern fn gtk_check_button_set_active(button: *CheckButton, active: gboolean) void;
+pub extern fn gtk_check_button_set_group(button: *CheckButton, group: ?*CheckButton) void;
 pub extern fn gtk_menu_button_new() *Widget;
 pub extern fn gtk_menu_button_set_icon_name(button: *MenuButton, icon_name: [*:0]const u8) void;
 pub extern fn gtk_menu_button_set_label(button: *MenuButton, label: [*:0]const u8) void;
@@ -981,6 +1017,9 @@ pub extern fn gtk_list_item_set_child(item: *ListItem, child: ?*Widget) void;
 pub extern fn gtk_list_item_get_child(item: *ListItem) ?*Widget;
 pub extern fn gtk_list_item_get_item(item: *ListItem) ?*anyopaque;
 pub extern fn gtk_list_item_get_position(item: *ListItem) c_uint;
+pub extern fn gtk_list_item_set_activatable(item: *ListItem, activatable: gboolean) void;
+pub extern fn gtk_list_item_set_selectable(item: *ListItem, selectable: gboolean) void;
+pub extern fn gtk_widget_remove_tick_callback(widget: *Widget, id: c_uint) void;
 pub extern fn gtk_list_view_new(model: ?*SelectionModel, factory: ?*ListItemFactory) *Widget;
 pub extern fn gtk_list_view_set_tab_behavior(view: *ListView, behavior: c_int) void;
 pub extern fn gtk_list_view_scroll_to(view: *ListView, position: c_uint, flags: c_int, scroll: ?*anyopaque) void;
@@ -1156,6 +1195,7 @@ pub extern fn gtk_widget_get_color(widget: *Widget, color: *GdkRGBA) void;
 pub extern fn gtk_widget_get_style_context(widget: *Widget) *StyleContext;
 pub extern fn gtk_style_context_lookup_color(context: *StyleContext, name: [*:0]const u8, color: *GdkRGBA) c_int;
 pub extern fn gtk_gesture_drag_new() *EventController;
+pub extern fn gtk_gesture_drag_get_start_point(gesture: *Gesture, x: ?*f64, y: ?*f64) gboolean;
 pub extern fn gtk_event_controller_motion_new() *EventController;
 
 pub extern fn cairo_save(cr: *Cairo) void;
@@ -1217,4 +1257,14 @@ comptime {
     std.debug.assert(@sizeOf(GDBusInterfaceVTable) == 88);
     std.debug.assert(@sizeOf(BitsetIter) == 80);
     std.debug.assert(@sizeOf(GValue) == 24);
+    std.debug.assert(@sizeOf(GInterfaceInfo) == 24);
+    std.debug.assert(@offsetOf(ListModelInterface, "get_item") == 32);
 }
+pub extern fn gtk_editable_set_max_width_chars(editable: *Editable, n_chars: c_int) void;
+pub extern fn gtk_widget_get_last_child(widget: *Widget) ?*Widget;
+pub const GMenuItem = opaque {};
+pub extern fn g_menu_item_new(label: ?[*:0]const u8, detailed_action: ?[*:0]const u8) *GMenuItem;
+pub extern fn g_menu_item_set_attribute_value(item: *GMenuItem, attribute: [*:0]const u8, value: ?*GVariant) void;
+pub extern fn g_menu_append_item(menu: *GMenu, item: *GMenuItem) void;
+pub extern fn g_menu_insert_section(menu: *GMenu, position: c_int, label: ?[*:0]const u8, section: *GMenuModel) void;
+pub extern fn gtk_window_set_focus(window: *Window, focus: ?*Widget) void;

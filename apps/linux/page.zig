@@ -15,6 +15,8 @@ const preferences = @import("preferences.zig");
 const App = app.App;
 
 pub const Bar = struct {
+    widget: ?*gtk.Widget = null,
+    view: ?*adw.ToolbarView = null,
     back: ?*gtk.Widget = null,
     forward: ?*gtk.Widget = null,
     trail: ?*gtk.Stack = null,
@@ -22,6 +24,7 @@ pub const Bar = struct {
     current: ?*gtk.Label = null,
     search: ?*gtk.Stack = null,
     entry: ?*gtk.Widget = null,
+    editor_actions: ?*gtk.Widget = null,
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -118,6 +121,7 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_header_bar_set_show_start_title_buttons(gtk.cast(adw.HeaderBar, bar), gtk.false_);
     adw.adw_header_bar_set_show_end_title_buttons(gtk.cast(adw.HeaderBar, bar), gtk.false_);
     gtk.gtk_widget_add_css_class(bar, "page-header");
+    self.top_bar.widget = bar;
     const back = historyButton("orca-back-symbolic", "Back", "Back (Alt+Left)", gtk.callback(backClicked), self);
     const forward = historyButton("orca-forward-symbolic", "Forward", "Forward (Alt+Right)", gtk.callback(forwardClicked), self);
     self.top_bar.back = back;
@@ -125,6 +129,7 @@ pub fn build(self: *App) *gtk.Widget {
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), back);
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), forward);
     adw.adw_header_bar_pack_start(gtk.cast(adw.HeaderBar, bar), buildTrail(self));
+    adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildEditorActions(self));
     adw.adw_header_bar_pack_end(gtk.cast(adw.HeaderBar, bar), buildSearch(self));
     return bar;
 }
@@ -139,8 +144,10 @@ pub fn refresh(self: *App) void {
     if (bar.back) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoBack(self)));
     if (bar.forward) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(window.canGoForward(self)));
     showTrail(self);
+    showEditorActions(self);
     showPlaceholder(self);
     showWindowTitle(self);
+    fitToPage(self);
 }
 
 fn placeholder(self: *App) [*:0]const u8 {

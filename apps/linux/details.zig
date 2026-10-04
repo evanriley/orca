@@ -1783,9 +1783,14 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const title = newLabel("inspector-title");
     const artist = newLabel("inspector-subtitle");
     const album = newLabel("inspector-subtitle");
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_add_css_class(heading, "inspector-header");
-    for ([_]*gtk.Widget{ title, artist, album }) |label| gtk.gtk_box_append(gtk.cast(gtk.Box, heading), label);
+    gtk.gtk_widget_add_css_class(album, "dim");
+    const track_actions = gtk.gtk_button_new_from_icon_name("orca-more-symbolic");
+    gtk.gtk_widget_add_css_class(track_actions, "flat");
+    gtk.gtk_widget_add_css_class(track_actions, "inspector-close");
+    gtk.gtk_widget_set_valign(track_actions, gtk.ALIGN_START);
+    gtk.gtk_widget_set_tooltip_text(track_actions, "Track actions");
+    _ = gtk.signalConnect(track_actions, "clicked", gtk.callback(trackActionsClicked), panel);
+    const heading = newHeader(panel, &.{ title, artist, album }, track_actions);
 
     const format_row = newRow("Format");
     const sample_rate_row = newRow("Sample rate");
@@ -1824,8 +1829,8 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     const album_row = newRow("Album");
     const date_row = newRow("Date");
     const genre_row = newRow("Genre");
-    const track_row = newRow("Track number");
-    const disc_row = newRow("Disc number");
+    const track_row = newRow("Track");
+    const disc_row = newRow("Disc");
     const compilation_row = newRow("Compilation");
     const explicit_row = newRow("Explicit");
     const plays_row = newRow("Plays");

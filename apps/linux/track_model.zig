@@ -33,6 +33,7 @@ pub const Fields = struct {
     feedback: liborca.Feedback = .none,
     rating: ?u8 = null,
     in_library: bool = true,
+    placeholder: bool = false,
     recording_id: ?i64 = null,
     release_id: ?i64 = null,
     artist_id: ?i64 = null,
@@ -48,6 +49,11 @@ pub const Fields = struct {
     last_played_at: ?i64 = null,
     explicit: bool = false,
     year: ?i32 = null,
+    album_artist: [:0]u8 = &empty,
+    genre: [:0]u8 = &empty,
+    path: [:0]u8 = &empty,
+    loudness: ?f32 = null,
+    bitrate_kbps: ?u32 = null,
 };
 
 var empty: [0:0]u8 = .{};
@@ -164,6 +170,9 @@ fn finalize(object: *gtk.GObject) callconv(.c) void {
     freeText(values.artist);
     freeText(values.album);
     freeText(values.codec);
+    freeText(values.album_artist);
+    freeText(values.genre);
+    freeText(values.path);
     values.* = .{};
     if (parent_class) |parent| {
         if (parent.finalize) |chain| chain(object);
@@ -209,6 +218,11 @@ pub fn new(summary: liborca.TrackSummary) ?*TrackObject {
     values.last_played_at = summary.last_played_at;
     values.explicit = summary.explicit == .explicit;
     values.year = summary.year;
+    values.album_artist = dupe(summary.album_artist);
+    values.genre = dupe(summary.genre);
+    values.path = dupe(summary.path);
+    values.loudness = summary.integrated_lufs;
+    values.bitrate_kbps = summary.bitrate_kbps;
     return self;
 }
 
@@ -255,6 +269,9 @@ pub fn clone(source: *TrackObject) ?*TrackObject {
     self.fields().artist = dupe(from.artist);
     self.fields().album = dupe(from.album);
     self.fields().codec = dupe(from.codec);
+    self.fields().album_artist = dupe(from.album_artist);
+    self.fields().genre = dupe(from.genre);
+    self.fields().path = dupe(from.path);
     return self;
 }
 
@@ -278,11 +295,15 @@ pub const Column = enum {
     duration,
     format,
     codec,
-    bit_depth,
-    sample_rate,
+    rate_depth,
+    album_artist,
+    genre,
+    bitrate,
+    loudness,
+    path,
     more,
 
-    pub const all = [_]Column{ .number, .title, .artist, .album, .loved, .rating, .date_added, .year, .last_played, .plays, .duration, .format, .codec, .bit_depth, .sample_rate, .more };
+    pub const all = std.enums.values(Column);
 
     pub fn sortKey(self: Column) ?liborca.TrackSort {
         return switch (self) {
@@ -297,7 +318,12 @@ pub const Column = enum {
             .last_played => .last_played,
             .plays => .play_count,
             .duration => .duration,
-            .format, .codec, .bit_depth, .sample_rate, .more => null,
+            .album_artist => .album_artist,
+            .genre => .genre,
+            .bitrate => .bitrate,
+            .loudness => .loudness,
+            .path => .path,
+            .format, .codec, .rate_depth, .more => null,
         };
     }
 };
@@ -310,4 +336,330 @@ pub const Column = enum {
 /// so it is never actually asked to compare anything.
 pub fn headerSorter() *gtk.Sorter {
     return gtk.gtk_custom_sorter_new(null, null, null);
+}
+
+pub const page_rows = 512;
+const cached_pages = 8;
+
+/// What became of asking the engine for a page.
+pub const Requested = union(enum) {
+    issued: u64,
+    /// The loader is full; the page is asked for again by `retryWaiting`.
+    busy,
+    failed,
+};
+
+/// Asks the engine for up to `limit` rows from `offset`; the rows arrive
+/// later through `pageArrived` under the returned request id.
+pub const Source = struct {
+    context: *anyopaque,
+    request: *const fn (context: *anyopaque, offset: u32, limit: u32) Requested,
+    cancel: *const fn (context: *anyopaque, request: u64) void,
+};
+
+const Load = union(enum) {
+    waiting,
+    pending: u64,
+    loaded,
+    failed,
+};
+
+/// The row a `PagedModel` shows at a position whose page has not arrived.
+/// It is not in the library, so nothing plays, rates or loves it.
+fn placeholder() ?*TrackObject {
+    const object = gtk.g_object_new_with_properties(getType(), 0, null, null) orelse return null;
+    const row: *TrackObject = @ptrCast(object);
+    row.fields().in_library = false;
+    row.fields().placeholder = true;
+    return row;
+}
+
+pub fn isPlaceholder(row: *TrackObject) bool {
+    return row.fields().placeholder;
+}
+
+const TrackRows = struct {
+    pub const Row = TrackObject;
+    pub const Page = liborca.TrackPage;
+    pub const type_name = "OrcaPagedTrackModel";
+    pub const itemType = getType;
+    pub const empty = placeholder;
+
+    pub fn fromItem(item: *const liborca.TrackSummary) ?*TrackObject {
+        return new(item.*);
+    }
+};
+
+pub const PagedModel = Paged(TrackRows);
+
+pub fn newPagedModel() ?*PagedModel {
+    return PagedModel.create();
+}
+
+/// A `GListModel` of `Rows.Row`s over a listing the engine pages: it knows
+/// only the listing's length, and asks for a 512-row page when GTK asks for
+/// a row it has not cached, keeping the few pages used most recently.
+/// Until a page arrives each of its rows is `Rows.empty()`.
+pub fn Paged(comptime Rows: type) type {
+    const Row = Rows.Row;
+
+    const CachedPage = struct {
+        index: u32 = 0,
+        used: u64 = 0,
+        load: Load = .waiting,
+        count: u32 = 0,
+        rows: []?*Row = &.{},
+    };
+
+    const PagedState = struct {
+        source: ?Source = null,
+        count: u32 = 0,
+        clock: u64 = 0,
+        pages: [cached_pages]CachedPage = @splat(.{}),
+    };
+
+    return extern struct {
+        parent: gtk.GObject,
+        storage: [@sizeOf(PagedState)]u8 align(@alignOf(PagedState)),
+
+        const Self = @This();
+
+        var model_type: gtk.GType = 0;
+        var paged_parent_class: ?*gtk.GObjectClass = null;
+
+        pub fn create() ?*Self {
+            const object = gtk.g_object_new_with_properties(modelType(), 0, null, null) orelse return null;
+            return @ptrCast(object);
+        }
+
+        fn paged(self: *Self) *PagedState {
+            return @ptrCast(&self.storage);
+        }
+
+        pub fn setSource(self: *Self, source: Source) void {
+            self.paged().source = source;
+        }
+
+        pub fn count(self: *Self) u32 {
+            return self.paged().count;
+        }
+
+        /// Forgets every cached row, cancelling the pages still being read, and
+        /// reports the listing as `length` new rows.
+        pub fn reset(self: *Self, length: u32) void {
+            const values = self.paged();
+            const removed = values.count;
+            dropPages(values);
+            // One signal that both removes and adds makes GtkListItemManager and
+            // GtkMultiSelection fetch every added row to find their tracked rows
+            // again, which reads the whole listing a page at a time.
+            values.count = 0;
+            if (removed != 0) gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), 0, removed, 0);
+            values.count = length;
+            if (length != 0) gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), 0, 0, length);
+        }
+
+        /// Changes the listing's length at its end only, keeping the pages
+        /// already asked for: they were asked for under the same listing.
+        pub fn resize(self: *Self, length: u32) void {
+            const values = self.paged();
+            const previous = values.count;
+            values.count = length;
+            if (length > previous)
+                gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), previous, 0, length - previous)
+            else if (length < previous)
+                gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), length, previous - length, 0);
+        }
+
+        /// Fills the page `request` was issued for and reports its rows as
+        /// changed. A result no page is waiting for is ignored.
+        pub fn pageArrived(self: *Self, request: u64, page: Rows.Page) void {
+            const values = self.paged();
+            const cached = pendingPage(values, request) orelse return;
+            var made: u32 = 0;
+            for (page.items[0..@min(page.items.len, cached.rows.len)]) |*item| {
+                const row = Rows.fromItem(item) orelse break;
+                if (cached.rows[made]) |shown| gtk.g_object_unref(shown);
+                cached.rows[made] = row;
+                made += 1;
+            }
+            cached.count = made;
+            cached.load = .loaded;
+            const first = cached.index * page_rows;
+            if (first >= values.count) return;
+            const changed = @min(made, values.count - first);
+            if (changed != 0) gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), first, changed, changed);
+        }
+
+        /// Leaves the page `request` was issued for showing placeholders until
+        /// it is evicted or the listing is reset. False when no page waits for it.
+        pub fn pageFailed(self: *Self, request: u64) bool {
+            const cached = pendingPage(self.paged(), request) orelse return false;
+            cached.load = .failed;
+            return true;
+        }
+
+        /// Asks again for the pages the loader was too full to take. Returns
+        /// whether any is still waiting.
+        pub fn retryWaiting(self: *Self) bool {
+            const values = self.paged();
+            var waiting = false;
+            for (&values.pages) |*page| {
+                if (page.used == 0 or page.load != .waiting) continue;
+                requestPage(values, page);
+                if (page.load == .waiting) waiting = true;
+            }
+            return waiting;
+        }
+
+        /// Offers every cached row to `replace`, and swaps in the row it returns.
+        /// Rows not cached are fetched fresh when next shown, so they need no
+        /// update. Returns whether any row changed.
+        pub fn update(
+            self: *Self,
+            context: anytype,
+            comptime replace: fn (@TypeOf(context), *Row) ?*Row,
+        ) bool {
+            const values = self.paged();
+            var changed = false;
+            for (&values.pages) |*page| {
+                if (page.used == 0 or page.load != .loaded) continue;
+                for (page.rows[0..page.count], 0..) |*slot, index| {
+                    const row = slot.* orelse continue;
+                    const fresh = replace(context, row) orelse continue;
+                    gtk.g_object_unref(row);
+                    slot.* = fresh;
+                    const position = page.index * page_rows + @as(u32, @intCast(index));
+                    gtk.g_list_model_items_changed(gtk.cast(gtk.ListModel, self), position, 1, 1);
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+
+        fn pendingPage(values: *PagedState, request: u64) ?*CachedPage {
+            for (&values.pages) |*page| {
+                if (page.used == 0) continue;
+                switch (page.load) {
+                    .pending => |id| if (id == request) return page,
+                    else => {},
+                }
+            }
+            return null;
+        }
+
+        fn requestPage(values: *PagedState, page: *CachedPage) void {
+            const source = values.source orelse return;
+            page.load = switch (source.request(source.context, page.index * page_rows, page_rows)) {
+                .issued => |id| .{ .pending = id },
+                .busy => .waiting,
+                .failed => .failed,
+            };
+        }
+
+        fn clearPage(values: *PagedState, page: *CachedPage) void {
+            switch (page.load) {
+                .pending => |id| if (values.source) |source| source.cancel(source.context, id),
+                else => {},
+            }
+            for (page.rows) |*row| if (row.*) |object| {
+                gtk.g_object_unref(object);
+                row.* = null;
+            };
+            page.load = .waiting;
+            page.count = 0;
+        }
+
+        fn dropPages(values: *PagedState) void {
+            for (&values.pages) |*page| {
+                clearPage(values, page);
+                if (page.rows.len != 0) allocator.free(page.rows);
+                page.* = .{};
+            }
+        }
+
+        fn cachedPage(values: *PagedState, index: u32) ?*CachedPage {
+            values.clock += 1;
+            var oldest = &values.pages[0];
+            for (&values.pages) |*page| {
+                if (page.used != 0 and page.index == index) {
+                    page.used = values.clock;
+                    return page;
+                }
+                if (page.used < oldest.used) oldest = page;
+            }
+            if (values.source == null) return null;
+            if (oldest.rows.len == 0) {
+                oldest.rows = allocator.alloc(?*Row, page_rows) catch return null;
+                @memset(oldest.rows, null);
+            }
+            clearPage(values, oldest);
+            oldest.index = index;
+            oldest.used = values.clock;
+            requestPage(values, oldest);
+            return oldest;
+        }
+
+        fn modelType() gtk.GType {
+            if (model_type != 0) return model_type;
+            const info: gtk.GTypeInfo = .{
+                .class_size = @sizeOf(gtk.GObjectClass),
+                .class_init = pagedClassInit,
+                .instance_size = @sizeOf(Self),
+                .instance_init = pagedInstanceInit,
+            };
+            model_type = gtk.g_type_register_static(gtk.g_object_get_type(), Rows.type_name, &info, 0);
+            const interface: gtk.GInterfaceInfo = .{ .interface_init = listInit };
+            gtk.g_type_add_interface_static(model_type, gtk.g_list_model_get_type(), &interface);
+            return model_type;
+        }
+
+        fn pagedClassInit(class: *anyopaque, _: ?*anyopaque) callconv(.c) void {
+            paged_parent_class = @ptrCast(@alignCast(gtk.g_type_class_peek_parent(class)));
+            const object_class: *gtk.GObjectClass = @ptrCast(@alignCast(class));
+            object_class.finalize = pagedFinalize;
+        }
+
+        fn pagedInstanceInit(instance: *anyopaque, _: ?*anyopaque) callconv(.c) void {
+            const self: *Self = @ptrCast(@alignCast(instance));
+            self.paged().* = .{};
+        }
+
+        fn pagedFinalize(object: *gtk.GObject) callconv(.c) void {
+            const self: *Self = @ptrCast(@alignCast(object));
+            self.paged().source = null;
+            dropPages(self.paged());
+            if (paged_parent_class) |parent| {
+                if (parent.finalize) |chain| chain(object);
+            }
+        }
+
+        fn listInit(interface: *anyopaque, _: ?*anyopaque) callconv(.c) void {
+            const methods: *gtk.ListModelInterface = @ptrCast(@alignCast(interface));
+            methods.get_item_type = itemType;
+            methods.get_n_items = itemCount;
+            methods.get_item = itemAt;
+        }
+
+        fn itemType(_: *gtk.ListModel) callconv(.c) gtk.GType {
+            return Rows.itemType();
+        }
+
+        fn itemCount(list: *gtk.ListModel) callconv(.c) c_uint {
+            const self: *Self = @ptrCast(@alignCast(list));
+            return self.paged().count;
+        }
+
+        fn itemAt(list: *gtk.ListModel, position: c_uint) callconv(.c) ?*anyopaque {
+            const self: *Self = @ptrCast(@alignCast(list));
+            const values = self.paged();
+            if (position >= values.count) return null;
+            const index = position % page_rows;
+            // GtkListItemManager tells rows apart by object, so every position needs
+            // its own placeholder: one shared object is a duplicate item to it.
+            const page = cachedPage(values, position / page_rows) orelse return Rows.empty();
+            if (page.rows[index] == null) page.rows[index] = Rows.empty();
+            return gtk.g_object_ref(page.rows[index] orelse return null);
+        }
+    };
 }

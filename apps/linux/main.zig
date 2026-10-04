@@ -79,6 +79,7 @@ fn tick(self: *App) void {
         },
         else => {},
     };
+    self.takeBrowseResults();
     if (self.window != null) {
         if (library_changed) jobs.reloadLibraryViews(self);
         art.tick(self);
@@ -529,6 +530,7 @@ fn resolveServer(
 }
 
 pub fn main(init: std.process.Init) !u8 {
+    _ = mallopt(M_ARENA_MAX, 1);
     const allocator = std.heap.smp_allocator;
     track_model.allocator = allocator;
     browse_model.allocator = allocator;
@@ -561,6 +563,7 @@ pub fn main(init: std.process.Init) !u8 {
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
     self.art.debug = debugRequested(init.environ_map, "art");
     self.debug_frames = debugRequested(init.environ_map, "frames");
+    self.debug_reveal = debugRequested(init.environ_map, "reveal");
     runtime.setClientIdentity(.{
         .name = "Orca",
         .version = std.fmt.comptimePrint("{f}", .{liborca.version}),

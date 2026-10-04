@@ -87,6 +87,7 @@ images=$(mktemp -d)
 trap 'rm -rf "$images"' EXIT
 
 cli scan "$database" "$audio_root"
+cli analyze-library "$database"
 
 track_of_file() {
     "$orca_cli" folders "$database" 1 | awk -F'\t' -v name="$1" '$1 == "file" && $4 == name { sub(/^track=/, "", $2); print $2 }'

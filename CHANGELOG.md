@@ -150,9 +150,33 @@
   Release is filed under. `orca-cli artist-info` prints `origin=` and, with
   `--include-releases`, `elsewhere:` lines; `orca-cli artists` takes
   `--album-artists`.
+- **Tracks at scale in orca-gtk.** From 20,000 tracks, Tracks shows its
+  filters as removable tokens with `+ Filter`, the filtered count and
+  duration, and Save as Smart Playlist, which saves the tokens as version 1
+  rules that select the same tracks. Row numbers count from the top of the
+  whole listing, and its Columns menu offers 15 columns, among them Album
+  artist, Genre, Bitrate, Loudness (LUFS) and File path, which drag to
+  reorder and save per view as `[view] track_columns_large` with Reset to
+  default. Column order is now saved for the ordinary Tracks view too. A
+  sort click no longer recounts the tracks, and the unfiltered count reads
+  the tracks table directly: at 522,000 tracks a genre or bitrate sort
+  click takes 54 ms instead of 152 ms and 211 ms. `libraryTrackQueryPlayableIds`
+  returns up to 10,000 playable ids from an offset for play from a row.
 - **Files-without-bitrate index.** Schema version 41 adds
   `files_without_bitrate`, so a bitrate-sorted Track page finds the Tracks
   without a bitrate through it instead of reading every Track.
+- **Tracks page redesign in orca-gtk.** Tracks follows the redesign: a
+  grouped `2,847 tracks` count, Sort by, Filters and Columns buttons in the
+  Albums header style, Date Added newest first as the library's default
+  order, a Rating column of five stars and a heart that set rating and love,
+  a tinted playing row with an accent play mark, sort arrows on the sorted
+  column, and a ••• menu with Play Next, Play Later, Go to Album, Go to
+  Artist, Edit Metadata… and Show in Folder. Double-click or Enter plays
+  the list from that row. The List/Browse switch is gone: Browse by Artist
+  and Album is a toggle at the foot of the Columns menu.
+  `ORCA_GTK_DEBUG=reveal` logs Show in Folder's path instead of opening a
+  file manager. `scripts/headless-gui.sh` takes a `dclick:X,Y` step, and
+  saves the last frame instead of failing when the window never settles.
 - **Release name order indexes.** Schema version 39 adds
   `releases_artist_order` and `releases_title_order`, built from the same
   terms as the artist and title sorts, so a Release page in either order
@@ -583,6 +607,12 @@
 
 ### Changed
 
+- **Tracks no longer freeze on slow sorts and filters in orca-gtk.** The
+  Tracks list reads its pages and its count and duration on the Library's
+  browse loader instead of the main thread, so a sort by path or a broad
+  search over a large library no longer stalls the window. Rows whose page
+  has not arrived show blank and cannot be played, rated or opened; a new
+  search or filter keeps the previous count until its totals arrive.
 - **Newsreader, Geist and Geist Mono replace Inter and Source Serif 4.**
   `orca-gtk` sets display titles in Newsreader and the interface in Geist,
   and bundles Geist Mono, all under the SIL Open Font License and

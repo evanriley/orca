@@ -14,6 +14,8 @@
 @define-color orca_border_strong #2A3036;
 @define-color orca_border_popover #2E343A;
 @define-color orca_track #2A2F34;
+@define-color orca_bg_inset #15181B;
+@define-color orca_divider #262B30;
 @define-color orca_text #F2F2F0;
 @define-color orca_text_2 #B7B9B9;
 @define-color orca_text_3 #8A8E91;
@@ -3652,20 +3654,12 @@ button.filters-button,
   color: @orca_text_2;
 }
 
-.tracks-title dropdown {
-  min-width: 170px;
-}
-
 .view-switch > button {
   padding: 4px 10px;
 }
 
 .track-list > header > button.sorted > box {
   color: @orca_text;
-}
-
-.track-list > header > button.column-chooser > box {
-  margin-left: 0;
 }
 
 .track-list .track-format {
@@ -3683,13 +3677,119 @@ button.filters-button,
   color: @orca_text_3;
 }
 
-.track-list row.playing button.row-more,
-.track-list.loved-tracks button.row-more {
+.track-list row.playing button.row-more {
   opacity: 1;
 }
 
 .track-list > header > button.clock-header > box {
   margin-left: 0;
+}
+
+window:not(.narrow) .page-title.tracks-title {
+  padding-bottom: 14px;
+}
+
+.tracks-page .track-list > header {
+  border-bottom: none;
+}
+
+.tracks-page .track-list > header > button {
+  padding-top: 0;
+  padding-bottom: 7px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+}
+
+.tracks-page .track-list > header > button:hover > box {
+  color: @orca_text;
+}
+
+.tracks-page .track-list > header sort-indicator {
+  min-width: 12px;
+  min-height: 12px;
+  margin-left: 4px;
+  -gtk-icon-size: 12px;
+}
+
+.tracks-page .track-list > header sort-indicator.ascending {
+  -gtk-icon-source: -gtk-icontheme("orca-arrow-up-symbolic");
+}
+
+.tracks-page .track-list > header sort-indicator.descending {
+  -gtk-icon-source: -gtk-icontheme("orca-arrow-down-symbolic");
+}
+
+.tracks-page .track-list > listview > row {
+  min-height: 32px;
+  border-top: 1px solid @orca_bg_raised_2;
+  border-bottom: none;
+}
+
+.tracks-page .track-list > listview > row:hover {
+  background-color: mix(@orca_bg_raised, @orca_bg_raised_2, 0.67);
+}
+
+.tracks-page .track-list > listview > row:selected {
+  background-color: @orca_bg_selected;
+}
+
+.tracks-page .track-list row.playing {
+  background-color: color-mix(in srgb, @orca_accent 10%, transparent);
+}
+
+.tracks-page .track-list > listview > row.playing:selected {
+  background-color: color-mix(in srgb, @orca_accent 14%, @orca_bg_selected);
+}
+
+.tracks-page .track-list row.playing .track-title {
+  font-weight: 500;
+}
+
+.tracks-page .track-list .track-secondary,
+.tracks-page .track-list .track-duration {
+  color: @orca_text_2;
+}
+
+.tracks-page .track-list button.row-heart {
+  opacity: 1;
+  color: mix(@orca_border_popover, @orca_text_dim, 0.26);
+}
+
+.tracks-page .track-list button.row-heart:hover {
+  color: @orca_text_2;
+}
+
+.tracks-page .track-list .rating-stars button.star {
+  min-width: 12px;
+  padding: 0;
+  color: mix(@orca_border_popover, @orca_text_dim, 0.13);
+}
+
+.tracks-page .track-list row:hover button.row-heart:not(:hover),
+.tracks-page .track-list row:selected button.row-heart:not(:hover),
+.tracks-page .track-list row.playing button.row-heart:not(:hover),
+.tracks-page .track-list row:hover .rating-stars button.star:not(.filled):not(:hover),
+.tracks-page .track-list row:selected .rating-stars button.star:not(.filled):not(:hover),
+.tracks-page .track-list row.playing .rating-stars button.star:not(.filled):not(:hover) {
+  color: @orca_text_dim;
+}
+
+.tracks-page .track-list .rating-stars button.star:hover {
+  color: @orca_text_2;
+}
+
+.tracks-page .track-list .row-stars:not(.rated) {
+  opacity: 1;
+}
+
+.tracks-page .track-list .rating-stars button.star.filled {
+  color: @orca_text_2;
+}
+
+.tracks-page .track-list button.row-more {
+  min-width: 28px;
+  min-height: 28px;
+  -gtk-icon-size: 16px;
 }
 
 .track-list > header popover {

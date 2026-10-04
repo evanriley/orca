@@ -659,26 +659,49 @@ The window is an `AdwNavigationSplitView`:
   without search text, and the Genre list holds every genre, read 512 at a
   time each time the menu opens. The Filters button turns accent while any
   filter is set, and filters are not saved. The title row shows the exact
-  count from liborca, or while searching `N matching`, the loaded rows with
-  a `+` while more remain, then a Sort by menu (Default, Title, Artist, Album, Track Number, Date
-  Added, Last Played, Play Count, Rating, Loved, Year, Duration; dates,
-  counts, ratings and years newest or highest first), kept in step with the
-  column headers and not saved, and a linked List / Browse switch, Browse
-  showing the Artist and Album panes. The list pages 512 rows at a time from
-  liborca as it scrolls, and a header click re-queries in the engine's order
+  count from liborca with digit grouping (`2,847 tracks`), or while
+  searching `N matching`, the loaded rows with a `+` while more remain, then
+  a Sort by menu (Default, Title, Artist, Album, Track Number, Date Added,
+  Last Played, Play Count, Rating, Loved, Year, Duration; dates, counts,
+  ratings and years newest or highest first), kept in step with the column
+  headers and not saved, Filters, and a Columns menu. The whole library
+  opens sorted by Date Added, newest first. The list pages 512 rows at a time from
+  liborca as it scrolls, each page and the listing's totals read on the
+  Library's browse loader (`libraryRequestBrowse`) so no query runs on
+  the main thread: a row whose page has not arrived shows blank and cannot
+  be played, rated or opened, the 8 most recently shown pages stay cached,
+  a page scrolled out of the cache before it arrives is cancelled, and a
+  request the full loader refuses is asked again 25 ms later. A new search,
+  filter or scope keeps the previous count and empty state until its totals
+  arrive. A header click re-queries in the engine's order
   rather than sorting loaded rows; the sorted column's title is
-  highlighted. Under an uppercase header each track is one thin-ruled row:
-  the playing track shows a play mark in place of its number and an accent
-  title, an explicit track shows an E badge after its title, its heart sits
-  in its own column, its rating stars show on hover and once rated, and
-  hovering a row shows a ••• button with the track menu. The ••• at the
-  header's end, and every column title's menu, choose the columns: Artist,
+  highlighted with an arrow for its direction. Under an uppercase header
+  each track is one thin-ruled row: the playing track's row is tinted, with
+  an accent play mark in place of its number and an accent title, an
+  explicit track shows an E badge after its title, its heart sits in its
+  own column and toggles love, and five stars set its rating with
+  `librarySetRating`, dim until rated. Hovering a row, or the playing row,
+  shows a ••• button whose menu has Play Next, Play Later, Go to Album, Go
+  to Artist, Edit Metadata… and Show in Folder; right-click keeps the full
+  track menu. Show in Folder opens the folder holding the track's file;
+  under `ORCA_GTK_DEBUG=reveal` it prints `orca-gtk reveal: PATH` on stderr
+  instead. Double-click or Enter plays the list from that row, at most the
+  queue's 10,000 entries starting there. The Columns menu, and every
+  column title's menu, choose the columns: Artist,
   Album, Loved, Rating, Date Added, Year, Last Played, Plays, Duration,
   Format, Codec, Bit Depth and Sample Rate; # and Title always show. The
-  default is Artist, Album, Loved, Date Added, Duration and Format. The
-  choice is saved as `[view] track_columns` (a comma list of those names in
-  snake case) and dragged widths as `[view] track_column_widths`
-  (`name:pixels` pairs); the older `song_columns` and `song_column_widths` keys are read when these are absent; column order is not saved. A narrow window drops
+  default is Artist, Album, Loved, Rating, Date Added, Duration (titled
+  Time) and Format. Below the columns, the Columns menu's Browse by
+  Artist and Album toggle shows the Artist and Album panes beside the list;
+  it is not saved, and while the window is narrow the panes hide and the
+  toggle is disabled. The
+  column choice and order are saved as `[view] track_columns` (a comma list
+  of those names in snake case in their order, a hidden column's name
+  prefixed with `-`) and dragged widths as `[view] track_column_widths`
+  (`name:pixels` pairs); the older `song_columns` and `song_column_widths`
+  keys are read when these are absent. Each row of the Columns menu has a
+  grip that drags the column elsewhere, and Reset to default, beside Saved
+  per view, puts the view's columns, order and widths back. A narrow window drops
   every chosen column except Artist, Loved and Duration without forgetting
   the choice and narrows Title and Artist, which ellipsize, so that Title,
   Artist, the heart and Duration fit a 560 px window without saving those
@@ -689,6 +712,25 @@ The window is an `AdwNavigationSplitView`:
   Artists and Albums searches query 200 ms after the last keystroke. A
   library with no tracks shows a welcome page with Add Music Folder; a scan
   in progress shows there too.
+  From 20,000 tracks in the library the page takes its large form. A bar
+  under the title row shows each set filter as a token, `Codec FLAC`,
+  `Sample rate > 48 kHz` or `Added last 12 months`, whose × clears it, then
+  `+ Filter`, which opens the Filters popover (which also offers Codec,
+  Sample rate above and Added); tokens and popover share one set of
+  filters. On the right, with no filter it reads `522,432 tracks`, and with
+  filters the count and duration from `libraryTrackQueryTotals`, `18,772
+  tracks · 61 h 14 min`, then Save as Smart Playlist while there is no
+  search text or Artist or Album scope. Save writes version 1 rules from
+  the tokens (`genre`, `year`, `lossless`, `codec`, `sample_rate`,
+  `added_at`, `loved`, `explicit`), names the playlist after them and opens
+  it, so the playlist holds what the count counted. Row numbers are the
+  row's position in the whole listing. The large form has its own columns,
+  saved as `[view] track_columns_large` and `track_column_widths_large`:
+  Title, Artist, Album, Codec, Rate / depth and Time by default, with
+  Album artist, Year, Genre, Bitrate, Plays, Rating, Loudness (LUFS), Date
+  added and File path on offer. A sort click lists the same tracks in the
+  new order without recounting them, and play from a row hands the queue
+  at most 10,000 ids from `libraryTrackQueryPlayableIds`.
 - **Artwork backdrops** sit behind the album, artist and playlist page
   headers and Now Playing, never behind the sidebar, the player bar, tables
   or Settings. The cover, or for a playlist a two by two blend of its first
@@ -1315,7 +1357,7 @@ available. MPRIS methods invoke the same Player handle, and `PlaybackStatus` is
 read from and signaled from authoritative snapshots.
 
 `nix build` installs `share/applications/org.orca_music.Orca.desktop`, the
-icon and the two heart icons, so the package can be installed like any desktop
+application icon and the bundled symbolic icons, so the package can be installed like any desktop
 application. At startup `orca-gtk` adds `<exe dir>/../share/icons` to the icon
 theme's search path, so the heart icons resolve when `zig-out/bin/orca-gtk`
 runs directly, without `XDG_DATA_DIRS`.

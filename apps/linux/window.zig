@@ -39,16 +39,6 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-fn scrolled(adjustment: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    if (self.page_exhausted) return;
-    const value = gtk.cast(gtk.Adjustment, adjustment);
-    const page = gtk.gtk_adjustment_get_page_size(value);
-    const remaining = gtk.gtk_adjustment_get_upper(value) -
-        (gtk.gtk_adjustment_get_value(value) + page);
-    if (remaining < page) self.loadNextPage();
-}
-
 pub fn markPlaying(self: *App, track_id: ?i64) void {
     track_table.markPlaying(&.{ &self.tracks, &self.loved.tracks, &self.playlists.tracks }, track_id);
 }
@@ -84,7 +74,7 @@ fn sortChoiceIndex(sort: liborca.TrackSort) c_uint {
 /// Numbers the rows by disc and track only where the order is the album's,
 /// and highlights the sorted column's title.
 fn showSortedColumn(self: *App) void {
-    self.tracks.positions = self.browse.sort != .track_number and self.browse.sort != .album;
+    self.tracks.positions = self.tracks_large or (self.browse.sort != .track_number and self.browse.sort != .album);
     track_table.markSorted(&self.tracks, if (self.browse.sort == .id) null else self.browse.sort);
 }
 
@@ -118,7 +108,7 @@ fn sortChosen(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv
     self.browse.sort = sort_choices[index].sort;
     self.browse.direction = sort_choices[index].direction;
     showSort(self);
-    self.reload();
+    self.resort();
 }
 
 /// A header click, turned into a new engine query.
@@ -150,7 +140,7 @@ fn sortChanged(sorter: ?*anyopaque, _: c_uint, data: ?*anyopaque) callconv(.c) v
         gtk.gtk_drop_down_set_selected(dropdown, sortChoiceIndex(self.browse.sort));
     }
     showSortedColumn(self);
-    self.reload();
+    self.resort();
 }
 
 fn filterTracks(self: *App, text: []const u8) void {
@@ -923,10 +913,66 @@ fn buildSidebar(self: *App) *gtk.Widget {
     return nav;
 }
 
-fn browseToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn showBrowsePanes(self: *App) void {
+    const narrow = self.browse_collapsed;
+    if (self.browse_panes) |panes| gtk.gtk_widget_set_visible(panes, if (self.browse_chosen and !narrow) gtk.true_ else gtk.false_);
+    if (self.browse_action) |action| gtk.g_simple_action_set_enabled(action, if (narrow) gtk.false_ else gtk.true_);
+}
+
+fn browseActivated(action: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const panes = self.browse_panes orelse return;
-    gtk.gtk_widget_set_visible(panes, gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)));
+    self.browse_chosen = !self.browse_chosen;
+    gtk.g_simple_action_set_state(gtk.cast(gtk.GSimpleAction, action), gtk.g_variant_new_boolean(if (self.browse_chosen) gtk.true_ else gtk.false_));
+    showBrowsePanes(self);
+}
+
+fn buildColumnsButton(self: *App) *gtk.Widget {
+    const group = gtk.g_simple_action_group_new();
+    defer gtk.g_object_unref(group);
+    if (gtk.g_simple_action_new_stateful("browse", null, gtk.g_variant_new_boolean(gtk.false_))) |action| {
+        _ = gtk.signalConnect(action, "activate", gtk.callback(browseActivated), self);
+        gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
+        gtk.g_object_unref(action);
+        self.browse_action = action;
+    }
+    const browse_check = gtk.gtk_check_button_new_with_label("Browse by Artist and Album");
+    gtk.gtk_actionable_set_action_name(gtk.cast(gtk.Actionable, browse_check), "tracks.browse");
+    gtk.gtk_widget_add_css_class(browse_check, "chooser-extra");
+    const button = track_table.newColumnsButton(&self.tracks, false, browse_check);
+    gtk.gtk_widget_insert_action_group(button, "tracks", gtk.cast(gtk.GActionGroup, group));
+    return button;
+}
+
+/// Tracks lists at least this many Tracks in its large form: a token bar
+/// for filters, global row numbers and the large view's columns.
+const large_library_tracks = 20_000;
+
+/// Chooses the Tracks page's form from the library's size.
+pub fn applyTracksForm(self: *App) void {
+    if (self.track_library_total == null) {
+        if (self.library) |library| {
+            if (self.runtime.libraryTrackQueryTotals(library, "", .{})) |totals| {
+                self.track_library_total = totals.count;
+            } else |_| {}
+        }
+    }
+    const large = (self.track_library_total orelse 0) >= large_library_tracks;
+    self.tracks_large = large;
+    if (self.tracks_title_end) |end| gtk.gtk_widget_set_visible(end, @intFromBool(!large));
+    if (self.tracks_columns_corner) |corner| gtk.gtk_widget_set_visible(corner, @intFromBool(large));
+    if (self.tracks_page) |page| {
+        if (large) gtk.gtk_widget_add_css_class(page, "tracks-large") else gtk.gtk_widget_remove_css_class(page, "tracks-large");
+    }
+    if (self.tracks_title_text) |text| {
+        gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, text), if (large) gtk.ORIENTATION_HORIZONTAL else gtk.ORIENTATION_VERTICAL);
+        gtk.gtk_box_set_spacing(gtk.cast(gtk.Box, text), if (large) 14 else 2);
+        var child = gtk.gtk_widget_get_first_child(text);
+        while (child) |label| : (child = gtk.gtk_widget_get_next_sibling(label))
+            gtk.gtk_widget_set_valign(label, if (large) gtk.ALIGN_BASELINE_FILL else gtk.ALIGN_FILL);
+    }
+    track_filters.setLarge(self, large);
+    track_table.useConfig(&self.tracks, if (large) &self.track_columns_large else &self.track_columns);
+    showSortedColumn(self);
 }
 
 pub fn focusSearch(self: *App) void {
@@ -936,7 +982,7 @@ pub fn focusSearch(self: *App) void {
 }
 
 fn buildTrackList(self: *App) *gtk.Widget {
-    const view = track_table.build(&self.tracks, self, .{ .multiple = true, .sortable = true, .config = &self.track_columns });
+    const view = track_table.build(&self.tracks, self, .{ .multiple = true, .sortable = true, .paged = true, .config = &self.track_columns });
     _ = gtk.signalConnect(
         gtk.gtk_column_view_get_sorter(self.tracks.view.?),
         "changed",
@@ -950,13 +996,16 @@ fn buildTrackList(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_vexpand(scroller, gtk.true_);
     gtk.gtk_widget_set_hexpand(scroller, gtk.true_);
     gtk.gtk_scrolled_window_set_child(gtk.cast(gtk.ScrolledWindow, scroller), view);
-    _ = gtk.signalConnect(
-        gtk.gtk_scrolled_window_get_vadjustment(gtk.cast(gtk.ScrolledWindow, scroller)),
-        "value-changed",
-        gtk.callback(scrolled),
-        self,
-    );
-    return scroller;
+
+    const overlay = gtk.gtk_overlay_new();
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, overlay), scroller);
+    const corner = track_table.newColumnsButton(&self.tracks, true, null);
+    gtk.gtk_widget_set_halign(corner, gtk.ALIGN_END);
+    gtk.gtk_widget_set_valign(corner, gtk.ALIGN_START);
+    gtk.gtk_widget_set_visible(corner, gtk.false_);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, overlay), corner);
+    self.tracks_columns_corner = corner;
+    return overlay;
 }
 
 fn buildSortDropdown(self: *App) *gtk.Widget {
@@ -965,6 +1014,7 @@ fn buildSortDropdown(self: *App) *gtk.Widget {
     const dropdown = gtk.gtk_drop_down_new_from_strings(&labels);
     self.sort_dropdown = gtk.cast(gtk.DropDown, dropdown);
     gtk.gtk_widget_add_css_class(dropdown, "sort-dropdown");
+    gtk.gtk_widget_add_css_class(dropdown, "btn-dropdown");
     gtk.gtk_widget_set_tooltip_text(dropdown, "Sort tracks");
     gtk.gtk_widget_set_valign(dropdown, gtk.ALIGN_CENTER);
     gtk.gtk_drop_down_set_selected(self.sort_dropdown.?, sortChoiceIndex(self.browse.sort));
@@ -1019,34 +1069,27 @@ fn buildTracksPage(self: *App) *gtk.Widget {
     const title = page_ui.title("Tracks");
     gtk.gtk_widget_add_css_class(title.widget, "tracks-title");
     self.tracks_meta = title.meta;
+    self.tracks_title_end = gtk.cast(gtk.Widget, title.end);
+    self.tracks_title_text = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, title.title));
 
-    const list_toggle = gtk.gtk_toggle_button_new();
-    self.list_toggle = list_toggle;
-    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, list_toggle), "view-list-symbolic");
-    gtk.gtk_widget_set_tooltip_text(list_toggle, "Tracks only");
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, list_toggle), gtk.true_);
-    const browse_toggle = gtk.gtk_toggle_button_new();
-    self.browse_toggle = browse_toggle;
-    gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, browse_toggle), "view-dual-symbolic");
-    gtk.gtk_widget_set_tooltip_text(browse_toggle, "Show artists and albums");
-    gtk.gtk_toggle_button_set_group(gtk.cast(gtk.ToggleButton, browse_toggle), gtk.cast(gtk.ToggleButton, list_toggle));
     gtk.gtk_widget_set_visible(panes, gtk.false_);
-    _ = gtk.signalConnect(browse_toggle, "toggled", gtk.callback(browseToggled), self);
-    const view_switch = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(view_switch, "linked");
-    gtk.gtk_widget_add_css_class(view_switch, "view-switch");
-    gtk.gtk_widget_set_valign(view_switch, gtk.ALIGN_CENTER);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, view_switch), list_toggle);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, view_switch), browse_toggle);
     const sort_label = gtk.gtk_label_new("Sort by");
-    gtk.gtk_widget_add_css_class(sort_label, "meta");
+    gtk.gtk_widget_add_css_class(sort_label, "sort-label");
     gtk.gtk_widget_set_valign(sort_label, gtk.ALIGN_CENTER);
+    adw.adw_wrap_box_set_child_spacing(title.end, 10);
     title.add(sort_label);
     title.add(buildSortDropdown(self));
     title.add(track_filters.build(self));
-    title.add(view_switch);
+    title.add(buildColumnsButton(self));
+    showSort(self);
 
-    return page_ui.withTitle(title, body);
+    const content = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), track_filters.buildBar(self));
+    gtk.gtk_widget_set_vexpand(body, gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, content), body);
+    const page = page_ui.withTitle(title, content);
+    self.tracks_page = page;
+    return page;
 }
 
 /// Below this width the sidebar folds away behind a back button and the
@@ -1139,8 +1182,6 @@ fn adaptWhenNarrow(self: *App, window: *gtk.Widget, split: *gtk.Widget) void {
     const condition = adw.adw_breakpoint_condition_parse(collapse_condition) orelse return;
     const breakpoint = adw.adw_breakpoint_new(condition);
     setBoolean(breakpoint, split, "collapsed", true);
-    if (self.browse_toggle) |toggle| setBoolean(breakpoint, toggle, "active", false);
-    if (self.list_toggle) |toggle| setBoolean(breakpoint, toggle, "active", true);
     tightenPlayerBar(self, breakpoint);
     if (self.loved.stats) |stats| setBoolean(breakpoint, stats, "visible", false);
     if (self.folders.pane) |pane| setBoolean(breakpoint, pane, "visible", false);
@@ -1161,6 +1202,8 @@ fn narrowed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     page_ui.setCompact(self, true);
     details.setNarrow(self, true);
     narrowTables(self, true);
+    self.browse_collapsed = true;
+    showBrowsePanes(self);
     albums.setNarrow(self);
     artists.setNarrow(self);
     playlists.setNarrow(self);
@@ -1173,6 +1216,8 @@ fn widened(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     page_ui.setCompact(self, false);
     details.setNarrow(self, false);
     narrowTables(self, false);
+    self.browse_collapsed = false;
+    showBrowsePanes(self);
     albums.setNarrow(self);
     artists.setNarrow(self);
     playlists.setNarrow(self);

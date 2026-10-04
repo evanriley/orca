@@ -72,6 +72,7 @@ fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u
 pub fn reloadLibraryViews(self: *App) void {
     self.shown_playing = .{};
     browse.reload(self);
+    self.track_library_total = null;
     self.reload();
     albums.reload(self);
     artists.reload(self);
@@ -714,7 +715,7 @@ pub fn tick(self: *App) void {
     if (submission_stats) |value| writeSubmissionDetail(self, snapshot, value);
     if (stats) |value| {
         writeDetail(self, task, snapshot, value);
-        if (task == .scan and self.loaded_rows == 0 and value.tracks_written != 0) reloadLibraryViews(self);
+        if (task == .scan and self.track_count == 0 and value.tracks_written != 0) reloadLibraryViews(self);
     }
     if (match_stats) |value| {
         writeMatchDetail(self, snapshot, value);
