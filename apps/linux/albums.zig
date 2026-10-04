@@ -22,6 +22,7 @@ const album_filters = @import("album_filters.zig");
 const signal_path = @import("signal_path.zig");
 const preferences = @import("preferences.zig");
 const window = @import("window.zig");
+const offline = @import("offline.zig");
 
 const App = app.App;
 const BrowseObject = browse_model.BrowseObject;
@@ -233,6 +234,8 @@ fn newTile(self: *App) *gtk.Widget {
     gtk.gtk_widget_set_valign(badge, gtk.ALIGN_END);
     gtk.gtk_widget_add_css_class(badge, "cover-badge");
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), badge);
+    const local = offline.localBadge();
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, frame), local);
 
     const playing = playingBars();
     const title = tileLabel(null, "tile-title");
@@ -264,6 +267,7 @@ fn newTile(self: *App) *gtk.Widget {
     gtk.g_object_set_data(tile, "orca-artist", artist);
     gtk.g_object_set_data(tile, "orca-year", year);
     gtk.g_object_set_data(tile, "orca-explicit", badge);
+    gtk.g_object_set_data(tile, "orca-local", local);
     gtk.g_object_set_data(tile, "orca-playing", playing);
     menu.onSecondaryClick(tile, tileMenu, self);
     return tile;
@@ -433,6 +437,7 @@ fn bindTile(_: ?*anyopaque, item: ?*anyopaque, data: ?*anyopaque) callconv(.c) v
     if (tilePart(tile, "orca-explicit")) |badge| gtk.gtk_widget_set_visible(badge, @intFromBool(row.release().explicit));
     art.setInitials(cover, row.name());
     showPlaying(tile, self.playing().matches(.release, row.id()));
+    offline.markTile(self, tile, row.id());
     const id = row.id() orelse return;
     const grid: ?*gtk.Widget = if (self.album_grid) |view| gtk.cast(gtk.Widget, view) else null;
     art.show(self, cover, art.Key.release(id, coverArtSize(grid, self.album_tile_pixels)));
@@ -762,6 +767,7 @@ pub fn countFailed(self: *App) void {
 pub fn pageArrived(self: *App, request_id: u64, page: liborca.ReleasePage) void {
     const model = self.album_model orelse return;
     const started = gtk.g_get_monotonic_time();
+    offline.prefetchReleases(self, page.items);
     model.pageArrived(request_id, page);
     if (self.debug_frames) std.debug.print("orca-gtk frames: album page {d} us\n", .{gtk.g_get_monotonic_time() - started});
 }
@@ -812,9 +818,40 @@ fn showCount(self: *App, total: u64) void {
             strings.printZ(&buffer, "{d} albums", .{total}) catch "";
         gtk.gtk_label_set_text(meta, text.ptr);
     }
+    showUnavailable(self);
     const label = sections.match orelse return;
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, label), @intFromBool(sections.large and narrowed(self)));
     gtk.gtk_label_set_text(label, (strings.printZ(&buffer, "{f} match", .{strings.grouped(total)}) catch @as([:0]const u8, "")).ptr);
+}
+
+/// " · N unavailable" after the album count while a root is offline and the
+/// listing is the whole library.
+pub fn showUnavailable(self: *App) void {
+    const label = self.albums_unavailable orelse return;
+    const count = offline.unavailableReleases(self);
+    var buffer: [64]u8 = undefined;
+    const shown = count != 0 and (self.album_sections.large or !narrowed(self));
+    const text: [:0]const u8 = if (shown) strings.format(&buffer, " \u{00b7} {f} unavailable", .{strings.grouped(count)}) else "";
+    gtk.gtk_label_set_text(label, text.ptr);
+    gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, label), @intFromBool(shown));
+}
+
+fn besideMeta(meta: *gtk.Label) *gtk.Label {
+    const meta_widget = gtk.cast(gtk.Widget, meta);
+    const column = gtk.gtk_widget_get_parent(meta_widget).?;
+    const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
+    _ = gtk.g_object_ref(meta_widget);
+    gtk.gtk_box_remove(gtk.cast(gtk.Box, column), meta_widget);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), meta_widget);
+    gtk.g_object_unref(meta_widget);
+    const unavailable = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(unavailable, "meta");
+    gtk.gtk_widget_add_css_class(unavailable, "numeric");
+    gtk.gtk_widget_add_css_class(unavailable, "meta-unavailable");
+    gtk.gtk_widget_set_visible(unavailable, gtk.false_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, row), unavailable);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, column), row);
+    return gtk.cast(gtk.Label, unavailable);
 }
 
 pub fn reloadKeepingScroll(self: *App) void {
@@ -1431,6 +1468,7 @@ pub fn build(self: *App) *gtk.Widget {
 
     const title = page_ui.title("Albums");
     self.albums_meta = title.meta;
+    self.albums_unavailable = besideMeta(title.meta);
     self.album_sections.title_text = gtk.gtk_widget_get_parent(gtk.cast(gtk.Widget, title.title));
     self.album_sections.title_end = gtk.cast(gtk.Widget, title.end);
     var labels: [sorts.len + 1]?[*:0]const u8 = undefined;
@@ -1729,6 +1767,7 @@ fn bindSectionTile(self: *App, tile: *gtk.Widget, release: *const liborca.Releas
     const label = strings.format(&buffer, "{s} by {s}", .{ name, if (release.album_artist.len != 0) release.album_artist else "Unknown Artist" });
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, tile), gtk.ACCESSIBLE_PROPERTY_LABEL, label.ptr, @as(c_int, -1));
     showPlaying(tile, self.playing().matches(.release, release.id));
+    offline.markTile(self, tile, release.id);
     const cover = tilePart(tile, "orca-cover") orelse return;
     const key = art.Key.release(release.id, sectionArtSize(self));
     if (art.cached(self, key)) {

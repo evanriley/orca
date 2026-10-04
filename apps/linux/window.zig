@@ -35,6 +35,7 @@ const track_filters = @import("track_filters.zig");
 const preferences = @import("preferences.zig");
 const palette = @import("palette.zig");
 const lyrics = @import("lyrics.zig");
+const offline = @import("offline.zig");
 
 const App = app.App;
 const Column = track_model.Column;
@@ -837,6 +838,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .folders) folders.shown(self);
     if (page == .settings) preferences.show(self);
     if (page == .activity) activity.shown(self);
+    offline.showBanner(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -899,6 +901,7 @@ fn navItem(self: *App, item: NavItem) *gtk.Widget {
         .tracks => self.library_counts.set(.tracks, count_label),
         .queue => self.queue_count = count_label,
         .matches => self.matches_count = count_label,
+        .folders => self.folders_count = count_label,
         else => {},
     }
     return button;
@@ -1306,6 +1309,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     adw.adw_overlay_split_view_set_enable_show_gesture(inspected_view, gtk.false_);
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
+    adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), offline.build(self));
     adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
     self.top_bar.view = gtk.cast(adw.ToolbarView, framed);
     gtk.gtk_widget_set_hexpand(framed, gtk.true_);

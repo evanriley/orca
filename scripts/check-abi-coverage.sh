@@ -50,6 +50,7 @@ declare -A reasons=(
     [libraryPlaylistFormats]="later: a playlist's codecs and analysis counts (docs/roadmap.md, Later)"
     [libraryReshufflePlaylists]="later: drawing new random smart playlist orders (docs/roadmap.md, Later)"
     [librarySmartPlaylistPreview]="later: a smart playlist preview with its length and a sample (docs/roadmap.md, Later)"
+    [libraryReleasesAvailable]="later: offline roots and what they leave unable to play (docs/roadmap.md, Later)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

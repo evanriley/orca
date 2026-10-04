@@ -12,6 +12,7 @@ const runtime_watch = @import("runtime_watch.zig");
 
 const EditedTracks = runtime.EditedTracks;
 const JobHandle = runtime.JobHandle;
+const LibraryAvailability = runtime.LibraryAvailability;
 const LibraryHandle = runtime.LibraryHandle;
 const OrcaRuntime = runtime.OrcaRuntime;
 const PendingTagWrite = job_worker.PendingTagWrite;
@@ -176,10 +177,19 @@ pub fn libraryRootPage(
     limit: u32,
     offset: u32,
 ) !database.repository.LibraryRootPage {
+    return checkedRootPage(self, library, self.control_threaded.io(), limit, offset);
+}
+
+fn checkedRootPage(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    io: std.Io,
+    limit: u32,
+    offset: u32,
+) !database.repository.LibraryRootPage {
     const library_database = try runtime.libraryDatabase(self, library);
     const page = try library_database.library_roots.page(self.allocator, limit, offset);
     errdefer page.deinit();
-    const io = self.control_threaded.io();
     for (page.items) |*root| {
         const recorded_key = try library_database.recordedVolumeKey(self.allocator, root.volume_id);
         defer if (recorded_key) |key| self.allocator.free(key);
@@ -187,6 +197,63 @@ pub fn libraryRootPage(
         if (!root.available) root.unavailable_tracks = root.track_count;
     }
     return page;
+}
+
+pub fn libraryAvailability(self: *OrcaRuntime, library: LibraryHandle, io: std.Io) !LibraryAvailability {
+    const library_database = try runtime.libraryDatabase(self, library);
+    var offline: std.ArrayList(database.repository.LibraryRoot) = .empty;
+    errdefer {
+        for (offline.items) |root| root.deinit(self.allocator);
+        offline.deinit(self.allocator);
+    }
+    var ids: std.ArrayList(u8) = .empty;
+    defer ids.deinit(self.allocator);
+    try ids.append(self.allocator, ',');
+    const page_size = 512;
+    var offset: u32 = 0;
+    while (true) {
+        var page = try checkedRootPage(self, library, io, page_size, offset);
+        defer page.deinit();
+        for (page.items) |*root| {
+            if (root.available or !root.enabled) continue;
+            try offline.ensureUnusedCapacity(self.allocator, 1);
+            try ids.print(self.allocator, "{d},", .{root.id});
+            offline.appendAssumeCapacity(root.*);
+            root.path = &.{};
+            root.volume = &.{};
+        }
+        if (page.items.len < page_size) break;
+        offset += page_size;
+    }
+    const counts: database.repository.OfflineCounts = if (offline.items.len == 0)
+        .{}
+    else
+        try library_database.library_roots.offlineCounts(ids.items);
+    const offline_ids = try ids.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(offline_ids);
+    return .{
+        .allocator = self.allocator,
+        .offline_roots = try offline.toOwnedSlice(self.allocator),
+        .unavailable_tracks = counts.tracks,
+        .unavailable_releases = counts.releases,
+        .offline_ids = offline_ids,
+    };
+}
+
+pub fn libraryReleasesAvailable(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    availability: *const LibraryAvailability,
+    release_ids: []const i64,
+    available: []bool,
+) !void {
+    if (available.len != release_ids.len) return error.InvalidArgument;
+    const library_database = try runtime.libraryDatabase(self, library);
+    if (availability.offline_roots.len == 0) {
+        @memset(available, true);
+        return;
+    }
+    try library_database.library_roots.releasesAvailable(availability.offline_ids, release_ids, available);
 }
 
 pub fn libraryFolderPage(

@@ -28,6 +28,9 @@
 @define-color orca_accent_ring #3A5878;
 @define-color orca_loved #E5615C;
 @define-color orca_warn #E0915A;
+@define-color orca_warn_surface #251E19;
+@define-color orca_warn_edge #4A3627;
+@define-color orca_warn_body #C9BFB6;
 @define-color orca_caution #CBB062;
 @define-color orca_diff #E5C88A;
 @define-color orca_lyric_faded #6A6E71;
@@ -6848,5 +6851,149 @@ button.scan-tile:disabled {
 
 .scan-tile-artist {
   font-size: 12px;
+  color: @orca_text_3;
+}
+
+/* Offline music folder */
+
+.offline-banner {
+  margin: 14px 32px 2px 32px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background-color: @orca_warn_surface;
+  box-shadow: inset 0 0 0 1px @orca_warn_edge;
+}
+
+.offline-icon {
+  min-width: 40px;
+  min-height: 40px;
+  border-radius: 10px;
+  background-color: color-mix(in srgb, @orca_warn 14%, transparent);
+  color: @orca_warn;
+}
+
+.offline-title {
+  font-size: 14.5px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.offline-body {
+  font-size: 13px;
+  color: @orca_warn_body;
+}
+
+.offline-safe {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.offline-shield {
+  margin-top: 1px;
+  color: @orca_text_3;
+}
+
+button.offline-button {
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_popover;
+  color: @orca_text;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+button.offline-button:hover {
+  background-color: @orca_bg_hover;
+}
+
+menubutton.offline-more > button {
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background-color: transparent;
+  box-shadow: none;
+  color: @orca_text_2;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+menubutton.offline-more > button:hover,
+menubutton.offline-more > button:checked {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+.offline-details {
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.offline-details-name {
+  color: @orca_text_3;
+}
+
+.offline-details-path {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px;
+}
+
+.nav-count.nav-count-warn {
+  color: @orca_warn;
+}
+
+.page-title .meta.meta-unavailable {
+  color: @orca_text_2;
+}
+
+.album-tile.unavailable .album-cover {
+  opacity: 0.7;
+}
+
+.album-tile.unavailable .tile-title {
+  color: @orca_text_dim;
+}
+
+.album-tile.unavailable .tile-artist,
+.album-tile.unavailable .tile-year {
+  color: alpha(@orca_text_dim, 0.75);
+}
+
+.local-badge {
+  margin: 0 0 8px 8px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background-color: alpha(@orca_on_accent, 0.85);
+  color: @orca_accent_text;
+  font-size: 11px;
+}
+
+.player-bar.failed .now-title {
+  color: @orca_text_2;
+}
+
+.player-bar.failed .now-detail-row {
+  color: @orca_warn;
+}
+
+.player-bar.failed .now-detail {
+  color: @orca_warn;
+}
+
+.failed-cover {
+  opacity: 0.5;
+}
+
+.player-bar.failed button.play-button:disabled {
+  background-color: @orca_border_strong;
+  color: @orca_text_3;
+}
+
+.player-bar.failed scale.seek highlight {
+  background-color: @orca_text_dim;
+}
+
+.player-bar.failed .bar-format {
   color: @orca_text_3;
 }

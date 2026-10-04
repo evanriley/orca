@@ -47,6 +47,7 @@ pub const RecordingInput = recordings.RecordingInput;
 pub const VolumeInput = volumes.VolumeInput;
 pub const LibraryRoot = roots.LibraryRoot;
 pub const LibraryRootPage = roots.LibraryRootPage;
+pub const OfflineCounts = roots.OfflineCounts;
 pub const ScanRunState = scan_runs.ScanRunState;
 pub const ScanRun = scan_runs.ScanRun;
 pub const ScanCounters = scan_runs.ScanCounters;

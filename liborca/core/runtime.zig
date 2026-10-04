@@ -198,6 +198,28 @@ pub const RemovedRoot = struct {
     tracks_removed: u64,
 };
 
+/// The Library's roots that are offline now, and what they leave unable to
+/// play. Caller-owned; pass it to `libraryReleasesAvailable` to ask about
+/// particular Releases under the same view.
+pub const LibraryAvailability = struct {
+    allocator: std.mem.Allocator,
+    /// Each enabled root whose folder does not open or is on another volume
+    /// than the one recorded, in id order.
+    offline_roots: []database.repository.LibraryRoot,
+    /// Tracks whose play file is under an offline root and present under no
+    /// online one.
+    unavailable_tracks: u64 = 0,
+    /// Releases with such a Track and no Track that can still play.
+    unavailable_releases: u64 = 0,
+    offline_ids: []u8,
+
+    pub fn deinit(self: LibraryAvailability) void {
+        for (self.offline_roots) |root| root.deinit(self.allocator);
+        self.allocator.free(self.offline_roots);
+        self.allocator.free(self.offline_ids);
+    }
+};
+
 /// The Tracks an edit's files back once it is applied. An edit that moves a
 /// track to another album or position reprojects it as a new Track, so the
 /// ids a caller passed in may no longer exist. Caller-owned.
@@ -2301,6 +2323,28 @@ pub const OrcaRuntime = struct {
         offset: u32,
     ) !database.repository.LibraryRootPage {
         return runtime_roots.libraryRootPage(self, library, limit, offset);
+    }
+
+    /// Checks every enabled root on disk now, as `libraryRootPage` does, and
+    /// counts what the offline ones leave unable to play. Writes nothing;
+    /// calling it again is how a host re-checks after a drive returns. The
+    /// check can block on a hung mount, so a host with a UI calls it off its
+    /// event loop, with an `io` of that thread's own.
+    pub fn libraryAvailability(self: *OrcaRuntime, library: LibraryHandle, io: std.Io) !LibraryAvailability {
+        return runtime_roots.libraryAvailability(self, library, io);
+    }
+
+    /// Sets `available[i]` to whether Release `release_ids[i]` keeps a Track
+    /// that can play while `availability`'s roots are offline. With no root
+    /// offline every Release is reported available.
+    pub fn libraryReleasesAvailable(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        availability: *const LibraryAvailability,
+        release_ids: []const i64,
+        available: []bool,
+    ) !void {
+        return runtime_roots.libraryReleasesAvailable(self, library, availability, release_ids, available);
     }
 
     /// One page of a folder below library root `root_id`: subfolders with

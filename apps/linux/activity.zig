@@ -350,7 +350,7 @@ fn durationText(buffer: []u8, entry: *const liborca.JobHistoryEntry) [:0]const u
     return strings.format(buffer, "{d} hr {d} min", .{ minutes / 60, minutes % 60 });
 }
 
-fn agoText(buffer: []u8, now_s: i64, then_s: i64) [:0]const u8 {
+pub fn agoText(buffer: []u8, now_s: i64, then_s: i64) [:0]const u8 {
     const minutes: u64 = @intCast(@divFloor(@max(now_s - then_s, 0), 60));
     if (minutes < 1) return "just now";
     if (minutes < 60) return strings.format(buffer, "{d} min ago", .{minutes});
@@ -365,7 +365,7 @@ fn nowSeconds(self: *App) i64 {
 }
 
 /// `pattern` applied to `unix_seconds` in local time, or empty.
-fn localTime(buffer: []u8, unix_seconds: i64, pattern: [*:0]const u8) [:0]const u8 {
+pub fn localTime(buffer: []u8, unix_seconds: i64, pattern: [*:0]const u8) [:0]const u8 {
     const moment = gtk.g_date_time_new_from_unix_local(unix_seconds) orelse return "";
     defer gtk.g_date_time_unref(moment);
     const text = gtk.g_date_time_format(moment, pattern) orelse return "";

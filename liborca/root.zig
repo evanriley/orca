@@ -107,6 +107,7 @@ pub const ArtworkRole = database.repository.ArtworkRole;
 pub const FolderPage = database.repository.FolderPage;
 pub const RootBinding = database.RootBinding;
 pub const RemovedRoot = runtime.RemovedRoot;
+pub const LibraryAvailability = runtime.LibraryAvailability;
 pub const EmbeddedImage = internal.metadata.EmbeddedImage;
 pub const ArtworkSubject = runtime.ArtworkSubject;
 pub const ArtworkResult = runtime.ArtworkResult;

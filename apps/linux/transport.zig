@@ -517,7 +517,15 @@ fn buildNowPlaying(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(now_title, "now-title");
     gtk.gtk_widget_add_css_class(now_detail, "now-detail");
     gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), now_detail);
+    const alert = gtk.gtk_image_new_from_icon_name("orca-alert-symbolic");
+    gtk.gtk_image_set_pixel_size(gtk.cast(gtk.Image, alert), 13);
+    gtk.gtk_widget_set_visible(alert, gtk.false_);
+    self.now_playing_alert = alert;
+    const detail_row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 5);
+    gtk.gtk_widget_add_css_class(detail_row, "now-detail-row");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail_row), alert);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, detail_row), now_detail);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), detail_row);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), labels);
     const love = feedback.newButton(self, gtk.callback(loveClicked));
     gtk.gtk_widget_add_css_class(love, "bar-button");
@@ -945,7 +953,8 @@ pub fn refreshSignalPath(self: *App) void {
         gtk.gtk_label_set_text(label, text.ptr);
     }
     if (self.format_label) |label| {
-        const text = if (path) |value| signal_path.renderTechnology(&buffer, value) else "";
+        const technology = if (path) |value| signal_path.renderTechnology(&buffer, value) else "";
+        const text = if (technology.len == 0 and self.shown_failure_track != null) "No signal" else technology;
         gtk.gtk_label_set_text(label, text.ptr);
         if (self.format_button) |button| gtk.gtk_widget_set_visible(button, boolean(text.len != 0));
     }
@@ -1187,11 +1196,62 @@ pub fn tick(self: *App) void {
         feedback.showPlaying(self);
         refreshSignalPath(self);
     }
+    const failed: ?liborca.PlaybackFailure = if (status.track_id == null) status.last_failure else null;
+    const failed_track: ?i64 = if (failed) |failure| failure.track_id else null;
+    if (track_changed or !optionalEql(failed_track, self.shown_failure_track)) {
+        self.shown_failure_track = failed_track;
+        showFailure(self, failed);
+    }
     refreshSignalPathWhenOutputStarts(self);
     if (track_changed or transport_changed) {
         self.shown_transport = status.transport;
         self.mpris.notify();
     }
+}
+
+fn failureDetail(reason: liborca.PlaybackFailure.Reason) [:0]const u8 {
+    return switch (reason) {
+        .codec_unavailable => "Stopped \u{00b7} no decoder for this file",
+        .decode_error => "Stopped \u{00b7} file could not be read",
+        else => "Stopped \u{00b7} file unavailable",
+    };
+}
+
+/// The bar while nothing plays because the last entry could not be opened:
+/// that Track, why it stopped, and no signal.
+fn showFailure(self: *App, failure: ?liborca.PlaybackFailure) void {
+    const bar = picker.bar;
+    const controls = &self.transport_controls;
+    if (self.now_playing_alert) |alert| gtk.gtk_widget_set_visible(alert, @intFromBool(failure != null));
+    for ([_]?*gtk.Widget{ controls.shuffle, controls.repeat }) |button|
+        if (button) |widget| gtk.gtk_widget_set_visible(widget, @intFromBool(failure == null));
+    if (controls.play) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(failure == null));
+    if (self.now_playing_art) |cover| {
+        if (failure != null) gtk.gtk_widget_add_css_class(cover, "failed-cover") else gtk.gtk_widget_remove_css_class(cover, "failed-cover");
+    }
+    const failed = failure orelse {
+        if (bar) |widget| gtk.gtk_widget_remove_css_class(widget, "failed");
+        if (self.shown_track_id == null) {
+            if (self.now_playing_title) |label| gtk.gtk_label_set_text(label, "Nothing playing");
+            if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, "");
+            refreshCover(self, null);
+        }
+        refreshSignalPath(self);
+        return;
+    };
+    if (bar) |widget| gtk.gtk_widget_add_css_class(widget, "failed");
+    var title_buffer: [512]u8 = undefined;
+    var title: [:0]const u8 = "Unknown title";
+    if (self.library) |library| {
+        if (self.runtime.libraryTrackSummary(library, failed.track_id) catch null) |summary| {
+            defer summary.deinit(self.allocator);
+            if (summary.title.len != 0) title = strings.printZ(&title_buffer, "{s}", .{summary.title}) catch title;
+        }
+    }
+    if (self.now_playing_title) |label| gtk.gtk_label_set_text(label, title.ptr);
+    if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, failureDetail(failed.reason).ptr);
+    refreshCover(self, failed.track_id);
+    refreshSignalPath(self);
 }
 
 fn seekPositionVisiblyMoved(self: *App, adjustment: *gtk.Adjustment, status: liborca.PlayerStatus) bool {

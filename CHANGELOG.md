@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Offline folder state.** `libraryAvailability` re-checks the roots and
+  counts the Tracks and Releases the unavailable ones leave unable to play,
+  and `libraryReleasesAvailable` answers per Release; `LibraryRoot` adds
+  `volume` and `last_seen_at`. `orca-cli availability` prints them and
+  `orca-cli roots` ends each line `volume= last_seen_at=`. `orca-gtk` shows
+  a banner while a music folder is offline, with Try Again, Locate Folder…
+  (`libraryRelocateRoot`) and a Details popover; Albums counts and dims the
+  unavailable albums and badges the others "On this computer", the sidebar
+  shows Folders `1 offline`, and the player bar reads `Stopped · file
+  unavailable` and `No signal` after an entry fails.
 - **Composer and comment.** `metadata.Field.composer` and `.comment` are
   editable (`orca-cli edit --composer= --comment=`, `--clear=composer|comment`),
   shown in `TrackDetails` and `orca-cli track`, and written back by

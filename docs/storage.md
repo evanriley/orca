@@ -226,6 +226,10 @@ A root is available when its directory opens for reading and passes the
 volume check above. `libraryRootPage` reports it as `LibraryRoot.available`,
 beside the root's Track count and the Tracks it cannot play. While a root is
 unavailable, every Track under it counts as unavailable.
+`libraryAvailability` gathers the unavailable roots with those Tracks and
+the Releases left with nothing to play, and `libraryReleasesAvailable`
+answers per Release, so a frontend dims what cannot play without deciding
+availability itself (`orca-cli availability DATABASE [RELEASE_ID...]`).
 
 Playback applies the same test. When a Track's file cannot be found, the
 opener checks the root the location belongs to. An unavailable root fails the

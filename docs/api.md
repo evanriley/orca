@@ -154,7 +154,16 @@ defer page.deinit();
   tag write under the root `error.MutationInProgress`; and one under the root
   awaiting reconciliation `error.MutationNeedsReconciliation`.
   `libraryMissingFileCount(library)` counts the Tracks whose preferred file
-  has no present location. See
+  has no present location. Each `LibraryRoot` also carries `volume`, the
+  label or stable key of the volume it is bound to, and `last_seen_at`, when
+  its newest scan completed, else when its volume was last bound.
+  `libraryAvailability(library, io)` re-checks every enabled root and returns a
+  caller-owned `LibraryAvailability`: the offline roots and the Tracks and
+  Releases they leave unable to play (a Release counts when it has a Track
+  under an offline root and none with a present file elsewhere). The check
+  can block on a hung mount, so a host with a UI calls it off its event loop
+  with that thread's own `io`. `libraryReleasesAvailable(library, &availability, ids,
+  available)` answers that per Release for one page of ids. See
   [storage.md](storage.md#unavailable-and-relocated-roots).
 - `PlayerStatus.last_failure` is the last queue entry that could not be
   opened, as a `PlaybackFailure`: its `track_id` and a

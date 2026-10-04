@@ -24,6 +24,7 @@ const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
+const offline = @import("offline.zig");
 const art = @import("art.zig");
 const preferences = @import("preferences.zig");
 const track_table = @import("track_table.zig");
@@ -100,6 +101,7 @@ pub fn reloadLibraryViews(self: *App) void {
     browse.reload(self);
     self.track_library_total = null;
     self.reload();
+    offline.refresh(self);
     albums.reload(self);
     artists.reload(self);
     health.reload(self);
@@ -334,6 +336,56 @@ pub fn chooseFolder(self: *App) void {
     gtk.gtk_file_dialog_set_title(dialog, "Add Music Folder");
     gtk.gtk_file_dialog_select_folder(dialog, self.window, null, folderChosen, self);
     gtk.g_object_unref(dialog);
+}
+
+/// Asks where root `root_id` is now and moves it there, keeping its tracks.
+pub fn relocateRoot(self: *App, root_id: i64) void {
+    if (self.library == null) {
+        self.toast("No library is open");
+        return;
+    }
+    self.offline.relocating_root = root_id;
+    const dialog = gtk.gtk_file_dialog_new();
+    gtk.gtk_file_dialog_set_title(dialog, "Locate Folder");
+    gtk.gtk_file_dialog_select_folder(dialog, self.window, null, relocationChosen, self);
+    gtk.g_object_unref(dialog);
+}
+
+fn relocationChosen(
+    source: ?*gtk.GObject,
+    result: *gtk.GAsyncResult,
+    data: ?*anyopaque,
+) callconv(.c) void {
+    const self = state(data);
+    const root_id = self.offline.relocating_root orelse return;
+    self.offline.relocating_root = null;
+    var err: ?*gtk.GError = null;
+    const folder = gtk.gtk_file_dialog_select_folder_finish(
+        gtk.cast(gtk.FileDialog, source),
+        result,
+        &err,
+    ) orelse {
+        gtk.g_clear_error(&err);
+        return;
+    };
+    const raw_path = gtk.g_file_get_path(folder);
+    gtk.g_object_unref(folder);
+    const path_pointer = raw_path orelse {
+        self.toast("That folder is not on the local filesystem");
+        return;
+    };
+    defer gtk.g_free(path_pointer);
+    const library = self.library orelse return;
+    const job = self.runtime.libraryRelocateRoot(library, self.io, root_id, std.mem.span(path_pointer)) catch |err_value| {
+        self.toast(switch (err_value) {
+            error.LibraryJobRunning => "Wait for the running task to finish, then try again",
+            error.RootPathOverlaps => "That folder overlaps another music folder",
+            error.InvalidLibraryRoot => "That folder cannot be read",
+            else => queueRefusal(err_value, "Could not move the music folder there"),
+        });
+        return;
+    };
+    begin(self, .{ .task = .scan, .job = job });
 }
 
 fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

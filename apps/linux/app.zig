@@ -27,6 +27,7 @@ const playlists = @import("playlists.zig");
 const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
+const offline = @import("offline.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
 const first_run = @import("first_run.zig");
@@ -404,6 +405,7 @@ pub const App = struct {
     albums_count_request: TotalsRequest = .idle,
     albums_failure: Failure = .none,
     albums_meta: ?*gtk.Label = null,
+    albums_unavailable: ?*gtk.Label = null,
     albums_body: ?*gtk.Stack = null,
     albums_navigation: ?*adw.NavigationView = null,
     album_sort: liborca.ReleaseSort = .recently_added,
@@ -443,6 +445,8 @@ pub const App = struct {
     loved: loved.State = .{},
     genres: genres.State = .{},
     folders: folders.State = .{},
+    offline: offline.State = .{},
+    folders_count: ?*gtk.Label = null,
     palette: palette.State = .{},
 
     health: health.State = .{},
@@ -527,6 +531,7 @@ pub const App = struct {
     seek_adjustment: ?*gtk.Adjustment = null,
     now_playing_title: ?*gtk.Label = null,
     now_playing_detail: ?*gtk.Label = null,
+    now_playing_alert: ?*gtk.Widget = null,
     /// The now-playing cover. One widget in two states: a paintable when the
     /// audible track's file carries a readable image, and a placeholder icon
     /// when it does not, so there is no second widget to keep visible in step
@@ -569,6 +574,7 @@ pub const App = struct {
     shown_recording_id: ?i64 = null,
     shown_feedback: liborca.Feedback = .none,
     shown_transport: liborca.TransportState = .stopped,
+    shown_failure_track: ?i64 = null,
     repeat_mode: liborca.RepeatMode = .off,
 
     queue: queue.State = .{},
@@ -979,6 +985,7 @@ pub const App = struct {
         self.album_artist_name.clear(self.allocator);
         self.genres.deinit(self.allocator);
         self.folders.deinit(self.allocator);
+        self.offline.deinit(self.allocator);
         self.palette.deinit(self.allocator);
         self.activity.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);

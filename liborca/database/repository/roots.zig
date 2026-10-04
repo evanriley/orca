@@ -7,9 +7,10 @@ const VolumeInput = @import("volumes.zig").VolumeInput;
 const VolumeRepository = @import("volumes.zig").VolumeRepository;
 const refreshFolderCoverLocked = @import("locations.zig").refreshFolderCoverLocked;
 
-/// `available`, `track_count` and `unavailable_tracks` are filled in by a
-/// `page`, and `available` only by `Runtime.libraryRootPage`, which looks at
-/// the filesystem; `list` leaves them at their defaults.
+/// `available`, `track_count`, `unavailable_tracks`, `volume` and
+/// `last_seen_at` are filled in by a `page`, and `available` only by
+/// `Runtime.libraryRootPage`, which looks at the filesystem; `list` leaves
+/// them at their defaults.
 pub const LibraryRoot = struct {
     id: i64,
     volume_id: i64,
@@ -18,11 +19,30 @@ pub const LibraryRoot = struct {
     available: bool = true,
     track_count: u64 = 0,
     unavailable_tracks: u64 = 0,
+    /// The volume's label, else its stable key (`uuid:…`, `root:…`); empty
+    /// when the root has no recorded volume.
+    volume: []u8 = &.{},
+    /// Unix seconds when the root was last read: its newest completed scan,
+    /// else when its volume was last bound.
+    last_seen_at: ?i64 = null,
 
     pub fn deinit(self: LibraryRoot, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+        allocator.free(self.volume);
     }
 };
+
+pub const OfflineCounts = struct {
+    tracks: u64 = 0,
+    releases: u64 = 0,
+};
+
+pub const available_location =
+    \\SELECT 1 FROM locations AS held
+    \\WHERE held.state <> 'missing'
+    \\  AND (held.root_id IS NULL OR instr(?1, ',' || held.root_id || ',') = 0)
+    \\  AND
+;
 
 pub const LibraryRootPage = struct {
     allocator: std.mem.Allocator,
@@ -396,7 +416,7 @@ pub const LibraryRootRepository = struct {
         offset: u32,
     ) !LibraryRootPage {
         var statement = try self.db.prepare(
-            \\SELECT id, volume_id, path, enabled,
+            \\SELECT library_roots.id, volume_id, path, enabled,
             \\    (SELECT count(DISTINCT tracks.id) FROM locations
             \\     JOIN tracks ON tracks.preferred_file_id = locations.file_id
             \\     WHERE locations.root_id = library_roots.id),
@@ -404,9 +424,15 @@ pub const LibraryRootRepository = struct {
             \\     JOIN tracks ON tracks.preferred_file_id = locations.file_id
             \\     WHERE locations.root_id = library_roots.id AND NOT EXISTS (
             \\         SELECT 1 FROM locations AS held
-            \\         WHERE held.file_id = tracks.preferred_file_id AND held.state <> 'missing'))
+            \\         WHERE held.file_id = tracks.preferred_file_id AND held.state <> 'missing')),
+            \\    COALESCE(NULLIF(volumes.label, ''), volumes.stable_key, ''),
+            \\    COALESCE(
+            \\        (SELECT max(finished_at) FROM scan_runs
+            \\         WHERE scan_runs.root_id = library_roots.id AND scan_runs.state = 'completed'),
+            \\        volumes.last_seen_at, 0)
             \\FROM library_roots
-            \\ORDER BY id LIMIT ?1 OFFSET ?2;
+            \\LEFT JOIN volumes ON volumes.id = library_roots.volume_id
+            \\ORDER BY library_roots.id LIMIT ?1 OFFSET ?2;
         );
         defer statement.deinit();
         try statement.bindInt64(1, limit);
@@ -419,6 +445,9 @@ pub const LibraryRootRepository = struct {
         while (try statement.step() == .row) {
             const path = try allocator.dupe(u8, statement.columnText(2));
             errdefer allocator.free(path);
+            const volume = try allocator.dupe(u8, statement.columnText(6));
+            errdefer allocator.free(volume);
+            const last_seen_at = statement.columnInt64(7);
             try roots.append(allocator, .{
                 .id = statement.columnInt64(0),
                 .volume_id = statement.columnInt64(1),
@@ -426,8 +455,74 @@ pub const LibraryRootRepository = struct {
                 .enabled = statement.columnInt64(3) != 0,
                 .track_count = @intCast(statement.columnInt64(4)),
                 .unavailable_tracks = @intCast(statement.columnInt64(5)),
+                .volume = volume,
+                .last_seen_at = if (last_seen_at > 0) last_seen_at else null,
             });
         }
         return .{ .allocator = allocator, .items = try roots.toOwnedSlice(allocator) };
+    }
+
+    /// Tracks and Releases that cannot play because of the roots in
+    /// `offline`, a comma-delimited id list with a leading and trailing comma
+    /// (",3,7,"): those with a play file under one of them and none present
+    /// under any other root.
+    pub fn offlineCounts(self: *const LibraryRootRepository, offline: []const u8) !OfflineCounts {
+        var tracks = try self.db.prepare(
+            \\SELECT count(DISTINCT tracks.id) FROM locations
+            \\JOIN tracks ON tracks.preferred_file_id = locations.file_id
+            \\WHERE instr(?1, ',' || locations.root_id || ',') > 0
+            \\  AND NOT EXISTS (
+        ++ available_location ++
+            \\      held.file_id = tracks.preferred_file_id);
+        );
+        defer tracks.deinit();
+        try tracks.bindText(1, offline);
+        if (try tracks.step() != .row) return error.SqlFailed;
+        var releases = try self.db.prepare(
+            \\SELECT count(DISTINCT tracks.release_id) FROM locations
+            \\JOIN tracks ON tracks.preferred_file_id = locations.file_id
+            \\WHERE instr(?1, ',' || locations.root_id || ',') > 0
+            \\  AND tracks.release_id IS NOT NULL
+            \\  AND NOT EXISTS (
+            \\      SELECT 1 FROM tracks AS sibling
+            \\      WHERE sibling.release_id = tracks.release_id AND EXISTS (
+        ++ available_location ++
+            \\      held.file_id = sibling.preferred_file_id));
+        );
+        defer releases.deinit();
+        try releases.bindText(1, offline);
+        if (try releases.step() != .row) return error.SqlFailed;
+        return .{
+            .tracks = @intCast(tracks.columnInt64(0)),
+            .releases = @intCast(releases.columnInt64(0)),
+        };
+    }
+
+    /// Sets `available[i]` to whether `release_ids[i]` keeps a Track that can
+    /// play while the roots in `offline` (as for `offlineCounts`) are away.
+    pub fn releasesAvailable(
+        self: *const LibraryRootRepository,
+        offline: []const u8,
+        release_ids: []const i64,
+        available: []bool,
+    ) !void {
+        if (available.len != release_ids.len) return error.InvalidArgument;
+        var statement = try self.db.prepare(
+            \\SELECT EXISTS (
+            \\    SELECT 1 FROM tracks JOIN locations ON locations.file_id = tracks.preferred_file_id
+            \\    WHERE tracks.release_id = ?2 AND instr(?1, ',' || locations.root_id || ',') > 0)
+            \\  AND NOT EXISTS (
+            \\    SELECT 1 FROM tracks WHERE tracks.release_id = ?2 AND EXISTS (
+        ++ available_location ++
+            \\    held.file_id = tracks.preferred_file_id));
+        );
+        defer statement.deinit();
+        for (release_ids, available) |release_id, *slot| {
+            try statement.bindText(1, offline);
+            try statement.bindInt64(2, release_id);
+            if (try statement.step() != .row) return error.SqlFailed;
+            slot.* = statement.columnInt64(0) == 0;
+            try statement.reset();
+        }
     }
 };

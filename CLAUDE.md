@@ -125,7 +125,8 @@ zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unkn
 # library
 zig build run -- scan DATABASE ROOT   # `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
-zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N
+zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
+zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no
 zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now
 zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
 zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; binds the volume PATH is on now, then reconciles

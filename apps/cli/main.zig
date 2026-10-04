@@ -211,6 +211,7 @@ const commands = [_]Command{
     .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
     .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
     .{ .name = "relocate-root", .usage = "relocate-root DATABASE ID PATH", .min_arguments = 3, .max_arguments = 3, .run = relocateRoot },
+    .{ .name = "availability", .usage = "availability DATABASE [RELEASE_ID...]", .min_arguments = 1, .max_arguments = null, .run = showAvailability },
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
@@ -1787,8 +1788,12 @@ fn listRoots(context: Context) !void {
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
     var page = try runtime.libraryRootPage(library_handle, 512, 0);
     defer page.deinit();
-    for (page.items) |root| try context.stdout.print(
-        "{d}\t{s}\t{s}\tavailable={s}\ttracks={d}\tunavailable={d}\n",
+    for (page.items) |root| try printRoot(context.stdout, root);
+}
+
+fn printRoot(stdout: *std.Io.Writer, root: liborca.LibraryRoot) !void {
+    try stdout.print(
+        "{d}\t{s}\t{s}\tavailable={s}\ttracks={d}\tunavailable={d}\tvolume={s}\tlast_seen_at=",
         .{
             root.id,
             if (root.enabled) "enabled" else "disabled",
@@ -1796,8 +1801,36 @@ fn listRoots(context: Context) !void {
             if (root.available) "yes" else "no",
             root.track_count,
             root.unavailable_tracks,
+            if (root.volume.len != 0) root.volume else "-",
         },
     );
+    if (root.last_seen_at) |seen| try stdout.print("{d}\n", .{seen}) else try stdout.writeAll("-\n");
+}
+
+/// `orca-cli availability DATABASE [RELEASE_ID...]`: the roots offline now,
+/// what they leave unable to play, and whether each Release named can play.
+fn showAvailability(context: Context) !void {
+    const stdout = context.stdout;
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const availability = try runtime.libraryAvailability(library, context.io);
+    defer availability.deinit();
+    try stdout.print("offline_roots={d} unavailable_tracks={d} unavailable_releases={d}\n", .{
+        availability.offline_roots.len,
+        availability.unavailable_tracks,
+        availability.unavailable_releases,
+    });
+    for (availability.offline_roots) |root| {
+        try stdout.writeAll("offline\t");
+        try printRoot(stdout, root);
+    }
+    for (context.arguments[1..]) |argument| {
+        const release_id = [1]i64{try std.fmt.parseInt(i64, argument, 10)};
+        var available: [1]bool = undefined;
+        try runtime.libraryReleasesAvailable(library, &availability, &release_id, &available);
+        try stdout.print("release={d} available={s}\n", .{ release_id[0], if (available[0]) "yes" else "no" });
+    }
 }
 
 /// `orca-cli folders DATABASE [ROOT_ID [PATH]]`: the roots with their totals,

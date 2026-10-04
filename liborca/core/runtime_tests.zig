@@ -1797,6 +1797,74 @@ test "a Track under a root that has moved is reported as folder unavailable unti
     try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
 }
 
+test "an offline root leaves only its own Releases unavailable until its folder returns" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    for ([_][]const u8{ "away", "home" }, [_][]const u8{ "fixtures/audio/tagged-reference.flac", "fixtures/audio/covered-reference.flac" }) |name, fixture| {
+        try temporary.dir.createDirPath(std.testing.io, name);
+        const directory = try temporary.dir.openDir(std.testing.io, name, .{});
+        defer directory.close(std.testing.io);
+        try copyFixtureInto(directory, fixture, "a.flac");
+    }
+    const away = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/away", .{temporary.sub_path});
+    defer std.testing.allocator.free(away);
+    const home = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/home", .{temporary.sub_path});
+    defer std.testing.allocator.free(home);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-offline-availability?mode=memory&cache=shared");
+    const away_root = (try runtime.libraryAddRoot(library, std.testing.io, away)).root_id;
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = away_root })));
+    _ = try runtime.libraryAddRoot(library, std.testing.io, home);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{})));
+    var away_release: ?i64 = null;
+    var home_release: ?i64 = null;
+    {
+        var tracks = try runtime.libraryTrackQuery(library, "", .{ .limit = 16 });
+        defer tracks.deinit();
+        try std.testing.expectEqual(@as(usize, 2), tracks.items.len);
+        for (tracks.items) |track| {
+            if (std.mem.eql(u8, track.title, "Reference Tone")) away_release = track.release_id else home_release = track.release_id;
+        }
+    }
+    const releases = [_]i64{ home_release.?, away_release.?, home_release.?, away_release.? };
+    try std.testing.expect(releases[0] != releases[1]);
+    var available: [4]bool = undefined;
+
+    {
+        const availability = try runtime.libraryAvailability(library, std.testing.io);
+        defer availability.deinit();
+        try std.testing.expectEqual(@as(usize, 0), availability.offline_roots.len);
+        try runtime.libraryReleasesAvailable(library, &availability, &releases, &available);
+        try std.testing.expectEqualSlices(bool, &.{ true, true, true, true }, &available);
+    }
+
+    try std.Io.Dir.rename(temporary.dir, "away", temporary.dir, "gone", std.testing.io);
+    {
+        const availability = try runtime.libraryAvailability(library, std.testing.io);
+        defer availability.deinit();
+        try std.testing.expectEqual(@as(usize, 1), availability.offline_roots.len);
+        const offline = availability.offline_roots[0];
+        try std.testing.expectEqual(away_root, offline.id);
+        try std.testing.expectEqualStrings(away, offline.path);
+        try std.testing.expect(offline.volume.len != 0);
+        try std.testing.expect(offline.last_seen_at != null);
+        try std.testing.expectEqual(@as(u64, 1), availability.unavailable_tracks);
+        try std.testing.expectEqual(@as(u64, 1), availability.unavailable_releases);
+        try runtime.libraryReleasesAvailable(library, &availability, &releases, &available);
+        try std.testing.expectEqualSlices(bool, &.{ true, false, true, false }, &available);
+    }
+
+    try std.Io.Dir.rename(temporary.dir, "gone", temporary.dir, "away", std.testing.io);
+    {
+        const availability = try runtime.libraryAvailability(library, std.testing.io);
+        defer availability.deinit();
+        try std.testing.expectEqual(@as(usize, 0), availability.offline_roots.len);
+        try std.testing.expectEqual(@as(u64, 0), availability.unavailable_releases);
+    }
+}
+
 test "a tag write undone after its root was relocated restores the original bytes at the new path" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

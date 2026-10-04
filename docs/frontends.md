@@ -1305,6 +1305,28 @@ Hide opens Albums and leaves the scan running; the sidebar's activity widget
 still shows it, and the steps after the scan are skipped. The page has no
 search bar.
 
+**Offline folder.** While a root is unavailable, a warn banner sits above
+every page but Now Playing and Scan: "Your music folder isn't available"
+(or "Some of your music folders aren't available"), the first offline
+root's path in mono, the Tracks it leaves unable to play, and that ratings,
+playlists and history are safe. The state is `libraryAvailability`, read on
+a thread of its own at launch, after each library job and on Try Again, since
+a hung mount can block the check; a request while one runs repeats it once
+it ends. Try Again reads "Checking…" and is insensitive until the answer
+arrives, then toasts "The folder is still not available" if a root is still
+offline. Locate Folder… opens the folder
+dialog and passes the choice to `libraryRelocateRoot`, then follows the
+reconcile it starts. Details is a popover with each offline root's path,
+volume and when it was last seen. Albums appends `· N unavailable` to its
+count, dims each tile whose Release cannot play and badges "On this
+computer" on those that can, from `libraryReleasesAvailable` per page;
+Folders in the sidebar reads `N offline`. When the Player stops because an
+entry failed (`PlayerStatus.last_failure`), the bar keeps that Track with
+`Stopped · file unavailable`, a warn alert, a dimmed cover and an
+insensitive play button, hides shuffle and repeat, and the signal path reads
+`No signal`. Unavailable album tiles dim their title, artist and year
+strongly and their cover lightly.
+
 **Activity** is a page, opened from the activity popover's View all or the
 command palette's Show Activity, of what the Library's Jobs are doing and
 have done. Its header has Change History, insensitive until that page exists,
