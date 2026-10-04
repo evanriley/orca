@@ -9,6 +9,12 @@ const watch = @import("watch.zig");
 
 pub const CancellationToken = struct {
     requested: std.atomic.Value(bool) = .init(false),
+    paused: std.atomic.Value(bool) = .init(false),
+    /// What a paused `checkpoint` sleeps on. Without one, a checkpoint never
+    /// holds, so a pause is not honoured.
+    io: ?std.Io = null,
+
+    pub const pause_poll_ms = 50;
 
     pub fn cancel(self: *CancellationToken) void {
         self.requested.store(true, .release);
@@ -16,6 +22,57 @@ pub const CancellationToken = struct {
 
     pub fn isCancelled(self: *const CancellationToken) bool {
         return self.requested.load(.acquire);
+    }
+
+    pub fn pause(self: *CancellationToken) void {
+        self.paused.store(true, .release);
+    }
+
+    pub fn unpause(self: *CancellationToken) void {
+        self.paused.store(false, .release);
+    }
+
+    pub fn isPaused(self: *const CancellationToken) bool {
+        return self.paused.load(.acquire);
+    }
+
+    pub fn checkpoint(self: *const CancellationToken) bool {
+        if (self.io) |io| {
+            while (self.isPaused() and !self.isCancelled()) {
+                io.sleep(.fromMilliseconds(pause_poll_ms), .awake) catch break;
+            }
+        }
+        return self.isCancelled();
+    }
+};
+
+/// The path or title a pass is working on, written by its threads and read by
+/// the control lane for a Job's snapshot.
+pub const CurrentItem = struct {
+    lock: std.atomic.Mutex = .unlocked,
+    bytes: [capacity]u8 = undefined,
+    len: usize = 0,
+
+    pub const capacity = 512;
+
+    pub fn set(self: *CurrentItem, text: []const u8) void {
+        var length = @min(text.len, capacity);
+        while (length > 0 and length < text.len and (text[length] & 0xC0) == 0x80) length -= 1;
+        self.acquire();
+        defer self.lock.unlock();
+        @memcpy(self.bytes[0..length], text[0..length]);
+        self.len = length;
+    }
+
+    pub fn read(self: *CurrentItem, out: *[capacity]u8) []const u8 {
+        self.acquire();
+        defer self.lock.unlock();
+        @memcpy(out[0..self.len], self.bytes[0..self.len]);
+        return out[0..self.len];
+    }
+
+    fn acquire(self: *CurrentItem) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
     }
 };
 
@@ -88,6 +145,7 @@ pub const Scanner = struct {
     /// name the ones it did not.
     generation: i64 = 0,
     cancellation: ?*const CancellationToken = null,
+    current_item: ?*CurrentItem = null,
     /// Files walked so far, published for a host that is showing progress. A
     /// scan has no honest denominator until the walk finishes, so this is a
     /// count and never a fraction. Optional: nothing here depends on it.
@@ -155,7 +213,7 @@ pub const Scanner = struct {
     fn walk(self: *Scanner, root_path: []const u8, subtree: ?[]const u8) !Result {
         if (self.batch_size == 0) return error.InvalidBatchSize;
         if (self.cancellation) |token| {
-            if (token.isCancelled()) return .{ .cancelled = true };
+            if (token.checkpoint()) return .{ .cancelled = true };
         }
         const root = try std.Io.Dir.cwd().openDir(self.io, root_path, .{ .iterate = true });
         defer root.close(self.io);
@@ -192,7 +250,7 @@ pub const Scanner = struct {
         try open_folders.append(self.allocator, try self.allocator.dupe(u8, ""));
 
         while (try walker.next(self.io)) |entry| {
-            if (self.cancellation) |token| if (token.isCancelled()) {
+            if (self.cancellation) |token| if (token.checkpoint()) {
                 result.cancelled = true;
                 break;
             };
@@ -206,6 +264,7 @@ pub const Scanner = struct {
             if (self.progress) |counter| counter.store(result.files_seen, .release);
 
             const path = try pathUnder(self.allocator, start_path, entry.path);
+            if (self.current_item) |current| current.set(path);
             if (hasImageExtension(entry.basename) and try self.examineImage(path, entry.basename, &result)) {
                 self.allocator.free(path);
             } else {
@@ -804,6 +863,46 @@ test "cancelled scans stop before filesystem work" {
     defer scanner.deinit();
     const result = try scanner.scan(root_path);
     try std.testing.expect(result.cancelled);
+}
+
+const PausedCheckpoint = struct {
+    threaded: std.Io.Threaded = .init_single_threaded,
+    token: CancellationToken = .{},
+    returned: std.atomic.Value(bool) = .init(false),
+    cancelled: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *PausedCheckpoint) void {
+        self.cancelled.store(self.token.checkpoint(), .release);
+        self.returned.store(true, .release);
+    }
+};
+
+test "a paused checkpoint holds its thread until cancel, which it notices within one poll" {
+    var state: PausedCheckpoint = .{};
+    defer state.threaded.deinit();
+    state.token.io = state.threaded.io();
+    state.token.pause();
+    const thread = try std.Thread.spawn(.{}, PausedCheckpoint.run, .{&state});
+    try std.testing.io.sleep(.fromMilliseconds(3 * CancellationToken.pause_poll_ms), .awake);
+    try std.testing.expect(!state.returned.load(.acquire));
+
+    const cancelled_at = std.Io.Clock.awake.now(std.testing.io);
+    state.token.cancel();
+    while (!state.returned.load(.acquire)) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    const waited = cancelled_at.durationTo(std.Io.Clock.awake.now(std.testing.io));
+    thread.join();
+    try std.testing.expect(state.cancelled.load(.acquire));
+    try std.testing.expect(waited.toMilliseconds() < 100);
+}
+
+test "an unpaused checkpoint returns at once" {
+    var state: PausedCheckpoint = .{};
+    defer state.threaded.deinit();
+    state.token.io = state.threaded.io();
+    state.token.pause();
+    state.token.unpause();
+    state.run();
+    try std.testing.expect(!state.cancelled.load(.acquire));
 }
 
 test "a scan after migration claims the files it inherited instead of re-importing them" {

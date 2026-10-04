@@ -415,6 +415,9 @@ held only for the duration of one of these:
 - `Runtime.undoTagWrite`, until the group is undone; the files are re-observed
   after it is released.
 - `Runtime.pruneTagWriteBackups`.
+- `Runtime.libraryRelocateRoot`, while it rewrites the root and the journaled
+  paths under it. It runs no recovery, which would look for the files at the
+  root's old path.
 
 A write, undo or prune that finds the lock held returns
 `error.MutationInProgress` and changes nothing; a refused write's plan stays
@@ -559,6 +562,21 @@ awaiting reconciliation keep their backups, and nothing prunes automatically.
 ```sh
 orca-cli prune-backups DATABASE [--older-than=DAYS]
 ```
+
+### Relocated roots
+
+A write stays undoable after its root moves. `libraryRelocateRoot` rewrites
+every journaled source, destination, stage and backup path below the root's
+old path to the same path below the new one, in the transaction that moves
+the root, so the journal and the root never disagree. A path matches only
+below the old path and a `/`, so relocating `/music` leaves `/music2` alone.
+Backups in `<database>.orca-backups` are outside the root and stay where they
+are; a legacy backup beside the music moves with it.
+
+Only finished operations are rewritten. A relocate that finds an operation
+under the root `planned`, `staged`, `failed` or `undoing` returns
+`error.MutationInProgress`, and one `needs_reconciliation` returns
+`error.MutationNeedsReconciliation`; either way nothing changes.
 
 ## Writing tags back
 

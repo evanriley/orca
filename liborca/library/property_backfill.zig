@@ -25,6 +25,7 @@ const projection = @import("projection.zig");
 const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
+const CurrentItem = scanner.CurrentItem;
 
 pub const Result = struct {
     /// Rows selected and examined.
@@ -76,6 +77,7 @@ pub const PropertyBackfill = struct {
     /// test can narrow the set; absent, the builtins are used.
     codecs: ?*const codec.CodecRegistry = null,
     cancellation: ?*const CancellationToken = null,
+    current_item: ?*CurrentItem = null,
     /// Rows examined so far, published for a host showing progress. Unlike a
     /// filesystem walk this pass has an honest denominator before it starts,
     /// which the runtime reads separately through `incompletePropertiesCount`.
@@ -144,6 +146,7 @@ pub const PropertyBackfill = struct {
                     break;
                 }
                 cursor = item.id;
+                if (self.current_item) |current| current.set(item.uri);
                 result.files_seen += 1;
                 if (self.progress) |counter| counter.store(result.files_seen, .release);
                 try repairs.append(self.allocator, .{
@@ -168,7 +171,7 @@ pub const PropertyBackfill = struct {
 
     fn isCancelled(self: *const PropertyBackfill) bool {
         const token = self.cancellation orelse return false;
-        return token.isCancelled();
+        return token.checkpoint();
     }
 
     /// Headers only, never audio — the same contract the scanner probes under.

@@ -1291,6 +1291,23 @@ with `EXISTS`, costs a table lookup per row for `state` and is about three
 times slower at 500,000 files. `last_analysis_at` reads the last entry of
 `analysis_results_created`.
 
+## Job history
+
+Version 47 adds **`job_history`**, one row per host Job that held its
+Library's slot and finished, written by the control lane after the worker is
+joined (see [control-plane.md](control-plane.md#history)): `kind` and `state`
+as their enum tag names, `request` (the start request as JSON, null for a tag
+write), `started_at` and `finished_at` in Unix seconds, `completed_units`,
+`total_units` (null without a denominator), `error` (null on success),
+`undo_group_id` (the tag write's mutation group, on success only),
+`retryable` (1 when a request is kept and the Job did not succeed) and
+`summary`, a line such as "1,204 files · 32 changed". Each insert prunes the
+table to its newest 1,000 rows. `job_history_finished (finished_at, id)`
+serves `JobHistoryRepository.page`, newest first; its filters are `scans`
+(scan, reconcile, projection, property backfill), `analysis` (analysis,
+duplicate scan), `file_changes` (tag writes) and `problems` (failed or
+cancelled).
+
 ## Concurrency
 
 - The primary connection uses WAL and `synchronous=NORMAL`.

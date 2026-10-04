@@ -1,7 +1,9 @@
 const std = @import("std");
 const analysis_service = @import("../analysis/service.zig");
 const database = @import("../database/root.zig");
+const library_pass = @import("../library/root.zig");
 const job = @import("job.zig");
+const job_history = @import("job_history.zig");
 const work = @import("work.zig");
 const job_worker = @import("job_worker.zig");
 const runtime = @import("runtime.zig");
@@ -40,15 +42,51 @@ const retained_job_records: usize = 8;
 
 pub const job_progress_interval_ms: u64 = 100;
 
-/// A host's matching, cover or submission job that arrived while a
-/// maintenance unit ran: created queued, and started by `startQueuedHostJob`
-/// once the unit's worker is joined and its `job_finished` published, so two
-/// workers never share a provider. Control lane only.
-pub const PendingHostJob = struct {
+pub const max_waiting_jobs = 32;
+
+/// A host's Job in the `waiting` state: its Library's slot was held, the
+/// Library's Jobs were paused, or, for a provider Job, a maintenance unit had
+/// yet to stop. The queue owns `request` until `startWaitingJobs` hands it to
+/// a worker. Control lane only.
+pub const WaitingJob = struct {
     job: JobHandle,
     library: LibraryHandle,
     request: job_worker.Request,
 };
+
+pub const WaitingJobs = struct {
+    entries: [max_waiting_jobs]WaitingJob = undefined,
+    len: usize = 0,
+
+    pub fn items(self: *const WaitingJobs) []const WaitingJob {
+        return self.entries[0..self.len];
+    }
+
+    fn append(self: *WaitingJobs, entry: WaitingJob) !void {
+        if (self.len == max_waiting_jobs) return error.JobQueueFull;
+        self.entries[self.len] = entry;
+        self.len += 1;
+    }
+
+    fn orderedRemove(self: *WaitingJobs, index: usize) WaitingJob {
+        const entry = self.entries[index];
+        std.mem.copyForwards(WaitingJob, self.entries[index .. self.len - 1], self.entries[index + 1 .. self.len]);
+        self.len -= 1;
+        return entry;
+    }
+};
+
+/// A Job holding or waiting for its Library's slot, in the order they run.
+pub const QueuedJob = struct {
+    job: JobHandle,
+    kind: job.Kind,
+    /// The Job this one starts after; null for the one holding the slot, or
+    /// the first waiting while none does.
+    after: ?JobHandle,
+};
+
+pub const JobHistoryEntry = job_history.JobHistoryEntry;
+pub const JobHistoryFilter = job_history.Filter;
 
 pub fn startLibraryScan(
     self: *OrcaRuntime,
@@ -141,8 +179,8 @@ pub fn startLibraryMatching(
         .accept_minimum_confidence = request.accept_minimum_confidence,
         .cover_art = request.cover_art,
     } };
-    if (self.pending_host_job != null) return error.MatchingAlreadyRunning;
-    if (maintenanceUnitRunning(self)) |unit| return queueHostJob(self, library, job_request, unit);
+    if (providerJobWaiting(self)) return error.MatchingAlreadyRunning;
+    if (maintenanceUnitRunning(self)) |unit| return queueBehindUnit(self, library, job_request, unit);
     if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
     if (runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
     return startJobWorker(self, library, job_request);
@@ -167,8 +205,8 @@ pub fn startReleaseCoverArtFetch(self: *OrcaRuntime, library: LibraryHandle, rel
         .lookups = false,
         .cover_art = true,
     } };
-    if (self.pending_host_job != null) return error.MatchingAlreadyRunning;
-    if (maintenanceUnitRunning(self)) |unit| return queueHostJob(self, library, job_request, unit);
+    if (providerJobWaiting(self)) return error.MatchingAlreadyRunning;
+    if (maintenanceUnitRunning(self)) |unit| return queueBehindUnit(self, library, job_request, unit);
     if (runningJob(self, .metadata_lookup)) return error.MatchingAlreadyRunning;
     return startJobWorker(self, library, job_request);
 }
@@ -291,62 +329,342 @@ pub fn startAcoustIdSubmission(self: *OrcaRuntime, library: LibraryHandle) !JobH
         .hooks = self.matching_hooks,
         .acoustid = acoustIdSetup(self),
     } };
-    if (self.pending_host_job != null) return error.AcoustIdBusy;
-    if (maintenanceUnitRunning(self)) |unit| return queueHostJob(self, library, job_request, unit);
+    if (providerJobWaiting(self)) return error.AcoustIdBusy;
+    if (maintenanceUnitRunning(self)) |unit| return queueBehindUnit(self, library, job_request, unit);
     if (runningJob(self, .metadata_lookup) or runningJob(self, .acoustid_submission)) return error.AcoustIdBusy;
     return startJobWorker(self, library, job_request);
 }
 
-fn queueHostJob(self: *OrcaRuntime, library: LibraryHandle, request: job_worker.Request, unit: *JobWorker) !JobHandle {
-    try checkBatchSize(request);
-    const total_units = try plannedUnits(self, try runtime.libraryDatabase(self, library), request);
-    const job_handle = try self.jobs.create(request.kind(), total_units);
+/// A provider Job arriving while a maintenance unit runs: the unit is
+/// cancelled and the Job waits until its worker is joined and its
+/// `job_finished` published, so two workers never share a provider.
+fn queueBehindUnit(self: *OrcaRuntime, library: LibraryHandle, request: job_worker.Request, unit: *JobWorker) !JobHandle {
+    const job_handle = try queueJob(self, library, request);
     unit.token.cancel();
     unit.registration.requestCancellation();
-    self.pending_host_job = .{ .job = job_handle, .library = library, .request = request };
     return job_handle;
 }
 
-/// Control lane, from `pump` once finished workers are reaped. Starts the
-/// queued host job when no maintenance unit is left unjoined, or finishes it
-/// cancelled when the host cancelled it while it waited.
-pub fn startQueuedHostJob(self: *OrcaRuntime) void {
-    const pending = self.pending_host_job orelse return;
-    if (maintenanceWorkerLive(self) or !self.events.hasCapacity()) return;
-    self.pending_host_job = null;
-    const snapshot = self.jobs.snapshot(pending.job) catch return;
-    const state: job.State = if (snapshot.state == .cancelling) .cancelled else started: {
-        const library_database = runtime.libraryDatabase(self, pending.library) catch break :started .failed;
-        spawnWorkerForJob(self, pending.job, pending.library, library_database, pending.request, .host) catch
-            break :started .failed;
-        return;
-    };
-    self.jobs.finish(pending.job, state) catch {};
+/// Takes ownership of `request` only on success.
+fn queueJob(self: *OrcaRuntime, library: LibraryHandle, request: job_worker.Request) !JobHandle {
+    try checkBatchSize(request);
+    const object_value = try self.libraries.get(library);
+    const library_database = object_value.database orelse return error.LibraryHasNoDatabase;
+    if (self.waiting_jobs.len == max_waiting_jobs) return error.JobQueueFull;
+    const job_handle = try self.jobs.create(request.kind(), try plannedUnits(self, library_database, request));
+    self.jobs.wait(job_handle) catch unreachable;
+    if (object_value.jobs_paused) self.jobs.setPausedWhileWaiting(job_handle, true) catch unreachable;
+    self.waiting_jobs.append(.{ .job = job_handle, .library = library, .request = request }) catch unreachable;
+    return job_handle;
+}
+
+fn providerJobWaiting(self: *const OrcaRuntime) bool {
+    for (self.waiting_jobs.items()) |entry| {
+        if (usesProviders(entry.request.kind())) return true;
+    }
+    return false;
+}
+
+fn usesProviders(kind: job.Kind) bool {
+    return kind == .metadata_lookup or kind == .acoustid_submission;
+}
+
+/// The live host worker holding `library`'s one slot, finished or not until
+/// it is reaped.
+fn slotHolder(self: *const OrcaRuntime, library: LibraryHandle) ?*JobWorker {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or worker.origin != .host or !worker.library.eql(library)) continue;
+        if (worker.request.queues()) return worker;
+    }
+    return null;
+}
+
+fn mustWait(self: *const OrcaRuntime, library: LibraryHandle) bool {
+    const object_value = self.libraries.getConst(library) catch return false;
+    if (object_value.jobs_paused) return true;
+    for (self.waiting_jobs.items()) |entry| {
+        if (entry.library.eql(library)) return true;
+    }
+    return slotHolder(self, library) != null;
+}
+
+/// Control lane, from `pump` once finished workers are reaped. Finishes
+/// the waiting Jobs the host cancelled, and starts each one whose Library's
+/// slot is free, in the order they arrived.
+pub fn startWaitingJobs(self: *OrcaRuntime) void {
+    var index: usize = 0;
+    while (index < self.waiting_jobs.len) {
+        const entry = self.waiting_jobs.entries[index];
+        const cancelling = if (self.jobs.snapshot(entry.job)) |snapshot| snapshot.state == .cancelling else |_| true;
+        if (!cancelling and !waitingJobStartable(self, index)) {
+            index += 1;
+            continue;
+        }
+        if (!self.events.hasCapacity()) return;
+        _ = self.waiting_jobs.orderedRemove(index);
+        if (cancelling) {
+            finishWaitingJob(self, entry, .cancelled, true);
+            continue;
+        }
+        startWaitingJob(self, entry) catch finishWaitingJob(self, entry, .failed, true);
+    }
+}
+
+fn waitingJobStartable(self: *const OrcaRuntime, index: usize) bool {
+    if (self.state.load(.acquire) != .running) return false;
+    const entry = self.waiting_jobs.entries[index];
+    const object_value = self.libraries.getConst(entry.library) catch return true;
+    if (object_value.jobs_paused) return false;
+    for (self.waiting_jobs.entries[0..index]) |earlier| {
+        if (earlier.library.eql(entry.library)) return false;
+    }
+    if (slotHolder(self, entry.library) != null) return false;
+    return !(usesProviders(entry.request.kind()) and maintenanceWorkerLive(self));
+}
+
+fn startWaitingJob(self: *OrcaRuntime, entry: WaitingJob) !void {
+    const library_database = try runtime.libraryDatabase(self, entry.library);
+    try self.jobs.replan(entry.job, try plannedUnits(self, library_database, entry.request));
+    switch (entry.request.kind()) {
+        .scan, .reconcile, .mutation => runtime_watch.preemptAutoReconcile(self, entry.library),
+        else => {},
+    }
+    if (walksLibrary(entry.request.kind()) and walkRunning(self, entry.library)) return error.LibraryScanRunning;
+    try spawnWorkerForJob(self, entry.job, entry.library, library_database, entry.request, .host);
+    runtime_watch.hostJobStarted(self, entry.library, entry.job, entry.request);
+}
+
+fn finishWaitingJob(self: *OrcaRuntime, entry: WaitingJob, state: job.State, publish: bool) void {
+    self.jobs.finish(entry.job, state) catch {};
+    if (self.libraries.get(entry.library)) |object_value| {
+        if (object_value.database) |library_database| recordWaitingHistory(self, library_database, entry, state);
+    } else |_| {}
+    destroyRequest(self, entry.request);
+    if (!publish) return;
     self.events.publish(.{
         .request_id = 0,
-        .outcome = .{ .job_finished = .{ .job = pending.job, .state = state } },
+        .outcome = .{ .job_finished = .{ .job = entry.job, .state = state } },
     }) catch {};
 }
 
-/// Zero while a queued host job could start now; null otherwise. One held
-/// up by a unit's worker is covered by that worker's own pump timeout.
-pub fn queuedJobPumpDueMs(self: *const OrcaRuntime) ?u64 {
-    if (self.pending_host_job == null or maintenanceWorkerLive(self)) return null;
-    return 0;
+fn destroyRequest(self: *OrcaRuntime, request: job_worker.Request) void {
+    switch (request) {
+        .reconcile => |pending| pending.destroy(),
+        .mutation => |pending| pending.destroy(self.control_threaded.io()),
+        else => {},
+    }
 }
 
-/// Finishes the queued host job cancelled without an event when `library`
-/// is going away, or any Library when null.
-pub fn dropQueuedHostJob(self: *OrcaRuntime, library: ?LibraryHandle) void {
-    const pending = self.pending_host_job orelse return;
-    if (library) |only| if (!pending.library.eql(only)) return;
-    self.jobs.finish(pending.job, .cancelled) catch {};
-    self.pending_host_job = null;
+/// Zero while a waiting Job could start or finish now; null otherwise. One
+/// held up by a worker is covered by that worker's own pump timeout, and one
+/// held by a paused Library by the `resumeAll` that frees it.
+pub fn queuedJobPumpDueMs(self: *const OrcaRuntime) ?u64 {
+    for (self.waiting_jobs.items(), 0..) |entry, index| {
+        const snapshot = self.jobs.snapshot(entry.job) catch return 0;
+        if (snapshot.state == .cancelling or waitingJobStartable(self, index)) return 0;
+    }
+    return null;
+}
+
+/// Finishes the waiting Jobs cancelled without an event when `library` is
+/// going away, or every Library's when null.
+pub fn dropWaitingJobs(self: *OrcaRuntime, library: ?LibraryHandle) void {
+    var index: usize = 0;
+    while (index < self.waiting_jobs.len) {
+        const entry = self.waiting_jobs.entries[index];
+        if (library) |only| if (!entry.library.eql(only)) {
+            index += 1;
+            continue;
+        };
+        _ = self.waiting_jobs.orderedRemove(index);
+        finishWaitingJob(self, entry, .cancelled, false);
+    }
 }
 
 fn queuedHostJob(self: *const OrcaRuntime, job_handle: JobHandle) bool {
-    const pending = self.pending_host_job orelse return false;
-    return pending.job.eql(job_handle);
+    for (self.waiting_jobs.items()) |entry| {
+        if (entry.job.eql(job_handle)) return true;
+    }
+    return false;
+}
+
+fn liveWorker(self: *const OrcaRuntime, job_handle: JobHandle) ?*JobWorker {
+    for (self.job_workers.items) |worker| {
+        if (!worker.retired and worker.job.eql(job_handle)) return worker;
+    }
+    return null;
+}
+
+pub fn pauseJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+    try runtime.requireRunning(self);
+    const worker = liveWorker(self, job_handle) orelse return notLive(self, job_handle);
+    if (!worker.request.pausable()) return error.JobNotPausable;
+    try self.jobs.pause(job_handle);
+    worker.token.pause();
+}
+
+pub fn resumeJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+    try runtime.requireRunning(self);
+    const worker = liveWorker(self, job_handle) orelse return notLive(self, job_handle);
+    try self.jobs.unpause(job_handle);
+    worker.token.unpause();
+}
+
+fn notLive(self: *const OrcaRuntime, job_handle: JobHandle) error{ StaleHandle, JobAlreadyFinished, JobNotPausable } {
+    const snapshot = self.jobs.snapshot(job_handle) catch return error.StaleHandle;
+    return switch (snapshot.state) {
+        .succeeded, .failed, .cancelled => error.JobAlreadyFinished,
+        else => error.JobNotPausable,
+    };
+}
+
+pub fn pauseAll(self: *OrcaRuntime, library: LibraryHandle) !void {
+    try runtime.requireRunning(self);
+    const object_value = try self.libraries.get(library);
+    object_value.jobs_paused = true;
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or !worker.library.eql(library) or !worker.request.pausable()) continue;
+        self.jobs.pause(worker.job) catch continue;
+        worker.token.pause();
+    }
+    markWaitingPaused(self, library, true);
+}
+
+pub fn resumeAll(self: *OrcaRuntime, library: LibraryHandle) !void {
+    try runtime.requireRunning(self);
+    const object_value = try self.libraries.get(library);
+    object_value.jobs_paused = false;
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or !worker.library.eql(library)) continue;
+        self.jobs.unpause(worker.job) catch continue;
+        worker.token.unpause();
+    }
+    markWaitingPaused(self, library, false);
+}
+
+fn markWaitingPaused(self: *OrcaRuntime, library: LibraryHandle, paused: bool) void {
+    for (self.waiting_jobs.items()) |entry| {
+        if (entry.library.eql(library)) self.jobs.setPausedWhileWaiting(entry.job, paused) catch {};
+    }
+}
+
+pub fn libraryJobsPaused(self: *const OrcaRuntime, library: LibraryHandle) !bool {
+    const object_value = try self.libraries.getConst(library);
+    return object_value.jobs_paused;
+}
+
+pub fn jobQueuePage(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator) ![]QueuedJob {
+    try runtime.requireRunning(self);
+    _ = try self.libraries.getConst(library);
+    var queued: std.ArrayList(QueuedJob) = .empty;
+    errdefer queued.deinit(allocator);
+    var after: ?JobHandle = null;
+    if (slotHolder(self, library)) |worker| {
+        try queued.append(allocator, .{ .job = worker.job, .kind = worker.kind(), .after = null });
+        after = worker.job;
+    }
+    for (self.waiting_jobs.items()) |entry| {
+        if (!entry.library.eql(library)) continue;
+        const snapshot = self.jobs.snapshot(entry.job) catch continue;
+        if (snapshot.state == .cancelling) continue;
+        try queued.append(allocator, .{ .job = entry.job, .kind = entry.request.kind(), .after = after });
+        after = entry.job;
+    }
+    return queued.toOwnedSlice(allocator);
+}
+
+pub fn jobHistoryPage(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    allocator: std.mem.Allocator,
+    filter: JobHistoryFilter,
+    limit: u32,
+    offset: u32,
+) ![]JobHistoryEntry {
+    const library_database = try runtime.libraryDatabase(self, library);
+    var page = try library_database.job_history.page(allocator, filter, limit, offset);
+    defer page.deinit();
+    var entries: std.ArrayList(JobHistoryEntry) = try .initCapacity(allocator, page.items.len);
+    errdefer entries.deinit(allocator);
+    for (page.items) |row| {
+        if (JobHistoryEntry.fromRow(row)) |entry| entries.appendAssumeCapacity(entry);
+    }
+    return entries.toOwnedSlice(allocator);
+}
+
+pub fn jobRetry(self: *OrcaRuntime, library: LibraryHandle, history_id: i64) !JobHandle {
+    const library_database = try runtime.libraryDatabase(self, library);
+    const row = try library_database.job_history.get(self.allocator, history_id) orelse return error.UnknownJobHistory;
+    defer row.deinit();
+    if (!row.retryable) return error.JobNotRetryable;
+    const text = row.request orelse return error.JobNotRetryable;
+    const parsed = job_history.RetryRequest.decode(self.allocator, text) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.JobNotRetryable,
+    };
+    defer parsed.deinit();
+    return switch (parsed.value) {
+        .scan => |request| startLibraryScan(self, library, request),
+        .reconcile => |request| startLibraryReconcile(self, library, request),
+        .projection => startLibraryProjection(self, library),
+        .property_backfill => |request| startLibraryPropertyBackfill(self, library, request),
+        .analysis => |request| startLibraryAnalysis(self, library, request),
+        .duplicate_scan => |request| startLibraryDuplicateScan(self, library, request),
+        .matching => |request| startLibraryMatching(self, library, request),
+        .cover_art => |request| startReleaseCoverArtFetch(self, library, request.release_id),
+        .acoustid_submission => startAcoustIdSubmission(self, library),
+        .genre_fill => |options| startGenreFill(self, library, options),
+    };
+}
+
+fn recordWaitingHistory(self: *OrcaRuntime, library_database: *database.LibraryDatabase, entry: WaitingJob, state: job.State) void {
+    const snapshot = self.jobs.snapshot(entry.job) catch return;
+    const now = runtime_listens.sampleTime(self).wall_s;
+    recordHistory(self, library_database, entry.request, .{
+        .kind = @tagName(snapshot.kind),
+        .started_at = now,
+        .finished_at = now,
+        .state = @tagName(state),
+        .completed_units = 0,
+        .total_units = snapshot.total_units,
+        .error_text = @tagName(state),
+    });
+}
+
+fn recordWorkerHistory(self: *OrcaRuntime, worker: *const JobWorker, state: job.State) void {
+    if (worker.origin != .host or !worker.request.queues()) return;
+    const snapshot = self.jobs.snapshot(worker.job) catch return;
+    const now = runtime_listens.sampleTime(self).wall_s;
+    var error_buffer: [64]u8 = undefined;
+    var summary_buffer: [256]u8 = undefined;
+    recordHistory(self, worker.database, worker.request, .{
+        .kind = @tagName(snapshot.kind),
+        .started_at = snapshot.started_at orelse now,
+        .finished_at = now,
+        .state = @tagName(state),
+        .completed_units = snapshot.completed_units,
+        .total_units = snapshot.total_units,
+        .error_text = job_history.errorText(worker, state, &error_buffer),
+        .undo_group_id = if (state == .succeeded) if (worker.tagWrite()) |pending| pending.plan.id else null else null,
+        .summary = job_history.summary(worker, &summary_buffer),
+    });
+}
+
+fn recordHistory(
+    self: *OrcaRuntime,
+    library_database: *database.LibraryDatabase,
+    request: job_worker.Request,
+    input: database.JobHistoryInput,
+) void {
+    var row = input;
+    const encoded: ?[]u8 = if (job_history.RetryRequest.fromRequest(request)) |retry|
+        retry.encode(self.allocator) catch null
+    else
+        null;
+    defer if (encoded) |text| self.allocator.free(text);
+    row.request = encoded;
+    row.retryable = encoded != null and !std.mem.eql(u8, input.state, "succeeded");
+    _ = library_database.job_history.insert(row) catch {};
 }
 
 pub fn jobOrigin(self: *const OrcaRuntime, job_handle: JobHandle) !job_worker.Origin {
@@ -358,7 +676,7 @@ pub fn jobOrigin(self: *const OrcaRuntime, job_handle: JobHandle) !job_worker.Or
 }
 
 pub fn hostWorkLive(self: *const OrcaRuntime) bool {
-    if (self.pending_host_job != null) return true;
+    if (self.waiting_jobs.len != 0) return true;
     for (self.job_workers.items) |worker| {
         if (!worker.retired and worker.origin != .maintenance) return true;
     }
@@ -440,6 +758,7 @@ pub fn startJobWorker(
     request: job_worker.Request,
 ) !JobHandle {
     try runtime.requireRunning(self);
+    if (request.queues() and mustWait(self, library)) return queueJob(self, library, request);
     switch (request.kind()) {
         .scan, .reconcile, .mutation => runtime_watch.preemptAutoReconcile(self, library),
         else => {},
@@ -505,7 +824,7 @@ fn spawnWorkerForJob(
     pruneRetiredJobWorkers(self);
     const worker = try self.allocator.create(JobWorker);
     errdefer self.allocator.destroy(worker);
-    try self.jobs.start(job_handle);
+    try self.jobs.start(job_handle, runtime_listens.sampleTime(self).wall_s);
 
     const work_handle = try self.work_registry.begin(work.unowned);
     const registration = self.work_registry.registration(work_handle) catch unreachable;
@@ -525,6 +844,8 @@ fn spawnWorkerForJob(
         .stats = .init(request),
         .host_signal = &self.host_signal,
     };
+    worker.token.io = worker.threaded.io();
+    registration.waker = .{ .context = &worker.token, .wake_fn = JobWorker.wakeFromPause };
     try self.job_workers.append(self.allocator, worker);
     errdefer _ = self.job_workers.pop();
     registration.thread = try std.Thread.spawn(.{}, JobWorker.run, .{worker});
@@ -542,7 +863,23 @@ pub fn cancelJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
 
 pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
     syncJobProgress(self);
-    return self.jobs.snapshot(job_handle);
+    var snapshot = try self.jobs.snapshot(job_handle);
+    const worker = liveWorker(self, job_handle) orelse return snapshot;
+    var item: [library_pass.CurrentItem.capacity]u8 = undefined;
+    snapshot.current_item.set(worker.current_item.read(&item));
+    writeDetail(worker, &snapshot.detail);
+    return snapshot;
+}
+
+fn writeDetail(worker: *const JobWorker, detail: *job.BoundedText(128)) void {
+    var buffer: [128]u8 = undefined;
+    detail.set(switch (worker.request) {
+        .analysis => |request| std.fmt.bufPrint(&buffer, "{d} threads", .{
+            request.threads orelse library_pass.analysis_pass.defaultThreads(),
+        }) catch "",
+        .metadata_lookup, .acoustid_submission => "rate-limited to 1 request a second",
+        else => "",
+    });
 }
 
 pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
@@ -593,9 +930,30 @@ pub fn jobMatchRelease(self: *OrcaRuntime, job_handle: JobHandle) !?i64 {
 }
 
 fn syncJobProgress(self: *OrcaRuntime) void {
+    const now_ms = runtime_listens.sampleTime(self).mono_ms;
     for (self.job_workers.items) |worker| {
         if (worker.retired) continue;
         self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
+        self.jobs.sampleProgress(worker.job, now_ms) catch {};
+    }
+}
+
+fn publishJobProgress(self: *OrcaRuntime) void {
+    for (self.job_workers.items) |worker| {
+        if (worker.retired or worker.origin != .host or worker.registration.isFinished()) continue;
+        const snapshot = self.jobs.snapshot(worker.job) catch continue;
+        const current: job_worker.PublishedProgress = .{
+            .completed_units = snapshot.completed_units,
+            .total_units = snapshot.total_units,
+            .state = snapshot.state,
+        };
+        if (worker.published) |published| if (std.meta.eql(published, current)) continue;
+        self.telemetry.publish(.{ .job_progress = .{
+            .job = worker.job,
+            .completed_units = current.completed_units,
+            .total_units = current.total_units,
+        } }) catch continue;
+        worker.published = current;
     }
 }
 
@@ -614,6 +972,7 @@ pub fn jobPumpDueMs(self: *const OrcaRuntime) ?u64 {
 
 pub fn reapFinishedJobs(self: *OrcaRuntime) void {
     syncJobProgress(self);
+    publishJobProgress(self);
     for (self.job_workers.items) |worker| {
         if (worker.retired or !worker.registration.isFinished()) continue;
         // The completion event is lossless: a full channel means the host
@@ -626,7 +985,9 @@ pub fn reapFinishedJobs(self: *OrcaRuntime) void {
 
 /// Ignores maintenance units, which a caller pre-empts instead.
 pub fn libraryJobRunning(self: *const OrcaRuntime, library: LibraryHandle) bool {
-    if (self.pending_host_job) |pending| if (pending.library.eql(library)) return true;
+    for (self.waiting_jobs.items()) |entry| {
+        if (entry.library.eql(library)) return true;
+    }
     for (self.job_workers.items) |worker| {
         if (!worker.retired and worker.origin != .maintenance and worker.library.eql(library)) return true;
     }
@@ -646,6 +1007,7 @@ pub fn finalizeJobWorker(self: *OrcaRuntime, worker: *JobWorker, publish: bool) 
         .succeeded;
     self.jobs.observeProgress(worker.job, worker.filesProcessed()) catch {};
     self.jobs.finish(worker.job, state) catch {};
+    recordWorkerHistory(self, worker, state);
     if (worker.matchStats().accepted != 0) runtime_listens.recordingIdsChanged(self, worker.library);
     runtime_watch.jobFinalized(self, worker, state);
     runtime_maintenance.jobFinalized(self, worker, state);

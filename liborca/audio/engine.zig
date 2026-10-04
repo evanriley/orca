@@ -406,8 +406,8 @@ pub const PlayerEngine = struct {
         const position = queue.positionForSerial(request.serial) orelse
             return self.seekLoadedSource(request.frame);
         const ref = queue.refAt(position) orelse return self.seekLoadedSource(request.frame);
-        var session = opener.open(ref) catch {
-            self.noteOpenFailure(queue, position);
+        var session = opener.open(ref) catch |err| {
+            self.noteOpenFailure(queue, position, ref, err);
             return;
         };
         session.replay_gain.shares_release = queue.sharesRelease(position, opener);
@@ -453,8 +453,8 @@ pub const PlayerEngine = struct {
             // "enqueue then play" work without the control lane opening a file.
             const position = queue.cursorPosition();
             const ref = queue.refAt(position) orelse return;
-            var session = opener.open(ref) catch {
-                self.noteOpenFailure(queue, position);
+            var session = opener.open(ref) catch |err| {
+                self.noteOpenFailure(queue, position, ref, err);
                 if (queue.followingPosition()) |next| queue.seekTo(next);
                 return;
             };
@@ -471,8 +471,8 @@ pub const PlayerEngine = struct {
         if (self.player.stop_after_current.load(.acquire)) return;
         const position = queue.followingPosition() orelse return;
         const ref = queue.refAt(position) orelse return;
-        var session = opener.open(ref) catch {
-            self.noteOpenFailure(queue, position);
+        var session = opener.open(ref) catch |err| {
+            self.noteOpenFailure(queue, position, ref, err);
             return;
         };
         session.replay_gain.shares_release = queue.sharesRelease(position, opener);
@@ -485,11 +485,12 @@ pub const PlayerEngine = struct {
                 return;
             }
             session.deinit();
-            self.noteOpenFailure(queue, position);
+            self.noteOpenFailure(queue, position, ref, err);
             return;
         };
         queue.advanceDecodeTo(position);
         queue.noteEntrySerial(sources.next_entry_serial, position);
+        self.player.open_failure.clearWhenAudible(sources.next_entry_serial);
         self.consecutive_open_failures = 0;
         self.entries_started += 1;
         self.gapless_transitions += 1;
@@ -582,7 +583,10 @@ pub const PlayerEngine = struct {
         self: *PlayerEngine,
         queue: *playback_queue.PlaybackQueue,
         position: u32,
+        ref: playback_queue.TrackRef,
+        err: anyerror,
     ) void {
+        self.player.open_failure.record(ref.track_id, err);
         self.open_failures += 1;
         self.consecutive_open_failures +|= 1;
         // Step past the entry that could not be opened so one unreadable file
@@ -886,6 +890,7 @@ pub const PlayerEngine = struct {
         // figures. The queue cursor is stored last.
         self.player.position_frames.store(frames, .release);
         self.player.observeRenderedSerial(serial);
+        self.player.open_failure.observeAudible(serial);
         self.player.publishSourceInfo();
         if (self.queue) |queue| queue.observeRenderedSerial(serial);
 
@@ -951,6 +956,7 @@ pub fn loadQueueEntry(
     queue.seekTo(position);
     queue.noteEntrySerial(player.stageSource(session), position);
     player.adoptLoadedEntryAsAudible();
+    player.open_failure.clear();
 }
 
 const source_session = @import("source_session.zig");
@@ -2339,6 +2345,86 @@ test "a queue of unopenable entries on repeat stops retrying and goes idle" {
     try std.testing.expectEqual(@as(u64, max_consecutive_open_failures), harness.engine.open_failures);
     try std.testing.expectEqual(@as(u64, 0), harness.engine.entries_started);
     try std.testing.expect(harness.engine.isIdle());
+}
+
+test "an unopenable entry is reported until the entry after it is heard" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 2 * frames_per_block },
+        .{ .track_id = 12, .frames = 8192 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{11};
+    try harness.enqueue(&.{ 10, 11, 12 });
+    harness.player.play();
+
+    var pass: usize = 0;
+    while (pass < 64 and harness.engine.gapless_transitions == 0) : (pass += 1)
+        harness.step(0);
+    try std.testing.expectEqual(@as(u64, 1), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    const failure = harness.player.open_failure.read().?;
+    try std.testing.expectEqual(@as(i64, 11), failure.track_id);
+    try std.testing.expectEqual(@as(anyerror, error.TrackFileMissing), failure.err);
+
+    harness.step(64);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(i64, 11), harness.player.open_failure.read().?.track_id);
+
+    while (pass < 256 and harness.queue.cursorPosition() != 2) : (pass += 1)
+        harness.step(frames_per_block);
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+    try std.testing.expect(harness.player.open_failure.read() == null);
+}
+
+test "a newer open failure outlasts the clear an earlier successor was waiting for" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 10, .frames = 2 * frames_per_block },
+        .{ .track_id = 12, .frames = 2 * frames_per_block },
+        .{ .track_id = 14, .frames = 8192 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{ 11, 13 };
+    try harness.enqueue(&.{ 10, 11, 12, 13, 14 });
+    harness.player.play();
+
+    var pass: usize = 0;
+    while (pass < 64 and harness.engine.gapless_transitions < 2) : (pass += 1)
+        harness.step(0);
+    try std.testing.expectEqual(@as(u64, 2), harness.engine.gapless_transitions);
+    try std.testing.expectEqual(@as(u32, 0), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(i64, 13), harness.player.open_failure.read().?.track_id);
+
+    while (pass < 256 and harness.queue.cursorPosition() < 2) : (pass += 1)
+        harness.step(64);
+    try std.testing.expectEqual(@as(u32, 2), harness.queue.cursorPosition());
+    try std.testing.expectEqual(@as(i64, 13), harness.player.open_failure.read().?.track_id);
+
+    while (pass < 512 and harness.queue.cursorPosition() < 4) : (pass += 1)
+        harness.step(frames_per_block);
+    try std.testing.expectEqual(@as(u32, 4), harness.queue.cursorPosition());
+    try std.testing.expect(harness.player.open_failure.read() == null);
+}
+
+test "an entry that cannot be opened at start is reported until its successor loads" {
+    const allocator = std.testing.allocator;
+    var harness = try QueueHarness.init(allocator, &.{
+        .{ .track_id = 11, .frames = 1024 },
+    });
+    defer harness.deinit();
+    harness.test_opener.fail_ids = &.{10};
+    try harness.enqueue(&.{ 10, 11 });
+    harness.player.play();
+
+    harness.step(0);
+    try std.testing.expectEqual(@as(usize, 0), harness.test_opener.opensOf(11));
+    const failure = harness.player.open_failure.read().?;
+    try std.testing.expectEqual(@as(i64, 10), failure.track_id);
+
+    harness.step(0);
+    try std.testing.expectEqual(@as(usize, 1), harness.test_opener.opensOf(11));
+    try std.testing.expect(harness.player.open_failure.read() == null);
 }
 
 const FailingDecoder = struct {

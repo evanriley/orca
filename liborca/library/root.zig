@@ -18,6 +18,7 @@ pub const watch_linux = if (builtin.os.tag == .linux) @import("watch_linux.zig")
 
 pub const AcoustIdSubmission = acoustid_submission.AcoustIdSubmission;
 pub const CancellationToken = scanner.CancellationToken;
+pub const CurrentItem = scanner.CurrentItem;
 pub const DuplicateScan = duplicate_pass.DuplicateScan;
 pub const LibraryAnalysis = analysis_pass.LibraryAnalysis;
 pub const LibraryMatching = matching.LibraryMatching;

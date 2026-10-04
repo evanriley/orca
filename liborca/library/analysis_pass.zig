@@ -29,6 +29,7 @@ const storage = @import("../storage/root.zig");
 const scanner = @import("scanner.zig");
 
 pub const CancellationToken = scanner.CancellationToken;
+const CurrentItem = scanner.CurrentItem;
 
 pub const Result = struct {
     /// Rows selected and carried through to a commit.
@@ -139,6 +140,7 @@ const Batch = struct {
         while (!self.failed.load(.acquire) and !self.pass.isCancelled()) {
             const index = self.next.fetchAdd(1, .monotonic);
             if (index >= self.items.len) return;
+            if (self.pass.current_item) |current| current.set(self.items[index].uri);
             const outcome = self.pass.measure(io, self.codecs, self.items[index]);
             self.slots[index] = outcome;
             if (outcome) |_| {
@@ -181,6 +183,7 @@ pub const LibraryAnalysis = struct {
     /// set; absent, the builtins are used.
     codecs: ?*const codec.CodecRegistry = null,
     cancellation: ?*const CancellationToken = null,
+    current_item: ?*CurrentItem = null,
     /// Rows carried to a commit so far, published for a host showing progress.
     /// The denominator is separate and indexed: `unanalyzedCount`.
     progress: ?*std.atomic.Value(u64) = null,
@@ -291,7 +294,7 @@ pub const LibraryAnalysis = struct {
 
     fn isCancelled(self: *const LibraryAnalysis) bool {
         const token = self.cancellation orelse return false;
-        return token.isCancelled();
+        return token.checkpoint();
     }
 
     /// Measures a batch on this thread and `helpers.len` more, and returns once

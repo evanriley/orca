@@ -1,9 +1,11 @@
 pub const artist_info = @import("artist_info.zig");
 pub const artwork = @import("artwork.zig");
+pub const browse_loader = @import("browse_loader.zig");
 pub const control = @import("control.zig");
 pub const cover_art = @import("cover_art.zig");
 pub const handle = @import("handle.zig");
 pub const job = @import("job.zig");
+pub const job_history = @import("job_history.zig");
 pub const job_worker = @import("job_worker.zig");
 pub const listen_worker = @import("listen_worker.zig");
 pub const lyrics_fetch = @import("lyrics_fetch.zig");
@@ -41,10 +43,12 @@ pub const WorkHandle = runtime.WorkHandle;
 test {
     _ = @import("artist_info.zig");
     _ = @import("artwork.zig");
+    _ = @import("browse_loader.zig");
     _ = @import("control.zig");
     _ = @import("cover_art.zig");
     _ = @import("handle.zig");
     _ = @import("job.zig");
+    _ = @import("job_history.zig");
     _ = @import("job_worker.zig");
     _ = @import("listen_worker.zig");
     _ = @import("lyrics_fetch.zig");

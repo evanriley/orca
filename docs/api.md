@@ -53,10 +53,11 @@ defer page.deinit();
   and pages (`TrackQuery`, `TrackPage`, `ArtistQuery`, ...), playback state
   (`PlayerStatus`, `RepeatMode`, `ReplayGainMode`, ...), outputs (`Device`,
   `ZoneStats`, ...), jobs (`ScanRequest`, `ReconcileRequest`, `JobSnapshot`,
-  `ScanStats`, ...), tag
+  `ScanStats`, `QueuedJob`, `JobHistoryEntry`, `JobHistoryFilter`, ...), tag
   write-back (`TagWritePlan`, `TagWriteConflict`, `TagWriteDigest`, ...),
   artwork
-  (`ArtworkSubject`, `ArtworkResult`), watching (`WatchOptions`,
+  (`ArtworkSubject`, `ArtworkResult`), browse loading (`BrowseRequest`,
+  `BrowseResult`, `BrowsePayload`, ...), watching (`WatchOptions`,
   `WatchStatus`, `WatchState`), idle maintenance (`MaintenanceOptions`,
   `MaintenanceStatus`, `JobOrigin`, ...) and the control lane (`Action`, `Event`,
   `Telemetry`, `Failure`, `HostWaker`).
@@ -96,13 +97,63 @@ defer page.deinit();
   last one as a `MaintenanceUnit`. `jobOrigin` returns a job's `JobOrigin`
   (`host`, `watcher` or `maintenance`). `startLibraryMatching`,
   `startReleaseCoverArtFetch` and `startAcoustIdSubmission` called while a
-  unit runs cancel it and return a `queued` job, which `pump` starts once
+  unit runs cancel it and return a `waiting` job, which `pump` starts once
   the unit has finished. See
   [control-plane.md](control-plane.md#idle-maintenance).
+- A Library runs one host job at a time. A job started while another holds
+  its Library's slot, or while the Library is paused, is returned in state
+  `waiting` and started by `pump` in order; at most `max_waiting_jobs` (32)
+  wait in the runtime, and the next start returns `error.JobQueueFull`.
+  Lyrics, artist info and single-Release info fetches never wait.
+  `jobQueuePage(library, allocator)` returns the job holding the slot and the
+  waiting ones as `QueuedJob`s, each with the job it waits `after`.
+  `pauseJob(job)` holds a running job at its next cancellation poll, keeping
+  its thread and any provider lease, and `resumeJob(job)` lets it carry on;
+  a projection or tag write returns `error.JobNotPausable`, a finished job
+  `error.JobAlreadyFinished`. `pauseAll(library)` pauses the Library's
+  running jobs and holds its waiting jobs, watcher reconciles and idle
+  maintenance until `resumeAll(library)`; `libraryJobsPaused` reports it.
+  `cancelJob` wakes a paused job within one 50 ms poll. `JobSnapshot` adds
+  `started_at`, `paused`, `estimated_remaining_ms` (null until 10 s of
+  progress, while paused, and without a total), `current_item` and `detail`,
+  and `pump` publishes `Telemetry.job_progress` whenever a host job's units or
+  state move. `jobHistoryPage(library, allocator, filter, limit, offset)`
+  returns finished jobs newest first as `JobHistoryEntry`s, filtered by
+  `JobHistoryFilter` (`all`, `scans`, `analysis`, `file_changes` or
+  `problems`), and `jobRetry(library, history_id)` starts a failed or
+  cancelled one's request again (`error.JobNotRetryable` for one that
+  succeeded or was a tag write, `error.UnknownJobHistory` for an unknown id).
+  See [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue).
 - A scan or reconcile of a root whose path now lies on another volume than
   the one recorded, as an unmounted drive's mount point does, walks and
   sweeps nothing and ends `failed`. See
   [storage.md](storage.md#volume-check-before-a-walk).
+- `libraryRootPage` fills each `LibraryRoot`'s `available` (its directory is
+  readable and on the volume it records), `track_count` (Tracks whose
+  preferred file is located under it) and `unavailable_tracks` (those with no
+  present file, or all of them while the root is unavailable).
+  `libraryRelocateRoot(library, io, root_id, path)` moves a root to a new
+  path, keeping its id and every file and Track id, binds it to the volume
+  that path is on now, rewrites the tag write journal's paths under it, and
+  returns the reconcile job it starts. A path that is not a readable
+  directory is `error.InvalidLibraryRoot`; one nested with another root, its
+  files, or the root's old directory while that still exists
+  `error.RootPathOverlaps`; an unknown root `error.UnknownRoot`; a running
+  library job `error.LibraryJobRunning`; a held journal lock or an unfinished
+  tag write under the root `error.MutationInProgress`; and one under the root
+  awaiting reconciliation `error.MutationNeedsReconciliation`.
+  `libraryMissingFileCount(library)` counts the Tracks whose preferred file
+  has no present location. See
+  [storage.md](storage.md#unavailable-and-relocated-roots).
+- `PlayerStatus.last_failure` is the last queue entry that could not be
+  opened, as a `PlaybackFailure`: its `track_id` and a
+  `PlaybackFailure.Reason` (`file_missing`, `folder_unavailable`,
+  `codec_unavailable`, `decode_error`, `unsupported_channels`). It is set
+  when a play command cannot open its entry and when the engine steps over
+  one, and cleared once an entry opened after it is heard. Opening a Track
+  whose root is unavailable fails with `error.TrackFolderUnavailable` and
+  marks nothing missing. See
+  [audio-engine.md](audio-engine.md#playback-failures).
 - `libraryFolderPage(library, root_id, relative_path, limit, offset)` returns
   a `FolderPage` of one folder's children as `FolderEntry` values: its
   subfolders first, each with `file_count`, `track_count` and

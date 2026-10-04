@@ -30,6 +30,70 @@ pub const PendingSeek = struct {
     frame: u64,
 };
 
+pub const OpenFailure = struct {
+    track_id: i64,
+    err: anyerror,
+};
+
+/// Written only by whichever lane owns `sources`: the engine thread inside
+/// `pass`, or the control lane under `quiesce` or before an engine exists.
+/// Those lanes never run together, so writes are serialized; the sequence
+/// counter only lets hosts read the track and error as one pair. The render
+/// callback never touches it.
+pub const OpenFailureSlot = struct {
+    const ErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+
+    sequence: std.atomic.Value(u64) = .init(0),
+    track_id: std.atomic.Value(i64) = .init(0),
+    error_code: std.atomic.Value(ErrorInt) = .init(0),
+    /// 0 for none, which relies on entry serials skipping 0.
+    clear_at_serial: std.atomic.Value(u32) = .init(0),
+
+    pub fn record(self: *OpenFailureSlot, track_id: i64, err: anyerror) void {
+        _ = self.sequence.fetchAdd(1, .seq_cst);
+        self.track_id.store(track_id, .seq_cst);
+        self.error_code.store(@intFromError(err), .seq_cst);
+        self.clear_at_serial.store(0, .seq_cst);
+        _ = self.sequence.fetchAdd(1, .seq_cst);
+    }
+
+    pub fn clear(self: *OpenFailureSlot) void {
+        self.clear_at_serial.store(0, .seq_cst);
+        if (self.error_code.load(.seq_cst) == 0) return;
+        _ = self.sequence.fetchAdd(1, .seq_cst);
+        self.error_code.store(0, .seq_cst);
+        _ = self.sequence.fetchAdd(1, .seq_cst);
+    }
+
+    pub fn clearWhenAudible(self: *OpenFailureSlot, serial: u32) void {
+        if (self.error_code.load(.seq_cst) == 0) return;
+        self.clear_at_serial.store(serial, .seq_cst);
+    }
+
+    /// Serials wrap, so "at or past" is a wrapping comparison.
+    pub fn observeAudible(self: *OpenFailureSlot, serial: u32) void {
+        const target = self.clear_at_serial.load(.seq_cst);
+        if (target == 0 or serial == 0) return;
+        if (serial -% target >= 1 << 31) return;
+        self.clear();
+    }
+
+    pub fn read(self: *const OpenFailureSlot) ?OpenFailure {
+        while (true) {
+            const before = self.sequence.load(.seq_cst);
+            if (before & 1 == 0) {
+                const track_id = self.track_id.load(.seq_cst);
+                const code = self.error_code.load(.seq_cst);
+                if (self.sequence.load(.seq_cst) == before) {
+                    if (code == 0) return null;
+                    return .{ .track_id = track_id, .err = @errorFromInt(code) };
+                }
+            }
+            std.atomic.spinLoopHint();
+        }
+    }
+};
+
 /// Timeline shape of one queue entry, remembered by serial.
 ///
 /// The decode cursor leads the audible one by the whole render-ahead depth, so
@@ -115,6 +179,7 @@ pub const Player = struct {
     /// A seek whose target entry is no longer the one being decoded. Set by the
     /// control lane under `quiesce`, taken by the engine on its next pass.
     pending_seek: ?PendingSeek = null,
+    open_failure: OpenFailureSlot = .{},
 
     pub fn deinit(self: *Player) void {
         if (self.sources) |*sources| sources.deinit();
@@ -658,6 +723,34 @@ test "a hard load makes the entry it loaded the audible one immediately" {
     player.releaseSources();
     try std.testing.expectEqual(@as(u32, 0), player.audible_entry_serial.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), player.published_frame_count.load(.acquire));
+}
+
+test "an open failure clears once the awaited serial or a later one is heard, across the wrap" {
+    var slot: OpenFailureSlot = .{};
+    try std.testing.expect(slot.read() == null);
+    slot.record(7, error.TrackFileMissing);
+    slot.clearWhenAudible(std.math.maxInt(u32));
+    slot.observeAudible(std.math.maxInt(u32) - 1);
+    try std.testing.expectEqual(@as(i64, 7), slot.read().?.track_id);
+    slot.observeAudible(0);
+    try std.testing.expect(slot.read() != null);
+    slot.observeAudible(1);
+    try std.testing.expect(slot.read() == null);
+
+    slot.record(8, error.TrackFileMissing);
+    slot.clearWhenAudible(5);
+    slot.record(9, error.TrackFolderUnavailable);
+    slot.observeAudible(5);
+    const newer = slot.read().?;
+    try std.testing.expectEqual(@as(i64, 9), newer.track_id);
+    try std.testing.expectEqual(@as(anyerror, error.TrackFolderUnavailable), newer.err);
+
+    slot.clearWhenAudible(6);
+    slot.clear();
+    try std.testing.expect(slot.read() == null);
+    slot.record(10, error.TrackFileMissing);
+    slot.observeAudible(6);
+    try std.testing.expectEqual(@as(i64, 10), slot.read().?.track_id);
 }
 
 test "a seek is deferred when the audible entry is no longer the decoded one" {

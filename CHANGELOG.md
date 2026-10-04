@@ -4,6 +4,28 @@
 
 ### Added
 
+- **Job pause, waiting queue, history and progress telemetry.** A Library
+  runs one host Job at a time; one started while another holds the slot, or
+  while the Library is paused, is returned in the new `waiting` state and
+  started in order by `pump`. At most 32 wait (`max_waiting_jobs`); the next
+  start returns `error.JobQueueFull`. `pauseJob` and `resumeJob` hold a
+  running Job at its next cancellation poll, keeping its thread and provider
+  lease, and `cancelJob` wakes it within 50 ms; `pauseAll` and `resumeAll`
+  hold a whole Library, its watcher reconciles and idle maintenance included.
+  `jobQueuePage` lists the slot and the queue. `JobSnapshot` gains
+  `started_at`, `paused`, `estimated_remaining_ms` (a rolling rate over the
+  last 10 s, null before then), `current_item` and `detail`, and `pump`
+  publishes `job_progress` whenever a host Job's units move. Schema version
+  47 adds `job_history`, written when a Job finishes: `jobHistoryPage` reads
+  it newest first through a `JobHistoryFilter`, and `jobRetry` starts a
+  failed or cancelled Job's request again. `orca-cli jobs` starts, pauses,
+  resumes and lists Jobs and their history, `orca-cli retry-job` retries one,
+  and `orca-cli watch` takes `--pause-after` and `--resume-after`. The C ABI
+  adds `ORCA_JOB_PAUSED`, `ORCA_JOB_WAITING`, `ORCA_MAX_WAITING_JOBS`,
+  `orca_job_pause`, `orca_job_resume`, `orca_library_pause_jobs`,
+  `orca_library_resume_jobs`, `orca_library_jobs_paused`,
+  `orca_job_details_get`, `orca_library_query_job_queue`,
+  `orca_library_query_job_history` and `orca_library_retry_job`.
 - **Smart ReplayGain, preamp, untagged fallback and stop after current.**
   `ReplayGainMode.smart` applies the album correction while the entry before
   or after the one heard, in playback order, belongs to the same Release, and
@@ -21,6 +43,24 @@
   The C ABI adds `ORCA_REPLAY_GAIN_SMART`, `orca_untagged_fallback`,
   `orca_replay_gain_settings`, the matching `orca_player_*` setters and
   getters, and the new `orca_signal_path_view` fields at its end.
+- **Playback failures, root availability and relocation.**
+  `PlayerStatus.last_failure` names the last queue entry that could not be
+  opened, as a `PlaybackFailure` with its Track and a reason (`file_missing`,
+  `folder_unavailable`, `codec_unavailable`, `decode_error`,
+  `unsupported_channels`), until an entry opened after it is heard. A Track
+  whose root is unmounted or renamed fails with `TrackFolderUnavailable` and
+  is no longer marked missing. `LibraryRoot` gains `available`,
+  `track_count` and `unavailable_tracks`; `libraryRelocateRoot` moves a root
+  to a new path in one transaction, keeping every id and the undo of its tag
+  writes, refuses a path nested with another root or the old folder with
+  `RootPathOverlaps`, and starts a reconcile; `libraryMissingFileCount`
+  counts Tracks with no present file.
+  `orca-cli play-tracks` prints `failure=TRACK_ID:REASON` and goes on to the
+  next entry, `roots` appends `available= tracks= unavailable=`, `health
+  --summary` adds `missing_files`, and `relocate-root DATABASE ID PATH` is
+  new. The C ABI adds `orca_library_query_roots_v2`,
+  `orca_library_relocate_root`, `orca_library_missing_file_count`,
+  `orca_player_status_get_v2` and `ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE`.
 - **Folder covers.** A Release whose files carry no cover shows the front
   image in its folder (`cover`, then `front`, then `folder`, then the
   largest), before the Cover Art Archive's, in `libraryTrackArtwork`,
@@ -78,6 +118,15 @@
   methods yet. `orca-cli playlist` prints a `formats:` line, and
   `orca-cli smart-playlist-count` prints `duration_ms=` and takes
   `--sample=N`.
+- **Browse queries off the host's thread.** `libraryRequestBrowse` queues a
+  Track page, Track totals, a Release page or a Release count on the
+  Library's browse loader, which reads on its own read-only connection and
+  wakes the host when the result is ready; `libraryTakeBrowse` collects it
+  and `libraryCancelBrowse` skips a request that has not started. At most 8
+  requests are outstanding, the request's text is copied, and closing the
+  Library or the runtime interrupts the running query and joins the loader.
+  The C ABI does not offer it yet. `orca-cli tracks` and `orca-cli releases`
+  take `--async`, which reads the same output through the loader.
 - **Elsewhere covers and origin with its subdivision.** An artist-info fetch
   asks the Cover Art Archive for the 250-pixel front cover of the first 24
   release groups Elsewhere lists, keeps each in the new

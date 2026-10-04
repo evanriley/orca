@@ -434,6 +434,26 @@ pub const Request = union(enum) {
             .projection, .mutation, .acoustid_submission, .lyrics, .artist_info, .release_info => null,
         };
     }
+
+    /// Whether a host's Job of this kind takes its Library's one slot, and so
+    /// waits behind the Job holding it.
+    pub fn queues(self: Request) bool {
+        return switch (self) {
+            .lyrics, .artist_info => false,
+            .release_info => |request| request.target == .missing_genres,
+            else => true,
+        };
+    }
+
+    /// Whether the worker reaches a `CancellationToken.checkpoint`, which is
+    /// what holds a paused Job.
+    pub fn pausable(self: Request) bool {
+        return switch (self) {
+            .scan, .reconcile, .property_backfill, .analysis, .duplicate_scan, .metadata_lookup, .acoustid_submission => true,
+            .release_info => |request| request.target == .missing_genres,
+            .projection, .mutation, .lyrics, .artist_info => false,
+        };
+    }
 };
 
 /// What a scan job observed, mirroring `scanner.Result` plus what the
@@ -772,6 +792,12 @@ const InfoServices = struct {
 
 pub const Origin = enum { host, watcher, maintenance };
 
+pub const PublishedProgress = struct {
+    completed_units: u64,
+    total_units: ?u64,
+    state: job.State,
+};
+
 /// One background worker behind a `JobHandle`.
 ///
 /// Threading contract, the same one `core/work.zig` states: the worker thread
@@ -800,11 +826,14 @@ pub const JobWorker = struct {
     token: library_pass.CancellationToken = .{},
     /// Files the *current* root's walk has reached, written by the scanner.
     progress: std.atomic.Value(u64) = .init(0),
+    current_item: library_pass.CurrentItem = .{},
     stats: Stats,
     failed: std.atomic.Value(bool) = .init(false),
     volume_changed: std.atomic.Value(bool) = .init(false),
     /// Control lane only: the thread has been joined and the record finalized.
     retired: bool = false,
+    /// Control lane only: what the last `job_progress` telemetry carried.
+    published: ?PublishedProgress = null,
     /// Written by the worker just before it finishes; read only after.
     tag_write_failure: ?TagWriteFailure = null,
     /// Raised after `finish`, which is safe only because the control lane
@@ -852,8 +881,13 @@ pub const JobWorker = struct {
         };
     }
 
+    pub fn wakeFromPause(context: *anyopaque) callconv(.c) void {
+        const token: *library_pass.CancellationToken = @ptrCast(@alignCast(context));
+        token.cancel();
+    }
+
     fn cancelled(self: *const JobWorker) bool {
-        return self.token.isCancelled() or self.registration.cancellationRequested();
+        return self.token.checkpoint() or self.registration.cancellationRequested();
     }
 
     fn runLyrics(self: *JobWorker, request: LyricsRequest) void {
@@ -1007,6 +1041,7 @@ pub const JobWorker = struct {
             .write_lane = self.database.write_lane,
             .database_handle = self.database.database,
             .cancellation = &self.token,
+            .current_item = &self.current_item,
             .progress = &self.progress,
             .batch_size = request.batch_size,
             .force = request.force,
@@ -1047,6 +1082,7 @@ pub const JobWorker = struct {
             .write_lane = self.database.write_lane,
             .database_handle = self.database.database,
             .cancellation = &self.token,
+            .current_item = &self.current_item,
             .progress = &self.progress,
             .batch_size = request.batch_size,
             .threads = request.threads,
@@ -1476,6 +1512,7 @@ pub const JobWorker = struct {
             .root_id = root.id,
             .generation = generation,
             .cancellation = &self.token,
+            .current_item = &self.current_item,
             .batch_size = batch_size,
             .progress = &self.progress,
             .projection = pass,

@@ -2,13 +2,22 @@ const std = @import("std");
 const sqlite = @import("../sqlite.zig");
 
 const WriteLane = @import("write_lane.zig").WriteLane;
+const MutationState = @import("mutations.zig").MutationState;
+const VolumeInput = @import("volumes.zig").VolumeInput;
+const VolumeRepository = @import("volumes.zig").VolumeRepository;
 const refreshFolderCoverLocked = @import("locations.zig").refreshFolderCoverLocked;
 
+/// `available`, `track_count` and `unavailable_tracks` are filled in by a
+/// `page`, and `available` only by `Runtime.libraryRootPage`, which looks at
+/// the filesystem; `list` leaves them at their defaults.
 pub const LibraryRoot = struct {
     id: i64,
     volume_id: i64,
     path: []u8,
     enabled: bool,
+    available: bool = true,
+    track_count: u64 = 0,
+    unavailable_tracks: u64 = 0,
 
     pub fn deinit(self: LibraryRoot, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -98,6 +107,14 @@ pub fn pruneOrphanedReleasesAndArtists(
         if (db.changes() == 1) counts.artists += 1;
     }
     return counts;
+}
+
+pub fn pathWithin(inner: []const u8, outer: []const u8) bool {
+    return std.mem.startsWith(u8, inner, outer) and (inner.len == outer.len or inner[outer.len] == '/');
+}
+
+inline fn journalUnder(comptime column: []const u8) []const u8 {
+    return "(" ++ column ++ ">=?1 || '/' AND " ++ column ++ "<?1 || '0')";
 }
 
 pub const LibraryRootRepository = struct {
@@ -204,6 +221,136 @@ pub const LibraryRootRepository = struct {
         };
     }
 
+    /// One transaction, so a crash leaves the root, every row under it and the
+    /// journaled paths under it wholly at the old path or wholly at the new
+    /// one.
+    pub fn relocate(
+        self: *LibraryRootRepository,
+        allocator: std.mem.Allocator,
+        root_id: i64,
+        volume: VolumeInput,
+        path: []const u8,
+    ) !i64 {
+        if (path.len == 0) return error.InvalidLibraryRoot;
+        self.write_lane.acquire();
+        defer self.write_lane.release();
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+
+        const old_path = old: {
+            var statement = try self.db.prepare("SELECT path FROM library_roots WHERE id=?1;");
+            defer statement.deinit();
+            try statement.bindInt64(1, root_id);
+            if (try statement.step() != .row) return error.UnknownRoot;
+            break :old try allocator.dupe(u8, statement.columnText(0));
+        };
+        defer allocator.free(old_path);
+        var volumes: VolumeRepository = .{ .db = self.db, .write_lane = self.write_lane };
+        const volume_id = try volumes.ensureLocked(volume);
+
+        {
+            var taken = try self.db.prepare(
+                \\SELECT 1 FROM library_roots WHERE id<>?1 AND (path=?2
+                \\    OR path>=?2 || '/' AND path<?2 || '0'
+                \\    OR ?2>=path || '/' AND ?2<path || '0')
+                \\UNION ALL
+                \\SELECT 1 FROM locations WHERE volume_id=?3 AND uri>=?2 || '/' AND uri<?2 || '0'
+                \\    AND root_id IS NOT ?1
+                \\UNION ALL
+                \\SELECT 1 FROM folder_images WHERE volume_id=?3 AND uri>=?2 || '/' AND uri<?2 || '0'
+                \\    AND root_id IS NOT ?1
+                \\LIMIT 1;
+            );
+            defer taken.deinit();
+            try taken.bindInt64(1, root_id);
+            try taken.bindText(2, path);
+            try taken.bindInt64(3, volume_id);
+            if (try taken.step() == .row) return error.RootPathOverlaps;
+        }
+        if (pathWithin(path, old_path) or pathWithin(old_path, path)) {
+            inline for (.{ "locations", "folder_images" }) |table| {
+                var landing = try self.db.prepare(
+                    "SELECT 1 FROM " ++ table ++ " AS moving JOIN " ++ table ++ " AS held\n" ++
+                        "    ON held.volume_id=?3 AND held.uri=?2 || substr(moving.uri, length(?4) + 1)\n" ++
+                        "    AND held.id<>moving.id\n" ++
+                        "WHERE moving.root_id=?1 AND moving.uri>=?4 || '/' AND moving.uri<?4 || '0' LIMIT 1;",
+                );
+                defer landing.deinit();
+                try landing.bindInt64(1, root_id);
+                try landing.bindText(2, path);
+                try landing.bindInt64(3, volume_id);
+                try landing.bindText(4, old_path);
+                if (try landing.step() == .row) return error.RootPathOverlaps;
+            }
+        }
+        {
+            var unfinished = try self.db.prepare(
+                "SELECT state FROM mutation_operations WHERE state NOT IN (?2, ?3) AND (" ++
+                    journalUnder("source_path") ++ " OR " ++ journalUnder("destination_path") ++ " OR " ++
+                    journalUnder("stage_path") ++ " OR " ++ journalUnder("backup_path") ++
+                    ")\nORDER BY state=?4 DESC LIMIT 1;",
+            );
+            defer unfinished.deinit();
+            try unfinished.bindText(1, old_path);
+            try unfinished.bindInt64(2, @intFromEnum(MutationState.committed));
+            try unfinished.bindInt64(3, @intFromEnum(MutationState.rolled_back));
+            try unfinished.bindInt64(4, @intFromEnum(MutationState.needs_reconciliation));
+            if (try unfinished.step() == .row) {
+                if (unfinished.columnInt64(0) == @intFromEnum(MutationState.needs_reconciliation))
+                    return error.MutationNeedsReconciliation;
+                return error.MutationInProgress;
+            }
+        }
+
+        inline for (.{ "locations", "folder_images" }) |table| {
+            var statement = try self.db.prepare(
+                "UPDATE " ++ table ++ " SET volume_id=?3, uri=?2 || substr(uri, length(?4) + 1)\n" ++
+                    "WHERE root_id=?1 AND uri>=?4 || '/' AND uri<?4 || '0';",
+            );
+            defer statement.deinit();
+            try statement.bindInt64(1, root_id);
+            try statement.bindText(2, path);
+            try statement.bindInt64(3, volume_id);
+            try statement.bindText(4, old_path);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
+        inline for (.{ "source_path", "destination_path", "stage_path", "backup_path" }) |column| {
+            var statement = try self.db.prepare(
+                "UPDATE mutation_operations SET " ++ column ++ "=?2 || substr(" ++ column ++ ", length(?1) + 1)\n" ++
+                    "WHERE " ++ journalUnder(column) ++ ";",
+            );
+            defer statement.deinit();
+            try statement.bindText(1, old_path);
+            try statement.bindText(2, path);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
+        {
+            var statement = try self.db.prepare("UPDATE library_roots SET path=?2, volume_id=?3 WHERE id=?1;");
+            defer statement.deinit();
+            try statement.bindInt64(1, root_id);
+            try statement.bindText(2, path);
+            try statement.bindInt64(3, volume_id);
+            if (try statement.step() != .done) return error.SqlFailed;
+        }
+        try self.db.exec("COMMIT;");
+        return volume_id;
+    }
+
+    pub fn find(self: *const LibraryRootRepository, allocator: std.mem.Allocator, root_id: i64) !?LibraryRoot {
+        var statement = try self.db.prepare(
+            "SELECT id, volume_id, path, enabled FROM library_roots WHERE id=?1;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, root_id);
+        if (try statement.step() != .row) return null;
+        return .{
+            .id = statement.columnInt64(0),
+            .volume_id = statement.columnInt64(1),
+            .path = try allocator.dupe(u8, statement.columnText(2)),
+            .enabled = statement.columnInt64(3) != 0,
+        };
+    }
+
     fn execWithRoot(self: *LibraryRootRepository, sql: [:0]const u8, root_id: i64) !u64 {
         var statement = try self.db.prepare(sql);
         defer statement.deinit();
@@ -247,7 +394,16 @@ pub const LibraryRootRepository = struct {
         offset: u32,
     ) !LibraryRootPage {
         var statement = try self.db.prepare(
-            \\SELECT id, volume_id, path, enabled FROM library_roots
+            \\SELECT id, volume_id, path, enabled,
+            \\    (SELECT count(DISTINCT tracks.id) FROM locations
+            \\     JOIN tracks ON tracks.preferred_file_id = locations.file_id
+            \\     WHERE locations.root_id = library_roots.id),
+            \\    (SELECT count(DISTINCT tracks.id) FROM locations
+            \\     JOIN tracks ON tracks.preferred_file_id = locations.file_id
+            \\     WHERE locations.root_id = library_roots.id AND NOT EXISTS (
+            \\         SELECT 1 FROM locations AS held
+            \\         WHERE held.file_id = tracks.preferred_file_id AND held.state <> 'missing'))
+            \\FROM library_roots
             \\ORDER BY id LIMIT ?1 OFFSET ?2;
         );
         defer statement.deinit();
@@ -266,6 +422,8 @@ pub const LibraryRootRepository = struct {
                 .volume_id = statement.columnInt64(1),
                 .path = path,
                 .enabled = statement.columnInt64(3) != 0,
+                .track_count = @intCast(statement.columnInt64(4)),
+                .unavailable_tracks = @intCast(statement.columnInt64(5)),
             });
         }
         return .{ .allocator = allocator, .items = try roots.toOwnedSlice(allocator) };

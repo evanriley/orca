@@ -856,6 +856,16 @@ pub const RootView = extern struct {
 
 pub const RootCallback = *const fn (?*anyopaque, *const RootView) callconv(.c) void;
 
+pub const RootViewV2 = extern struct {
+    base: RootView,
+    track_count: u64,
+    unavailable_tracks: u64,
+    available: u8,
+    _reserved: [7]u8 = @splat(0),
+};
+
+pub const RootV2Callback = *const fn (?*anyopaque, *const RootViewV2) callconv(.c) void;
+
 pub const FolderEntryView = extern struct {
     track_id: i64,
     file_id: i64,
@@ -944,6 +954,14 @@ pub const PlayerStatus = extern struct {
     queue_index: u32,
     volume: f32,
     _reserved: [4]u8 = @splat(0),
+};
+
+pub const PlayerStatusV2 = extern struct {
+    base: PlayerStatus,
+    failure_track_id: i64,
+    has_failure: u8,
+    failure_reason: u8,
+    _reserved: [6]u8 = @splat(0),
 };
 
 pub const EqualizerView = extern struct {
@@ -1050,6 +1068,48 @@ pub const JobSnapshot = extern struct {
     completed_units: u64,
     total_units: u64,
 };
+
+pub const JobDetails = extern struct {
+    started_at: i64,
+    estimated_remaining_ms: u64,
+    has_started_at: u8,
+    paused: u8,
+    has_estimated_remaining_ms: u8,
+    _reserved: [5]u8 = @splat(0),
+    current_item: StringView,
+    detail: StringView,
+};
+
+pub const JobDetailsCallback = *const fn (?*anyopaque, *const JobDetails) callconv(.c) void;
+
+pub const QueuedJobView = extern struct {
+    job: Handle,
+    after: Handle,
+    kind: u8,
+    has_after: u8,
+    _reserved: [6]u8 = @splat(0),
+};
+
+pub const QueuedJobCallback = *const fn (?*anyopaque, *const QueuedJobView) callconv(.c) void;
+
+pub const JobHistoryView = extern struct {
+    id: i64,
+    started_at: i64,
+    finished_at: i64,
+    completed_units: u64,
+    total_units: u64,
+    undo_group_id: u64,
+    kind: u8,
+    state: u8,
+    has_total: u8,
+    has_undo_group_id: u8,
+    retryable: u8,
+    _reserved: [3]u8 = @splat(0),
+    error_text: StringView,
+    summary: StringView,
+};
+
+pub const JobHistoryCallback = *const fn (?*anyopaque, *const JobHistoryView) callconv(.c) void;
 
 pub const ScanStats = extern struct {
     files_seen: u64,
@@ -4597,6 +4657,26 @@ pub export fn orca_library_remove_root(
     return .ok;
 }
 
+pub export fn orca_library_relocate_root(
+    runtime: ?*Runtime,
+    library: Handle,
+    root_id: i64,
+    path: ?[*:0]const u8,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const path_pointer = path orelse return box.reject(@src(), .invalid_argument, "path is null");
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const started = box.runtime.libraryRelocateRoot(
+        importLibrary(library),
+        box.io(),
+        root_id,
+        std.mem.span(path_pointer),
+    ) catch |err| return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
+    return .ok;
+}
+
 pub export fn orca_library_query_roots(
     runtime: ?*Runtime,
     library: Handle,
@@ -4612,14 +4692,56 @@ pub export fn orca_library_query_roots(
         return box.fail(@src(), err);
     defer page.deinit();
     for (page.items) |item| {
-        const view: RootView = .{
-            .id = item.id,
-            .volume_id = item.volume_id,
-            .enabled = @intFromBool(item.enabled),
-            .path = stringView(item.path),
+        const view = exportRoot(item);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_query_roots_v2(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?RootV2Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    var page = box.runtime.libraryRootPage(importLibrary(library), limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer page.deinit();
+    for (page.items) |item| {
+        const view: RootViewV2 = .{
+            .base = exportRoot(item),
+            .track_count = item.track_count,
+            .unavailable_tracks = item.unavailable_tracks,
+            .available = @intFromBool(item.available),
         };
         visit(context, &view);
     }
+    return .ok;
+}
+
+fn exportRoot(root: database.repository.LibraryRoot) RootView {
+    return .{
+        .id = root.id,
+        .volume_id = root.volume_id,
+        .enabled = @intFromBool(root.enabled),
+        .path = stringView(root.path),
+    };
+}
+
+pub export fn orca_library_missing_file_count(
+    runtime: ?*Runtime,
+    library: Handle,
+    output: ?*u64,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    destination.* = box.runtime.libraryMissingFileCount(importLibrary(library)) catch |err|
+        return box.fail(@src(), err);
     return .ok;
 }
 
@@ -4954,6 +5076,145 @@ pub export fn orca_job_reconcile_root(
     const root = box.runtime.jobReconcileRoot(importJob(job_handle)) catch |err| return box.fail(@src(), err);
     root_destination.* = root orelse 0;
     has_destination.* = @intFromBool(root != null);
+    return .ok;
+}
+
+pub export fn orca_job_details_get(
+    runtime: ?*Runtime,
+    job_handle: Handle,
+    context: ?*anyopaque,
+    callback: ?JobDetailsCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const snapshot = box.runtime.jobSnapshotSynced(importJob(job_handle)) catch |err|
+        return box.fail(@src(), err);
+    const details: JobDetails = .{
+        .started_at = snapshot.started_at orelse 0,
+        .estimated_remaining_ms = snapshot.estimated_remaining_ms orelse 0,
+        .has_started_at = @intFromBool(snapshot.started_at != null),
+        .paused = @intFromBool(snapshot.paused),
+        .has_estimated_remaining_ms = @intFromBool(snapshot.estimated_remaining_ms != null),
+        .current_item = stringView(snapshot.current_item.slice()),
+        .detail = stringView(snapshot.detail.slice()),
+    };
+    visit(context, &details);
+    return .ok;
+}
+
+pub export fn orca_job_pause(runtime: ?*Runtime, job_handle: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.pauseJob(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_job_resume(runtime: ?*Runtime, job_handle: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.resumeJob(importJob(job_handle)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_pause_jobs(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.pauseAll(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_resume_jobs(runtime: ?*Runtime, library: Handle) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    box.runtime.resumeAll(importLibrary(library)) catch |err| return box.fail(@src(), err);
+    return .ok;
+}
+
+pub export fn orca_library_jobs_paused(
+    runtime: ?*Runtime,
+    library: Handle,
+    paused: ?*u8,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = paused orelse return box.reject(@src(), .invalid_argument, "paused is null");
+    destination.* = @intFromBool(box.runtime.libraryJobsPaused(importLibrary(library)) catch |err|
+        return box.fail(@src(), err));
+    return .ok;
+}
+
+pub export fn orca_library_query_job_queue(
+    runtime: ?*Runtime,
+    library: Handle,
+    context: ?*anyopaque,
+    callback: ?QueuedJobCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const queued = box.runtime.jobQueuePage(importLibrary(library), box.runtime.allocator) catch |err|
+        return box.fail(@src(), err);
+    defer box.runtime.allocator.free(queued);
+    for (queued) |entry| {
+        const view: QueuedJobView = .{
+            .job = exportJobHandle(entry.job),
+            .after = if (entry.after) |after| exportJobHandle(after) else .{ .index = 0, .generation = 0 },
+            .kind = exportJobKind(entry.kind),
+            .has_after = @intFromBool(entry.after != null),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_query_job_history(
+    runtime: ?*Runtime,
+    library: Handle,
+    filter: u8,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?JobHistoryCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const history_filter = importJobHistoryFilter(filter) orelse
+        return box.reject(@src(), .invalid_argument, "filter is not an orca_job_history_filter");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const entries = box.runtime.jobHistoryPage(
+        importLibrary(library),
+        box.runtime.allocator,
+        history_filter,
+        limit,
+        offset,
+    ) catch |err| return box.fail(@src(), err);
+    defer box.runtime.allocator.free(entries);
+    for (entries) |*entry| {
+        const view: JobHistoryView = .{
+            .id = entry.id,
+            .started_at = entry.started_at,
+            .finished_at = entry.finished_at,
+            .completed_units = entry.completed_units,
+            .total_units = entry.total_units orelse 0,
+            .undo_group_id = entry.undo_group_id orelse 0,
+            .kind = exportJobKind(entry.kind),
+            .state = @intFromEnum(entry.state),
+            .has_total = @intFromBool(entry.total_units != null),
+            .has_undo_group_id = @intFromBool(entry.undo_group_id != null),
+            .retryable = @intFromBool(entry.retryable),
+            .error_text = stringView(entry.error_text.slice()),
+            .summary = stringView(entry.summary.slice()),
+        };
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_retry_job(
+    runtime: ?*Runtime,
+    library: Handle,
+    history_id: i64,
+    job_output: ?*Handle,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = job_output orelse return box.reject(@src(), .invalid_argument, "job is null");
+    const started = box.runtime.jobRetry(importLibrary(library), history_id) catch |err|
+        return box.fail(@src(), err);
+    destination.* = exportJobHandle(started);
     return .ok;
 }
 
@@ -5442,7 +5703,40 @@ pub export fn orca_player_status_get(
     const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
     const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
         return box.fail(@src(), err);
+    destination.* = exportPlayerStatus(status);
+    return .ok;
+}
+
+pub export fn orca_player_status_get_v2(
+    runtime: ?*Runtime,
+    player: Handle,
+    output: ?*PlayerStatusV2,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    const status = box.runtime.playerStatus(importPlayer(player)) catch |err|
+        return box.fail(@src(), err);
     destination.* = .{
+        .base = exportPlayerStatus(status),
+        .failure_track_id = if (status.last_failure) |failure| failure.track_id else 0,
+        .has_failure = @intFromBool(status.last_failure != null),
+        .failure_reason = if (status.last_failure) |failure| exportPlaybackFailureReason(failure.reason) else 0,
+    };
+    return .ok;
+}
+
+pub fn exportPlaybackFailureReason(reason: core.runtime.PlaybackFailure.Reason) u8 {
+    return switch (reason) {
+        .file_missing => 0,
+        .folder_unavailable => 1,
+        .codec_unavailable => 2,
+        .decode_error => 3,
+        .unsupported_channels => 4,
+    };
+}
+
+fn exportPlayerStatus(status: core.runtime.PlayerStatus) PlayerStatus {
+    return .{
         .transport = @intFromEnum(status.transport),
         .repeat = @intFromEnum(status.repeat),
         .shuffle = @intFromBool(status.shuffle),
@@ -5455,7 +5749,6 @@ pub export fn orca_player_status_get(
         .queue_index = status.queue_index,
         .volume = status.volume,
     };
-    return .ok;
 }
 
 pub export fn orca_player_now_playing(
@@ -6766,7 +7059,19 @@ fn exportFailure(failure: control.Failure) u8 {
         .codec_unavailable => 7,
         .queue_full => 8,
         .not_playable => 9,
+        .track_folder_unavailable => 10,
         .internal => 255,
+    };
+}
+
+pub fn importJobHistoryFilter(value: u8) ?core.runtime.JobHistoryFilter {
+    return switch (value) {
+        0 => .all,
+        1 => .scans,
+        2 => .analysis,
+        3 => .file_changes,
+        4 => .problems,
+        else => null,
     };
 }
 
@@ -6888,11 +7193,13 @@ fn mapError(err: anyerror) Status {
         error.PlaylistNameTaken, error.PlaylistFull, error.PlaylistEmpty, error.FolderEmpty => .invalid_state,
         error.PlaylistIsSmart, error.PlaylistIsManual => .invalid_state,
         error.NoBackupDirectory, error.MutationGroupNotCommitted, error.ClientIdentityRequired, error.TagTargetUnavailable => .invalid_state,
-        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
+        error.TrackHasNoPlayableFile, error.TrackFileMissing, error.TrackFolderUnavailable, error.UnknownRoot, error.UnknownPlaylist, error.UnknownFile => .not_found,
         error.TrackNotFound, error.UnknownTagWritePlan, error.MutationGroupNotFound => .not_found,
         error.PlaybackQueueFull, error.ArtworkQueueFull, error.LibraryJobRunning, error.LibraryScanRunning, error.MutationInProgress => .busy,
         error.TooManyPendingTagWrites, error.TagWriteInProgress => .busy,
-        error.MatchingAlreadyRunning, error.AcoustIdBusy => .busy,
+        error.MatchingAlreadyRunning, error.AcoustIdBusy, error.JobQueueFull => .busy,
+        error.JobNotPausable, error.JobNotRetryable => .invalid_state,
+        error.UnknownJobHistory => .not_found,
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
         error.MutationGroupAlreadyUndone => .already_done,
@@ -6907,6 +7214,7 @@ fn mapError(err: anyerror) Status {
         error.InvalidVolume,
         error.InvalidBatchSize,
         error.InvalidLibraryRoot,
+        error.RootPathOverlaps,
         error.InvalidWatchOptions,
         error.InvalidReconcileDirectory,
         error.InvalidFolderPath,
@@ -8431,6 +8739,12 @@ test "an undone, unreconciled or pruned tag write and a write still running each
     try std.testing.expectEqual(Status.invalid_state, mapError(error.MutationGroupNotCommitted));
     try std.testing.expectEqual(Status.invalid_state, mapError(error.TagTargetUnavailable));
     try std.testing.expectEqual(Status.invalid_argument, mapError(error.MutationApprovalMismatch));
+}
+
+test "a relocate onto another root's folder is an invalid argument, and over an unfinished or unreconciled write its own status" {
+    try std.testing.expectEqual(Status.invalid_argument, mapError(error.RootPathOverlaps));
+    try std.testing.expectEqual(Status.busy, mapError(error.MutationInProgress));
+    try std.testing.expectEqual(Status.needs_reconciliation, mapError(error.MutationNeedsReconciliation));
 }
 
 test "tag edits and writes refuse bad arguments, unknown Tracks and plans, and a Library with no database file" {

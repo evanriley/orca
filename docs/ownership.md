@@ -39,10 +39,10 @@ A Library with idle maintenance enabled keeps its schedule, its cursor and
 the last unit's result on its own record, which holds no pointer and
 survives a drain. Its unit is an ordinary job worker with origin
 `maintenance` and goes with the other job workers; the drain finalizes it,
-and the next unit starts one interval later. A host job queued behind a unit
-holds a Library handle and a request, not a worker. `destroyLibrary` finishes
-its Library's queued job `cancelled`, so no pending job names a Library that
-is gone. See [control-plane.md](control-plane.md#idle-maintenance).
+and the next unit starts one interval later. A waiting host job, behind a
+unit or another job of its Library, holds a Library handle and a request, not
+a worker. `destroyLibrary` finishes its Library's waiting jobs `cancelled`, so
+no waiting job names a Library that is gone. See [control-plane.md](control-plane.md#idle-maintenance).
 
 The `CredentialStore` passed to `setCredentialStore` is borrowed: its context
 must outlive the runtime, because a worker may call it at any time.
@@ -62,10 +62,13 @@ work → Zones → Players → Libraries:
 
 1. Stop accepting commands and enter `shutting_down`.
 2. End open listens, stop every Player's engine thread, cancel job workers and
-   all other registered work (listen workers, artwork loaders, watchers), and
-   block until every worker has finished. Then release the drained workers,
-   discard tag write plans awaiting approval, finish a host job queued
-   behind a maintenance unit `cancelled`, and cancel and drain Jobs.
+   all other registered work (listen workers, artwork and browse loaders,
+   watchers), and block until every worker has finished. A paused job worker
+   sees its cancelled token within one 50 ms poll, so pausing never holds
+   this step. Then record each host job's history, release the drained
+   workers, which closes each loader's read-only connection before its
+   Library's database closes, discard tag write plans awaiting approval,
+   finish every waiting host job `cancelled`, and cancel and drain Jobs.
 3. Destroy Zones, closing their output sessions; Zones depend on Players and
    output resources.
 4. Free Players.

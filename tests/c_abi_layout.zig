@@ -71,6 +71,7 @@ const struct_pairs = .{
     .{ c_api.ProviderSourceView, c.orca_provider_source_view },
     .{ c_api.HealthFileView, c.orca_health_file_view },
     .{ c_api.RootView, c.orca_root_view },
+    .{ c_api.RootViewV2, c.orca_root_view_v2 },
     .{ c_api.FolderEntryView, c.orca_folder_entry_view },
     .{ c_api.DeviceView, c.orca_device_view },
     .{ c_api.DeviceViewV2, c.orca_device_view_v2 },
@@ -79,6 +80,7 @@ const struct_pairs = .{
     .{ c_api.QueueStats, c.orca_queue_stats },
     .{ c_api.NowPlayingView, c.orca_now_playing_view },
     .{ c_api.PlayerStatus, c.orca_player_status },
+    .{ c_api.PlayerStatusV2, c.orca_player_status_v2 },
     .{ c_api.ZoneStatus, c.orca_zone_status },
     .{ c_api.EqualizerView, c.orca_equalizer },
     .{ c_api.ParametricFilterView, c.orca_parametric_filter },
@@ -87,6 +89,9 @@ const struct_pairs = .{
     .{ c_api.SignalPathView, c.orca_signal_path_view },
     .{ c_api.ReplayGainSettingsView, c.orca_replay_gain_settings },
     .{ c_api.JobSnapshot, c.orca_job_snapshot },
+    .{ c_api.JobDetails, c.orca_job_details },
+    .{ c_api.QueuedJobView, c.orca_queued_job_view },
+    .{ c_api.JobHistoryView, c.orca_job_history_view },
     .{ c_api.ScanStats, c.orca_scan_stats },
     .{ c_api.ScanOptions, c.orca_scan_options },
     .{ c_api.AnalysisOptions, c.orca_analysis_options },
@@ -500,6 +505,13 @@ const export_mappings = .{
         }
     },
     struct {
+        pub const prefix = "ORCA_PLAYBACK_FAILURE_";
+        pub const Tag = core.runtime.PlaybackFailure.Reason;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportPlaybackFailureReason(tag);
+        }
+    },
+    struct {
         pub const prefix = "ORCA_FAILURE_";
         pub const Tag = core.control.Failure;
         pub fn produce(tag: Tag) ?i64 {
@@ -649,6 +661,13 @@ const import_mappings = .{
         pub const Tag = c_api.CredentialResult;
         pub fn consume(value: u8) ?Tag {
             return c_api.importCredentialResult(value);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_JOB_HISTORY_";
+        pub const Tag = core.runtime.JobHistoryFilter;
+        pub fn consume(value: u8) ?Tag {
+            return c_api.importJobHistoryFilter(value);
         }
     },
 };
@@ -902,7 +921,7 @@ test "every orca.h constant the C API accepts imports as the Zig value of the sa
 }
 
 test "every orca.h enum constant is checked against liborca" {
-    @setEvalBranchQuota(2_000_000);
+    @setEvalBranchQuota(4_000_000);
     var unchecked: usize = 0;
     inline for (@typeInfo(c).@"struct".decls) |decl| {
         if (comptime !std.mem.startsWith(u8, decl.name, "ORCA_")) continue;
@@ -961,6 +980,10 @@ test "the credential limit and names orca.h declares are liborca's" {
     try std.testing.expectEqualStrings(liborca.acoustid_credential_service, c.ORCA_CREDENTIAL_SERVICE_ACOUSTID);
     try std.testing.expectEqualStrings(liborca.acoustid_client_key_account, c.ORCA_CREDENTIAL_ACCOUNT_CLIENT_KEY);
     try std.testing.expectEqualStrings(liborca.acoustid_user_key_account, c.ORCA_CREDENTIAL_ACCOUNT_USER_KEY);
+}
+
+test "the waiting-job bound orca.h declares is liborca's" {
+    try std.testing.expectEqual(@as(usize, c.ORCA_MAX_WAITING_JOBS), liborca.max_waiting_jobs);
 }
 
 test "a finished job is reported as a job_finished event carrying its state" {

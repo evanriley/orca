@@ -53,6 +53,10 @@ pub fn readStatus(object_value: *PlayerObject) StatusRead {
             .queue_length = queue_snapshot.entries,
             .queue_index = position orelse queue_snapshot.cursor,
             .volume = object_value.gain.linear.load(.acquire),
+            .last_failure = if (object_value.player.open_failure.read()) |failure| .{
+                .track_id = failure.track_id,
+                .reason = .of(failure.err),
+            } else null,
         },
     };
 }

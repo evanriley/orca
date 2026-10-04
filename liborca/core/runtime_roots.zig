@@ -145,17 +145,46 @@ pub fn libraryRemoveRoot(
     };
 }
 
+pub fn libraryRelocateRoot(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    io: std.Io,
+    root_id: i64,
+    path: []const u8,
+) !JobHandle {
+    try runtime.requireRunning(self);
+    const library_database = try runtime.libraryDatabase(self, library);
+    {
+        const directory = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch
+            return error.InvalidLibraryRoot;
+        directory.close(io);
+    }
+    runtime_watch.preemptAutoReconcile(self, library);
+    runtime_maintenance.preemptUnit(self, library);
+    if (runtime_jobs.libraryJobRunning(self, library)) return error.LibraryJobRunning;
+    const binding = try library_database.relocateRoot(io, root_id, path, .{ .allow_persist = true });
+    runtime_watch.rootRemoved(self, library, root_id);
+    runtime_watch.rootAdded(self, library, binding, path);
+    return runtime_jobs.startLibraryReconcile(self, library, .{ .root_id = root_id, .scope = .whole_root });
+}
+
 pub fn libraryRootPage(
     self: *OrcaRuntime,
     library: LibraryHandle,
     limit: u32,
     offset: u32,
 ) !database.repository.LibraryRootPage {
-    return (try runtime.libraryDatabase(self, library)).library_roots.page(
-        self.allocator,
-        limit,
-        offset,
-    );
+    const library_database = try runtime.libraryDatabase(self, library);
+    const page = try library_database.library_roots.page(self.allocator, limit, offset);
+    errdefer page.deinit();
+    const io = self.control_threaded.io();
+    for (page.items) |*root| {
+        const recorded_key = try library_database.recordedVolumeKey(self.allocator, root.volume_id);
+        defer if (recorded_key) |key| self.allocator.free(key);
+        root.available = library_pass.volume_check.rootAvailable(self.allocator, io, root.path, recorded_key);
+        if (!root.available) root.unavailable_tracks = root.track_count;
+    }
+    return page;
 }
 
 pub fn libraryFolderPage(

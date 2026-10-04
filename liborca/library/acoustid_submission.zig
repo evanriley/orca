@@ -219,7 +219,7 @@ pub const AcoustIdSubmission = struct {
     }
 
     fn isCancelled(self: *const AcoustIdSubmission) bool {
-        if (self.cancellation) |token| if (token.isCancelled()) return true;
+        if (self.cancellation) |token| if (token.checkpoint()) return true;
         if (self.acoustid.gateway.cancel) |flag| if (flag.load(.acquire)) return true;
         return false;
     }

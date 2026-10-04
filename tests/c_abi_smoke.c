@@ -2176,6 +2176,79 @@ static int health_summary_v2_smoke(orca_runtime *runtime, orca_handle library,
     return 0;
 }
 
+struct root_v2_capture {
+    int64_t id;
+    uint64_t track_count;
+    uint64_t unavailable_tracks;
+    uint32_t count;
+    uint8_t available;
+};
+
+static void capture_root_v2(void *context, const orca_root_view_v2 *root) {
+    struct root_v2_capture *capture = context;
+    capture->id = root->base.id;
+    capture->track_count = root->track_count;
+    capture->unavailable_tracks = root->unavailable_tracks;
+    capture->available = root->available;
+    capture->count += 1;
+}
+
+static int roots_v2_smoke(orca_runtime *runtime, orca_handle library, int64_t root_id,
+                          const char *root_path) {
+    struct root_v2_capture root;
+    memset(&root, 0, sizeof root);
+    SMOKE_CHECK(orca_library_query_roots_v2(runtime, library, 64, 0, &root, capture_root_v2) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(root.count == 1 && root.id == root_id && root.available == 1);
+    SMOKE_CHECK(root.track_count > 0 && root.unavailable_tracks == 0);
+    SMOKE_CHECK(orca_library_query_roots_v2(runtime, library, 0, 0, &root, capture_root_v2) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_roots_v2(runtime, library, 64, 0, &root, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
+    uint64_t missing = 1;
+    SMOKE_CHECK(orca_library_missing_file_count(runtime, library, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_missing_file_count(runtime, library, &missing) == ORCA_STATUS_OK);
+    SMOKE_CHECK(missing == 0);
+
+    orca_handle job;
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, 0, &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, root_path, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id,
+                                           "/nonexistent/orca-relocated-root", &job) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id + 1000, root_path, &job) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_relocate_root(runtime, library, root_id, root_path, &job) ==
+                ORCA_STATUS_OK);
+    uint8_t state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, job, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    uint64_t track_count = root.track_count;
+    memset(&root, 0, sizeof root);
+    SMOKE_CHECK(orca_library_query_roots_v2(runtime, library, 64, 0, &root, capture_root_v2) ==
+                ORCA_STATUS_OK);
+    SMOKE_CHECK(root.count == 1 && root.id == root_id && root.available == 1);
+    SMOKE_CHECK(root.track_count == track_count && root.unavailable_tracks == 0);
+    return 0;
+}
+
+static int player_status_v2_smoke(orca_runtime *runtime, orca_handle player,
+                                  const orca_player_status *status) {
+    orca_player_status_v2 extended;
+    memset(&extended, 0xff, sizeof extended);
+    SMOKE_CHECK(orca_player_status_get_v2(runtime, player, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_player_status_get_v2(runtime, player, &extended) == ORCA_STATUS_OK);
+    SMOKE_CHECK(extended.base.transport == status->transport &&
+                extended.base.track_id == status->track_id &&
+                extended.base.queue_length == status->queue_length);
+    SMOKE_CHECK(extended.has_failure == 0 && extended.failure_track_id == 0 &&
+                extended.failure_reason == 0);
+    return 0;
+}
+
 static int library_stats_smoke(orca_runtime *runtime, orca_handle library) {
     orca_library_stats_view stats;
     SMOKE_CHECK(orca_library_stats(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
@@ -3698,6 +3771,138 @@ static int maintenance_smoke(orca_runtime *runtime, orca_handle library, int64_t
     return 0;
 }
 
+struct queued_job_capture {
+    uint32_t count;
+    orca_queued_job_view jobs[4];
+};
+
+static void capture_queued_job(void *context, const orca_queued_job_view *job) {
+    struct queued_job_capture *capture = context;
+    if (capture->count < 4) capture->jobs[capture->count] = *job;
+    capture->count += 1;
+}
+
+struct job_history_capture {
+    uint32_t count;
+    orca_job_history_view entry;
+    char error_text[32];
+    size_t summary_length;
+};
+
+static void capture_job_history(void *context, const orca_job_history_view *entry) {
+    struct job_history_capture *capture = context;
+    capture->count += 1;
+    capture->entry = *entry;
+    size_t length = entry->error_text.length < 31 ? entry->error_text.length : 31;
+    memcpy(capture->error_text, entry->error_text.pointer, length);
+    capture->error_text[length] = 0;
+    capture->summary_length = entry->summary.length;
+}
+
+struct job_details_capture {
+    uint32_t count;
+    orca_job_details details;
+};
+
+static void capture_job_details(void *context, const orca_job_details *details) {
+    struct job_details_capture *capture = context;
+    capture->count += 1;
+    capture->details = *details;
+}
+
+static int same_handle(orca_handle left, orca_handle right) {
+    return left.index == right.index && left.generation == right.generation;
+}
+
+static int read_job_history(orca_runtime *runtime, orca_handle library, uint8_t filter,
+                            struct job_history_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_library_query_job_history(runtime, library, filter, 1, 0, capture,
+                                               capture_job_history) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->count == 1);
+    return 0;
+}
+
+/* Scans after the first wait for the Library's one slot, in order; a paused
+ * job is reported paused, a cancelled waiting job is remembered as a problem,
+ * and retrying it starts the same scan again. */
+static int job_queue_smoke(orca_runtime *runtime, orca_handle library, int64_t root_id) {
+    SMOKE_CHECK(drain_events(runtime) == 0);
+    orca_handle first, second, third;
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, root_id, 0, &first) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, root_id, 0, &second) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_start_scan(runtime, library, root_id, 0, &third) == ORCA_STATUS_OK);
+    orca_job_snapshot snapshot;
+    SMOKE_CHECK(orca_job_snapshot_get(runtime, second, &snapshot) == ORCA_STATUS_OK);
+    SMOKE_CHECK(snapshot.state == ORCA_JOB_WAITING);
+
+    struct queued_job_capture queue;
+    memset(&queue, 0, sizeof queue);
+    SMOKE_CHECK(orca_library_query_job_queue(runtime, library, &queue, capture_queued_job) == ORCA_STATUS_OK);
+    SMOKE_CHECK(queue.count == 3);
+    SMOKE_CHECK(same_handle(queue.jobs[0].job, first) && queue.jobs[0].has_after == 0);
+    SMOKE_CHECK(same_handle(queue.jobs[1].job, second) && same_handle(queue.jobs[1].after, first));
+    SMOKE_CHECK(same_handle(queue.jobs[2].job, third) && same_handle(queue.jobs[2].after, second));
+    SMOKE_CHECK(queue.jobs[2].kind == ORCA_JOB_KIND_SCAN && queue.jobs[2].has_after == 1);
+    SMOKE_CHECK(orca_library_query_job_queue(runtime, library, &queue, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    struct job_details_capture details;
+    memset(&details, 0, sizeof details);
+    SMOKE_CHECK(orca_job_details_get(runtime, second, &details, capture_job_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(details.count == 1 && details.details.has_started_at == 0);
+    SMOKE_CHECK(details.details.has_estimated_remaining_ms == 0);
+    SMOKE_CHECK(orca_job_pause(runtime, second) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_job_cancel(runtime, third) == ORCA_STATUS_OK);
+
+    SMOKE_CHECK(orca_job_pause(runtime, first) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_job_snapshot_get(runtime, first, &snapshot) == ORCA_STATUS_OK);
+    SMOKE_CHECK(snapshot.state == ORCA_JOB_PAUSED);
+    SMOKE_CHECK(orca_job_details_get(runtime, first, &details, capture_job_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(details.details.paused == 1 && details.details.has_started_at == 1);
+    SMOKE_CHECK(details.details.started_at > 0);
+    SMOKE_CHECK(orca_job_resume(runtime, first) == ORCA_STATUS_OK);
+
+    uint8_t paused = 255;
+    SMOKE_CHECK(orca_library_pause_jobs(runtime, library) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_jobs_paused(runtime, library, &paused) == ORCA_STATUS_OK && paused == 1);
+    SMOKE_CHECK(orca_library_resume_jobs(runtime, library) == ORCA_STATUS_OK);
+    SMOKE_CHECK(orca_library_jobs_paused(runtime, library, &paused) == ORCA_STATUS_OK && paused == 0);
+    SMOKE_CHECK(orca_library_jobs_paused(runtime, library, 0) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    uint8_t state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, first, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, second, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+    state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, third, &state, 0, 60000) == 1 && state == ORCA_JOB_CANCELLED);
+
+    struct job_history_capture history;
+    if (read_job_history(runtime, library, ORCA_JOB_HISTORY_PROBLEMS, &history) != 0) return 1;
+    SMOKE_CHECK(history.entry.kind == ORCA_JOB_KIND_SCAN && history.entry.state == ORCA_JOB_CANCELLED);
+    SMOKE_CHECK(history.entry.retryable == 1 && strcmp(history.error_text, "cancelled") == 0);
+    orca_handle retried;
+    SMOKE_CHECK(orca_library_retry_job(runtime, library, history.entry.id, &retried) == ORCA_STATUS_OK);
+    state = ORCA_JOB_RUNNING;
+    SMOKE_CHECK(await_job(runtime, retried, &state, 0, 60000) == 1 && state == ORCA_JOB_SUCCEEDED);
+
+    if (read_job_history(runtime, library, ORCA_JOB_HISTORY_SCANS, &history) != 0) return 1;
+    SMOKE_CHECK(history.entry.state == ORCA_JOB_SUCCEEDED && history.entry.retryable == 0);
+    SMOKE_CHECK(history.entry.finished_at >= history.entry.started_at && history.summary_length > 0);
+    SMOKE_CHECK(history.error_text[0] == 0 && history.entry.has_undo_group_id == 0);
+    SMOKE_CHECK(orca_library_retry_job(runtime, library, history.entry.id, &retried) == ORCA_STATUS_INVALID_STATE);
+    SMOKE_CHECK(orca_library_retry_job(runtime, library, -1, &retried) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_query_job_history(runtime, library, 5, 1, 0, &history, capture_job_history) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_job_history(runtime, library, ORCA_JOB_HISTORY_ALL, 0, 0, &history,
+                                               capture_job_history) == ORCA_STATUS_INVALID_ARGUMENT);
+
+    memset(&queue, 0, sizeof queue);
+    SMOKE_CHECK(orca_library_query_job_queue(runtime, library, &queue, capture_queued_job) == ORCA_STATUS_OK);
+    SMOKE_CHECK(queue.count == 0);
+    SMOKE_CHECK(drain_events(runtime) == 0);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     uint64_t device_id = 0;
     if (test_device_id(argc, argv, &device_id) != 0) return 234;
@@ -3794,6 +3999,7 @@ int main(int argc, char **argv) {
     settled = await_job(runtime, projection_job, &projection_state, 0, 60000);
     if (settled != 1) return 32;
     if (projection_state != ORCA_JOB_SUCCEEDED) return 33;
+    if (roots_v2_smoke(runtime, library, root_id, fixtures) != 0) return 1;
 
     /* The scan above already probed every fixture, so a default backfill has
      * nothing to repair and must say so rather than reopening the library. A
@@ -4331,6 +4537,7 @@ int main(int argc, char **argv) {
     orca_player_status status;
     if (orca_player_status_get(runtime, player, &status) != ORCA_STATUS_OK) return 4;
     if (status.transport != ORCA_TRANSPORT_STOPPED) return 5;
+    if (player_status_v2_smoke(runtime, player, &status) != 0) return 1;
 
     /* Nor can it enqueue before it knows which Library ids belong to. */
     int64_t ids[1];
@@ -4583,6 +4790,7 @@ int main(int argc, char **argv) {
     if (acoustid_submission_smoke(runtime, library) != 0) return 1;
     if (scrobbling_smoke(runtime, library) != 0) return 1;
     if (maintenance_smoke(runtime, library, root_id) != 0) return 1;
+    if (job_queue_smoke(runtime, library, root_id) != 0) return 1;
     if (artist_smoke(runtime, library) != 0) return 1;
 
     if (orca_player_clear_queue(runtime, player) != ORCA_STATUS_OK) return 85;

@@ -41,6 +41,7 @@ pub const Failure = enum {
     /// The database still lists the file; the filesystem no longer has it. The
     /// Location is marked `missing` as a side effect of discovering this.
     track_file_missing,
+    track_folder_unavailable,
     /// Nothing in the CodecRegistry can read those bytes.
     codec_unavailable,
     queue_full,

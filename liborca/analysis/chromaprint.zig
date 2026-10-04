@@ -246,7 +246,7 @@ pub fn fingerprintDecoder(
 }
 
 fn isCancelled(cancellation: ?*const scanner.CancellationToken) bool {
-    return if (cancellation) |token| token.isCancelled() else false;
+    return if (cancellation) |token| token.checkpoint() else false;
 }
 
 fn downmix(interleaved: []const f32, channels: usize, mono: []f32) void {

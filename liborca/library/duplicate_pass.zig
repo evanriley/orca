@@ -209,7 +209,7 @@ pub const DuplicateScan = struct {
 
     fn isCancelled(self: *const DuplicateScan) bool {
         const token = self.cancellation orelse return false;
-        return token.isCancelled();
+        return token.checkpoint();
     }
 
     /// Decides what, if anything, one file duplicates. Touches no filesystem

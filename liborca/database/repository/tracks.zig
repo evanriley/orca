@@ -49,6 +49,7 @@ pub const ResolvedLocation = struct {
     volume_stable_key: []u8,
     uri: []u8,
     audio_format: u8,
+    root_id: ?i64,
 
     pub fn deinit(self: ResolvedLocation) void {
         self.allocator.free(self.volume_stable_key);
@@ -645,7 +646,8 @@ pub const TrackRepository = struct {
         track_id: i64,
     ) !?ResolvedLocation {
         var statement = try self.db.prepare(
-            \\SELECT locations.file_id, volumes.stable_key, locations.uri, files.audio_format
+            \\SELECT locations.file_id, volumes.stable_key, locations.uri, files.audio_format,
+            \\       locations.root_id
             \\FROM tracks
             \\JOIN files ON files.id = COALESCE(
             \\    tracks.preferred_file_id,
@@ -672,6 +674,7 @@ pub const TrackRepository = struct {
             .uri = uri,
             .audio_format = std.math.cast(u8, statement.columnInt64(3)) orelse
                 return error.InvalidStoredAudioFormat,
+            .root_id = if (statement.columnIsNull(4)) null else statement.columnInt64(4),
         };
     }
 

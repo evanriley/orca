@@ -772,7 +772,7 @@ pub const LibraryMatching = struct {
     }
 
     fn isCancelled(self: *const LibraryMatching) bool {
-        if (self.cancellation) |token| if (token.isCancelled()) return true;
+        if (self.cancellation) |token| if (token.checkpoint()) return true;
         if (self.musicbrainz.gateway.cancel) |flag| if (flag.load(.acquire)) return true;
         return false;
     }

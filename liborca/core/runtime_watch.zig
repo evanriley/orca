@@ -460,7 +460,9 @@ fn cancelAutoReconcile(self: *OrcaRuntime, job_handle: JobHandle) void {
     }
 }
 
-fn conflictingJobRunning(self: *const OrcaRuntime, library: LibraryHandle) bool {
+fn reconcileHeldBack(self: *const OrcaRuntime, library: LibraryHandle) bool {
+    const object_value = self.libraries.getConst(library) catch return true;
+    if (object_value.jobs_paused) return true;
     for (self.job_workers.items) |worker| {
         if (worker.retired or !worker.library.eql(library)) continue;
         switch (worker.kind()) {
@@ -473,7 +475,7 @@ fn conflictingJobRunning(self: *const OrcaRuntime, library: LibraryHandle) bool 
 
 fn startPendingReconcile(self: *OrcaRuntime, library_watch: *LibraryWatch) void {
     if (library_watch.active != null or library_watch.pending.items.len == 0) return;
-    if (conflictingJobRunning(self, library_watch.library)) return;
+    if (reconcileHeldBack(self, library_watch.library)) return;
     var next = library_watch.pending.orderedRemove(0);
     defer next.dirty.deinit(self.allocator);
     const pending = job_worker.PendingReconcile.create(self.allocator, .{
@@ -489,14 +491,15 @@ fn startPendingReconcile(self: *OrcaRuntime, library_watch: *LibraryWatch) void 
 
 /// Zero while a watcher's hints wait to be taken, or while a Library's
 /// waiting changes could start a reconcile now; null otherwise. A reconcile
-/// held back by a running job is covered by that job's own pump timeout.
+/// held back by a running job is covered by that job's own pump timeout, and
+/// one held back by `pauseAll` waits for `resumeAll`.
 pub fn watchPumpDueMs(self: *OrcaRuntime) ?u64 {
     for (self.libraries.slots.items) |*slot| {
         const object_value = if (slot.value) |*value| value else continue;
         const library_watch = object_value.watch orelse continue;
         if (library_watch.watcher.hintsQueued()) return 0;
         if (library_watch.active == null and library_watch.pending.items.len != 0 and
-            !conflictingJobRunning(self, library_watch.library)) return 0;
+            !reconcileHeldBack(self, library_watch.library)) return 0;
     }
     return null;
 }

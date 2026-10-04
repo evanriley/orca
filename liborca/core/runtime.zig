@@ -4,6 +4,7 @@ const analysis_service = @import("../analysis/service.zig");
 const artist_info = @import("artist_info.zig");
 const release_info = @import("release_info.zig");
 const artwork = @import("artwork.zig");
+const browse_loader = @import("browse_loader.zig");
 const audio = @import("../audio/root.zig");
 const codec = @import("../codec/root.zig");
 const control = @import("control.zig");
@@ -88,6 +89,7 @@ pub const LibraryObject = struct {
     database: ?*database.LibraryDatabase = null,
     /// Started on the first artwork request, and again after any drain.
     artwork: ?*ArtworkLoader = null,
+    browse: ?*BrowseLoader = null,
     /// Created on the first Player bind or scrobbling change and kept until
     /// the Library closes. Its worker restarts on the next listen after any
     /// drain.
@@ -100,10 +102,18 @@ pub const LibraryObject = struct {
     watch_options: ?runtime_watch.WatchOptions = null,
     /// Set while idle maintenance is enabled; survives drains.
     maintenance: ?runtime_maintenance.LibraryMaintenance = null,
+    /// Set by `pauseAll` until `resumeAll`: the Library's waiting Jobs,
+    /// watcher reconciles and maintenance units stay unstarted.
+    jobs_paused: bool = false,
 };
 
 pub const ArtworkLoader = struct {
     loader: artwork.Loader,
+    work_handle: WorkHandle,
+};
+
+pub const BrowseLoader = struct {
+    loader: browse_loader.Loader,
     work_handle: WorkHandle,
 };
 
@@ -116,9 +126,18 @@ pub const MaintenanceBlock = runtime_maintenance.MaintenanceBlock;
 pub const MaintenanceUnit = runtime_maintenance.MaintenanceUnit;
 pub const MaintenanceStatus = runtime_maintenance.MaintenanceStatus;
 pub const JobOrigin = job_worker.Origin;
+pub const QueuedJob = runtime_jobs.QueuedJob;
+pub const JobHistoryEntry = runtime_jobs.JobHistoryEntry;
+pub const JobHistoryFilter = runtime_jobs.JobHistoryFilter;
+pub const max_waiting_jobs = runtime_jobs.max_waiting_jobs;
 
 pub const ArtworkSubject = artwork.Subject;
 pub const ArtworkResult = artwork.Result;
+pub const BrowseKind = browse_loader.Kind;
+pub const BrowseTrackListing = browse_loader.TrackListing;
+pub const BrowseRequest = browse_loader.Request;
+pub const BrowsePayload = browse_loader.Payload;
+pub const BrowseResult = browse_loader.Result;
 pub const PlayerObject = struct {
     player: *audio.player.Player,
     /// Player-scope volume. Lives beside the Player rather than inside the
@@ -391,6 +410,32 @@ pub const PlayerStatus = struct {
     queue_length: u32,
     queue_index: u32,
     volume: f32,
+    /// The last entry that could not be opened, kept until an entry opened
+    /// after it is audible.
+    last_failure: ?PlaybackFailure = null,
+};
+
+pub const PlaybackFailure = struct {
+    track_id: i64,
+    reason: Reason,
+
+    pub const Reason = enum(u8) {
+        file_missing,
+        folder_unavailable,
+        codec_unavailable,
+        decode_error,
+        unsupported_channels,
+
+        pub fn of(err: anyerror) Reason {
+            return switch (err) {
+                error.TrackFileMissing, error.TrackHasNoPlayableFile => .file_missing,
+                error.TrackFolderUnavailable => .folder_unavailable,
+                error.CodecUnavailable, error.UnsupportedAudioFormat => .codec_unavailable,
+                error.UnsupportedChannelCount => .unsupported_channels,
+                else => .decode_error,
+            };
+        }
+    };
 };
 
 /// Open one file and read the cover image out of it.
@@ -428,9 +473,9 @@ pub const OrcaRuntime = struct {
     job_workers: std.ArrayList(*JobWorker) = .empty,
     /// Tag-write plans awaiting approval. Control lane only.
     pending_tag_writes: [max_pending_tag_writes]?*PendingTagWrite = @splat(null),
-    /// A host's provider job waiting for a maintenance unit to stop.
+    /// Host Jobs waiting for their Library's slot, in arrival order.
     /// Control lane only.
-    pending_host_job: ?runtime_jobs.PendingHostJob = null,
+    waiting_jobs: runtime_jobs.WaitingJobs = .{},
     /// Null until the host calls `setClientIdentity`.
     client_identity: ?network.client.OwnedIdentity = null,
     credential_store: ?CredentialStore = null,
@@ -461,6 +506,7 @@ pub const OrcaRuntime = struct {
     /// taking and releasing a tag write's journal lock only.
     control_threaded: std.Io.Threaded = .init_single_threaded,
     last_listen_sample_ms: ?i64 = null,
+    next_browse_request: u64 = 1,
     /// Fixes every random smart playlist order until
     /// `libraryReshufflePlaylists`; drawn on first use.
     playlist_shuffle_seed: ?u64 = null,
@@ -529,11 +575,12 @@ pub const OrcaRuntime = struct {
         self.work_registry.drain();
         runtime_jobs.finalizeDrainedJobWorkers(self);
         self.releaseDrainedArtworkLoaders();
+        self.releaseDrainedBrowseLoaders();
         runtime_listens.releaseDrainedListenWorkers(self);
         runtime_watch.releaseDrainedWatchers(self);
         runtime_jobs.freeAllJobWorkers(self);
         runtime_jobs.discardPendingTagWrites(self, null);
-        runtime_jobs.dropQueuedHostJob(self, null);
+        runtime_jobs.dropWaitingJobs(self, null);
         self.jobs.cancelAndDrain();
         for (self.zones.slots.items) |*slot| {
             if (slot.value) |zone| zone.zone.destroy();
@@ -589,7 +636,7 @@ pub const OrcaRuntime = struct {
         // before the database is closed.
         self.unbindLibraryFromPlayers(library);
         runtime_jobs.discardPendingTagWrites(self, library);
-        runtime_jobs.dropQueuedHostJob(self, library);
+        runtime_jobs.dropWaitingJobs(self, library);
         var removed = try self.libraries.remove(library);
         self.closeLibraryDatabase(&removed);
         runtime_listens.freeListens(self, &removed);
@@ -956,6 +1003,69 @@ pub const OrcaRuntime = struct {
             loader.loader.deinit();
             self.allocator.destroy(loader);
             object_value.artwork = null;
+        }
+    }
+
+    pub fn libraryRequestBrowse(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        request: BrowseRequest,
+    ) !u64 {
+        try requireRunning(self);
+        const object_value = try self.libraries.get(library);
+        const loader = object_value.browse orelse try self.startBrowseLoader(object_value);
+        const id = self.next_browse_request;
+        try loader.loader.request(io, id, request);
+        self.next_browse_request += 1;
+        return id;
+    }
+
+    pub fn libraryCancelBrowse(self: *OrcaRuntime, library: LibraryHandle, request: u64) void {
+        const object_value = self.libraries.get(library) catch return;
+        const loader = object_value.browse orelse return;
+        loader.loader.cancel(request);
+    }
+
+    pub fn libraryTakeBrowse(self: *OrcaRuntime, library: LibraryHandle) ?BrowseResult {
+        const object_value = self.libraries.get(library) catch return null;
+        const loader = object_value.browse orelse return null;
+        return loader.loader.take();
+    }
+
+    fn startBrowseLoader(self: *OrcaRuntime, object_value: *LibraryObject) !*BrowseLoader {
+        const library_database = object_value.database orelse return error.LibraryHasNoDatabase;
+        const loader = try self.allocator.create(BrowseLoader);
+        errdefer self.allocator.destroy(loader);
+        // Declared before the registration's errdefer so it runs after it:
+        // completing the registration calls the waker, which interrupts this
+        // reader, so the reader must still be open.
+        const reader = try library_database.openReader();
+        errdefer reader.close();
+        const work_handle = try self.work_registry.begin(work.unowned);
+        const registration = self.work_registry.registration(work_handle) catch unreachable;
+        errdefer {
+            registration.finish();
+            self.work_registry.complete(work_handle) catch {};
+        }
+        loader.* = .{
+            .loader = .init(self.allocator, library_database, reader, registration),
+            .work_handle = work_handle,
+        };
+        loader.loader.host_signal = &self.host_signal;
+        registration.waker = loader.loader.waker();
+        registration.thread = try std.Thread.spawn(.{}, browse_loader.Loader.run, .{&loader.loader});
+        object_value.browse = loader;
+        return loader;
+    }
+
+    fn releaseDrainedBrowseLoaders(self: *OrcaRuntime) void {
+        for (self.libraries.slots.items) |*slot| {
+            const object_value = if (slot.value) |*value| value else continue;
+            const loader = object_value.browse orelse continue;
+            loader.loader.deinit();
+            self.allocator.destroy(loader);
+            object_value.browse = null;
         }
     }
 
@@ -1553,6 +1663,11 @@ pub const OrcaRuntime = struct {
         return (try libraryDatabase(self, library)).health_issues.summary();
     }
 
+    /// How many Tracks have no present or unverified copy of their file.
+    pub fn libraryMissingFileCount(self: *OrcaRuntime, library: LibraryHandle) !u64 {
+        return (try libraryDatabase(self, library)).tracks.missingFileCount();
+    }
+
     /// Hides one issue of a file until the file's bytes change.
     pub fn libraryDismissHealthIssue(
         self: *OrcaRuntime,
@@ -2034,6 +2149,20 @@ pub const OrcaRuntime = struct {
         return runtime_roots.libraryRemoveRoot(self, library, root_id);
     }
 
+    /// Moves root `root_id` to `path`, a readable directory, bound to the
+    /// volume it is on now, keeping the root's id and every File, Track and
+    /// location under it, then starts a whole-root reconcile Job. Refused
+    /// while any job on the Library runs.
+    pub fn libraryRelocateRoot(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        io: std.Io,
+        root_id: i64,
+        path: []const u8,
+    ) !JobHandle {
+        return runtime_roots.libraryRelocateRoot(self, library, io, root_id, path);
+    }
+
     pub fn libraryRootPage(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -2209,9 +2338,8 @@ pub const OrcaRuntime = struct {
     }
 
     /// Starts a scan of one root, or of some directories under it, that marks
-    /// missing only what those walks no longer found. Refused with
-    /// `error.LibraryScanRunning` while a scan or reconcile of the Library
-    /// runs, as `startLibraryScan` is.
+    /// missing only what those walks no longer found. Waits, as a scan does,
+    /// while another host Job holds the Library's slot.
     pub fn startLibraryReconcile(
         self: *OrcaRuntime,
         library: LibraryHandle,
@@ -2422,6 +2550,62 @@ pub const OrcaRuntime = struct {
     /// polling progress never sees a stale count.
     pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapshot {
         return runtime_jobs.jobSnapshotSynced(self, job_handle);
+    }
+
+    /// Holds a running Job at its next cancellation poll, keeping its thread
+    /// and any provider lease, until `resumeJob`. `error.JobNotPausable` for
+    /// a Job that is not running, or one of a kind that never polls: a tag
+    /// write, a projection, and the one-item fetches.
+    pub fn pauseJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+        return runtime_jobs.pauseJob(self, job_handle);
+    }
+
+    pub fn resumeJob(self: *OrcaRuntime, job_handle: JobHandle) !void {
+        return runtime_jobs.resumeJob(self, job_handle);
+    }
+
+    /// Pauses every pausable Job of the Library, whoever started it, and
+    /// holds its waiting Jobs, watcher reconciles and maintenance until
+    /// `resumeAll`.
+    pub fn pauseAll(self: *OrcaRuntime, library: LibraryHandle) !void {
+        return runtime_jobs.pauseAll(self, library);
+    }
+
+    pub fn resumeAll(self: *OrcaRuntime, library: LibraryHandle) !void {
+        return runtime_jobs.resumeAll(self, library);
+    }
+
+    /// Whether `pauseAll` holds the Library.
+    pub fn libraryJobsPaused(self: *OrcaRuntime, library: LibraryHandle) !bool {
+        return runtime_jobs.libraryJobsPaused(self, library);
+    }
+
+    /// The Job holding the Library's one slot, then the Jobs waiting for it
+    /// in the order they start. A host Job of the slot's kinds that arrives
+    /// while the slot is held waits; at most `max_waiting_jobs` wait across
+    /// the runtime, and one more returns `error.JobQueueFull`. Caller frees.
+    pub fn jobQueuePage(self: *OrcaRuntime, library: LibraryHandle, allocator: std.mem.Allocator) ![]QueuedJob {
+        return runtime_jobs.jobQueuePage(self, library, allocator);
+    }
+
+    /// The Library's finished host Jobs, newest first; the newest thousand
+    /// are kept. Caller frees.
+    pub fn jobHistoryPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        filter: JobHistoryFilter,
+        limit: u32,
+        offset: u32,
+    ) ![]JobHistoryEntry {
+        return runtime_jobs.jobHistoryPage(self, library, allocator, filter, limit, offset);
+    }
+
+    /// Starts again the request a finished Job recorded, as its start
+    /// function would. `error.JobNotRetryable` for one that succeeded or
+    /// whose request cannot be repeated, such as a tag write.
+    pub fn jobRetry(self: *OrcaRuntime, library: LibraryHandle, history_id: i64) !JobHandle {
+        return runtime_jobs.jobRetry(self, library, history_id);
     }
 
     /// Scanner counters for a job, live while it runs and retained for a
@@ -2778,14 +2962,15 @@ pub const OrcaRuntime = struct {
 
     /// One turn of the host's loop: executes the commands already submitted,
     /// at most the command queue's capacity so a host that keeps submitting
-    /// cannot trap its loop here, joins finished job workers, starts a host
-    /// job that waited for a maintenance unit, takes what watchers reported
-    /// and starts their reconciles, then starts a due maintenance unit.
+    /// cannot trap its loop here, joins finished job workers and publishes
+    /// their progress, starts the waiting host jobs whose turn has come,
+    /// takes what watchers reported and starts their reconciles, then starts
+    /// a due maintenance unit.
     pub fn pump(self: *OrcaRuntime) void {
         var executed: usize = 0;
         while (executed < control.CommandQueue.capacity and self.processNextCommand()) executed += 1;
         self.reapFinishedJobs();
-        runtime_jobs.startQueuedHostJob(self);
+        runtime_jobs.startWaitingJobs(self);
         runtime_watch.pumpWatchers(self);
         runtime_maintenance.pumpMaintenance(self);
     }
@@ -2830,7 +3015,7 @@ pub const OrcaRuntime = struct {
             .create_zone => .{ .zone_created = try self.createZone() },
             .start_job => |options| blk: {
                 const job_handle = try self.jobs.create(options.kind, options.total_units);
-                try self.jobs.start(job_handle);
+                try self.jobs.start(job_handle, runtime_listens.sampleTime(self).wall_s);
                 break :blk .{ .job_started = job_handle };
             },
             .cancel_job => |job_handle| blk: {
@@ -2858,6 +3043,7 @@ pub const OrcaRuntime = struct {
             error.PlayerHasNoSource, error.PlayerHasNoOutput => .not_playable,
             error.TrackHasNoPlayableFile => .track_has_no_file,
             error.TrackFileMissing => .track_file_missing,
+            error.TrackFolderUnavailable => .track_folder_unavailable,
             error.CodecUnavailable, error.UnsupportedAudioFormat => .codec_unavailable,
             error.PlaybackQueueFull => .queue_full,
             else => .internal,
@@ -2870,6 +3056,7 @@ pub const OrcaRuntime = struct {
         runtime_listens.wakeListenWorkers(self);
         self.work_registry.drain();
         self.releaseDrainedArtworkLoaders();
+        self.releaseDrainedBrowseLoaders();
         runtime_listens.releaseDrainedListenWorkers(self);
         runtime_watch.releaseDrainedWatchers(self);
     }

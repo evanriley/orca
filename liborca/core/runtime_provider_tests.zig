@@ -4647,7 +4647,7 @@ test "a host matching job started during a unit cancels it, is queued with defau
     const unit = try rig.awaitLookups(1);
 
     const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
-    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(job.State.waiting, (try rig.runtime().jobSnapshotSynced(host)).state);
     try std.testing.expectEqual(runtime_module.MatchStats{}, try rig.runtime().jobMatchStats(host));
     try std.testing.expectEqual(runtime_module.JobOrigin.host, try rig.runtime().jobOrigin(host));
     try std.testing.expectEqual(runtime_module.JobOrigin.maintenance, try rig.runtime().jobOrigin(unit));
@@ -4655,7 +4655,7 @@ test "a host matching job started during a unit cancels it, is queued with defau
     try std.testing.expectError(error.AcoustIdBusy, rig.runtime().startAcoustIdSubmission(library));
 
     rig.pumpFor(50);
-    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(job.State.waiting, (try rig.runtime().jobSnapshotSynced(host)).state);
     try std.testing.expectEqual(@as(usize, 1), rig.runtime().work_registry.count());
 
     while (rig.runtime().events.hasCapacity())
@@ -4666,12 +4666,12 @@ test "a host matching job started during a unit cancels it, is queued with defau
         if (!deadline.tick()) return error.UnitDidNotStop;
     }
     rig.pumpFor(20);
-    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(job.State.waiting, (try rig.runtime().jobSnapshotSynced(host)).state);
 
     var finished_buffer: [4]runtime_module.JobHandle = undefined;
     try std.testing.expectEqual(@as(usize, 0), finishedJobs(rig.runtime(), &finished_buffer).len);
     rig.runtime().pump();
-    try std.testing.expect((try rig.runtime().jobSnapshotSynced(host)).state != .queued);
+    try std.testing.expect((try rig.runtime().jobSnapshotSynced(host)).state != .waiting);
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(rig.runtime(), host));
     const finished = finishedJobs(rig.runtime(), &finished_buffer);
     try std.testing.expectEqual(@as(usize, 2), finished.len);
@@ -4746,7 +4746,7 @@ test "shutdown with a running unit and a queued host job leaves no worker" {
     rig.runtime().shutdown();
     try std.testing.expectEqual(@as(usize, 0), rig.runtime().work_registry.count());
     try std.testing.expectEqual(@as(usize, 0), rig.runtime().job_workers.items.len);
-    try std.testing.expect(rig.runtime().pending_host_job == null);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().waiting_jobs.len);
     try std.testing.expectError(error.StaleHandle, rig.runtime().jobs.snapshot(host));
     rig.runtime().pump();
     try std.testing.expect(rig.runtime().pollEvent() == null);
@@ -4771,7 +4771,7 @@ test "destroying the Library of a queued host job drops it and leaves another Li
     const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
 
     try rig.runtime().destroyLibrary(library);
-    try std.testing.expect(rig.runtime().pending_host_job == null);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime().waiting_jobs.len);
     try std.testing.expectEqual(job.State.cancelled, (try rig.runtime().jobSnapshotSynced(host)).state);
     try std.testing.expectEqual(@as(usize, 0), rig.runtime().work_registry.count());
     const waiting = try rig.status(other);
@@ -4819,17 +4819,110 @@ test "removing a root refuses while a host job waits behind a unit" {
     rig.runtime().pump();
     _ = try rig.awaitLookups(1);
     const host = try rig.runtime().startLibraryMatching(library, .{ .release_id = release, .mode = .verify });
-    try std.testing.expectEqual(job.State.queued, (try rig.runtime().jobSnapshotSynced(host)).state);
+    try std.testing.expectEqual(job.State.waiting, (try rig.runtime().jobSnapshotSynced(host)).state);
 
     try std.testing.expectError(error.LibraryJobRunning, rig.runtime().libraryRemoveRoot(library, root.root_id));
     rig.verify.acoustid.held.store(false, .release);
     var deadline: runtime_tests.TestDeadline = .init(10_000);
-    while ((try rig.runtime().jobSnapshotSynced(host)).state == .queued) {
+    while ((try rig.runtime().jobSnapshotSynced(host)).state == .waiting) {
         if (!deadline.tick()) return error.HostJobNeverStarted;
         rig.runtime().pump();
     }
     try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(rig.runtime(), host));
     _ = try rig.runtime().libraryRemoveRoot(library, root.root_id);
+}
+
+const PausedVerification = struct {
+    job: runtime_module.JobHandle,
+    registration: *work.Registration,
+};
+
+fn pausedVerification(rig: *VerifyRig) !PausedVerification {
+    _ = try rig.addTone("paused.wav", 300, "Northern Sky", northern_sky_mbid, null);
+    rig.acoustid.lookup_body = acoustIdAnswer(heardBy("0", heardResult("0.95", northern_sky_heard)));
+    rig.acoustid.held.store(true, .release);
+    const verification = try rig.runtime.startLibraryMatching(rig.library, .{ .mode = .verify });
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (rig.acoustid.lookups.load(.acquire) == 0) {
+        if (!deadline.tick()) return error.LookupNeverSent;
+    }
+    try rig.runtime.pauseJob(verification);
+    rig.acoustid.held.store(false, .release);
+    for (rig.runtime.job_workers.items) |worker| {
+        if (worker.job.eql(verification)) return .{ .job = verification, .registration = worker.registration };
+    }
+    return error.WorkerNotFound;
+}
+
+fn holdForPolls(polls: u64) void {
+    var hold: runtime_tests.TestDeadline = .init(polls * library_pass.CancellationToken.pause_poll_ms);
+    while (hold.tick()) {}
+}
+
+test "a paused Job holds its thread past its next cancellation poll until cancel wakes it within 100 ms" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-paused-job-cancel?mode=memory&cache=shared");
+    defer rig.deinit();
+    defer rig.acoustid.held.store(false, .release);
+    const paused = try pausedVerification(&rig);
+
+    holdForPolls(5);
+    try std.testing.expect(!paused.registration.isFinished());
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+    const snapshot = try rig.runtime.jobSnapshotSynced(paused.job);
+    try std.testing.expectEqual(job.State.paused, snapshot.state);
+    try std.testing.expect(snapshot.paused);
+    try std.testing.expect(snapshot.started_at != null);
+    try std.testing.expectEqual(@as(?u64, null), snapshot.estimated_remaining_ms);
+
+    const cancelled_at = std.Io.Clock.awake.now(std.testing.io);
+    try rig.runtime.cancelJob(paused.job);
+    var deadline: runtime_tests.TestDeadline = .init(10_000);
+    while (!paused.registration.isFinished()) {
+        if (!deadline.tick()) return error.PausedJobNeverWoke;
+    }
+    const woke_after = cancelled_at.durationTo(std.Io.Clock.awake.now(std.testing.io));
+    try std.testing.expect(woke_after.toMilliseconds() < 100);
+    try std.testing.expectEqual(job.State.cancelled, try runtime_tests.awaitJob(&rig.runtime, paused.job));
+}
+
+test "a resumed Job carries on from the poll it was paused at" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-paused-job-resume?mode=memory&cache=shared");
+    defer rig.deinit();
+    defer rig.acoustid.held.store(false, .release);
+    const paused = try pausedVerification(&rig);
+    holdForPolls(3);
+    try std.testing.expect(!paused.registration.isFinished());
+
+    try rig.runtime.resumeJob(paused.job);
+    try std.testing.expectEqual(job.State.running, (try rig.runtime.jobSnapshotSynced(paused.job)).state);
+    try std.testing.expectEqual(job.State.succeeded, try runtime_tests.awaitJob(&rig.runtime, paused.job));
+    try std.testing.expectEqual(@as(u64, 1), (try rig.runtime.jobMatchStats(paused.job)).verified);
+    try std.testing.expectEqual(@as(u32, 1), rig.acoustid.lookups.load(.acquire));
+}
+
+test "shutdown completes with a paused Job holding its thread and Jobs waiting behind it" {
+    var rig: VerifyRig = undefined;
+    try rig.init("file:orca-paused-job-shutdown?mode=memory&cache=shared");
+    defer rig.deinit();
+    defer rig.acoustid.held.store(false, .release);
+    const paused = try pausedVerification(&rig);
+    const behind = try rig.runtime.startLibraryProjection(rig.library);
+    try std.testing.expectEqual(job.State.waiting, (try rig.runtime.jobSnapshotSynced(behind)).state);
+    try rig.runtime.pauseAll(rig.library);
+    const held_back = try rig.runtime.startLibraryProjection(rig.library);
+    try std.testing.expect((try rig.runtime.jobSnapshotSynced(held_back)).paused);
+    holdForPolls(2);
+    try std.testing.expect(!paused.registration.isFinished());
+
+    rig.runtime.shutdown();
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime.work_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime.job_workers.items.len);
+    try std.testing.expectEqual(@as(usize, 0), rig.runtime.waiting_jobs.len);
+    for ([_]runtime_module.JobHandle{ paused.job, behind, held_back }) |job_handle| {
+        try std.testing.expectError(error.StaleHandle, rig.runtime.jobs.snapshot(job_handle));
+    }
 }
 
 test "disabling maintenance cancels the running unit and reports off" {

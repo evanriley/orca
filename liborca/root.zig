@@ -104,6 +104,11 @@ pub const RemovedRoot = runtime.RemovedRoot;
 pub const EmbeddedImage = internal.metadata.EmbeddedImage;
 pub const ArtworkSubject = runtime.ArtworkSubject;
 pub const ArtworkResult = runtime.ArtworkResult;
+pub const BrowseKind = runtime.BrowseKind;
+pub const BrowseTrackListing = runtime.BrowseTrackListing;
+pub const BrowseRequest = runtime.BrowseRequest;
+pub const BrowsePayload = runtime.BrowsePayload;
+pub const BrowseResult = runtime.BrowseResult;
 pub const FileAnalysis = runtime.FileAnalysis;
 pub const TrackEdit = runtime.TrackEdit;
 pub const TrackEditPage = runtime.TrackEditPage;
@@ -151,6 +156,7 @@ pub const PruneSummary = runtime.PruneSummary;
 
 // Playback.
 pub const PlayerStatus = runtime.PlayerStatus;
+pub const PlaybackFailure = runtime.PlaybackFailure;
 pub const PlayerSnapshot = audio.player.Snapshot;
 pub const TransportState = audio.player.TransportState;
 pub const RepeatMode = runtime.RepeatMode;
@@ -296,6 +302,10 @@ pub const ScanStats = runtime.ScanStats;
 pub const JobSnapshot = job.Snapshot;
 pub const JobKind = job.Kind;
 pub const JobState = job.State;
+pub const QueuedJob = runtime.QueuedJob;
+pub const JobHistoryEntry = runtime.JobHistoryEntry;
+pub const JobHistoryFilter = runtime.JobHistoryFilter;
+pub const max_waiting_jobs = runtime.max_waiting_jobs;
 
 // Filesystem watching: automatic reconciles of what changed under a root.
 pub const WatchOptions = runtime.WatchOptions;

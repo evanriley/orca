@@ -124,17 +124,18 @@ zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unkn
 
 # library
 zig build run -- scan DATABASE ROOT
-zig build run -- roots DATABASE
+zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N
 zig build run -- add-root DATABASE ROOT   # binds an existing root to the volume it is on now
 zig build run -- remove-root DATABASE ID   # forgets the root's files and tracks; nothing on disk
-zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or subfolders with recursive counts, then files with track ids
-zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle
+zig build run -- relocate-root DATABASE ID PATH   # moves a root that moved on disk, keeping its ids; binds the volume PATH is on now, then reconciles
+zig build run -- folders DATABASE [ROOT_ID [PATH]]   # roots with totals; or a `folder: release= tracks= images= last_scanned_at=` line, subfolders with recursive counts, files with track ids, then images; entries end kind= status=imported|unreadable, images role=
+zig build run -- watch DATABASE [--quiet=MS] [--max-delay=MS] [--once] [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]   # Linux; reconciles folders as they change; --maintenance also verifies recording IDs while idle; --pause-after/--resume-after pause and resume the Library's Jobs, printing `jobs: state=paused|running`
 zig build run -- reconcile DATABASE ROOT_ID [DIR...]   # rescans the root or only DIRs under it; marks missing only under them
 zig build run -- project DATABASE
 zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
-zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only
+zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
 zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at= (- when none)
 zig build run -- health-dismiss DATABASE FILE_ID KIND   # hidden until the file's bytes change
@@ -142,6 +143,9 @@ zig build run -- health-restore DATABASE FILE_ID KIND
 zig build run -- analyze DATABASE AUDIO
 zig build run -- analyze-library DATABASE [--batch=N] [--threads=N] [--cancel-after=MS]
 zig build run -- duplicates DATABASE [--batch=N] [--cancel-after=MS]
+zig build run -- jobs DATABASE [--start=scan|analysis|duplicates|backfill|project]... [--pause-after=MS] [--resume-after=MS]   # one runtime: each after the first prints `waiting after=`; prints every state change until all finish
+zig build run -- jobs DATABASE --history [--filter=all|scans|analysis|file_changes|problems] [--limit N] [--offset N]   # finished Jobs newest first: id, kind, state, started_at=, duration_s=, completed=, total=, retry=yes|no, summary=
+zig build run -- retry-job DATABASE HISTORY_ID   # starts a failed or cancelled Job's request again and waits for it
 
 # browse
 zig build run -- artists DATABASE [--album-artists] [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`, then `photo` when its photo is stored; --album-artists: only Artists a Release is filed under
@@ -190,6 +194,7 @@ zig build run -- play-tracks DATABASE (IDS | --playlist=ID) --device=ID [--start
     [--move=MS:FROM:TO]...   # at MS, moves the entry at playback position FROM to TO; prints `move at= ... result=ok|in_use|out_of_range`
     [--print-history] [--save-queue=NAME]   # at the end: queue history newest first; the queue from the current entry as a playlist
     # records listens in the play history; never sends them
+    # an entry that cannot be opened prints `failure=TRACK_ID:file_missing|folder_unavailable|codec_unavailable|decode_error|unsupported_channels` and play goes on to the next
 zig build run -- play-folder DATABASE ROOT_ID PATH --device=ID [--shuffle] [--limit=MS]   # every Track below PATH, recursively in path order
 zig build run -- peq-check FILE   # validates an EqualizerAPO file and prints it back normalised
 zig build run -- peq-response FILE [--rate=HZ]   # HZ<TAB>DB at 32 log-spaced frequencies, preamp included; --rate defaults to 44100

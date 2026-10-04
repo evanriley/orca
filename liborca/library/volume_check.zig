@@ -26,6 +26,17 @@ pub fn onRecordedVolume(
     return std.mem.eql(u8, resolution.key, expected);
 }
 
+pub fn rootAvailable(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    recorded_key: ?[]const u8,
+) bool {
+    const directory = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return false;
+    directory.close(io);
+    return onRecordedVolume(allocator, io, path, recorded_key);
+}
+
 test "a root with no recorded volume passes, and one recorded on another volume does not" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
@@ -48,4 +59,16 @@ test "a root is on the volume the platform names for its path" {
     } else {
         try std.testing.expect(onRecordedVolume(std.testing.allocator, std.testing.io, path, "root:7"));
     }
+}
+
+test "a root is unavailable once its directory is gone, whatever volume it records" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(rootAvailable(std.testing.allocator, std.testing.io, path, null));
+    const gone = try std.fmt.allocPrint(std.testing.allocator, "{s}/renamed-away", .{path});
+    defer std.testing.allocator.free(gone);
+    try std.testing.expect(!rootAvailable(std.testing.allocator, std.testing.io, gone, null));
+    try std.testing.expect(!rootAvailable(std.testing.allocator, std.testing.io, gone, "root:7"));
 }

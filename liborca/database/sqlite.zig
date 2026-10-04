@@ -80,6 +80,10 @@ pub const Database = struct {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
 
+    pub fn interrupt(self: Database) void {
+        c.sqlite3_interrupt(self.handle);
+    }
+
     /// Register a deterministic text function on this connection.
     ///
     /// This exists so a migration can call Zig from SQL. The artist key is
@@ -243,3 +247,26 @@ pub const Statement = struct {
 };
 
 pub const Step = enum { row, done };
+
+test "an interrupt from another thread ends a statement that would never finish" {
+    const db = try Database.open(":memory:");
+    defer db.close();
+    var statement = try db.prepare("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT count(*) FROM n;");
+    defer statement.deinit();
+    const Interrupter = struct {
+        fn run(target: Database, done: *const std.atomic.Value(bool)) void {
+            while (!done.load(.acquire)) {
+                target.interrupt();
+                const pause: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+                _ = std.c.nanosleep(&pause, null);
+            }
+        }
+    };
+    var done: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(.{}, Interrupter.run, .{ db, &done });
+    const outcome = statement.step();
+    done.store(true, .release);
+    thread.join();
+    try std.testing.expectError(error.SqlFailed, outcome);
+    try std.testing.expectEqual(c.SQLITE_INTERRUPT, c.sqlite3_errcode(db.handle));
+}

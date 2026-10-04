@@ -7,6 +7,7 @@ const object = @import("object.zig");
 const quick_hash = @import("../storage/quick_hash.zig");
 const sqlite = @import("../database/sqlite.zig");
 const storage = @import("../storage/root.zig");
+const library_pass = @import("../library/root.zig");
 
 pub const TrackRef = audio.playback_queue.TrackRef;
 
@@ -17,6 +18,7 @@ pub const OpenTrackError = error{
     TrackNotInBoundLibrary,
     TrackHasNoPlayableFile,
     TrackFileMissing,
+    TrackFolderUnavailable,
     CodecUnavailable,
 };
 
@@ -92,6 +94,19 @@ pub const TrackSourceOpener = struct {
         return self.openTrack(ref);
     }
 
+    fn rootAvailable(self: *TrackSourceOpener, root_id: ?i64) bool {
+        const roots: database.LibraryRootRepository = .{ .db = self.reader, .write_lane = self.tracks.write_lane };
+        const root = (roots.find(self.allocator, root_id orelse return true) catch return true) orelse return true;
+        defer root.deinit(self.allocator);
+        const volumes: database.VolumeRepository = .{ .db = self.reader, .write_lane = self.tracks.write_lane };
+        const recorded_key = if (root.volume_id == database.LibraryDatabase.null_volume)
+            null
+        else
+            (volumes.stableKey(self.allocator, root.volume_id) catch return true) orelse return true;
+        defer if (recorded_key) |key| self.allocator.free(key);
+        return library_pass.volume_check.rootAvailable(self.allocator, self.io, root.path, recorded_key);
+    }
+
     /// Opens a queue entry's audio, already carrying its own loudness
     /// corrections, track and album.
     ///
@@ -125,6 +140,7 @@ pub const TrackSourceOpener = struct {
             resolved.uri,
         ) catch |err| switch (err) {
             error.FileNotFound, error.BadPathName => {
+                if (!self.rootAvailable(resolved.root_id)) return error.TrackFolderUnavailable;
                 // The library still claims this file exists. Record what is
                 // actually true rather than failing the same way every time.
                 _ = self.locations.markMissingIfLaneFree(resolved.file_id) catch {};

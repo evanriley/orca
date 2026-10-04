@@ -42,17 +42,103 @@ pub const State = enum {
     cancelled,
     succeeded,
     failed,
+    paused,
+    waiting,
 };
+
+pub fn BoundedText(comptime capacity: usize) type {
+    return struct {
+        bytes: [capacity]u8 = @splat(0),
+        len: std.math.IntFittingRange(0, capacity) = 0,
+
+        const Self = @This();
+
+        pub fn init(text: []const u8) Self {
+            var result: Self = .{};
+            result.set(text);
+            return result;
+        }
+
+        pub fn set(self: *Self, text: []const u8) void {
+            const length = utf8Prefix(text, capacity);
+            @memcpy(self.bytes[0..length], text[0..length]);
+            self.len = @intCast(length);
+        }
+
+        pub fn slice(self: *const Self) []const u8 {
+            return self.bytes[0..self.len];
+        }
+    };
+}
+
+pub fn utf8Prefix(text: []const u8, capacity: usize) usize {
+    var length = @min(text.len, capacity);
+    while (length > 0 and length < text.len and (text[length] & 0xC0) == 0x80) length -= 1;
+    return length;
+}
 
 pub const Snapshot = struct {
     kind: Kind,
     state: State,
     completed_units: u64,
     total_units: ?u64,
+    /// Unix seconds; null until the Job leaves the waiting queue.
+    started_at: ?i64 = null,
+    paused: bool = false,
+    estimated_remaining_ms: ?u64 = null,
+    current_item: BoundedText(512) = .{},
+    detail: BoundedText(128) = .{},
+};
+
+const RateWindow = struct {
+    samples: [capacity]Sample = undefined,
+    len: usize = 0,
+
+    const capacity = 32;
+    const window_ms = 10_000;
+    const spacing_ms = 500;
+
+    const Sample = struct {
+        at_ms: i64,
+        completed_units: u64,
+    };
+
+    fn record(self: *RateWindow, at_ms: i64, completed_units: u64) void {
+        if (self.len > 0) {
+            const last = self.samples[self.len - 1];
+            if (completed_units < last.completed_units or at_ms < last.at_ms) {
+                self.len = 0;
+            } else if (at_ms - last.at_ms < spacing_ms) return;
+        }
+        while (self.len >= 2 and at_ms - self.samples[1].at_ms >= window_ms) self.dropOldest();
+        if (self.len == capacity) self.dropOldest();
+        self.samples[self.len] = .{ .at_ms = at_ms, .completed_units = completed_units };
+        self.len += 1;
+    }
+
+    fn dropOldest(self: *RateWindow) void {
+        std.mem.copyForwards(Sample, self.samples[0 .. self.len - 1], self.samples[1..self.len]);
+        self.len -= 1;
+    }
+
+    fn remainingMs(self: *const RateWindow, total_units: ?u64) ?u64 {
+        const total = total_units orelse return null;
+        if (self.len < 2) return null;
+        const first = self.samples[0];
+        const last = self.samples[self.len - 1];
+        const elapsed_ms: u64 = @intCast(last.at_ms - first.at_ms);
+        if (elapsed_ms < window_ms) return null;
+        if (last.completed_units >= total) return 0;
+        const done = last.completed_units - first.completed_units;
+        if (done == 0) return null;
+        const remaining: u128 = total - last.completed_units;
+        return @intCast(@min(remaining * elapsed_ms / done, std.math.maxInt(u64)));
+    }
 };
 
 const Job = struct {
     snapshot: Snapshot,
+    rate: RateWindow = .{},
 };
 
 pub const Manager = struct {
@@ -76,10 +162,71 @@ pub const Manager = struct {
         } });
     }
 
-    pub fn start(self: *Manager, job_handle: object.JobHandle) !void {
+    pub fn wait(self: *Manager, job_handle: object.JobHandle) !void {
         const job = try self.jobs.get(job_handle);
         if (job.snapshot.state != .queued) return error.InvalidJobTransition;
+        job.snapshot.state = .waiting;
+    }
+
+    pub fn replan(self: *Manager, job_handle: object.JobHandle, total_units: ?u64) !void {
+        const job = try self.jobs.get(job_handle);
+        if (job.snapshot.state != .waiting) return error.InvalidJobTransition;
+        job.snapshot.total_units = total_units;
+    }
+
+    pub fn start(self: *Manager, job_handle: object.JobHandle, started_at: i64) !void {
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .queued, .waiting => {},
+            else => return error.InvalidJobTransition,
+        }
         job.snapshot.state = .running;
+        job.snapshot.started_at = started_at;
+    }
+
+    pub fn pause(self: *Manager, job_handle: object.JobHandle) !void {
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .running => {
+                job.snapshot.state = .paused;
+                job.snapshot.paused = true;
+                job.snapshot.estimated_remaining_ms = null;
+                job.rate = .{};
+            },
+            .paused => {},
+            .cancelled, .succeeded, .failed => return error.JobAlreadyFinished,
+            .queued, .waiting, .cancelling => return error.InvalidJobTransition,
+        }
+    }
+
+    pub fn unpause(self: *Manager, job_handle: object.JobHandle) !void {
+        const job = try self.jobs.get(job_handle);
+        switch (job.snapshot.state) {
+            .paused => {
+                job.snapshot.state = .running;
+                job.snapshot.paused = false;
+                job.rate = .{};
+            },
+            .running => {},
+            .cancelled, .succeeded, .failed => return error.JobAlreadyFinished,
+            .queued, .waiting, .cancelling => return error.InvalidJobTransition,
+        }
+    }
+
+    pub fn sampleProgress(self: *Manager, job_handle: object.JobHandle, monotonic_ms: i64) !void {
+        const job = try self.jobs.get(job_handle);
+        if (job.snapshot.state != .running) {
+            job.snapshot.estimated_remaining_ms = null;
+            return;
+        }
+        job.rate.record(monotonic_ms, job.snapshot.completed_units);
+        job.snapshot.estimated_remaining_ms = job.rate.remainingMs(job.snapshot.total_units);
+    }
+
+    pub fn setPausedWhileWaiting(self: *Manager, job_handle: object.JobHandle, paused: bool) !void {
+        const job = try self.jobs.get(job_handle);
+        if (job.snapshot.state != .waiting) return error.InvalidJobTransition;
+        job.snapshot.paused = paused;
     }
 
     pub fn update(self: *Manager, job_handle: object.JobHandle, completed_units: u64) !void {
@@ -101,7 +248,7 @@ pub const Manager = struct {
     ) !void {
         const job = try self.jobs.get(job_handle);
         switch (job.snapshot.state) {
-            .running, .cancelling => job.snapshot.completed_units = completed_units,
+            .running, .cancelling, .paused => job.snapshot.completed_units = completed_units,
             else => return error.InvalidJobTransition,
         }
     }
@@ -120,7 +267,11 @@ pub const Manager = struct {
         }
         const job = try self.jobs.get(job_handle);
         switch (job.snapshot.state) {
-            .queued, .running, .cancelling => job.snapshot.state = state,
+            .queued, .waiting, .running, .paused, .cancelling => {
+                job.snapshot.state = state;
+                job.snapshot.paused = false;
+                job.snapshot.estimated_remaining_ms = null;
+            },
             else => return error.JobAlreadyFinished,
         }
     }
@@ -128,7 +279,11 @@ pub const Manager = struct {
     pub fn requestCancellation(self: *Manager, job_handle: object.JobHandle) !void {
         const job = try self.jobs.get(job_handle);
         switch (job.snapshot.state) {
-            .queued, .running => job.snapshot.state = .cancelling,
+            .queued, .waiting, .running, .paused => {
+                job.snapshot.state = .cancelling;
+                job.snapshot.paused = false;
+                job.snapshot.estimated_remaining_ms = null;
+            },
             .cancelling, .cancelled => {},
             .succeeded, .failed => return error.JobAlreadyFinished,
         }
@@ -141,7 +296,7 @@ pub const Manager = struct {
     pub fn cancelAndDrain(self: *Manager) void {
         for (self.jobs.slots.items) |*slot| {
             if (slot.value) |*job| switch (job.snapshot.state) {
-                .queued, .running, .cancelling => job.snapshot.state = .cancelled,
+                .queued, .waiting, .running, .paused, .cancelling => job.snapshot.state = .cancelled,
                 else => {},
             };
         }
@@ -154,7 +309,7 @@ test "jobs expose progress and cooperative cancellation" {
     defer manager.deinit();
 
     const job_handle = try manager.create(.analysis, 100);
-    try manager.start(job_handle);
+    try manager.start(job_handle, 0);
     try manager.update(job_handle, 25);
     try manager.requestCancellation(job_handle);
 
@@ -163,4 +318,59 @@ test "jobs expose progress and cooperative cancellation" {
     try std.testing.expectEqual(@as(u64, 25), current.completed_units);
     manager.cancelAndDrain();
     try std.testing.expectError(error.StaleHandle, manager.snapshot(job_handle));
+}
+
+test "the estimate stays null until ten seconds of progress and then follows the rolling rate" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const job_handle = try manager.create(.analysis, 1000);
+    try manager.start(job_handle, 0);
+    var now_ms: i64 = 0;
+    var completed: u64 = 0;
+    while (now_ms < 10_000) : (now_ms += 100) {
+        try manager.observeProgress(job_handle, completed);
+        try manager.sampleProgress(job_handle, now_ms);
+        try std.testing.expectEqual(@as(?u64, null), (try manager.snapshot(job_handle)).estimated_remaining_ms);
+        completed += 1;
+    }
+    try manager.observeProgress(job_handle, completed);
+    try manager.sampleProgress(job_handle, now_ms);
+    try std.testing.expectEqual(@as(?u64, 90_000), (try manager.snapshot(job_handle)).estimated_remaining_ms);
+
+    try manager.pause(job_handle);
+    const paused = try manager.snapshot(job_handle);
+    try std.testing.expectEqual(State.paused, paused.state);
+    try std.testing.expect(paused.paused);
+    try std.testing.expectEqual(@as(?u64, null), paused.estimated_remaining_ms);
+    try manager.unpause(job_handle);
+    try manager.sampleProgress(job_handle, now_ms + 5_000);
+    try std.testing.expectEqual(@as(?u64, null), (try manager.snapshot(job_handle)).estimated_remaining_ms);
+}
+
+test "waiting jobs start, cancel and finish but never pause" {
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    const job_handle = try manager.create(.scan, null);
+    try manager.wait(job_handle);
+    try std.testing.expectError(error.InvalidJobTransition, manager.pause(job_handle));
+    try manager.replan(job_handle, 12);
+    try manager.start(job_handle, 1_700_000_000);
+    const started = try manager.snapshot(job_handle);
+    try std.testing.expectEqual(State.running, started.state);
+    try std.testing.expectEqual(@as(?u64, 12), started.total_units);
+    try std.testing.expectEqual(@as(?i64, 1_700_000_000), started.started_at);
+
+    const waiting = try manager.create(.scan, null);
+    try manager.wait(waiting);
+    try manager.requestCancellation(waiting);
+    try manager.finish(waiting, .cancelled);
+    try std.testing.expectEqual(State.cancelled, (try manager.snapshot(waiting)).state);
+}
+
+test "bounded text keeps whole UTF-8 sequences" {
+    const Text = BoundedText(4);
+    try std.testing.expectEqualStrings("ab\u{e9}", Text.init("ab\u{e9}t").slice());
+    try std.testing.expectEqualStrings("abc", Text.init("abc\u{e9}").slice());
 }

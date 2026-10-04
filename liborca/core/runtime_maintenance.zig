@@ -132,6 +132,7 @@ pub fn pumpMaintenance(self: *OrcaRuntime) void {
     for (self.libraries.slots.items, 0..) |*slot, index| {
         const object_value = if (slot.value) |*value| value else continue;
         const record = if (object_value.maintenance) |*value| value else continue;
+        if (object_value.jobs_paused) continue;
         const now_ms = now orelse sampled: {
             now = runtime_listens.sampleTime(self).mono_ms;
             break :sampled now.?;
@@ -237,6 +238,7 @@ pub fn maintenancePumpDueMs(self: *OrcaRuntime) ?u64 {
     for (self.libraries.slots.items) |*slot| {
         const object_value = if (slot.value) |*value| value else continue;
         const record = if (object_value.maintenance) |*value| value else continue;
+        if (object_value.jobs_paused) continue;
         const now_ms = now orelse sampled: {
             now = runtime_listens.sampleTime(self).mono_ms;
             break :sampled now.?;

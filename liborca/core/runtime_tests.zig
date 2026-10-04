@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const analysis_service = @import("../analysis/service.zig");
 const artwork = @import("artwork.zig");
+const browse_loader = @import("browse_loader.zig");
 const audio = @import("../audio/root.zig");
 const control = @import("control.zig");
 const database = @import("../database/root.zig");
@@ -17,6 +18,7 @@ const runtime_zones = @import("runtime_zones.zig");
 const runtime_queue = @import("runtime_queue.zig");
 
 const ArtworkResult = runtime_module.ArtworkResult;
+const BrowseResult = runtime_module.BrowseResult;
 const JobHandle = runtime_module.JobHandle;
 const LibraryHandle = runtime_module.LibraryHandle;
 const OrcaRuntime = runtime_module.OrcaRuntime;
@@ -1590,6 +1592,180 @@ test "playing a stopped queue whose cursor file has gone steps over it to the ne
     try std.testing.expectEqual(fixtures.ids[1], (try runtime.playerNowPlaying(player)).?.track_id);
 }
 
+test "a Player reports the Track whose file has gone, until another entry opens" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try copyFixtureInto(temporary.dir, "fixtures/audio/generated-reference.flac", "a.flac");
+    try copyFixtureInto(temporary.dir, "fixtures/audio/tagged-reference.flac", "b.flac");
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const library = try scannedTempFolder(&runtime, &temporary, "file:orca-failure-file-missing?mode=memory&cache=shared");
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    const library_database = try libraryDatabase(&runtime, library);
+    const first = (try library_database.tracks.playableLocation(std.testing.allocator, ids[0])).?;
+    const first_is_a = std.mem.endsWith(u8, first.uri, "/a.flac");
+    first.deinit();
+    const order: [2]i64 = if (first_is_a) .{ ids[0], ids[1] } else .{ ids[1], ids[0] };
+    try temporary.dir.deleteFile(std.testing.io, "a.flac");
+
+    const player = try runtime.createPlayer();
+    try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
+    try std.testing.expectError(
+        error.TrackFileMissing,
+        runtime.playerPlayTracks(player, library, std.testing.io, &order, 0),
+    );
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(order[0], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.file_missing, failure.reason);
+    try std.testing.expectEqual(@as(u64, 1), try runtime.libraryMissingFileCount(library));
+    var roots = try runtime.libraryRootPage(library, 8, 0);
+    defer roots.deinit();
+    try std.testing.expect(roots.items[0].available);
+    try std.testing.expectEqual(@as(u64, 2), roots.items[0].track_count);
+    try std.testing.expectEqual(@as(u64, 1), roots.items[0].unavailable_tracks);
+
+    try runtime.playerPlayTracks(player, library, std.testing.io, &order, 1);
+    try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
+}
+
+test "a Track under a root that has moved is reported as folder unavailable until the root is relocated" {
+    var backend: audio.output.TestBackend = .{ .allocator = std.testing.allocator };
+    defer backend.deinit();
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.createDirPath(std.testing.io, "music");
+    {
+        const music = try temporary.dir.openDir(std.testing.io, "music", .{});
+        defer music.close(std.testing.io);
+        try copyFixtureInto(music, "fixtures/audio/generated-reference.flac", "a.flac");
+    }
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
+    defer std.testing.allocator.free(moved);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    runtime.setOutputFactory(backend.factory());
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-failure-folder?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+
+    try std.Io.Dir.rename(temporary.dir, "music", temporary.dir, "moved", std.testing.io);
+    const player = try runtime.createPlayer();
+    try std.testing.expectError(
+        error.TrackFolderUnavailable,
+        runtime.playerPlayTracks(player, library, std.testing.io, ids, 0),
+    );
+    const failure = (try runtime.playerStatus(player)).last_failure.?;
+    try std.testing.expectEqual(ids[0], failure.track_id);
+    try std.testing.expectEqual(runtime_module.PlaybackFailure.Reason.folder_unavailable, failure.reason);
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryMissingFileCount(library));
+    {
+        var roots = try runtime.libraryRootPage(library, 8, 0);
+        defer roots.deinit();
+        try std.testing.expect(!roots.items[0].available);
+        try std.testing.expectEqual(@as(u64, 1), roots.items[0].track_count);
+        try std.testing.expectEqual(@as(u64, 1), roots.items[0].unavailable_tracks);
+    }
+
+    try std.testing.expectError(
+        error.InvalidLibraryRoot,
+        runtime.libraryRelocateRoot(library, std.testing.io, binding.root_id, root),
+    );
+    try std.testing.expectError(
+        error.UnknownRoot,
+        runtime.libraryRelocateRoot(library, std.testing.io, binding.root_id + 1, moved),
+    );
+    const relocation = try runtime.libraryRelocateRoot(library, std.testing.io, binding.root_id, moved);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, relocation));
+    {
+        var roots = try runtime.libraryRootPage(library, 8, 0);
+        defer roots.deinit();
+        try std.testing.expectEqual(@as(usize, 1), roots.items.len);
+        try std.testing.expectEqual(binding.root_id, roots.items[0].id);
+        try std.testing.expectEqualStrings(moved, roots.items[0].path);
+        try std.testing.expect(roots.items[0].available);
+        try std.testing.expectEqual(@as(u64, 0), roots.items[0].unavailable_tracks);
+    }
+    const relocated_ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(relocated_ids);
+    try std.testing.expectEqualSlices(i64, ids, relocated_ids);
+
+    try runtime.playerPlayTracks(player, library, std.testing.io, ids, 0);
+    try std.testing.expect((try runtime.playerStatus(player)).last_failure == null);
+}
+
+test "a tag write undone after its root was relocated restores the original bytes at the new path" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    const fixtures = [_]struct { source: []const u8, name: []const u8 }{
+        .{ .source = "fixtures/audio/covered-reference.mp3", .name = "a.mp3" },
+        .{ .source = "fixtures/audio/tagged-reference.flac", .name = "b.flac" },
+    };
+    try temporary.dir.createDirPath(std.testing.io, "music");
+    {
+        const music = try temporary.dir.openDir(std.testing.io, "music", .{});
+        defer music.close(std.testing.io);
+        for (fixtures) |fixture| try copyFixtureInto(music, fixture.source, fixture.name);
+    }
+    const root = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/music", .{temporary.sub_path});
+    defer std.testing.allocator.free(root);
+    const moved = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/moved", .{temporary.sub_path});
+    defer std.testing.allocator.free(moved);
+
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, database_path);
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, root);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album, .value = "Written Album" }});
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    edited.deinit();
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+
+    try std.Io.Dir.rename(temporary.dir, "music", temporary.dir, "moved", std.testing.io);
+    const library_database = try libraryDatabase(&runtime, library);
+    {
+        var foreign = (try metadata.JournalLock.tryAcquire(std.testing.io, library_database.journal_lock_path.?)).?;
+        defer foreign.release(std.testing.io);
+        try std.testing.expectError(
+            error.MutationInProgress,
+            runtime.libraryRelocateRoot(library, std.testing.io, binding.root_id, moved),
+        );
+    }
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.libraryRelocateRoot(library, std.testing.io, binding.root_id, moved)));
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+
+    const restored_dir = try temporary.dir.openDir(std.testing.io, "moved", .{});
+    defer restored_dir.close(std.testing.io);
+    for (fixtures) |fixture| {
+        const original = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture.source, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(original);
+        const restored = try restored_dir.readFileAlloc(std.testing.io, fixture.name, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(restored);
+        try std.testing.expectEqualSlices(u8, original, restored);
+    }
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, library_database.backup_directory.?, .{}));
+}
+
 test "a track with no file behind it fails typed through the command lane" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -2307,6 +2483,20 @@ pub fn awaitJob(runtime: *OrcaRuntime, job_handle: JobHandle) !job.State {
     var deadline: TestDeadline = .init(10_000);
     while (deadline.tick()) {
         runtime.reapFinishedJobs();
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        switch (snapshot.state) {
+            .succeeded, .failed, .cancelled => return snapshot.state,
+            else => {},
+        }
+    }
+    return error.JobDidNotFinish;
+}
+
+/// Pumps, so a Job waiting for its Library's slot starts once it is free.
+pub fn awaitJobPumping(runtime: *OrcaRuntime, job_handle: JobHandle) !job.State {
+    var deadline: TestDeadline = .init(10_000);
+    while (deadline.tick()) {
+        runtime.pump();
         const snapshot = try runtime.jobSnapshotSynced(job_handle);
         switch (snapshot.state) {
             .succeeded, .failed, .cancelled => return snapshot.state,
@@ -3139,6 +3329,210 @@ test "closing a library frees covers nobody took" {
     try runtime.destroyLibrary(library);
 }
 
+fn awaitBrowse(runtime: *OrcaRuntime, library: LibraryHandle, request: u64) !BrowseResult {
+    var deadline: TestDeadline = .init(10_000);
+    while (deadline.tick()) {
+        const result = runtime.libraryTakeBrowse(library) orelse continue;
+        errdefer result.deinit();
+        try std.testing.expectEqual(request, result.request);
+        return result;
+    }
+    return error.BrowseNeverFinished;
+}
+
+fn expectSameTracks(expected: []const database.TrackSummary, actual: []const database.TrackSummary) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |wanted, found| {
+        try std.testing.expectEqual(wanted.id, found.id);
+        try std.testing.expectEqualStrings(wanted.title, found.title);
+    }
+}
+
+fn expectSameReleases(expected: []const database.ReleaseSummary, actual: []const database.ReleaseSummary) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |wanted, found| {
+        try std.testing.expectEqual(wanted.id, found.id);
+        try std.testing.expectEqualStrings(wanted.title, found.title);
+    }
+}
+
+fn firstTitleWord(items: anytype) ![]const u8 {
+    for (items) |item| {
+        var words = std.mem.tokenizeAny(u8, item.title, " -()[]");
+        if (words.next()) |word| return word;
+    }
+    return error.NoTitledItem;
+}
+
+test "browse requests answer exactly as the synchronous page, totals and count queries do" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-browse-round-trip?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+
+    var every_track = try runtime.libraryTrackQuery(library, "", .{});
+    defer every_track.deinit();
+    const word = try firstTitleWord(every_track.items);
+    const track_queries = [_]struct { text: []const u8, query: database.TrackQuery }{
+        .{ .text = "", .query = .{ .sort = .title, .direction = .descending, .lossless = true, .limit = 7, .offset = 1 } },
+        .{ .text = "", .query = .{ .sort = .path, .codec = "FLAC", .min_sample_rate = 44_100 } },
+        .{ .text = word, .query = .{ .limit = 50 } },
+    };
+    for (track_queries) |listing| {
+        var expected = try runtime.libraryTrackQuery(library, listing.text, listing.query);
+        defer expected.deinit();
+        try std.testing.expect(expected.items.len > 0);
+        const page_request = try runtime.libraryRequestBrowse(library, std.testing.io, .{ .track_page = .{ .text = listing.text, .query = listing.query } });
+        const page = try awaitBrowse(&runtime, library, page_request);
+        defer page.deinit();
+        try std.testing.expectEqual(runtime_module.BrowseKind.track_page, page.kind);
+        try expectSameTracks(expected.items, (try page.payload).track_page.items);
+
+        const expected_totals = try runtime.libraryTrackQueryTotals(library, listing.text, listing.query);
+        try std.testing.expect(expected_totals.count > 0);
+        const totals_request = try runtime.libraryRequestBrowse(library, std.testing.io, .{ .track_totals = .{ .text = listing.text, .query = listing.query } });
+        const totals = try awaitBrowse(&runtime, library, totals_request);
+        try std.testing.expectEqual(runtime_module.BrowseKind.track_totals, totals.kind);
+        try std.testing.expectEqual(expected_totals, (try totals.payload).track_totals);
+    }
+
+    var every_release = try runtime.libraryReleasePage(library, .{});
+    defer every_release.deinit();
+    const release_queries = [_]database.ReleaseQuery{
+        .{ .sort = .artist, .limit = 5, .offset = 1 },
+        .{ .sort = .year, .lossless_only = true },
+        .{ .text = try firstTitleWord(every_release.items) },
+    };
+    for (release_queries) |query| {
+        var expected = try runtime.libraryReleasePage(library, query);
+        defer expected.deinit();
+        try std.testing.expect(expected.items.len > 0);
+        const page_request = try runtime.libraryRequestBrowse(library, std.testing.io, .{ .release_page = query });
+        const page = try awaitBrowse(&runtime, library, page_request);
+        defer page.deinit();
+        try std.testing.expectEqual(runtime_module.BrowseKind.release_page, page.kind);
+        try expectSameReleases(expected.items, (try page.payload).release_page.items);
+
+        const expected_count = try runtime.libraryReleaseCountMatching(library, query);
+        const count_request = try runtime.libraryRequestBrowse(library, std.testing.io, .{ .release_count = query });
+        const count = try awaitBrowse(&runtime, library, count_request);
+        try std.testing.expectEqual(runtime_module.BrowseKind.release_count, count.kind);
+        try std.testing.expectEqual(expected_count, (try count.payload).release_count);
+    }
+}
+
+test "a browse request copies its text, so changing the caller's buffers afterwards changes nothing" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try runtime.openLibrary(std.testing.io, "file:orca-browse-copies?mode=memory&cache=shared");
+    const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    const library_database = try libraryDatabase(&runtime, library);
+    var registration: work.Registration = .{};
+    var loader: browse_loader.Loader = .init(std.testing.allocator, library_database, try library_database.openReader(), &registration);
+    defer loader.deinit();
+
+    var flac = try runtime.libraryTrackQuery(library, "", .{ .codec = "flac" });
+    defer flac.deinit();
+    var releases = try runtime.libraryReleasePage(library, .{});
+    defer releases.deinit();
+    const track_word = try firstTitleWord(flac.items);
+    const release_word = try firstTitleWord(releases.items);
+    var track_text: [64]u8 = undefined;
+    var codec: [8]u8 = undefined;
+    var release_text: [64]u8 = undefined;
+    @memcpy(track_text[0..track_word.len], track_word);
+    @memcpy(codec[0..4], "flac");
+    @memcpy(release_text[0..release_word.len], release_word);
+    const track_query: database.TrackQuery = .{ .codec = codec[0..4] };
+    try loader.request(std.testing.io, 1, .{ .track_page = .{ .text = track_text[0..track_word.len], .query = track_query } });
+    try loader.request(std.testing.io, 2, .{ .track_totals = .{ .text = track_text[0..track_word.len], .query = track_query } });
+    try loader.request(std.testing.io, 3, .{ .release_page = .{ .text = release_text[0..release_word.len] } });
+    try loader.request(std.testing.io, 4, .{ .release_count = .{ .text = release_text[0..release_word.len] } });
+    @memset(&track_text, 'q');
+    @memset(&codec, 'q');
+    @memset(&release_text, 'q');
+    while (loader.step()) {}
+
+    var expected_tracks = try runtime.libraryTrackQuery(library, track_word, .{ .codec = "flac" });
+    defer expected_tracks.deinit();
+    try std.testing.expect(expected_tracks.items.len > 0);
+    var changed_tracks = try runtime.libraryTrackQuery(library, track_text[0..track_word.len], .{ .codec = codec[0..4] });
+    defer changed_tracks.deinit();
+    try std.testing.expectEqual(@as(usize, 0), changed_tracks.items.len);
+    const track_page = loader.take().?;
+    defer track_page.deinit();
+    try expectSameTracks(expected_tracks.items, (try track_page.payload).track_page.items);
+    const track_totals = loader.take().?;
+    try std.testing.expectEqual(try runtime.libraryTrackQueryTotals(library, track_word, .{ .codec = "flac" }), (try track_totals.payload).track_totals);
+
+    var expected_releases = try runtime.libraryReleasePage(library, .{ .text = release_word });
+    defer expected_releases.deinit();
+    try std.testing.expect(expected_releases.items.len > 0);
+    try std.testing.expectEqual(@as(u64, 0), try runtime.libraryReleaseCountMatching(library, .{ .text = release_text[0..release_word.len] }));
+    const release_page = loader.take().?;
+    defer release_page.deinit();
+    try expectSameReleases(expected_releases.items, (try release_page.payload).release_page.items);
+    const release_count = loader.take().?;
+    try std.testing.expectEqual(@as(u64, expected_releases.items.len), (try release_count.payload).release_count);
+}
+
+test "closing a library or the runtime with browse requests in flight joins the loader and frees every result" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const closed = try runtime.openLibrary(std.testing.io, "file:orca-browse-close-a?mode=memory&cache=shared");
+    const left_open = try runtime.openLibrary(std.testing.io, "file:orca-browse-close-b?mode=memory&cache=shared");
+    for ([_]LibraryHandle{ closed, left_open }) |library| {
+        const binding = try runtime.libraryAddRoot(library, std.testing.io, "fixtures/audio");
+        try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startLibraryScan(library, .{ .root_id = binding.root_id })));
+    }
+    for ([_]LibraryHandle{ closed, left_open }) |library| {
+        for (0..browse_loader.capacity) |index| _ = try runtime.libraryRequestBrowse(library, std.testing.io, switch (index % 4) {
+            0 => .{ .track_page = .{ .query = .{ .sort = .path } } },
+            1 => .{ .track_totals = .{ .query = .{ .lossless = true } } },
+            2 => .{ .release_page = .{ .sort = .artist } },
+            else => .{ .release_count = .{ .lossless_only = true } },
+        });
+        try std.testing.expectError(error.BrowseQueueFull, runtime.libraryRequestBrowse(library, std.testing.io, .{ .release_count = .{} }));
+    }
+    const loader = &(try runtime.libraries.get(closed)).browse.?.loader;
+    var deadline: TestDeadline = .init(5_000);
+    while (loader.results.len() == 0 and deadline.tick()) {}
+    try runtime.destroyLibrary(closed);
+    try std.testing.expect(runtime.libraryTakeBrowse(closed) == null);
+    try std.testing.expectEqual(@as(?*runtime_module.BrowseLoader, null), (try runtime.libraries.get(left_open)).browse);
+    try std.testing.expectEqual(@as(usize, 0), inFlightWorkCount(&runtime));
+
+    for (0..browse_loader.capacity) |_| _ = try runtime.libraryRequestBrowse(left_open, std.testing.io, .{ .track_page = .{ .query = .{ .sort = .genre } } });
+}
+
+test "a browse result for a closed library is never delivered to the library that reuses its slot" {
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const first = try runtime.openLibrary(std.testing.io, "file:orca-browse-slot-a?mode=memory&cache=shared");
+    const finished = try runtime.libraryRequestBrowse(first, std.testing.io, .{ .track_totals = .{} });
+    const loader = &(try runtime.libraries.get(first)).browse.?.loader;
+    var deadline: TestDeadline = .init(5_000);
+    while (loader.results.len() == 0 and deadline.tick()) {}
+    try std.testing.expectEqual(@as(usize, 1), loader.results.len());
+    const pending = try runtime.libraryRequestBrowse(first, std.testing.io, .{ .release_page = .{} });
+    try runtime.destroyLibrary(first);
+
+    const second = try runtime.openLibrary(std.testing.io, "file:orca-browse-slot-b?mode=memory&cache=shared");
+    try std.testing.expectEqual(first.index, second.index);
+    try std.testing.expect(runtime.libraryTakeBrowse(first) == null);
+    try std.testing.expect(runtime.libraryTakeBrowse(second) == null);
+    try std.testing.expectEqual(@as(?*runtime_module.BrowseLoader, null), (try runtime.libraries.get(second)).browse);
+
+    const fresh = try runtime.libraryRequestBrowse(second, std.testing.io, .{ .track_totals = .{} });
+    try std.testing.expect(fresh > finished and fresh > pending);
+    const result = try awaitBrowse(&runtime, second, fresh);
+    try std.testing.expectEqual(@as(u64, 0), (try result.payload).track_totals.count);
+    var quiet: TestDeadline = .init(20);
+    while (quiet.tick()) try std.testing.expect(runtime.libraryTakeBrowse(second) == null);
+}
+
 test "every release order lists the same releases, each in its own order" {
     var runtime = OrcaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -3479,7 +3873,7 @@ test "an unreadable subdirectory fails the reconcile and sweeps nothing under it
     try std.testing.expectEqual(database.LocationState.missing, (try fixture.location("B/two.mp3")).?.state);
 }
 
-test "a second scan or reconcile of a library is refused while one runs" {
+test "a second scan or reconcile of a library waits for the one that runs and then runs in turn" {
     var fixture: ReconcileFixture = undefined;
     try fixture.init("file:orca-reconcile-concurrent?mode=memory&cache=shared");
     defer fixture.deinit();
@@ -3492,9 +3886,13 @@ test "a second scan or reconcile of a library is refused while one runs" {
     const second_scan = fixture.runtime.startLibraryScan(fixture.library, .{});
     const reconcile = fixture.runtime.startLibraryReconcile(fixture.library, .{ .root_id = fixture.root_id });
     library_database.write_lane.release();
-    try std.testing.expectError(error.LibraryScanRunning, second_scan);
-    try std.testing.expectError(error.LibraryScanRunning, reconcile);
+    for ([_]JobHandle{ try second_scan, try reconcile }) |waiting| {
+        try std.testing.expectEqual(job.State.waiting, (try fixture.runtime.jobSnapshotSynced(waiting)).state);
+    }
     try std.testing.expectEqual(job.State.succeeded, try awaitJob(&fixture.runtime, running));
+    try std.testing.expectEqual(job.State.waiting, (try fixture.runtime.jobSnapshotSynced(try reconcile)).state);
+    try std.testing.expectEqual(job.State.succeeded, try awaitJobPumping(&fixture.runtime, try second_scan));
+    try std.testing.expectEqual(job.State.succeeded, try awaitJobPumping(&fixture.runtime, try reconcile));
     try std.testing.expectEqual(job.State.succeeded, (try fixture.reconcile(&.{"A"})).state);
 }
 

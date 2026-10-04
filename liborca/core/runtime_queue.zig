@@ -608,10 +608,14 @@ fn loadCursor(object_value: *PlayerObject) !void {
         object_value.player.releaseSources();
         return;
     };
-    var session = try opener.openTrack(ref);
+    var session = opener.openTrack(ref) catch |err| {
+        object_value.player.open_failure.record(ref.track_id, err);
+        return err;
+    };
     const format = session.decoder.format;
     if (format.channels == 0 or format.channels > audio.zone_runtime.max_channels) {
         session.deinit();
+        object_value.player.open_failure.record(ref.track_id, error.UnsupportedChannelCount);
         return error.UnsupportedChannelCount;
     }
     session.replay_gain.shares_release = object_value.queue.sharesRelease(cursor, opener.opener());

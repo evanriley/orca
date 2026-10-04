@@ -77,6 +77,7 @@ pub const LibraryDatabase = struct {
     artist_info: repository.ArtistInfoRepository,
     release_info: repository.ReleaseInfoRepository,
     settings: repository.LibrarySettingsRepository,
+    job_history: repository.JobHistoryRepository,
     stats: repository.LibraryStatsRepository,
     genres: repository.GenreRepository,
     search: repository.SearchRepository,
@@ -175,6 +176,7 @@ pub const LibraryDatabase = struct {
             .artist_info = .{ .db = database, .write_lane = write_lane },
             .release_info = .{ .db = database, .write_lane = write_lane },
             .settings = .{ .db = database, .write_lane = write_lane },
+            .job_history = .{ .db = database, .write_lane = write_lane },
             .stats = .{ .db = database },
             .genres = .{ .db = database, .write_lane = write_lane },
             .search = .{ .db = database },
@@ -327,6 +329,44 @@ pub const LibraryDatabase = struct {
                 path,
             ),
         };
+    }
+
+    pub fn relocateRoot(
+        self: *LibraryDatabase,
+        io: std.Io,
+        root_id: i64,
+        path: []const u8,
+        options: VolumeOptions,
+    ) !RootBinding {
+        const existing = (try self.library_roots.find(self.allocator, root_id)) orelse return error.UnknownRoot;
+        defer existing.deinit(self.allocator);
+        if (!std.mem.eql(u8, existing.path, path) and
+            (repository.pathWithin(path, existing.path) or repository.pathWithin(existing.path, path)))
+        {
+            if (std.Io.Dir.cwd().access(io, existing.path, .{})) |_| return error.RootPathOverlaps else |_| {}
+        }
+        var lock: ?JournalLock = if (self.journal_lock_path) |lock_path|
+            try JournalLock.tryAcquire(io, lock_path) orelse return error.MutationInProgress
+        else
+            null;
+        defer if (lock) |*held| held.release(io);
+        const resolved = if (options.stable_key == null and options.use_platform_adapter)
+            platform.volume.stableKey(self.allocator, io, path, .{ .allow_persist = options.allow_persist }) catch null
+        else
+            null;
+        defer if (resolved) |resolution| resolution.deinit(self.allocator);
+        var key_buffer: [32]u8 = undefined;
+        const key = options.stable_key orelse if (resolved) |resolution|
+            resolution.key
+        else
+            try std.fmt.bufPrint(&key_buffer, root_volume_key_prefix ++ "{d}", .{root_id});
+        const volume_id = try self.library_roots.relocate(
+            self.allocator,
+            root_id,
+            .{ .stable_key = key, .label = options.label },
+            path,
+        );
+        return .{ .volume_id = volume_id, .root_id = root_id, .claimed_locations = 0 };
     }
 
     /// Resolve the file a path names, creating `files` and `locations` rows for
@@ -1774,6 +1814,265 @@ test "a directory sweep reads a uri range of the volume's unique index, never th
     defer std.testing.allocator.free(plan);
     try std.testing.expect(std.mem.indexOf(u8, plan, "sqlite_autoindex_locations_1 (volume_id=? AND uri>? AND uri<?)") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "locations_sweep") == null);
+}
+
+fn locationOf(library: *LibraryDatabase, file_id: i64) !struct { volume_id: i64, uri: []u8 } {
+    var statement = try library.database.prepare("SELECT volume_id, uri FROM locations WHERE file_id=?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, file_id);
+    if (try statement.step() != .row) return error.LocationNotFound;
+    return .{
+        .volume_id = statement.columnInt64(0),
+        .uri = try std.testing.allocator.dupe(u8, statement.columnText(1)),
+    };
+}
+
+test "relocating a root moves the locations under it and keeps every id, and a path nested with another root's is refused" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-relocate-root?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const moving = try library.ensureRoot(std.testing.io, "/music/old", .{ .stable_key = "uuid:old" });
+    const other = try library.ensureRoot(std.testing.io, "/music/other", .{ .stable_key = "uuid:other" });
+
+    const Placed = struct { uri: []const u8, binding: RootBinding, state: repository.LocationState };
+    const placed = [_]Placed{
+        .{ .uri = "/music/old/a.flac", .binding = moving, .state = .present },
+        .{ .uri = "/music/old/sub/b.flac", .binding = moving, .state = .missing },
+        .{ .uri = "/music/other/c.flac", .binding = other, .state = .present },
+    };
+    var file_ids: [placed.len]i64 = undefined;
+    for (placed, &file_ids, 0..) |item, *file_id, index| {
+        file_id.* = try library.files.create(.{ .audio_format = 1, .size_bytes = 1 });
+        _ = try library.locations.upsert(.{
+            .file_id = file_id.*,
+            .volume_id = item.binding.volume_id,
+            .root_id = item.binding.root_id,
+            .uri = item.uri,
+            .state = item.state,
+        });
+        var title: [16]u8 = undefined;
+        try library.tracks.upsertTracks(&.{.{
+            .title = try std.fmt.bufPrint(&title, "Entry {d}", .{index}),
+            .preferred_file_id = file_id.*,
+        }});
+    }
+    var tracks_before = try library.tracks.page(std.testing.allocator, .{ .limit = 8, .offset = 0 });
+    defer tracks_before.deinit();
+    try std.testing.expectEqual(@as(u64, 1), try library.tracks.missingFileCount());
+
+    var roots = try library.library_roots.page(std.testing.allocator, 8, 0);
+    defer roots.deinit();
+    try std.testing.expectEqual(@as(u64, 2), roots.items[0].track_count);
+    try std.testing.expectEqual(@as(u64, 1), roots.items[0].unavailable_tracks);
+    try std.testing.expectEqual(@as(u64, 1), roots.items[1].track_count);
+    try std.testing.expectEqual(@as(u64, 0), roots.items[1].unavailable_tracks);
+
+    const moved_volume = try library.library_roots.relocate(std.testing.allocator, moving.root_id, .{ .stable_key = "uuid:moved" }, "/mnt/new");
+    const relocated = (try library.library_roots.find(std.testing.allocator, moving.root_id)).?;
+    defer relocated.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/mnt/new", relocated.path);
+    try std.testing.expectEqual(moved_volume, relocated.volume_id);
+    const expected = [_]struct { volume_id: i64, uri: []const u8 }{
+        .{ .volume_id = moved_volume, .uri = "/mnt/new/a.flac" },
+        .{ .volume_id = moved_volume, .uri = "/mnt/new/sub/b.flac" },
+        .{ .volume_id = other.volume_id, .uri = "/music/other/c.flac" },
+    };
+    for (expected, file_ids) |want, file_id| {
+        const location = try locationOf(&library, file_id);
+        defer std.testing.allocator.free(location.uri);
+        try std.testing.expectEqual(want.volume_id, location.volume_id);
+        try std.testing.expectEqualStrings(want.uri, location.uri);
+    }
+    var tracks_after = try library.tracks.page(std.testing.allocator, .{ .limit = 8, .offset = 0 });
+    defer tracks_after.deinit();
+    try std.testing.expectEqual(tracks_before.items.len, tracks_after.items.len);
+    for (tracks_before.items, tracks_after.items) |before, after|
+        try std.testing.expectEqual(before.id, after.id);
+
+    const held = try library.files.create(.{ .audio_format = 1, .size_bytes = 1 });
+    _ = try library.locations.upsert(.{ .file_id = held, .volume_id = moved_volume, .uri = "/mnt/held/d.flac" });
+    const refused: repository.VolumeInput = .{ .stable_key = "uuid:refused" };
+    for ([_][]const u8{ "/music/other", "/music", "/music/other/inner" }) |taken| {
+        try std.testing.expectError(
+            error.RootPathOverlaps,
+            library.library_roots.relocate(std.testing.allocator, moving.root_id, refused, taken),
+        );
+    }
+    try std.testing.expectError(
+        error.RootPathOverlaps,
+        library.library_roots.relocate(std.testing.allocator, moving.root_id, .{ .stable_key = "uuid:moved" }, "/mnt/held"),
+    );
+    try std.testing.expectError(
+        error.InvalidLibraryRoot,
+        library.library_roots.relocate(std.testing.allocator, moving.root_id, refused, ""),
+    );
+    try std.testing.expectError(
+        error.UnknownRoot,
+        library.library_roots.relocate(std.testing.allocator, moving.root_id + other.root_id + 1, refused, "/mnt/none"),
+    );
+    try std.testing.expectEqual(@as(?i64, null), try library.volumes.find("uuid:refused"));
+    const unchanged = (try library.library_roots.find(std.testing.allocator, moving.root_id)).?;
+    defer unchanged.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("/mnt/new", unchanged.path);
+    const kept = try locationOf(&library, file_ids[0]);
+    defer std.testing.allocator.free(kept.uri);
+    try std.testing.expectEqualStrings("/mnt/new/a.flac", kept.uri);
+}
+
+fn placeLocation(library: *LibraryDatabase, binding: RootBinding, uri: []const u8) !i64 {
+    const file_id = try library.files.create(.{ .audio_format = 1, .size_bytes = 1 });
+    _ = try library.locations.upsert(.{
+        .file_id = file_id,
+        .volume_id = binding.volume_id,
+        .root_id = binding.root_id,
+        .uri = uri,
+    });
+    return file_id;
+}
+
+test "a root is not relocated into or around its old folder while it exists, nor where a moved location lands on another" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-relocate-nested?mode=memory&cache=shared",
+    );
+    defer library.close();
+    try temporary.dir.createDirPath(std.testing.io, "lib/music/inner");
+    const old_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/lib/music", .{temporary.sub_path});
+    defer std.testing.allocator.free(old_path);
+    const inner = try std.fmt.allocPrint(std.testing.allocator, "{s}/inner", .{old_path});
+    defer std.testing.allocator.free(inner);
+    const parent = std.fs.path.dirname(old_path).?;
+    const volume: VolumeOptions = .{ .stable_key = "uuid:nested" };
+    const root = try library.ensureRoot(std.testing.io, old_path, volume);
+    const top_uri = try std.fmt.allocPrint(std.testing.allocator, "{s}/a.flac", .{old_path});
+    defer std.testing.allocator.free(top_uri);
+    const nested_uri = try std.fmt.allocPrint(std.testing.allocator, "{s}/music/a.flac", .{old_path});
+    defer std.testing.allocator.free(nested_uri);
+    const top = try placeLocation(&library, root, top_uri);
+    const nested = try placeLocation(&library, root, nested_uri);
+
+    try std.testing.expectError(error.RootPathOverlaps, library.relocateRoot(std.testing.io, root.root_id, inner, volume));
+    try std.testing.expectError(error.RootPathOverlaps, library.relocateRoot(std.testing.io, root.root_id, parent, volume));
+    _ = try library.relocateRoot(std.testing.io, root.root_id, old_path, volume);
+
+    try temporary.dir.deleteTree(std.testing.io, "lib/music");
+    try std.testing.expectError(error.RootPathOverlaps, library.relocateRoot(std.testing.io, root.root_id, parent, volume));
+    const unmoved = try locationOf(&library, nested);
+    defer std.testing.allocator.free(unmoved.uri);
+    try std.testing.expectEqualStrings(nested_uri, unmoved.uri);
+
+    _ = try library.relocateRoot(std.testing.io, root.root_id, inner, volume);
+    const expected = [_]struct { file_id: i64, suffix: []const u8 }{
+        .{ .file_id = top, .suffix = "/inner/a.flac" },
+        .{ .file_id = nested, .suffix = "/inner/music/a.flac" },
+    };
+    for (expected) |want| {
+        const location = try locationOf(&library, want.file_id);
+        defer std.testing.allocator.free(location.uri);
+        const uri = try std.mem.concat(std.testing.allocator, u8, &.{ old_path, want.suffix });
+        defer std.testing.allocator.free(uri);
+        try std.testing.expectEqualStrings(uri, location.uri);
+    }
+}
+
+fn expectJournalPaths(library: *LibraryDatabase, operation_id: i64, expected: [4]?[]const u8) !void {
+    const operation = try library.mutation_journal.get(std.testing.allocator, operation_id);
+    defer operation.deinit();
+    const actual = [4]?[]const u8{ operation.source_path, operation.destination_path, operation.stage_path, operation.backup_path };
+    for (expected, actual) |want, have| {
+        if (want) |path| try std.testing.expectEqualStrings(path, have.?) else try std.testing.expectEqual(@as(?[]const u8, null), have);
+    }
+}
+
+test "relocating a root rewrites the journal's paths under it and no others, and refuses over an unfinished or unreconciled write" {
+    var library = try LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-test-relocate-journal?mode=memory&cache=shared",
+    );
+    defer library.close();
+    const root = try library.ensureRoot(std.testing.io, "/music/old", .{ .stable_key = "uuid:old" });
+    const journal = &library.mutation_journal;
+    const Row = struct {
+        kind: repository.MutationKind = .write_tags,
+        before: [4]?[]const u8,
+        after: [4]?[]const u8,
+    };
+    const rows = [_]Row{
+        .{
+            .before = .{ "/music/old/a.flac", null, "/music/old/.a.flac.orca-stage-1-0", "/data/library.db.orca-backups/1/0-a.flac" },
+            .after = .{ "/mnt/new/a.flac", null, "/mnt/new/.a.flac.orca-stage-1-0", "/data/library.db.orca-backups/1/0-a.flac" },
+        },
+        .{
+            .before = .{ "/music/old/sub/b.flac", null, "/music/old/sub/b.flac.orca-stage-1-1", "/music/old/sub/b.flac.orca-backup-1-1" },
+            .after = .{ "/mnt/new/sub/b.flac", null, "/mnt/new/sub/b.flac.orca-stage-1-1", "/mnt/new/sub/b.flac.orca-backup-1-1" },
+        },
+        .{
+            .kind = .move,
+            .before = .{ "/music/old/c.flac", "/music/old/moved/c.flac", null, null },
+            .after = .{ "/mnt/new/c.flac", "/mnt/new/moved/c.flac", null, null },
+        },
+        .{
+            .before = .{ "/music/older/d.flac", null, "/music/older/.d.flac.orca-stage-1-3", "/music/old.orca-backups/1/3-d.flac" },
+            .after = .{ "/music/older/d.flac", null, "/music/older/.d.flac.orca-stage-1-3", "/music/old.orca-backups/1/3-d.flac" },
+        },
+    };
+    var operation_ids: [rows.len]i64 = undefined;
+    for (rows, &operation_ids, 0..) |row, *operation_id, index| {
+        operation_id.* = try journal.prepare(.{
+            .plan_id = 1,
+            .group_id = 1,
+            .action_index = @intCast(index),
+            .kind = row.kind,
+            .source_path = row.before[0].?,
+            .destination_path = row.before[1],
+            .stage_path = row.before[2],
+            .backup_path = row.before[3],
+            .expected_size = 1,
+            .expected_modified_ns = 1,
+            .expected_quick_hash = @splat(0),
+        });
+        try journal.transition(operation_id.*, .planned, .staged, null);
+        try journal.transition(operation_id.*, .staged, .committed, null);
+    }
+
+    const unfinished = try journal.prepare(.{
+        .plan_id = 2,
+        .group_id = 2,
+        .action_index = 0,
+        .kind = .write_tags,
+        .source_path = "/music/old/e.flac",
+        .stage_path = "/music/old/.e.flac.orca-stage-2-0",
+        .expected_size = 1,
+        .expected_modified_ns = 1,
+        .expected_quick_hash = @splat(0),
+    });
+    try journal.transition(unfinished, .planned, .staged, null);
+    const refused: repository.VolumeInput = .{ .stable_key = "uuid:refused" };
+    try std.testing.expectError(
+        error.MutationInProgress,
+        library.library_roots.relocate(std.testing.allocator, root.root_id, refused, "/mnt/new"),
+    );
+    try journal.transition(unfinished, .staged, .needs_reconciliation, "kept every file");
+    try std.testing.expectError(
+        error.MutationNeedsReconciliation,
+        library.library_roots.relocate(std.testing.allocator, root.root_id, refused, "/mnt/new"),
+    );
+    try std.testing.expectEqual(@as(?i64, null), try library.volumes.find("uuid:refused"));
+    for (rows, operation_ids) |row, operation_id| try expectJournalPaths(&library, operation_id, row.before);
+
+    var statement = try library.database.prepare("DELETE FROM mutation_operations WHERE id=?1;");
+    defer statement.deinit();
+    try statement.bindInt64(1, unfinished);
+    try std.testing.expectEqual(sqlite.Step.done, try statement.step());
+    _ = try library.library_roots.relocate(std.testing.allocator, root.root_id, .{ .stable_key = "uuid:new" }, "/mnt/new");
+    for (rows, operation_ids) |row, operation_id| try expectJournalPaths(&library, operation_id, row.after);
 }
 
 test "opening a version-7 library recovers its journal before the schema moves" {

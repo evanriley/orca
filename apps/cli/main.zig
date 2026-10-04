@@ -17,6 +17,7 @@ fn describe(err: anyerror) []const u8 {
     return switch (err) {
         error.TrackNotFound => "no track with that id",
         error.UnknownRoot => "no folder with that id",
+        error.RootPathOverlaps => "PATH is inside or holds another root, files of another root, or the root's old folder while that still exists",
         error.RootVolumeChanged => "the folder is not on the drive it was added from, so nothing was scanned; mount that drive, or run add-root to accept the drive it is on now",
         error.OpenFailed => "could not open the database",
         error.InvalidCharacter, error.Overflow => "expected a number",
@@ -109,8 +110,14 @@ fn describe(err: anyerror) []const u8 {
         error.LosslessAndLossy => "give either --lossless or --lossy, not both",
         error.SortHasNoLetters => "--letters needs --sort title or --sort artist",
         error.LettersAndTotals => "give either --letters or --totals, not both",
-        error.TotalsWithFilter => "--totals counts the filters other than --filter; leave --filter out",
+        error.AsyncListingOnly => "--async lists a page and its count; give it no --letters or --totals",
         error.UnknownFile => "no file with that id",
+        error.UnknownJobKind => "--start takes scan, analysis, duplicates, backfill or project",
+        error.UnknownHistoryFilter => "--filter takes all, scans, analysis, file_changes or problems",
+        error.JobsNeedStartOrHistory => "give either --start=KIND or --history",
+        error.JobQueueFull => "32 jobs are already waiting; start this one when one has finished",
+        error.UnknownJobHistory => "no finished job with that id; list them with jobs DATABASE --history",
+        error.JobNotRetryable => "that job succeeded, or its request cannot be repeated",
         else => @errorName(err),
     };
 }
@@ -163,7 +170,7 @@ const commands = [_]Command{
     .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
     .{
         .name = "watch",
-        .usage = "watch DATABASE [--quiet=MS] [--max-delay=MS] [--once]\n" ++ usage_indent ++ "  [--limit=MS] [--maintenance[=MS]]",
+        .usage = "watch DATABASE [--quiet=MS] [--max-delay=MS] [--once]\n" ++ usage_indent ++ "  [--limit=MS] [--maintenance[=MS]] [--pause-after=MS] [--resume-after=MS]",
         .min_arguments = 1,
         .max_arguments = null,
         .run = watchLibrary,
@@ -179,9 +186,19 @@ const commands = [_]Command{
         .run = analyzeLibrary,
     },
     .{ .name = "duplicates", .usage = "duplicates DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = findDuplicates },
+    .{
+        .name = "jobs",
+        .usage = "jobs DATABASE [--start=KIND]... [--pause-after=MS] [--resume-after=MS]\n" ++ usage_indent ++
+            "  | --history [--filter=FILTER] [--limit N] [--offset N]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = runJobs,
+    },
+    .{ .name = "retry-job", .usage = "retry-job DATABASE HISTORY_ID", .min_arguments = 2, .max_arguments = 2, .run = retryJob },
     .{ .name = "roots", .usage = "roots DATABASE", .min_arguments = 1, .max_arguments = 1, .run = listRoots },
     .{ .name = "add-root", .usage = "add-root DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = addRoot, .shares_usage_line = true },
     .{ .name = "remove-root", .usage = "remove-root DATABASE ID", .min_arguments = 2, .max_arguments = 2, .run = removeRoot, .shares_usage_line = true },
+    .{ .name = "relocate-root", .usage = "relocate-root DATABASE ID PATH", .min_arguments = 3, .max_arguments = 3, .run = relocateRoot },
     .{ .name = "folders", .usage = "folders DATABASE [ROOT_ID [PATH]]", .min_arguments = 1, .max_arguments = 3, .run = listFolders },
     .{ .name = "health", .usage = "health DATABASE [--summary | --kind=KIND] [OFFSET]", .min_arguments = 1, .max_arguments = 3, .run = listHealthIssues },
     .{ .name = "stats", .usage = "stats DATABASE", .min_arguments = 1, .max_arguments = 1, .run = printLibraryStats },
@@ -838,7 +855,7 @@ fn reconcileRoot(context: Context) !void {
 
 fn watchLibrary(context: Context) !void {
     const stdout = context.stdout;
-    const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit, .maintenance });
+    const options = try parseJobOptions(context.arguments[1..], &.{ .quiet, .max_delay, .once, .limit, .maintenance, .pause_after, .resume_after });
     const limit_ms: u64 = options.limit orelse 10 * 60 * 1000;
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
@@ -863,7 +880,19 @@ fn watchLibrary(context: Context) !void {
     var unavailable: u32 = 0;
     var limit_reported = false;
     var maintenance_blocked: ?liborca.MaintenanceBlock = null;
+    var pause: PauseSchedule = .{ .pause_after_ms = options.pause_after_ms, .resume_after_ms = options.resume_after_ms };
     while (monotonicMs(context.io) - started_ms < limit_ms) {
+        switch (pause.due(monotonicMs(context.io) - started_ms)) {
+            .pause => {
+                try runtime.pauseAll(library);
+                try printLibraryJobsState(context.allocator, &runtime, stdout, library);
+            },
+            .resume_jobs => {
+                try runtime.resumeAll(library);
+                try printLibraryJobsState(context.allocator, &runtime, stdout, library);
+            },
+            .none => {},
+        }
         runtime.pump();
         var changed = false;
         while (runtime.pollEvent()) |event| switch (event.outcome) {
@@ -944,6 +973,200 @@ fn monotonicMs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.awake.now(io).toMilliseconds());
 }
 
+const PauseSchedule = struct {
+    pause_after_ms: ?u64,
+    resume_after_ms: ?u64,
+    paused: bool = false,
+    resumed: bool = false,
+
+    const Step = enum { none, pause, resume_jobs };
+
+    fn due(self: *PauseSchedule, elapsed_ms: u64) Step {
+        const pause_ms = self.pause_after_ms orelse return .none;
+        if (!self.paused) {
+            if (elapsed_ms < pause_ms) return .none;
+            self.paused = true;
+            return .pause;
+        }
+        const resume_ms = self.resume_after_ms orelse return .none;
+        if (self.resumed or elapsed_ms < resume_ms) return .none;
+        self.resumed = true;
+        return .resume_jobs;
+    }
+};
+
+fn printLibraryJobsState(
+    allocator: std.mem.Allocator,
+    runtime: *liborca.Runtime,
+    stdout: *std.Io.Writer,
+    library: liborca.LibraryHandle,
+) !void {
+    const queued = try runtime.jobQueuePage(library, allocator);
+    defer allocator.free(queued);
+    const maintenance = try runtime.libraryMaintenanceStatus(library);
+    try stdout.print("jobs: state={s} queue={d} maintenance={t}\n", .{
+        if (try runtime.libraryJobsPaused(library)) "paused" else "running",
+        queued.len,
+        maintenance.state,
+    });
+    try stdout.flush();
+}
+
+const StartableJob = enum { scan, analysis, duplicates, backfill, project };
+
+fn startListedJob(runtime: *liborca.Runtime, library: liborca.LibraryHandle, kind: StartableJob) !liborca.JobHandle {
+    return switch (kind) {
+        .scan => runtime.startLibraryScan(library, .{}),
+        .analysis => runtime.startLibraryAnalysis(library, .{}),
+        .duplicates => runtime.startLibraryDuplicateScan(library, .{}),
+        .backfill => runtime.startLibraryPropertyBackfill(library, .{}),
+        .project => runtime.startLibraryProjection(library),
+    };
+}
+
+/// `orca-cli jobs DATABASE [--start=KIND]... [--pause-after=MS]
+/// [--resume-after=MS]` starts the Jobs in one runtime, so each after the
+/// first waits for the Library's slot, pauses and resumes the first, and
+/// prints each state change until all have finished. `--history` lists
+/// the Library's finished Jobs instead.
+fn runJobs(context: Context) !void {
+    const allocator = context.allocator;
+    var starts: std.ArrayList(StartableJob) = .empty;
+    var history = false;
+    var filter: liborca.JobHistoryFilter = .all;
+    var limit: u32 = 50;
+    var offset: u32 = 0;
+    var pause: PauseSchedule = .{ .pause_after_ms = null, .resume_after_ms = null };
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.startsWith(u8, argument, "--start=")) {
+            const kind = std.meta.stringToEnum(StartableJob, argument["--start=".len..]) orelse return error.UnknownJobKind;
+            try starts.append(allocator, kind);
+        } else if (std.mem.eql(u8, argument, "--history")) {
+            history = true;
+        } else if (std.mem.startsWith(u8, argument, "--filter=")) {
+            filter = std.meta.stringToEnum(liborca.JobHistoryFilter, argument["--filter=".len..]) orelse return error.UnknownHistoryFilter;
+        } else if (std.mem.startsWith(u8, argument, "--pause-after=")) {
+            pause.pause_after_ms = try std.fmt.parseInt(u64, argument["--pause-after=".len..], 10);
+        } else if (std.mem.startsWith(u8, argument, "--resume-after=")) {
+            pause.resume_after_ms = try std.fmt.parseInt(u64, argument["--resume-after=".len..], 10);
+        } else if (std.mem.eql(u8, argument, "--limit") or std.mem.eql(u8, argument, "--offset")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = try std.fmt.parseInt(u32, context.arguments[index], 10);
+            if (argument[2] == 'l') limit = value else offset = value;
+        } else return error.UnknownOption;
+    }
+    if (history == (starts.items.len != 0)) return error.JobsNeedStartOrHistory;
+    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    if (history) return printJobHistory(allocator, &runtime, context.stdout, library, filter, limit, offset);
+
+    const handles = try allocator.alloc(liborca.JobHandle, starts.items.len);
+    for (starts.items, handles) |kind, *job_handle| job_handle.* = try startListedJob(&runtime, library, kind);
+    const queued = try runtime.jobQueuePage(library, allocator);
+    for (handles, starts.items, 0..) |job_handle, kind, position| {
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        try context.stdout.print("job={d} kind={t} state={t}", .{ position + 1, kind, snapshot.state });
+        for (queued) |entry| {
+            if (!entry.job.eql(job_handle)) continue;
+            const after = entry.after orelse break;
+            try context.stdout.print(" after={d}", .{jobPosition(handles, after)});
+        }
+        try context.stdout.writeByte('\n');
+    }
+    try context.stdout.flush();
+    try followJobs(context, &runtime, handles, &pause);
+}
+
+fn jobPosition(handles: []const liborca.JobHandle, job_handle: liborca.JobHandle) usize {
+    for (handles, 1..) |candidate, position| {
+        if (candidate.eql(job_handle)) return position;
+    }
+    return 0;
+}
+
+fn followJobs(context: Context, runtime: *liborca.Runtime, handles: []const liborca.JobHandle, pause: *PauseSchedule) !void {
+    const stdout = context.stdout;
+    const states = try context.allocator.alloc(liborca.JobState, handles.len);
+    for (handles, states) |job_handle, *state| state.* = (try runtime.jobSnapshotSynced(job_handle)).state;
+    const started_ms = monotonicMs(context.io);
+    while (true) {
+        const step = pause.due(monotonicMs(context.io) - started_ms);
+        if (step != .none) for (handles, states) |job_handle, state| {
+            if (state != .running and state != .paused) continue;
+            if (step == .pause) runtime.pauseJob(job_handle) catch continue else runtime.resumeJob(job_handle) catch continue;
+            break;
+        };
+        runtime.pump();
+        while (runtime.pollEvent()) |_| {}
+        while (runtime.pollTelemetry()) |_| {}
+        var live = false;
+        for (handles, states, 1..) |job_handle, *state, position| {
+            const snapshot = try runtime.jobSnapshotSynced(job_handle);
+            if (snapshot.state != state.*) {
+                state.* = snapshot.state;
+                try stdout.print("job={d} state={t} completed={d}", .{ position, snapshot.state, snapshot.completed_units });
+                if (snapshot.total_units) |total| try stdout.print(" total={d}", .{total});
+                try stdout.writeByte('\n');
+                try stdout.flush();
+            }
+            switch (snapshot.state) {
+                .succeeded, .failed, .cancelled => {},
+                else => live = true,
+            }
+        }
+        if (!live) return;
+        sleepMilliseconds(20);
+    }
+}
+
+fn printJobHistory(
+    allocator: std.mem.Allocator,
+    runtime: *liborca.Runtime,
+    stdout: *std.Io.Writer,
+    library: liborca.LibraryHandle,
+    filter: liborca.JobHistoryFilter,
+    limit: u32,
+    offset: u32,
+) !void {
+    const entries = try runtime.jobHistoryPage(library, allocator, filter, limit, offset);
+    defer allocator.free(entries);
+    for (entries) |entry| {
+        try stdout.print("{d}\t{t}\t{t}\tstarted_at={d}\tduration_s={d}\tcompleted={d}", .{
+            entry.id,
+            entry.kind,
+            entry.state,
+            entry.started_at,
+            @max(entry.finished_at - entry.started_at, 0),
+            entry.completed_units,
+        });
+        if (entry.total_units) |total| try stdout.print("\ttotal={d}", .{total});
+        if (entry.undo_group_id) |group| try stdout.print("\tundo={d}", .{group});
+        if (entry.error_text.len != 0) try stdout.print("\terror={s}", .{entry.error_text.slice()});
+        try stdout.print("\tretry={s}\tsummary={s}\n", .{ if (entry.retryable) "yes" else "no", entry.summary.slice() });
+    }
+}
+
+/// `orca-cli retry-job DATABASE HISTORY_ID`
+fn retryJob(context: Context) !void {
+    const history_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    defer runtime.deinit();
+    try identifyOrca(&runtime);
+    try configureArtistInfo(context.allocator, &runtime, context.environ);
+    try configureAcoustId(context.allocator, &runtime, context.environ);
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const job_handle = try runtime.jobRetry(library, history_id);
+    const snapshot = try runtime.jobSnapshotSynced(job_handle);
+    try context.stdout.print("job=1 kind={t} state={t}\n", .{ snapshot.kind, snapshot.state });
+    try context.stdout.flush();
+    var pause: PauseSchedule = .{ .pause_after_ms = null, .resume_after_ms = null };
+    try followJobs(context, &runtime, &.{job_handle}, &pause);
+}
+
 /// Reprojection without a filesystem walk: this is what refreshes the library
 /// after a metadata edit or a provider acceptance, and it is why the
 /// projection is a pass of its own rather than part of the scanner.
@@ -976,6 +1199,8 @@ const JobOption = enum {
     reidentify,
     maintenance,
     fetch,
+    pause_after,
+    resume_after,
 
     fn spelling(self: JobOption) []const u8 {
         return switch (self) {
@@ -998,6 +1223,8 @@ const JobOption = enum {
             .reidentify => "--reidentify",
             .maintenance => "--maintenance",
             .fetch => "--fetch",
+            .pause_after => "--pause-after=",
+            .resume_after => "--resume-after=",
         };
     }
 };
@@ -1022,6 +1249,8 @@ const JobOptions = struct {
     reidentify: bool = false,
     maintenance_ms: ?u32 = null,
     fetch: bool = false,
+    pause_after_ms: ?u64 = null,
+    resume_after_ms: ?u64 = null,
 };
 
 fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const JobOption) !JobOptions {
@@ -1062,6 +1291,8 @@ fn parseJobOptions(arguments: []const []const u8, comptime accepted: []const Job
                     .reidentify => options.reidentify = true,
                     .maintenance => options.maintenance_ms = (liborca.MaintenanceOptions{ .enabled = true }).interval_ms,
                     .fetch => options.fetch = true,
+                    .pause_after => options.pause_after_ms = try std.fmt.parseInt(u64, value, 10),
+                    .resume_after => options.resume_after_ms = try std.fmt.parseInt(u64, value, 10),
                 }
                 continue :next_argument;
             }
@@ -1201,6 +1432,7 @@ fn listHealthIssues(context: Context) !void {
             "{s}\t{s}\t{d}\t{d}\t{d}\n",
             .{ @tagName(entry.kind), @tagName(entry.severity), entry.count, entry.files, entry.bytes },
         );
+        try context.stdout.print("missing_files\t{d}\n", .{try runtime.libraryMissingFileCount(library_handle)});
         return;
     }
     var page = if (kind) |only|
@@ -1271,8 +1503,15 @@ fn listRoots(context: Context) !void {
     var page = try runtime.libraryRootPage(library_handle, 512, 0);
     defer page.deinit();
     for (page.items) |root| try context.stdout.print(
-        "{d}\t{s}\t{s}\n",
-        .{ root.id, if (root.enabled) "enabled" else "disabled", root.path },
+        "{d}\t{s}\t{s}\tavailable={s}\ttracks={d}\tunavailable={d}\n",
+        .{
+            root.id,
+            if (root.enabled) "enabled" else "disabled",
+            root.path,
+            if (root.available) "yes" else "no",
+            root.track_count,
+            root.unavailable_tracks,
+        },
     );
 }
 
@@ -1444,6 +1683,17 @@ fn removeRoot(context: Context) !void {
         "removed root {d}: {d} files, {d} tracks\n",
         .{ root_id, removed.files_forgotten, removed.tracks_removed },
     );
+}
+
+fn relocateRoot(context: Context) !void {
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const root_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    const job_handle = try runtime.libraryRelocateRoot(library_handle, context.io, root_id, context.arguments[2]);
+    try context.stdout.print("relocated root {d} to {s}\n", .{ root_id, context.arguments[2] });
+    try awaitJob(&runtime, context.stdout, job_handle, null);
+    try printScanStats(context.stdout, try runtime.jobScanStats(job_handle));
 }
 
 fn undoTagWrite(context: Context) !void {
@@ -1910,9 +2160,24 @@ fn playTracks(context: Context) !void {
     try runtime.playerSetCrossfeed(player, options.crossfeed);
     try runtime.playerSetRepeat(player, options.repeat);
     if (options.shuffle) try runtime.playerSetShuffle(player, true);
-    if (options.playlist_id) |playlist_id| {
-        try runtime.playerPlayPlaylist(player, library, io, playlist_id, options.start);
-    } else try runtime.playerPlayTracks(player, library, io, ids.items, options.start);
+    var failures: FailureReporter = .{ .runtime = &runtime, .player = player };
+    var start = options.start;
+    while (true) {
+        const started = if (options.playlist_id) |playlist_id|
+            runtime.playerPlayPlaylist(player, library, io, playlist_id, start)
+        else
+            runtime.playerPlayTracks(player, library, io, ids.items, start);
+        started catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.PositionOutOfRange => return if (start == options.start) err else error.NothingPlayable,
+            else => {
+                if (!try failures.poll(stdout)) return err;
+                start += 1;
+                continue;
+            },
+        };
+        break;
+    }
 
     var elapsed_ms: u64 = 0;
     var entry_elapsed_ms: u64 = 0;
@@ -1930,6 +2195,7 @@ fn playTracks(context: Context) !void {
     while (elapsed_ms < options.limit_ms) {
         _ = runtime.processNextCommand();
         if (options.lyrics) try lyrics.poll(stdout, player, elapsed_ms);
+        _ = try failures.poll(stdout);
         const snapshot = try runtime.playerQueueSnapshot(player);
         if (snapshot.decode_position != snapshot.cursor) decode_lead_polls += 1;
         if (last_cursor == null or last_cursor.? != snapshot.cursor) {
@@ -1993,14 +2259,20 @@ fn playTracks(context: Context) !void {
         }
         if (!took_previous and elapsed_ms >= options.previous_after_ms.?) {
             took_previous = true;
-            const moved = try runtime.playerPrevious(player);
+            const moved = runtime.playerPrevious(player) catch |err| moved: {
+                if (!try failures.poll(stdout)) return err;
+                break :moved true;
+            };
             try stdout.print("previous at={d}ms moved={}\n", .{ elapsed_ms, moved });
             try stdout.flush();
             last_cursor = null;
         }
         if (options.skip_after_ms) |after| {
             if (entry_elapsed_ms >= after) {
-                const moved = try runtime.playerNext(player);
+                const moved = runtime.playerNext(player) catch |err| moved: {
+                    if (!try failures.poll(stdout)) return err;
+                    break :moved true;
+                };
                 try stdout.print("next at={d}ms moved={}\n", .{ elapsed_ms, moved });
                 try stdout.flush();
                 if (!moved) break;
@@ -2022,6 +2294,7 @@ fn playTracks(context: Context) !void {
         entry_elapsed_ms += 10;
     }
 
+    _ = try failures.poll(stdout);
     try runtime.pausePlayer(player);
     sleepMilliseconds(200);
     const snapshot = try runtime.playerQueueSnapshot(player);
@@ -2073,6 +2346,22 @@ fn printQueueHistory(
         });
     }
 }
+
+const FailureReporter = struct {
+    runtime: *liborca.Runtime,
+    player: liborca.PlayerHandle,
+    printed: ?liborca.PlaybackFailure = null,
+
+    fn poll(self: *FailureReporter, stdout: *std.Io.Writer) !bool {
+        const failure = (try self.runtime.playerStatus(self.player)).last_failure;
+        defer self.printed = failure;
+        const current = failure orelse return false;
+        if (self.printed) |printed| if (std.meta.eql(printed, current)) return true;
+        try stdout.print("failure={d}:{t}\n", .{ current.track_id, current.reason });
+        try stdout.flush();
+        return true;
+    }
+};
 
 /// play-tracks --lyrics: resolves the audible Track's lyrics on a job, so the
 /// playback loop never waits on a file, and prints each synced line reached.
@@ -4201,6 +4490,7 @@ const ReleaseFilters = struct {
     added_days: ?u32 = null,
     letters: bool = false,
     totals: bool = false,
+    asynchronous: bool = false,
 
     fn any(self: ReleaseFilters) bool {
         return self.high_resolution_only or self.needs_review_only or self.lossless_only or
@@ -4248,6 +4538,8 @@ fn parseReleaseFilters(arguments: []const []const u8, remaining: *std.ArrayList(
             filters.letters = true;
         } else if (std.mem.eql(u8, name, "--totals")) {
             filters.totals = true;
+        } else if (std.mem.eql(u8, name, "--async")) {
+            filters.asynchronous = true;
         } else if (std.mem.eql(u8, name, "--year-from") or std.mem.eql(u8, name, "--year-to")) {
             index += 1;
             if (index >= arguments.len) return error.MissingOptionValue;
@@ -4278,6 +4570,7 @@ fn listReleases(context: Context) !void {
     if (options.descending) return error.UnknownOption;
     if (filters.own_releases_only and options.artist_id == null) return error.OwnNeedsArtist;
     if (filters.letters and filters.totals) return error.LettersAndTotals;
+    if (filters.asynchronous and (filters.letters or filters.totals)) return error.AsyncListingOnly;
     const sort: liborca.ReleaseSort = if (options.sort) |key|
         std.meta.stringToEnum(liborca.ReleaseSort, key) orelse return error.UnknownOption
     else
@@ -4315,10 +4608,17 @@ fn listReleases(context: Context) !void {
         try stdout.print("count={d} artists={d} bytes={d}\n", .{ totals.count, totals.artists, totals.bytes });
         return;
     }
-    var page = try runtime.libraryReleasePage(library, query);
+    var page = if (filters.asynchronous)
+        (try awaitBrowse(&runtime, library, io, .{ .release_page = query })).release_page
+    else
+        try runtime.libraryReleasePage(library, query);
     defer page.deinit();
-    if (options.genre_id != null or options.filter.len != 0 or filters.any())
-        try stdout.print("{d} releases match\n", .{try runtime.libraryReleaseCountMatching(library, query)});
+    if (options.genre_id != null or options.filter.len != 0 or filters.any()) try stdout.print("{d} releases match\n", .{
+        if (filters.asynchronous)
+            (try awaitBrowse(&runtime, library, io, .{ .release_count = query })).release_count
+        else
+            try runtime.libraryReleaseCountMatching(library, query),
+    });
     for (page.items) |release| {
         try stdout.print("{d}\t{s}\t{s}\t", .{ release.id, release.title, release.album_artist });
         try writeDuration(stdout, release.total_duration_ms);
@@ -4408,6 +4708,7 @@ const TrackFilters = struct {
     added_days: ?u32 = null,
     explicit_only: bool = false,
     totals: bool = false,
+    asynchronous: bool = false,
 };
 
 /// Takes the flags only `tracks` reads out of `arguments`, leaving the rest
@@ -4441,6 +4742,8 @@ fn parseTrackFilters(arguments: []const []const u8, remaining: *std.ArrayList([]
             filters.added_days = try std.fmt.parseInt(u32, name["--added-days=".len..], 10);
         } else if (std.mem.eql(u8, name, "--totals")) {
             filters.totals = true;
+        } else if (std.mem.eql(u8, name, "--async")) {
+            filters.asynchronous = true;
         } else {
             try remaining.append(allocator, name);
             if (std.mem.startsWith(u8, name, "--") and !std.mem.eql(u8, name, "--loved") and
@@ -4484,18 +4787,26 @@ fn listTracks(context: Context) !void {
         .limit = options.limit,
         .offset = options.offset,
     };
+    const listing: liborca.BrowseTrackListing = .{ .text = options.filter, .query = query };
     if (filters.totals) {
-        if (options.filter.len != 0) return error.TotalsWithFilter;
-        const totals = try runtime.libraryTrackQueryTotals(library, query);
+        const totals = if (filters.asynchronous)
+            (try awaitBrowse(&runtime, library, io, .{ .track_totals = listing })).track_totals
+        else
+            try runtime.libraryTrackQueryTotals(library, options.filter, query);
         try stdout.print("count={d} duration_ms={d}\n", .{ totals.count, totals.duration_ms });
         return;
     }
-    var page = try runtime.libraryTrackQuery(library, options.filter, query);
+    var page = if (filters.asynchronous)
+        (try awaitBrowse(&runtime, library, io, .{ .track_page = listing })).track_page
+    else
+        try runtime.libraryTrackQuery(library, options.filter, query);
     defer page.deinit();
-    if (options.filter.len == 0) try stdout.print(
-        "{d} tracks match\n",
-        .{try runtime.libraryTrackMatchCount(library, query)},
-    );
+    if (options.filter.len == 0) try stdout.print("{d} tracks match\n", .{
+        if (filters.asynchronous)
+            (try awaitBrowse(&runtime, library, io, .{ .track_totals = listing })).track_totals.count
+        else
+            try runtime.libraryTrackMatchCount(library, query),
+    });
     for (page.items) |track| {
         const disc: u64 = @intCast(@max(track.disc_number orelse 1, 0));
         const number: u64 = @intCast(@max(track.track_number orelse 0, 0));
@@ -4525,6 +4836,21 @@ fn listTracks(context: Context) !void {
         try stdout.print(" path={s}", .{if (track.path.len == 0) "?" else track.path});
         try stdout.print("{s}\n", .{if (track.has_playable_file) "" else "\tunreachable"});
     }
+}
+
+fn awaitBrowse(
+    runtime: *liborca.Runtime,
+    library: liborca.LibraryHandle,
+    io: std.Io,
+    request: liborca.BrowseRequest,
+) !liborca.BrowsePayload {
+    const id = try runtime.libraryRequestBrowse(library, io, request);
+    const result = while (true) {
+        if (runtime.libraryTakeBrowse(library)) |result| break result;
+        sleepMilliseconds(1);
+    };
+    std.debug.assert(result.request == id);
+    return result.payload;
 }
 
 /// The Unix time `days` days before now, for an `--added-days` filter.

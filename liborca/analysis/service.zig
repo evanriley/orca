@@ -254,7 +254,7 @@ pub const Service = struct {
     }
 
     fn cancelled(self: Service) bool {
-        return if (self.cancellation) |token| token.isCancelled() else false;
+        return if (self.cancellation) |token| token.checkpoint() else false;
     }
 
     fn verifyIdentity(self: Service, path: []const u8, expected: storage.StorageIdentity) !void {

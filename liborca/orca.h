@@ -126,6 +126,12 @@ typedef enum orca_job_state {
     ORCA_JOB_CANCELLED = 3,
     ORCA_JOB_SUCCEEDED = 4,
     ORCA_JOB_FAILED = 5,
+    /* Held at its next cancellation poll by orca_job_pause or
+     * orca_library_pause_jobs; it keeps its thread until resumed or
+     * cancelled. */
+    ORCA_JOB_PAUSED = 6,
+    /* In its Library's waiting queue behind the Job holding the slot. */
+    ORCA_JOB_WAITING = 7,
 } orca_job_state;
 
 typedef enum orca_job_kind {
@@ -1020,6 +1026,22 @@ typedef struct orca_root_view {
 /* String views are valid only for the duration of this callback. */
 typedef void (*orca_root_callback)(void *context, const orca_root_view *root);
 
+/* orca_root_view with the root's Tracks. `available` is 1 when the root's
+ * directory can be listed and lies on the volume it was bound to.
+ * `track_count` counts the Tracks whose preferred file has a location under
+ * the root, and `unavailable_tracks` those of them with no location that is
+ * not missing; while the root is unavailable it equals `track_count`. */
+typedef struct orca_root_view_v2 {
+    orca_root_view base;
+    uint64_t track_count;
+    uint64_t unavailable_tracks;
+    uint8_t available;
+    uint8_t reserved[7];
+} orca_root_view_v2;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_root_v2_callback)(void *context, const orca_root_view_v2 *root);
+
 typedef enum orca_folder_entry_kind {
     ORCA_FOLDER_ENTRY_KIND_FOLDER = 0,
     ORCA_FOLDER_ENTRY_KIND_FILE = 1,
@@ -1201,6 +1223,29 @@ typedef struct orca_player_status {
     uint8_t reserved[4];
 } orca_player_status;
 
+/* Why a queue entry could not be opened. FOLDER_UNAVAILABLE: the root folder
+ * or the volume it is on is not there, so the file is not marked missing.
+ * FILE_MISSING: the root is there and the file is not. */
+typedef enum orca_playback_failure {
+    ORCA_PLAYBACK_FAILURE_FILE_MISSING = 0,
+    ORCA_PLAYBACK_FAILURE_FOLDER_UNAVAILABLE = 1,
+    ORCA_PLAYBACK_FAILURE_CODEC_UNAVAILABLE = 2,
+    ORCA_PLAYBACK_FAILURE_DECODE_ERROR = 3,
+    ORCA_PLAYBACK_FAILURE_UNSUPPORTED_CHANNELS = 4,
+} orca_playback_failure;
+
+/* orca_player_status with the last entry the Player could not open. Playback
+ * moves past such an entry; the failure stays until an entry opened after it
+ * is audible. `failure_track_id` and `failure_reason` are 0 when
+ * `has_failure` is 0. */
+typedef struct orca_player_status_v2 {
+    orca_player_status base;
+    int64_t failure_track_id;
+    uint8_t has_failure;
+    uint8_t failure_reason;  /* orca_playback_failure */
+    uint8_t reserved[6];
+} orca_player_status_v2;
+
 typedef struct orca_zone_status {
     uint8_t output_state;  /* orca_output_state */
     uint8_t reserved[3];
@@ -1329,6 +1374,7 @@ typedef enum orca_failure {
     ORCA_FAILURE_CODEC_UNAVAILABLE = 7,
     ORCA_FAILURE_QUEUE_FULL = 8,
     ORCA_FAILURE_NOT_PLAYABLE = 9,
+    ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE = 10,
     ORCA_FAILURE_INTERNAL = 255,
 } orca_failure;
 
@@ -3574,6 +3620,22 @@ orca_status orca_library_remove_root(
     orca_handle library,
     int64_t root_id
 );
+/* Moves root `root_id` to `path`, bound to the volume `path` is on now, and
+ * keeps the root's id, every File, Track and location under it, and the undo
+ * of every tag write there; then starts a whole-root reconcile Job and returns
+ * it in `job`. INVALID_ARGUMENT when `path` is not a readable directory, is
+ * inside or holds another root or files of another root, or is inside or
+ * holds the root's old folder while that still exists; NOT_FOUND for an
+ * unknown root; BUSY while a job is running on the library, a tag write holds
+ * the library's journal, or one under the root is unfinished;
+ * NEEDS_RECONCILIATION when one under the root needs reconciliation. */
+orca_status orca_library_relocate_root(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t root_id,
+    const char *path,
+    orca_handle *job
+);
 /* `limit` must be between 1 and 512. */
 orca_status orca_library_query_roots(
     orca_runtime *runtime,
@@ -3582,6 +3644,23 @@ orca_status orca_library_query_roots(
     uint32_t offset,
     void *context,
     orca_root_callback callback
+);
+/* orca_library_query_roots with each root's availability and Track counts.
+ * `limit` must be between 1 and 512. */
+orca_status orca_library_query_roots_v2(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_root_v2_callback callback
+);
+/* How many Tracks have no present or unverified copy of their preferred
+ * file, as scans and playback last recorded it; nothing on disk is read. */
+orca_status orca_library_missing_file_count(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t *count
 );
 /* One page of the folder `path` below root `root_id`: subfolders, then files.
  * `path` is relative to the root, `/`-separated, and empty for the root
@@ -3630,9 +3709,9 @@ orca_status orca_library_start_projection(
  * and marks missing only the files under what it walked. `directories` may
  * be null when `count` is zero. The strings need not outlive the call.
  *
- * INVALID_ARGUMENT for a directory not in that form, BUSY while a scan or
- * reconcile of the library runs. Its stats are read through
- * orca_library_scan_stats, with a scan's meaning.
+ * INVALID_ARGUMENT for a directory not in that form. Started while another
+ * job holds the library's slot, it is ORCA_JOB_WAITING until that one ends.
+ * Its stats are read through orca_library_scan_stats, with a scan's meaning.
  *
  * No scan or reconcile walks a root whose path now resolves to another
  * volume than the one recorded when it was added, as the empty mount point
@@ -3754,7 +3833,7 @@ typedef struct orca_match_options {
  * per service. Its counts are read with orca_job_match_stats.
  *
  * While an idle-maintenance unit runs, returns OK with a job that stays
- * ORCA_JOB_QUEUED: the unit is cancelled, and the job starts from a later
+ * ORCA_JOB_WAITING: the unit is cancelled, and the job starts from a later
  * orca_runtime_pump once it has stopped. INVALID_STATE without a
  * client identity (orca_runtime_set_client_identity), and for VERIFY without
  * AcoustID. INVALID_ARGUMENT for an unknown mode, both `track_id` and
@@ -3778,7 +3857,7 @@ orca_status orca_library_start_match(
  * stored in the Library, never in a file, and orca_library_release_artwork
  * returns it. Statuses as orca_library_start_match: INVALID_STATE without a
  * client identity, NOT_FOUND for an unknown Release, BUSY while a matching
- * job runs or is queued, and OK with a queued job while an idle-maintenance
+ * job runs or is queued, and OK with a waiting job while an idle-maintenance
  * unit stops.
  */
 orca_status orca_library_start_cover_art_fetch(
@@ -4145,7 +4224,7 @@ typedef enum orca_submission_outcome {
  * through the credential callback. It writes no file.
  *
  * While an idle-maintenance unit runs, returns OK with a job that stays
- * ORCA_JOB_QUEUED until the unit has stopped. INVALID_STATE without a client
+ * ORCA_JOB_WAITING until the unit has stopped. INVALID_STATE without a client
  * identity. BUSY while a matching job or another submission runs or is
  * queued.
  */
@@ -4514,6 +4593,150 @@ orca_status orca_job_reconcile_root(
     orca_handle job,
     int64_t *root_id,
     uint8_t *has_root_id
+);
+
+/* What orca_job_snapshot leaves out. `started_at` is Unix seconds, with
+ * `has_started_at` 0 while the job waits. `estimated_remaining_ms` comes from
+ * the rate over the last ten seconds of progress, so `has_estimated_
+ * remaining_ms` is 0 until ten seconds of it, while paused, and for a job with
+ * no total. `current_item` is the path or title being worked on and `detail`
+ * a note such as "14 threads"; either may be empty. */
+typedef struct orca_job_details {
+    int64_t started_at;
+    uint64_t estimated_remaining_ms;
+    uint8_t has_started_at;
+    uint8_t paused;
+    uint8_t has_estimated_remaining_ms;
+    uint8_t reserved[5];
+    orca_string_view current_item;
+    orca_string_view detail;
+} orca_job_details;
+
+typedef void (*orca_job_details_callback)(
+    void *context,
+    const orca_job_details *details
+);
+
+/* Calls `callback` once with the job's details. STALE_HANDLE as
+ * orca_job_origin_get. */
+orca_status orca_job_details_get(
+    orca_runtime *runtime,
+    orca_handle job,
+    void *context,
+    orca_job_details_callback callback
+);
+
+/* Holds a running job at its next cancellation poll; it keeps its thread and
+ * any provider lease, and orca_job_cancel still stops it. A paused job stays
+ * paused. INVALID_STATE for a job that is waiting, cancelling or finished, or
+ * of a kind that never polls: a tag write, a projection, and the one-item
+ * fetches. */
+orca_status orca_job_pause(orca_runtime *runtime, orca_handle job);
+/* A running job stays running. Resuming one job of a paused Library leaves
+ * the rest held. INVALID_STATE as orca_job_pause. */
+orca_status orca_job_resume(orca_runtime *runtime, orca_handle job);
+
+/* Pauses every pausable job of the Library, whoever started it, and holds its
+ * waiting jobs, watcher reconciles and maintenance until
+ * orca_library_resume_jobs. A job started while paused waits. */
+orca_status orca_library_pause_jobs(orca_runtime *runtime, orca_handle library);
+orca_status orca_library_resume_jobs(orca_runtime *runtime, orca_handle library);
+orca_status orca_library_jobs_paused(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t *paused
+);
+
+/* One Library runs one scan, reconcile, backfill, analysis, duplicate scan,
+ * tag write, match, cover fetch, submission or genre fill at a time. A host job
+ * of those kinds started while the slot is held is created ORCA_JOB_WAITING
+ * and starts in order on a later orca_runtime_pump. At most
+ * ORCA_MAX_WAITING_JOBS wait across the runtime; one more is BUSY. */
+#define ORCA_MAX_WAITING_JOBS 32
+
+/* `after` is the job this one starts behind, with `has_after` 0 for the job
+ * holding the slot. */
+typedef struct orca_queued_job_view {
+    orca_handle job;
+    orca_handle after;
+    uint8_t kind;  /* orca_job_kind */
+    uint8_t has_after;
+    uint8_t reserved[6];
+} orca_queued_job_view;
+
+typedef void (*orca_queued_job_callback)(
+    void *context,
+    const orca_queued_job_view *job
+);
+
+/* The job holding the Library's slot, then the jobs waiting for it in the
+ * order they start. */
+orca_status orca_library_query_job_queue(
+    orca_runtime *runtime,
+    orca_handle library,
+    void *context,
+    orca_queued_job_callback callback
+);
+
+typedef enum orca_job_history_filter {
+    ORCA_JOB_HISTORY_ALL = 0,
+    /* Scans, reconciles, projections and backfills. */
+    ORCA_JOB_HISTORY_SCANS = 1,
+    /* Analyses and duplicate scans. */
+    ORCA_JOB_HISTORY_ANALYSIS = 2,
+    /* Tag writes. */
+    ORCA_JOB_HISTORY_FILE_CHANGES = 3,
+    /* Failed and cancelled jobs. */
+    ORCA_JOB_HISTORY_PROBLEMS = 4,
+} orca_job_history_filter;
+
+/* A finished host job of the kinds the queue holds, as its Library recorded
+ * it. Times are Unix seconds. `error_text` is empty when it succeeded;
+ * `summary` reads as "2,847 files · 3 changed". `undo_group_id` is the group
+ * orca_library_undo_tag_write takes, for a tag write that succeeded.
+ * `retryable` 1: orca_library_retry_job starts it again. */
+typedef struct orca_job_history_view {
+    int64_t id;
+    int64_t started_at;
+    int64_t finished_at;
+    uint64_t completed_units;
+    uint64_t total_units;
+    uint64_t undo_group_id;
+    uint8_t kind;   /* orca_job_kind */
+    uint8_t state;  /* orca_job_state */
+    uint8_t has_total;
+    uint8_t has_undo_group_id;
+    uint8_t retryable;
+    uint8_t reserved[3];
+    orca_string_view error_text;
+    orca_string_view summary;
+} orca_job_history_view;
+
+typedef void (*orca_job_history_callback)(
+    void *context,
+    const orca_job_history_view *entry
+);
+
+/* Newest first; the newest thousand are kept. INVALID_ARGUMENT for an unknown
+ * `filter` or a `limit` outside 1...512. */
+orca_status orca_library_query_job_history(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint8_t filter,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_job_history_callback callback
+);
+
+/* Starts the recorded job's request again, as its start function would, and
+ * writes the new job. NOT_FOUND for an unknown `history_id`; INVALID_STATE for
+ * an entry whose `retryable` is 0. */
+orca_status orca_library_retry_job(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t history_id,
+    orca_handle *job
 );
 
 /* --------------------------------------------------------------- player */
@@ -5060,6 +5283,11 @@ orca_status orca_player_status_get(
     orca_runtime *runtime,
     orca_handle player,
     orca_player_status *output
+);
+orca_status orca_player_status_get_v2(
+    orca_runtime *runtime,
+    orca_handle player,
+    orca_player_status_v2 *output
 );
 /* The callback runs zero times when nothing is playing. Strings are valid only
  * for its duration. */

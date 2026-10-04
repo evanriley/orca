@@ -127,12 +127,16 @@ DATABASE ROOT_ID [DIR...]` runs it.
   on the `(volume_id, uri)` unique index, so a sibling such as `A/Newer` is
   never swept for `A/New`, and the sweep reads only that directory's rows.
 
-A runtime refuses a second scan or reconcile of a Library while one runs, with
-`error.LibraryScanRunning` (`ORCA_STATUS_BUSY` through the C ABI). Each walk
-stamps the locations it reaches with its own generation, so a second walk
-could overwrite the first walk's stamp and the first walk's sweep would then
-mark present files `missing`. The check covers jobs in one runtime only; two
-processes scanning the same database are not coordinated.
+A runtime never runs two walks of a Library at once. A host scan or
+reconcile started while another host Job holds the Library's slot waits for
+it (see [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue)),
+a host walk stops the watcher's reconcile before it starts, and a walk that
+would still run beside another is refused with `error.LibraryScanRunning`
+(`ORCA_STATUS_BUSY` through the C ABI). Each walk stamps the locations it
+reaches with its own generation, so a second walk could overwrite the first
+walk's stamp and the first walk's sweep would then mark present files
+`missing`. The check covers jobs in one runtime only; two processes scanning
+the same database are not coordinated.
 
 `ScanStats.marked_missing` counts the locations a scan or reconcile marked
 `missing`.
@@ -168,6 +172,45 @@ its path is on now, which is how a replacement drive at the same path is
 accepted. `orca-cli scan DATABASE ROOT` therefore scans a registered root by
 its id without adding it again, and fails with a message when the check
 fails; `orca-cli add-root DATABASE ROOT` rebinds it explicitly.
+
+## Unavailable and relocated roots
+
+A root is available when its directory opens for reading and passes the
+volume check above. `libraryRootPage` reports it as `LibraryRoot.available`,
+beside the root's Track count and the Tracks it cannot play. While a root is
+unavailable, every Track under it counts as unavailable.
+
+Playback applies the same test. When a Track's file cannot be found, the
+opener checks the root the location belongs to. An unavailable root fails the
+open with `TrackFolderUnavailable` and leaves the location as it is, so an
+unmounted drive or a renamed music folder does not mark a whole library
+`missing`. Only a missing file under an available root is marked `missing`
+and fails with `TrackFileMissing`.
+
+`libraryRelocateRoot` (`orca-cli relocate-root DATABASE ID PATH`) is the
+repair for a root that moved. It refuses a path that is not a readable
+directory, then binds the path to the volume it is on now, as `libraryAddRoot`
+does, and rewrites the root, its locations and its folder images in one
+`BEGIN IMMEDIATE` transaction, with the tag write journal's paths under it
+(see [metadata.md](metadata.md#relocated-roots)). A crash leaves the root
+wholly at its old path or wholly at its new one. Each location's URI keeps
+its path below the root. Root, file, location and Track ids are kept, so play
+counts, ratings, playlists and edits stay attached.
+
+Before it changes anything, the relocate refuses with
+`error.RootPathOverlaps`:
+
+- a path that is another root's, or inside or around one;
+- a path under which locations or folder images of another root, or of none,
+  already sit;
+- a path inside or around the root's old path while the old directory still
+  exists, since the two would then hold the same files;
+- a path nested with the old one at which a moved location or folder image
+  would land on another of the root's.
+
+A refusal leaves no new volume row behind. The reconcile job it starts then
+walks the new path, so files that changed or went away while the root was
+elsewhere are noticed.
 
 ## Repairing properties without a walk
 

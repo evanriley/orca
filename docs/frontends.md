@@ -28,7 +28,17 @@ first database open; see [database.md](database.md#concurrency).
 The boundary covers the whole engine, not a fragment of it:
 
 - **Library and roots.** Open/close, bounded track and health pages, root
-  add/remove/query.
+  add/remove/query. `orca_library_query_roots_v2` calls back with an
+  `orca_root_view_v2`, which adds whether the root is `available`, its
+  `track_count` and its `unavailable_tracks`.
+  `orca_library_relocate_root` moves a root to a new path, keeping its ids
+  and the undo of its tag writes, and returns the reconcile job it starts; a
+  path that is not a readable directory, or is nested with another root, its
+  files or the root's old directory while that still exists, is
+  `ORCA_STATUS_INVALID_ARGUMENT`, an unknown root `ORCA_STATUS_NOT_FOUND`, a
+  held journal or an unfinished tag write under the root `ORCA_STATUS_BUSY`,
+  and one awaiting reconciliation `ORCA_STATUS_NEEDS_RECONCILIATION`.
+  `orca_library_missing_file_count` counts the Tracks with no present file.
 - **Folders.** `orca_library_query_folder` pages one folder of a root as
   `orca_folder_entry_view` values: subfolders first, with file and Track
   counts and duration counted through every folder below, then files with
@@ -231,7 +241,11 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_player_status`, which carries transport, epoch, position, duration,
   track, queue position and volume in one lock-free read. Position comes from
   the packed epoch+frames atomic the render callback writes; now-playing reports
-  the audible entry, never the decode cursor.
+  the audible entry, never the decode cursor. `orca_player_status_get_v2`
+  fills an `orca_player_status_v2`, which adds the last entry that could not
+  be opened: `has_failure`, `failure_track_id` and an `orca_playback_failure`
+  reason. A Track whose root is unavailable fails with
+  `ORCA_FAILURE_TRACK_FOLDER_UNAVAILABLE` on the command lane.
 - **Queue edits.** `orca_player_queue_jump` plays an entry now,
   `orca_player_queue_insert_next` queues Tracks after the current entry (or
   after the one the engine has already lined up), and
