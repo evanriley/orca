@@ -305,6 +305,7 @@ const commands = [_]Command{
     .{ .name = "related-photo", .usage = "related-photo DATABASE MBID --out=PATH", .min_arguments = 3, .max_arguments = 3, .run = saveRelatedArtistPhoto },
     .{ .name = "release-group-cover", .usage = "release-group-cover DATABASE MBID --out=PATH", .min_arguments = 3, .max_arguments = 3, .run = saveReleaseGroupCover },
     .{ .name = "edit", .usage = "edit DATABASE IDS [EDITS]", .min_arguments = 2, .max_arguments = null, .run = editTracks },
+    .{ .name = "fields", .usage = "fields DATABASE IDS", .min_arguments = 2, .max_arguments = 2, .run = showTrackFields },
     .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
     .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
     .{ .name = "prune-backups", .usage = "prune-backups DATABASE [--older-than=DAYS]", .min_arguments = 1, .max_arguments = 2, .run = pruneBackups },
@@ -404,6 +405,12 @@ const help_details =
     \\                      musicbrainz_release_track_id|
     \\                      musicbrainz_album_artist_id|explicit|composer|
     \\                      comment|genre)
+    \\
+    \\fields prints, for a comma-separated list of Track ids, each editable
+    \\field's shared value, - when none, and mixed=yes when the Tracks
+    \\disagree; edited=yes when Orca's value differs from a file's tag. Then
+    \\the shared disc total and the cover the first Track shows, with how
+    \\many of the Tracks show the same one.
     \\
     \\write-tags writes Orca's values for the Tracks into their files: an edit
     \\or an accepted correction wherever it differs from the file's tag, a
@@ -3074,6 +3081,36 @@ fn editTracks(context: Context) !void {
             .{ track_id, value.field, value.text, value.provenance, if (value.locked) "\tlocked" else "" },
         );
     }
+}
+
+/// `orca-cli fields DATABASE IDS`: what a metadata editor shows for them.
+fn showTrackFields(context: Context) !void {
+    const allocator = context.allocator;
+    const stdout = context.stdout;
+    var ids = try parseTrackIds(allocator, context.arguments[1]);
+    defer ids.deinit(allocator);
+    var runtime = liborca.Runtime.init(allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(allocator, context.io, &runtime, context.arguments[0]);
+    const states = try runtime.libraryTrackFieldStates(library, ids.items);
+    defer states.deinit();
+    for (std.enums.values(liborca.EditableTrackField)) |field| {
+        const state = states.fields.get(field);
+        try stdout.print("{t}\tvalue={s}\tmixed={s}\tedited={s}\n", .{
+            field,
+            state.value orelse "-",
+            if (state.mixed) "yes" else "no",
+            if (state.edited) "yes" else "no",
+        });
+    }
+    if (states.disc_total) |total| try stdout.print("disc_total={d}\n", .{total}) else try stdout.writeAll("disc_total=-\n");
+    try stdout.print("cover\tsource={t}\tfile={s}\tmime={s}\ttracks={d}/{d}\n", .{
+        states.cover.source,
+        states.cover.file_name orelse "-",
+        states.cover.mime_type orelse "-",
+        states.cover.tracks,
+        states.track_count,
+    });
 }
 
 /// Tag write-back through the runtime's plan, approve and undo path.

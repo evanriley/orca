@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Edit Metadata and Write to Files pages.** `orca-gtk`'s tag editor is a
+  page: a checklist of the selected tracks, fields with `Mixed` placeholders
+  and Edited badges, Apply to Orca, and the front cover with where it comes
+  from. Write to Files previews the plan as cards and a per-file Before /
+  After table with the tags' own keys, then writes it as a Job with undo
+  kept. `libraryTrackFieldStates` reports the shared, mixed and edited state
+  of each editable field and the cover, `TagWritePlan` files carry their
+  `TagWriteFormat`, and `orca-cli fields` prints them.
 - **Change History page.** `orca-gtk` lists the finished tag writes newest
   first, with their date, file count, Release title and whether they can
   still be undone, and shows the selected write's changed tags beside what

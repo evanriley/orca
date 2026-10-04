@@ -34,6 +34,7 @@ const runtime_jobs = @import("runtime_jobs.zig");
 const runtime_status = @import("runtime_status.zig");
 const runtime_watch = @import("runtime_watch.zig");
 const track_details = @import("track_details.zig");
+const track_fields = @import("track_fields.zig");
 const track_source = @import("track_source.zig");
 const work = @import("work.zig");
 
@@ -51,6 +52,11 @@ pub const queue_history_capacity = queue_history.queue_history_capacity;
 pub const TrackDetails = track_details.TrackDetails;
 pub const RecordingIdSource = track_details.RecordingIdSource;
 pub const TrackLoudness = track_details.Loudness;
+pub const TrackFieldStates = track_fields.TrackFieldStates;
+pub const TrackFieldState = track_fields.FieldState;
+pub const EditableTrackField = track_fields.EditableField;
+pub const TrackFieldCover = track_fields.Cover;
+pub const TrackFieldCoverSource = track_fields.CoverSource;
 pub const DuplicateGroup = runtime_duplicates.DuplicateGroup;
 pub const DuplicateGroupPage = runtime_duplicates.DuplicateGroupPage;
 pub const DuplicateGroupTotals = runtime_duplicates.DuplicateGroupTotals;
@@ -264,10 +270,13 @@ pub const TagWritePlan = struct {
 pub const TagWriteFile = struct {
     file_id: i64,
     path: []const u8,
+    format: TagWriteFormat,
     changes: []const TagWriteChange,
     /// The file's genres replaced by the user's, or null when they stay.
     genres: ?TagWriteGenres,
 };
+
+pub const TagWriteFormat = metadata.executor.TagBlock;
 
 /// `before` is what the file states, value by value; `after` is the genres
 /// the user gave the Track.
@@ -2396,6 +2405,18 @@ pub const OrcaRuntime = struct {
         track_id: i64,
     ) !?TrackDetails {
         return runtime_roots.libraryTrackDetails(self, library, track_id);
+    }
+
+    /// What `track_ids` hold in each editable field: the value they share or
+    /// whether they disagree, whether Orca's value differs from their files',
+    /// and the cover the first of them shows. Read from the database alone.
+    /// At most `max_page` Tracks.
+    pub fn libraryTrackFieldStates(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        track_ids: []const i64,
+    ) !TrackFieldStates {
+        return track_fields.load(self.allocator, try libraryDatabase(self, library), track_ids);
     }
 
     /// Sets or clears Orca's own values for tracks, without touching their

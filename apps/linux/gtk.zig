@@ -884,6 +884,7 @@ pub extern fn gtk_label_new(text: ?[*:0]const u8) *Widget;
 pub extern fn gtk_label_set_text(label: *Label, text: [*:0]const u8) void;
 pub extern fn gtk_label_get_text(label: *Label) [*:0]const u8;
 pub extern fn gtk_label_set_xalign(label: *Label, xalign: f32) void;
+pub extern fn gtk_label_set_yalign(label: *Label, yalign: f32) void;
 pub extern fn gtk_label_set_ellipsize(label: *Label, mode: c_int) void;
 pub extern fn gtk_label_set_max_width_chars(label: *Label, n_chars: c_int) void;
 
@@ -1165,6 +1166,7 @@ pub extern fn gtk_switch_set_active(self: *Switch, is_active: gboolean) void;
 
 pub extern fn gtk_grid_new() *Widget;
 pub extern fn gtk_grid_attach(grid: *Grid, child: *Widget, column: c_int, row: c_int, width: c_int, height: c_int) void;
+pub extern fn gtk_grid_remove(grid: *Grid, child: *Widget) void;
 pub extern fn gtk_grid_set_column_homogeneous(grid: *Grid, homogeneous: gboolean) void;
 pub extern fn gtk_grid_set_column_spacing(grid: *Grid, spacing: c_uint) void;
 pub extern fn gtk_grid_set_row_spacing(grid: *Grid, spacing: c_uint) void;

@@ -170,6 +170,7 @@ zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
 zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--composer=…] [--comment=…] [--genre=A;B] [--clear=FIELD]…   # library only; FIELD includes composer and comment
+zig build run -- fields DATABASE IDS   # FIELD value= mixed=yes|no edited=yes|no per editable field, then disc_total= and `cover source=none|embedded|folder|fetched file= mime= tracks=N/M`
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone

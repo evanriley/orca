@@ -295,15 +295,20 @@ pub fn startSubmission(self: *App) void {
     begin(self, .{ .task = .submission, .job = job });
 }
 
-/// Writes an approved plan. The plan id is its undo group.
-pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) void {
-    const library = self.library orelse return;
-    const job = self.runtime.startTagWrite(library, plan_id, digest) catch |err| return self.toast(switch (err) {
-        error.NoBackupDirectory => "This library has no database file to keep the originals beside",
-        error.MutationInProgress => "Another Orca is writing tags",
-        else => queueRefusal(err, "Could not write the tags"),
-    });
+/// Writes an approved plan. The plan id is its undo group. False when the
+/// write did not start, after a toast saying why.
+pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) bool {
+    const library = self.library orelse return false;
+    const job = self.runtime.startTagWrite(library, plan_id, digest) catch |err| {
+        self.toast(switch (err) {
+            error.NoBackupDirectory => "This library has no database file to keep the originals beside",
+            error.MutationInProgress => "Another Orca is writing tags",
+            else => queueRefusal(err, "Could not write the tags"),
+        });
+        return false;
+    };
     begin(self, .{ .task = .tag_write, .job = job, .tag_write_group = plan_id });
+    return true;
 }
 
 fn folderChosen(

@@ -555,7 +555,9 @@ are sniffed or not recognized until then:
   hits (`SearchHit.reason`, which `orca_library_search` leaves out) and the
   hit to feature (`SearchResults.top`); the roots offline now and what they
   leave unable to play (`libraryAvailability`, `libraryReleasesAvailable`),
-  and a root's `volume` and `last_seen_at`. The command lane (`submit`,
+  and a root's `volume` and `last_seen_at`; a selection's shared, mixed and
+  edited field values and its cover (`libraryTrackFieldStates`), and the tag
+  block a tag write replaces in each file (`TagWriteFile.format`). The command lane (`submit`,
   `processNextCommand`) stays behind `orca_runtime_pump` and the
   request-correlated functions that use it.
 - Lyrics from a WAV or AIFF file's `id3 ` chunk (`USLT`, `SYLT`), and plain

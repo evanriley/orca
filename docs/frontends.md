@@ -1255,14 +1255,41 @@ open or a text field or popover has focus, so a focused search box keeps
 them. Ctrl+Shift+R scans the library. The window title names the page:
 `Orca — Albums`, a pushed page's own title, or `Orca — Settings · Advanced`.
 
-**Edit Tags** edits one track or many; a field the selection disagrees on is
-marked mixed and left alone unless filled in, and clearing a field returns it
-to what the file says. Save changes the library only. Save and Write to Files
-plans the write with `Runtime.planTagWrite`, shows each file's changes and any
-files skipped, and runs the approved plan as a job; the toast when it finishes
-offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
-files back afterwards, because an edit that moves a track to another album
-gives it a new id.
+**Edit Metadata** (Edit Tags… in menus) is a page pushed over the current
+section, or over Albums when the section has no navigation; the top bar shows
+`ALBUM › Edit Metadata`, Cancel and Apply to Orca. The left column lists the
+selected Tracks with check boxes, headed `13 tracks` and Select none or Select
+all; Apply edits only the checked Tracks. The fields are Title, Artist, Album,
+Album artist, Genre, Date, Track, Disc (`1 of 1`), Composer and Comment, plus
+MusicBrainz recording for one Track, read from `libraryTrackFieldStates`. A
+field the Tracks disagree on is empty with the placeholder `Mixed` and is left
+alone unless typed into; a field whose library value differs from what a file
+states shows an Edited badge. Genre shows its names joined with ` / `
+(`Hip Hop / Rap`). Apply calls `libraryEditTracks`, and
+`librarySetTrackGenres` for Genre (names split on ` / ` and `;`, so a bare
+`/` as in `R&B/Soul` stays in one name), and keeps the page open
+on the Tracks `libraryEditTracks` returns, because an edit that moves a track
+to another album gives it a new id. The note's Write to Files… link applies,
+then opens Write to Files on the checked Tracks. The Front cover column shows
+the first Track's cover and where it comes from (`cover.jpg · same on all 13
+tracks`, `Embedded JPEG`, `Cover Art Archive`); Replace… and Remove are
+insensitive until liborca can change a Release's cover in the library.
+
+**Write to Files** (Write Tags to Files… in menus, or the editor's link) plans
+the write with `Runtime.planTagWrite` and shows it before anything changes, in
+a column at most 1036 pixels wide: `Write tags to 13 files`, a card naming the fields that change and a card
+naming the tag format (`Vorbis comments · FLAC · no audio data is touched`,
+or ID3v2 for MP3 and AAC). Changes per file is a File / Field / Before /
+After table of `TagWritePlan.files[].changes` and genres, the same changes
+`orca-cli write-tags` previews, with Vorbis keys (`ALBUMARTIST`) for FLAC and
+Ogg and field names for ID3v2, and genres joined with ` / ` where the CLI
+joins them with `; `; the first two files show, then `and the same
+4 changes on 11 more files · Show all 52 changes`. Conflicts and skipped
+files are listed under the table. Keep original tags for undo is on and
+cannot be turned off. Write 13 Files runs the plan as a `tag_write` Job with
+the plan's digest; the Job shows in Activity, the finished write in Change
+History, and its toast offers Undo (`undoTagWrite`). Back to Editor (Cancel
+when no editor is below) discards the plan.
 
 **First Run** fills the window, sidebar and player bar included, when the
 library opened at launch has no roots. A step bar shows Folders, Scan,

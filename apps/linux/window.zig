@@ -27,6 +27,8 @@ const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
+const metadata_editor = @import("metadata_editor.zig");
+const write_tags = @import("write_tags.zig");
 const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
@@ -373,6 +375,8 @@ pub const Pushed = union(enum) {
     artist: i64,
     playlist: i64,
     smart_rules: ?i64,
+    metadata_editor,
+    write_tags,
 };
 
 fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
@@ -381,7 +385,7 @@ fn pushedKey(comptime kind: std.meta.Tag(Pushed)) [*:0]const u8 {
 
 pub fn markPushed(page: *adw.NavigationPage, pushed: Pushed) void {
     switch (pushed) {
-        .smart_rules => {},
+        .smart_rules, .metadata_editor, .write_tags => {},
         inline .album, .artist, .playlist => |id, kind| {
             const value = std.math.cast(usize, id) orelse return;
             gtk.g_object_set_data(page, pushedKey(kind), @ptrFromInt(value));
@@ -395,6 +399,8 @@ fn pushedOf(self: *App, page: *adw.NavigationPage) ?Pushed {
             return @unionInit(Pushed, @tagName(kind), @intCast(@intFromPtr(value)));
     }
     if (smart_playlist_editor.pushedOf(page)) |pushed| return pushed;
+    if (metadata_editor.pushedOf(page)) |pushed| return pushed;
+    if (write_tags.pushedOf(page)) |pushed| return pushed;
     if (adw.adw_navigation_page_get_tag(page)) |tag| {
         if (std.mem.eql(u8, std.mem.span(tag), playlists.page_tag))
             return .{ .playlist = self.playlists.open_id orelse return null };
@@ -506,7 +512,7 @@ fn pushedSource(self: *App, page: *adw.NavigationPage) ?details.Source {
             .selection = self.playlists.tracks.selection orelse return null,
             .playlist_id = id,
         } },
-        .smart_rules => null,
+        .smart_rules, .metadata_editor, .write_tags => null,
     };
 }
 
@@ -572,6 +578,7 @@ fn open(self: *App, navigation: *adw.NavigationView, pushed: Pushed) void {
         .artist => |artist_id| artist_page.openArtist(self, navigation, artist_id),
         .playlist => |playlist_id| playlists.open(self, playlist_id),
         .smart_rules => |playlist_id| smart_playlist_editor.present(self, playlist_id),
+        .metadata_editor, .write_tags => {},
     }
 }
 
@@ -579,6 +586,7 @@ fn revisit(self: *App, visit: Visit) bool {
     if (visit.pushed) |pushed| switch (pushed) {
         .playlist => |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
         .smart_rules => |editing| if (editing) |playlist_id| if (!playlists.exists(self, playlist_id)) return false,
+        .metadata_editor, .write_tags => return false,
         else => {},
     };
     switchTo(self, visit.page);

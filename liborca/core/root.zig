@@ -32,6 +32,7 @@ pub const runtime_watch_tests = @import("runtime_watch_tests.zig");
 pub const runtime_zones = @import("runtime_zones.zig");
 pub const tag_write_history = @import("tag_write_history.zig");
 pub const track_details = @import("track_details.zig");
+pub const track_fields = @import("track_fields.zig");
 pub const track_source = @import("track_source.zig");
 pub const work = @import("work.zig");
 
@@ -77,6 +78,7 @@ test {
     _ = @import("runtime_zones.zig");
     _ = @import("tag_write_history.zig");
     _ = @import("track_details.zig");
+    _ = @import("track_fields.zig");
     _ = @import("track_source.zig");
     _ = @import("work.zig");
 }

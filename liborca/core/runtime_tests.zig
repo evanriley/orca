@@ -3059,6 +3059,53 @@ test "a composer and comment are written into FLAC and MP3 files, an unlocked va
     }
 }
 
+test "field states mark an unwritten edit as edited and shared, and a tag-write plan names each file's tag format" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+
+    const untouched = try runtime.libraryTrackFieldStates(library, ids);
+    defer untouched.deinit();
+    try std.testing.expectEqual(@as(u32, @intCast(ids.len)), untouched.track_count);
+    for (std.enums.values(runtime_module.EditableTrackField)) |field|
+        try std.testing.expect(!untouched.fields.get(field).edited);
+    try std.testing.expect(untouched.fields.get(.composer).value == null);
+    try std.testing.expect(!untouched.fields.get(.composer).mixed);
+
+    const edited = try runtime.libraryEditTracks(library, ids, &.{.{ .field = .album_artist, .value = "Orca Edit Ensemble" }});
+    defer edited.deinit();
+    const states = try runtime.libraryTrackFieldStates(library, edited.ids);
+    defer states.deinit();
+    const album_artist = states.fields.get(.album_artist);
+    try std.testing.expectEqualStrings("Orca Edit Ensemble", album_artist.value.?);
+    try std.testing.expect(!album_artist.mixed);
+    try std.testing.expect(album_artist.edited);
+    try std.testing.expect(!states.fields.get(.composer).edited);
+    try std.testing.expect(states.cover.tracks <= states.track_count);
+
+    const plan = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.files.len);
+    for (plan.files) |file| {
+        if (std.mem.endsWith(u8, file.path, ".flac")) {
+            try std.testing.expectEqual(runtime_module.TagWriteFormat.vorbis_comment, file.format);
+            try std.testing.expectEqualStrings("ALBUMARTIST", file.format.key(.album_artist).?);
+            try std.testing.expectEqualStrings("GENRE", file.format.key(null).?);
+        } else {
+            try std.testing.expectEqual(runtime_module.TagWriteFormat.id3v2, file.format);
+            try std.testing.expect(file.format.key(.album_artist) == null);
+        }
+    }
+    try runtime.discardTagWrite(library, plan.plan_id);
+}
 test "a value stored under a field number this build does not know is skipped by edits, tag-write planning and the projection" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

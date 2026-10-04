@@ -421,6 +421,11 @@ pub fn planTagWrite(
             continue;
         }
 
+        const detected = metadata.executor.tagFormat(io, location.uri) catch null;
+        const format: runtime.TagWriteFormat = .of(detected orelse {
+            try skipped.append(owned, .{ .file_id = file_id, .path = try owned.dupe(u8, location.uri), .reason = .missing });
+            continue;
+        });
         const values = try library_database.orca_metadata.values(scratch, file_id);
         const observed = try library_database.observed_tags.get(scratch, file_id);
         const tags: metadata.ObservedTags = if (observed) |stored| stored.values else .{};
@@ -463,6 +468,7 @@ pub fn planTagWrite(
         try files.append(owned, .{
             .file_id = file_id,
             .path = try owned.dupe(u8, location.uri),
+            .format = format,
             .changes = shown.items,
             .genres = if (genres) |change| .{
                 .before = try dupeValues(owned, change.before),
@@ -533,7 +539,7 @@ fn userGenreChange(
     return null;
 }
 
-fn sameGenres(allocator: std.mem.Allocator, left: []const []const u8, right: []const []const u8) !bool {
+pub fn sameGenres(allocator: std.mem.Allocator, left: []const []const u8, right: []const []const u8) !bool {
     const left_genres = try metadata.genre_alias.foldAll(allocator, left);
     const right_genres = try metadata.genre_alias.foldAll(allocator, right);
     if (left_genres.len != right_genres.len) return false;

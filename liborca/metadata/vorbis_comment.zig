@@ -659,7 +659,8 @@ fn valueMatches(field: mutation.Field, expected: []const u8, raw: []const u8) bo
     };
 }
 
-fn fieldKey(field: mutation.Field) []const u8 {
+/// The key a write stores `field` under.
+pub fn fieldKey(field: mutation.Field) []const u8 {
     return switch (field) {
         .title => "TITLE",
         .artist => "ARTIST",

@@ -13,6 +13,8 @@ const strings = @import("strings.zig");
 const preferences = @import("preferences.zig");
 const nowplaying = @import("nowplaying.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
+const metadata_editor = @import("metadata_editor.zig");
+const write_tags = @import("write_tags.zig");
 
 const App = app.App;
 
@@ -27,6 +29,7 @@ pub const Bar = struct {
     search: ?*gtk.Stack = null,
     entry: ?*gtk.Widget = null,
     editor_actions: ?*gtk.Widget = null,
+    editor_save: ?*gtk.Widget = null,
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -119,11 +122,15 @@ fn buildSearch(self: *App) *gtk.Widget {
 }
 
 fn editorCancelClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    smart_playlist_editor.cancelShown(state(data));
+    const self = state(data);
+    if (metadata_editor.isShown(self)) return metadata_editor.cancelShown(self);
+    smart_playlist_editor.cancelShown(self);
 }
 
 fn editorSaveClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    smart_playlist_editor.saveShown(state(data));
+    const self = state(data);
+    if (metadata_editor.isShown(self)) return metadata_editor.applyShown(self);
+    smart_playlist_editor.saveShown(self);
 }
 
 fn buildEditorActions(self: *App) *gtk.Widget {
@@ -141,6 +148,7 @@ fn buildEditorActions(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, actions), save);
     gtk.gtk_widget_set_visible(actions, gtk.false_);
     self.top_bar.editor_actions = actions;
+    self.top_bar.editor_save = save;
     return actions;
 }
 
@@ -246,18 +254,25 @@ fn showTrail(self: *App) void {
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, trail), gtk.true_);
     gtk.gtk_stack_set_visible_child_name(trail, "trail");
     const navigation = window.pageNavigation(self, page).?;
-    const parent = if (adw.adw_navigation_view_get_previous_page(navigation, pushed)) |previous|
-        adw.adw_navigation_page_get_title(previous)
-    else
-        page.title();
+    var previous = adw.adw_navigation_view_get_previous_page(navigation, pushed);
+    while (previous) |shown| {
+        if (!metadata_editor.isEditorPage(shown)) break;
+        previous = adw.adw_navigation_view_get_previous_page(navigation, shown);
+    }
+    const parent = if (previous) |shown| adw.adw_navigation_page_get_title(shown) else page.title();
     if (bar.parent) |button| gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), parent);
     if (bar.current) |label| gtk.gtk_label_set_text(label, adw.adw_navigation_page_get_title(pushed));
 }
 
 fn showEditorActions(self: *App) void {
-    const editing = smart_playlist_editor.isShown(self);
+    const metadata = metadata_editor.isShown(self);
+    const editing = metadata or smart_playlist_editor.isShown(self);
+    if (self.top_bar.editor_save) |save| {
+        gtk.gtk_button_set_label(gtk.cast(gtk.Button, save), if (metadata) "Apply to Orca" else "Save Smart Playlist");
+    }
     if (self.top_bar.editor_actions) |actions| gtk.gtk_widget_set_visible(actions, @intFromBool(editing));
-    if (self.top_bar.search) |search| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, search), @intFromBool(!editing));
+    const searching = !editing and !write_tags.isShown(self);
+    if (self.top_bar.search) |search| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, search), @intFromBool(searching));
 }
 
 fn showSearch(self: *App) void {

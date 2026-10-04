@@ -4,6 +4,7 @@ const database = @import("../database/repository.zig");
 const file_mutation = @import("file_mutation.zig");
 const JournalLock = @import("journal_lock.zig").JournalLock;
 const mutation = @import("mutation.zig");
+const vorbis_comment = @import("vorbis_comment.zig");
 
 /// Boundaries at which an execution can lose power. Production callers leave
 /// `Executor.fault` null; recovery tests set it so the real executor stops at a
@@ -876,11 +877,35 @@ pub fn canWriteTags(io: std.Io, path: []const u8) !bool {
     return try tagFormat(io, path) != null;
 }
 
-const TagFormat = enum { mpeg, flac };
+pub const TagFormat = enum { mpeg, flac };
+
+/// The tag block a write replaces in a file.
+pub const TagBlock = enum {
+    /// FLAC's Vorbis comment block.
+    vorbis_comment,
+    /// An ID3v2 tag at the start of an MP3 or ADTS AAC file.
+    id3v2,
+
+    pub fn of(format: TagFormat) TagBlock {
+        return switch (format) {
+            .flac => .vorbis_comment,
+            .mpeg => .id3v2,
+        };
+    }
+
+    /// The Vorbis comment key a field is written under, `GENRE` for null,
+    /// or null for ID3v2, whose frames depend on the tag's version.
+    pub fn key(self: TagBlock, field: ?mutation.Field) ?[]const u8 {
+        return switch (self) {
+            .vorbis_comment => if (field) |value| vorbis_comment.fieldKey(value) else "GENRE",
+            .id3v2 => null,
+        };
+    }
+};
 
 /// Which writer a file takes, decided by its bytes as every reader decides,
 /// never by its name. Null for a format Orca cannot write tags into yet.
-fn tagFormat(io: std.Io, path: []const u8) !?TagFormat {
+pub fn tagFormat(io: std.Io, path: []const u8) !?TagFormat {
     var local = try storage.LocalFileSource.open(io, path);
     defer local.close();
     const detected = try storage.format.detect(local.readable()) orelse return null;

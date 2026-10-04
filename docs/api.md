@@ -284,8 +284,16 @@ defer page.deinit();
   back afterwards. An edit that moves a track to another album or a free
   position keeps its id; one that moves it onto a position another Track
   holds takes that Track's id.
+- `libraryTrackFieldStates` returns `TrackFieldStates` for up to 512 Tracks:
+  per `EditableTrackField` the value they share, whether they are `mixed`, and
+  whether Orca's value is `edited` (differs from a file's tag), the disc
+  total they share, and the first Track's `TrackFieldCover` (`embedded`,
+  `folder` or `fetched`, in that order of preference) with how
+  many of them show the same one. It reads the
+  database only. The caller frees it with `deinit`.
 - `planTagWrite` returns a `TagWritePlan`: each file's `TagWriteChange`s with
-  the `Provenance` of Orca's value, its `TagWriteGenres` when the user's
+  the `Provenance` of Orca's value, its `TagWriteFormat` (Vorbis comments or
+  ID3v2) and `key` for a field's tag name, its `TagWriteGenres` when the user's
   genres replace the file's, the `TagWriteConflict`s it leaves out
   because an unlocked value disagrees with the file's tag, and the files it
   skips. `tagWriteGenres` returns one file's `TagWriteGenres` from a held
