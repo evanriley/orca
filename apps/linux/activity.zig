@@ -787,6 +787,8 @@ fn showWidget(self: *App, entries: []const Entry, library_paused: bool) void {
         (if (waiting == 0) "Paused" else strings.format(&buffer, "Paused · {d} waiting", .{waiting}))
     else if (running == 0)
         strings.format(&buffer, "{d} {s} waiting", .{ waiting, if (waiting == 1) "task" else "tasks" })
+    else if (running == 1 and waiting == 0 and lead.?.kind == .scan)
+        "Scanning library"
     else if (waiting == 0)
         strings.format(&buffer, "{d} {s} running", .{ running, if (running == 1) "task" else "tasks" })
     else

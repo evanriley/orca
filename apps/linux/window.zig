@@ -22,6 +22,7 @@ const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
+const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
@@ -309,6 +310,7 @@ pub const Page = enum(c_uint) {
     playlists,
     settings,
     activity,
+    scan,
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -325,6 +327,7 @@ pub const Page = enum(c_uint) {
             .playlists => "playlists",
             .settings => "settings",
             .activity => "activity",
+            .scan => "scan",
         };
     }
 
@@ -343,6 +346,7 @@ pub const Page = enum(c_uint) {
             .playlists => "Playlists",
             .settings => "Settings",
             .activity => "Activity",
+            .scan => "Scan",
         };
     }
 
@@ -1285,6 +1289,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, loved.build(self), Page.loved.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, activity.build(self), Page.activity.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, first_run.buildScan(self), Page.scan.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());
@@ -1322,7 +1327,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
 
     const overlay = adw.adw_toast_overlay_new();
     self.toasts = gtk.cast(adw.ToastOverlay, overlay);
-    adw.adw_toast_overlay_set_child(self.toasts.?, root);
+    adw.adw_toast_overlay_set_child(self.toasts.?, first_run.wrap(self, root));
     adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), palette.wrapWindow(self, overlay));
     overlayInspectorWhenCrowded(self, window);
     compactWhenNarrow(self, window);

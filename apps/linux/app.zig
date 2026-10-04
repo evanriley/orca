@@ -29,6 +29,7 @@ const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
+const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
@@ -427,6 +428,7 @@ pub const App = struct {
 
     health: health.State = .{},
     activity: activity.State = .{},
+    first_run: first_run.State = .{},
 
     matches_list: ?*gtk.ListBox = null,
     matches_corrections: ?*gtk.ListBox = null,

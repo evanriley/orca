@@ -375,6 +375,8 @@ pub extern fn g_unlink(filename: [*:0]const u8) c_int;
 pub extern fn g_filename_to_uri(filename: [*:0]const u8, hostname: ?[*:0]const u8, err: ?*?*GError) ?[*:0]u8;
 pub extern fn g_app_info_launch_default_for_uri(uri: [*:0]const u8, context: ?*anyopaque, err: ?*?*GError) c_int;
 pub extern fn g_get_monotonic_time() i64;
+pub extern fn g_get_user_special_dir(directory: c_int) ?[*:0]const u8;
+pub extern fn g_get_home_dir() ?[*:0]const u8;
 
 pub const GDateTime = opaque {};
 pub extern fn g_date_time_new_now_local() ?*GDateTime;

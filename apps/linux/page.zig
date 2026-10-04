@@ -173,6 +173,7 @@ pub fn fitToPage(self: *App) void {
     gtk.gtk_widget_set_margin_end(bar, if (over) nowplaying.panelWidth(self) else 0);
     for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
         if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!over));
+    gtk.gtk_widget_set_visible(bar, @intFromBool(self.current_page != .scan));
 }
 
 pub fn addTrail(self: *App, page: window.Page, crumbs: *gtk.Widget) void {

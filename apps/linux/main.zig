@@ -40,6 +40,7 @@ const watching = @import("watching.zig");
 const maintenance = @import("maintenance.zig");
 const playlists = @import("playlists.zig");
 const appearance = @import("appearance.zig");
+const first_run = @import("first_run.zig");
 
 const App = app.App;
 
@@ -87,6 +88,7 @@ fn tick(self: *App) void {
         transport.tick(self);
         queue.tick(self);
         jobs.tick(self);
+        first_run.tick(self);
         maintenance.tick(self);
         preferences.tick(self);
         details.tick(self);
@@ -152,6 +154,7 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     health.reload(self);
     matches.invalidate(self);
     if (self.library == null) self.toast("The library could not be opened");
+    first_run.startIfEmpty(self);
     window.refreshCounts(self);
     window.focusSidebar(self);
     gtk.gtk_window_present(self.window.?);
@@ -692,6 +695,7 @@ pub fn main(init: std.process.Init) !u8 {
     lyrics.shutdown(&self);
     albums.shutdown(&self);
     artist_page.shutdown(&self);
+    first_run.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};

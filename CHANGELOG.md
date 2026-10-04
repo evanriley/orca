@@ -19,13 +19,21 @@
   by their name as written rather than by the stored sort key that drops a
   leading "The", "A" or "An", and `orca-cli artists --sort-as-written`
   reaches it.
-- **Scan totals and unreadable-file reasons.** A scan now records each file
+- **First Run and Scan pages.** `orca-gtk` opens a four-step First Run on
+  a library with no roots: folders with an audio file count each, Watch for
+  changes and Scan My Music; the Scan page; loudness analysis, started when
+  the scan ends, with Analyze my music and Skip; and the library's counts
+  with Start Listening, which opens Albums. The Scan page shows the stages,
+  the file being read, the time left, the files that could not be read and
+  the albums found so far, with Pause and Hide. A scan now records each file
   it cannot read as an `unreadable_file` health issue with the reason, and
   clears it once the file reads. A scan or reconcile Job now counts the
   files its walk will reach before reading any, and its Job snapshot
   reports them as `total_units`, with the files walked as
   `completed_units`, so it has a percent and an ETA like other Jobs;
-  `orca-cli scan` progress lines print `total=`.
+  `orca-cli scan` progress lines print `total=`. The sidebar's activity
+  widget reads `Scanning library` with the percent while a scan is the only
+  Job.
 - **Change history.** `libraryTagWriteGroupPage` lists finished tag writes
   newest first with their files, Release title, state (`applied`,
   `undoing`, `undone`, `rolled_back`, `failed`, `needs_reconciliation`) and

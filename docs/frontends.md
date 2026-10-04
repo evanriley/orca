@@ -571,9 +571,11 @@ The window is an `AdwNavigationSplitView`:
   Settings. With Show counts in sidebar on, Albums, Artists and Tracks show
   the library's totals from `Runtime.libraryStats`. While a Job runs or
   waits, an activity widget at the foot reads `1 task running · 65%`,
+  `Scanning library · 62%` when the only Job is a scan,
   `1 task running · 2 waiting` or, with the Library's Jobs paused,
   `Paused · 2 waiting`, over a 3 px bar that pulses when the running Job
-  has no total, such as a scan; it is hidden when nothing runs or waits.
+  has no total, such as a scan still counting its files; it is hidden when
+  nothing runs or waits.
   Pressing it opens the activity popover (see **Activity** below).
 - **Albums** is a grid of covers with each album's title, artist and year.
   The grid and the list are a paged model as long as the count: the
@@ -1259,6 +1261,49 @@ files skipped, and runs the approved plan as a job; the toast when it finishes
 offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
 files back afterwards, because an edit that moves a track to another album
 gives it a new id.
+
+**First Run** fills the window, sidebar and player bar included, when the
+library opened at launch has no roots. A step bar shows Folders, Scan,
+Identify (optional) and Listen.
+
+1. **Folders**, "Welcome to Orca", lists the folders to scan. The XDG music
+   folder is filled in when it exists and is not the home folder; Add
+   Folder… (Add Another Folder… once one is listed) opens a folder chooser,
+   and × removes a row. Each row counts its audio files on its own thread with
+   `estimateAudioFiles`, which reads no tags and adds nothing, and reads
+   `About 2,800 audio files found`, `More than 100,000 audio files found`,
+   `No audio files found yet` or `Orca cannot read this folder`. Watch for
+   changes sets `[library] watch_folders` as the Settings switch does. Scan My
+   Music adds each folder with `libraryAddRoot`, starts a scan and opens the
+   Scan page.
+2. **Scan** is the Scan page below.
+3. **Identify**, "Measure your music", opens when the scan finishes while the
+   Scan page is showing. Loudness analysis (`analysis` Job) starts on its own
+   when the scan ends; the Analyze my music switch cancels or restarts it, and
+   the card shows `Measuring 1,952 of 3,002 files`. Skip, or Continue with the
+   switch off, moves on and leaves the analysis running.
+4. **Listen**, "Ready to listen", shows the Albums, Artists and Tracks counts
+   from `libraryStats`; Start Listening opens Albums.
+
+**Scan** is the page a scan started from First Run shows, "Building your
+library". A card shows the stage title (`Finding files`, `Reading files ·
+1,971 of 3,002`, `Finishing up`), the time left, a bar, the file being read
+and four stages: Discover files, Read tags & build albums (files read and
+albums found), Loudness analysis and Match with MusicBrainz, each waiting,
+running or done. The files read, the total and the time left are the scan
+Job snapshot's `completed_units`, `total_units` and
+`estimated_remaining_ms`: the total counts every file the walk reaches,
+covers included, so Discover files reads `3,302 files`, and the time left
+appears once liborca has 10 s of progress to estimate from.
+Below, `2 files couldn’t be read` lists the scan's `unreadable_file` health
+issues with each file's last folder, name and reason, and Review later in
+Library Health opens Health. Found so far shows the 14 most recently added
+albums with the album count, and opens an album on click; it, the problems
+and the sidebar counts, when shown, refresh once a second. Pause calls `pauseJob` and
+then reads Resume (`resumeJob`), with `Paused` in place of the time left.
+Hide opens Albums and leaves the scan running; the sidebar's activity widget
+still shows it, and the steps after the scan are skipped. The page has no
+search bar.
 
 **Activity** is a page, opened from the activity popover's View all or the
 command palette's Show Activity, of what the Library's Jobs are doing and

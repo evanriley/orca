@@ -112,23 +112,31 @@ pub fn reloadLibraryViews(self: *App) void {
     window.refreshCounts(self);
 }
 
-fn startScan(self: *App, root_id: ?i64) void {
-    const library = self.library orelse return;
-    const job = self.runtime.startLibraryScan(library, .{ .root_id = root_id }) catch |err|
-        return self.toast(queueRefusal(err, "Could not start the scan"));
+fn startScan(self: *App, root_id: ?i64) ?liborca.JobHandle {
+    const library = self.library orelse return null;
+    const job = self.runtime.startLibraryScan(library, .{ .root_id = root_id }) catch |err| {
+        self.toast(queueRefusal(err, "Could not start the scan"));
+        return null;
+    };
     begin(self, .{ .task = .scan, .job = job });
+    return job;
+}
+
+/// Scans every enabled root, returning the Job so First Run can follow it.
+pub fn scanLibrary(self: *App) ?liborca.JobHandle {
+    return startScan(self, null);
 }
 
 /// Walks every enabled root again. Unchanged files cost a stat each; this
 /// finds whatever watching did not, and everything when watching is off.
 pub fn rescan(self: *App) void {
     if (self.library == null) return;
-    startScan(self, null);
+    _ = startScan(self, null);
 }
 
 pub fn rescanRoot(self: *App, root_id: i64) void {
     if (self.library == null) return;
-    startScan(self, root_id);
+    _ = startScan(self, root_id);
 }
 
 pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
@@ -144,10 +152,18 @@ pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
 /// finding compares. Hours on a large library, and stopping it keeps what is
 /// done.
 pub fn startAnalysis(self: *App) void {
-    const library = self.library orelse return;
-    const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch |err|
-        return self.toast(queueRefusal(err, "Could not start measuring"));
+    _ = analyzeLibrary(self);
+}
+
+/// `startAnalysis`, returning the Job so First Run can follow it.
+pub fn analyzeLibrary(self: *App) ?liborca.JobHandle {
+    const library = self.library orelse return null;
+    const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch |err| {
+        self.toast(queueRefusal(err, "Could not start measuring"));
+        return null;
+    };
     begin(self, .{ .task = .analysis, .job = job });
+    return job;
 }
 
 pub fn startDuplicates(self: *App) void {
@@ -305,7 +321,7 @@ fn folderChosen(
         return;
     };
     preferences.refreshLibrary(self);
-    startScan(self, binding.root_id);
+    _ = startScan(self, binding.root_id);
 }
 
 pub fn chooseFolder(self: *App) void {
