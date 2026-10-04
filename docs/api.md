@@ -356,6 +356,24 @@ defer page.deinit();
   `orca_library_merge_duplicate_metadata` and
   `orca_library_duplicate_copy_playlists`. See
   [analysis.md](analysis.md#groups).
+- Metadata consistency: `startLibraryConsistencyPass(library,
+  ConsistencyRequest)` starts a Job of kind `consistency` that stores each
+  Release's disagreements as open issues. `libraryMetadataIssueCount(library,
+  ?IssueCategory)` counts them and `libraryMetadataIssuePage(library,
+  allocator, ?IssueCategory, limit, offset)` returns a `MetadataIssuePage` of
+  `MetadataIssueGroup`s, each with its `IssueOption`s (value and support
+  text) and `MetadataIssueProposal`s (the Tracks the first option changes).
+  `libraryApplyMetadataIssue(library, id, MetadataIssueChoice)` writes an
+  option or a custom value as locked Orca values, keeping locked ones, and
+  returns the Tracks changed; `libraryApplyMetadataIssues(library,
+  []const MetadataIssueApplication)` does so for several issues, each
+  optionally limited to some of its Tracks, after checking them all;
+  `librarySkipMetadataIssue(library, id)` hides an issue until its values
+  change. `libraryMetadataIssueStatus(library)` returns a
+  `MetadataIssueStatus`: open issues by category, their Releases, the last
+  successful pass and whether a scan completed since. No file is written. The C ABI has the
+  Job kind (`ORCA_JOB_KIND_CONSISTENCY`) but not these calls yet. See
+  [analysis.md](analysis.md#metadata-consistency).
 - `libraryStats(library)` returns `LibraryStats`: the Artist, Release and
   Track counts the unfiltered listings show, the files with a location that
   is not missing and their bytes, the Tracks' summed `total_duration_ms`,

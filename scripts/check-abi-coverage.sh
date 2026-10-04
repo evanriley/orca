@@ -62,6 +62,13 @@ declare -A reasons=(
     [libraryArtworkProblemReleasePage]="later: the albums with artwork problems, for an Artwork Review page (docs/roadmap.md, Later)"
     [libraryArtworkProblemReleaseCount]="later: the albums with artwork problems, for an Artwork Review page (docs/roadmap.md, Later)"
     [libraryTrackFieldStates]="later: a selection's shared, mixed and edited field values and cover, for a metadata editor (docs/roadmap.md, Later)"
+    [startLibraryConsistencyPass]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryMetadataIssueCount]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryMetadataIssuePage]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryApplyMetadataIssue]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [librarySkipMetadataIssue]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryMetadataIssueStatus]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
+    [libraryApplyMetadataIssues]="later: the metadata consistency pass and its issues, for a Metadata Issues page (docs/roadmap.md, Later)"
 )
 
 methods=$(grep -oE '^    pub fn [A-Za-z0-9_]+' "$runtime" | awk '{ print $3 }' | sort -u)

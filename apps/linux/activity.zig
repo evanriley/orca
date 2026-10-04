@@ -155,7 +155,7 @@ fn kindIcon(kind: liborca.JobKind) [*:0]const u8 {
         .analysis => "orca-gain-symbolic",
         .metadata_lookup, .acoustid_submission => "orca-matches-symbolic",
         .mutation => "orca-pen-symbolic",
-        .duplicate_scan => "orca-health-symbolic",
+        .duplicate_scan, .consistency => "orca-health-symbolic",
         .release_info => "orca-genres-symbolic",
         .artwork => "orca-image-symbolic",
         .lyrics => "orca-tracks-symbolic",
@@ -172,6 +172,7 @@ fn taskTitle(buffer: []u8, kind: liborca.JobKind, total: ?u64, waiting: bool) [:
         .property_backfill => if (waiting) "Read file properties" else "Reading file properties",
         .analysis => if (waiting) "Analyze loudness" else "Analyzing loudness",
         .duplicate_scan => if (waiting) "Find duplicates" else "Finding duplicates",
+        .consistency => if (waiting) "Check metadata" else "Checking metadata",
         .metadata_lookup => if (waiting) "Match with MusicBrainz" else "Matching with MusicBrainz",
         .acoustid_submission => if (waiting) "Submit to AcoustID" else "Submitting to AcoustID",
         .mutation => if (total) |files| strings.format(buffer, "{s} tags to {f} {s}", .{
@@ -197,6 +198,7 @@ fn kindNoun(kind: liborca.JobKind) []const u8 {
         .property_backfill => "reading file properties",
         .analysis => "loudness analysis",
         .duplicate_scan => "the duplicate search",
+        .consistency => "the metadata check",
         .metadata_lookup => "MusicBrainz matching",
         .acoustid_submission => "the AcoustID submission",
         .mutation => "the tag write",
@@ -218,6 +220,7 @@ fn historyName(kind: liborca.JobKind) []const u8 {
         .property_backfill => "File properties",
         .analysis => "Loudness analysis",
         .duplicate_scan => "Duplicate search",
+        .consistency => "Metadata check",
         .metadata_lookup => "MusicBrainz matching",
         .acoustid_submission => "AcoustID submission",
         .mutation => "Tag write",
@@ -234,7 +237,7 @@ fn historyName(kind: liborca.JobKind) []const u8 {
 fn unitName(kind: liborca.JobKind, count: u64) []const u8 {
     const plural: []const u8 = switch (kind) {
         .metadata_lookup, .projection, .ripping, .lyrics => "tracks",
-        .release_info => "releases",
+        .release_info, .consistency => "releases",
         .artist_info => "artists",
         .artwork => "covers",
         .dummy => "items",

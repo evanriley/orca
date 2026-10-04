@@ -32,6 +32,8 @@ pub const Kind = enum {
     /// Fetching Releases' descriptions, or filling their Tracks' genres from
     /// MusicBrainz.
     release_info,
+    /// Finding where a Release's tracks disagree about its metadata.
+    consistency,
     dummy,
 };
 

@@ -7953,6 +7953,7 @@ pub fn exportJobKind(kind: job.Kind) u8 {
         .lyrics => 9,
         .artist_info => 10,
         .release_info => 11,
+        .consistency => 12,
         .artwork, .conversion, .ripping, .dummy => 255,
     };
 }

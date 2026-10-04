@@ -18,7 +18,7 @@ pub const JobHistoryFilter = enum {
         return switch (self) {
             .all => "1",
             .scans => "kind IN ('scan', 'reconcile', 'projection', 'property_backfill')",
-            .analysis => "kind IN ('analysis', 'duplicate_scan')",
+            .analysis => "kind IN ('analysis', 'duplicate_scan', 'consistency')",
             .file_changes => "kind = 'mutation'",
             .problems => "state IN ('failed', 'cancelled')",
         };

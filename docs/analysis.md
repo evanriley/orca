@@ -508,6 +508,107 @@ than on the process arena most subcommands use. The pass frees each
 fingerprint as soon as it has been compared, and an arena does not honour that:
 it would keep one fingerprint per comparison for the length of the run.
 
+## Metadata consistency
+
+The consistency pass (`library/consistency_pass.zig`) finds where a
+Release's Tracks disagree about its metadata and stores each disagreement
+as a reviewable issue in `metadata_proposals`. It reads effective values (a
+locked Orca value, then the file's tag, then an unlocked Orca value), the
+user and file genres, and the values of accepted MusicBrainz matches. It
+writes no metadata and no file: applying an issue is a separate, explicit
+step.
+
+`Runtime.startLibraryConsistencyPass` (`orca-cli consistency DATABASE`, or
+`orca-cli jobs DATABASE --start=consistency`) runs it as a Job of kind
+`consistency`. It walks Releases by id in batches of
+`ConsistencyRequest.batch_size` (128 by default, at most 512), one
+transaction per batch on the write lane, checks for cancellation and pause
+between batches, and reports Releases examined against the Release count.
+Its history entry reads `N releases, N metadata issues` and is listed under
+the `analysis` history filter.
+
+### Categories
+
+| Category | Field | Raised when |
+| --- | --- | --- |
+| `album_artist` | album artist | the Tracks state more than one album artist |
+| `dates` | date | the Tracks state more than one date, a date that is not `YYYY`, `YYYY-MM` or `YYYY-MM-DD`, or some state a date and others none |
+| `track_numbering` | track number | a disc's Tracks repeat a number or one states none |
+| `genre_variants` | genre | the Tracks spell one genre (one `genre_alias` key) more than one way; one issue per genre |
+| `musicbrainz_differs` | album, album artist or date | the Tracks agree on a value that differs from the MusicBrainz release their accepted matches name |
+
+The MusicBrainz release is the one most of the Release's accepted matches
+name, with its title, artist and date from the match payload.
+`musicbrainz_differs` is not raised for the album artist or date when that
+field already has an `album_artist` or `dates` issue.
+
+### Options and support
+
+Each issue has options, the values to choose between, and proposals, the
+Tracks each option changes. Options are ordered with the MusicBrainz value
+first, then, in a `dates` issue whose other dates are all less precise forms
+of one date (`2016` and `2016-08` of `2016-08-20`), that precise date, then
+by the Tracks stating each, most first. Each option stores the count of
+Tracks stating it. Its support text says why it is offered:
+
+- `N tracks`: the Tracks stating it.
+- `1 track · TITLE`: the one Track stating it, by title, outside
+  `track_numbering` issues.
+- `N tracks · MusicBrainz agrees`: as well, the MusicBrainz release states it.
+- `MusicBrainz`: only the MusicBrainz release states it.
+- `Year of the dates stated`: a `dates` issue whose dates are all invalid
+  offers the year found in them.
+- `N tracks renumbered`: the single option of a `track_numbering` issue,
+  `Next free numbers`. On each disc, in path order, the first Track holding a
+  number keeps it, and every repeat or missing number takes the lowest number
+  no Track of the disc holds. The issue records the gap: the lowest such
+  number below the highest number the disc states, as 6 when a repeated 5
+  is followed by 7.
+
+Proposals are listed against the first option and leave out Tracks whose
+value is locked, at most 512 per issue.
+
+### Re-running, skipping and applying
+
+A run replaces the open issues of every Release it examines, so a Release
+that is consistent now has none. An issue's fingerprint hashes its category,
+field, genre key and each member file's current value. A skipped issue
+(`librarySkipMetadataIssue`, `orca-cli skip-issue`) stays skipped while a run
+finds the same fingerprint, and is dropped, and raised again as open, once
+the values change. Issue ids are never reused.
+
+`libraryApplyMetadataIssue` (`orca-cli apply-issue DATABASE GROUP
+(--option=ID | --custom=TEXT) [--tracks=IDS]`) first recomputes the
+Release's issue and refuses with `IssueOutOfDate` when its fingerprint
+changed since the run. It then writes the chosen value through `libraryEditTracks`, the path
+`orca-cli edit` uses: a locked user value per changed Track, reprojected. A
+Track whose value is locked keeps it. A genre issue replaces the variant in
+each Track's user genres and renames the genre. A custom value must be a
+valid date for `dates` and fold to the issue's genre for `genre_variants`;
+`track_numbering` takes none. It returns the number of Tracks changed and
+marks the issue applied. No media file is written; `write-tags` does that.
+
+`libraryApplyMetadataIssues` applies several issues, each with its own
+choice and, optionally, the only Tracks it changes; the others keep their
+values and the issue is still marked applied. It checks every issue before
+it changes any: one that is not open (`IssueNotOpen`), out of date, named
+twice (`InvalidIssueSelection`), given no Tracks (`NoTracksChosen`) or a
+Track it does not cover (`TrackNotInIssue`) leaves them all open. Each issue
+is checked against the Release as it was before any of them changed, which
+matters because an album or album artist fix can regroup a Release.
+
+`libraryMetadataIssueCount` counts the open issues, of one category or all,
+and `libraryMetadataIssuePage` pages them, by category and Release. Both use
+`metadata_proposals_groups`, a partial index over the issue rows. A page's
+groups also carry the gap, `missing` (the changes to a Track with no
+value), `precision` (a precise-date `dates` issue) and `case_only` (options
+that differ only in letter case, as a title MusicBrainz capitalises
+differently). `libraryMetadataIssueStatus` returns the open issues by
+category, the Releases they are on, when the pass last succeeded (from the
+Job history) and `stale`: the pass never ran, or a scan that changed files
+completed after it; a scan that found nothing new leaves the issues current.
+`orca-cli health --summary` ends with `metadata_issues N`.
+
 ## Health issues
 
 `library_health_issues` holds at most one row per file and kind. Each kind has

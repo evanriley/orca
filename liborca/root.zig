@@ -369,6 +369,41 @@ pub const analysisAvailableThreads = internal.library.analysis_pass.availableThr
 /// `analysisAvailableThreads`, and at least 1.
 pub const analysisDefaultThreads = internal.library.analysis_pass.defaultThreads;
 pub const DuplicateScanRequest = runtime.DuplicateScanRequest;
+/// Releases per bounded commit of `startLibraryConsistencyPass`.
+pub const ConsistencyRequest = runtime.ConsistencyRequest;
+/// What kind of inconsistency a metadata issue names: album_artist,
+/// dates, track_numbering, genre_variants or musicbrainz_differs.
+pub const IssueCategory = runtime.IssueCategory;
+/// Open, skipped until its Tracks change, or applied.
+pub const IssueState = runtime.IssueState;
+/// The value a metadata issue is about: album, album_artist, date,
+/// track_number or genre.
+pub const IssueField = runtime.IssueField;
+/// One value a metadata issue can take. `support` says how many Tracks state
+/// it and whether MusicBrainz agrees, as "16 tracks · MusicBrainz agrees", or
+/// names the one Track, as "1 track · Solo (Reprise)"; `tracks` is that count.
+pub const IssueOption = runtime.IssueOption;
+/// One Track's change if the issue's first option is applied.
+pub const MetadataIssueProposal = runtime.MetadataIssueProposal;
+/// One open metadata issue on one Release: its options, recommended first,
+/// and at most 512 of the changes the first one makes. `gap` is the lowest
+/// number a track_numbering issue fills below its disc's highest; `missing`
+/// counts the changes to a Track with no value; `precision` marks a dates
+/// issue whose other dates are less precise forms of the first; `case_only`
+/// marks options that differ only in letter case.
+pub const MetadataIssueGroup = runtime.MetadataIssueGroup;
+/// A page of `MetadataIssueGroup`s; free with `deinit`.
+pub const MetadataIssuePage = runtime.MetadataIssuePage;
+/// An option's `id`, or a value of the caller's. A track_numbering issue
+/// takes no value of the caller's.
+pub const MetadataIssueChoice = runtime.MetadataIssueChoice;
+/// Open metadata issues in all, by category and as Releases, when the
+/// consistency pass last succeeded, and `stale` when it never ran or a scan
+/// that changed files completed since.
+pub const MetadataIssueStatus = runtime.MetadataIssueStatus;
+/// One issue for `libraryApplyMetadataIssues`: its choice and, when given,
+/// the only Tracks it changes.
+pub const MetadataIssueApplication = runtime.MetadataIssueApplication;
 pub const ScanStats = runtime.ScanStats;
 pub const ScanStage = runtime.ScanStage;
 pub const CancellationToken = internal.library.CancellationToken;

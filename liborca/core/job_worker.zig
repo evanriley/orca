@@ -209,6 +209,11 @@ pub const DuplicateScanRequest = struct {
     batch_size: usize = 256,
 };
 
+pub const ConsistencyRequest = struct {
+    /// Releases per bounded commit.
+    batch_size: usize = 128,
+};
+
 /// What an AcoustID submission job did.
 pub const SubmissionStats = struct {
     files_examined: u64 = 0,
@@ -422,6 +427,7 @@ pub const Request = union(enum) {
     lyrics: LyricsRequest,
     artist_info: ArtistInfoRequest,
     release_info: ReleaseInfoRequest,
+    consistency: ConsistencyRequest,
 
     pub fn kind(self: Request) job.Kind {
         return switch (self) {
@@ -437,6 +443,7 @@ pub const Request = union(enum) {
             .lyrics => .lyrics,
             .artist_info => .artist_info,
             .release_info => .release_info,
+            .consistency => .consistency,
         };
     }
 
@@ -448,6 +455,7 @@ pub const Request = union(enum) {
             .analysis => |request| request.batch_size,
             .duplicate_scan => |request| request.batch_size,
             .metadata_lookup => |request| request.batch_size,
+            .consistency => |request| request.batch_size,
             .projection, .mutation, .acoustid_submission, .lyrics, .artist_info, .release_info => null,
         };
     }
@@ -466,7 +474,7 @@ pub const Request = union(enum) {
     /// what holds a paused Job.
     pub fn pausable(self: Request) bool {
         return switch (self) {
-            .scan, .reconcile, .property_backfill, .analysis, .duplicate_scan, .metadata_lookup, .acoustid_submission => true,
+            .scan, .reconcile, .property_backfill, .analysis, .duplicate_scan, .metadata_lookup, .acoustid_submission, .consistency => true,
             .release_info => |request| request.target == .missing_genres,
             .projection, .mutation, .lyrics, .artist_info => false,
         };
@@ -742,7 +750,7 @@ pub const Stats = union(enum) {
 
     pub fn init(request: Request) Stats {
         return switch (request) {
-            .scan, .reconcile, .projection, .property_backfill, .analysis, .mutation => .{ .scan = .{} },
+            .scan, .reconcile, .projection, .property_backfill, .analysis, .mutation, .consistency => .{ .scan = .{} },
             .duplicate_scan => .{ .duplicates = .{} },
             .metadata_lookup => .{ .matching = .{} },
             .acoustid_submission => .{ .submission = .{} },
@@ -910,6 +918,7 @@ pub const JobWorker = struct {
             .lyrics => |request| self.runLyrics(request),
             .artist_info => |*request| self.runArtistInfo(request),
             .release_info => |*request| self.runReleaseInfo(request),
+            .consistency => |request| self.runConsistency(request),
         }
     }
 
@@ -1214,6 +1223,26 @@ pub const JobWorker = struct {
         _ = stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
         _ = stats.buckets_truncated.fetchAdd(result.buckets_truncated, .acq_rel);
         _ = stats.comparisons.fetchAdd(result.comparisons, .acq_rel);
+        if (result.cancelled) stats.cancelled.store(true, .release);
+    }
+
+    fn runConsistency(self: *JobWorker, request: ConsistencyRequest) void {
+        const stats = &self.stats.scan;
+        var pass: library_pass.ConsistencyPass = .{
+            .allocator = self.allocator,
+            .library = self.database,
+            .cancellation = &self.token,
+            .progress = &self.progress,
+            .batch_size = request.batch_size,
+        };
+        const result = pass.run() catch {
+            self.failed.store(true, .release);
+            return;
+        };
+        self.progress.store(0, .release);
+        _ = stats.files_seen.fetchAdd(result.releases_seen, .acq_rel);
+        _ = stats.changed.fetchAdd(result.issues, .acq_rel);
+        _ = stats.batches_committed.fetchAdd(result.batches_committed, .acq_rel);
         if (result.cancelled) stats.cancelled.store(true, .release);
     }
 

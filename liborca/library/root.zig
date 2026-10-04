@@ -10,6 +10,7 @@ pub const m3u = @import("m3u.zig");
 pub const matching = @import("matching.zig");
 pub const projection = @import("projection.zig");
 pub const property_backfill = @import("property_backfill.zig");
+pub const consistency_pass = @import("consistency_pass.zig");
 pub const scanner = @import("scanner.zig");
 pub const smart_playlist = @import("smart_playlist.zig");
 pub const tag_reader = @import("tag_reader.zig");
@@ -29,6 +30,7 @@ pub const LibraryMatching = matching.LibraryMatching;
 pub const Projection = projection.Projection;
 pub const ProjectionScope = projection.Scope;
 pub const PropertyBackfill = property_backfill.PropertyBackfill;
+pub const ConsistencyPass = consistency_pass.ConsistencyPass;
 pub const Scanner = scanner.Scanner;
 pub const Tags = tag_reader.Tags;
 
@@ -43,6 +45,7 @@ test {
     _ = @import("matching.zig");
     _ = @import("projection.zig");
     _ = @import("property_backfill.zig");
+    _ = @import("consistency_pass.zig");
     _ = @import("scanner.zig");
     _ = @import("smart_playlist.zig");
     _ = @import("tag_reader.zig");

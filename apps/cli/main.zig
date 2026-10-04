@@ -116,7 +116,17 @@ fn describe(err: anyerror) []const u8 {
         error.LettersAndTotals => "give either --letters or --totals, not both",
         error.AsyncListingOnly => "--async lists a page and its count; give it no --letters or --totals",
         error.UnknownFile => "no file with that id",
-        error.UnknownJobKind => "--start takes scan, analysis, duplicates, backfill or project",
+        error.UnknownJobKind => "--start takes scan, analysis, duplicates, backfill, project or consistency",
+        error.UnknownIssueCategory => "--category takes album_artist, dates, track_numbering, genre_variants or musicbrainz_differs",
+        error.IssueNotFound => "no metadata issue with that group id; list them with issues DATABASE",
+        error.IssueNotOpen => "that metadata issue was already applied or skipped",
+        error.IssueOutOfDate => "the release's values changed since the issue was found; run consistency DATABASE again",
+        error.UnknownIssueOption => "the issue has no option with that id",
+        error.CustomValueNotAllowed => "a track_numbering issue takes --option=0 only",
+        error.GenreDoesNotMatchIssue => "the custom genre must be a spelling of the issue's genre",
+        error.IssueChoiceRequired => "give either --option=ID or --custom=TEXT",
+        error.TrackNotInIssue => "--tracks names a track the issue does not cover",
+        error.NoTracksChosen => "--tracks needs at least one track id",
         error.UnknownHistoryFilter => "--filter takes all, scans, analysis, file_changes or problems",
         error.JobsNeedStartOrHistory => "give either --start=KIND or --history",
         error.JobQueueFull => "32 jobs are already waiting; start this one when one has finished",
@@ -198,6 +208,17 @@ const commands = [_]Command{
         .max_arguments = null,
         .run = findDuplicates,
     },
+    .{ .name = "consistency", .usage = "consistency DATABASE [--batch=N] [--cancel-after=MS]", .min_arguments = 1, .max_arguments = null, .run = checkConsistency },
+    .{
+        .name = "issues",
+        .usage = "issues DATABASE [--category=album_artist|dates|track_numbering|genre_variants|musicbrainz_differs]\n" ++
+            usage_indent ++ "  [--limit N] [--offset N]",
+        .min_arguments = 1,
+        .max_arguments = null,
+        .run = listMetadataIssues,
+    },
+    .{ .name = "apply-issue", .usage = "apply-issue DATABASE GROUP (--option=ID | --custom=TEXT) [--tracks=IDS]", .min_arguments = 3, .max_arguments = 4, .run = applyMetadataIssue },
+    .{ .name = "skip-issue", .usage = "skip-issue DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = skipMetadataIssue, .shares_usage_line = true },
     .{ .name = "merge-duplicate", .usage = "merge-duplicate DATABASE KEEP_TRACK_ID FROM_TRACK_ID", .min_arguments = 3, .max_arguments = 3, .run = mergeDuplicate },
     .{ .name = "keep-both", .usage = "keep-both DATABASE FILE_ID FILE_ID", .min_arguments = 3, .max_arguments = 3, .run = keepBothDuplicates, .shares_usage_line = true },
     .{ .name = "ignore-duplicate", .usage = "ignore-duplicate DATABASE GROUP_ID", .min_arguments = 2, .max_arguments = 2, .run = ignoreDuplicateGroup, .shares_usage_line = true },
@@ -1174,7 +1195,7 @@ fn printLibraryJobsState(
     try stdout.flush();
 }
 
-const StartableJob = enum { scan, analysis, duplicates, backfill, project };
+const StartableJob = enum { scan, analysis, duplicates, backfill, project, consistency };
 
 fn startListedJob(runtime: *liborca.Runtime, library: liborca.LibraryHandle, kind: StartableJob) !liborca.JobHandle {
     return switch (kind) {
@@ -1183,6 +1204,7 @@ fn startListedJob(runtime: *liborca.Runtime, library: liborca.LibraryHandle, kin
         .duplicates => runtime.startLibraryDuplicateScan(library, .{}),
         .backfill => runtime.startLibraryPropertyBackfill(library, .{}),
         .project => runtime.startLibraryProjection(library),
+        .consistency => runtime.startLibraryConsistencyPass(library, .{}),
     };
 }
 
@@ -1551,6 +1573,120 @@ fn findDuplicates(context: Context) !void {
     try printDuplicateStats(stdout, try runtime.jobScanStats(job_handle));
 }
 
+fn checkConsistency(context: Context) !void {
+    const stdout = context.stdout;
+    const options = try parseJobOptions(context.arguments[1..], &.{ .batch, .cancel_after });
+    const database_path = try context.allocator.dupeSentinel(u8, context.arguments[0], 0);
+    var runtime = liborca.Runtime.init(std.heap.smp_allocator);
+    defer runtime.deinit();
+    const library_handle = try runtime.openLibrary(context.io, database_path);
+    var request: liborca.ConsistencyRequest = .{};
+    if (options.batch_size) |batch_size| if (batch_size != 0) {
+        request.batch_size = batch_size;
+    };
+    const job_handle = try runtime.startLibraryConsistencyPass(library_handle, request);
+    const planned = try runtime.jobSnapshotSynced(job_handle);
+    try stdout.print("{d} releases to examine\n", .{planned.total_units orelse 0});
+    try stdout.flush();
+    try awaitJob(&runtime, stdout, job_handle, options.cancel_after_ms);
+    const stats = try runtime.jobScanStats(job_handle);
+    try stdout.print("releases={d} issues={d} batches={d} cancelled={s}\n", .{
+        stats.files_seen,
+        stats.changed,
+        stats.batches_committed,
+        if (stats.cancelled) "yes" else "no",
+    });
+    inline for (std.meta.fields(liborca.IssueCategory)) |field| {
+        const category: liborca.IssueCategory = @enumFromInt(field.value);
+        try stdout.print("{s}={d} ", .{ field.name, try runtime.libraryMetadataIssueCount(library_handle, category) });
+    }
+    try stdout.print("open={d}\n", .{try runtime.libraryMetadataIssueCount(library_handle, null)});
+}
+
+fn listMetadataIssues(context: Context) !void {
+    var category: ?liborca.IssueCategory = null;
+    var limit: u32 = 256;
+    var offset: u32 = 0;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.startsWith(u8, argument, "--category=")) {
+            category = std.meta.stringToEnum(liborca.IssueCategory, argument["--category=".len..]) orelse
+                return error.UnknownIssueCategory;
+        } else if (std.mem.eql(u8, argument, "--limit") or std.mem.eql(u8, argument, "--offset")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = try std.fmt.parseInt(u32, context.arguments[index], 10);
+            if (std.mem.eql(u8, argument, "--limit")) limit = value else offset = value;
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    var page = try runtime.libraryMetadataIssuePage(library, context.allocator, category, limit, offset);
+    defer page.deinit();
+    const stdout = context.stdout;
+    for (page.items) |group| {
+        try stdout.print("group={d} release={d} category={t} field={t} tracks={d} title={s} artist={s}\n", .{
+            group.id,
+            group.release_id,
+            group.category,
+            group.field,
+            group.track_count,
+            group.title,
+            group.artist,
+        });
+        for (group.options) |option| try stdout.print("  option={d} value={s} support={s}\n", .{
+            option.id,
+            option.value,
+            option.support.slice(),
+        });
+        for (group.proposals) |proposal| try stdout.print("  proposal track={d} title={s} current={s} proposed={s}\n", .{
+            proposal.track_id,
+            proposal.title,
+            proposal.current orelse "-",
+            proposal.proposed,
+        });
+    }
+    try stdout.print("issues={d}\n", .{try runtime.libraryMetadataIssueCount(library, category)});
+}
+
+fn applyMetadataIssue(context: Context) !void {
+    const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var choice: ?liborca.MetadataIssueChoice = null;
+    var tracks: ?std.ArrayList(i64) = null;
+    defer if (tracks) |*ids| ids.deinit(context.allocator);
+    for (context.arguments[2..]) |argument| {
+        if (std.mem.startsWith(u8, argument, "--option=")) {
+            if (choice != null) return error.IssueChoiceRequired;
+            choice = .{ .option = try std.fmt.parseInt(u32, argument["--option=".len..], 10) };
+        } else if (std.mem.startsWith(u8, argument, "--custom=")) {
+            if (choice != null) return error.IssueChoiceRequired;
+            choice = .{ .custom = argument["--custom=".len..] };
+        } else if (std.mem.startsWith(u8, argument, "--tracks=") and tracks == null) {
+            tracks = try parseTrackIds(context.allocator, argument["--tracks=".len..]);
+        } else return error.UnknownOption;
+    }
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    const changed = try runtime.libraryApplyMetadataIssues(library, &.{.{
+        .group_id = group_id,
+        .choice = choice orelse return error.IssueChoiceRequired,
+        .tracks = if (tracks) |ids| ids.items else null,
+    }});
+    try context.stdout.print("changed={d}\n", .{changed});
+}
+
+fn skipMetadataIssue(context: Context) !void {
+    const group_id = try std.fmt.parseInt(i64, context.arguments[1], 10);
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    try runtime.librarySkipMetadataIssue(library, group_id);
+    try context.stdout.print("skipped={d}\n", .{group_id});
+}
+
 fn listDuplicateGroups(context: Context) !void {
     var limit: u32 = 256;
     var offset: u32 = 0;
@@ -1726,6 +1862,7 @@ fn listHealthIssues(context: Context) !void {
             .{ @tagName(entry.kind), @tagName(entry.severity), entry.count, entry.files, entry.bytes },
         );
         try context.stdout.print("missing_files\t{d}\n", .{try runtime.libraryMissingFileCount(library_handle)});
+        try context.stdout.print("metadata_issues\t{d}\n", .{try runtime.libraryMetadataIssueCount(library_handle, null)});
         return;
     }
     var page = if (kind) |only|

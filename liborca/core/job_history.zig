@@ -54,6 +54,7 @@ pub const RetryRequest = union(enum) {
     property_backfill: job_worker.BackfillRequest,
     analysis: job_worker.AnalysisRequest,
     duplicate_scan: job_worker.DuplicateScanRequest,
+    consistency: job_worker.ConsistencyRequest,
     matching: runtime.MatchRequest,
     cover_art: CoverArt,
     acoustid_submission,
@@ -71,6 +72,7 @@ pub const RetryRequest = union(enum) {
             .property_backfill => |backfill| .{ .property_backfill = backfill },
             .analysis => |analysis| .{ .analysis = analysis },
             .duplicate_scan => |duplicates| .{ .duplicate_scan = duplicates },
+            .consistency => |consistency| .{ .consistency = consistency },
             .metadata_lookup => |matching| matchingRetry(matching),
             .acoustid_submission => .acoustid_submission,
             .release_info => |info| switch (info.target) {
@@ -187,6 +189,11 @@ fn writeSummary(worker: *const JobWorker, writer: *std.Io.Writer) !void {
             try parts.optional(stats.tracks_written, "exact duplicates");
             try parts.optional(stats.releases_written, "likely duplicates");
             try parts.optional(stats.unsupported, "not yet analyzed");
+        },
+        .consistency => {
+            const stats = worker.scanStats();
+            try parts.count(stats.files_seen, "release", "releases");
+            try parts.optional(stats.changed, "metadata issues");
         },
         .metadata_lookup => |matching| {
             const stats = worker.matchStats();

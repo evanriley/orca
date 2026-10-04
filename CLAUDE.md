@@ -152,8 +152,12 @@ zig build run -- duplicates DATABASE --groups [--limit N] [--offset N]   # id, t
 zig build run -- duplicates DATABASE --group=ID   # the copies, suggested first: file= track= keep=yes|no locations= playlists= codec= rate= depth= bytes= ... path=
 zig build run -- merge-duplicate DATABASE KEEP_TRACK_ID FROM_TRACK_ID   # fills KEEP's missing Orca values, user genres, rating and feedback from FROM; KEEP's locks win; no file written
 zig build run -- keep-both DATABASE FILE_ID FILE_ID   # dismisses both files' duplicate issues
+zig build run -- consistency DATABASE [--batch=N] [--cancel-after=MS]   # finds where a Release's Tracks disagree; `releases= issues= batches= cancelled=`, then the open count per category and `open=`
+zig build run -- issues DATABASE [--category=album_artist|dates|track_numbering|genre_variants|musicbrainz_differs] [--limit N] [--offset N]   # group= release= category= field= tracks= title= artist=, then `option=ID value= support=` and `proposal track= title= current= proposed=` lines, then `issues=N`
+zig build run -- apply-issue DATABASE GROUP (--option=ID | --custom=TEXT) [--tracks=IDS]   # locked Orca values through the edit path, locks kept; --tracks changes only those of the issue's Tracks; prints changed=N; no file written
+zig build run -- skip-issue DATABASE GROUP   # hidden until the Release's values change
 zig build run -- ignore-duplicate DATABASE GROUP_ID   # dismisses the duplicate issues of the whole group
-zig build run -- jobs DATABASE [--start=scan|analysis|duplicates|backfill|project]... [--pause-after=MS] [--resume-after=MS]   # one runtime: each after the first prints `waiting after=`; prints every state change until all finish
+zig build run -- jobs DATABASE [--start=scan|analysis|duplicates|backfill|project|consistency]... [--pause-after=MS] [--resume-after=MS]   # one runtime: each after the first prints `waiting after=`; prints every state change until all finish
 zig build run -- jobs DATABASE --history [--filter=all|scans|analysis|file_changes|problems] [--limit N] [--offset N]   # finished Jobs newest first: id, kind, state, started_at=, duration_s=, completed=, total=, retry=yes|no, summary=
 zig build run -- retry-job DATABASE HISTORY_ID   # starts a failed or cancelled Job's request again and waits for it
 

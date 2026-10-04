@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 52;
+pub const current_version = 55;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1521,6 +1521,36 @@ const migration_52 =
     \\
 ;
 
+const migration_54 =
+    \\CREATE TABLE metadata_proposals (
+    \\    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    \\    group_id INTEGER,
+    \\    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    \\    category INTEGER NOT NULL CHECK (category BETWEEN 0 AND 4),
+    \\    field TEXT NOT NULL,
+    \\    track_id INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+    \\    current TEXT,
+    \\    proposed TEXT,
+    \\    reason TEXT,
+    \\    option INTEGER CHECK (option IS NULL OR option >= 0),
+    \\    state INTEGER NOT NULL DEFAULT 0 CHECK (state BETWEEN 0 AND 2),
+    \\    fingerprint INTEGER NOT NULL,
+    \\    created_at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX metadata_proposals_groups ON metadata_proposals(state, category, release_id, id)
+    \\    WHERE id = group_id;
+    \\CREATE INDEX metadata_proposals_members ON metadata_proposals(group_id, option, id);
+    \\CREATE INDEX metadata_proposals_release ON metadata_proposals(release_id, state);
+    \\CREATE INDEX metadata_proposals_track ON metadata_proposals(track_id) WHERE track_id IS NOT NULL;
+    \\
+;
+
+const migration_55 =
+    \\ALTER TABLE metadata_proposals ADD COLUMN tracks INTEGER CHECK (tracks IS NULL OR tracks >= 0);
+    \\ALTER TABLE metadata_proposals ADD COLUMN gap INTEGER CHECK (gap IS NULL OR gap > 0);
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -2057,6 +2087,8 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 50 and target_version >= 50) try db.exec(migration_50);
     if (version < 51 and target_version >= 51) try db.exec(migration_51);
     if (version < 52 and target_version >= 52) try db.exec(migration_52);
+    if (version < 54 and target_version >= 54) try db.exec(migration_54);
+    if (version < 55 and target_version >= 55) try db.exec(migration_55);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -4045,5 +4077,76 @@ test "a version-51 library keeps its releases and gains release candidate dismis
     ));
     try db.exec("DELETE FROM releases WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM dismissed_release_candidates;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-53 library keeps its releases and gains metadata proposals that go with their release and track" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v53-metadata-proposals.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 53);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key) VALUES (1, 'Blonde', 'Frank Ocean', 'blonde'), (2, 'Endless', 'Frank Ocean', 'endless');
+        \\INSERT INTO tracks(id, release_id, title) VALUES (1, 1, 'Nikes'), (2, 2, 'Device Control');
+    );
+    const rows_sql = "SELECT group_concat(id || ':' || title || ':' || album_artist, ' ') FROM (SELECT * FROM releases ORDER BY id);";
+    const before = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(before);
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    const after = try text(std.testing.allocator, db, rows_sql);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
+    try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM metadata_proposals;"));
+
+    try db.exec(
+        \\INSERT INTO metadata_proposals(id, group_id, release_id, category, field, fingerprint, created_at) VALUES (1, 1, 1, 0, 'album_artist', 7, 1800000000);
+        \\INSERT INTO metadata_proposals(group_id, release_id, category, field, proposed, reason, option, fingerprint, created_at)
+        \\VALUES (1, 1, 0, 'album_artist', 'Frank Ocean', '1 track', 0, 7, 1800000000);
+        \\INSERT INTO metadata_proposals(group_id, release_id, category, field, track_id, current, proposed, fingerprint, created_at)
+        \\VALUES (1, 1, 0, 'album_artist', 1, 'frank ocean', 'Frank Ocean', 7, 1800000000);
+        \\INSERT INTO metadata_proposals(id, group_id, release_id, category, field, fingerprint, created_at) VALUES (4, 4, 2, 1, 'date', 9, 1800000000);
+    );
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO metadata_proposals(release_id, category, field, fingerprint, created_at) VALUES (1, 5, 'x', 0, 0);",
+    ));
+    try std.testing.expectError(error.SqlFailed, db.exec(
+        "INSERT INTO metadata_proposals(release_id, category, field, state, fingerprint, created_at) VALUES (1, 0, 'x', 3, 0, 0);",
+    ));
+    try db.exec("DELETE FROM tracks WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 3), try scalar(db, "SELECT count(*) FROM metadata_proposals;"));
+    try db.exec("DELETE FROM tracks WHERE id = 2; DELETE FROM releases WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 4), try scalar(db, "SELECT id FROM metadata_proposals;"));
+    try checkForeignKeys(db);
+}
+
+test "a version-54 library keeps its metadata issues and gains option track counts and numbering gaps" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v54-metadata-proposal-counts.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 54);
+    try db.exec(
+        \\INSERT INTO releases(id, title, album_artist, release_key) VALUES (1, 'Room 25', 'Noname', 'room 25');
+        \\INSERT INTO metadata_proposals(id, group_id, release_id, category, field, fingerprint, created_at) VALUES (1, 1, 1, 2, 'track_number', 7, 1800000000);
+        \\INSERT INTO metadata_proposals(group_id, release_id, category, field, proposed, reason, option, fingerprint, created_at)
+        \\VALUES (1, 1, 2, 'track_number', 'Next free numbers', '1 track renumbered', 0, 7, 1800000000);
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 2), try scalar(db, "SELECT count(*) FROM metadata_proposals WHERE tracks IS NULL AND gap IS NULL;"));
+    try db.exec("UPDATE metadata_proposals SET gap = 6 WHERE id = 1; UPDATE metadata_proposals SET tracks = 1 WHERE id = 2;");
+    try std.testing.expectEqual(@as(i64, 7), try scalar(db, "SELECT sum(COALESCE(gap, 0) + COALESCE(tracks, 0)) FROM metadata_proposals;"));
+    try std.testing.expectError(error.SqlFailed, db.exec("UPDATE metadata_proposals SET gap = 0 WHERE id = 1;"));
+    try std.testing.expectError(error.SqlFailed, db.exec("UPDATE metadata_proposals SET tracks = -1 WHERE id = 2;"));
     try checkForeignKeys(db);
 }

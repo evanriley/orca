@@ -20,6 +20,7 @@ const ReleaseInfoOutcome = runtime.ReleaseInfoOutcome;
 const GenreFillOptions = runtime.GenreFillOptions;
 const BackfillRequest = runtime.BackfillRequest;
 const DuplicateScanRequest = runtime.DuplicateScanRequest;
+const ConsistencyRequest = runtime.ConsistencyRequest;
 const JobHandle = runtime.JobHandle;
 const JobWorker = job_worker.JobWorker;
 const LibraryHandle = runtime.LibraryHandle;
@@ -132,6 +133,14 @@ pub fn startLibraryDuplicateScan(
     request: DuplicateScanRequest,
 ) !JobHandle {
     return startJobWorker(self, library, .{ .duplicate_scan = request });
+}
+
+pub fn startLibraryConsistencyPass(
+    self: *OrcaRuntime,
+    library: LibraryHandle,
+    request: ConsistencyRequest,
+) !JobHandle {
+    return startJobWorker(self, library, .{ .consistency = request });
 }
 
 pub fn startLibraryMatching(
@@ -632,6 +641,7 @@ pub fn jobRetry(self: *OrcaRuntime, library: LibraryHandle, history_id: i64) !Jo
         .property_backfill => |request| startLibraryPropertyBackfill(self, library, request),
         .analysis => |request| startLibraryAnalysis(self, library, request),
         .duplicate_scan => |request| startLibraryDuplicateScan(self, library, request),
+        .consistency => |request| startLibraryConsistencyPass(self, library, request),
         .matching => |request| startLibraryMatching(self, library, request),
         .cover_art => |request| startReleaseCoverArtFetch(self, library, request.release_id),
         .acoustid_submission => startAcoustIdSubmission(self, library),
@@ -819,6 +829,7 @@ fn plannedUnits(self: *const OrcaRuntime, library_database: *database.LibraryDat
             analysis_service.diagnosticsSelector(.{}),
         ),
         .duplicate_scan => try library_database.files.count(),
+        .consistency => try library_database.releases.count(),
         .mutation => |pending| pending.plan.actions.len,
         .metadata_lookup => |matching| if (!matching.lookups)
             0

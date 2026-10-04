@@ -504,6 +504,28 @@ reads Releases in that order from the index instead of sorting every one,
 which took 0.66 s at 429,312 Releases. The rewind to version 25 drops the
 table and the index.
 
+Migration 54 adds `metadata_proposals`, the issues of the metadata
+consistency pass ([analysis.md](analysis.md#metadata-consistency)). One row
+per issue header (`id = group_id`, `option` and `track_id` null), per option
+(`option` from 0, `proposed` the value, `reason` its support text) and per
+proposal (`track_id`, `current`, `proposed`). Each row carries the issue's
+`release_id`, `category` (0 to 4), `field`, `state` (0 open, 1 skipped, 2
+applied), `fingerprint` and `created_at`. Rows cascade with their Release
+and Track. `id` is `AUTOINCREMENT` so a replaced issue's id never names a
+later one. `metadata_proposals_groups` is a partial index on `(state,
+category, release_id, id) WHERE id = group_id` for the page and count;
+`metadata_proposals_members` on `(group_id, option, id)` reads an issue's
+rows, `metadata_proposals_release` on `(release_id, state)` serves a
+Release's replacement, and `metadata_proposals_track` the Track cascade.
+Existing libraries start with none. The rewind to version 25 drops the
+table.
+
+Migration 55 adds two nullable columns to `metadata_proposals`: `tracks`, an
+option's count of Tracks stating its value (at least 0), and `gap`, on a
+`track_numbering` header, the lowest number it fills below the disc's
+highest (at least 1). Issues stored before it have neither until the pass
+runs again.
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the

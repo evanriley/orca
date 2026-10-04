@@ -4,6 +4,26 @@
 
 ### Added
 
+- **Metadata consistency.** A `consistency` Job finds, per Release, album
+  artist spellings that disagree, mixed or invalid dates, repeated or
+  missing track numbers, genre spelling variants and values that differ
+  from the accepted MusicBrainz release, and stores each as an issue with
+  its options, their support (`3 tracks · MusicBrainz agrees`) and the
+  Tracks each changes. It runs in bounded batches with progress and pause.
+  `startLibraryConsistencyPass`, `libraryMetadataIssueCount`,
+  `libraryMetadataIssuePage`, `libraryApplyMetadataIssue` (locked Orca
+  values through the edit path, locks kept, no file written) and
+  `librarySkipMetadataIssue`; a skipped issue returns when its values
+  change. `libraryApplyMetadataIssues` applies several issues, each
+  optionally to some of its Tracks, after checking them all, and
+  `libraryMetadataIssueStatus` counts open issues and says whether a scan
+  that changed files ran since the pass. A precise date is proposed over
+  its less precise forms, a date missing from some Tracks is an issue, a
+  one-Track option names the Track, and numbering issues record their gap.
+  Migrations 54 and 55 add `metadata_proposals`. `orca-cli consistency`, `issues`,
+  `apply-issue [--tracks=IDS]`, `skip-issue` and `jobs --start=consistency`;
+  `health --summary` ends with `metadata_issues N`. The C ABI reports the
+  Job kind as `ORCA_JOB_KIND_CONSISTENCY`.
 - **Matches and Match Review.** `orca-gtk`'s Matches page lists albums
   by their best MusicBrainz release in Confident, Needs Review and
   Unmatched tabs with their counts, each row with its candidate, confidence

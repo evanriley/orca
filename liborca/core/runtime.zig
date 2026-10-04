@@ -21,6 +21,7 @@ const provider_sources = @import("provider_sources.zig");
 const providers = @import("../providers/root.zig");
 const queue_history = @import("queue.zig");
 const runtime_artist_info = @import("runtime_artist_info.zig");
+const runtime_consistency = @import("runtime_consistency.zig");
 const runtime_duplicates = @import("runtime_duplicates.zig");
 const runtime_genres = @import("runtime_genres.zig");
 const runtime_listens = @import("runtime_listens.zig");
@@ -68,6 +69,16 @@ pub const DuplicateGroupTotals = runtime_duplicates.DuplicateGroupTotals;
 pub const DuplicateCopy = runtime_duplicates.DuplicateCopy;
 pub const DuplicateCopyList = runtime_duplicates.DuplicateCopyList;
 pub const DuplicateMerge = runtime_duplicates.DuplicateMerge;
+pub const IssueCategory = runtime_consistency.IssueCategory;
+pub const IssueState = runtime_consistency.IssueState;
+pub const IssueField = runtime_consistency.IssueField;
+pub const IssueOption = runtime_consistency.IssueOption;
+pub const MetadataIssueProposal = runtime_consistency.MetadataIssueProposal;
+pub const MetadataIssueGroup = runtime_consistency.MetadataIssueGroup;
+pub const MetadataIssuePage = runtime_consistency.MetadataIssuePage;
+pub const MetadataIssueChoice = runtime_consistency.MetadataIssueChoice;
+pub const MetadataIssueStatus = runtime_consistency.MetadataIssueStatus;
+pub const MetadataIssueApplication = runtime_consistency.MetadataIssueApplication;
 pub const PlayStats = database.PlayStats;
 pub const Feedback = database.Feedback;
 pub const FeedbackChange = database.FeedbackChange;
@@ -380,6 +391,7 @@ pub const BackfillPending = struct {
 };
 pub const AnalysisRequest = job_worker.AnalysisRequest;
 pub const DuplicateScanRequest = job_worker.DuplicateScanRequest;
+pub const ConsistencyRequest = job_worker.ConsistencyRequest;
 
 pub const MatchMode = library_pass.matching.Mode;
 
@@ -2861,6 +2873,78 @@ pub const OrcaRuntime = struct {
         request: DuplicateScanRequest,
     ) !JobHandle {
         return runtime_jobs.startLibraryDuplicateScan(self, library, request);
+    }
+
+    /// Starts the metadata consistency pass: finds, per Release, album artist
+    /// spellings, mixed or invalid dates, repeated or missing track numbers,
+    /// genre spellings, and values that differ from an accepted MusicBrainz
+    /// release, replacing the open issues it found before. It reads the
+    /// Library only; nothing changes until an issue is applied.
+    pub fn startLibraryConsistencyPass(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        request: ConsistencyRequest,
+    ) !JobHandle {
+        return runtime_jobs.startLibraryConsistencyPass(self, library, request);
+    }
+
+    /// Open metadata issues by category and the Releases they are on, when
+    /// the consistency pass last succeeded, and whether a scan completed
+    /// since, or it never ran.
+    pub fn libraryMetadataIssueStatus(self: *OrcaRuntime, library: LibraryHandle) !MetadataIssueStatus {
+        return runtime_consistency.libraryMetadataIssueStatus(self, library);
+    }
+
+    /// Open metadata issues, of one category or of all.
+    pub fn libraryMetadataIssueCount(self: *OrcaRuntime, library: LibraryHandle, category: ?IssueCategory) !u64 {
+        return runtime_consistency.libraryMetadataIssueCount(self, library, category);
+    }
+
+    /// A page of open metadata issues, ordered by category and Release, each
+    /// with its options, recommended first, and the changes the first option
+    /// makes. Free with `deinit`.
+    pub fn libraryMetadataIssuePage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        category: ?IssueCategory,
+        limit: u32,
+        offset: u32,
+    ) !MetadataIssuePage {
+        return runtime_consistency.libraryMetadataIssuePage(self, library, allocator, category, limit, offset);
+    }
+
+    /// Applies an option, or a value of the caller's, to an open issue's
+    /// Tracks as locked Orca values, through the same path as
+    /// `libraryEditTracks`, and marks it applied. A Track whose value is
+    /// locked keeps it; no file is written. Returns the Tracks changed.
+    /// `error.IssueOutOfDate` when the Tracks changed since the pass found it.
+    pub fn libraryApplyMetadataIssue(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        group_id: i64,
+        choice: MetadataIssueChoice,
+    ) !u64 {
+        return runtime_consistency.libraryApplyMetadataIssue(self, library, group_id, choice);
+    }
+
+    /// `libraryApplyMetadataIssue` for several issues, each limited to the
+    /// Tracks in its `tracks` when that is given. Every issue is checked
+    /// before any changes, so one that is out of date, not open, or names a
+    /// Track it does not have leaves them all open. At most 512 issues.
+    /// Returns the Tracks changed.
+    pub fn libraryApplyMetadataIssues(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        applications: []const MetadataIssueApplication,
+    ) !u64 {
+        return runtime_consistency.libraryApplyMetadataIssues(self, library, applications);
+    }
+
+    /// Hides an open issue; the pass finds it again only once its Tracks'
+    /// values change.
+    pub fn librarySkipMetadataIssue(self: *OrcaRuntime, library: LibraryHandle, group_id: i64) !void {
+        return runtime_consistency.librarySkipMetadataIssue(self, library, group_id);
     }
 
     /// At most one runs per runtime, so MusicBrainz sees one request a second,

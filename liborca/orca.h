@@ -155,6 +155,9 @@ typedef enum orca_job_kind {
     /* Release descriptions, or genres filled from MusicBrainz:
      * orca_library_start_release_info and orca_library_start_genre_fill. */
     ORCA_JOB_KIND_RELEASE_INFO = 11,
+    /* Finding where a Release's tracks disagree about its metadata. The
+     * ABI cannot start this Job yet; a history entry can name it. */
+    ORCA_JOB_KIND_CONSISTENCY = 12,
     ORCA_JOB_KIND_OTHER = 255,
 } orca_job_kind;
 
