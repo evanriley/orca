@@ -158,7 +158,7 @@ zig build run -- retry-job DATABASE HISTORY_ID   # starts a failed or cancelled 
 zig build run -- artists DATABASE [--album-artists] [--filter TEXT] [--genre ID] [--loved] [--sort name|tracks|loved|recently_added] [--limit N] [--offset N]   # a loved Artist ends in `loved`, then `photo` when its photo is stored; --album-artists: only Artists a Release is filed under
 zig build run -- releases DATABASE [--filter TEXT] [--artist ID] [--genre ID] [--loved] [--high-resolution] [--needs-review] [--lossless] [--year-from Y] [--year-to Y] [--with-artwork | --without-artwork] [--type=album|ep-single|other] [--appears=ARTIST_ID] [--own] [--added-days=N] [--sort title|artist|year|recently_added|loved|most_played] [--letters | --totals | --async] [--limit N] [--offset N]   # each line ends `format=FLAC 24/96`, `lossless`, `reviews=N`; --own needs --artist and leaves out appearances; --letters prints `letter count offset` (title or artist sort), --totals `count= artists= bytes=`; --async reads the page and count on the browse loader
 zig build run -- tracks DATABASE [--filter TEXT] [--artist ID] [--release ID] [--genre ID] [--loved] [--year-from Y] [--year-to Y] [--lossless | --lossy] [--min-rate HZ] [--max-rate=HZ] [--codec=NAME] [--added-days=N] [--explicit] [--sort KEY] [--desc] [--totals] [--async] [--limit N] [--offset N]   # KEY includes rating, loved, play_count, last_played, year, loudness, bitrate, path, album_artist, genre; lines end `lufs= kbps= path=`; a search ranks by relevance; --totals prints `count= duration_ms=`, a search's with --filter; --async reads them on the browse loader
-zig build run -- track DATABASE ID
+zig build run -- track DATABASE ID   # includes `composer:` and `comment:`, `-` when none
 zig build run -- search DATABASE TEXT [--artists N] [--releases N] [--tracks N] [--playlists N] [--genres N]   # kind, id, title, subtitle, releases= tracks= year= duration_ms= artist= reason=name|tracks_by|main_genre_of count=, then `top KIND ID TITLE`; each word a word prefix, no syntax
 zig build run -- genres DATABASE [--filter TEXT] [--sort name|tracks] [--limit N] [--offset N]
 zig build run -- genre DATABASE ID   # counts, top artists, most played releases
@@ -167,7 +167,7 @@ zig build run -- genre-fill DATABASE [on|off]   # automatic MusicBrainz genre fi
 zig build run -- artwork DATABASE (--track=ID | --release=ID) [--out=PATH]
 zig build run -- covers DATABASE [--limit N] [--offset N]   # a page of covers via the artwork loader
 zig build run -- lyrics DATABASE TRACK_ID [--fetch]   # .lrc sidecar or embedded; synced before plain; prints source_name= (file name, embedded, LRCLIB) and offset_ms=; --fetch: see LRCLIB below
-zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--genre=A;B] [--clear=FIELD]…   # library only
+zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--composer=…] [--comment=…] [--genre=A;B] [--clear=FIELD]…   # library only; FIELD includes composer and comment
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone

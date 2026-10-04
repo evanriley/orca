@@ -3068,6 +3068,81 @@ static void capture_edited_ids(void *context, const int64_t *ids, size_t count) 
     capture->first = count != 0 ? ids[0] : 0;
 }
 
+struct text_details_capture {
+    uint32_t count;
+    char composer[64];
+    char comment[64];
+};
+
+static void copy_view(char *destination, size_t capacity, orca_string_view view) {
+    size_t length = view.length < capacity - 1 ? view.length : capacity - 1;
+    if (length != 0) memcpy(destination, view.pointer, length);
+    destination[length] = 0;
+}
+
+static void capture_text_details(void *context, const orca_track_details_view *details,
+                                 const orca_track_details_extra_view *extra,
+                                 const orca_track_details_text_view *text) {
+    (void)details;
+    (void)extra;
+    struct text_details_capture *capture = context;
+    capture->count += 1;
+    copy_view(capture->composer, sizeof capture->composer, text->composer);
+    copy_view(capture->comment, sizeof capture->comment, text->comment);
+}
+
+static int composer_comment_smoke(orca_runtime *runtime, orca_handle library, int64_t track_id) {
+    struct text_details_capture text;
+    memset(&text, 0, sizeof text);
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, track_id, &text,
+                                              capture_text_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(text.count == 1 && text.composer[0] == 0 && text.comment[0] == 0);
+
+    orca_track_edit edits[2];
+    memset(edits, 0, sizeof edits);
+    edits[0].field = ORCA_METADATA_FIELD_COMPOSER;
+    edits[0].has_value = 1;
+    edits[0].value.pointer = "Smoke Composer";
+    edits[0].value.length = strlen("Smoke Composer");
+    edits[1].field = ORCA_METADATA_FIELD_COMMENT;
+    edits[1].has_value = 1;
+    edits[1].value.pointer = "Smoke comment";
+    edits[1].value.length = strlen("Smoke comment");
+    struct edited_ids_capture edited;
+    memset(&edited, 0, sizeof edited);
+    SMOKE_CHECK(orca_library_edit_tracks(runtime, library, &track_id, 1, edits, 2, &edited,
+                                         capture_edited_ids) == ORCA_STATUS_OK);
+    SMOKE_CHECK(edited.count == 1 && edited.first == track_id);
+    memset(&text, 0, sizeof text);
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, track_id, &text,
+                                              capture_text_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(strcmp(text.composer, "Smoke Composer") == 0);
+    SMOKE_CHECK(strcmp(text.comment, "Smoke comment") == 0);
+
+    edits[0].has_value = 0;
+    SMOKE_CHECK(orca_library_edit_tracks(runtime, library, &track_id, 1, edits, 1, &edited,
+                                         capture_edited_ids) == ORCA_STATUS_OK);
+    memset(&text, 0, sizeof text);
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, track_id, &text,
+                                              capture_text_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(text.composer[0] == 0 && strcmp(text.comment, "Smoke comment") == 0);
+    edits[1].has_value = 0;
+    SMOKE_CHECK(orca_library_edit_tracks(runtime, library, &track_id, 1, &edits[1], 1, &edited,
+                                         capture_edited_ids) == ORCA_STATUS_OK);
+    memset(&text, 0, sizeof text);
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, track_id, &text,
+                                              capture_text_details) == ORCA_STATUS_OK);
+    SMOKE_CHECK(text.composer[0] == 0 && text.comment[0] == 0);
+
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, track_id, &text, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    memset(&text, 0, sizeof text);
+    SMOKE_CHECK(orca_library_track_details_v3(runtime, library, 999999999, &text,
+                                              capture_text_details) == ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(text.count == 0);
+    return 0;
+}
+
 static int set_title(orca_runtime *runtime, orca_handle library, int64_t track_id,
                      const char *title, int64_t *edited_id) {
     orca_track_edit edit;
@@ -3121,12 +3196,6 @@ struct tag_plan_capture {
     char after[128];
     char path[512];
 };
-
-static void copy_view(char *destination, size_t capacity, orca_string_view view) {
-    size_t length = view.length < capacity - 1 ? view.length : capacity - 1;
-    memcpy(destination, view.pointer, length);
-    destination[length] = 0;
-}
 
 static void capture_tag_plan(void *context, const orca_tag_write_plan_view *plan) {
     struct tag_plan_capture *capture = context;
@@ -3420,6 +3489,7 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
     char original_title[128];
     memcpy(original_title, track.title, sizeof original_title);
     SMOKE_CHECK(original_title[0] != 0);
+    if (composer_comment_smoke(runtime, *library, track.id) != 0) return 1;
 
     orca_track_edit edits[65];
     memset(edits, 0, sizeof edits);

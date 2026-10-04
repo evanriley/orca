@@ -743,6 +743,8 @@ pub const Projection = struct {
                     .musicbrainz_release_group_id,
                     .musicbrainz_release_track_id,
                     .musicbrainz_album_artist_id,
+                    .composer,
+                    .comment,
                     => {},
                 }
             }

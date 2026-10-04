@@ -270,6 +270,8 @@ fn fieldLabel(field: liborca.MetadataField) []const u8 {
         .musicbrainz_release_track_id => "MusicBrainz Release Track",
         .musicbrainz_album_artist_id => "MusicBrainz Album Artist",
         .explicit => "Explicit",
+        .composer => "Composer",
+        .comment => "Comment",
         .title, .artist, .album, .album_artist, .date, .track_number, .disc_number, .musicbrainz_recording_id => @tagName(field),
     };
 }

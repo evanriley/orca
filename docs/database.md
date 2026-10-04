@@ -455,6 +455,14 @@ refused it as not committed. The recovery pass that follows the migrations in
 `LibraryDatabase.open` finishes those undos. `MutationState` values are stored
 by number, so new states are appended and never reordered.
 
+Migration 50 adds `observed_file_tags.comment`, a nullable `TEXT`, and sets
+`modified_ns` to -1 on every present location, so the next scan, reconcile or
+watch pass re-observes every file, as after migration 22. Until then the
+column is null for every file, a tag write is refused for each one as
+`changed_since_scan`, and a file's own comment cannot be replaced unseen.
+`observed_file_tags.composer` was already observed and is unchanged. See
+[metadata.md](metadata.md#composer-and-comment).
+
 Track full-text search uses an external-content FTS5 table over
 `title, artist, album, album_artist`, maintained by SQLite triggers. Such tables
 cannot be `ALTER`ed to gain a column, so migration 8 drops the triggers and the

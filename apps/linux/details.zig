@@ -1328,6 +1328,8 @@ fn fieldName(field: liborca.MetadataField) [*:0]const u8 {
         .musicbrainz_release_track_id => "Release track ID",
         .musicbrainz_album_artist_id => "Album artist ID",
         .explicit => "Explicit",
+        .composer => "Composer",
+        .comment => "Comment",
     };
 }
 

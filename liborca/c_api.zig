@@ -540,6 +540,18 @@ pub const TrackDetailsExtraView = extern struct {
 
 pub const TrackDetailsV2Callback = *const fn (?*anyopaque, *const TrackDetailsView, *const TrackDetailsExtraView) callconv(.c) void;
 
+pub const TrackDetailsTextView = extern struct {
+    composer: StringView,
+    comment: StringView,
+};
+
+pub const TrackDetailsV3Callback = *const fn (
+    ?*anyopaque,
+    *const TrackDetailsView,
+    *const TrackDetailsExtraView,
+    *const TrackDetailsTextView,
+) callconv(.c) void;
+
 pub const ChangeCount = extern struct {
     updated: u32,
     skipped: u32,
@@ -2805,7 +2817,36 @@ pub export fn orca_library_track_details_v2(
     const details = found orelse return box.reject(@src(), .not_found, "no such track");
     defer details.deinit();
     const view = trackDetailsView(&details);
-    const extra: TrackDetailsExtraView = .{
+    const extra = trackDetailsExtraView(&details);
+    visit(context, &view, &extra);
+    return .ok;
+}
+
+pub export fn orca_library_track_details_v3(
+    runtime: ?*Runtime,
+    library: Handle,
+    track_id: i64,
+    context: ?*anyopaque,
+    callback: ?TrackDetailsV3Callback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const found = box.runtime.libraryTrackDetails(importLibrary(library), track_id) catch |err|
+        return box.fail(@src(), err);
+    const details = found orelse return box.reject(@src(), .not_found, "no such track");
+    defer details.deinit();
+    const view = trackDetailsView(&details);
+    const extra = trackDetailsExtraView(&details);
+    const text: TrackDetailsTextView = .{
+        .composer = stringView(details.composer orelse ""),
+        .comment = stringView(details.comment orelse ""),
+    };
+    visit(context, &view, &extra, &text);
+    return .ok;
+}
+
+fn trackDetailsExtraView(details: *const core.track_details.TrackDetails) TrackDetailsExtraView {
+    return .{
         .track_total = details.track_total orelse 0,
         .disc_total = details.disc_total orelse 0,
         .added_at = details.added_at orelse 0,
@@ -2817,8 +2858,6 @@ pub export fn orca_library_track_details_v2(
         .track_total_inferred = @intFromBool(details.track_total_inferred),
         .explicit = exportExplicit(details.explicit),
     };
-    visit(context, &view, &extra);
-    return .ok;
 }
 
 pub export fn orca_library_track_play_stats(
@@ -7084,6 +7123,8 @@ pub fn exportMetadataField(field: metadata.Field) u8 {
         .musicbrainz_release_track_id => 11,
         .musicbrainz_album_artist_id => 12,
         .explicit => 13,
+        .composer => 14,
+        .comment => 15,
     };
 }
 
@@ -7103,6 +7144,8 @@ pub fn importMetadataField(value: u8) ?metadata.Field {
         11 => .musicbrainz_release_track_id,
         12 => .musicbrainz_album_artist_id,
         13 => .explicit,
+        14 => .composer,
+        15 => .comment,
         else => null,
     };
 }

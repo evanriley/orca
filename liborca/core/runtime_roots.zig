@@ -48,7 +48,7 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
         .musicbrainz_release_track_id,
         .musicbrainz_album_artist_id,
         => if (!metadata.isMusicBrainzId(value)) return error.InvalidEditValue,
-        .title, .artist, .album, .album_artist, .date => {},
+        .title, .artist, .album, .album_artist, .date, .composer, .comment => {},
     }
 }
 
@@ -69,6 +69,8 @@ pub fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, f
         .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
         .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
         .explicit => if (tags.explicit) |advisory| advisory.advisoryText() else null,
+        .composer => tags.composer,
+        .comment => tags.comment,
     };
 }
 

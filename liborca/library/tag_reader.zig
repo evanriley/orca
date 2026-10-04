@@ -70,16 +70,20 @@ fn readValues(
 /// ID3v2 is authoritative when it holds anything besides a cover; the 128-byte
 /// ID3v1 trailer is only a fallback, because essentially every tagged MP3
 /// written this century carries ID3v2 and many carry a stale v1 trailer
-/// alongside it. A cover-only ID3v2 tag keeps its cover on the trailer's values.
+/// alongside it. An ID3v2 tag holding only a cover or a comment keeps them on
+/// the trailer's values.
 fn readMpegTags(
     allocator: std.mem.Allocator,
     readable: storage.ReadableSource,
 ) !?metadata.ObservedTags {
     const tagged = try metadata.id3v2.read(allocator, readable);
     if (tagged) |tags| {
-        if (tags.hasValuesBesidesArtwork()) return tags;
+        if (tags.hasValuesBesidesArtworkAndComment()) return tags;
     }
-    var tags: metadata.ObservedTags = .{ .artwork = if (tagged) |cover_only| cover_only.artwork else null };
+    var tags: metadata.ObservedTags = .{
+        .artwork = if (tagged) |partial| partial.artwork else null,
+        .comment = if (tagged) |partial| partial.comment else null,
+    };
     var trailer: [128]u8 = undefined;
     if (try metadata.id3v1.read(readable, &trailer)) |legacy| {
         tags.title = try own(allocator, legacy.title);
@@ -236,6 +240,23 @@ test "an MP3 whose ID3v2 tag holds only a cover reads the ID3v1 trailer's values
     try std.testing.expectEqual(metadata.ArtworkKind.front_cover, tags.values.artwork.?.kind);
 }
 
+test "an MP3 whose ID3v2 tag holds only a comment and a cover reads the ID3v1 trailer's values and keeps both" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const comment = try id3v23Frame(allocator, "COMM", "\x00eng\x00Ripped from vinyl");
+    const bytes = try mpegStream(allocator, &.{ try frontCover(allocator), comment }, try songTrailer());
+
+    var memory = storage.MemorySource{ .bytes = bytes };
+    const tags = (try read(std.testing.allocator, .mp3, memory.readable())).?;
+    defer tags.deinit();
+
+    try std.testing.expectEqualStrings("Song", tags.values.title.?);
+    try std.testing.expectEqualStrings("Band", tags.values.artist.?);
+    try std.testing.expectEqualStrings("Ripped from vinyl", tags.values.comment.?);
+    try std.testing.expectEqual(@as(u64, 32), tags.values.artwork.?.byte_size);
+}
+
 test "an MP3 whose ID3v2 tag holds only a cover and no trailer observes the cover alone" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -247,7 +268,7 @@ test "an MP3 whose ID3v2 tag holds only a cover and no trailer observes the cove
     defer tags.deinit();
 
     try std.testing.expect(tags.values.title == null);
-    try std.testing.expect(!tags.values.hasValuesBesidesArtwork());
+    try std.testing.expect(!tags.values.hasValuesBesidesArtworkAndComment());
     try std.testing.expectEqual(@as(u64, 32), tags.values.artwork.?.byte_size);
 }
 

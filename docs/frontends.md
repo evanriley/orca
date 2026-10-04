@@ -129,7 +129,9 @@ The boundary covers the whole engine, not a fragment of it:
   `orca_library_track_details` is a details view of the Track and its file,
   read from the database alone, and `orca_library_track_details_v2` adds an
   `orca_track_details_extra_view` of the totals, whether the track total was
-  counted, the advisory, and the dates the file was added and modified. `orca_library_track_play_stats`,
+  counted, the advisory, and the dates the file was added and modified;
+  `orca_library_track_details_v3` adds an `orca_track_details_text_view` of
+  the composer and comment, empty when none is stated. `orca_library_track_play_stats`,
   `orca_library_listens_recorded` and `orca_library_unanalyzed_count` are
   plain reads.
 - **Listen settings.** `orca_library_set_listen_policy` and

@@ -16,6 +16,7 @@ const struct_pairs = .{
     .{ c_api.TrackQueryV2View, c.orca_track_query_v2 },
     .{ c_api.TrackFactsView, c.orca_track_facts_view },
     .{ c_api.TrackDetailsExtraView, c.orca_track_details_extra_view },
+    .{ c_api.TrackDetailsTextView, c.orca_track_details_text_view },
     .{ c_api.ArtistView, c.orca_artist_view },
     .{ c_api.ArtistViewV2, c.orca_artist_view_v2 },
     .{ c_api.ArtistInfoOptionsView, c.orca_artist_info_options },

@@ -30,19 +30,20 @@ const Chunks = struct {
 
 pub fn read(allocator: std.mem.Allocator, readable: source.ReadableSource) !?model.ObservedTags {
     const chunks = try findChunks(readable) orelse return null;
-    var artwork: ?model.Artwork = null;
+    var partial: model.ObservedTags = .{};
     if (chunks.id3) |offset| {
         var view: source.OffsetSource = .{ .inner = readable, .offset = offset };
         if (try id3v2.read(allocator, view.readable())) |tags| {
-            if (tags.hasValuesBesidesArtwork()) return tags;
-            artwork = tags.artwork;
+            if (tags.hasValuesBesidesArtworkAndComment()) return tags;
+            partial = tags;
         }
     }
     var tags: model.ObservedTags = if (chunks.info) |info|
         try readInfo(allocator, readable, info.offset, info.size) orelse .{}
     else
         .{};
-    tags.artwork = artwork;
+    tags.artwork = partial.artwork;
+    tags.comment = partial.comment;
     if (tags.isEmpty()) return null;
     return tags;
 }
@@ -207,7 +208,7 @@ test "a WAV id3 chunk holding only a cover and no LIST/INFO chunk yields the cov
     const bytes = try withCoverOnlyId3Chunk(allocator, "fixtures/audio/generated-reference.wav");
     var memory = source.MemorySource{ .bytes = bytes };
     const tags = (try read(allocator, memory.readable())).?;
-    try std.testing.expect(!tags.hasValuesBesidesArtwork());
+    try std.testing.expect(!tags.hasValuesBesidesArtworkAndComment());
     try std.testing.expectEqual(@as(u64, 32), tags.artwork.?.byte_size);
 }
 

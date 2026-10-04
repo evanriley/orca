@@ -347,6 +347,7 @@ fn applyFrame(
     if (std.mem.eql(u8, &id, "APIC")) return applyPicture(allocator, data, tags);
     if (std.mem.eql(u8, &id, "UFID")) return applyUniqueFileIdentifier(allocator, data, tags);
     if (std.mem.eql(u8, &id, "TXXX")) return applyUserText(allocator, data, tags);
+    if (std.mem.eql(u8, &id, "COMM")) return applyComment(allocator, data, tags);
     if (id[0] != 'T') return;
 
     var values = try decodeTextValues(allocator, data);
@@ -441,6 +442,58 @@ fn applyUserText(
         if (tags.explicit == null) tags.explicit = model.Explicit.fromAdvisoryText(value);
         return;
     }
+}
+
+/// The comment is the first `COMM` frame with an empty description and some
+/// text, in any language. Described frames, such as iTunes' `iTunNORM`, are
+/// other data and are never read as the comment.
+fn applyComment(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    tags: *model.ObservedTags,
+) !void {
+    if (tags.comment != null) return;
+    const comment = splitComment(data) orelse return;
+    if (!comment.undescribed()) return;
+    const text = decodeText(allocator, comment.encoding, comment.text) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    };
+    claim(&tags.comment, text);
+}
+
+const CommentFrame = struct {
+    encoding: u8,
+    description: []const u8,
+    text: []const u8,
+
+    fn undescribed(self: CommentFrame) bool {
+        if (self.description.len == 0) return true;
+        return self.encoding == 1 and self.description.len == 2 and
+            (std.mem.eql(u8, self.description, "\xff\xfe") or std.mem.eql(u8, self.description, "\xfe\xff"));
+    }
+};
+
+fn splitComment(data: []const u8) ?CommentFrame {
+    if (data.len < 4 or data[0] > 3) return null;
+    const encoding = data[0];
+    const description = splitTerminated(encoding, data[4..]);
+    const text = splitTerminated(encoding, description.rest).value;
+    if (text.len > max_text_bytes) return null;
+    return .{ .encoding = encoding, .description = description.value, .text = text };
+}
+
+fn splitTerminated(encoding: u8, bytes: []const u8) struct { value: []const u8, rest: []const u8 } {
+    if (isWideEncoding(encoding)) {
+        var index: usize = 0;
+        while (index + 1 < bytes.len) : (index += 2) {
+            if (bytes[index] == 0 and bytes[index + 1] == 0)
+                return .{ .value = bytes[0..index], .rest = bytes[index + 2 ..] };
+        }
+        return .{ .value = bytes, .rest = &.{} };
+    }
+    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse return .{ .value = bytes, .rest = &.{} };
+    return .{ .value = bytes[0..end], .rest = bytes[end + 1 ..] };
 }
 
 const recording_id_descriptions: []const []const u8 = &.{ "MusicBrainz Track Id", "MUSICBRAINZ_TRACKID" };
@@ -814,12 +867,15 @@ const CurrentTags = struct {
 };
 
 fn currentTags(allocator: std.mem.Allocator, loaded: ?LoadedTag, trailer: ?id3v1.Tag) !CurrentTags {
+    var comment: ?[]const u8 = null;
     if (loaded) |tag| {
         const tags = try parseFrames(allocator, tag.span, tag.major);
-        if (tags.hasValuesBesidesArtwork()) return .{ .tags = tags, .origin = .id3v2 };
+        if (tags.hasValuesBesidesArtworkAndComment()) return .{ .tags = tags, .origin = .id3v2 };
+        comment = tags.comment;
     }
-    const legacy = trailer orelse return .{ .tags = .{}, .origin = .none };
+    const legacy = trailer orelse return .{ .tags = .{ .comment = comment }, .origin = .none };
     var tags: model.ObservedTags = .{
+        .comment = comment,
         .title = if (legacy.title.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.title) else null,
         .artist = if (legacy.artist.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.artist) else null,
         .album = if (legacy.album.len != 0) try id3v1.latin1ToUtf8(allocator, legacy.album) else null,
@@ -847,6 +903,8 @@ fn currentValue(allocator: std.mem.Allocator, tags: model.ObservedTags, field: m
         .musicbrainz_release_track_id => tags.musicbrainz_release_track_id,
         .musicbrainz_album_artist_id => tags.musicbrainz_album_artist_id,
         .explicit => if (tags.explicit) |advisory| advisory.advisoryText() else null,
+        .composer => tags.composer,
+        .comment => tags.comment,
     };
 }
 
@@ -861,6 +919,7 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .track_number => &.{"TRCK"},
         .disc_number => &.{"TPOS"},
         .compilation => &.{"TCMP"},
+        .composer => &.{"TCOM"},
         .date => if (major >= 4) &.{"TDRC"} else &.{ "TYER", "TDAT", "TIME", "TRDA" },
         .musicbrainz_recording_id,
         .musicbrainz_release_id,
@@ -868,6 +927,7 @@ fn fieldFrames(field: mutation.Field, major: u8) []const *const [4]u8 {
         .musicbrainz_release_track_id,
         .musicbrainz_album_artist_id,
         .explicit,
+        .comment,
         => &.{},
     };
 }
@@ -882,14 +942,16 @@ fn userTextDescriptions(field: mutation.Field) []const []const u8 {
         .musicbrainz_release_track_id => release_track_id_descriptions,
         .musicbrainz_album_artist_id => album_artist_id_descriptions,
         .explicit => advisory_descriptions,
-        .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => &.{},
+        .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation, .composer, .comment => &.{},
     };
 }
 
 /// Whether a change replaces `frame`. MusicBrainz IDs live in `TXXX` frames
 /// under a description the reader accepts, and a recording ID also in a `UFID`
 /// frame owned by MusicBrainz, so those two frame types are told apart by
-/// description and owner, and every other description or owner is kept.
+/// description and owner, and every other description or owner is kept. The
+/// comment replaces every `COMM` frame with an empty description and keeps
+/// described ones.
 fn replaced(
     allocator: std.mem.Allocator,
     frame: []const u8,
@@ -906,8 +968,16 @@ fn replaced(
         if (try carriesUserText(allocator, frame, major, userTextDescriptions(change.field))) return true;
         if (change.field == .musicbrainz_recording_id and try carriesMusicBrainzUfid(allocator, frame, major))
             return true;
+        if (change.field == .comment and try carriesUndescribedComment(allocator, frame, major)) return true;
     }
     return false;
+}
+
+fn carriesUndescribedComment(allocator: std.mem.Allocator, frame: []const u8, major: u8) !bool {
+    if (!std.mem.eql(u8, frame[0..4], "COMM")) return false;
+    const payload = try framePayload(allocator, frame, major) orelse return false;
+    const comment = splitComment(payload) orelse return false;
+    return comment.undescribed();
 }
 
 fn carriesMusicBrainzUfid(allocator: std.mem.Allocator, frame: []const u8, major: u8) !bool {
@@ -1022,7 +1092,8 @@ fn appendChangedFrames(
                 if (isAllDigits(&day_month)) try appendTextFrame(allocator, body, major, "TDAT", &day_month);
             }
         },
-        .title, .artist, .album, .album_artist, .compilation => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
+        .title, .artist, .album, .album_artist, .compilation, .composer => try appendTextFrame(allocator, body, major, fieldFrames(field, major)[0], value),
+        .comment => try appendComment(allocator, body, major, value),
         .musicbrainz_recording_id => try appendUniqueFileIdentifier(allocator, body, major, musicbrainz_ufid_owner, value),
         .musicbrainz_release_id,
         .musicbrainz_release_group_id,
@@ -1094,6 +1165,27 @@ fn appendUserText(
         try appendUtf16(allocator, &payload, value);
     }
     try appendFrame(allocator, body, major, "TXXX", payload.items);
+}
+
+fn appendComment(
+    allocator: std.mem.Allocator,
+    body: *std.ArrayList(u8),
+    major: u8,
+    value: []const u8,
+) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    if (major >= 4) {
+        try payload.append(allocator, 3);
+        try payload.appendSlice(allocator, "eng\x00");
+        try payload.appendSlice(allocator, value);
+    } else {
+        try payload.append(allocator, 1);
+        try payload.appendSlice(allocator, "eng");
+        try appendUtf16(allocator, &payload, "");
+        try payload.appendSlice(allocator, &.{ 0, 0 });
+        try appendUtf16(allocator, &payload, value);
+    }
+    try appendFrame(allocator, body, major, "COMM", payload.items);
 }
 
 fn appendUtf16(allocator: std.mem.Allocator, payload: *std.ArrayList(u8), text: []const u8) !void {
@@ -1168,6 +1260,8 @@ fn updatedTrailer(legacy: id3v1.Tag, original: [128]u8, changes: []const mutatio
             .musicbrainz_release_track_id,
             .musicbrainz_album_artist_id,
             .explicit,
+            .composer,
+            .comment,
             => {},
         }
     }
@@ -1587,6 +1681,144 @@ test "clearing a field removes its frame" {
     try std.testing.expectEqualStrings(before.title.?, after.title.?);
 }
 
+fn expectComposerAndCommentRewrite(comptime major: u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const title = try buildFrame(allocator, "TIT2", major, "\x00Kept");
+    const encoder = try buildFrame(allocator, "TSSE", major, "\x00LAME 3.100");
+    const normalisation = try buildFrame(allocator, "COMM", major, "\x00engiTunNORM\x00 00000A2B 00000B3C");
+    const replay_gain = try buildFrame(allocator, "TXXX", major, "\x00REPLAYGAIN_TRACK_GAIN\x00-6.50 dB");
+    const cover = try buildFrame(allocator, "APIC", major, "\x00image/png\x00\x03\x00\x89PNG\r\n\x1a\nimage");
+    var frames: std.ArrayList(u8) = .empty;
+    for ([_][]const u8{
+        title,
+        try buildFrame(allocator, "TCOM", major, "\x00Old Composer"),
+        encoder,
+        normalisation,
+        try buildFrame(allocator, "COMM", major, "\x00eng\x00Old note"),
+        replay_gain,
+        try buildFrame(allocator, "COMM", major, "\x00fra\x00Vieille note"),
+        cover,
+    }) |frame| try frames.appendSlice(allocator, frame);
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, major, 0, frames.items), "\xff\xfb\x90\x64audio" });
+    const before = (try expectTags(allocator, original)).?;
+    try std.testing.expectEqualStrings("Old Composer", before.composer.?);
+    try std.testing.expectEqualStrings("Old note", before.comment.?);
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .composer, .before = "Old Composer", .after = "Nick Drake" },
+        .{ .field = .comment, .before = "Old note", .after = "Ωμέγα remaster" },
+    });
+    try std.testing.expectEqual(major, written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expectEqualStrings("Nick Drake", after.composer.?);
+    try std.testing.expectEqualStrings("Ωμέγα remaster", after.comment.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    for ([_][]const u8{ title, encoder, normalisation, replay_gain, cover }) |frame| {
+        try std.testing.expect(std.mem.indexOf(u8, written, frame) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, written, "Old note") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Vieille note") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Old Composer") == null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, written, "COMM"));
+    if (major >= 4) {
+        const comment = try buildFrame(allocator, "COMM", major, "\x03eng\x00Ωμέγα remaster");
+        try std.testing.expect(std.mem.indexOf(u8, written, comment) != null);
+        const composer = try buildFrame(allocator, "TCOM", major, "\x03Nick Drake");
+        try std.testing.expect(std.mem.indexOf(u8, written, composer) != null);
+    }
+    try std.testing.expect(std.mem.endsWith(u8, written, "\xff\xfb\x90\x64audio"));
+}
+
+test "a composer and comment written to an ID3v2.4 tag read back, replace every undescribed COMM, and keep every other frame byte for byte" {
+    try expectComposerAndCommentRewrite(4);
+}
+
+test "a composer and comment written to an ID3v2.3 tag read back, replace every undescribed COMM, and keep every other frame byte for byte" {
+    try expectComposerAndCommentRewrite(3);
+}
+
+test "a described COMM such as iTunNORM is never read as the comment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, try buildFrame(allocator, "COMM", 3, "\x00engiTunNORM\x00 00000A2B"));
+    try frames.appendSlice(allocator, try buildFrame(allocator, "COMM", 3, "\x01eng\xff\xfe\x00\x00\xff\xfeN\x00o\x00t\x00e\x00"));
+    const tags = (try expectTags(allocator, try buildTag(allocator, 3, 0, frames.items))).?;
+    try std.testing.expectEqualStrings("Note", tags.comment.?);
+
+    const described_only = try buildFrame(allocator, "COMM", 4, "\x03eng" ++ "iTunNORM\x00 00000A2B");
+    try std.testing.expect((try expectTags(allocator, try buildTag(allocator, 4, 0, described_only))).?.comment == null);
+}
+
+test "clearing the comment removes the undescribed COMM and leaves the composer and the described COMM" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const composer = try buildFrame(allocator, "TCOM", 4, "\x03Nick Drake");
+    const normalisation = try buildFrame(allocator, "COMM", 4, "\x03engiTunNORM\x00 00000A2B");
+    var frames: std.ArrayList(u8) = .empty;
+    try frames.appendSlice(allocator, composer);
+    try frames.appendSlice(allocator, try buildFrame(allocator, "COMM", 4, "\x03eng\x00Old note"));
+    try frames.appendSlice(allocator, normalisation);
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, 4, 0, frames.items), "\xff\xfb\x90\x64audio" });
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .comment, .before = "Old note", .after = null },
+    });
+    const after = (try expectTags(allocator, written)).?;
+    try std.testing.expect(after.comment == null);
+    try std.testing.expectEqualStrings("Nick Drake", after.composer.?);
+    try std.testing.expect(std.mem.indexOf(u8, written, composer) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, normalisation) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "Old note") == null);
+}
+
+test "a comment change whose before no longer matches the file's comment is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const frames = try std.mem.concat(allocator, u8, &.{
+        try buildFrame(allocator, "TIT2", 4, "\x03Kept"),
+        try buildFrame(allocator, "COMM", 4, "\x03eng\x00Changed elsewhere"),
+    });
+    const original = try std.mem.concat(allocator, u8, &.{ try buildTag(allocator, 4, 0, frames), "\xff\xfb\x90\x64audio" });
+    var memory = source.MemorySource{ .bytes = original };
+    try std.testing.expectError(error.MetadataPreconditionChanged, rewrite(
+        allocator,
+        memory.readable(),
+        &.{.{ .field = .comment, .before = "Old note", .after = "New" }},
+        null,
+    ));
+}
+
+test "a comment written to a comment-only ID3v2 tag keeps every trailer value and the trailer itself" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const trailer = try legacyTrailer("1999");
+    const original = try std.mem.concat(allocator, u8, &.{
+        try buildTag(allocator, 3, 0, try buildFrame(allocator, "COMM", 3, "\x00eng\x00Old note")),
+        "\xff\xfb\x90\x64audio",
+        &trailer,
+    });
+    const before = (try expectTags(allocator, original)).?;
+    try std.testing.expect(!before.hasValuesBesidesArtworkAndComment());
+
+    const written = try applyRewrite(allocator, original, &.{
+        .{ .field = .comment, .before = "Old note", .after = "New note" },
+        .{ .field = .composer, .before = null, .after = "Nick Drake" },
+    });
+    try std.testing.expectEqual(@as(u8, 3), written[3]);
+    const after = (try expectTags(allocator, written)).?;
+    try expectTrailerValues(after, "Song", "1999");
+    try std.testing.expectEqualStrings("New note", after.comment.?);
+    try std.testing.expectEqualStrings("Nick Drake", after.composer.?);
+    try std.testing.expectEqualSlices(u8, &trailer, written[written.len - 128 ..]);
+}
+
 fn expectRecordingIdRewrite(comptime major: u8) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1847,7 +2079,7 @@ test "a recording id written to a cover-only ID3v2.3 tag keeps the cover byte fo
         &trailer,
     });
     const before = (try expectTags(allocator, original)).?;
-    try std.testing.expect(!before.hasValuesBesidesArtwork());
+    try std.testing.expect(!before.hasValuesBesidesArtworkAndComment());
     const recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a";
 
     const written = try applyRewrite(allocator, original, &.{
@@ -2048,7 +2280,7 @@ test "release ids written to a cover-only ID3v2.3 tag keep the cover and ReplayG
         "\xff\xfb\x90\x64audio",
         &trailer,
     });
-    try std.testing.expect(!(try expectTags(allocator, original)).?.hasValuesBesidesArtwork());
+    try std.testing.expect(!(try expectTags(allocator, original)).?.hasValuesBesidesArtworkAndComment());
 
     const written = try applyRewrite(allocator, original, &releaseIdChanges(null, first_release_ids));
     try std.testing.expectEqual(@as(u8, 3), written[3]);

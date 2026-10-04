@@ -786,6 +786,21 @@ typedef void (*orca_track_details_v2_callback)(
     const orca_track_details_extra_view *extra
 );
 
+/* The composer and comment: a locked edit, else the file's tag, else an
+ * unlocked edit. Empty when none states one. */
+typedef struct orca_track_details_text_view {
+    orca_string_view composer;
+    orca_string_view comment;
+} orca_track_details_text_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_track_details_v3_callback)(
+    void *context,
+    const orca_track_details_view *details,
+    const orca_track_details_extra_view *extra,
+    const orca_track_details_text_view *text
+);
+
 typedef struct orca_play_stats {
     /* Listens of the Track's recording, through any of its files. */
     uint64_t play_count;
@@ -2385,6 +2400,14 @@ orca_status orca_library_track_details_v2(
     void *context,
     orca_track_details_v2_callback callback
 );
+/* orca_library_track_details_v2 with the composer and comment. */
+orca_status orca_library_track_details_v3(
+    orca_runtime *runtime,
+    orca_handle library,
+    int64_t track_id,
+    void *context,
+    orca_track_details_v3_callback callback
+);
 /* How often the Track's recording has been heard through any of its files,
  * and when last. A Track with no recording, or an unknown id, has a play
  * count of zero. */
@@ -3526,6 +3549,8 @@ typedef enum orca_metadata_field {
     ORCA_METADATA_FIELD_MUSICBRAINZ_ALBUM_ARTIST_ID = 12,
     /* "1" explicit, "2" clean, "0" neither: the ITUNESADVISORY values. */
     ORCA_METADATA_FIELD_EXPLICIT = 13,
+    ORCA_METADATA_FIELD_COMPOSER = 14,
+    ORCA_METADATA_FIELD_COMMENT = 15,
 } orca_metadata_field;
 
 /* Where one of Orca's values came from. */

@@ -552,12 +552,13 @@ pub const TrackRepository = struct {
     }
 
     pub fn recordingMbid(self: *const TrackRepository, allocator: std.mem.Allocator, track_id: i64) !?RecordingMbid {
-        return self.musicBrainzId(allocator, track_id, .musicbrainz_recording_id);
+        return self.resolvedField(allocator, track_id, .musicbrainz_recording_id);
     }
 
-    /// One MusicBrainz ID of the file a Track plays, resolved under
-    /// `prefer_file` from Orca's value and the file's tag of the same name.
-    pub fn musicBrainzId(
+    /// One text field of the file a Track plays, such as a MusicBrainz ID or
+    /// the composer, resolved under `prefer_file` from Orca's value and the
+    /// file's tag of the same name.
+    pub fn resolvedField(
         self: *const TrackRepository,
         allocator: std.mem.Allocator,
         track_id: i64,

@@ -34,8 +34,9 @@ or Artist when the edit says so. Editable fields are title, artist, album, album
 artist, track number, disc number, date and compilation, the fields the
 projection groups and orders by, and the MusicBrainz recording, release,
 release-group, release-track and album-artist IDs, which must be lowercase
-UUIDs, and the parental advisory (`0`, `1` or `2`; see
-[Parental advisory](#parental-advisory)); `metadata.Field` appends new ones, because
+UUIDs, the parental advisory (`0`, `1` or `2`; see
+[Parental advisory](#parental-advisory)), and the composer and comment (see
+[Composer and comment](#composer-and-comment)); `metadata.Field` appends new ones, because
 `orca_metadata_values.field` stores them by number. `orca-cli edit` and the
 `orca-gtk` tag editor drive it; the recording ID is `--recording-id` there,
 and the editor's MusicBrainz Recording field for a single track.
@@ -202,6 +203,28 @@ advisory, else the first member file's that states one. A user edit
 `TXXX` frame or Vorbis comment. `Explicit.advisoryText` and
 `fromAdvisoryText` convert between the enum and that text, and are the only
 place the numbers are spelled.
+
+## Composer and comment
+
+`metadata.Field.composer` and `metadata.Field.comment` are free text, observed
+into `observed_file_tags.composer` and `.comment`. The readers take them from:
+
+- ID3v2: `TCOM`, and the first `COMM` frame with an empty description, in any
+  language. A described `COMM`, such as iTunes' `iTunNORM`, is other data and
+  is never the comment. An ID3v2 tag that holds only a cover, a comment or
+  both reads the ID3v1 trailer's values beside them. The ID3v1 comment is
+  neither read nor written.
+- Vorbis comments: `COMPOSER` and `COMMENT`, in any case; `DESCRIPTION` is the
+  comment only when no `COMMENT` has text.
+- MP4: the `©wrt` and `©cmt` atoms.
+
+WAV and AIFF `INFO` chunks state neither. `TrackDetails.composer` and
+`.comment` are a locked edit, else the preferred file's tag, else an unlocked
+edit (`TracksRepository.resolvedField` under `prefer_file`), and null when
+none states one. `orca-cli edit --composer= --comment=` sets them,
+`--clear=composer` and `--clear=comment` drop Orca's value, and
+`orca-cli track` prints them. Neither enters the projection, grouping or
+search.
 
 ## Genres
 
@@ -743,15 +766,21 @@ Writers keep what they do not understand:
   given but reads back as something else: digits only as that ID3v1 genre
   (`80` as `Folk`, or nothing for a number past the table up to 255), a name
   in parentheses without them (`(Live)` as `Live`), and `RX` and `CR` as
-  `Remix` and `Cover`. This is a known, minor limitation.
+  `Remix` and `Cover`. This is a known, minor limitation. The composer
+  replaces every `TCOM` frame. The comment replaces every `COMM` frame with an
+  empty description, in any language, with one in language `eng`; described
+  `COMM` frames are kept byte for byte. The ID3v1 trailer's comment is kept.
 - Vorbis comments in FLAC match fields by the same aliases and canonical values
   the reader uses, so a write never duplicates a field under another spelling.
   The release-level IDs are `MUSICBRAINZ_ALBUMID`,
   `MUSICBRAINZ_RELEASEGROUPID`, `MUSICBRAINZ_RELEASETRACKID` and
   `MUSICBRAINZ_ALBUMARTISTID`. A write replaces every entry under the key, in
   any case, with one. Genres replace every `GENRE` entry, in any case, with
-  one entry per genre.
-- MP4 has no tag writer, so its genres are not written either.
+  one entry per genre. The composer is `COMPOSER` and the comment `COMMENT`;
+  a `DESCRIPTION` entry is kept, and a comment the reader took from it is the
+  write's precondition.
+- MP4 has no tag writer, so its genres, composer and comment are not written
+  either.
 - The audio bytes are copied unchanged; only the tag region is rewritten.
 
 From the command line, `orca-cli write-tags DATABASE IDS` prints the plan,

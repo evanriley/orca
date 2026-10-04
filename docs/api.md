@@ -246,8 +246,9 @@ defer page.deinit();
   recording ID in effect with its `RecordingIdSource` (`tag`, `match` or
   `edit`), track and disc totals with `track_total_inferred` when the track
   total was counted rather than stated, the `Explicit` advisory, `added_at`
-  and `modified_at`, and the first five `genres`. The caller frees it with
-  `deinit`.
+  and `modified_at`, the first five `genres`, and the `composer` and
+  `comment`: a locked edit, else the file's tag, else an unlocked edit, and
+  null when none states one. The caller frees it with `deinit`.
 - Genres are browsable: `libraryGenrePage` takes a `GenreQuery` (a filter,
   `GenreSort.name` or `track_count`) and returns a `GenrePage` of
   `GenreSummary`s with Track, Release and Artist counts and total duration;

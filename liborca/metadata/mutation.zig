@@ -120,7 +120,7 @@ pub const Plan = struct {
                         const value = change.after orelse continue;
                         if (model.Explicit.fromAdvisoryText(value) == null) return error.InvalidMutationPlan;
                     },
-                    .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation => {},
+                    .title, .artist, .album, .track_number, .album_artist, .disc_number, .date, .compilation, .composer, .comment => {},
                 };
             },
             .move => |move| {

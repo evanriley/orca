@@ -288,13 +288,19 @@ fn parseInto(
     var cursor: usize = 0;
     _ = try takeString(payload, &cursor);
     const count = try takeU32(payload, &cursor);
+    var description: ?[]const u8 = null;
     for (0..count) |_| {
         const entry = try takeString(payload, &cursor);
         const parsed = try parseEntry(entry);
         const value = std.mem.trim(u8, parsed.value, " \t\r\n");
         if (value.len == 0) continue;
+        if (matches(parsed.key, &.{"DESCRIPTION"})) {
+            if (description == null) description = value;
+            continue;
+        }
         try assign(allocator, parsed.key, value, tags, genres);
     }
+    if (description) |text| try setText(allocator, &tags.comment, text);
 }
 
 /// Key spellings, alias sets, and `n/total` packing stop here. Real libraries
@@ -317,6 +323,7 @@ fn assign(
     if (matches(key, &.{ "ALBUMARTIST", "ALBUM ARTIST", "ALBUM_ARTIST" }))
         return setText(allocator, &tags.album_artist, value);
     if (matches(key, &.{"COMPOSER"})) return setText(allocator, &tags.composer, value);
+    if (matches(key, &.{"COMMENT"})) return setText(allocator, &tags.comment, value);
     if (matches(key, &.{"TRACKNUMBER"})) return setPair(
         value,
         &tags.track_number,
@@ -472,7 +479,7 @@ pub fn rewrite(
             for (0..count) |_| {
                 const entry = try takeString(payload, &check_cursor);
                 const parsed = try parseEntry(entry);
-                if (fieldMatches(change.field, parsed.key) and
+                if (readerMatches(change.field, parsed.key) and
                     valueMatches(change.field, expected, parsed.value))
                 {
                     found = true;
@@ -625,8 +632,17 @@ fn fieldMatches(field: mutation.Field, key: []const u8) bool {
         .musicbrainz_release_track_id => &.{"MUSICBRAINZ_RELEASETRACKID"},
         .musicbrainz_album_artist_id => &.{"MUSICBRAINZ_ALBUMARTISTID"},
         .explicit => &.{"ITUNESADVISORY"},
+        .composer => &.{"COMPOSER"},
+        .comment => &.{"COMMENT"},
     };
     return matches(key, spellings);
+}
+
+/// The keys the reader may have taken `field` from: those a rewrite replaces,
+/// and for a comment also the `DESCRIPTION` it falls back to, which a rewrite
+/// keeps.
+fn readerMatches(field: mutation.Field, key: []const u8) bool {
+    return fieldMatches(field, key) or (field == .comment and matches(key, &.{"DESCRIPTION"}));
 }
 
 /// Whether a stored comment value is `expected` as the reader interprets it:
@@ -659,6 +675,8 @@ fn fieldKey(field: mutation.Field) []const u8 {
         .musicbrainz_release_track_id => "MUSICBRAINZ_RELEASETRACKID",
         .musicbrainz_album_artist_id => "MUSICBRAINZ_ALBUMARTISTID",
         .explicit => "ITUNESADVISORY",
+        .composer => "COMPOSER",
+        .comment => "COMMENT",
     };
 }
 
@@ -1051,6 +1069,87 @@ test "a recording id rewrite replaces the existing MUSICBRAINZ_TRACKID in place 
     try std.testing.expectEqualStrings("Kept", after.title.?);
     try std.testing.expect(std.mem.indexOf(u8, rewritten, old_id) == null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rewritten, "MUSICBRAINZ_TRACKID="));
+}
+
+test "a composer and comment rewrite replaces COMPOSER and COMMENT in any case and keeps every other entry byte for byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const kept = [_][]const u8{
+        "TITLE=Kept",
+        "REPLAYGAIN_TRACK_GAIN=-6.50 dB",
+        "DESCRIPTION=Liner notes",
+        "ENCODER=reference libFLAC 1.4.3",
+        "Lyricist=Someone Else",
+    };
+    const payload = try commentPayload(allocator, &.{
+        kept[0],
+        "composer=Old Composer",
+        kept[1],
+        "Comment=Old note",
+        kept[2],
+        "COMMENT=Second note",
+        kept[3],
+        kept[4],
+    });
+    const before = try parse(allocator, payload);
+    try std.testing.expectEqualStrings("Old Composer", before.composer.?);
+    try std.testing.expectEqualStrings("Old note", before.comment.?);
+
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .composer, .before = "Old Composer", .after = "Nick Drake" },
+        .{ .field = .comment, .before = "Old note", .after = "Ωμέγα remaster" },
+    }, null);
+    const after = try parse(allocator, rewritten);
+    try std.testing.expectEqualStrings("Nick Drake", after.composer.?);
+    try std.testing.expectEqualStrings("Ωμέγα remaster", after.comment.?);
+    try std.testing.expectEqualStrings("Kept", after.title.?);
+    for (kept) |entry| try std.testing.expect(std.mem.indexOf(u8, rewritten, entry) != null);
+    try std.testing.expectEqual(@as(usize, 1), try countEntries(rewritten, "COMMENT"));
+    try std.testing.expectEqual(@as(usize, 1), try countEntries(rewritten, "COMPOSER"));
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "COMMENT=Ωμέγα remaster") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "COMPOSER=Nick Drake") != null);
+}
+
+test "COMMENT outranks DESCRIPTION, and DESCRIPTION is the comment only when no COMMENT has text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const both = try parse(allocator, try commentPayload(allocator, &.{ "DESCRIPTION=Liner notes", "COMMENT=Note" }));
+    try std.testing.expectEqualStrings("Note", both.comment.?);
+    const fallback = try parse(allocator, try commentPayload(allocator, &.{ "COMMENT= ", "description=Liner notes", "DESCRIPTION=Second" }));
+    try std.testing.expectEqualStrings("Liner notes", fallback.comment.?);
+    try std.testing.expect((try parse(allocator, try commentPayload(allocator, &.{"TITLE=None"}))).comment == null);
+}
+
+test "a comment read from DESCRIPTION is the precondition for a write, which adds COMMENT and keeps DESCRIPTION" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const payload = try commentPayload(allocator, &.{ "TITLE=Kept", "DESCRIPTION=Liner notes" });
+    try std.testing.expectError(error.MetadataPreconditionChanged, rewrite(allocator, payload, &.{
+        .{ .field = .comment, .before = "Something else", .after = "New note" },
+    }, null));
+
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .comment, .before = "Liner notes", .after = "New note" },
+    }, null);
+    try std.testing.expectEqualStrings("New note", (try parse(allocator, rewritten)).comment.?);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "DESCRIPTION=Liner notes") != null);
+}
+
+test "clearing the comment removes every COMMENT entry and leaves COMPOSER" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const payload = try commentPayload(allocator, &.{ "COMPOSER=Nick Drake", "COMMENT=Old note", "comment=Another" });
+    const rewritten = try rewrite(allocator, payload, &.{
+        .{ .field = .comment, .before = "Old note", .after = null },
+    }, null);
+    const after = try parse(allocator, rewritten);
+    try std.testing.expect(after.comment == null);
+    try std.testing.expectEqualStrings("Nick Drake", after.composer.?);
+    try std.testing.expectEqual(@as(usize, 0), try countEntries(rewritten, "COMMENT"));
 }
 
 test "a genre rewrite replaces every GENRE entry in any case with one entry per genre" {

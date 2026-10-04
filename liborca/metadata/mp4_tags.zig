@@ -125,6 +125,7 @@ fn assign(
         .{ .code = "aART", .field = "album_artist" },
         .{ .code = "\xa9alb", .field = "album" },
         .{ .code = "\xa9wrt", .field = "composer" },
+        .{ .code = "\xa9cmt", .field = "comment" },
     };
     inline for (text_items) |entry| {
         if (std.mem.eql(u8, &code, entry.code)) {
@@ -303,4 +304,15 @@ test "a genre stored as an ID3v1 number is named" {
     var tags: model.ObservedTags = .{};
     try std.testing.expect(try assign(arena.allocator(), "gnre".*, .{ .kind = .binary, .bytes = "\x00\x0a" }, &tags, &genres));
     try std.testing.expectEqualStrings("Metal", genres.items[0]);
+}
+
+test "the ©wrt and ©cmt atoms are the composer and the comment" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var genres: std.ArrayList([]const u8) = .empty;
+    var tags: model.ObservedTags = .{};
+    try std.testing.expect(try assign(arena.allocator(), "\xa9wrt".*, .{ .kind = .utf8, .bytes = "Nick Drake" }, &tags, &genres));
+    try std.testing.expect(try assign(arena.allocator(), "\xa9cmt".*, .{ .kind = .utf8, .bytes = "Remastered " }, &tags, &genres));
+    try std.testing.expectEqualStrings("Nick Drake", tags.composer.?);
+    try std.testing.expectEqualStrings("Remastered", tags.comment.?);
 }

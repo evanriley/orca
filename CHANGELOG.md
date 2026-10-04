@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Composer and comment.** `metadata.Field.composer` and `.comment` are
+  editable (`orca-cli edit --composer= --comment=`, `--clear=composer|comment`),
+  shown in `TrackDetails` and `orca-cli track`, and written back by
+  `write-tags`: ID3v2 `TCOM` and an undescribed `COMM` in language `eng`,
+  keeping described `COMM` frames such as `iTunNORM`; Vorbis `COMPOSER` and
+  `COMMENT`, keeping `DESCRIPTION`. The readers also take Vorbis
+  `DESCRIPTION` when no `COMMENT` has text and MP4 `©cmt`. Migration 50 adds
+  `observed_file_tags.comment` and re-observes every present file on the next
+  scan. The C ABI adds `orca_library_track_details_v3` with an
+  `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
+  `ORCA_METADATA_FIELD_COMMENT` (15).
 - **Change history.** `libraryTagWriteGroupPage` lists finished tag writes
   newest first with their files, Release title, state (`applied`,
   `undoing`, `undone`, `rolled_back`, `failed`, `needs_reconciliation`) and

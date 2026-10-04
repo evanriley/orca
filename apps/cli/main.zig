@@ -388,6 +388,7 @@ const help_details =
     \\edit sets Orca's own values for a comma-separated list of Track ids;
     \\the files are not written. With no edits it lists the values held.
     \\  --title= --artist= --album= --album-artist= --date=
+    \\  --composer= --comment=
     \\  --track=N --disc=N --compilation=0|1 --recording-id=MBID
     \\  --explicit=yes|no|clean
     \\  --genre=A;B        the Tracks' genres, which outrank their files' tags
@@ -398,7 +399,8 @@ const help_details =
     \\                      musicbrainz_recording_id|musicbrainz_release_id|
     \\                      musicbrainz_release_group_id|
     \\                      musicbrainz_release_track_id|
-    \\                      musicbrainz_album_artist_id|explicit|genre)
+    \\                      musicbrainz_album_artist_id|explicit|composer|
+    \\                      comment|genre)
     \\
     \\write-tags writes Orca's values for the Tracks into their files: an edit
     \\or an accepted correction wherever it differs from the file's tag, a
@@ -2980,6 +2982,8 @@ const edit_options = [_]struct { flag: []const u8, field: liborca.MetadataField 
     .{ .flag = "--date", .field = .date },
     .{ .flag = "--compilation", .field = .compilation },
     .{ .flag = "--recording-id", .field = .musicbrainz_recording_id },
+    .{ .flag = "--composer", .field = .composer },
+    .{ .flag = "--comment", .field = .comment },
 };
 
 /// Library-only edits: Orca's own values, never written to the files.
@@ -3160,6 +3164,8 @@ fn showTrack(context: Context) !void {
     try printDetail(stdout, "album", "{s}", .{details.album});
     try printDetail(stdout, "album artist", "{s}", .{details.album_artist});
     try printOptionalDetail(stdout, "date", "{s}", details.date);
+    try printOptionalDetail(stdout, "composer", "{s}", details.composer);
+    try printOptionalDetail(stdout, "comment", "{s}", details.comment);
     try writeDetailKey(stdout, "genres");
     for (details.genres, 0..) |genre, index| try stdout.print("{s}{s}", .{ if (index == 0) "" else "; ", genre });
     if (details.genres.len == 0) try stdout.writeAll("-\n") else {

@@ -2832,6 +2832,127 @@ test "user genres are written into FLAC and MP3 files, a rescan reads them back,
     }
 }
 
+fn expectComposerAndComment(runtime: *OrcaRuntime, library: LibraryHandle, track_id: i64, composer: ?[]const u8, comment: ?[]const u8) !void {
+    const details = (try runtime.libraryTrackDetails(library, track_id)).?;
+    defer details.deinit();
+    try std.testing.expectEqualDeep(composer, @as(?[]const u8, details.composer));
+    try std.testing.expectEqualDeep(comment, @as(?[]const u8, details.comment));
+}
+
+test "a composer and comment are written into FLAC and MP3 files, an unlocked value that disagrees is a conflict, and clearing one edit leaves the other" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var data = std.testing.tmpDir(.{});
+    defer data.cleanup();
+    const database_path = try tempDatabasePath(&data);
+    defer std.testing.allocator.free(database_path);
+    var runtime = OrcaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    const library = try scannedTempLibrary(&runtime, &temporary, database_path);
+    const library_database = try libraryDatabase(&runtime, library);
+    const names = [_][]const u8{ "a.mp3", "b.flac" };
+    var originals: [names.len][]u8 = undefined;
+    for (names, &originals) |name, *original|
+        original.* = try temporary.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+    defer for (originals) |original| std.testing.allocator.free(original);
+    const ids = try allTrackIds(&runtime, library);
+    defer std.testing.allocator.free(ids);
+    for (ids) |id| try expectComposerAndComment(&runtime, library, id, null, null);
+
+    const edited = try runtime.libraryEditTracks(library, ids, &.{
+        .{ .field = .composer, .value = "Nick Drake" },
+        .{ .field = .comment, .value = "First note" },
+    });
+    defer edited.deinit();
+    for (edited.ids) |id| try expectComposerAndComment(&runtime, library, id, "Nick Drake", "First note");
+    const preview = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer preview.deinit();
+    try std.testing.expectEqual(@as(usize, 2), preview.files.len);
+    try std.testing.expectEqual(@as(usize, 1), preview.skipped.len);
+    try std.testing.expectEqual(TagWriteSkipReason.format_not_writable, preview.skipped[0].reason);
+    for (preview.files) |file| {
+        try std.testing.expectEqual(@as(usize, 2), file.changes.len);
+        for (file.changes) |change| try std.testing.expect(change.before == null);
+    }
+    try std.testing.expectEqual(job.State.succeeded, try awaitJob(&runtime, try runtime.startTagWrite(library, preview.plan_id, preview.digest)));
+    try rescan(&runtime, library);
+    for (preview.files) |file| {
+        const stored = (try library_database.observed_tags.get(std.testing.allocator, file.file_id)).?;
+        defer stored.deinit();
+        try std.testing.expectEqualStrings("Nick Drake", stored.values.composer.?);
+        try std.testing.expectEqualStrings("First note", stored.values.comment.?);
+    }
+
+    const provider_note: database.repository.OrcaMetadataInput = .{
+        .file_id = 0,
+        .field = .comment,
+        .value = "Provider note",
+        .provenance = .provider,
+        .locked = false,
+    };
+    for (preview.files) |file| {
+        var input = provider_note;
+        input.file_id = file.file_id;
+        try library_database.orca_metadata.upsert(input);
+        var values = try library_database.orca_metadata.values(std.testing.allocator, file.file_id);
+        defer values.deinit();
+        for (values.items) |value| {
+            try std.testing.expect(value.locked and value.provenance == .user);
+            if (value.field == .comment) try std.testing.expectEqualStrings("First note", value.text);
+        }
+        try library_database.orca_metadata.remove(file.file_id, .comment);
+        try library_database.orca_metadata.upsert(input);
+    }
+    for (edited.ids) |id| try expectComposerAndComment(&runtime, library, id, "Nick Drake", "First note");
+    const unlocked = try runtime.planTagWrite(library, std.testing.io, edited.ids);
+    defer unlocked.deinit();
+    try std.testing.expectEqual(@as(usize, 0), unlocked.files.len);
+    try std.testing.expectEqual(@as(usize, 2), unlocked.conflicts.len);
+    for (unlocked.conflicts) |conflict| {
+        try std.testing.expectEqual(metadata.Field.comment, conflict.field);
+        try std.testing.expectEqualStrings("First note", conflict.file_value);
+        try std.testing.expectEqualStrings("Provider note", conflict.orca_value);
+    }
+
+    const relocked = try runtime.libraryEditTracks(library, edited.ids, &.{.{ .field = .comment, .value = "Locked note" }});
+    defer relocked.deinit();
+    for (relocked.ids) |id| try expectComposerAndComment(&runtime, library, id, "Nick Drake", "Locked note");
+    const locked = try runtime.planTagWrite(library, std.testing.io, relocked.ids);
+    defer locked.deinit();
+    try std.testing.expectEqual(@as(usize, 2), locked.files.len);
+    try std.testing.expectEqual(@as(usize, 0), locked.conflicts.len);
+    for (locked.files) |file| {
+        try std.testing.expectEqual(@as(usize, 1), file.changes.len);
+        try std.testing.expectEqual(metadata.Field.comment, file.changes[0].field);
+        try std.testing.expectEqualStrings("First note", file.changes[0].before.?);
+        try std.testing.expectEqualStrings("Locked note", file.changes[0].after.?);
+    }
+    try runtime.discardTagWrite(library, locked.plan_id);
+
+    const cleared = try runtime.libraryEditTracks(library, relocked.ids, &.{.{ .field = .comment, .value = null }});
+    defer cleared.deinit();
+    for (cleared.ids) |id| {
+        const file_ids = try library_database.tracks.fileIds(std.testing.allocator, id);
+        defer std.testing.allocator.free(file_ids);
+        const written = for (preview.files) |file| {
+            if (file.file_id == file_ids[0]) break true;
+        } else false;
+        try expectComposerAndComment(&runtime, library, id, "Nick Drake", if (written) "First note" else null);
+        var values = try runtime.libraryTrackEdits(library, id);
+        defer values.deinit();
+        try std.testing.expectEqual(@as(usize, 1), values.items.len);
+        try std.testing.expectEqual(metadata.Field.composer, values.items[0].field);
+        try std.testing.expect(values.items[0].locked);
+    }
+
+    try runtime.undoTagWrite(library, std.testing.io, preview.plan_id);
+    for (names, originals) |name, original| {
+        const restored = try temporary.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1 << 22));
+        defer std.testing.allocator.free(restored);
+        try std.testing.expectEqualSlices(u8, original, restored);
+    }
+}
+
 test "a value stored under a field number this build does not know is skipped by edits, tag-write planning and the projection" {
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

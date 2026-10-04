@@ -45,6 +45,8 @@ pub const TrackDetails = struct {
     artist: []u8,
     album: []u8,
     album_artist: []u8,
+    composer: ?[]u8,
+    comment: ?[]u8,
     /// The Release's date as the projection resolved it.
     date: ?[]u8,
     track_number: ?i64,
@@ -117,6 +119,8 @@ pub const TrackDetails = struct {
         self.allocator.free(self.codec);
         if (self.path) |value| self.allocator.free(value);
         inline for (.{
+            self.composer,
+            self.comment,
             self.musicbrainz_recording_id,
             self.musicbrainz_release_id,
             self.musicbrainz_release_group_id,
@@ -161,14 +165,18 @@ pub fn loadForFile(
     const feedback_syncable = try library.feedback.canSync(track_id);
     const recording_mbid = try library.tracks.recordingMbid(allocator, track_id);
     errdefer if (recording_mbid) |value| value.deinit(allocator);
-    const release_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_id);
+    const release_mbid = try library.tracks.resolvedField(allocator, track_id, .musicbrainz_release_id);
     errdefer if (release_mbid) |value| value.deinit(allocator);
-    const release_group_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_group_id);
+    const release_group_mbid = try library.tracks.resolvedField(allocator, track_id, .musicbrainz_release_group_id);
     errdefer if (release_group_mbid) |value| value.deinit(allocator);
-    const release_track_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_release_track_id);
+    const release_track_mbid = try library.tracks.resolvedField(allocator, track_id, .musicbrainz_release_track_id);
     errdefer if (release_track_mbid) |value| value.deinit(allocator);
-    const album_artist_mbid = try library.tracks.musicBrainzId(allocator, track_id, .musicbrainz_album_artist_id);
+    const album_artist_mbid = try library.tracks.resolvedField(allocator, track_id, .musicbrainz_album_artist_id);
     errdefer if (album_artist_mbid) |value| value.deinit(allocator);
+    const composer = try library.tracks.resolvedField(allocator, track_id, .composer);
+    errdefer if (composer) |value| value.deinit(allocator);
+    const comment = try library.tracks.resolvedField(allocator, track_id, .comment);
+    errdefer if (comment) |value| value.deinit(allocator);
     const genres = try loadGenres(allocator, library, track_id);
     errdefer freeGenres(allocator, genres);
     const codec_identifier = if (facts) |file| file.codec else try allocator.alloc(u8, 0);
@@ -180,6 +188,8 @@ pub fn loadForFile(
         .artist = summary.artist,
         .album = summary.album,
         .album_artist = summary.album_artist,
+        .composer = if (composer) |value| value.text else null,
+        .comment = if (comment) |value| value.text else null,
         .date = if (facts) |file| file.release_date else null,
         .track_number = summary.track_number,
         .disc_number = summary.disc_number,

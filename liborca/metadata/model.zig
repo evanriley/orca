@@ -26,6 +26,8 @@ pub const Field = enum {
     musicbrainz_album_artist_id,
     /// Held as an `ITUNESADVISORY` value: `1` explicit, `2` clean, `0` neither.
     explicit,
+    composer,
+    comment,
 };
 
 /// A recording's content advisory. `unknown` is what a file that states none
@@ -263,6 +265,7 @@ pub const ObservedTags = struct {
     album: ?[]const u8 = null,
     album_artist: ?[]const u8 = null,
     composer: ?[]const u8 = null,
+    comment: ?[]const u8 = null,
     track_number: ?u32 = null,
     track_total: ?u32 = null,
     disc_number: ?u32 = null,
@@ -299,10 +302,11 @@ pub const ObservedTags = struct {
         return true;
     }
 
-    pub fn hasValuesBesidesArtwork(self: ObservedTags) bool {
-        var without_artwork = self;
-        without_artwork.artwork = null;
-        return !without_artwork.isEmpty();
+    pub fn hasValuesBesidesArtworkAndComment(self: ObservedTags) bool {
+        var rest = self;
+        rest.artwork = null;
+        rest.comment = null;
+        return !rest.isEmpty();
     }
 
     /// Project the resolution-participating subset onto the layered model.
@@ -336,12 +340,15 @@ test "observed tags project onto the layered metadata model with file provenance
     try std.testing.expect((ObservedTags{}).isEmpty());
 }
 
-test "artwork alone is not a value besides artwork, while any other field or a genre is" {
+test "artwork and a comment are not values besides themselves, while any other field or a genre is" {
     const cover: Artwork = .{ .mime_type = "image/jpeg", .byte_size = 64, .kind = .front_cover };
-    try std.testing.expect(!(ObservedTags{}).hasValuesBesidesArtwork());
-    try std.testing.expect(!(ObservedTags{ .artwork = cover }).hasValuesBesidesArtwork());
+    try std.testing.expect(!(ObservedTags{}).hasValuesBesidesArtworkAndComment());
+    try std.testing.expect(!(ObservedTags{ .artwork = cover }).hasValuesBesidesArtworkAndComment());
+    try std.testing.expect(!(ObservedTags{ .artwork = cover, .comment = "Ripped" }).hasValuesBesidesArtworkAndComment());
     try std.testing.expect(!(ObservedTags{ .artwork = cover }).isEmpty());
-    try std.testing.expect((ObservedTags{ .artwork = cover, .title = "Song" }).hasValuesBesidesArtwork());
-    try std.testing.expect((ObservedTags{ .musicbrainz_recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }).hasValuesBesidesArtwork());
-    try std.testing.expect((ObservedTags{ .artwork = cover, .genres = &.{"Rock"} }).hasValuesBesidesArtwork());
+    try std.testing.expect(!(ObservedTags{ .comment = "Ripped" }).isEmpty());
+    try std.testing.expect((ObservedTags{ .artwork = cover, .title = "Song" }).hasValuesBesidesArtworkAndComment());
+    try std.testing.expect((ObservedTags{ .comment = "Ripped", .composer = "Nick Drake" }).hasValuesBesidesArtworkAndComment());
+    try std.testing.expect((ObservedTags{ .musicbrainz_recording_id = "8f3471b5-7e6a-48da-86a9-c1c07a0f5b4a" }).hasValuesBesidesArtworkAndComment());
+    try std.testing.expect((ObservedTags{ .artwork = cover, .genres = &.{"Rock"} }).hasValuesBesidesArtworkAndComment());
 }

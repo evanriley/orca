@@ -4,7 +4,7 @@ const repository = @import("repository.zig");
 const text_key = @import("text_key.zig");
 const genre_alias = @import("../metadata/genre_alias.zig");
 
-pub const current_version = 49;
+pub const current_version = 50;
 
 const migration_1 =
     \\CREATE TABLE artists (
@@ -1454,6 +1454,12 @@ const migration_49 =
     \\
 ;
 
+const migration_50 =
+    \\ALTER TABLE observed_file_tags ADD COLUMN comment TEXT;
+    \\UPDATE locations SET modified_ns = -1 WHERE state = 'present';
+    \\
+;
+
 fn diagnosticsKey(comptime keyword: []const u8, comptime row: []const u8) []const u8 {
     return keyword ++ " " ++ row ++ ".kind = 1 AND " ++ row ++ ".algorithm_id = 'orca.audio-diagnostics'\n" ++
         "  AND " ++ row ++ ".algorithm_version = 4\n" ++
@@ -1987,6 +1993,7 @@ pub fn applyThrough(db: sqlite.Database, target_version: i64) sqlite.Error!void 
     if (version < 47 and target_version >= 47) try db.exec(migration_47);
     if (version < 48 and target_version >= 48) try db.exec(migration_48);
     if (version < 49 and target_version >= 49) try db.exec(migration_49);
+    if (version < 50 and target_version >= 50) try db.exec(migration_50);
     try checkForeignKeys(db);
     var pragma_buffer: [64]u8 = undefined;
     const pragma = std.fmt.bufPrintSentinel(
@@ -2848,9 +2855,9 @@ test "a version-21 library re-observes present files whose tags held only a cove
         \\INSERT INTO observed_file_genres(file_id, ordinal, value) VALUES (4, 0, 'Rock');
     );
 
-    try apply(db);
+    try applyThrough(db, 49);
 
-    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 49), try scalar(db, "PRAGMA user_version;"));
     var write_lane: repository.WriteLane = .{ .io = std.testing.io };
     const locations: repository.LocationRepository = .{ .db = db, .write_lane = &write_lane };
     const cases = [_]struct { uri: []const u8, inode: i64, unchanged: bool }{
@@ -2959,9 +2966,9 @@ test "migration 25 re-observes every present location of a file held at more tha
         \\    (8, 4, 1, '/m/c/three.flac', 17, 10, 500, 'missing');
     );
 
-    try apply(db);
+    try applyThrough(db, 49);
 
-    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 49), try scalar(db, "PRAGMA user_version;"));
     try std.testing.expectEqual(
         @as(i64, 4),
         try scalar(db, "SELECT count(*) FROM locations WHERE modified_ns = -1 AND id IN (1, 2, 6, 7);"),
@@ -3850,4 +3857,31 @@ test "a version-48 library keeps its duplicate issues, each with no stored simil
     try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE similarity IS NULL;"));
     try db.exec("UPDATE library_health_issues SET similarity = 0.99;");
     try std.testing.expectEqual(@as(i64, 0), try scalar(db, "SELECT count(*) FROM library_health_issues WHERE similarity IS NULL;"));
+}
+
+test "a version-49 library gains an empty observed comment and re-observes every present file" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const path = try temporaryPath(std.testing.allocator, &temporary.sub_path, "v49-comment.db");
+    defer std.testing.allocator.free(path);
+    const db = try sqlite.Database.open(path);
+    defer db.close();
+    try applyThrough(db, 49);
+    try db.exec(
+        \\INSERT INTO files(id, audio_format, size_bytes) VALUES (1, 1, 10), (2, 1, 10);
+        \\INSERT INTO locations(file_id, volume_id, uri, native_inode, size_bytes, modified_ns, state) VALUES
+        \\    (1, 1, '/m/song.flac', 11, 10, 500, 'present'),
+        \\    (2, 1, '/m/gone.flac', 12, 10, 500, 'missing');
+        \\INSERT INTO observed_file_tags(file_id, title, composer) VALUES (1, 'Song', 'Nick Drake');
+    );
+
+    try apply(db);
+
+    try std.testing.expectEqual(current_version, try scalar(db, "PRAGMA user_version;"));
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM observed_file_tags WHERE comment IS NULL AND composer = 'Nick Drake';"));
+    try std.testing.expectEqual(@as(i64, -1), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 1;"));
+    try std.testing.expectEqual(@as(i64, 500), try scalar(db, "SELECT modified_ns FROM locations WHERE file_id = 2;"));
+    try db.exec("UPDATE observed_file_tags SET comment = 'Ripped from vinyl';");
+    try std.testing.expectEqual(@as(i64, 1), try scalar(db, "SELECT count(*) FROM observed_file_tags WHERE comment = 'Ripped from vinyl';"));
+    try checkForeignKeys(db);
 }
