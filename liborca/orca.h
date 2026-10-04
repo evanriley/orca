@@ -1269,7 +1269,23 @@ typedef struct orca_job_snapshot {
     uint64_t total_units;
 } orca_job_snapshot;
 
-/* Mirrors the scanner's own result, plus what the projection made of it. */
+typedef enum orca_scan_stage {
+    ORCA_SCAN_STAGE_DISCOVER = 0,
+    ORCA_SCAN_STAGE_READ_TAGS = 1,
+    ORCA_SCAN_STAGE_DONE = 2,
+} orca_scan_stage;
+
+/*
+ * Mirrors the scanner's own result, plus what the projection made of it.
+ *
+ * `stage` is an orca_scan_stage. A scan or reconcile is DISCOVER until its
+ * walk starts and READ_TAGS while it walks; every job is DONE once its worker
+ * has finished, and other jobs report DISCOVER until then. `albums_found`
+ * counts the distinct Releases the job's projection wrote that still exist.
+ * `current_path` holds `current_path_length` bytes of UTF-8, not
+ * NUL-terminated: the file a scan or reconcile is reading during READ_TAGS,
+ * and empty otherwise.
+ */
 typedef struct orca_scan_stats {
     uint64_t files_seen;
     uint64_t changed;
@@ -1283,7 +1299,20 @@ typedef struct orca_scan_stats {
     uint64_t releases_written;
     uint8_t cancelled;
     uint8_t reserved[7];
+    uint64_t albums_found;
+    uint8_t stage;  /* orca_scan_stage */
+    uint8_t reserved2[1];
+    uint16_t current_path_length;
+    uint8_t reserved3[4];
+    char current_path[512];
 } orca_scan_stats;
+
+/* How many audio files a folder holds; see orca_estimate_audio_files. */
+typedef struct orca_folder_estimate {
+    uint64_t audio_files;
+    uint8_t truncated;
+    uint8_t reserved[7];
+} orca_folder_estimate;
 
 typedef struct orca_scan_options {
     /* Rows per bounded commit. Zero selects the default. */
@@ -4568,6 +4597,20 @@ orca_status orca_library_scan_stats(
     orca_runtime *runtime,
     orca_handle job,
     orca_scan_stats *output
+);
+
+/*
+ * Counts the audio files under `path`, a folder not yet added to any Library,
+ * by each file's first bytes rather than its name, on the calling thread. It
+ * stops at `limit` audio files, zero selecting 100000, and then sets
+ * `truncated`: the folder holds at least that many. It reads nothing past a
+ * file's header and writes nothing.
+ */
+orca_status orca_estimate_audio_files(
+    orca_runtime *runtime,
+    const char *path,
+    uint32_t limit,
+    orca_folder_estimate *output
 );
 
 /* Who started a job. WATCHER: a reconcile orca_library_watch started.

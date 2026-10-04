@@ -3989,6 +3989,18 @@ int main(int argc, char **argv) {
     /* The scan projects as it commits: a scan that leaves no tracks behind has
      * not made the library browsable. */
     if (stats.tracks_written == 0) return 28;
+    if (stats.stage != ORCA_SCAN_STAGE_DONE) return 600;
+    if (stats.current_path_length != 0) return 601;
+    if (stats.albums_found == 0 || stats.albums_found > stats.releases_written) return 602;
+
+    /* The estimate counts by bytes exactly what the scan imported. */
+    orca_folder_estimate estimate;
+    if (orca_estimate_audio_files(runtime, fixtures, 0, &estimate) != ORCA_STATUS_OK) return 603;
+    if (estimate.audio_files != stats.changed || estimate.truncated != 0) return 604;
+    if (orca_estimate_audio_files(runtime, fixtures, 3, &estimate) != ORCA_STATUS_OK) return 605;
+    if (estimate.audio_files != 3 || estimate.truncated != 1) return 606;
+    if (orca_estimate_audio_files(runtime, 0, 0, &estimate) != ORCA_STATUS_INVALID_ARGUMENT)
+        return 607;
 
     if (orca_library_track_count(runtime, library, &track_count) != ORCA_STATUS_OK) return 29;
     if (track_count == 0) return 30;

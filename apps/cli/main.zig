@@ -167,6 +167,7 @@ const commands = [_]Command{
     .{ .name = "--version", .usage = "--version", .min_arguments = 0, .max_arguments = null, .run = printVersion },
     .{ .name = "demo", .usage = "demo", .min_arguments = 0, .max_arguments = null, .run = runDemo, .shares_usage_line = true },
     .{ .name = "scan", .usage = "scan DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = scanRoot, .shares_usage_line = true },
+    .{ .name = "estimate", .usage = "estimate PATH", .min_arguments = 1, .max_arguments = 1, .run = estimateFolder, .shares_usage_line = true },
     .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
     .{
         .name = "watch",
@@ -315,6 +316,13 @@ fn writeHelp(stdout: *std.Io.Writer) !void {
 }
 
 const help_details =
+    \\scan prints a `progress` line each time the stage changes and every
+    \\half second: stage=discover|read_tags|done, files= read so far,
+    \\albums= distinct Releases written, and current= the file being read.
+    \\
+    \\estimate counts the audio files under PATH, by their bytes, without
+    \\adding it to a Library; truncated=yes when it stopped at 100000.
+    \\
     \\reconcile walks the registered root ROOT_ID (see roots) again, or with
     \\DIRs only those directories under it, given relative to the root, and
     \\marks missing only files under what it walked. A directory that is gone
@@ -801,12 +809,64 @@ fn scanRoot(context: Context) !void {
     const root_id = try registeredRootId(&runtime, library_handle, context.arguments[1]) orelse
         (try bindRoot(&runtime, library_handle, context)).root_id;
     const job_handle = try runtime.startLibraryScan(library_handle, .{ .root_id = root_id });
-    awaitJob(&runtime, stdout, job_handle, null) catch |err| {
+    awaitScan(&runtime, stdout, job_handle) catch |err| {
         if (err == error.JobFailed and (try runtime.jobScanStats(job_handle)).volume_changed)
             return error.RootVolumeChanged;
         return err;
     };
     try printScanStats(stdout, try runtime.jobScanStats(job_handle));
+}
+
+const scan_progress_interval_ms = 500;
+
+fn awaitScan(runtime: *liborca.Runtime, stdout: *std.Io.Writer, job_handle: liborca.JobHandle) !void {
+    var printed_stage: ?liborca.ScanStage = null;
+    var since_printed_ms: u64 = 0;
+    while (true) {
+        runtime.pump();
+        while (runtime.pollEvent()) |_| {}
+        while (runtime.pollTelemetry()) |_| {}
+        const snapshot = try runtime.jobSnapshotSynced(job_handle);
+        const stats = try runtime.jobScanStats(job_handle);
+        if (printed_stage != stats.stage or since_printed_ms >= scan_progress_interval_ms) {
+            const current = stats.current_path.slice();
+            try stdout.print("progress stage={t} files={d} albums={d} current={s}\n", .{
+                stats.stage,
+                stats.files_seen,
+                stats.albums_found,
+                if (current.len == 0) "-" else current,
+            });
+            try stdout.flush();
+            printed_stage = stats.stage;
+            since_printed_ms = 0;
+        }
+        switch (snapshot.state) {
+            .succeeded => return,
+            .failed => return error.JobFailed,
+            .cancelled => {
+                try stdout.print("cancelled after {d} files\n", .{snapshot.completed_units});
+                return;
+            },
+            else => {},
+        }
+        sleepMilliseconds(20);
+        since_printed_ms += 20;
+    }
+}
+
+fn estimateFolder(context: Context) !void {
+    var token: liborca.CancellationToken = .{};
+    const estimate = try liborca.estimateAudioFiles(
+        context.io,
+        context.allocator,
+        context.arguments[0],
+        &token,
+        liborca.estimate_default_limit,
+    );
+    try context.stdout.print("audio_files={d} truncated={s}\n", .{
+        estimate.audio_files,
+        if (estimate.truncated) "yes" else "no",
+    });
 }
 
 fn addRoot(context: Context) !void {

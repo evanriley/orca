@@ -59,6 +59,7 @@ pub fn pruneOrphanedReleasesAndArtists(
     allocator: std.mem.Allocator,
     release_candidates: []const i64,
     artist_candidates: []const i64,
+    deleted_releases: ?*std.ArrayList(i64),
 ) !OrphanPruneCounts {
     var counts: OrphanPruneCounts = .{};
     if (release_candidates.len == 0) return counts;
@@ -87,6 +88,7 @@ pub fn pruneOrphanedReleasesAndArtists(
         if (try delete_release.step() != .done) return error.SqlFailed;
         try delete_release.reset();
         counts.releases += 1;
+        if (deleted_releases) |deleted| try deleted.append(allocator, release_id);
     }
 
     var artist_in_use = try db.prepare(
@@ -204,7 +206,7 @@ pub const LibraryRootRepository = struct {
 
         try self.db.exec("DELETE FROM tracks WHERE preferred_file_id IN (SELECT id FROM temp.forgotten_files);");
         const tracks_removed = self.db.changes();
-        _ = try pruneOrphanedReleasesAndArtists(self.db, allocator, releases.items, artists.items);
+        _ = try pruneOrphanedReleasesAndArtists(self.db, allocator, releases.items, artists.items, null);
 
         try self.db.exec("UPDATE mutation_operations SET file_id = NULL WHERE file_id IN (SELECT id FROM temp.forgotten_files);");
         _ = try self.execWithRoot("DELETE FROM locations WHERE root_id = ?1;", root_id);

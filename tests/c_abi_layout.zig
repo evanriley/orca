@@ -94,6 +94,7 @@ const struct_pairs = .{
     .{ c_api.QueuedJobView, c.orca_queued_job_view },
     .{ c_api.JobHistoryView, c.orca_job_history_view },
     .{ c_api.ScanStats, c.orca_scan_stats },
+    .{ c_api.FolderEstimate, c.orca_folder_estimate },
     .{ c_api.ScanOptions, c.orca_scan_options },
     .{ c_api.AnalysisOptions, c.orca_analysis_options },
     .{ c_api.DuplicateScanOptions, c.orca_duplicate_scan_options },
@@ -130,6 +131,13 @@ const export_mappings = .{
         pub const Tag = core.runtime.AcoustIdUse;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportAcoustIdUse(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_SCAN_STAGE_";
+        pub const Tag = core.runtime.ScanStage;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportScanStage(tag);
         }
     },
     struct {

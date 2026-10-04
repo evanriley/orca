@@ -401,9 +401,32 @@ const Folder = struct {
     path: []const u8,
 };
 
+/// Only the projecting thread touches `ids`; `count` is the one field another
+/// thread may read.
+pub const FoundReleases = struct {
+    ids: std.AutoHashMapUnmanaged(i64, void) = .empty,
+    count: std.atomic.Value(u64) = .init(0),
+
+    fn note(self: *FoundReleases, allocator: std.mem.Allocator, release_id: i64) !void {
+        if ((try self.ids.getOrPut(allocator, release_id)).found_existing) return;
+        self.count.store(self.ids.count(), .release);
+    }
+
+    fn forget(self: *FoundReleases, release_ids: []const i64) void {
+        for (release_ids) |release_id| _ = self.ids.remove(release_id);
+        self.count.store(self.ids.count(), .release);
+    }
+
+    pub fn freeIds(self: *FoundReleases, allocator: std.mem.Allocator) void {
+        self.ids.deinit(allocator);
+        self.ids = .empty;
+    }
+};
+
 pub const Projection = struct {
     allocator: std.mem.Allocator,
     library: *database.LibraryDatabase,
+    found_releases: ?*FoundReleases = null,
     /// Explicit, per `docs/metadata.md`: the projection resolves under a stated
     /// policy rather than an implied one. A user lock outranks it either way.
     policy: metadata.ResolutionPolicy = .prefer_file,
@@ -482,12 +505,16 @@ pub const Projection = struct {
             }
         }
         try carryReleaseState(db, allocator, vacated.moved.items);
+        var deleted_releases: std.ArrayList(i64) = .empty;
+        defer deleted_releases.deinit(allocator);
         const pruned = try database.repository.pruneOrphanedReleasesAndArtists(
             db,
             allocator,
             vacated.releases.items,
             vacated.artists.items,
+            if (self.found_releases != null) &deleted_releases else null,
         );
+        if (self.found_releases) |found| found.forget(deleted_releases.items);
         result.releases_pruned += pruned.releases;
         result.artists_pruned += pruned.artists;
     }
@@ -808,6 +835,7 @@ pub const Projection = struct {
             .release_type = identity.release_type,
         });
         result.releases_written += 1;
+        if (self.found_releases) |found| try found.note(self.allocator, release_id);
         if (identity.is_compilation) result.compilations += 1;
 
         try assignPositions(allocator, entries);
@@ -2562,6 +2590,36 @@ test "a retagged file keeps its Track while its old release and artist are prune
     var page = try trackTitles(&library);
     defer page.deinit();
     try testing.expectEqualStrings("New Album", page.items[0].album);
+}
+
+test "albums found counts only the releases a run wrote that still exist" {
+    var library = try openTestLibrary("file:orca-projection-found-releases?mode=memory&cache=shared");
+    defer library.close();
+    const file_id = try observe(&library, "/m/Old/a.flac", .flac, .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = "Old Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    });
+    var found: FoundReleases = .{};
+    defer found.freeIds(testing.allocator);
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library, .found_releases = &found };
+    _ = try projection.run(.{ .files = &.{file_id} });
+    try testing.expectEqual(@as(u64, 1), found.count.load(.acquire));
+
+    try library.observed_tags.upsert(.{ .file_id = file_id, .values = .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = "New Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    } });
+    const result = try projection.run(.{ .files = &.{file_id} });
+    try testing.expectEqual(@as(u64, 1), result.releases_written);
+    try testing.expectEqual(@as(u64, 1), result.releases_pruned);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(u64, 1), found.count.load(.acquire));
 }
 
 test "a release that still has other tracks survives one of them moving away" {

@@ -102,6 +102,40 @@ identities are skipped, so no traversal-order checkpoint is required.
 [Watching roots](#watching-roots) drives the same reconciliation from
 filesystem events.
 
+A running scan or reconcile reports where it is through `ScanStats`:
+
+- `stage` is `discover` until the walk starts, `read_tags` while it walks,
+  and `done` once the Job's worker has finished. Other Jobs that report
+  `ScanStats` stay `discover` until they are `done`.
+- `current_path` is the file being read during `read_tags`, and empty
+  otherwise.
+- `albums_found` counts the distinct Releases the Job's projection wrote
+  that still exist. `releases_written` counts every Release write, so a
+  Release whose files span two batches counts twice there and once here, and
+  a Release the projection wrote and then pruned, as one a duplicate copy's
+  folder held until its Tracks moved, counts there and not here.
+
+`orca-cli scan` prints these as `progress stage= files= albums= current=`
+lines, on each stage change and every half second.
+
+## Estimating a folder before it is a root
+
+`estimateAudioFiles(io, allocator, path, token, limit)` counts the audio files
+under a folder that is not yet a root, so a host can say how large a library
+is before adding it. It walks as a scan does, skipping tag-write temporaries
+and the volume marker, and counts a file when `storage.format.detect` names an
+audio format from its first bytes, the detection the scanner and the codec
+registry use. On a folder that holds no Library database or backups it counts
+the files a first scan records as changed. It reads nothing past a header and
+writes nothing.
+
+- It stops once it has counted `limit` files (`estimate_default_limit`,
+  100000, in `orca-cli` and for a zero limit through the C ABI) and sets
+  `FolderEstimate.truncated`.
+- It polls `token` between entries, so a cancel returns `error.Cancelled`
+  within one entry, or within one 50 ms poll while the token is paused.
+- `orca-cli estimate PATH` prints `audio_files=N truncated=no|yes`.
+
 ## Folder-scoped reconciliation
 
 `Runtime.startLibraryReconcile(library, ReconcileRequest)` starts a `reconcile`

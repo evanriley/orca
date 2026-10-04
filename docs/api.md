@@ -124,6 +124,16 @@ defer page.deinit();
   cancelled one's request again (`error.JobNotRetryable` for one that
   succeeded or was a tag write, `error.UnknownJobHistory` for an unknown id).
   See [control-plane.md](control-plane.md#one-job-per-library-and-the-waiting-queue).
+- `jobScanStats` adds `stage` (`ScanStage`: `discover`, `read_tags`,
+  `done`), `current_path` (the file a scan or reconcile is reading) and
+  `albums_found` (distinct Releases written that still exist).
+  `estimateAudioFiles(io,
+  allocator, path, token, limit)` counts the audio files under a folder not
+  yet added, by their bytes, as a `FolderEstimate` (`audio_files`,
+  `truncated` at `limit`, `estimate_default_limit` 100000); it runs on the
+  caller's thread and returns `error.Cancelled` once `token`, a
+  `CancellationToken`, is cancelled. See
+  [storage.md](storage.md#estimating-a-folder-before-it-is-a-root).
 - A scan or reconcile of a root whose path now lies on another volume than
   the one recorded, as an unmounted drive's mount point does, walks and
   sweeps nothing and ends `failed`. See

@@ -369,6 +369,7 @@ pub const SubmissionStats = job_worker.SubmissionStats;
 pub const TagWriteFailure = job_worker.TagWriteFailure;
 pub const TagWriteFailureReason = job_worker.TagWriteFailureReason;
 pub const ScanStats = job_worker.ScanStats;
+pub const ScanStage = job_worker.ScanStage;
 pub const MatchStats = job_worker.MatchStats;
 pub const MatchingHooks = job_worker.MatchingHooks;
 const PendingTagWrite = job_worker.PendingTagWrite;

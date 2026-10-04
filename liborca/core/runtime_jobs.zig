@@ -886,7 +886,12 @@ pub fn jobScanStats(self: *OrcaRuntime, job_handle: JobHandle) !ScanStats {
     if (queuedHostJob(self, job_handle)) return .{};
     for (self.job_workers.items) |worker| {
         if (!worker.job.eql(job_handle)) continue;
-        return worker.scanStats();
+        var stats = worker.scanStats();
+        if (stats.stage == .read_tags) {
+            var item: [library_pass.CurrentItem.capacity]u8 = undefined;
+            stats.current_path.set(worker.current_item.read(&item));
+        }
+        return stats;
     }
     return error.StaleHandle;
 }

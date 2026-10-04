@@ -476,6 +476,15 @@ pub const ScanStats = struct {
     /// A root was not walked because it is no longer on the volume the
     /// Library recorded for it, as when its drive is not mounted.
     volume_changed: bool = false,
+    current_path: job.BoundedText(512) = .{},
+    stage: ScanStage = .discover,
+    albums_found: u64 = 0,
+};
+
+pub const ScanStage = enum(u8) {
+    discover,
+    read_tags,
+    done,
 };
 
 /// The same counters as the worker publishes them: monotonic atomics, so the
@@ -493,6 +502,8 @@ const LiveScanStats = struct {
     tracks_written: std.atomic.Value(u64) = .init(0),
     releases_written: std.atomic.Value(u64) = .init(0),
     marked_missing: std.atomic.Value(u64) = .init(0),
+    stage: std.atomic.Value(ScanStage) = .init(.discover),
+    found_releases: library_pass.projection.FoundReleases = .{},
 
     fn read(self: *const LiveScanStats, in_flight: u64) ScanStats {
         return .{
@@ -508,6 +519,8 @@ const LiveScanStats = struct {
             .tracks_written = self.tracks_written.load(.acquire),
             .releases_written = self.releases_written.load(.acquire),
             .marked_missing = self.marked_missing.load(.acquire),
+            .stage = self.stage.load(.acquire),
+            .albums_found = self.found_releases.count.load(.acquire),
         };
     }
 };
@@ -843,6 +856,13 @@ pub const JobWorker = struct {
 
     pub fn run(self: *JobWorker) void {
         defer {
+            switch (self.stats) {
+                .scan => |*stats| {
+                    stats.found_releases.freeIds(self.allocator);
+                    stats.stage.store(.done, .release);
+                },
+                else => {},
+            }
             self.threaded.deinit();
             self.registration.finish();
             self.host_signal.raise();
@@ -1535,9 +1555,11 @@ pub const JobWorker = struct {
         var pass: library_pass.Projection = .{
             .allocator = self.allocator,
             .library = self.database,
+            .found_releases = &self.stats.scan.found_releases,
         };
         var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
         defer scanner.deinit();
+        self.stats.scan.stage.store(.read_tags, .release);
         const result = try scanner.scan(root.path);
         try self.database.scan_runs.finish(
             scan_run.id,
@@ -1585,9 +1607,11 @@ pub const JobWorker = struct {
         var pass: library_pass.Projection = .{
             .allocator = self.allocator,
             .library = self.database,
+            .found_releases = &stats.found_releases,
         };
         var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
         defer scanner.deinit();
+        stats.stage.store(.read_tags, .release);
         var totals: library_pass.scanner.Result = .{};
         var walk_failed = false;
         for (subtrees, walked) |subtree, *completed| {

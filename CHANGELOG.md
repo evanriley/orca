@@ -4,6 +4,17 @@
 
 ### Added
 
+- **First-run folder estimate and scan progress.** `estimateAudioFiles`
+  counts the audio files under a folder not yet added, by each file's first
+  bytes, up to a limit (100000 by default) past which `FolderEstimate`
+  reports `truncated`; it is cancelled through a `CancellationToken`.
+  `ScanStats` gains `stage` (`discover`, `read_tags`, `done`), `current_path`
+  (the file a scan or reconcile is reading) and `albums_found` (distinct
+  Releases written that still exist). `orca-cli estimate PATH` prints
+  `audio_files=N truncated=no|yes`, and `orca-cli scan` prints `progress`
+  lines with `stage=`, `files=`, `albums=` and `current=`. The C ABI appends
+  `albums_found`, `stage` and `current_path` to `orca_scan_stats` and adds
+  `orca_scan_stage`, `orca_folder_estimate` and `orca_estimate_audio_files`.
 - **Job pause, waiting queue, history and progress telemetry.** A Library
   runs one host Job at a time; one started while another holds the slot, or
   while the Library is paused, is returned in the new `waiting` state and

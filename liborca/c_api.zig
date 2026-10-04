@@ -11,6 +11,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const analysis_pass = @import("library/analysis_pass.zig");
+const folder_estimate = @import("library/folder_estimate.zig");
 const audio = @import("audio/root.zig");
 const control = @import("core/control.zig");
 const core = @import("core/root.zig");
@@ -1131,6 +1132,18 @@ pub const ScanStats = extern struct {
     tracks_written: u64,
     releases_written: u64,
     cancelled: u8,
+    _reserved: [7]u8 = @splat(0),
+    albums_found: u64,
+    stage: u8,
+    _reserved2: [1]u8 = @splat(0),
+    current_path_length: u16,
+    _reserved3: [4]u8 = @splat(0),
+    current_path: [512]u8,
+};
+
+pub const FolderEstimate = extern struct {
+    audio_files: u64,
+    truncated: u8,
     _reserved: [7]u8 = @splat(0),
 };
 
@@ -4549,6 +4562,14 @@ pub fn importMatchMode(value: u8) ?core.runtime.MatchMode {
     };
 }
 
+pub fn exportScanStage(stage: core.runtime.ScanStage) u8 {
+    return switch (stage) {
+        .discover => 0,
+        .read_tags => 1,
+        .done => 2,
+    };
+}
+
 pub fn exportAcoustIdUse(use: core.runtime.AcoustIdUse) u8 {
     return switch (use) {
         .searched => 0,
@@ -5056,6 +5077,34 @@ pub export fn orca_library_scan_stats(
         .tracks_written = stats.tracks_written,
         .releases_written = stats.releases_written,
         .cancelled = @intFromBool(stats.cancelled),
+        .albums_found = stats.albums_found,
+        .stage = exportScanStage(stats.stage),
+        .current_path_length = stats.current_path.len,
+        .current_path = stats.current_path.bytes,
+    };
+    return .ok;
+}
+
+pub export fn orca_estimate_audio_files(
+    runtime: ?*Runtime,
+    path: ?[*:0]const u8,
+    limit: u32,
+    output: ?*FolderEstimate,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const path_pointer = path orelse return box.reject(@src(), .invalid_argument, "path is null");
+    const destination = output orelse return box.reject(@src(), .invalid_argument, "output is null");
+    var token: folder_estimate.CancellationToken = .{};
+    const estimate = folder_estimate.estimateAudioFiles(
+        box.io(),
+        std.heap.c_allocator,
+        std.mem.span(path_pointer),
+        &token,
+        if (limit == 0) folder_estimate.default_limit else limit,
+    ) catch |err| return box.fail(@src(), err);
+    destination.* = .{
+        .audio_files = estimate.audio_files,
+        .truncated = @intFromBool(estimate.truncated),
     };
     return .ok;
 }
