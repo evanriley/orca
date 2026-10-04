@@ -54,6 +54,7 @@ pub extern fn adw_preferences_group_new() *gtk.Widget;
 pub extern fn adw_preferences_group_add(group: *PreferencesGroup, child: *gtk.Widget) void;
 pub extern fn adw_preferences_group_set_title(group: *PreferencesGroup, title: [*:0]const u8) void;
 pub extern fn adw_preferences_group_set_description(group: *PreferencesGroup, description: ?[*:0]const u8) void;
+pub extern fn adw_preferences_group_remove(group: *PreferencesGroup, child: *gtk.Widget) void;
 pub extern fn adw_preferences_row_set_title(row: *PreferencesRow, title: [*:0]const u8) void;
 pub extern fn adw_preferences_row_set_use_markup(row: *PreferencesRow, use_markup: gtk.gboolean) void;
 pub extern fn adw_preferences_row_get_type() gtk.GType;
@@ -79,6 +80,7 @@ pub extern fn adw_expander_row_set_subtitle_lines(row: *ExpanderRow, lines: c_in
 pub extern fn adw_entry_row_new() *gtk.Widget;
 pub extern fn adw_entry_row_set_show_apply_button(row: *EntryRow, show_apply_button: gtk.gboolean) void;
 pub extern fn adw_action_row_set_activatable_widget(row: *ActionRow, widget: ?*gtk.Widget) void;
+pub extern fn adw_action_row_get_activatable_widget(row: *ActionRow) ?*gtk.Widget;
 pub extern fn adw_switch_row_new() *gtk.Widget;
 pub extern fn adw_switch_row_get_active(row: *SwitchRow) gtk.gboolean;
 pub extern fn adw_switch_row_set_active(row: *SwitchRow, active: gtk.gboolean) void;
@@ -188,6 +190,7 @@ pub extern fn adw_wrap_box_set_child_spacing(box: *WrapBox, spacing: c_int) void
 pub extern fn adw_wrap_box_set_line_spacing(box: *WrapBox, spacing: c_int) void;
 pub extern fn adw_wrap_box_set_align(box: *WrapBox, alignment: f32) void;
 pub extern fn adw_wrap_box_set_justify(box: *WrapBox, justify: c_int) void;
+pub extern fn adw_wrap_box_set_justify_last_line(box: *WrapBox, justify_last_line: c_int) void;
 pub const JUSTIFY_SPREAD: c_int = 2;
 
 pub extern fn adw_split_button_new() *gtk.Widget;

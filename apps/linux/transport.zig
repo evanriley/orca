@@ -28,6 +28,7 @@ const details = @import("details.zig");
 const lyrics = @import("lyrics.zig");
 const feedback = @import("feedback.zig");
 const preferences = @import("preferences.zig");
+const parametric = @import("parametric.zig");
 
 const App = app.App;
 
@@ -259,6 +260,7 @@ pub fn selectDevice(self: *App, index: usize) void {
         self.toast("The output is pinned by ORCA_OUTPUT_DEVICE");
         return;
     }
+    if (parametric.applyDevicePreset(self, self.device_names.items[index])) preferences.showEqualizer(self);
     // Only an open output moves; one that was never opened waits for the
     // next play, as at launch.
     const zone = self.zone orelse return;
@@ -366,7 +368,7 @@ pub fn cycleRepeat(self: *App) void {
     showRepeat(self, self.repeat_mode);
 }
 
-fn showRepeat(self: *App, mode: liborca.RepeatMode) void {
+pub fn showRepeat(self: *App, mode: liborca.RepeatMode) void {
     const button = self.transport_controls.repeat orelse return;
     gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), if (mode == .one)
         "orca-repeat-one-symbolic"
@@ -607,6 +609,7 @@ fn buildControls(self: *App) *gtk.Widget {
     const controls = &self.transport_controls;
     for ([_]?*gtk.Widget{ controls.shuffle, controls.previous, controls.next, controls.repeat }) |button|
         gtk.gtk_widget_add_css_class(button.?, "bar-button");
+    showRepeat(self, self.repeat_mode);
     const seek = newSeek(self);
     gtk.gtk_box_set_spacing(gtk.cast(gtk.Box, seek), 10);
     for ([_]?*gtk.Label{ controls.elapsed, controls.total }) |label|
@@ -971,7 +974,6 @@ fn outputReady(self: *App) bool {
 
 fn signalPathVisible(self: *App) bool {
     if (details.shownMode(self) == .signal_path) return true;
-    if (preferences.audioInformationShown(self)) return true;
     for ([_]?*gtk.Popover{ self.signal_path_popover, self.device_popover }) |maybe_popover| {
         const popover = maybe_popover orelse continue;
         if (gtk.gtk_widget_get_visible(gtk.cast(gtk.Widget, popover)) != 0) return true;

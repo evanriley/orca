@@ -1,8 +1,11 @@
 //! The frontend's own preferences, in `$XDG_CONFIG_HOME/orca/settings.ini`.
 //!
 //! Only choices a host keeps for itself live here: which output to open, the
-//! ReplayGain mode, which equalizer runs, the graphic and parametric curves,
-//! the saved parametric presets and crossfeed to hand the Player at launch, and
+//! ReplayGain mode, preamp, untagged-track fallback and clipping protection,
+//! what happens when the queue ends, whether long tracks resume and what
+//! launch restores, which equalizer runs, the graphic and parametric curves,
+//! the saved parametric presets, the preset each output device switches to,
+//! and crossfeed to hand the Player at launch, and
 //! whether listens and the current track are submitted, how confident a match
 //! Accept Confident takes, whether matching uses audio fingerprints, whether
 //! the music folders are watched, whether idle maintenance runs, how many
@@ -138,6 +141,82 @@ fn savePresets(self: *App, keys: *gtk.GKeyFile) void {
     gtk.g_key_file_set_string_list(keys, "sound", "parametric_presets", &entries, count);
 }
 
+fn loadDevicePresets(self: *App, keys: *gtk.GKeyFile) void {
+    if (getString(keys, "sound", "switch_preset_with_device")) |value| {
+        defer gtk.g_free(value);
+        self.parametric.switch_with_device = isEnabled(std.mem.span(value));
+    }
+    var count: usize = 0;
+    var err: ?*gtk.GError = null;
+    const list = gtk.g_key_file_get_string_list(keys, "sound", "device_presets", &count, &err) orelse {
+        gtk.g_clear_error(&err);
+        return;
+    };
+    defer gtk.g_strfreev(list);
+    for (list[0..count]) |maybe_entry| {
+        const entry = std.mem.span(maybe_entry orelse continue);
+        const split = std.mem.indexOfScalar(u8, entry, '\n') orelse continue;
+        _ = parametric.setDevicePreset(self, entry[0..split], entry[split + 1 ..]);
+    }
+}
+
+fn saveDevicePresets(self: *App, keys: *gtk.GKeyFile) void {
+    const editor = &self.parametric;
+    gtk.g_key_file_set_string(keys, "sound", "switch_preset_with_device", if (editor.switch_with_device) "true" else "false");
+    if (editor.device_preset_count == 0) return;
+    var storage: [parametric.max_device_presets][parametric.max_device_name_bytes + 1 + parametric.max_name_bytes + 1]u8 = undefined;
+    var entries: [parametric.max_device_presets][*:0]const u8 = undefined;
+    for (editor.device_presets[0..editor.device_preset_count], 0..) |*entry, index| {
+        entries[index] = (std.fmt.bufPrintSentinel(&storage[index], "{s}\n{s}", .{ entry.device(), entry.preset() }, 0) catch unreachable).ptr;
+    }
+    gtk.g_key_file_set_string_list(keys, "sound", "device_presets", &entries, editor.device_preset_count);
+}
+
+fn loadPlayback(self: *App, keys: *gtk.GKeyFile) void {
+    if (getString(keys, "playback", "preamp")) |value| {
+        defer gtk.g_free(value);
+        if (std.fmt.parseFloat(f32, std.mem.trim(u8, std.mem.span(value), " "))) |decibels| {
+            if (std.math.isFinite(decibels)) self.runtime.playerSetReplayGainPreamp(self.player, decibels) catch {};
+        } else |_| {}
+    }
+    if (getString(keys, "playback", "untagged")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.UntaggedFallback, std.mem.span(value))) |fallback|
+            self.runtime.playerSetReplayGainFallback(self.player, fallback) catch {};
+    }
+    if (getString(keys, "playback", "prevent_clipping")) |value| {
+        defer gtk.g_free(value);
+        self.runtime.playerSetPeakProtection(self.player, isEnabled(std.mem.span(value))) catch {};
+    }
+    if (getString(keys, "playback", "queue_end")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "repeat")) {
+            if (self.runtime.playerSetRepeat(self.player, .all)) |_| {
+                self.repeat_mode = .all;
+            } else |_| {}
+        }
+    }
+    if (getString(keys, "playback", "remember_long_position")) |value| {
+        defer gtk.g_free(value);
+        self.playback.remember_long_position = isEnabled(std.mem.span(value));
+    }
+    if (getString(keys, "playback", "on_launch")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(app.OnLaunch, std.mem.span(value))) |choice| self.playback.on_launch = choice;
+    }
+}
+
+fn savePlayback(self: *App, keys: *gtk.GKeyFile) void {
+    const gain = self.runtime.playerReplayGainSettings(self.player) catch liborca.ReplayGainSettings{};
+    var preamp_buffer: [32]u8 = undefined;
+    gtk.g_key_file_set_string(keys, "playback", "preamp", strings.format(&preamp_buffer, "{d}", .{strings.withoutNegativeZero(gain.preamp_db)}).ptr);
+    gtk.g_key_file_set_string(keys, "playback", "untagged", @tagName(gain.fallback));
+    gtk.g_key_file_set_string(keys, "playback", "prevent_clipping", if (gain.peak_protection) "true" else "false");
+    gtk.g_key_file_set_string(keys, "playback", "queue_end", if (self.repeat_mode == .all) "repeat" else "stop");
+    gtk.g_key_file_set_string(keys, "playback", "remember_long_position", if (self.playback.remember_long_position) "true" else "false");
+    gtk.g_key_file_set_string(keys, "playback", "on_launch", @tagName(self.playback.on_launch));
+}
+
 fn loadCrossfeed(self: *App, text: []const u8, enabled: ?[]const u8) void {
     const amount = parseCrossfeed(text) orelse return;
     self.crossfeed_amount = amount;
@@ -180,6 +259,7 @@ fn enableScrobbling(self: *App) void {
 
 /// Applies saved choices to a newly started app.
 pub fn load(self: *App) void {
+    self.runtime.playerSetReplayGainFallback(self.player, .minus_6_db) catch {};
     var buffer: [1024]u8 = undefined;
     const file = path(&buffer) orelse return;
     const keys = gtk.g_key_file_new();
@@ -198,7 +278,9 @@ pub fn load(self: *App) void {
         defer gtk.g_free(value);
         self.preferred_output.set(self.allocator, std.mem.span(value));
     } else gtk.g_clear_error(&err);
+    loadPlayback(self, keys);
     loadEqualizers(self, keys);
+    loadDevicePresets(self, keys);
     if (getString(keys, "sound", "crossfeed")) |value| {
         defer gtk.g_free(value);
         const enabled = getString(keys, "sound", "crossfeed_enabled");
@@ -406,6 +488,7 @@ pub fn save(self: *App) void {
     const mode = self.runtime.playerReplayGainMode(self.player) catch .off;
     gtk.g_key_file_set_string(keys, "playback", "replay_gain", @tagName(mode));
     gtk.g_key_file_set_string(keys, "playback", "output_device", self.preferred_output.value.ptr);
+    savePlayback(self, keys);
     if (self.runtime.playerVolume(self.player)) |level| {
         var volume_buffer: [32]u8 = undefined;
         gtk.g_key_file_set_string(keys, "playback", "volume", strings.format(&volume_buffer, "{d}", .{level}).ptr);
@@ -418,6 +501,7 @@ pub fn save(self: *App) void {
     if (parametric.writeCurve(&parametric_buffer, self.parametric.curve)) |curve|
         gtk.g_key_file_set_string(keys, "sound", "parametric", curve.ptr);
     savePresets(self, keys);
+    saveDevicePresets(self, keys);
     var crossfeed_buffer: [32]u8 = undefined;
     gtk.g_key_file_set_string(keys, "sound", "crossfeed", strings.format(&crossfeed_buffer, "{d}", .{self.crossfeed_amount}).ptr);
     const crossfeed_on = (self.runtime.playerCrossfeed(self.player) catch null) != null;

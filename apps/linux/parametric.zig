@@ -34,18 +34,55 @@ const shelf_q_range = [2]f32{ 0.3, 2 };
 const preamp_range = [2]f64{ -24, 6 };
 const max_file_bytes = 64 * 1024;
 
-const sample_name = "HD 650 (sample)";
+pub const sample_name = "HD 650";
 const sample_text = @embedFile("hd650.txt");
 const flat_index: c_uint = 0;
 const custom_index: c_uint = 1;
 const first_user_index: c_uint = 2;
 
+const kind_order = [_]Kind{ .low_shelf, .peak, .high_shelf, .low_pass, .high_pass, .notch };
+const listed_kinds = kind_order.len - 1;
+
 const kind_labels = blk: {
-    const kinds = std.enums.values(Kind);
-    var labels: [kinds.len + 1]?[*:0]const u8 = undefined;
-    for (kinds, 0..) |kind, index| labels[index] = signal_path.filterKindName(kind);
-    labels[kinds.len] = null;
+    var labels: [kind_order.len + 1]?[*:0]const u8 = undefined;
+    for (kind_order, 0..) |kind, index| labels[index] = signal_path.filterKindName(kind);
+    labels[kind_order.len] = null;
     break :blk labels;
+};
+
+const listed_kind_labels = blk: {
+    var labels: [listed_kinds + 1]?[*:0]const u8 = undefined;
+    @memcpy(labels[0..listed_kinds], kind_labels[0..listed_kinds]);
+    labels[listed_kinds] = null;
+    break :blk labels;
+};
+
+comptime {
+    std.debug.assert(kind_order.len == std.enums.values(Kind).len);
+    std.debug.assert(kind_order[listed_kinds] == .notch);
+}
+
+fn kindPosition(kind: Kind) c_uint {
+    return @intCast(std.mem.indexOfScalar(Kind, &kind_order, kind).?);
+}
+
+pub const max_device_presets = 16;
+pub const max_device_name_bytes = 200;
+
+/// The preset `switch_with_device` applies when the output becomes `device`.
+pub const DevicePreset = struct {
+    device_buffer: [max_device_name_bytes]u8 = undefined,
+    device_len: u8 = 0,
+    preset_buffer: [max_name_bytes]u8 = undefined,
+    preset_len: u8 = 0,
+
+    pub fn device(self: *const DevicePreset) []const u8 {
+        return self.device_buffer[0..self.device_len];
+    }
+
+    pub fn preset(self: *const DevicePreset) []const u8 {
+        return self.preset_buffer[0..self.preset_len];
+    }
 };
 
 pub const Preset = struct {
@@ -62,7 +99,6 @@ pub const Row = struct {
     self: *App = undefined,
     index: u8 = 0,
     widget: ?*gtk.Widget = null,
-    title: ?*gtk.Widget = null,
     kind: ?*gtk.Widget = null,
     frequency: ?*gtk.Widget = null,
     gain: ?*gtk.Widget = null,
@@ -86,6 +122,9 @@ pub const State = struct {
     view: View = .graphic,
     presets: [max_presets]Preset = undefined,
     preset_count: u8 = 0,
+    device_presets: [max_device_presets]DevicePreset = undefined,
+    device_preset_count: u8 = 0,
+    switch_with_device: bool = true,
     rate: u32 = default_rate,
     apply_timer: c_uint = 0,
     rebuild_idle: c_uint = 0,
@@ -145,6 +184,10 @@ fn sampleIndex(self: *App) c_uint {
     return first_user_index + self.parametric.preset_count;
 }
 
+fn newPresetIndex(self: *App) c_uint {
+    return sampleIndex(self) + 1;
+}
+
 fn presetCurve(self: *App, index: c_uint) ?Curve {
     const editor = &self.parametric;
     if (index == flat_index) return .{};
@@ -180,13 +223,115 @@ fn presetLabels(self: *App, buffer: []?[*:0]const u8, names: *[max_presets][max_
     }
     buffer[count] = sample_name;
     count += 1;
+    buffer[count] = "New preset…";
+    count += 1;
     buffer[count] = null;
     return buffer[0 .. count + 1];
 }
 
+/// Flat, the saved presets and the sample, by the names the Preset list
+/// shows; a saved preset wins over a built-in of the same name.
+pub fn presetNamed(self: *App, name: []const u8) ?Curve {
+    for (self.parametric.presets[0..self.parametric.preset_count]) |*preset| {
+        if (std.mem.eql(u8, preset.name(), name)) return preset.curve;
+    }
+    if (std.mem.eql(u8, name, "Flat")) return .{};
+    if (std.mem.eql(u8, name, sample_name)) return sampleCurve();
+    return null;
+}
+
+/// "None", Flat, the saved presets and the sample: what a device can switch to.
+pub fn devicePresetLabels(self: *App, buffer: *[max_presets + 4]?[*:0]const u8, names: *[max_presets][max_name_bytes + 1]u8) []?[*:0]const u8 {
+    var count: usize = 0;
+    for ([_][*:0]const u8{ "None", "Flat" }) |label| {
+        buffer[count] = label;
+        count += 1;
+    }
+    for (self.parametric.presets[0..self.parametric.preset_count], 0..) |*preset, index| {
+        @memcpy(names[index][0..preset.name_len], preset.name());
+        names[index][preset.name_len] = 0;
+        buffer[count] = @ptrCast(&names[index]);
+        count += 1;
+    }
+    buffer[count] = sample_name;
+    buffer[count + 1] = null;
+    return buffer[0 .. count + 2];
+}
+
+/// The preset name at `index` of `devicePresetLabels`, or null for None.
+pub fn devicePresetChoice(self: *App, index: c_uint) ?[]const u8 {
+    const count = self.parametric.preset_count;
+    if (index == 0 or index > count + 2) return null;
+    if (index == 1) return "Flat";
+    if (index == count + 2) return sample_name;
+    return self.parametric.presets[index - 2].name();
+}
+
+pub fn devicePresetIndex(self: *App, name: ?[]const u8) c_uint {
+    const chosen = name orelse return 0;
+    const count = self.parametric.preset_count;
+    for (self.parametric.presets[0..count], 0..) |*preset, index| {
+        if (std.mem.eql(u8, preset.name(), chosen)) return @intCast(index + 2);
+    }
+    if (std.mem.eql(u8, chosen, "Flat")) return 1;
+    if (std.mem.eql(u8, chosen, sample_name)) return count + 2;
+    return 0;
+}
+
+/// An editable decibel value, shown as `−3.0 dB`.
+pub fn decibelEntry(range: [2]f64, value: f64, label: [*:0]const u8) *gtk.Widget {
+    return spinEntry(range, 0.5, 1, 7, value, .preamp, label);
+}
+
+pub fn devicePreset(self: *App, device: []const u8) ?[]const u8 {
+    for (self.parametric.device_presets[0..self.parametric.device_preset_count]) |*entry| {
+        if (std.mem.eql(u8, entry.device(), device)) return entry.preset();
+    }
+    return null;
+}
+
+/// Binds `preset` to `device`, or unbinds it for null. False when a name is
+/// too long or every slot is taken.
+pub fn setDevicePreset(self: *App, device: []const u8, preset: ?[]const u8) bool {
+    const editor = &self.parametric;
+    const entries = editor.device_presets[0..editor.device_preset_count];
+    const existing = for (entries, 0..) |*entry, index| {
+        if (std.mem.eql(u8, entry.device(), device)) break index;
+    } else null;
+    const name = preset orelse {
+        const index = existing orelse return true;
+        std.mem.copyForwards(DevicePreset, entries[index .. entries.len - 1], entries[index + 1 ..]);
+        editor.device_preset_count -= 1;
+        return true;
+    };
+    if (device.len == 0 or device.len > max_device_name_bytes or name.len == 0 or name.len > max_name_bytes) return false;
+    const slot = if (existing) |index| &entries[index] else blk: {
+        if (editor.device_preset_count == max_device_presets) return false;
+        editor.device_preset_count += 1;
+        break :blk &editor.device_presets[editor.device_preset_count - 1];
+    };
+    @memcpy(slot.device_buffer[0..device.len], device);
+    slot.device_len = @intCast(device.len);
+    @memcpy(slot.preset_buffer[0..name.len], name);
+    slot.preset_len = @intCast(name.len);
+    return true;
+}
+
+/// Runs the preset bound to `device` when presets follow the output. True
+/// when it replaced the equalizer.
+pub fn applyDevicePreset(self: *App, device: []const u8) bool {
+    if (!self.parametric.switch_with_device) return false;
+    const name = devicePreset(self, device) orelse return false;
+    const curve = presetNamed(self, name) orelse return false;
+    self.parametric.curve = curve;
+    showCurve(self);
+    setMode(self, .parametric, self.equalizer_curve);
+    return true;
+}
+
 fn showPresets(self: *App) void {
     const names = self.parametric.controls.preset_names orelse return;
-    var labels: [max_presets + 4]?[*:0]const u8 = undefined;
+    var labels: [max_presets + 5]?[*:0]const u8 = undefined;
     var name_storage: [max_presets][max_name_bytes + 1]u8 = undefined;
     const list = presetLabels(self, &labels, &name_storage);
     const previous = self.parametric.suppress;
@@ -265,20 +410,6 @@ fn redraw(self: *App) void {
     if (self.parametric.controls.graph) |area| gtk.gtk_widget_queue_draw(area);
 }
 
-fn writeTitle(buffer: []u8, filter: Filter) [:0]const u8 {
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writer.print("{s} ", .{signal_path.filterKindName(filter.kind)}) catch {};
-    signal_path.writeFilterFrequency(&writer, filter.frequency_hz) catch {};
-    buffer[writer.end] = 0;
-    return buffer[0..writer.end :0];
-}
-
-fn showRowTitle(row: *Row, filter: Filter) void {
-    const label = row.title orelse return;
-    var buffer: [64]u8 = undefined;
-    gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), writeTitle(&buffer, filter).ptr);
-}
-
 fn setSpin(spin: ?*gtk.Widget, value: f64) void {
     gtk.gtk_spin_button_set_value(gtk.cast(gtk.SpinButton, spin orelse return), value);
 }
@@ -294,7 +425,6 @@ pub fn filterDragged(self: *App, index: u8) void {
     setSpin(row.frequency, filter.frequency_hz);
     setSpin(row.gain, filter.gain_db);
     setSpin(row.q, filter.q);
-    showRowTitle(row, filter);
     showMatchingPreset(self);
 }
 
@@ -344,9 +474,8 @@ fn displayText(buffer: []u8, display: Display, value: f64) ?[:0]const u8 {
     const shown = strings.withoutNegativeZero(@floatCast(value));
     (switch (display) {
         .frequency => signal_path.writeFilterFrequency(&writer, shown),
-        .decibels => writeTenths(&writer, shown, " dB"),
+        .decibels, .preamp => writeTenths(&writer, shown, " dB"),
         .q => writer.print("{d:.2}", .{shown}),
-        .preamp => writeTenths(&writer, shown, ""),
     }) catch return null;
     buffer[writer.end] = 0;
     return buffer[0..writer.end :0];
@@ -355,6 +484,7 @@ fn displayText(buffer: []u8, display: Display, value: f64) ?[:0]const u8 {
 fn writeTenths(writer: *std.Io.Writer, value: f32, unit: []const u8) std.Io.Writer.Error!void {
     const tenths = @round(value * 10);
     if (tenths < 0) try writer.writeAll(signal_path.minus);
+    if (tenths > 0) try writer.writeByte('+');
     try writer.print("{d:.1}{s}", .{ @abs(tenths) / 10, unit });
 }
 
@@ -424,6 +554,7 @@ fn spinEntry(
     gtk.gtk_spin_button_set_digits(gtk.cast(gtk.SpinButton, widget), digits);
     gtk.gtk_spin_button_set_numeric(gtk.cast(gtk.SpinButton, widget), gtk.false_);
     gtk.gtk_editable_set_width_chars(gtk.cast(gtk.Editable, widget), width_chars);
+    gtk.gtk_editable_set_alignment(gtk.cast(gtk.Editable, widget), 1);
     gtk.gtk_widget_add_css_class(widget, "peq-spin");
     gtk.gtk_widget_set_valign(widget, gtk.ALIGN_CENTER);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, widget), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
@@ -446,21 +577,22 @@ fn cell(child: *gtk.Widget, width: c_int) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_set_size_request(box, width, -1);
     gtk.gtk_widget_set_valign(child, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_halign(child, gtk.ALIGN_END);
+    gtk.gtk_widget_set_hexpand(child, gtk.true_);
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), child);
+    gtk.gtk_widget_set_hexpand(box, gtk.false_);
     return box;
 }
 
-const Column = enum { index, dot, title, kind, frequency, gain, q, enabled, menu };
+const Column = enum { index, kind, frequency, gain, q, enabled, menu };
 
 const column_widths = std.EnumArray(Column, c_int).init(.{
     .index = 22,
-    .dot = 18,
-    .title = 128,
-    .kind = 112,
-    .frequency = 84,
-    .gain = 78,
-    .q = 58,
-    .enabled = 66,
+    .kind = 104,
+    .frequency = 96,
+    .gain = 84,
+    .q = 60,
+    .enabled = 52,
     .menu = 30,
 });
 
@@ -469,25 +601,19 @@ fn tableHeader() *gtk.Widget {
     gtk.gtk_widget_add_css_class(box, "peq-header");
     const titles = std.EnumArray(Column, [*:0]const u8).init(.{
         .index = "#",
-        .dot = "",
-        .title = "Filter",
-        .kind = "Type",
-        .frequency = "Freq",
-        .gain = "Gain",
+        .kind = "TYPE",
+        .frequency = "FREQUENCY",
+        .gain = "GAIN",
         .q = "Q",
-        .enabled = "Enabled",
+        .enabled = "ON",
         .menu = "",
     });
     for (std.enums.values(Column)) |column| {
         const heading = textLabel(titles.get(column), column_widths.get(column), null);
-        if (column == .title) gtk.gtk_widget_set_hexpand(heading, gtk.true_);
-        if (column == .dot) {
-            const diamond = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-            gtk.gtk_widget_add_css_class(diamond, "peq-diamond");
-            gtk.gtk_widget_set_halign(diamond, gtk.ALIGN_START);
-            gtk.gtk_widget_set_valign(diamond, gtk.ALIGN_CENTER);
-            gtk.gtk_box_append(gtk.cast(gtk.Box, box), cell(diamond, column_widths.get(column)));
-            continue;
+        switch (column) {
+            .index => {},
+            .kind => gtk.gtk_widget_set_hexpand(heading, gtk.true_),
+            else => gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, heading), 1),
         }
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), heading);
     }
@@ -536,22 +662,12 @@ fn buildRow(self: *App, index: u8, filter: Filter) *gtk.Widget {
     var number: [8]u8 = undefined;
     gtk.gtk_box_append(gtk.cast(gtk.Box, box), textLabel(strings.printZ(&number, "{d}", .{index + 1}) catch "", column_widths.get(.index), "peq-index"));
 
-    const dot = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(dot, "peq-dot");
-    gtk.gtk_widget_set_halign(dot, gtk.ALIGN_START);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), cell(dot, column_widths.get(.dot)));
-
-    var title_buffer: [64]u8 = undefined;
-    const title = textLabel(writeTitle(&title_buffer, filter).ptr, column_widths.get(.title), null);
-    gtk.gtk_widget_set_hexpand(title, gtk.true_);
-    gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, title), gtk.ELLIPSIZE_END);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, box), title);
-    row.title = title;
-
-    const kind = gtk.gtk_drop_down_new_from_strings(&kind_labels);
-    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, kind), @intFromEnum(filter.kind));
+    const kind = gtk.gtk_drop_down_new_from_strings(if (filter.kind == .notch) &kind_labels else &listed_kind_labels);
+    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, kind), kindPosition(filter.kind));
     gtk.gtk_widget_add_css_class(kind, "peq-type");
     gtk.gtk_widget_set_size_request(kind, column_widths.get(.kind), -1);
+    gtk.gtk_widget_set_hexpand(kind, gtk.true_);
+    gtk.gtk_widget_set_halign(kind, gtk.ALIGN_START);
     gtk.gtk_widget_set_valign(kind, gtk.ALIGN_CENTER);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, kind), gtk.ACCESSIBLE_PROPERTY_LABEL, "Type", @as(c_int, -1));
     _ = gtk.signalConnect(kind, "notify::selected", gtk.callback(kindChanged), row);
@@ -630,7 +746,9 @@ fn kindChanged(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callcon
     const row = rowOf(data);
     const filter = rowFilter(row) orelse return;
     const self = row.self;
-    const kind = std.enums.fromInt(Kind, gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, dropdown))) orelse return;
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, dropdown));
+    if (selected >= kind_order.len) return;
+    const kind = kind_order[selected];
     filter.kind = kind;
     const range = qRange(kind);
     filter.q = std.math.clamp(filter.q, range[0], range[1]);
@@ -648,7 +766,6 @@ fn kindChanged(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callcon
             gtk.gtk_widget_set_sensitive(gain, boolean(filter.usesGain()));
         }
     }
-    showRowTitle(row, filter.*);
     edited(self);
     applyNow(self);
 }
@@ -657,7 +774,6 @@ fn frequencyChanged(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const row = rowOf(data);
     const filter = rowFilter(row) orelse return;
     filter.frequency_hz = @floatCast(spinValue(widget));
-    showRowTitle(row, filter.*);
     edited(row.self);
     scheduleApply(row.self);
 }
@@ -745,6 +861,10 @@ fn presetChanged(dropdown: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     const self = state(data);
     if (self.parametric.suppress) return;
     const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, dropdown));
+    if (selected == newPresetIndex(self)) {
+        showMatchingPreset(self);
+        return askPresetName(self);
+    }
     const curve = presetCurve(self, selected) orelse return;
     curveReplaced(self, curve);
 }
@@ -768,19 +888,6 @@ fn preampDown(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn preampUp(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     nudgePreamp(state(data), 0.5);
-}
-
-fn autoPreamp(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const suggested = std.math.clamp(self.parametric.curve.suggestedPreamp(), preamp_range[0], preamp_range[1]);
-    self.parametric.curve.preamp_db = @floatCast(suggested);
-    showPreamp(self);
-    edited(self);
-    applyNow(self);
-}
-
-fn resetClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    curveReplaced(state(data), .{});
 }
 
 fn errorText(err: anyerror) [:0]const u8 {
@@ -967,8 +1074,20 @@ fn nameResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) call
     settings.save(self);
 }
 
-/// The Preset, Preamp, Import and Reset controls, which wrap as the card
-/// narrows.
+fn exportClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    chooseExport(state(data));
+}
+
+fn fileButton(label: [*:0]const u8, handler: gtk.GCallback, self: *App) *gtk.Widget {
+    const button = gtk.gtk_button_new_with_label(label);
+    gtk.gtk_widget_add_css_class(button, "peq-file");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    _ = gtk.signalConnect(button, "clicked", handler, self);
+    return button;
+}
+
+/// The Preset and Preamp controls, then Import and Export, which wrap below
+/// them as the card narrows.
 fn controlRow(self: *App) *gtk.Widget {
     const editor = &self.parametric;
     const wrap = adw.adw_wrap_box_new();
@@ -976,68 +1095,49 @@ fn controlRow(self: *App) *gtk.Widget {
     adw.adw_wrap_box_set_child_spacing(gtk.cast(adw.WrapBox, wrap), 12);
     adw.adw_wrap_box_set_line_spacing(gtk.cast(adw.WrapBox, wrap), 10);
     adw.adw_wrap_box_set_justify(gtk.cast(adw.WrapBox, wrap), adw.JUSTIFY_SPREAD);
+    adw.adw_wrap_box_set_justify_last_line(gtk.cast(adw.WrapBox, wrap), gtk.true_);
 
-    const preset_group = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preset_group), textLabel("Preset", -1, "peq-label"));
-    var labels: [max_presets + 4]?[*:0]const u8 = undefined;
+    const settings_group = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, settings_group), textLabel("Preset", -1, "peq-label"));
+    var labels: [max_presets + 5]?[*:0]const u8 = undefined;
     var name_storage: [max_presets][max_name_bytes + 1]u8 = undefined;
     const names = gtk.gtk_string_list_new(presetLabels(self, &labels, &name_storage).ptr);
     const preset = gtk.gtk_drop_down_new(gtk.cast(gtk.ListModel, names), null);
-    gtk.gtk_widget_set_size_request(preset, 200, -1);
+    gtk.gtk_widget_add_css_class(preset, "settings-select");
     gtk.gtk_widget_add_css_class(preset, "peq-preset");
+    gtk.gtk_widget_set_valign(preset, gtk.ALIGN_CENTER);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, preset), gtk.ACCESSIBLE_PROPERTY_LABEL, "Preset", @as(c_int, -1));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preset_group), preset);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, settings_group), preset);
     editor.controls.preset = preset;
     editor.controls.preset_names = names;
     showMatchingPreset(self);
     _ = gtk.signalConnect(preset, "notify::selected", gtk.callback(presetChanged), self);
-    adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, wrap), preset_group);
 
-    const preamp_group = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
     const preamp_label = textLabel("Preamp", -1, "peq-label");
-    gtk.gtk_widget_set_margin_end(preamp_label, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preamp_group), preamp_label);
-    const preamp = spinEntry(preamp_range, 0.5, 1, 4, strings.withoutNegativeZero(editor.curve.preamp_db), .preamp, "Preamp");
+    gtk.gtk_widget_set_margin_start(preamp_label, 4);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, settings_group), preamp_label);
+    const preamp = spinEntry(preamp_range, 0.5, 1, 7, strings.withoutNegativeZero(editor.curve.preamp_db), .preamp, "Preamp");
     gtk.gtk_widget_add_css_class(preamp, "peq-preamp");
     _ = gtk.signalConnect(preamp, "value-changed", gtk.callback(preampChanged), self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preamp_group), preamp);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, settings_group), preamp);
     editor.controls.preamp = preamp;
-    const unit = textLabel("dB", -1, "peq-unit");
-    gtk.gtk_widget_set_margin_end(unit, 4);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preamp_group), unit);
     for ([_]struct { [*:0]const u8, [*:0]const u8, gtk.GCallback }{
-        .{ "list-remove-symbolic", "Lower preamp", gtk.callback(preampDown) },
-        .{ "list-add-symbolic", "Raise preamp", gtk.callback(preampUp) },
+        .{ "orca-minus-symbolic", "Lower preamp", gtk.callback(preampDown) },
+        .{ "orca-plus-symbolic", "Raise preamp", gtk.callback(preampUp) },
     }) |button_info| {
         const button = gtk.gtk_button_new_from_icon_name(button_info[0]);
         gtk.gtk_widget_add_css_class(button, "peq-step");
-        gtk.gtk_widget_set_size_request(button, 40, -1);
+        gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
         gtk.gtk_widget_set_tooltip_text(button, button_info[1]);
         gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, button_info[1], @as(c_int, -1));
         _ = gtk.signalConnect(button, "clicked", button_info[2], self);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, preamp_group), button);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, settings_group), button);
     }
-    const auto = gtk.gtk_button_new_with_label("Auto");
-    gtk.gtk_widget_add_css_class(auto, "peq-step");
-    gtk.gtk_widget_set_tooltip_text(auto, "Lower the preamp by the largest boost, so the curve cannot clip");
-    _ = gtk.signalConnect(auto, "clicked", gtk.callback(autoPreamp), self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, preamp_group), auto);
-    adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, wrap), preamp_group);
+    adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, wrap), settings_group);
 
-    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    const import = gtk.gtk_button_new_with_label("Import Preset…");
-    gtk.gtk_widget_add_css_class(import, "peq-import");
-    _ = gtk.signalConnect(import, "clicked", gtk.callback(importClicked), self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), import);
-    const reset = gtk.gtk_button_new();
-    const reset_content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, reset_content), gtk.gtk_image_new_from_icon_name("view-refresh-symbolic"));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, reset_content), gtk.gtk_label_new("Reset"));
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, reset), reset_content);
-    gtk.gtk_widget_add_css_class(reset, "peq-reset");
-    gtk.gtk_widget_set_tooltip_text(reset, "Remove every filter and zero the preamp");
-    _ = gtk.signalConnect(reset, "clicked", gtk.callback(resetClicked), self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), reset);
+    const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), fileButton("Import…", gtk.callback(importClicked), self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), fileButton("Export…", gtk.callback(exportClicked), self));
     adw.adw_wrap_box_append(gtk.cast(adw.WrapBox, wrap), actions);
     return wrap;
 }
@@ -1072,12 +1172,8 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_box_append(gtk.cast(gtk.Box, root), area);
     gtk.gtk_box_append(gtk.cast(gtk.Box, root), filterTable(self));
 
-    const add = gtk.gtk_button_new();
-    const add_content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 6);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, add_content), gtk.gtk_image_new_from_icon_name("list-add-symbolic"));
-    gtk.gtk_box_append(gtk.cast(gtk.Box, add_content), gtk.gtk_label_new("Add Filter"));
-    gtk.gtk_button_set_child(gtk.cast(gtk.Button, add), add_content);
-    gtk.gtk_widget_add_css_class(add, "flat");
+    const add = gtk.gtk_button_new_with_label("Add Filter");
+    gtk.gtk_widget_add_css_class(add, "peq-file");
     gtk.gtk_widget_add_css_class(add, "peq-add");
     gtk.gtk_widget_set_halign(add, gtk.ALIGN_START);
     _ = gtk.signalConnect(add, "clicked", gtk.callback(addClicked), self);

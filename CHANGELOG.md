@@ -25,6 +25,18 @@
   scan. The C ABI adds `orca_library_track_details_v3` with an
   `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
   `ORCA_METADATA_FIELD_COMMENT` (15).
+- **Settings Playback and Sound.** `orca-gtk`'s Playback tab holds Volume
+  Leveling (ReplayGain Off, Track, Album or Smart; Preamp; Prevent clipping;
+  Untagged tracks, now Use −6 dB by default), Transitions (Stop after
+  current track, and When the queue ends, Stop or Repeat queue, through
+  `playerSetRepeat`), Output and Resume. The Sound tab's Equalizer card
+  switches Off, Graphic or Parametric; the parametric editor has a preset
+  list with New preset…, Preamp steps, Import… and Export…, a labelled
+  response graph and a filter table with Add Filter. Per-Device Presets
+  picks a preset for each output, loaded when the output changes while
+  Switch preset with device is on, and Crossfeed's Amount is Low, Medium or
+  High (0.3, 0.5 or 0.7). Each is saved in `settings.ini` under
+  `[playback]` and `[sound]`.
 - **Settings General and Appearance.** `orca-gtk`'s Settings page has eight
   tabs (General, Library, Playback, Sound, Listening, Appearance, Advanced
   and About) under an underlined tab bar, and Search settings… filters rows

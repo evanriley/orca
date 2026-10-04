@@ -1,7 +1,7 @@
 //! Settings: a page of eight tabs. General holds startup, notifications,
 //! sorting and the keyboard summary; Library the folders, maintenance and
-//! AcoustID; Playback the ReplayGain and output choices; Sound the equalizer,
-//! crossfeed and what is playing; Listening ListenBrainz, lyrics and artist
+//! AcoustID; Playback volume leveling, transitions, the output and resume;
+//! Sound the equalizer, per-device presets and crossfeed; Listening ListenBrainz, lyrics and artist
 //! info; Appearance the window's look; Advanced the data sources and
 //! database; About the version and diagnostics.
 //! The tabs are built fresh each time the page is shown, from the engine's
@@ -51,16 +51,6 @@ const Card = struct {
 
     fn add(self: Card, row: *gtk.Widget) void {
         adw.adw_preferences_group_add(gtk.cast(adw.PreferencesGroup, self.group), row);
-    }
-
-    fn addSwitch(self: Card, label: [*:0]const u8, active: bool, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
-        const toggle = gtk.gtk_switch_new();
-        gtk.gtk_widget_set_valign(toggle, gtk.ALIGN_CENTER);
-        gtk.gtk_switch_set_active(gtk.cast(gtk.Switch, toggle), @intFromBool(active));
-        gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, toggle), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
-        _ = gtk.signalConnect(toggle, "notify::active", handler, data);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, self.body), toggle);
-        return toggle;
     }
 };
 
@@ -792,23 +782,78 @@ fn artistInfoSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callc
     settings.save(self);
 }
 
-fn replayGainChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+const replay_gain_modes = [_]liborca.ReplayGainMode{ .off, .track, .album, .smart };
+const replay_gain_preamp_range = [2]f64{ -15, 15 };
+
+fn replayGainPicked(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const selected = adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row));
-    const mode: liborca.ReplayGainMode = switch (selected) {
-        1 => .track,
-        2 => .album,
-        else => .off,
-    };
-    self.runtime.playerSetReplayGainMode(self.player, mode) catch return;
+    const index = chosenSegment(button) orelse return;
+    self.runtime.playerSetReplayGainMode(self.player, replay_gain_modes[index]) catch
+        return self.toast("Could not change ReplayGain");
     transport.refreshSignalPath(self);
     settings.save(self);
 }
 
-fn outputChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn replayGainPreampChanged(spin: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const value: f32 = @floatCast(gtk.gtk_spin_button_get_value(gtk.cast(gtk.SpinButton, spin)));
+    self.runtime.playerSetReplayGainPreamp(self.player, value) catch
+        return self.toast("Could not change the preamp");
+    transport.refreshSignalPath(self);
+    settings.save(self);
+}
+
+fn clippingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    self.runtime.playerSetPeakProtection(self.player, enabled) catch
+        return self.toast("Could not change clipping protection");
+    transport.refreshSignalPath(self);
+    settings.save(self);
+}
+
+fn untaggedPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    const fallback: liborca.UntaggedFallback = if (selected == 0) .minus_6_db else .as_is;
+    self.runtime.playerSetReplayGainFallback(self.player, fallback) catch
+        return self.toast("Could not change how untagged tracks play");
+    transport.refreshSignalPath(self);
+    settings.save(self);
+}
+
+fn stopAfterSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     if (self.settings_page.syncing) return;
-    transport.selectDevice(self, adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row)));
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    self.runtime.playerSetStopAfterCurrent(self.player, enabled) catch
+        return self.toast("Could not change stop after current track");
+    self.requestTick();
+}
+
+fn queueEndPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.settings_page.syncing) return;
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    const mode: liborca.RepeatMode = if (selected == 1) .all else .off;
+    self.runtime.playerSetRepeat(self.player, mode) catch
+        return self.toast("Could not change what happens when the queue ends");
+    self.repeat_mode = mode;
+    transport.showRepeat(self, mode);
+    settings.save(self);
+}
+
+fn rememberPositionSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.playback.remember_long_position = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    settings.save(self);
+}
+
+fn onLaunchPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    self.playback.on_launch = std.enums.fromInt(app.OnLaunch, selected) orelse return;
+    settings.save(self);
 }
 
 fn outputPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -824,15 +869,13 @@ fn fillDeviceNames(self: *App, names: *gtk.StringList) void {
 }
 
 pub fn showOutputDevice(self: *App) void {
+    showDevicePresets(self);
     const page = &self.settings_page;
-    if (page.device_row == null and page.device_drop_down == null) return;
+    const drop_down = page.device_drop_down orelse return;
     page.syncing = true;
     defer page.syncing = false;
-    const index: c_uint = @intCast(self.device_index);
-    if (page.device_row_names) |names| fillDeviceNames(self, names);
-    if (page.device_row) |row| adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, row), index);
     if (page.device_drop_down_names) |names| fillDeviceNames(self, names);
-    if (page.device_drop_down) |drop_down| gtk.gtk_drop_down_set_selected(drop_down, index);
+    gtk.gtk_drop_down_set_selected(drop_down, @intCast(self.device_index));
 }
 
 fn deviceNames(self: *App) *gtk.StringList {
@@ -841,40 +884,136 @@ fn deviceNames(self: *App) *gtk.StringList {
     return names;
 }
 
-fn playbackTab(self: *App) *gtk.Widget {
-    const volume = card("multimedia-volume-control-symbolic", "Volume", "ReplayGain plays each track, or each album, at the loudness Measure Loudness found for it.");
-    const modes = [_]?[*:0]const u8{ "Off", "Track", "Album", null };
-    const replay = adw.adw_combo_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, replay), "ReplayGain");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, replay), "Track evens out every track; Album keeps the levels within an album");
-    const mode_list = gtk.gtk_string_list_new(&modes);
-    adw.adw_combo_row_set_model(gtk.cast(adw.ComboRow, replay), gtk.cast(gtk.ListModel, mode_list));
-    gtk.g_object_unref(mode_list);
-    const mode = self.runtime.playerReplayGainMode(self.player) catch .off;
-    adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, replay), switch (mode) {
-        .off => 0,
-        .track => 1,
-        .album, .smart => 2,
-    });
-    _ = gtk.signalConnect(replay, "notify::selected", gtk.callback(replayGainChanged), self);
-    volume.add(replay);
-    const gapless = actionRow("Gapless playback", "Always on. Tracks that share a sample rate and channel count play back to back with no gap.");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, gapless), 3);
-    volume.add(gapless);
+fn fixedRow(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget {
+    const row = actionRow(title, subtitle);
+    const toggle = gtk.gtk_switch_new();
+    gtk.gtk_switch_set_active(gtk.cast(gtk.Switch, toggle), gtk.true_);
+    gtk.gtk_widget_set_sensitive(toggle, gtk.false_);
+    gtk.gtk_widget_add_css_class(toggle, "settings-fixed");
+    gtk.gtk_widget_set_valign(toggle, gtk.ALIGN_CENTER);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, toggle), gtk.ACCESSIBLE_PROPERTY_LABEL, title, @as(c_int, -1));
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), toggle);
+    return row;
+}
 
-    const output = card("audio-card-symbolic", "Output", "Where Orca plays. The device is remembered by name.");
+fn valueRow(title: [*:0]const u8, subtitle: [*:0]const u8, value: [*:0]const u8) *gtk.Widget {
+    const row = actionRow(title, subtitle);
+    const label = gtk.gtk_label_new(value);
+    gtk.gtk_widget_add_css_class(label, "settings-value");
+    gtk.gtk_widget_set_valign(label, gtk.ALIGN_CENTER);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), label);
+    return row;
+}
+
+fn queueEndIndex(mode: liborca.RepeatMode) c_uint {
+    return if (mode == .off) 0 else 1;
+}
+
+fn playbackTab(self: *App) *gtk.Widget {
+    const controls = &self.sound_controls;
+    const gain = self.runtime.playerReplayGainSettings(self.player) catch liborca.ReplayGainSettings{};
+    const leveling = flatCard("orca-gain-symbolic", "Volume Leveling", "Even out loudness without touching your files.");
+    leveling.add(segmentedRow(
+        "ReplayGain",
+        "Smart uses album gain for albums, track gain in shuffle",
+        &.{ "Off", "Track", "Album", "Smart" },
+        std.mem.indexOfScalar(liborca.ReplayGainMode, &replay_gain_modes, gain.mode) orelse 0,
+        gtk.callback(replayGainPicked),
+        self,
+    ));
+    const preamp = actionRow("Preamp", "Applied after ReplayGain");
+    const preamp_entry = parametric.decibelEntry(replay_gain_preamp_range, strings.withoutNegativeZero(gain.preamp_db), "Preamp");
+    gtk.gtk_widget_add_css_class(preamp_entry, "settings-number");
+    _ = gtk.signalConnect(preamp_entry, "value-changed", gtk.callback(replayGainPreampChanged), self);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, preamp), preamp_entry);
+    leveling.add(preamp);
+    leveling.add(switchRow("Prevent clipping", "Lowers gain when peaks would pass 0 dBFS", gain.peak_protection, gtk.callback(clippingSwitched), self));
+    leveling.add(selectRow(
+        "Untagged tracks",
+        "Tracks without loudness analysis",
+        &.{ "Use −6 dB", "Play as is", null },
+        if (gain.fallback == .minus_6_db) 0 else 1,
+        gtk.callback(untaggedPicked),
+        self,
+    ));
+
+    const transitions = flatCard("orca-shuffle-symbolic", "Transitions", "");
+    transitions.add(fixedRow("Gapless playback", ""));
+    const stop_after = switchRow(
+        "Stop after current track",
+        "",
+        self.runtime.playerStopAfterCurrent(self.player) catch false,
+        gtk.callback(stopAfterSwitched),
+        self,
+    );
+    controls.stop_after_current = stop_after;
+    transitions.add(stop_after);
+    const queue_end = selectRow(
+        "When the queue ends",
+        "",
+        &.{ "Stop", "Repeat queue", null },
+        queueEndIndex(self.repeat_mode),
+        gtk.callback(queueEndPicked),
+        self,
+    );
+    controls.queue_end = gtk.cast(gtk.DropDown, adw.adw_action_row_get_activatable_widget(gtk.cast(adw.ActionRow, queue_end)).?);
+    transitions.add(queue_end);
+
+    const output = flatCard("audio-headphones-symbolic", "Output", "Where Orca plays and how it talks to the device.");
     transport.refreshDevices(self);
+    const device = actionRow("Output device", "");
     const names = deviceNames(self);
-    const device = adw.adw_combo_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, device), "Output Device");
-    adw.adw_combo_row_set_model(gtk.cast(adw.ComboRow, device), gtk.cast(gtk.ListModel, names));
-    gtk.g_object_unref(names);
-    adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, device), @intCast(self.device_index));
-    _ = gtk.signalConnect(device, "notify::selected", gtk.callback(outputChanged), self);
+    const drop_down = gtk.gtk_drop_down_new(gtk.cast(gtk.ListModel, names), null);
+    gtk.gtk_widget_add_css_class(drop_down, "settings-select");
+    gtk.gtk_widget_set_valign(drop_down, gtk.ALIGN_CENTER);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, drop_down), gtk.ACCESSIBLE_PROPERTY_LABEL, "Output device", @as(c_int, -1));
+    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, drop_down), @intCast(self.device_index));
+    _ = gtk.signalConnect(drop_down, "notify::selected", gtk.callback(outputPicked), self);
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, device), drop_down);
+    adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, device), drop_down);
+    self.settings_page.device_drop_down = gtk.cast(gtk.DropDown, drop_down);
+    self.settings_page.device_drop_down_names = names;
     output.add(device);
-    self.settings_page.device_row = device;
-    self.settings_page.device_row_names = names;
-    return tab(self, .playback, null, &.{volume.widget}, &.{output.widget});
+    output.add(fixedRow("Match source sample rate", "Switches the device to each track's native rate"));
+    output.add(valueRow("Audio backend", "Change in Advanced", "PipeWire"));
+
+    const playback = self.playback;
+    const resuming = flatCard("orca-clock-symbolic", "Resume", "");
+    resuming.add(switchRow(
+        "Remember position in long tracks",
+        "Mixes, podcasts and anything over 20 minutes",
+        playback.remember_long_position,
+        gtk.callback(rememberPositionSwitched),
+        self,
+    ));
+    resuming.add(selectRow(
+        "On launch",
+        "",
+        &.{ "Restore queue, paused", "Restore and play", "Start empty", null },
+        @intFromEnum(playback.on_launch),
+        gtk.callback(onLaunchPicked),
+        self,
+    ));
+    return tab(self, .playback, null, &.{ leveling.widget, transitions.widget }, &.{ output.widget, resuming.widget });
+}
+
+/// Brings the rows that show live player state in line with it: stop after
+/// current clears itself once the track ends, and the player bar cycles repeat.
+fn showTransitions(self: *App) void {
+    const controls = &self.sound_controls;
+    const page = &self.settings_page;
+    page.syncing = true;
+    defer page.syncing = false;
+    if (controls.stop_after_current) |row| {
+        const active = self.runtime.playerStopAfterCurrent(self.player) catch false;
+        const switch_row = gtk.cast(adw.SwitchRow, row);
+        if ((adw.adw_switch_row_get_active(switch_row) != 0) != active)
+            adw.adw_switch_row_set_active(switch_row, @intFromBool(active));
+    }
+    if (controls.queue_end) |drop_down| {
+        const index = queueEndIndex(self.repeat_mode);
+        if (gtk.gtk_drop_down_get_selected(drop_down) != index) gtk.gtk_drop_down_set_selected(drop_down, index);
+    }
 }
 
 const band_count = app.equalizer_band_count;
@@ -899,7 +1038,7 @@ const band_labels = [band_count]Band{
 
 const preset_labels = [_]?[*:0]const u8{ "Flat", "Bass", "Treble", "Vocal", "Loudness", null };
 const preset_count: c_uint = preset_labels.len - 1;
-const amount_labels = [_]?[*:0]const u8{ "Light", "Medium", "Strong", null };
+const amount_labels = [_]?[*:0]const u8{ "Low", "Medium", "High", null };
 
 comptime {
     std.debug.assert(preset_count == std.enums.values(liborca.EqualizerPreset).len);
@@ -1042,17 +1181,17 @@ fn applyCrossfeed(self: *App, enabled: bool) void {
     settings.save(self);
 }
 
-fn crossfeedSwitched(toggle: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn crossfeedSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const enabled = gtk.gtk_switch_get_active(gtk.cast(gtk.Switch, toggle)) != 0;
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
     if (self.sound_controls.crossfeed_amount_row) |amount|
         gtk.gtk_widget_set_sensitive(amount, if (enabled) gtk.true_ else gtk.false_);
     applyCrossfeed(self, enabled);
 }
 
-fn crossfeedAmountChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+fn crossfeedAmountPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    const selected = adw.adw_combo_row_get_selected(gtk.cast(adw.ComboRow, row));
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
     if (selected >= app.crossfeed_amounts.len) return;
     self.crossfeed_amount = app.crossfeed_amounts[selected];
     applyCrossfeed(self, true);
@@ -1094,11 +1233,6 @@ fn bandSliders(self: *App, curve: liborca.Equalizer) *gtk.Widget {
     return box;
 }
 
-const graphic_title = "Equalizer";
-const graphic_description = "Ten bands from 31 Hz to 16 kHz, applied to everything Orca plays.";
-const parametric_title = "Parametric Equalizer";
-const parametric_description = "Fine-tune your sound with a parametric equalizer. Make subtle adjustments or create your own signature sound.";
-
 /// Shows the editor of `mode`, or the last one shown when the equalizer is
 /// off, so its controls stay where they were, insensitive.
 fn showEqualizerMode(self: *App, mode: parametric.Mode) void {
@@ -1114,12 +1248,21 @@ fn showEqualizerMode(self: *App, mode: parametric.Mode) void {
         gtk.gtk_widget_set_visible(root, @intFromBool(view == .parametric));
         gtk.gtk_widget_set_sensitive(root, @intFromBool(mode == .parametric));
     }
-    if (controls.equalizer_menu) |button| gtk.gtk_widget_set_visible(button, @intFromBool(view == .parametric));
-    if (controls.equalizer_title) |label|
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), if (view == .parametric) parametric_title else graphic_title);
-    if (controls.equalizer_meta) |label|
-        gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), if (view == .parametric) parametric_description else graphic_description);
     showEqualizerEnabled(self, mode == .graphic);
+}
+
+/// Brings the Equalizer card in line with an equalizer changed elsewhere, as
+/// a device's preset does when the output changes.
+pub fn showEqualizer(self: *App) void {
+    const mode = parametric.currentMode(self);
+    const previous = self.suppress_sound_signals;
+    self.suppress_sound_signals = true;
+    defer self.suppress_sound_signals = previous;
+    for (self.sound_controls.mode_buttons, std.enums.values(parametric.Mode)) |maybe_button, candidate| {
+        const button = maybe_button orelse continue;
+        if (candidate == mode) gtk.gtk_toggle_button_set_active(button, gtk.true_);
+    }
+    showEqualizerMode(self, mode);
 }
 
 fn modeToggled(self: *App, toggle: ?*anyopaque, mode: parametric.Mode) void {
@@ -1144,7 +1287,7 @@ fn parametricToggled(toggle: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 
 fn modeControl(self: *App, mode: parametric.Mode) *gtk.Widget {
     const box = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
-    gtk.gtk_widget_add_css_class(box, "eq-mode");
+    gtk.gtk_widget_add_css_class(box, "settings-segmented");
     gtk.gtk_widget_set_valign(box, gtk.ALIGN_START);
     gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, box), gtk.ACCESSIBLE_PROPERTY_LABEL, "Equalizer", @as(c_int, -1));
     var first: ?*gtk.ToggleButton = null;
@@ -1158,45 +1301,11 @@ fn modeControl(self: *App, mode: parametric.Mode) *gtk.Widget {
         const toggle = gtk.cast(gtk.ToggleButton, button);
         if (first) |group| gtk.gtk_toggle_button_set_group(toggle, group) else first = toggle;
         gtk.gtk_toggle_button_set_active(toggle, @intFromBool(choice[1] == mode));
+        self.sound_controls.mode_buttons[@intFromEnum(choice[1])] = toggle;
         _ = gtk.signalConnect(button, "toggled", choice[2], self);
         gtk.gtk_box_append(gtk.cast(gtk.Box, box), button);
     }
     return box;
-}
-
-fn exportActivated(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    parametric.chooseExport(state(data));
-}
-
-fn savePresetActivated(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    parametric.askPresetName(state(data));
-}
-
-fn equalizerMenu(self: *App) *gtk.Widget {
-    const group = gtk.g_simple_action_group_new();
-    for ([_]struct { [*:0]const u8, gtk.GCallback }{
-        .{ "export", gtk.callback(exportActivated) },
-        .{ "save-preset", gtk.callback(savePresetActivated) },
-    }) |entry| {
-        const action = gtk.g_simple_action_new(entry[0], null).?;
-        _ = gtk.signalConnect(action, "activate", entry[1], self);
-        gtk.g_action_map_add_action(gtk.cast(gtk.GActionMap, group), gtk.cast(gtk.GAction, action));
-        gtk.g_object_unref(action);
-    }
-    const model = gtk.g_menu_new();
-    gtk.g_menu_append(model, "Export…", "equalizer.export");
-    gtk.g_menu_append(model, "Save as Preset…", "equalizer.save-preset");
-    const button = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, button), "view-more-horizontal-symbolic");
-    gtk.gtk_menu_button_set_menu_model(gtk.cast(gtk.MenuButton, button), gtk.cast(gtk.GMenuModel, model));
-    gtk.g_object_unref(model);
-    gtk.gtk_widget_insert_action_group(button, "equalizer", gtk.cast(gtk.GActionGroup, group));
-    gtk.g_object_unref(group);
-    gtk.gtk_widget_add_css_class(button, "flat");
-    gtk.gtk_widget_set_valign(button, gtk.ALIGN_START);
-    gtk.gtk_widget_set_tooltip_text(button, "Equalizer actions");
-    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, "Equalizer actions", @as(c_int, -1));
-    return button;
 }
 
 fn soundTab(self: *App) *gtk.Widget {
@@ -1208,18 +1317,10 @@ fn soundTab(self: *App) *gtk.Widget {
     const curve = self.equalizer_curve;
     const mode = parametric.currentMode(self);
 
-    const equalizer = card("orca-pulse-symbolic", graphic_title, graphic_description);
+    const equalizer = flatCard("orca-pulse-symbolic", "Equalizer", "Runs in 32-bit float before output. Shows up in Signal Path.");
     gtk.gtk_widget_add_css_class(equalizer.widget, "eq-card");
-    controls.equalizer_title = equalizer.title;
-    controls.equalizer_meta = equalizer.meta;
     controls.graphic = equalizer.group;
-    const choices = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 14);
-    gtk.gtk_widget_set_halign(choices, gtk.ALIGN_START);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, choices), modeControl(self, mode));
-    const menu_button = equalizerMenu(self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, choices), menu_button);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, equalizer.body), choices);
-    controls.equalizer_menu = menu_button;
+    gtk.gtk_box_append(gtk.cast(gtk.Box, equalizer.body), modeControl(self, mode));
     controls.equalizer_header = equalizer.body;
     stackEqualizerHeader(self);
 
@@ -1246,7 +1347,7 @@ fn soundTab(self: *App) *gtk.Widget {
     _ = gtk.signalConnect(preset.row, "notify::selected", gtk.callback(presetChanged), self);
     _ = gtk.signalConnect(preamp, "notify::value", gtk.callback(preampChanged), self);
 
-    const view = tab(self, .sound, null, &.{equalizer.widget}, &.{ outputDeviceCard(self), crossfeedCard(self), audioInformationCard(self) });
+    const view = tab(self, .sound, null, &.{equalizer.widget}, &.{ devicePresetsCard(self), crossfeedCard(self) });
     _ = gtk.signalConnect(view, "map", gtk.callback(soundMapped), self);
     return view;
 }
@@ -1255,123 +1356,138 @@ fn soundMapped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     transport.refreshDevices(state(data));
 }
 
-fn sideCard(icon: [*:0]const u8, title: [*:0]const u8, description: [*:0]const u8) Card {
-    const side = card(icon, title, description);
-    gtk.gtk_widget_add_css_class(side.widget, "settings-side-card");
-    return side;
+const device_index_key = "orca-settings-device";
+
+fn devicePresetPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.settings_page.syncing) return;
+    const index = @intFromPtr(gtk.g_object_get_data(drop_down.?, device_index_key)) - 1;
+    if (index >= self.device_names.items.len) return;
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (!parametric.setDevicePreset(self, self.device_names.items[index], parametric.devicePresetChoice(self, selected)))
+        return self.toast("Could not keep a preset for this device");
+    settings.save(self);
 }
 
-fn outputDeviceCard(self: *App) *gtk.Widget {
-    const output = sideCard("audio-card-symbolic", "Output Device", "Where Orca plays, the same choice as the player bar's");
-    transport.refreshDevices(self);
-    const names = deviceNames(self);
-    const drop_down = gtk.gtk_drop_down_new(gtk.cast(gtk.ListModel, names), null);
-    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, drop_down), gtk.ACCESSIBLE_PROPERTY_LABEL, "Output Device", @as(c_int, -1));
-    gtk.gtk_drop_down_set_selected(gtk.cast(gtk.DropDown, drop_down), @intCast(self.device_index));
-    _ = gtk.signalConnect(drop_down, "notify::selected", gtk.callback(outputPicked), self);
-    gtk.gtk_widget_set_visible(output.group, gtk.false_);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, output.widget), drop_down);
-    self.settings_page.device_drop_down = gtk.cast(gtk.DropDown, drop_down);
-    self.settings_page.device_drop_down_names = names;
-    return output.widget;
+fn switchPresetSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    self.parametric.switch_with_device = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    settings.save(self);
+}
+
+fn forgetHidden(page: *app.SettingsPage, widget: *gtk.Widget) void {
+    var index: usize = 0;
+    while (index < page.filter_hidden_len) {
+        if (page.filter_hidden[index] == widget) {
+            page.filter_hidden_len -= 1;
+            page.filter_hidden[index] = page.filter_hidden[page.filter_hidden_len];
+        } else index += 1;
+    }
+}
+
+fn devicePresetDevices(self: *App, buffer: *[app.max_device_preset_rows]usize) []usize {
+    const names = self.device_names.items;
+    var count: usize = 0;
+    for (names, 0..) |name, index| {
+        if (count == buffer.len) break;
+        const shown = index == self.device_index or index == 0 or parametric.devicePreset(self, name) != null;
+        if (!shown) continue;
+        buffer[count] = index;
+        count += 1;
+    }
+    const devices = buffer[0..count];
+    if (self.device_index < names.len) {
+        for (devices, 0..) |device, position| {
+            if (device != self.device_index) continue;
+            std.mem.copyBackwards(usize, devices[1 .. position + 1], devices[0..position]);
+            devices[0] = device;
+            break;
+        }
+    }
+    return devices;
+}
+
+fn devicePresetRowsCurrent(self: *App, devices: []const usize) bool {
+    const controls = &self.sound_controls;
+    if (controls.device_switch_row == null) return false;
+    if (controls.device_preset_row_count != devices.len) return false;
+    for (controls.device_preset_rows[0..devices.len], devices) |maybe_row, device| {
+        const row = maybe_row orelse return false;
+        const title = adw.adw_preferences_row_get_title(gtk.cast(adw.PreferencesRow, row));
+        if (!std.mem.eql(u8, std.mem.span(title), self.device_names.items[device])) return false;
+    }
+    return true;
+}
+
+/// Rows for the current output, System default and every device with a
+/// preset, then the switch; rebuilt when the output or the devices change.
+fn showDevicePresets(self: *App) void {
+    const controls = &self.sound_controls;
+    const group = gtk.cast(adw.PreferencesGroup, controls.device_presets orelse return);
+    var device_buffer: [app.max_device_preset_rows]usize = undefined;
+    const devices = devicePresetDevices(self, &device_buffer);
+    if (devicePresetRowsCurrent(self, devices)) return;
+    const page = &self.settings_page;
+    page.syncing = true;
+    defer page.syncing = false;
+    for (controls.device_preset_rows[0..controls.device_preset_row_count]) |maybe_row| {
+        const row = maybe_row orelse continue;
+        forgetHidden(page, row);
+        adw.adw_preferences_group_remove(group, row);
+    }
+    controls.device_preset_rows = @splat(null);
+    controls.device_preset_row_count = 0;
+    if (controls.device_switch_row) |row| {
+        forgetHidden(page, row);
+        adw.adw_preferences_group_remove(group, row);
+    }
+
+    var labels: [parametric.max_presets + 4]?[*:0]const u8 = undefined;
+    var name_storage: [parametric.max_presets][parametric.max_name_bytes + 1]u8 = undefined;
+    const choices = parametric.devicePresetLabels(self, &labels, &name_storage);
+    for (devices, 0..) |device, position| {
+        const name = self.device_names.items[device];
+        const row = selectRow(
+            name.ptr,
+            "",
+            choices,
+            parametric.devicePresetIndex(self, parametric.devicePreset(self, name)),
+            gtk.callback(devicePresetPicked),
+            self,
+        );
+        const drop_down = adw.adw_action_row_get_activatable_widget(gtk.cast(adw.ActionRow, row)).?;
+        gtk.g_object_set_data(drop_down, device_index_key, @ptrFromInt(device + 1));
+        adw.adw_preferences_group_add(group, row);
+        controls.device_preset_rows[position] = row;
+        controls.device_preset_row_count = position + 1;
+    }
+    const switch_row = switchRow("Switch preset with device", "", self.parametric.switch_with_device, gtk.callback(switchPresetSwitched), self);
+    adw.adw_preferences_group_add(group, switch_row);
+    controls.device_switch_row = switch_row;
+}
+
+fn devicePresetsCard(self: *App) *gtk.Widget {
+    const presets = flatCard("audio-headphones-symbolic", "Per-Device Presets", "Orca switches EQ when the output changes.");
+    self.sound_controls.device_presets = presets.group;
+    showDevicePresets(self);
+    return presets.widget;
 }
 
 fn crossfeedCard(self: *App) *gtk.Widget {
     const controls = &self.sound_controls;
     const crossfeed_amount = self.runtime.playerCrossfeed(self.player) catch null;
     if (crossfeed_amount) |amount| self.crossfeed_amount = amount;
-    const headphones = sideCard("audio-headphones-symbolic", "Crossfeed", "Blends a little of each channel into the other, for headphones");
-    _ = headphones.addSwitch("Crossfeed", crossfeed_amount != null, gtk.callback(crossfeedSwitched), self);
-    const amount = comboRow("Amount", &amount_labels);
-    controls.crossfeed_amount_row = amount.row;
-    adw.adw_combo_row_set_selected(gtk.cast(adw.ComboRow, amount.row), nearestAmountIndex(self.crossfeed_amount));
-    gtk.gtk_widget_set_sensitive(amount.row, if (crossfeed_amount != null) gtk.true_ else gtk.false_);
-    headphones.add(amount.row);
-    _ = gtk.signalConnect(amount.row, "notify::selected", gtk.callback(crossfeedAmountChanged), self);
-    return headphones.widget;
-}
-
-const audio_fact_names = std.EnumArray(app.AudioFact, [*:0]const u8).init(.{
-    .output_format = "Output Format",
-    .sample_rate = "Sample Rate",
-    .bit_depth = "Bit Depth",
-    .channels = "Channels",
-});
-
-fn audioInformationMapped(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    transport.refreshSignalPath(state(data));
-}
-
-fn audioInformationCard(self: *App) *gtk.Widget {
-    const page = &self.settings_page;
-    const info = sideCard("audio-x-generic-symbolic", "Audio Information", "What is playing now, as the decoder reads it");
-    gtk.gtk_widget_set_visible(info.group, gtk.false_);
-    const rows = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 10);
-    gtk.gtk_widget_add_css_class(rows, "settings-audio-rows");
-    for (std.enums.values(app.AudioFact)) |fact| {
-        const row = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
-        const key = gtk.gtk_label_new(audio_fact_names.get(fact));
-        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, key), 0);
-        gtk.gtk_widget_set_hexpand(key, gtk.true_);
-        gtk.gtk_widget_add_css_class(key, "dim-label");
-        const value = gtk.gtk_label_new("");
-        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value), 1);
-        gtk.gtk_label_set_ellipsize(gtk.cast(gtk.Label, value), gtk.ELLIPSIZE_END);
-        gtk.gtk_widget_add_css_class(value, "numeric");
-        gtk.gtk_box_append(gtk.cast(gtk.Box, row), key);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, row), value);
-        gtk.gtk_box_append(gtk.cast(gtk.Box, rows), row);
-        page.audio_values.set(fact, gtk.cast(gtk.Label, value));
-    }
-    const idle = gtk.gtk_label_new(signal_path.nothing_playing);
-    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, idle), 0);
-    gtk.gtk_widget_add_css_class(idle, "dim-label");
-    gtk.gtk_widget_add_css_class(idle, "settings-audio-idle");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, info.widget), rows);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, info.widget), idle);
-    page.audio_card = info.widget;
-    page.audio_rows = rows;
-    page.audio_idle = idle;
-    _ = gtk.signalConnect(info.widget, "map", gtk.callback(audioInformationMapped), self);
-    showAudioInformation(self, self.runtime.playerSignalPath(self.player) catch null);
-    return info.widget;
-}
-
-fn writeAudioFact(writer: *std.Io.Writer, fact: app.AudioFact, path: liborca.SignalPath, source: liborca.PcmFormat) std.Io.Writer.Error!void {
-    switch (fact) {
-        .output_format => {
-            try signal_path.writeCodecName(writer, path.codec orelse "PCM");
-            try writer.writeAll(" · ");
-            try signal_path.writeRate(writer, source.sample_rate);
-        },
-        .sample_rate => try signal_path.writeHertz(writer, source.sample_rate),
-        .bit_depth => if (path.source_declared) try signal_path.writeBitDepth(writer, source) else try writer.writeAll("—"),
-        .channels => try signal_path.writeChannels(writer, source.channels),
-    }
+    const crossfeed = flatCard("orca-wave-symbolic", "Crossfeed", "Blends a little of each channel into the other for headphones.");
+    crossfeed.add(switchRow("Crossfeed", "", crossfeed_amount != null, gtk.callback(crossfeedSwitched), self));
+    const amount = selectRow("Amount", "", &amount_labels, nearestAmountIndex(self.crossfeed_amount), gtk.callback(crossfeedAmountPicked), self);
+    gtk.gtk_widget_set_sensitive(amount, @intFromBool(crossfeed_amount != null));
+    controls.crossfeed_amount_row = amount;
+    crossfeed.add(amount);
+    return crossfeed.widget;
 }
 
 pub fn showAudioInformation(self: *App, maybe_path: ?liborca.SignalPath) void {
     parametric.showRate(self, maybe_path);
-    const page = &self.settings_page;
-    const rows = page.audio_rows orelse return;
-    const path = maybe_path orelse liborca.SignalPath{};
-    const source = path.source;
-    gtk.gtk_widget_set_visible(rows, @intFromBool(source != null));
-    if (page.audio_idle) |idle| gtk.gtk_widget_set_visible(idle, @intFromBool(source == null));
-    const format = source orelse return;
-    for (std.enums.values(app.AudioFact)) |fact| {
-        const label = page.audio_values.get(fact) orelse continue;
-        var buffer: [96]u8 = undefined;
-        var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-        writeAudioFact(&writer, fact, path, format) catch {};
-        buffer[writer.end] = 0;
-        gtk.gtk_label_set_text(label, buffer[0..writer.end :0].ptr);
-    }
-}
-
-pub fn audioInformationShown(self: *App) bool {
-    const audio = self.settings_page.audio_card orelse return false;
-    return gtk.gtk_widget_get_mapped(audio) != 0;
 }
 
 const token_settings_url = "https://listenbrainz.org/settings/";
@@ -1753,6 +1869,7 @@ pub fn tick(self: *App) void {
     showListeningStatus(self);
     showWatchStatus(self);
     showMaintenanceStatus(self);
+    showTransitions(self);
 }
 
 fn listeningTab(self: *App) *gtk.Widget {
@@ -2117,7 +2234,7 @@ pub fn setFilter(self: *App, text: []const u8) void {
 }
 
 fn columnSpan(which: app.SettingsTab) [2]c_int {
-    return if (which == .sound) .{ 3, 2 } else .{ 1, 1 };
+    return if (which == .sound) .{ 7, 4 } else .{ 1, 1 };
 }
 
 fn layOut(self: *App, which: app.SettingsTab, narrow: bool) void {

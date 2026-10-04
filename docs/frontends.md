@@ -1386,13 +1386,42 @@ again at launch.
   loudness measurement, analysis threads, duplicate finding, idle maintenance
   and Fill missing genres from MusicBrainz (`setGenreFill`, kept in the
   Library); AcoustID.
-- Playback: ReplayGain (Off, Track or Album, saved as `[playback]
-  replay_gain`), a note that gapless playback is always on, and the output
-  device.
-- Sound: the equalizer, graphic or parametric, and beside it Output Device,
-  Crossfeed and Audio Information. Output Device re-reads the outputs each
-  time the tab is shown, as the player bar's picker does when it opens, and
-  both lists stay in step.
+- Playback, saved in `[playback]`:
+  - Volume Leveling: ReplayGain (`replay_gain=off|track|album|smart`; Smart
+    uses album gain while a neighbour in playback order shares the Release,
+    track gain otherwise), Preamp (`preamp`, −15 to +15 dB), Prevent clipping
+    (`prevent_clipping`, the Player's peak protection) and Untagged tracks
+    (`untagged=minus_6_db|as_is`, Use −6 dB by default).
+  - Transitions: Gapless playback, always on; Stop after current track
+    (`playerSetStopAfterCurrent`, not saved); When the queue ends
+    (`queue_end=stop|repeat`), which sets `playerSetRepeat` to off or all and
+    follows the player bar's repeat button.
+  - Output: Output device, the same list as the player bar's picker, re-read
+    each time the tab is shown; Match source sample rate, always on; Audio
+    backend.
+  - Resume: Remember position in long tracks (`remember_long_position`) and
+    On launch (`on_launch=restore_paused|restore_playing|start_empty`). Both
+    are saved only; nothing reads them yet.
+- Sound, saved in `[sound]`:
+  - Equalizer: Off, Graphic or Parametric (`equalizer_mode`). Graphic shows
+    the ten-band preset, preamp and sliders. Parametric shows Preset (Flat,
+    the saved presets, HD 650 and New preset…, which asks for a name and
+    saves the current curve), Preamp with − and + steps, Import… and
+    Export… of EqualizerAPO text, the response graph, and a table of
+    filters (type, frequency, gain, Q, on, and a menu to duplicate, move or
+    remove one) with Add Filter. A Notch filter read from a file keeps its type; the type
+    list offers Low shelf, Bell, High shelf, Low pass and High pass.
+  - Per-Device Presets: a preset (None, Flat, a saved preset or HD 650)
+    for the current output, System default and each other output that has
+    one, in that order and rebuilt when the output or the device list
+    changes; saved as `device_presets`, including those of outputs not
+    shown. Switch preset with device (`switch_preset_with_device`, on by
+    default) comes last. When the
+    output changes and the switch is on, the new output's preset is loaded
+    and the parametric equalizer turned on; None leaves the equalizer as it
+    is.
+  - Crossfeed: a switch (`crossfeed_enabled`) and Amount Low, Medium or
+    High (`crossfeed`, 0.3, 0.5 or 0.7, handed to `playerSetCrossfeed`).
 - Listening: ListenBrainz; Fetch lyrics from LRCLIB, saved as
   `[lyrics] fetch=true|false`; Artist Info, with Fetch artist info
   (`[library] fetch_artist_info`).

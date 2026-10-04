@@ -869,6 +869,7 @@ pub extern fn gtk_editable_get_text(editable: *Editable) [*:0]const u8;
 pub extern fn gtk_editable_set_text(editable: *Editable, text: [*:0]const u8) void;
 pub extern fn gtk_editable_set_position(editable: *Editable, position: c_int) void;
 pub extern fn gtk_editable_set_width_chars(editable: *Editable, n_chars: c_int) void;
+pub extern fn gtk_editable_set_alignment(editable: *Editable, xalign: f32) void;
 
 pub extern fn gtk_image_new() *Widget;
 pub extern fn gtk_image_new_from_icon_name(icon_name: ?[*:0]const u8) *Widget;

@@ -24,11 +24,11 @@ const top_margin: f64 = 8;
 const bottom_margin: f64 = 24;
 
 const decibel_marks = [_]struct { f64, [:0]const u8 }{
-    .{ 12, "12 dB" },
-    .{ 6, "6 dB" },
+    .{ 12, "+12" },
+    .{ 6, "+6" },
     .{ 0, "0 dB" },
-    .{ -6, "-6 dB" },
-    .{ -12, "-12 dB" },
+    .{ -6, "−6" },
+    .{ -12, "−12" },
 };
 
 const frequency_marks = [_]struct { f64, [:0]const u8 }{

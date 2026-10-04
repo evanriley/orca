@@ -129,7 +129,7 @@ pub const OwnedText = struct {
 };
 
 pub const equalizer_band_count = @typeInfo(@FieldType(liborca.Equalizer, "gains_db")).array.len;
-pub const crossfeed_amounts = [_]f32{ 0.2, 0.35, 0.5 };
+pub const crossfeed_amounts = [_]f32{ 0.3, 0.5, 0.7 };
 
 /// The widgets of Settings' Sound tab that its handlers reach back to.
 /// Reset when the page is left, since GTK destroys them with the tabs.
@@ -140,18 +140,22 @@ pub const SoundControls = struct {
     band_scales: [equalizer_band_count]?*gtk.Widget = @splat(null),
     preamp_row: ?*gtk.Widget = null,
     crossfeed_amount_row: ?*gtk.Widget = null,
-    equalizer_title: ?*gtk.Widget = null,
-    equalizer_meta: ?*gtk.Widget = null,
-    equalizer_menu: ?*gtk.Widget = null,
     equalizer_header: ?*gtk.Widget = null,
+    mode_buttons: [3]?*gtk.ToggleButton = @splat(null),
     graphic: ?*gtk.Widget = null,
+    stop_after_current: ?*gtk.Widget = null,
+    queue_end: ?*gtk.DropDown = null,
+    device_presets: ?*gtk.Widget = null,
+    device_preset_rows: [max_device_preset_rows]?*gtk.Widget = @splat(null),
+    device_preset_row_count: usize = 0,
+    device_switch_row: ?*gtk.Widget = null,
 };
+
+pub const max_device_preset_rows = 33;
 
 pub const SettingsTab = enum { general, library, playback, sound, listening, appearance, advanced, about };
 
 pub const settings_tab_count = @typeInfo(SettingsTab).@"enum".fields.len;
-
-pub const AudioFact = enum { output_format, sample_rate, bit_depth, channels };
 
 pub const SettingsFit = enum { wide, icons };
 
@@ -168,18 +172,12 @@ pub const SettingsPage = struct {
     folder_slot: ?*gtk.Box = null,
     measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
-    device_row: ?*gtk.Widget = null,
-    device_row_names: ?*gtk.StringList = null,
     device_drop_down: ?*gtk.DropDown = null,
     device_drop_down_names: ?*gtk.StringList = null,
     sources: ?*gtk.Box = null,
     genre_source_row: ?*gtk.Widget = null,
     tile_save_timer: c_uint = 0,
     tile_scale: ?*gtk.Range = null,
-    audio_card: ?*gtk.Widget = null,
-    audio_values: std.EnumArray(AudioFact, ?*gtk.Label) = .initFill(null),
-    audio_idle: ?*gtk.Widget = null,
-    audio_rows: ?*gtk.Widget = null,
     /// Set while the tab buttons and device lists are brought in line with
     /// state that has already changed, so their signals do not re-enter.
     syncing: bool = false,
@@ -213,6 +211,13 @@ pub const General = struct {
     notify_tracks: bool = false,
     notify_tasks: bool = true,
     name_order: liborca.NameOrder = .ignore_articles,
+};
+
+pub const OnLaunch = enum { restore_paused, restore_playing, start_empty };
+
+pub const Playback = struct {
+    remember_long_position: bool = true,
+    on_launch: OnLaunch = .restore_paused,
 };
 
 pub const default_album_tile_pixels: c_int = 132;
@@ -477,6 +482,7 @@ pub const App = struct {
     settings_page: SettingsPage = .{},
     appearance: Appearance = .{},
     general: General = .{},
+    playback: Playback = .{},
 
     /// Files Measure Loudness decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,

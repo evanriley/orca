@@ -5120,12 +5120,36 @@ dropdown.settings-select > button {
   color: @orca_text_2;
 }
 
-.settings-side-card .settings-card-title {
-  font-size: 16px;
+.settings-value {
+  font-size: 13.5px;
+  color: @orca_text_2;
 }
 
-.settings-side-card .meta {
-  font-size: 13px;
+switch.settings-fixed:disabled {
+  opacity: 1;
+  filter: none;
+}
+
+switch.settings-fixed:disabled > slider {
+  opacity: 1;
+}
+
+.settings-card.settings-flat spinbutton.settings-number {
+  min-height: 30px;
+  background: none;
+  box-shadow: none;
+  font-size: 13.5px;
+}
+
+.settings-card.settings-flat spinbutton.settings-number > text {
+  min-height: 30px;
+  padding: 0;
+}
+
+.settings-card.settings-flat spinbutton.settings-number:focus-within > text {
+  padding: 0 6px;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px @orca_accent;
 }
 
 .settings-card list.boxed-list {
@@ -5182,117 +5206,75 @@ dropdown.settings-select > button {
 
 /* Equalizer */
 
-.eq-mode {
-  padding: 3px;
-  border-radius: 999px;
-  background-color: @orca_bg_window;
-  box-shadow: inset 0 0 0 1px @orca_border;
-}
-
-.eq-mode > button {
-  min-height: 26px;
-  margin: 0;
-  padding: 0 12px;
-  border-radius: 999px;
-  background: none;
-  box-shadow: none;
-  color: @orca_text_2;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.eq-mode > button:hover {
-  background-color: @orca_bg_hover;
-  color: @orca_text;
-}
-
-.eq-mode > button:checked {
-  background-color: color-mix(in srgb, @orca_accent 22%, transparent);
-  color: @orca_accent_text;
-}
-
 .settings-card.eq-card {
-  padding: 24px 20px 20px;
+  padding-bottom: 20px;
 }
 
 .peq {
-  font-size: 14px;
-}
-
-.peq-controls button,
-.peq-controls dropdown > button {
-  font-size: 13px;
-  font-weight: 400;
-}
-
-.peq-controls dropdown.peq-preset > button {
-  font-size: 14px;
+  font-size: 13.5px;
 }
 
 .peq-controls .peq-label {
   color: @orca_text_2;
-}
-
-.peq-controls .peq-unit {
-  color: @orca_text_2;
-}
-
-.peq-controls dropdown > button,
-.peq-controls spinbutton,
-.peq-controls button.peq-step,
-.peq-controls button.peq-reset,
-.peq-controls button.peq-import {
-  min-height: 38px;
-  border-radius: 8px;
-}
-
-.peq-controls dropdown > button,
-.peq-controls spinbutton,
-.peq-controls button.peq-step,
-.peq-controls button.peq-reset {
-  background-color: @orca_bg_window;
-  box-shadow: inset 0 0 0 1px @orca_border;
-}
-
-.peq-controls spinbutton > text {
-  padding: 0 10px;
-}
-
-.peq-controls button.peq-step {
-  padding: 0 8px;
-}
-
-.peq-controls button.peq-import {
-  padding: 0 14px;
-  color: @orca_accent_text;
-  background-color: color-mix(in srgb, @orca_accent 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 45%, transparent);
-}
-
-.peq-graph {
-  font-size: 12px;
-}
-
-.peq-table {
-  border-radius: 8px;
-  box-shadow: inset 0 0 0 1px @orca_border;
   font-size: 13px;
 }
 
-.peq-header {
-  min-height: 28px;
-  padding: 0 10px;
-  color: @orca_text_2;
-  border-bottom: 1px solid @orca_border;
+.peq-controls dropdown.peq-preset > button {
+  min-width: 100px;
 }
 
-.peq-diamond {
-  min-width: 7px;
-  min-height: 7px;
-  margin-left: 2px;
-  background-color: @orca_text_2;
-  border-radius: 1px;
-  transform: rotate(45deg);
+.peq-controls spinbutton.peq-preamp {
+  min-height: 30px;
+  background: none;
+  box-shadow: none;
+}
+
+.peq-controls spinbutton.peq-preamp > text {
+  min-height: 30px;
+  padding: 0 2px;
+}
+
+.peq-controls button.peq-step {
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-radius: 999px;
+  background: none;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text_2;
+}
+
+.peq-controls button.peq-step:hover {
+  color: @orca_text;
+  background-color: @orca_bg_hover;
+}
+
+button.peq-file {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+button.peq-file:hover {
+  background-color: @orca_bg_hover;
+}
+
+.peq-graph {
+  font-size: 11px;
+}
+
+.peq-header {
+  min-height: 32px;
+  padding: 0 8px;
+  border-bottom: 1px solid @orca_divider;
+  color: @orca_text_3;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
 }
 
 list.peq-list {
@@ -5300,8 +5282,9 @@ list.peq-list {
 }
 
 list.peq-list > row {
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 44px;
+  padding: 0 8px;
+  border-bottom: 1px solid @orca_divider;
 }
 
 list.peq-list > row:hover {
@@ -5309,39 +5292,31 @@ list.peq-list > row:hover {
 }
 
 .peq-row .peq-index {
-  color: @orca_text_2;
+  color: @orca_text_3;
 }
 
 .peq-off .peq-index,
-.peq-off .peq-dot,
 .peq-off label {
   opacity: 0.5;
 }
 
-.peq-dot {
-  min-width: 10px;
-  min-height: 10px;
-  border-radius: 999px;
-  background-color: @orca_accent;
-}
-
 .peq-row dropdown.peq-type > button {
-  min-height: 22px;
-  padding: 0 4px;
-  background: none;
-  box-shadow: none;
-  color: @orca_text_3;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
   font-weight: 400;
 }
 
 .peq-row spinbutton.peq-spin {
-  min-height: 22px;
+  min-height: 26px;
   background: none;
   box-shadow: none;
 }
 
 .peq-row spinbutton.peq-spin > text {
-  min-height: 22px;
+  min-height: 26px;
   padding: 0 4px;
 }
 
@@ -5351,7 +5326,7 @@ list.peq-list > row:hover {
 }
 
 .peq-row switch.peq-switch {
-  padding: 2px;
+  padding: 3px;
   border-radius: 999px;
 }
 
@@ -5361,17 +5336,14 @@ list.peq-list > row:hover {
 }
 
 .peq-row menubutton.peq-row-menu > button {
-  min-height: 22px;
-  min-width: 22px;
+  min-height: 24px;
+  min-width: 24px;
   padding: 0;
+  color: @orca_text_3;
 }
 
 button.peq-add {
-  min-height: 34px;
-  padding: 0 14px;
-  border-radius: 8px;
   color: @orca_accent_text;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, @orca_accent 35%, transparent);
 }
 
 /* Appearance choices */
