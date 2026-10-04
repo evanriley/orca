@@ -1,16 +1,14 @@
 //! Background jobs — scans, loudness analysis, duplicate finding, tag writes,
-//! matching and AcoustID submission — and the activity widget at the foot of
-//! the sidebar, whose popover holds the task's detail and its Stop button.
-//! One runs at a time from this frontend, so the widget always describes the
-//! job there is.
-//!
-//! A filesystem walk has no honest denominator until it has finished walking,
-//! so a scan shows its counts rather than a fabricated percentage.
+//! matching and AcoustID submission — started from this frontend, and what
+//! each reports when it ends. A Job started while another holds the
+//! Library's slot waits its turn in liborca; the Activity page and the
+//! sidebar widget (`activity.zig`) show both.
 
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
+const activity = @import("activity.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const browse = @import("browse.zig");
@@ -36,37 +34,63 @@ fn state(data: ?*anyopaque) *App {
     return @ptrCast(@alignCast(data.?));
 }
 
-fn cancelClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const job = self.task_job orelse return;
-    self.runtime.cancelJob(job) catch return;
-    if (self.scan_label) |label| gtk.gtk_label_set_text(label, "Stopping…");
-}
-
-/// Refuses a second job while one runs, with a toast saying which.
-fn idle(self: *App) bool {
-    const task = self.task orelse return true;
-    self.toast(switch (task) {
-        .scan => "A scan is already running",
-        .analysis => "Loudness is being measured",
-        .duplicates => "Duplicates are being looked for",
-        .tag_write => "Tags are being written",
-        .matching => "Already finding matches",
-        .submission => "Already submitting to AcoustID",
-    });
-    return false;
-}
-
-fn begin(self: *App, task: app.Task, job: liborca.JobHandle, title: [*:0]const u8) void {
-    self.task = task;
-    self.task_job = job;
-    showScanning(self, true);
-    if (self.scan_label) |label| gtk.gtk_label_set_text(label, title);
-    if (self.scan_detail) |label| gtk.gtk_label_set_text(label, "Starting…");
-    showActivity(self, .{ .kind = .scan, .state = .queued, .completed_units = 0, .total_units = null });
+fn begin(self: *App, tracked: app.TrackedTask) void {
+    if (self.task_count < self.tasks.len) {
+        self.tasks[self.task_count] = tracked;
+        self.task_count += 1;
+    }
+    activity.refresh(self);
     health.updateBanner(self);
     self.updateTracksBody();
     self.requestTick();
+}
+
+/// Whether a `task` this frontend started is running or waiting.
+pub fn active(self: *const App, task: app.Task) bool {
+    for (self.tasks[0..self.task_count]) |tracked| {
+        if (tracked.task == task) return true;
+    }
+    return false;
+}
+
+/// Whether a running or waiting matching Job searches, or with `verify`
+/// verifies, this one Track.
+pub fn matchingTrack(self: *const App, track_id: i64, verify: bool) bool {
+    for (self.tasks[0..self.task_count]) |tracked| {
+        if (tracked.task != .matching or tracked.match_track != track_id) continue;
+        if ((tracked.match_mode == .verify) == verify) return true;
+    }
+    return false;
+}
+
+fn queueRefusal(err: anyerror, fallback: [:0]const u8) [:0]const u8 {
+    return switch (err) {
+        error.JobQueueFull => "Too many tasks are waiting; try again when some have finished",
+        else => fallback,
+    };
+}
+
+/// Starts a failed or stopped Job's request again from its history row.
+pub fn retry(self: *App, history_id: i64) void {
+    const library = self.library orelse return;
+    const job = self.runtime.jobRetry(library, history_id) catch |err| return self.toast(switch (err) {
+        error.JobNotRetryable, error.UnknownJobHistory => "This task cannot be run again",
+        error.JobQueueFull => queueRefusal(err, ""),
+        else => matchingRefusal(err),
+    });
+    const snapshot = self.runtime.jobSnapshotSynced(job) catch return activity.refresh(self);
+    const task: app.Task = switch (snapshot.kind) {
+        .scan, .reconcile => .scan,
+        .analysis => .analysis,
+        .duplicate_scan => .duplicates,
+        .metadata_lookup => .matching,
+        .acoustid_submission => .submission,
+        else => {
+            activity.refresh(self);
+            return self.requestTick();
+        },
+    };
+    begin(self, .{ .task = task, .job = job });
 }
 
 /// Everything shown from the library, rebuilt after its contents changed.
@@ -88,129 +112,32 @@ pub fn reloadLibraryViews(self: *App) void {
     window.refreshCounts(self);
 }
 
-pub fn build(self: *App) *gtk.Widget {
-    const card = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 10);
-    gtk.gtk_widget_add_css_class(card, "scan-status");
-    const spinner = adw.adw_spinner_new();
-    gtk.gtk_widget_set_size_request(spinner, 16, 16);
-    gtk.gtk_widget_set_valign(spinner, gtk.ALIGN_CENTER);
-    const labels = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_set_hexpand(labels, gtk.true_);
-    gtk.gtk_widget_set_valign(labels, gtk.ALIGN_CENTER);
-    const label = gtk.gtk_label_new("Scanning…");
-    self.scan_label = gtk.cast(gtk.Label, label);
-    gtk.gtk_label_set_xalign(self.scan_label.?, 0.0);
-    gtk.gtk_label_set_ellipsize(self.scan_label.?, gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(label, "heading");
-    const detail = gtk.gtk_label_new("");
-    self.scan_detail = gtk.cast(gtk.Label, detail);
-    gtk.gtk_label_set_xalign(self.scan_detail.?, 0.0);
-    gtk.gtk_label_set_ellipsize(self.scan_detail.?, gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_add_css_class(detail, "caption");
-    gtk.gtk_widget_add_css_class(detail, "dim-label");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), label);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, labels), detail);
-    const cancel = gtk.gtk_button_new_from_icon_name("process-stop-symbolic");
-    gtk.gtk_widget_set_tooltip_text(cancel, "Stop scanning");
-    gtk.gtk_widget_add_css_class(cancel, "flat");
-    gtk.gtk_widget_add_css_class(cancel, "circular");
-    gtk.gtk_widget_set_valign(cancel, gtk.ALIGN_CENTER);
-    _ = gtk.signalConnect(cancel, "clicked", gtk.callback(cancelClicked), self);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, card), spinner);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, card), labels);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, card), cancel);
-
-    const popover = gtk.gtk_popover_new();
-    self.activity_popover = gtk.cast(gtk.Popover, popover);
-    gtk.gtk_popover_set_child(self.activity_popover.?, card);
-    gtk.gtk_popover_set_position(self.activity_popover.?, gtk.POS_TOP);
-
-    const summary = gtk.gtk_label_new("1 task running");
-    self.activity_label = gtk.cast(gtk.Label, summary);
-    gtk.gtk_label_set_xalign(self.activity_label.?, 0.0);
-    gtk.gtk_label_set_ellipsize(self.activity_label.?, gtk.ELLIPSIZE_END);
-    gtk.gtk_widget_set_hexpand(summary, gtk.true_);
-    const percent = gtk.gtk_label_new("");
-    self.activity_percent = gtk.cast(gtk.Label, percent);
-    gtk.gtk_widget_add_css_class(percent, "numeric");
-    const line = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), summary);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, line), percent);
-    const bar = gtk.gtk_progress_bar_new();
-    self.activity_bar = gtk.cast(gtk.ProgressBar, bar);
-    gtk.gtk_progress_bar_set_pulse_step(self.activity_bar.?, 0.08);
-    gtk.gtk_widget_add_css_class(bar, "activity-bar");
-    const body = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 7);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), line);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, body), bar);
-    const button = gtk.gtk_menu_button_new();
-    gtk.gtk_menu_button_set_child(gtk.cast(gtk.MenuButton, button), body);
-    gtk.gtk_menu_button_set_popover(gtk.cast(gtk.MenuButton, button), popover);
-    gtk.gtk_widget_set_tooltip_text(button, "Show the running task");
-    gtk.gtk_widget_add_css_class(button, "activity");
-
-    const revealer = gtk.gtk_revealer_new();
-    self.scan_revealer = gtk.cast(gtk.Revealer, revealer);
-    gtk.gtk_revealer_set_transition_type(self.scan_revealer.?, gtk.REVEALER_TRANSITION_SLIDE_UP);
-    gtk.gtk_revealer_set_child(self.scan_revealer.?, button);
-    return revealer;
-}
-
-fn showActivity(self: *App, snapshot: liborca.JobSnapshot) void {
-    const waiting = snapshot.state == .queued;
-    if (self.activity_label) |label|
-        gtk.gtk_label_set_text(label, if (waiting) "1 task waiting" else "1 task running");
-    const total = snapshot.total_units orelse 0;
-    var buffer: [8]u8 = undefined;
-    if (!waiting and total != 0) {
-        const done = @min(snapshot.completed_units, total);
-        const text: [:0]const u8 = strings.printZ(&buffer, "{d}%", .{done * 100 / total}) catch "";
-        if (self.activity_percent) |label| gtk.gtk_label_set_text(label, text.ptr);
-        if (self.activity_bar) |bar|
-            gtk.gtk_progress_bar_set_fraction(bar, @as(f64, @floatFromInt(done)) / @as(f64, @floatFromInt(total)));
-        return;
-    }
-    if (self.activity_percent) |label| gtk.gtk_label_set_text(label, "");
-    if (self.activity_bar) |bar| {
-        if (waiting) gtk.gtk_progress_bar_set_fraction(bar, 0) else gtk.gtk_progress_bar_pulse(bar);
-    }
-}
-
-fn showScanning(self: *App, visible: bool) void {
-    if (!visible) if (self.activity_popover) |popover| gtk.gtk_popover_popdown(popover);
-    if (self.scan_revealer) |revealer|
-        gtk.gtk_revealer_set_reveal_child(revealer, if (visible) gtk.true_ else gtk.false_);
-}
-
 fn startScan(self: *App, root_id: ?i64) void {
     const library = self.library orelse return;
-    const job = self.runtime.startLibraryScan(library, .{ .root_id = root_id }) catch {
-        self.toast("Could not start the scan");
-        return;
-    };
-    begin(self, .scan, job, "Scanning your music");
+    const job = self.runtime.startLibraryScan(library, .{ .root_id = root_id }) catch |err|
+        return self.toast(queueRefusal(err, "Could not start the scan"));
+    begin(self, .{ .task = .scan, .job = job });
 }
 
 /// Walks every enabled root again. Unchanged files cost a stat each; this
 /// finds whatever watching did not, and everything when watching is off.
 pub fn rescan(self: *App) void {
-    if (self.library == null or !idle(self)) return;
+    if (self.library == null) return;
     startScan(self, null);
 }
 
 pub fn rescanRoot(self: *App, root_id: i64) void {
-    if (self.library == null or !idle(self)) return;
+    if (self.library == null) return;
     startScan(self, root_id);
 }
 
 pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startLibraryReconcile(library, .{
         .root_id = root_id,
         .scope = if (path.len == 0) .whole_root else .{ .subtrees = &.{path} },
-    }) catch return self.toast("Could not start the scan");
-    begin(self, .scan, job, "Scanning this folder");
+    }) catch |err| return self.toast(queueRefusal(err, "Could not start the scan"));
+    begin(self, .{ .task = .scan, .job = job });
 }
 
 /// Measures the loudness ReplayGain plays by, and the fingerprints duplicate
@@ -218,16 +145,16 @@ pub fn rescanFolder(self: *App, root_id: i64, path: []const u8) void {
 /// done.
 pub fn startAnalysis(self: *App) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
-    const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch return self.toast("Could not start measuring");
-    begin(self, .analysis, job, "Measuring loudness");
+    const job = self.runtime.startLibraryAnalysis(library, .{ .threads = self.analysis_threads }) catch |err|
+        return self.toast(queueRefusal(err, "Could not start measuring"));
+    begin(self, .{ .task = .analysis, .job = job });
 }
 
 pub fn startDuplicates(self: *App) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
-    const job = self.runtime.startLibraryDuplicateScan(library, .{}) catch return self.toast("Could not look for duplicates");
-    begin(self, .duplicates, job, "Finding duplicates");
+    const job = self.runtime.startLibraryDuplicateScan(library, .{}) catch |err|
+        return self.toast(queueRefusal(err, "Could not look for duplicates"));
+    begin(self, .{ .task = .duplicates, .job = job });
 }
 
 /// Searches MusicBrainz, and AcoustID by fingerprint when that is on, for
@@ -244,14 +171,11 @@ pub fn startTrackMatching(self: *App, track_id: i64) void {
 
 fn startMatchingJob(self: *App, track_id: ?i64) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startLibraryMatching(library, .{
         .track_id = track_id,
         .fingerprints = self.match_fingerprints,
     }) catch |err| return self.toast(matchingRefusal(err));
-    self.match_task_track = track_id;
-    self.match_task_mode = .search;
-    begin(self, .matching, job, "Finding matches");
+    begin(self, .{ .task = .matching, .job = job, .match_track = track_id });
     if (track_id != null) details.invalidate(self);
 }
 
@@ -279,7 +203,6 @@ pub fn startAlbumReidentification(self: *App, release_id: i64) void {
 
 fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarget) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const track_id: ?i64 = switch (target) {
         .track => |id| id,
         .release, .library => null,
@@ -295,13 +218,7 @@ fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarg
         .accept_minimum_confidence = null,
         .cover_art = false,
     }) catch |err| return self.toast(matchingRefusal(err));
-    self.match_task_track = track_id;
-    self.match_task_mode = mode;
-    begin(self, .matching, job, switch (mode) {
-        .verify => "Verifying",
-        .reidentify => "Re-identifying",
-        .search => unreachable,
-    });
+    begin(self, .{ .task = .matching, .job = job, .match_track = track_id, .match_mode = mode });
     if (track_id != null) details.invalidate(self);
 }
 
@@ -309,25 +226,19 @@ fn startIdentificationJob(self: *App, mode: liborca.MatchMode, target: MatchTarg
 /// threshold, and fetches the album's cover when it has none.
 pub fn startAlbumMatching(self: *App, release_id: i64) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startLibraryMatching(library, .{
         .release_id = release_id,
         .fingerprints = self.match_fingerprints,
         .accept_minimum_confidence = matches.thresholdFraction(self),
         .cover_art = true,
     }) catch |err| return self.toast(matchingRefusal(err));
-    self.match_task_release = release_id;
-    self.match_task_mode = .search;
-    begin(self, .matching, job, "Matching album");
+    begin(self, .{ .task = .matching, .job = job, .match_release = release_id });
 }
 
 pub fn startCoverArtFetch(self: *App, release_id: i64) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startReleaseCoverArtFetch(library, release_id) catch |err| return self.toast(matchingRefusal(err));
-    self.match_task_release = release_id;
-    self.match_task_mode = .search;
-    begin(self, .matching, job, "Fetching cover art");
+    begin(self, .{ .task = .matching, .job = job, .match_release = release_id });
 }
 
 const acoustid_required = "Verify needs AcoustID: turn on Match by audio fingerprint in Settings";
@@ -338,31 +249,29 @@ fn matchingRefusal(err: anyerror) [:0]const u8 {
         error.AcoustIdBusy => "Already submitting to AcoustID",
         error.AcoustIdRequired => acoustid_required,
         error.InvalidMatchRequest => "That search cannot run on this selection",
+        error.JobQueueFull => queueRefusal(err, ""),
         else => "Could not start finding matches",
     };
 }
 
 pub fn startSubmission(self: *App) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startAcoustIdSubmission(library) catch |err| return self.toast(switch (err) {
         error.AcoustIdBusy => "Already finding matches",
-        else => "Could not start submitting to AcoustID",
+        else => queueRefusal(err, "Could not start submitting to AcoustID"),
     });
-    begin(self, .submission, job, "Submitting");
+    begin(self, .{ .task = .submission, .job = job });
 }
 
 /// Writes an approved plan. The plan id is its undo group.
 pub fn startTagWrite(self: *App, plan_id: u64, digest: liborca.TagWriteDigest) void {
     const library = self.library orelse return;
-    if (!idle(self)) return;
     const job = self.runtime.startTagWrite(library, plan_id, digest) catch |err| return self.toast(switch (err) {
         error.NoBackupDirectory => "This library has no database file to keep the originals beside",
         error.MutationInProgress => "Another Orca is writing tags",
-        else => "Could not write the tags",
+        else => queueRefusal(err, "Could not write the tags"),
     });
-    self.tag_write_group = plan_id;
-    begin(self, .tag_write, job, "Writing tags");
+    begin(self, .{ .task = .tag_write, .job = job, .tag_write_group = plan_id });
 }
 
 fn folderChosen(
@@ -404,49 +313,10 @@ pub fn chooseFolder(self: *App) void {
         self.toast("No library is open");
         return;
     }
-    if (!idle(self)) return;
     const dialog = gtk.gtk_file_dialog_new();
     gtk.gtk_file_dialog_set_title(dialog, "Add Music Folder");
     gtk.gtk_file_dialog_select_folder(dialog, self.window, null, folderChosen, self);
     gtk.g_object_unref(dialog);
-}
-
-fn writeDetail(self: *App, task: app.Task, snapshot: liborca.JobSnapshot, stats: liborca.ScanStats) void {
-    const label = self.scan_detail orelse return;
-    var buffer: [160]u8 = undefined;
-    const text = switch (task) {
-        .scan => strings.printZ(&buffer, "{d} files · {d} new", .{ stats.files_seen, stats.changed }),
-        .analysis, .duplicates, .tag_write => if (snapshot.total_units) |total|
-            strings.printZ(&buffer, "{d} of {d} files", .{ snapshot.completed_units, total })
-        else
-            strings.printZ(&buffer, "{d} files", .{snapshot.completed_units}),
-        .matching, .submission => return,
-    } catch return;
-    gtk.gtk_label_set_text(label, text.ptr);
-}
-
-fn writeMatchDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.MatchStats) void {
-    const label = self.scan_detail orelse return;
-    if (self.match_task_release != null and snapshot.completed_units == (snapshot.total_units orelse 0))
-        return gtk.gtk_label_set_text(label, "Cover Art Archive");
-    var buffer: [160]u8 = undefined;
-    const text = strings.printZ(&buffer, "{f} of {f} tracks · {f} {s}", .{
-        strings.grouped(snapshot.completed_units),
-        strings.grouped(snapshot.total_units orelse snapshot.completed_units),
-        strings.grouped(if (self.match_task_mode == .verify) stats.verified else stats.matched),
-        if (self.match_task_mode == .verify) "verified" else "matched",
-    }) catch return;
-    gtk.gtk_label_set_text(label, text.ptr);
-}
-
-fn writeSubmissionDetail(self: *App, snapshot: liborca.JobSnapshot, stats: liborca.SubmissionStats) void {
-    const label = self.scan_detail orelse return;
-    var buffer: [160]u8 = undefined;
-    const text = strings.printZ(&buffer, "{f} of {f} tracks", .{
-        strings.grouped(stats.files_examined),
-        strings.grouped(snapshot.total_units orelse stats.files_examined),
-    }) catch return;
-    gtk.gtk_label_set_text(label, text.ptr);
 }
 
 fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -574,12 +444,10 @@ fn reidentificationFinished(self: *App, state_value: liborca.JobState, stats: ?l
         strings.printZ(&buffer, "Found {f} matches to review", .{strings.grouped(result.matched)}) catch "Found matches to review");
 }
 
-fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.MatchStats, match_release: ?i64) void {
-    const mode = self.match_task_mode;
-    self.match_task_mode = .search;
+fn matchingFinished(self: *App, tracked: app.TrackedTask, state_value: liborca.JobState, stats: ?liborca.MatchStats, match_release: ?i64) void {
+    const mode = tracked.match_mode;
     if (mode != .search) {
-        const track_id = self.match_task_track;
-        self.match_task_track = null;
+        const track_id = tracked.match_track;
         matches.invalidate(self);
         details.invalidate(self);
         return switch (mode) {
@@ -588,13 +456,11 @@ fn matchingFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.M
             .search => unreachable,
         };
     }
-    if (self.match_task_release) |release_id| {
-        self.match_task_release = null;
+    if (tracked.match_release) |release_id| {
         const moved_to = if (match_release) |found| (if (found != release_id) found else null) else null;
         return albumFinished(self, release_id, moved_to, state_value, stats);
     }
-    const searched = self.match_task_track;
-    self.match_task_track = null;
+    const searched = tracked.match_track;
     const matched = if (stats) |value| value.matched else 0;
     if (searched) |track_id| self.unmatched_track = if (state_value == .succeeded and matched == 0) track_id else null;
     matches.invalidate(self);
@@ -633,7 +499,7 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
 
 fn finished(
     self: *App,
-    task: app.Task,
+    tracked: app.TrackedTask,
     state_value: liborca.JobState,
     stats: ?liborca.ScanStats,
     match_stats: ?liborca.MatchStats,
@@ -641,7 +507,9 @@ fn finished(
     submission_stats: ?liborca.SubmissionStats,
     tag_write_failure: ?liborca.TagWriteFailure,
 ) void {
-    if (task == .matching) return matchingFinished(self, state_value, match_stats, match_release);
+    const task = tracked.task;
+    if (task == .tag_write) self.tag_write_group = tracked.tag_write_group;
+    if (task == .matching) return matchingFinished(self, tracked, state_value, match_stats, match_release);
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
@@ -699,23 +567,34 @@ fn tagWriteFailedText(failure: ?liborca.TagWriteFailure) [:0]const u8 {
     };
 }
 
+fn untrack(self: *App, index: usize) app.TrackedTask {
+    const tracked = self.tasks[index];
+    std.mem.copyForwards(app.TrackedTask, self.tasks[index .. self.task_count - 1], self.tasks[index + 1 .. self.task_count]);
+    self.task_count -= 1;
+    return tracked;
+}
+
 pub fn tick(self: *App) void {
-    const task = self.task orelse return;
-    const job = self.task_job orelse return;
+    var index: usize = 0;
+    while (index < self.task_count) {
+        if (tickTask(self, index)) index += 1;
+    }
+    activity.refresh(self);
+}
+
+/// Shows one tracked Job's progress, and reports it when it has ended.
+/// False when the Job left the list.
+fn tickTask(self: *App, index: usize) bool {
+    const tracked = &self.tasks[index];
+    const task = tracked.task;
+    const job = tracked.job;
     const snapshot = self.runtime.jobSnapshotSynced(job) catch {
-        self.task = null;
-        self.task_job = null;
-        self.match_task_track = null;
-        self.match_task_release = null;
-        self.match_task_mode = .search;
-        self.shown_matched = 0;
-        self.health.then_duplicates = false;
-        showScanning(self, false);
+        const gone = untrack(self, index);
+        if (gone.task == .analysis) self.health.then_duplicates = false;
         health.updateBanner(self);
-        return;
+        return false;
     };
-    showActivity(self, snapshot);
-    if (snapshot.state == .queued) return;
+    if (snapshot.state == .queued or snapshot.state == .waiting) return true;
     const stats: ?liborca.ScanStats = switch (task) {
         .matching, .submission => null,
         else => self.runtime.jobScanStats(job) catch null,
@@ -723,32 +602,27 @@ pub fn tick(self: *App) void {
     const match_stats: ?liborca.MatchStats = if (task == .matching) self.runtime.jobMatchStats(job) catch null else null;
     const submission_stats: ?liborca.SubmissionStats = if (task == .submission) self.runtime.jobSubmissionStats(job) catch null else null;
     const tag_write_failure: ?liborca.TagWriteFailure = if (task == .tag_write and snapshot.state == .failed) self.runtime.jobTagWriteFailure(job) catch null else null;
-    if (submission_stats) |value| writeSubmissionDetail(self, snapshot, value);
     if (stats) |value| {
-        writeDetail(self, task, snapshot, value);
         if (task == .scan and self.track_count == 0 and value.tracks_written != 0) reloadLibraryViews(self);
     }
     if (match_stats) |value| {
-        writeMatchDetail(self, snapshot, value);
-        if (value.matched != self.shown_matched) {
-            self.shown_matched = value.matched;
+        if (value.matched != tracked.shown_matched) {
+            tracked.shown_matched = value.matched;
             matches.updateCount(self);
         }
     }
     switch (snapshot.state) {
         .succeeded, .failed, .cancelled => {},
-        else => return,
+        else => return true,
     }
     const match_release: ?i64 = if (task == .matching) self.runtime.jobMatchRelease(job) catch null else null;
-    self.task = null;
-    self.task_job = null;
-    self.shown_matched = 0;
-    showScanning(self, false);
-    finished(self, task, snapshot.state, stats, match_stats, match_release, submission_stats, tag_write_failure);
+    const ended = untrack(self, index);
+    finished(self, ended, snapshot.state, stats, match_stats, match_release, submission_stats, tag_write_failure);
     switch (task) {
         .analysis, .duplicates, .matching => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),
     }
     if (task == .analysis) health.analysisEnded(self, snapshot.state);
     self.updateTracksBody();
+    return false;
 }

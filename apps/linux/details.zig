@@ -1454,7 +1454,7 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, link.value), gtk.true_);
     gtk.gtk_widget_set_visible(link.link, gtk.false_);
     const self = panel.self;
-    const searching = self.task == .matching and self.match_task_mode != .verify and self.match_task_track == details.track_id;
+    const searching = jobs.matchingTrack(self, details.track_id, false);
     const library = self.library orelse return;
     const proposals = self.runtime.libraryMatchProposals(library, details.track_id, proposal_slots + 1) catch null;
     defer if (proposals) |page| page.deinit();
@@ -1477,7 +1477,7 @@ fn populateRecording(panel: *Panel, details: liborca.TrackDetails) void {
 
 fn populateVerification(panel: *Panel, track_id: i64) void {
     const self = panel.self;
-    if (self.task == .matching and self.match_task_mode == .verify and self.match_task_track == track_id) {
+    if (jobs.matchingTrack(self, track_id, true)) {
         _ = setRow(panel.acoustid_row, "Checking…");
         return;
     }

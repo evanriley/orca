@@ -874,9 +874,12 @@ pub fn jobSnapshotSynced(self: *OrcaRuntime, job_handle: JobHandle) !job.Snapsho
 fn writeDetail(worker: *const JobWorker, detail: *job.BoundedText(128)) void {
     var buffer: [128]u8 = undefined;
     detail.set(switch (worker.request) {
-        .analysis => |request| std.fmt.bufPrint(&buffer, "{d} threads", .{
-            request.threads orelse library_pass.analysis_pass.defaultThreads(),
-        }) catch "",
+        .analysis => |request| blk: {
+            const threads = request.threads orelse library_pass.analysis_pass.defaultThreads();
+            break :blk std.fmt.bufPrint(&buffer, "{d} {s}", .{
+                threads, if (threads == 1) "thread" else "threads",
+            }) catch "";
+        },
         .metadata_lookup, .acoustid_submission => "rate-limited to 1 request a second",
         else => "",
     });

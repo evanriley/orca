@@ -21,6 +21,7 @@ const menu = @import("menu.zig");
 const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
 const health = @import("health.zig");
+const activity = @import("activity.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
 const smart_playlist_editor = @import("smart_playlist_editor.zig");
@@ -307,6 +308,7 @@ pub const Page = enum(c_uint) {
     queue,
     playlists,
     settings,
+    activity,
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -322,6 +324,7 @@ pub const Page = enum(c_uint) {
             .queue => "queue",
             .playlists => "playlists",
             .settings => "settings",
+            .activity => "activity",
         };
     }
 
@@ -339,6 +342,7 @@ pub const Page = enum(c_uint) {
             .queue => "Queue",
             .playlists => "Playlists",
             .settings => "Settings",
+            .activity => "Activity",
         };
     }
 
@@ -826,6 +830,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .genres) genres.shown(self);
     if (page == .folders) folders.shown(self);
     if (page == .settings) preferences.show(self);
+    if (page == .activity) activity.shown(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
     if (self.queue_visible) {
@@ -920,7 +925,7 @@ fn buildSidebar(self: *App) *gtk.Widget {
     gtk.gtk_widget_add_css_class(nav, "nav");
     gtk.gtk_box_append(gtk.cast(gtk.Box, nav), handle);
     gtk.gtk_box_append(gtk.cast(gtk.Box, nav), scroller);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, nav), jobs.build(self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, nav), activity.buildWidget(self));
     syncSidebarSelection(self);
     refreshCounts(self);
     return nav;
@@ -1279,6 +1284,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, folders.build(self), Page.folders.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, loved.build(self), Page.loved.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, activity.build(self), Page.activity.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, queue.build(self), Page.queue.name());

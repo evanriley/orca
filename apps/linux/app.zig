@@ -28,6 +28,8 @@ const loved = @import("loved.zig");
 const genres = @import("genres.zig");
 const folders = @import("folders.zig");
 const health = @import("health.zig");
+const activity = @import("activity.zig");
+const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
 const nowplaying = @import("nowplaying.zig");
 const queue = @import("queue.zig");
@@ -237,6 +239,21 @@ pub const Failure = enum { none, unreported, reported };
 
 pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission };
 
+/// A Job this frontend started or retried, with what its end should report.
+pub const TrackedTask = struct {
+    task: Task,
+    job: liborca.JobHandle,
+    /// The one Track a `.matching` task searches, when it searches one.
+    match_track: ?i64 = null,
+    /// The Release a `.matching` task matches or fetches the cover of.
+    match_release: ?i64 = null,
+    match_mode: liborca.MatchMode = .search,
+    /// The undo group a `.tag_write` task writes.
+    tag_write_group: u64 = 0,
+    /// Tracks a `.matching` task had matched when the badge was last counted.
+    shown_matched: u64 = 0,
+};
+
 pub const default_match_threshold_percent: u8 = 90;
 
 pub const App = struct {
@@ -251,21 +268,13 @@ pub const App = struct {
     library: ?liborca.LibraryHandle = null,
     player: liborca.PlayerHandle = undefined,
     zone: ?liborca.ZoneHandle = null,
-    /// The background job this frontend started and is showing, if any.
-    task: ?Task = null,
-    task_job: ?liborca.JobHandle = null,
+    /// The background Jobs this frontend started, running or waiting.
+    tasks: [activity.max_cards]TrackedTask = undefined,
+    task_count: usize = 0,
     /// The undo group of the last tag write, for the toast's Undo.
     tag_write_group: u64 = 0,
-    /// The one Track a `.matching` task searches, when it searches one.
-    match_task_track: ?i64 = null,
-    /// The Release a `.matching` task matches or fetches the cover of.
-    match_task_release: ?i64 = null,
-    match_task_mode: liborca.MatchMode = .search,
     /// The Track whose own search last found nothing, so its details say so.
     unmatched_track: ?i64 = null,
-    /// Tracks the running matching job had matched when the badge was last
-    /// counted.
-    shown_matched: u64 = 0,
     /// The output device chosen in Settings, by name, so the choice
     /// survives device ids being renumbered between runs.
     preferred_output: OwnedText = .{},
@@ -417,6 +426,7 @@ pub const App = struct {
     palette: palette.State = .{},
 
     health: health.State = .{},
+    activity: activity.State = .{},
 
     matches_list: ?*gtk.ListBox = null,
     matches_corrections: ?*gtk.ListBox = null,
@@ -490,14 +500,6 @@ pub const App = struct {
     artists_syncing_controls: bool = false,
     artist_info: artists.Info = .{},
     fetch_artist_info: bool = true,
-
-    scan_revealer: ?*gtk.Revealer = null,
-    activity_label: ?*gtk.Label = null,
-    activity_percent: ?*gtk.Label = null,
-    activity_bar: ?*gtk.ProgressBar = null,
-    activity_popover: ?*gtk.Popover = null,
-    scan_label: ?*gtk.Label = null,
-    scan_detail: ?*gtk.Label = null,
 
     transport_controls: TransportControls = .{},
     seek_adjustment: ?*gtk.Adjustment = null,
@@ -699,7 +701,7 @@ pub const App = struct {
     /// never shows an empty table while it is being read.
     pub fn updateWelcome(self: *App) void {
         const page = self.welcome orelse return;
-        if (self.task == .scan) {
+        if (jobs.active(self, .scan)) {
             adw.adw_status_page_set_icon_name(page, null);
             adw.adw_status_page_set_title(page, "Reading your music…");
             adw.adw_status_page_set_description(page, "Albums appear here as they are found.");
@@ -711,8 +713,8 @@ pub const App = struct {
                 "Add the folder your music lives in. Orca reads it and never changes a file unless you ask.",
             );
         }
-        if (self.welcome_button) |button| gtk.gtk_widget_set_visible(button, if (self.task == .scan) gtk.false_ else gtk.true_);
-        if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (self.task == .scan) gtk.true_ else gtk.false_);
+        if (self.welcome_button) |button| gtk.gtk_widget_set_visible(button, if (jobs.active(self, .scan)) gtk.false_ else gtk.true_);
+        if (self.welcome_spinner) |spinner| gtk.gtk_widget_set_visible(spinner, if (jobs.active(self, .scan)) gtk.true_ else gtk.false_);
     }
 
     fn trackListing(self: *App, offset: u32, limit: u32) liborca.BrowseTrackListing {
@@ -954,6 +956,7 @@ pub const App = struct {
         self.genres.deinit(self.allocator);
         self.folders.deinit(self.allocator);
         self.palette.deinit(self.allocator);
+        self.activity.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }

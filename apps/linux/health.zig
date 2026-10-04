@@ -217,7 +217,7 @@ fn actionAbout(kind: ?Kind) [*:0]const u8 {
 fn analyzeAgain(self: *App) void {
     self.health.then_duplicates = true;
     jobs.startAnalysis(self);
-    if (self.task != .analysis) self.health.then_duplicates = false;
+    if (!jobs.active(self, .analysis)) self.health.then_duplicates = false;
 }
 
 fn analyzeAgainClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1162,7 +1162,7 @@ pub fn build(self: *App) *gtk.Widget {
 }
 
 fn unanalysedCount(self: *App, library: liborca.LibraryHandle) u64 {
-    if (self.task == .analysis) return 0;
+    if (jobs.active(self, .analysis)) return 0;
     return self.runtime.libraryUnanalyzedCount(library) catch 0;
 }
 
@@ -1266,7 +1266,7 @@ pub fn reload(self: *App) void {
     gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, cards), if (len == 0) gtk.false_ else gtk.true_);
 
     var quiet_count: usize = 0;
-    if (unanalysed == 0 and self.task != .analysis) {
+    if (unanalysed == 0 and !jobs.active(self, .analysis)) {
         gtk.gtk_box_append(quiet, quietRow(null));
         quiet_count += 1;
     }

@@ -569,11 +569,12 @@ The window is an `AdwNavigationSplitView`:
   Collection (Playlists), Playback (Now Playing, and Queue with its
   length), Library Tools (Health, and Matches with its count) and
   Settings. With Show counts in sidebar on, Albums, Artists and Tracks show
-  the library's totals from `Runtime.libraryStats`. While a job runs or
-  waits, an activity card at the foot reads `1 task running` or
-  `1 task waiting`, with the percent and a 3 px bar when the job has a
-  total and a pulsing bar when it has none, such as a scan; pressing it
-  opens the job's progress and Stop in a popover.
+  the library's totals from `Runtime.libraryStats`. While a Job runs or
+  waits, an activity widget at the foot reads `1 task running · 65%`,
+  `1 task running · 2 waiting` or, with the Library's Jobs paused,
+  `Paused · 2 waiting`, over a 3 px bar that pulses when the running Job
+  has no total, such as a scan; it is hidden when nothing runs or waits.
+  Pressing it opens the activity popover (see **Activity** below).
 - **Albums** is a grid of covers with each album's title, artist and year.
   The grid and the list are a paged model as long as the count: the
   browse loader reads `release_count`, then a 512-Release `release_page`
@@ -1055,7 +1056,7 @@ The window is an `AdwNavigationSplitView`:
   and album and artist pages go back to their lists, as after an edit. An AcoustID
   proposal without a title reads Unknown title. A proposal more than 10 s
   longer or shorter than the track shows its length in the warning colour.
-  Find Matches starts the matching job, which shares the status card and,
+  Find Matches starts the matching job, which shows in Activity and,
   unless Match by audio fingerprint is off in Settings, also asks
   AcoustID by fingerprint with the application key the app sets at startup.
   Accept Confident asks first, then accepts each track's best proposal at or
@@ -1078,7 +1079,7 @@ The window is an `AdwNavigationSplitView`:
 
   Submit to AcoustID (N) appears when an AcoustID key is saved and
   `libraryAcoustIdSubmittableCount` is above zero. It asks first, then runs
-  `startAcoustIdSubmission` as a job on the status card, and the count is
+  `startAcoustIdSubmission` as a job shown in Activity, and the count is
   read again when it finishes. A missing or refused key, or an unreachable
   AcoustID, is reported in a toast; nothing is marked sent.
 
@@ -1259,6 +1260,35 @@ offers Undo (`undoTagWrite`). `libraryEditTracks` returns the Tracks the edited
 files back afterwards, because an edit that moves a track to another album
 gives it a new id.
 
+**Activity** is a page, opened from the activity popover's View all or the
+command palette's Show Activity, of what the Library's Jobs are doing and
+have done. Its header has Change History, insensitive until that page exists,
+and Pause All, which calls `Runtime.pauseAll` or, while
+`libraryJobsPaused`, reads Resume All and calls `resumeAll`. **Now** lists
+`Runtime.jobQueuePage`: the Job holding the slot first, then the waiting Jobs
+in the order they start. A running card shows the Job's kind, its progress
+from `jobSnapshotSynced` (`212 of 327 files · 14 threads`, the detail being
+liborca's, such as the provider rate limit), the percent, the estimated time
+left and a bar, with Pause or Resume (`pauseJob`, `resumeJob`) and Stop
+(`cancelJob`). A waiting card is outlined and reads which Job it starts
+after, with a Remove from the queue button. **History** lists
+`jobHistoryPage` newest first, 100 at a time with Show Older, under chips
+for All, Scans, Analysis, File changes and Problems, grouped under Today,
+Yesterday and dates. Each row has the finish time, a tick or a warning, the
+Job's name and liborca's summary (a failure's reason first), the duration
+(`instant` under a second, `—` for a Job that did not succeed), Undo for a
+tag write with an undo group (`undoTagWrite`) or Retry for a retryable Job
+(`jobRetry`), and Details, a popover of its start, finish, result, progress,
+reason and summary. The page refreshes on each tick and rereads the history
+when it is shown.
+
+The **activity popover**, opened from the sidebar widget, has Running,
+Waiting and Recently finished sections: the running Job with its bar, time
+left and Pause; the waiting Jobs and what each starts after; and the last
+three history entries with how long ago they finished and their Undo or
+Retry. Its footer has Pause all (or Resume all) and Change history,
+insensitive for now.
+
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title a pill tab bar switches between seven tabs; it is one
 Tab stop, Left and Right move between tabs, and it shows icons only when the
@@ -1320,11 +1350,11 @@ Settings is showing. Each tick reads that status once, and when `units_run`
 has grown it reloads Health and Matches without a toast. A job started from
 the frontend while a unit runs is queued and shows as starting until the unit
 stops. The tick rereads every library view once for each drain that brought a `Telemetry.library_changed` for the open
-library. Automatic reconciles never take the status card, which follows only
-jobs this frontend started, and a Rescan or other job started from the
-frontend pre-empts a running one. Scans, measurement, duplicate finding, tag writes,
-matching and AcoustID submission share the status card at the foot of the
-sidebar, one at a time. ReplayGain
+library. Scans, measurement, duplicate finding, tag writes, matching and
+AcoustID submission share the Library's one Job slot: a Job started while
+another holds it is `waiting`, shown as a waiting card on the Activity page
+and in the activity popover, and starts when the Jobs before it finish. The
+33rd waiting Job is refused (`error.JobQueueFull`) with a toast. ReplayGain
 and the output device (by name, since device ids are renumbered between runs)
 are saved in `$XDG_CONFIG_HOME/orca/settings.ini`, along with the sound
 settings below. Removing a folder asks first, then forgets its tracks; the

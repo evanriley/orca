@@ -475,6 +475,11 @@ menubutton.activity > button:hover {
   background-color: @orca_bg_hover;
 }
 
+menubutton.activity > button:checked {
+  background-color: @orca_bg_popover;
+  box-shadow: inset 0 0 0 1px @orca_accent_ring;
+}
+
 .activity .numeric {
   color: @orca_text_2;
 }
@@ -1127,10 +1132,6 @@ scale.volume.horizontal slider {
 scale.volume.horizontal:hover slider,
 scale.volume.horizontal:focus-visible slider {
   opacity: 1;
-}
-
-.scan-status {
-  padding: 4px 2px 4px 6px;
 }
 
 /* Tracks */
@@ -5953,4 +5954,336 @@ button.chooser-reset {
 
 .chooser-note {
   color: @orca_text_3;
+}
+
+/* Activity */
+
+.activity-body {
+  padding: 8px 32px 48px;
+}
+
+.activity-tagline {
+  font-size: 14px;
+  color: @orca_text_2;
+}
+
+button.activity-button {
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+button.activity-button:hover {
+  background-color: @orca_bg_hover;
+}
+
+button.activity-button:disabled {
+  color: @orca_text_3;
+}
+
+.section-label.activity-section {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  color: @orca_text_3;
+}
+
+.activity-card {
+  padding: 14px 16px;
+  border-radius: 10px;
+}
+
+.activity-card.running {
+  background-color: @orca_bg_raised;
+}
+
+.activity-card.waiting {
+  box-shadow: inset 0 0 0 1px @orca_smart_divider;
+}
+
+.activity-card-tile {
+  min-width: 38px;
+  min-height: 38px;
+  border-radius: 10px;
+  background-color: @orca_bg_hover;
+  color: @orca_text_2;
+}
+
+.activity-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.activity-card-subtitle {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.activity-card-percent,
+.activity-card-eta {
+  font-size: 12px;
+  color: @orca_text_2;
+}
+
+progressbar.activity-card-bar > trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_track;
+}
+
+progressbar.activity-card-bar > trough > progress {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @orca_accent;
+}
+
+button.activity-card-button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+}
+
+button.activity-card-button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+button.chip.activity-chip {
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.activity-empty {
+  padding: 6px 0;
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.activity-day {
+  padding: 10px 0 6px;
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.activity-history-row {
+  padding: 11px 10px;
+  border-top: 1px solid @orca_border;
+  border-radius: 6px;
+}
+
+.activity-history-time {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.activity-history-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.activity-history-detail,
+.activity-history-duration {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.activity-ok {
+  color: @orca_accent;
+}
+
+.activity-problem {
+  color: @orca_warn;
+}
+
+button.activity-history-action {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+button.activity-history-action:hover {
+  background-color: @orca_bg_hover;
+}
+
+button.activity-details-link {
+  min-height: 28px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+button.activity-details-link:hover {
+  background-color: transparent;
+  color: @orca_text;
+}
+
+popover.activity-details-popover > contents {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background-color: @orca_bg_popover;
+  box-shadow: 0 0 0 1px @orca_frosted_ring, 0 24px 60px @orca_shadow;
+}
+
+.activity-details-title {
+  margin-bottom: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.activity-details-key {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.activity-details-value {
+  font-size: 12.5px;
+  color: @orca_text;
+}
+
+popover.activity-popover > contents {
+  padding: 0;
+  border-radius: 14px;
+  background-color: @orca_bg_popover;
+  box-shadow: 0 0 0 1px @orca_frosted_ring, 0 24px 60px @orca_shadow;
+}
+
+.activity-popover-header {
+  padding: 14px 16px 10px;
+}
+
+.activity-popover-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+button.activity-view-all {
+  min-height: 0;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_accent_text;
+}
+
+button.activity-view-all:hover {
+  background-color: transparent;
+  color: @orca_accent_hover;
+}
+
+.activity-popover-sections {
+  padding: 0 8px;
+}
+
+.section-label.activity-popover-section {
+  padding: 10px 8px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: @orca_text_3;
+}
+
+.activity-row {
+  padding: 9px 8px;
+  border-radius: 9px;
+}
+
+.activity-row-tile {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 8px;
+  background-color: @orca_bg_hover;
+  color: @orca_text_2;
+}
+
+.activity-row.waiting .activity-row-tile {
+  color: @orca_text_3;
+}
+
+.activity-row-status {
+  min-width: 30px;
+  min-height: 30px;
+}
+
+.activity-row-status > image {
+  margin: 0 7px;
+}
+
+.activity-row-title {
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.activity-row-subtitle,
+.activity-row-eta {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+button.activity-row-button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  color: @orca_text_2;
+}
+
+button.activity-row-button:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+button.activity-row-action {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 12px;
+  font-weight: 400;
+  color: @orca_text_artist;
+}
+
+button.activity-row-action:hover {
+  background-color: @orca_bg_hover;
+}
+
+.activity-popover-footer {
+  margin-top: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid @orca_divider;
+}
+
+button.activity-footer-button {
+  min-height: 0;
+  padding: 0;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: @orca_text_2;
+}
+
+button.activity-footer-button:hover {
+  background-color: transparent;
+  color: @orca_text;
+}
+
+button.activity-footer-button:disabled {
+  color: @orca_text_2;
 }

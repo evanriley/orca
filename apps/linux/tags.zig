@@ -459,19 +459,29 @@ pub fn confirmWrite(self: *App, ids: []const i64) void {
 
 /// Restores the files the last tag write changed.
 pub fn undoLastWrite(self: *App) void {
-    const library = self.library orelse return;
     if (self.tag_write_group == 0) return;
-    self.runtime.undoTagWrite(library, self.io, self.tag_write_group) catch |err| switch (err) {
+    _ = undoWrite(self, self.tag_write_group);
+}
+
+/// Restores the files tag write `group` changed. False when they could not
+/// be restored, after a toast saying why.
+pub fn undoWrite(self: *App, group: u64) bool {
+    const library = self.library orelse return false;
+    self.runtime.undoTagWrite(library, self.io, group) catch |err| switch (err) {
         error.MutationGroupAlreadyUndone => {},
-        else => return self.toast(switch (err) {
-            error.TagWriteBackupPruned => "The backups for that write were pruned, so it can't be undone",
-            error.MutationInProgress => "Another Orca is writing tags",
-            error.MutationNeedsReconciliation => "Some files changed after the write, so Orca left them as they are",
-            else => "Could not undo that write",
-        }),
+        else => {
+            self.toast(switch (err) {
+                error.TagWriteBackupPruned => "The backups for that write were pruned, so it can't be undone",
+                error.MutationInProgress => "Another Orca is writing tags",
+                error.MutationNeedsReconciliation => "Some files changed after the write, so Orca left them as they are",
+                else => "Could not undo that write",
+            });
+            return false;
+        },
     };
-    self.tag_write_group = 0;
+    if (self.tag_write_group == group) self.tag_write_group = 0;
     jobs.reloadLibraryViews(self);
     self.requestTick();
     self.toast("The files are back as they were");
+    return true;
 }

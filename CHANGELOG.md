@@ -54,6 +54,17 @@
   `orca_library_query_duplicate_group`, `orca_library_keep_both_duplicates`,
   `orca_library_ignore_duplicate_group` and
   `orca_library_merge_duplicate_metadata`.
+- **Activity page.** `orca-gtk` gains an Activity page, opened from the
+  command palette's Show Activity or the activity popover's View all: Now
+  lists the running and waiting Jobs from `jobQueuePage` with their progress,
+  time left, Pause or Resume and Stop, and History lists `jobHistoryPage`
+  under All, Scans, Analysis, File changes and Problems, grouped by day, with
+  durations, Undo for tag writes, Retry and Details. The sidebar's activity
+  widget reads `1 task running · 65%`, `1 task running · 2 waiting` or
+  `Paused · 2 waiting` and opens a popover of running, waiting and recently
+  finished Jobs with Pause all; Pause All on the page pauses the Library's
+  Jobs. Jobs started from the frontend now wait for the Library's slot
+  instead of replacing the status card.
 - **Listen policy, history clearing and cache size.** A Library keeps a
   `ListenPolicy` (`half_or_four_minutes`, ListenBrainz's rule and the
   default, `thirty_seconds` or `full_track`) and a recording switch,
