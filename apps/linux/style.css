@@ -43,6 +43,38 @@
 @define-color orca_scrim alpha(@orca_bg_window, 0.48);
 @define-color orca_art_overlay alpha(@orca_bg_window, 0.72);
 @define-color orca_art_dim alpha(@orca_bg_window, 0.35);
+@define-color orca_now_row #202832;
+@define-color orca_now_button #1F2429;
+@define-color orca_now_star #3A4046;
+@define-color orca_lyric_past #4E5357;
+@define-color orca_lyric_future #7A7E81;
+@define-color orca_now_shadow rgb(0 0 0 / 0.5);
+@define-color orca_signal_panel #181B1F;
+@define-color orca_signal_card #1F2429;
+@define-color orca_signal_node_edge @orca_border_strong;
+@define-color orca_signal_active #1E2A38;
+@define-color orca_signal_active_edge #2C3E52;
+@define-color orca_signal_rail #2E3439;
+@define-color orca_signal_hover #1D2125;
+@define-color orca_signal_badge #9CC4EA;
+@define-color orca_signal_table #14171A;
+@define-color orca_smart_group_edge #2E3A4C;
+@define-color orca_smart_control #1F2328;
+@define-color orca_smart_card_edge #1F2327;
+@define-color orca_smart_divider #23282D;
+@define-color orca_smart_tile_edge #262B30;
+@define-color orca_folder_row #1F2328;
+@define-color orca_dup_keep #1D232B;
+@define-color orca_first_glow #1A1F24;
+@define-color orca_first_card #181B1F;
+@define-color orca_first_card_edge #23282D;
+@define-color orca_first_row #1F2328;
+@define-color orca_scan_card_edge #1F2327;
+@define-color orca_scan_divider #23282D;
+@define-color orca_scan_waiting #3A4046;
+@define-color orca_edited_field #1A2129;
+@define-color orca_write_card_edge #1F2327;
+@define-color orca_art_thumb #2B2F36;
 
 :root {
   --orca-display-font: Newsreader, serif;
@@ -2566,12 +2598,6 @@ button.album-artist {
 
 /* Now Playing */
 
-@define-color orca_now_row #202832;
-@define-color orca_now_button #1F2429;
-@define-color orca_now_star #3A4046;
-@define-color orca_lyric_past #4E5357;
-@define-color orca_lyric_future #7A7E81;
-@define-color orca_now_shadow rgb(0 0 0 / 0.5);
 
 .now-playing-page {
   background-color: @orca_bg_main;
@@ -3467,15 +3493,6 @@ button.inspector-action {
 
 /* Signal Path */
 
-@define-color orca_signal_panel #181B1F;
-@define-color orca_signal_card #1F2429;
-@define-color orca_signal_node_edge @orca_border_strong;
-@define-color orca_signal_active #1E2A38;
-@define-color orca_signal_active_edge #2C3E52;
-@define-color orca_signal_rail #2E3439;
-@define-color orca_signal_hover #1D2125;
-@define-color orca_signal_badge #9CC4EA;
-@define-color orca_signal_table #14171A;
 
 .signal-body {
   padding: 20px 20px 22px;
@@ -4300,11 +4317,6 @@ listview.playlist-list {
 
 /* Smart Playlist editor */
 
-@define-color orca_smart_group_edge #2E3A4C;
-@define-color orca_smart_control #1F2328;
-@define-color orca_smart_card_edge #1F2327;
-@define-color orca_smart_divider #23282D;
-@define-color orca_smart_tile_edge #262B30;
 
 button.btn-primary.smart-save {
   min-height: 38px;
@@ -5546,7 +5558,6 @@ switch.settings-fixed:disabled > slider {
   background-color: transparent;
 }
 
-@define-color orca_folder_row #1F2328;
 
 .settings-card list.boxed-list > row.settings-folder-row {
   min-height: 54px;
@@ -7108,7 +7119,6 @@ button.changes-export:hover {
 
 /* Duplicates */
 
-@define-color orca_dup_keep #1D232B;
 
 .page-title.duplicates-title {
   padding: 12px 32px 0 32px;
@@ -7330,10 +7340,6 @@ button.duplicates-ignore:hover {
 
 /* First Run */
 
-@define-color orca_first_glow #1A1F24;
-@define-color orca_first_card #181B1F;
-@define-color orca_first_card_edge #23282D;
-@define-color orca_first_row #1F2328;
 
 .first-run {
   background-image: radial-gradient(ellipse 60% 50% at 50% 35%, @orca_first_glow 0%, @orca_bg_window 70%);
@@ -7561,9 +7567,6 @@ progressbar.scan-bar > trough > progress {
 
 /* Scan */
 
-@define-color orca_scan_card_edge #1F2327;
-@define-color orca_scan_divider #23282D;
-@define-color orca_scan_waiting #3A4046;
 
 .scan-body {
   padding: 36px 32px 48px;
@@ -7877,8 +7880,6 @@ menubutton.offline-more > button:checked {
 
 /* Edit Metadata and Write to Files */
 
-@define-color orca_edited_field #1A2129;
-@define-color orca_write_card_edge #1F2327;
 
 .metadata-editor {
   padding: 20px 32px 40px 32px;
@@ -8156,7 +8157,6 @@ button.btn-primary.write-button {
 
 /* Artwork Review */
 
-@define-color orca_art_thumb #2B2F36;
 
 .page-title.artwork-review-title {
   padding: 12px 32px 0 32px;

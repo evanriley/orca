@@ -1465,6 +1465,8 @@
   whole-library path page takes 150 ms instead of 274 ms, and the totals for
   FLAC above 48 kHz added in the last year 61 ms instead of 238 ms. Results
   do not change.
+- **Colour tokens in one place.** Every `orca-gtk` colour token is defined
+  in the stylesheet's top block.
 
 ### Fixed
 
