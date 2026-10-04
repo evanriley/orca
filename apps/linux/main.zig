@@ -33,6 +33,7 @@ const health = @import("health.zig");
 const matches = @import("matches.zig");
 const preferences = @import("preferences.zig");
 const settings = @import("settings.zig");
+const logging = @import("logging.zig");
 const tags = @import("tags.zig");
 const art = @import("art.zig");
 const secret = @import("secret.zig");
@@ -554,8 +555,11 @@ fn resolveServer(
 const M_ARENA_MAX = -8;
 extern fn mallopt(param: c_int, value: c_int) c_int;
 
+pub const std_options: std.Options = .{ .log_level = .debug, .logFn = logging.write };
+
 pub fn main(init: std.process.Init) !u8 {
     _ = mallopt(M_ARENA_MAX, 1);
+    logging.open();
     const allocator = std.heap.smp_allocator;
     track_model.allocator = allocator;
     browse_model.allocator = allocator;

@@ -135,6 +135,10 @@ defer page.deinit();
   caller's thread and returns `error.Cancelled` once `token`, a
   `CancellationToken`, is cancelled. See
   [storage.md](storage.md#estimating-a-folder-before-it-is-a-root).
+- `ScanRequest.reprobe_all` makes a scan read every file's tags and
+  properties again, skipping none for an unchanged path and storage identity;
+  the C ABI's `orca_scan_options.reprobe_all` is the same flag. See
+  [storage.md](storage.md#incremental-scanning).
 - A scan or reconcile of a root whose path now lies on another volume than
   the one recorded, as an unmounted drive's mount point does, walks and
   sweeps nothing and ends `failed`. See
@@ -361,6 +365,10 @@ defer page.deinit();
   no single page. The list is fixed and needs no Library, so a frontend's
   credits read it rather than keeping their own. See
   [providers.md](providers.md).
+- `supported_formats` lists the `SupportedFormat`s Orca reads, each a `name`
+  and `planned`, true for a format recognized but not yet decoded. It is a
+  constant, so an About page and `orca-cli formats` read it rather than
+  keeping their own list.
 - `TrackSummary` carries `release_id` and `artist_id`, so a host can link a
   Track to its Release and Artist without a second query, and the facts a
   song list shows: the playing file's `codec`, `sample_rate`, `bit_depth` and

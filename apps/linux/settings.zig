@@ -13,7 +13,7 @@
 //! LRCLIB, whether artist info is fetched, whether the queue shows what it
 //! played, what the inspector shows, how albums and artists are sorted and
 //! laid out, which artists the Artists page lists, which columns an album's
-//! tracks show, the volume, and the Appearance tab's choices.
+//! tracks show, the volume, the log level, and the Appearance tab's choices.
 //! Nothing about the library does, and never the ListenBrainz token
 //! or the AcoustID key, which live in the Secret Service.
 
@@ -26,6 +26,7 @@ const track_table = @import("track_table.zig");
 const albums = @import("albums.zig");
 const playlists = @import("playlists.zig");
 const parametric = @import("parametric.zig");
+const logging = @import("logging.zig");
 
 const App = app.App;
 
@@ -341,6 +342,10 @@ pub fn load(self: *App) void {
     }
     loadAppearance(self, keys);
     loadGeneral(self, keys);
+    if (getString(keys, "advanced", "log_level")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(logging.Level, std.mem.span(value))) |level| logging.setLevel(level);
+    }
     if (getString(keys, "view", "album_sort")) |value| {
         defer gtk.g_free(value);
         if (std.meta.stringToEnum(liborca.ReleaseSort, std.mem.span(value))) |sort| self.album_sort = sort;
@@ -541,6 +546,7 @@ pub fn save(self: *App) void {
     gtk.g_key_file_set_string(keys, "general", "notify_tracks", if (general.notify_tracks) "true" else "false");
     gtk.g_key_file_set_string(keys, "general", "notify_tasks", if (general.notify_tasks) "true" else "false");
     gtk.g_key_file_set_string(keys, "general", "artist_name_order", @tagName(general.name_order));
+    gtk.g_key_file_set_string(keys, "advanced", "log_level", @tagName(logging.level()));
     const appearance = self.appearance;
     gtk.g_key_file_set_string(keys, "appearance", "artwork", @tagName(appearance.artwork));
     gtk.g_key_file_set_string(keys, "appearance", "density", @tagName(appearance.density));

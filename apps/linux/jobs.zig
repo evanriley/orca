@@ -118,8 +118,12 @@ pub fn reloadLibraryViews(self: *App) void {
 }
 
 fn startScan(self: *App, root_id: ?i64) ?liborca.JobHandle {
+    return startScanRequest(self, .{ .root_id = root_id });
+}
+
+fn startScanRequest(self: *App, request: liborca.ScanRequest) ?liborca.JobHandle {
     const library = self.library orelse return null;
-    const job = self.runtime.startLibraryScan(library, .{ .root_id = root_id }) catch |err| {
+    const job = self.runtime.startLibraryScan(library, request) catch |err| {
         self.toast(queueRefusal(err, "Could not start the scan"));
         return null;
     };
@@ -137,6 +141,13 @@ pub fn scanLibrary(self: *App) ?liborca.JobHandle {
 pub fn rescan(self: *App) void {
     if (self.library == null) return;
     _ = startScan(self, null);
+}
+
+/// Reads every file of every enabled root again, changed or not, keeping
+/// file and Track ids, ratings, loves and history.
+pub fn rebuildLibrary(self: *App) void {
+    if (self.library == null) return;
+    _ = startScanRequest(self, .{ .reprobe_all = true });
 }
 
 pub fn rescanRoot(self: *App, root_id: i64) void {

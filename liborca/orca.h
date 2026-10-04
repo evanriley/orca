@@ -1438,7 +1438,12 @@ typedef struct orca_folder_estimate {
 typedef struct orca_scan_options {
     /* Rows per bounded commit. Zero selects the default. */
     uint32_t batch_size;
-    uint8_t reserved[4];
+    /*
+     * Nonzero reads every file again, even one whose path and identity are
+     * unchanged. Files, Tracks and their ids are kept.
+     */
+    uint8_t reprobe_all;
+    uint8_t reserved[3];
 } orca_scan_options;
 
 typedef struct orca_analysis_options {

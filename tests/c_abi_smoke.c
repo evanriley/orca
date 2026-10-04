@@ -4344,6 +4344,22 @@ int main(int argc, char **argv) {
     if (orca_library_track_count(runtime, library, &track_count) != ORCA_STATUS_OK) return 29;
     if (track_count == 0) return 30;
 
+    /* A reprobe reads every unchanged file again and keeps the Tracks. */
+    orca_handle reprobe_job;
+    scan_options.reprobe_all = 1;
+    if (orca_library_start_scan(runtime, library, root_id, &scan_options, &reprobe_job) !=
+        ORCA_STATUS_OK)
+        return 608;
+    uint8_t reprobe_state = ORCA_JOB_RUNNING;
+    settled = await_job(runtime, reprobe_job, &reprobe_state, EXPECT_WALK_TOTAL, 60000);
+    if (settled != 1 || reprobe_state != ORCA_JOB_SUCCEEDED) return 609;
+    orca_scan_stats reprobe_stats;
+    if (orca_library_scan_stats(runtime, reprobe_job, &reprobe_stats) != ORCA_STATUS_OK) return 610;
+    if (reprobe_stats.changed != stats.changed || reprobe_stats.unchanged != 0) return 611;
+    uint64_t reprobed_tracks = 0;
+    if (orca_library_track_count(runtime, library, &reprobed_tracks) != ORCA_STATUS_OK) return 612;
+    if (reprobed_tracks != track_count) return 613;
+
     /* A standalone reprojection is the other direction: no filesystem walk. */
     orca_handle projection_job;
     if (orca_library_start_projection(runtime, library, &projection_job) != ORCA_STATUS_OK)

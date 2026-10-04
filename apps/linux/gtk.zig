@@ -366,6 +366,8 @@ pub extern fn g_markup_escape_text(text: [*]const u8, length: isize) [*:0]u8;
 pub extern fn g_get_user_data_dir() [*:0]const u8;
 pub extern fn g_mkdir_with_parents(pathname: [*:0]const u8, mode: c_int) c_int;
 pub extern fn g_get_user_cache_dir() [*:0]const u8;
+pub extern fn g_get_user_state_dir() [*:0]const u8;
+pub extern fn g_log_set_debug_enabled(enabled: gboolean) void;
 pub extern fn g_file_set_contents(
     filename: [*:0]const u8,
     contents: [*]const u8,
@@ -378,6 +380,7 @@ pub extern fn g_app_info_launch_default_for_uri(uri: [*:0]const u8, context: ?*a
 pub extern fn g_get_monotonic_time() i64;
 pub extern fn g_get_user_special_dir(directory: c_int) ?[*:0]const u8;
 pub extern fn g_get_home_dir() ?[*:0]const u8;
+pub extern fn g_get_user_name() [*:0]const u8;
 
 pub const GDateTime = opaque {};
 pub extern fn g_date_time_new_now_local() ?*GDateTime;

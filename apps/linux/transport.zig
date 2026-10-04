@@ -166,6 +166,10 @@ pub fn deviceName(self: *const App) [:0]const u8 {
     return "Output";
 }
 
+pub fn deviceCapabilities(self: *const App) ?liborca.DeviceCapabilities {
+    return if (self.device_index < max_rows) picker.capabilities[self.device_index] else null;
+}
+
 fn showSelectedDevice(self: *App) void {
     for (self.device_checks.items, 0..) |check, index| {
         const chosen = index == self.device_index;

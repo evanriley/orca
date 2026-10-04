@@ -110,6 +110,10 @@ pub const ScanRequest = struct {
     /// Which registered root to walk. Null walks every enabled root.
     root_id: ?i64 = null,
     batch_size: usize = 256,
+    /// Reads every file again, tags and audio properties included, even when
+    /// its path and identity are unchanged. Files, Tracks and their ids are
+    /// kept; only what each file says is observed afresh.
+    reprobe_all: bool = false,
 };
 
 pub const ReconcileScope = union(enum) {
@@ -1492,7 +1496,7 @@ pub const JobWorker = struct {
             if (request.root_id) |wanted| {
                 if (root.id != wanted) continue;
             }
-            self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release);
+            self.scanRoot(io, root, request.batch_size, request.reprobe_all) catch self.failed.store(true, .release);
         }
         self.settleTotal();
     }
@@ -1548,7 +1552,7 @@ pub const JobWorker = struct {
         switch (request.scope) {
             .whole_root => {
                 if (self.countRootFiles(io, root, null)) |total| self.publishTotal(total);
-                self.scanRoot(io, root, request.batch_size) catch self.failed.store(true, .release);
+                self.scanRoot(io, root, request.batch_size, false) catch self.failed.store(true, .release);
             },
             .subtrees => |subtrees| {
                 self.countSubtreeFiles(io, root, subtrees);
@@ -1601,6 +1605,7 @@ pub const JobWorker = struct {
         io: std.Io,
         root: database.repository.LibraryRoot,
         batch_size: usize,
+        reprobe: bool,
     ) !void {
         self.progress.store(0, .release);
         try self.requireRecordedVolume(io, root);
@@ -1611,6 +1616,7 @@ pub const JobWorker = struct {
             .found_releases = &self.stats.scan.found_releases,
         };
         var scanner = self.rootScanner(io, root, scan_run.generation, batch_size, &pass);
+        scanner.reprobe = reprobe;
         defer scanner.deinit();
         self.stats.scan.stage.store(.read_tags, .release);
         const result = try scanner.scan(root.path);

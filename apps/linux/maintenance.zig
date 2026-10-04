@@ -49,7 +49,7 @@ pub fn tick(self: *App) void {
 
 pub fn statusText(buffer: []u8, value: liborca.MaintenanceStatus) [:0]const u8 {
     return switch (value.state) {
-        .off => "Checks one album against AcoustID every few minutes while nothing plays",
+        .off => "Check one album against AcoustID while nothing is playing",
         .running => "Checking…",
         .blocked => switch (value.blocked orelse .provider_busy) {
             .client_identity_required, .acoustid_required => "AcoustID is unavailable",

@@ -30,6 +30,27 @@ const job = internal.core.job;
 
 pub const version = @import("version.zig").value;
 
+pub const SupportedFormat = struct {
+    name: []const u8,
+    /// Recognized but not yet decoded; see docs/roadmap.md, Deferred formats.
+    planned: bool = false,
+};
+
+/// The audio formats Orca imports and plays, then those it only plans to.
+pub const supported_formats = [_]SupportedFormat{
+    .{ .name = "FLAC" },
+    .{ .name = "ALAC" },
+    .{ .name = "WAV" },
+    .{ .name = "AIFF" },
+    .{ .name = "MP3" },
+    .{ .name = "AAC" },
+    .{ .name = "Opus" },
+    .{ .name = "Vorbis" },
+    .{ .name = "QOA" },
+    .{ .name = "WavPack", .planned = true },
+    .{ .name = "DSD", .planned = true },
+};
+
 /// The root object: owns libraries, players, zones and jobs, and shuts them
 /// down in dependency order.
 pub const Runtime = runtime.OrcaRuntime;

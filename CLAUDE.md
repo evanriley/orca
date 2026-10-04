@@ -123,7 +123,7 @@ zig build run -- demo
 zig build run -- devices   # id, name, kind (usb|pci|bluetooth|hdmi|virtual|unknown), then `rates=44100-384000 depths=16,24,32 channels=2 state=active|suspended|unavailable`, or `rates=- depths=- channels=- state=unknown` when PipeWire did not answer within 500 ms; the silent sink is virtual
 
 # library
-zig build run -- scan DATABASE ROOT   # `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
+zig build run -- scan DATABASE ROOT [--reprobe]   # --reprobe reads every file again, skipping none; `progress stage=discover|read_tags|done files= total= albums= current=` lines, then the counters
 zig build run -- estimate PATH   # audio_files=N truncated=no|yes; counts audio files by their bytes, up to 100000, without adding PATH
 zig build run -- roots DATABASE   # id, enabled, path, available=yes|no tracks=N unavailable=N volume= last_seen_at=
 zig build run -- availability DATABASE [RELEASE_ID...]   # offline_roots= unavailable_tracks= unavailable_releases=, an `offline` line per root, then release= available=yes|no
@@ -138,6 +138,7 @@ zig build run -- backfill DATABASE [--force] [--cancel-after=MS]
 zig build run -- health DATABASE [OFFSET]   # file_id, severity, kind, action, path, details
 zig build run -- health DATABASE --kind=KIND [OFFSET]   # the same lines, one kind only
 zig build run -- health DATABASE --summary   # kind, highest severity, count, files, bytes per kind with an issue; duplicate bytes are the redundant copies only; then `missing_files N`, Tracks with no present file
+zig build run -- formats   # each format Orca reads, `NAME<TAB>planned` for one recognized but not yet decoded
 zig build run -- sources   # id, name, url, licence, supplies, then licence url when there is one; needs no database
 zig build run -- stats DATABASE   # artists=, releases=, tracks=, files=, bytes=, duration_ms=, last_scan_finished_at=, last_analysis_at=, last_duplicate_scan_at= (- when none), listens=
 zig build run -- cache DATABASE [--clear]   # artwork_bytes= photo_bytes= lyrics_bytes= info_bytes= of fetched provider data; --clear deletes it and prints what it held; embedded and folder art and local lyrics stay

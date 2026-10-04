@@ -2,13 +2,15 @@
 //! sorting and the keyboard summary; Library the folders, maintenance and
 //! AcoustID; Playback volume leveling, transitions, the output and resume;
 //! Sound the equalizer, per-device presets and crossfeed; Listening ListenBrainz, lyrics and artist
-//! info; Appearance the window's look; Advanced the data sources and
-//! database; About the version and diagnostics.
+//! info and history; Appearance the window's look; Advanced the audio
+//! engine, data sources, storage, logs and resets; About the version, the
+//! system and the diagnostics Copy Diagnostics puts on the clipboard.
 //! The tabs are built fresh each time the page is shown, from the engine's
 //! current state, and destroyed when it is left. The search field filters
 //! their rows by title and subtitle.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
@@ -31,6 +33,9 @@ const parametric = @import("parametric.zig");
 const artists = @import("artists.zig");
 const browse = @import("browse.zig");
 const autostart = @import("autostart.zig");
+const activity = @import("activity.zig");
+const details = @import("details.zig");
+const logging = @import("logging.zig");
 
 const App = app.App;
 
@@ -104,7 +109,7 @@ fn actionRow(title: [*:0]const u8, subtitle: [*:0]const u8) *gtk.Widget {
 fn suffixButton(row: *gtk.Widget, label: ?[*:0]const u8, icon: ?[*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
     const button = if (label) |text| gtk.gtk_button_new_with_label(text) else gtk.gtk_button_new_from_icon_name(icon);
     gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
-    if (label == null) gtk.gtk_widget_add_css_class(button, "flat");
+    gtk.gtk_widget_add_css_class(button, if (label == null) "flat" else "settings-action");
     _ = gtk.signalConnect(button, "clicked", handler, data);
     adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, row), button);
     return button;
@@ -211,11 +216,14 @@ fn watchSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.
     self.requestTick();
 }
 
+const watch_subtitle = "Scan automatically for new or changed files";
+
 fn watchStatusText(buffer: []u8, self: *App) [:0]const u8 {
-    if (!self.watch_folders) return "Rescans a folder as soon as its files change";
-    const library = self.library orelse return "";
-    const status = self.runtime.libraryWatchStatus(library) catch return "";
+    if (!self.watch_folders) return watch_subtitle;
+    const library = self.library orelse return watch_subtitle;
+    const status = self.runtime.libraryWatchStatus(library) catch return watch_subtitle;
     if (status.state == .off) return "The music folders could not be watched";
+    if (status.state == .watching and status.roots_unavailable == 0 and !status.watch_limit_reached) return watch_subtitle;
     return watching.statusText(buffer, status);
 }
 
@@ -266,37 +274,105 @@ fn measureClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startAnalysis(state(data));
 }
 
-fn analysisThreadsSubtitle(buffer: []u8, threads: u16) [:0]const u8 {
-    if (threads == liborca.analysisAvailableThreads())
-        return "Uses every processor core. Playback and the rest of the system may slow down while measuring.";
-    return strings.printZ(buffer, "Default: {d}", .{liborca.analysisDefaultThreads()}) catch "";
+fn stepButton(icon: [*:0]const u8, label: [*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
+    const button = gtk.gtk_button_new_from_icon_name(icon);
+    gtk.gtk_widget_add_css_class(button, "circular");
+    gtk.gtk_widget_add_css_class(button, "settings-step");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    gtk.gtk_widget_set_tooltip_text(button, label);
+    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, button), gtk.ACCESSIBLE_PROPERTY_LABEL, label, @as(c_int, -1));
+    _ = gtk.signalConnect(button, "clicked", handler, data);
+    return button;
 }
 
-fn analysisThreadsChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const value = adw.adw_spin_row_get_value(gtk.cast(adw.SpinRow, row));
-    const available: f64 = @floatFromInt(liborca.analysisAvailableThreads());
-    const threads: u16 = @intFromFloat(std.math.clamp(@round(value), 1, available));
-    var buffer: [32]u8 = undefined;
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), analysisThreadsSubtitle(&buffer, threads).ptr);
-    if (self.analysis_threads == threads) return;
+fn stepperRow(
+    stepper: *app.Stepper,
+    title: [*:0]const u8,
+    subtitle: [*:0]const u8,
+    decrease: gtk.GCallback,
+    increase: gtk.GCallback,
+    data: ?*anyopaque,
+) *gtk.Widget {
+    const row = actionRow(title, subtitle);
+    const value = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(value, "settings-value");
+    gtk.gtk_widget_add_css_class(value, "numeric");
+    gtk.gtk_widget_set_valign(value, gtk.ALIGN_CENTER);
+    const minus = stepButton("orca-minus-symbolic", "Decrease", decrease, data);
+    const plus = stepButton("orca-plus-symbolic", "Increase", increase, data);
+    const row_widget = gtk.cast(adw.ActionRow, row);
+    adw.adw_action_row_add_suffix(row_widget, value);
+    adw.adw_action_row_add_suffix(row_widget, minus);
+    adw.adw_action_row_add_suffix(row_widget, plus);
+    stepper.* = .{ .value = gtk.cast(gtk.Label, value), .decrease = minus, .increase = plus };
+    return row;
+}
+
+fn showStepper(stepper: app.Stepper, text: [:0]const u8, value: u16, range: [2]u16) void {
+    if (stepper.value) |label| gtk.gtk_label_set_text(label, text.ptr);
+    if (stepper.decrease) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(value > range[0]));
+    if (stepper.increase) |button| gtk.gtk_widget_set_sensitive(button, @intFromBool(value < range[1]));
+}
+
+fn threadRange() [2]u16 {
+    return .{ 1, liborca.analysisAvailableThreads() };
+}
+
+fn shownThreads(self: *App) u16 {
+    return std.math.clamp(self.analysis_threads orelse liborca.analysisDefaultThreads(), 1, threadRange()[1]);
+}
+
+fn showThreads(self: *App) void {
+    const threads = shownThreads(self);
+    var buffer: [16]u8 = undefined;
+    showStepper(self.settings_page.threads, strings.format(&buffer, "{d}", .{threads}), threads, threadRange());
+}
+
+fn stepThreads(self: *App, delta: i32) void {
+    const range = threadRange();
+    const current: i32 = shownThreads(self);
+    const threads: u16 = @intCast(std.math.clamp(current + delta, range[0], range[1]));
+    if (threads == current) return;
     self.analysis_threads = threads;
     settings.save(self);
+    showThreads(self);
+}
+
+fn threadsDecreased(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    stepThreads(state(data), -1);
+}
+
+fn threadsIncreased(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    stepThreads(state(data), 1);
 }
 
 fn duplicatesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     jobs.startDuplicates(state(data));
 }
 
-fn thresholdChanged(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
-    const self = state(data);
-    const value = adw.adw_spin_row_get_value(gtk.cast(adw.SpinRow, row));
+fn showThreshold(self: *App) void {
+    const percent = self.match_threshold_percent;
+    var buffer: [16]u8 = undefined;
+    showStepper(self.settings_page.threshold, strings.format(&buffer, "{d}%", .{percent}), percent, .{ settings.threshold_range[0], settings.threshold_range[1] });
+}
+
+fn stepThreshold(self: *App, delta: i32) void {
     const range = settings.threshold_range;
-    const percent: u8 = @intFromFloat(std.math.clamp(@round(value), @as(f64, range[0]), @as(f64, range[1])));
-    if (percent == self.match_threshold_percent) return;
+    const current: i32 = self.match_threshold_percent;
+    const percent: u8 = @intCast(std.math.clamp(current + delta, range[0], range[1]));
+    if (percent == current) return;
     self.match_threshold_percent = percent;
     settings.save(self);
     matches.invalidate(self);
+    showThreshold(self);
+}
+
+fn thresholdDecreased(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    stepThreshold(state(data), -1);
+}
+
+fn thresholdIncreased(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    stepThreshold(state(data), 1);
 }
 
 fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -312,6 +388,7 @@ fn fingerprintsSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) cal
 }
 
 const acoustid_key_url = "https://acoustid.org/api-key";
+const acoustid_key_link = "<a href=\"" ++ acoustid_key_url ++ "\">acoustid.org↗</a>";
 
 fn externalLink(uri: [*:0]const u8, text: [*:0]const u8) *gtk.Widget {
     const button = gtk.gtk_link_button_new_with_label(uri, text);
@@ -326,29 +403,32 @@ fn externalLink(uri: [*:0]const u8, text: [*:0]const u8) *gtk.Widget {
     return button;
 }
 
-fn acoustIdCard(self: *App) *gtk.Widget {
-    const acoustid = card(
-        "auth-fingerprint-symbolic",
-        "AcoustID",
-        "AcoustID identifies tracks by their sound. With your key, matches you accept can be sent back from the Matches page.",
+fn identificationCard(self: *App) *gtk.Widget {
+    const identification = flatCard(
+        "orca-matches-symbolic",
+        "Identification",
+        "MusicBrainz and AcoustID help Orca match and tag your music.",
     );
-    const fingerprints = adw.adw_switch_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fingerprints), "Match by audio fingerprint");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fingerprints), "Find Matches also sends a fingerprint of each track's audio to AcoustID");
-    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fingerprints), if (self.match_fingerprints) gtk.true_ else gtk.false_);
-    _ = gtk.signalConnect(fingerprints, "notify::active", gtk.callback(fingerprintsSwitched), self);
-    acoustid.add(fingerprints);
-
-    AcoustIdKey.add(self, acoustid);
-
-    const link = actionRow("Get your token", "Create an account and get your key at acoustid.org");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
-    const link_button = externalLink(acoustid_key_url, "acoustid.org");
-    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, link), link_button);
-    adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), link_button);
-    acoustid.add(link);
+    identification.add(fixedRow("MusicBrainz", "Look up release metadata"));
+    identification.add(switchRow("Match by audio fingerprint", "Sends fingerprints to AcoustID", self.match_fingerprints, gtk.callback(fingerprintsSwitched), self));
+    AcoustIdKey.add(self, identification);
+    identification.add(stepperRow(
+        &self.settings_page.threshold,
+        "Accept confident matches at",
+        "Lower scores wait in Matches for your review",
+        gtk.callback(thresholdDecreased),
+        gtk.callback(thresholdIncreased),
+        self,
+    ));
+    showThreshold(self);
     AcoustIdKey.checkOnce(self);
-    return acoustid.widget;
+    return identification.widget;
+}
+
+fn writingCard() *gtk.Widget {
+    const writing = flatCard("orca-pen-symbolic", "Writing to Files", "Edits stay in Orca's database until you choose Write to Files.");
+    writing.add(fixedRow("Always preview before writing tags", ""));
+    return writing.widget;
 }
 
 const folder_rows_shown = 6;
@@ -369,19 +449,26 @@ fn folderMenu(root_id: i64) *gtk.GMenu {
     return model;
 }
 
+fn folderSubtitle(root: liborca.LibraryRoot) [*:0]const u8 {
+    if (!root.enabled) return "Paused";
+    if (!root.available) return "Unavailable";
+    return "";
+}
+
 fn folderRows(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
     const rows = adw.adw_preferences_group_new();
+    gtk.gtk_widget_add_css_class(rows, "settings-folder-list");
     var roots = self.runtime.libraryRootPage(library, app.page_size, 0) catch return rows;
     defer roots.deinit();
     var buffer: [1024]u8 = undefined;
     for (roots.items) |root| {
-        const row = actionRow(strings.terminated(&buffer, root.path).ptr, if (root.enabled) "" else "Paused");
+        const row = actionRow(strings.terminated(&buffer, root.path).ptr, folderSubtitle(root));
         gtk.gtk_widget_add_css_class(row, "settings-folder-row");
-        adw.adw_action_row_add_prefix(gtk.cast(adw.ActionRow, row), gtk.gtk_image_new_from_icon_name("folder-symbolic"));
+        adw.adw_action_row_add_prefix(gtk.cast(adw.ActionRow, row), gtk.gtk_image_new_from_icon_name("orca-folders-symbolic"));
         gtk.gtk_list_box_row_set_activatable(gtk.cast(gtk.ListBoxRow, row), gtk.false_);
         gtk.gtk_widget_set_focusable(row, gtk.false_);
         const actions = gtk.gtk_menu_button_new();
-        gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, actions), "view-more-symbolic");
+        gtk.gtk_menu_button_set_icon_name(gtk.cast(gtk.MenuButton, actions), "orca-more-symbolic");
         gtk.gtk_widget_add_css_class(actions, "flat");
         gtk.gtk_widget_set_valign(actions, gtk.ALIGN_CENTER);
         gtk.gtk_widget_set_tooltip_text(actions, "Folder actions");
@@ -418,11 +505,23 @@ fn showMeasure(self: *App) void {
     const unmeasured = self.runtime.libraryUnanalyzedCount(library) catch 0;
     var buffer: [256]u8 = undefined;
     const measure_text: [:0]const u8 = if (unmeasured == 0)
-        "Every file is measured. ReplayGain and duplicate finding use these measurements."
+        "Every track is measured"
     else
-        strings.printZ(&buffer, "{d} files not measured yet. ReplayGain and duplicate finding need this; it decodes every file, so it takes a while and can be stopped.", .{unmeasured}) catch "";
+        strings.format(&buffer, "{f} {s} need analysis · decodes each file, so this can take a while", .{
+            strings.grouped(unmeasured),
+            plural(unmeasured, "track", "tracks"),
+        });
     adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), measure_text.ptr);
     if (page.measure_button) |button| gtk.gtk_widget_set_sensitive(button, if (unmeasured != 0) gtk.true_ else gtk.false_);
+}
+
+fn duplicatesSubtitle(buffer: []u8, self: *App) [:0]const u8 {
+    const library = self.library orelse return "Compares audio";
+    const stats = self.runtime.libraryStats(library) catch return "Compares audio";
+    const scanned = stats.last_duplicate_scan_at orelse return "Compares audio · never run";
+    var ago_buffer: [32]u8 = undefined;
+    const now = std.Io.Clock.real.now(self.io).toSeconds();
+    return strings.format(buffer, "Compares audio · last scan {s}", .{activity.agoText(&ago_buffer, now, scanned)});
 }
 
 pub fn refreshLibrary(self: *App) void {
@@ -434,10 +533,10 @@ pub fn refreshLibrary(self: *App) void {
 }
 
 fn foldersCard(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
-    const folders = card(
-        "folder-symbolic",
+    const folders = flatCard(
+        "orca-folders-symbolic",
         "Music Folders",
-        "Orca reads these folders for your music. It never changes a file unless you write tags to it.",
+        "Orca reads these folders. It never changes a file unless you write tags to it.",
     );
     const slot = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
     gtk.gtk_box_append(gtk.cast(gtk.Box, slot), folderRows(self, library));
@@ -446,18 +545,14 @@ fn foldersCard(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
 
     const actions = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
     gtk.gtk_widget_add_css_class(actions, "settings-folder-actions");
-    const add = labelledButton("Add Folder…", "list-add-symbolic", gtk.callback(addFolderActivated), self);
+    const add = labelledButton("Add Folder…", "orca-plus-symbolic", gtk.callback(addFolderActivated), self);
     gtk.gtk_widget_add_css_class(add, "settings-add-folder");
     gtk.gtk_box_append(gtk.cast(gtk.Box, actions), add);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), labelledButton("Rescan All Folders", "view-refresh-symbolic", gtk.callback(rescanActivated), self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, actions), labelledButton("Rescan All Folders", "orca-refresh-symbolic", gtk.callback(rescanActivated), self));
     gtk.gtk_box_insert_child_after(gtk.cast(gtk.Box, folders.widget), actions, slot);
 
     if (watching.supported(self)) {
-        const watch = adw.adw_switch_row_new();
-        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, watch), "Watch folders for changes");
-        adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, watch), 4);
-        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, watch), if (self.watch_folders) gtk.true_ else gtk.false_);
-        _ = gtk.signalConnect(watch, "notify::active", gtk.callback(watchSwitched), self);
+        const watch = switchRow("Watch folders for changes", watch_subtitle, self.watch_folders, gtk.callback(watchSwitched), self);
         folders.add(watch);
         self.watch_row = watch;
         self.watch_status_len = 0;
@@ -467,61 +562,36 @@ fn foldersCard(self: *App, library: liborca.LibraryHandle) *gtk.Widget {
 }
 
 fn maintenanceCard(self: *App) *gtk.Widget {
-    const maintenance_card = card(
-        "applications-engineering-symbolic",
-        "Maintenance",
-        "Measures loudness and finds duplicate recordings when asked, and checks recording IDs while Orca is idle.",
-    );
-    var buffer: [64]u8 = undefined;
-    const measure = actionRow("Measure Loudness", "");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, measure), 3);
+    const maintenance_card = flatCard("orca-pulse-symbolic", "Maintenance", "Keep your library healthy and consistent.");
+    const measure = actionRow("Measure loudness", "");
     const measure_button = suffixButton(measure, "Measure", null, gtk.callback(measureClicked), self);
     self.settings_page.measure_row = measure;
     self.settings_page.measure_button = measure_button;
     showMeasure(self);
     maintenance_card.add(measure);
-    const available_threads = liborca.analysisAvailableThreads();
-    const shown_threads = @min(self.analysis_threads orelse liborca.analysisDefaultThreads(), available_threads);
-    const threads = adw.adw_spin_row_new_with_range(1, @floatFromInt(available_threads), 1);
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threads), "Analysis threads");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threads), analysisThreadsSubtitle(&buffer, shown_threads).ptr);
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threads), 3);
-    adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threads), 0);
-    adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threads), @floatFromInt(shown_threads));
-    _ = gtk.signalConnect(threads, "notify::value", gtk.callback(analysisThreadsChanged), self);
-    maintenance_card.add(threads);
-    const duplicates = actionRow("Find Duplicates", "Compares measured audio, so files that are the same recording show up in Health.");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, duplicates), 3);
+
+    var buffer: [64]u8 = undefined;
+    const threads_subtitle = strings.format(&buffer, "Parallel workers (default {d})", .{liborca.analysisDefaultThreads()});
+    maintenance_card.add(stepperRow(
+        &self.settings_page.threads,
+        "Analysis threads",
+        threads_subtitle.ptr,
+        gtk.callback(threadsDecreased),
+        gtk.callback(threadsIncreased),
+        self,
+    ));
+    showThreads(self);
+
+    var duplicates_buffer: [96]u8 = undefined;
+    const duplicates = actionRow("Find duplicates", duplicatesSubtitle(&duplicates_buffer, self).ptr);
     _ = suffixButton(duplicates, "Find", null, gtk.callback(duplicatesClicked), self);
     maintenance_card.add(duplicates);
-    const idle = adw.adw_switch_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, idle), "Idle maintenance");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, idle), 3);
-    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, idle), if (self.idle_maintenance) gtk.true_ else gtk.false_);
-    _ = gtk.signalConnect(idle, "notify::active", gtk.callback(maintenanceSwitched), self);
+
+    const idle = switchRow("Idle maintenance", "", self.idle_maintenance, gtk.callback(maintenanceSwitched), self);
     maintenance_card.add(idle);
     self.maintenance_row = idle;
     self.maintenance_status_len = 0;
     showMaintenanceStatus(self);
-    const range = settings.threshold_range;
-    const threshold = adw.adw_spin_row_new_with_range(@floatFromInt(range[0]), @floatFromInt(range[1]), 1);
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, threshold), "Accept confident matches at");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, threshold), "Percent. Accept Confident on the Matches page takes a track's best match scoring this or more.");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, threshold), 3);
-    adw.adw_spin_row_set_digits(gtk.cast(adw.SpinRow, threshold), 0);
-    adw.adw_spin_row_set_value(gtk.cast(adw.SpinRow, threshold), @floatFromInt(self.match_threshold_percent));
-    _ = gtk.signalConnect(threshold, "notify::value", gtk.callback(thresholdChanged), self);
-    maintenance_card.add(threshold);
-    if (self.library) |library| {
-        const fill = self.runtime.libraryGenreFill(library) catch liborca.GenreFill{};
-        const genres = adw.adw_switch_row_new();
-        adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, genres), "Fill missing genres from MusicBrainz");
-        adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, genres), "When artist or album info is fetched, tracks with no genre from a file or an edit take MusicBrainz's");
-        adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, genres), 3);
-        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, genres), @intFromBool(fill.musicbrainz));
-        _ = gtk.signalConnect(genres, "notify::active", gtk.callback(genreFillSwitched), self);
-        maintenance_card.add(genres);
-    }
     return maintenance_card.widget;
 }
 
@@ -590,11 +660,18 @@ fn sourceRow(source: liborca.ProviderSource) *gtk.Widget {
 }
 
 fn sourcesCard(self: *App) *gtk.Widget {
-    const sources = card("network-server-symbolic", "Data sources", "Where Orca's online information comes from, and the terms it comes under.");
+    const sources = flatCard("orca-info-symbolic", "Data sources", "Where Orca's online information comes from, and the terms it comes under.");
     const genre_fill_on = if (self.library) |library|
         (self.runtime.libraryGenreFill(library) catch liborca.GenreFill{}).musicbrainz
     else
         false;
+    if (self.library != null) sources.add(switchRow(
+        "Fill missing genres from MusicBrainz",
+        "When artist or album info is fetched, tracks with no genre from a file or an edit take MusicBrainz's",
+        genre_fill_on,
+        gtk.callback(genreFillSwitched),
+        self,
+    ));
     self.settings_page.genre_source_row = null;
     for (self.runtime.providerSources()) |source| {
         const row = sourceRow(source);
@@ -608,8 +685,8 @@ fn sourcesCard(self: *App) *gtk.Widget {
 }
 
 fn libraryTab(self: *App) *gtk.Widget {
-    const library = self.library orelse return tab(self, .library, null, &.{}, &.{});
-    return tab(self, .library, null, &.{ foldersCard(self, library), maintenanceCard(self) }, &.{acoustIdCard(self)});
+    const library = self.library orelse return tab(self, .library, null, &.{}, &.{ identificationCard(self), writingCard() });
+    return tab(self, .library, null, &.{ foldersCard(self, library), maintenanceCard(self) }, &.{ identificationCard(self), writingCard() });
 }
 
 fn generalTab(self: *App) *gtk.Widget {
@@ -762,8 +839,8 @@ fn chosenSegment(button: ?*anyopaque) ?usize {
 }
 
 fn artistInfoCard(self: *App) *gtk.Widget {
-    const info = card(
-        "avatar-default-symbolic",
+    const info = flatCard(
+        "orca-artists-symbolic",
         "Artist Info",
         "Photos, biographies, links and related artists come from MusicBrainz, Wikidata, Wikimedia Commons, Wikipedia and ListenBrainz, and stay in your library.",
     );
@@ -1535,6 +1612,11 @@ const Credential = struct {
     service: [:0]const u8,
     account: [:0]const u8,
     keyring_label: [:0]const u8,
+    row_title: [*:0]const u8,
+    open_label: [*:0]const u8,
+    replace_label: ?[*:0]const u8,
+    remove_label: [*:0]const u8,
+    stored_subtitle: [*:0]const u8,
     title: [*:0]const u8,
     replace_title: [*:0]const u8,
     locked_subtitle: [*:0]const u8,
@@ -1562,16 +1644,23 @@ fn listenBrainzTokenChanged(self: *App) void {
     self.requestTick();
 }
 
-fn ignorePresence(_: *App, _: secret.Presence) void {}
+fn listenBrainzChecked(self: *App, _: secret.Presence) void {
+    showAccount(self);
+}
 
 const listenbrainz_token: Credential = .{
     .service = listenbrainz_token_service,
     .account = listenbrainz_token_account,
     .keyring_label = "Orca ListenBrainz user token",
+    .row_title = "Account",
+    .open_label = "Connect…",
+    .replace_label = null,
+    .remove_label = "Disconnect",
+    .stored_subtitle = "Saved in your keyring",
     .title = "User token",
     .replace_title = "Replace token",
-    .add_title = "Add token",
-    .absent_subtitle = "No token saved",
+    .add_title = "Paste your user token",
+    .absent_subtitle = "Not connected · token from <a href=\"" ++ token_settings_url ++ "\">listenbrainz.org↗</a>",
     .hint = "Paste a new token and click Save",
     .reveal_label = "Show token",
     .locked_subtitle = "Keyring locked — unlock it to use your saved token",
@@ -1583,7 +1672,7 @@ const listenbrainz_token: Credential = .{
     .first_check = .unlock,
     .controls = listenBrainzControls,
     .changed = listenBrainzTokenChanged,
-    .checked = ignorePresence,
+    .checked = listenBrainzChecked,
 };
 
 fn acoustIdControls(self: *App) *app.CredentialControls {
@@ -1596,10 +1685,15 @@ const acoustid_user_key: Credential = .{
     .service = liborca.acoustid_credential_service,
     .account = liborca.acoustid_user_key_account,
     .keyring_label = "Orca AcoustID user key",
+    .row_title = "AcoustID key",
+    .open_label = "Add…",
+    .replace_label = "Replace…",
+    .remove_label = "Remove",
+    .stored_subtitle = "Saved in your keyring · " ++ acoustid_key_link,
     .title = "Your AcoustID key",
     .replace_title = "Replace key",
     .add_title = "Add key",
-    .absent_subtitle = "No key saved",
+    .absent_subtitle = "No key saved · " ++ acoustid_key_link,
     .hint = "Paste a new key and click Save",
     .reveal_label = "Show key",
     .locked_subtitle = "Keyring locked — unlock it to use your saved key",
@@ -1639,28 +1733,35 @@ fn CredentialRows(comptime credential: Credential) type {
         fn showPresence(self: *App, presence: secret.Presence) void {
             const controls = credential.controls(self);
             const stored_row = controls.stored_row orelse return;
-            gtk.gtk_widget_set_visible(stored_row, gtk.true_);
+            const is_stored = presence == .stored;
+            controls.stored = is_stored;
             const subtitle: [*:0]const u8 = switch (presence) {
                 .absent => credential.absent_subtitle,
-                .stored => "Saved in your keyring",
+                .stored => credential.stored_subtitle,
                 .locked => credential.locked_subtitle,
                 .unavailable => "Could not reach the system keyring",
             };
             adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, stored_row), subtitle);
             if (controls.remove_button) |button| {
-                gtk.gtk_widget_set_visible(button, if (presence == .stored) gtk.true_ else gtk.false_);
+                gtk.gtk_widget_set_visible(button, @intFromBool(is_stored));
                 gtk.gtk_widget_set_sensitive(button, gtk.true_);
             }
             if (controls.unlock_button) |button|
-                gtk.gtk_widget_set_visible(button, if (presence == .locked) gtk.true_ else gtk.false_);
-            const entry_title = if (presence == .stored) credential.replace_title else credential.add_title;
+                gtk.gtk_widget_set_visible(button, @intFromBool(presence == .locked));
+            if (controls.open_button) |button| {
+                const label = if (is_stored) credential.replace_label else credential.open_label;
+                gtk.gtk_widget_set_visible(button, @intFromBool(label != null and (presence == .absent or is_stored)));
+                if (label) |text| gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), text);
+            }
+            if (controls.entry_box) |box| if (presence != .absent and !is_stored) gtk.gtk_widget_set_visible(box, gtk.false_);
+            const entry_title = if (is_stored) credential.replace_title else credential.add_title;
             if (controls.entry_title) |label| gtk.gtk_label_set_text(label, entry_title);
         }
 
         fn presenceFound(presence: secret.Presence, data: ?*anyopaque) void {
             const self = state(data);
-            credential.checked(self, presence);
             showPresence(self, presence);
+            credential.checked(self, presence);
         }
 
         fn check(self: *App, locked_items: secret.LockedItems) void {
@@ -1675,6 +1776,7 @@ fn CredentialRows(comptime credential: Credential) type {
             const controls = credential.controls(self);
             if (controls.reveal_button) |button| gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, button), gtk.false_);
             if (controls.entry_row) |row| gtk.gtk_editable_set_text(gtk.cast(gtk.Editable, row), "");
+            if (controls.entry_box) |box| gtk.gtk_widget_set_visible(box, gtk.false_);
             credential.changed(self);
             self.toast(credential.saved);
             check(self, credential.first_check);
@@ -1729,6 +1831,16 @@ fn CredentialRows(comptime credential: Credential) type {
             check(state(data), .unlock);
         }
 
+        fn openClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+            const controls = credential.controls(state(data));
+            const box = controls.entry_box orelse return;
+            const shown = gtk.gtk_widget_get_visible(box) == gtk.false_;
+            gtk.gtk_widget_set_visible(box, @intFromBool(shown));
+            if (shown) if (controls.entry_row) |entry| {
+                _ = gtk.gtk_widget_grab_focus(entry);
+            };
+        }
+
         fn checkOnce(self: *App) void {
             const controls = credential.controls(self);
             if (controls.checked) return;
@@ -1737,12 +1849,14 @@ fn CredentialRows(comptime credential: Credential) type {
         }
 
         fn add(self: *App, target: Card) void {
-            const stored_row = actionRow(credential.title, credential.absent_subtitle);
-            const remove_button = suffixButton(stored_row, "Remove", null, gtk.callback(removeClicked), self);
+            const stored_row = actionRow(credential.row_title, credential.absent_subtitle);
+            const open_button = suffixButton(stored_row, credential.open_label, null, gtk.callback(openClicked), self);
+            const remove_button = suffixButton(stored_row, credential.remove_label, null, gtk.callback(removeClicked), self);
+            gtk.gtk_widget_set_visible(remove_button, gtk.false_);
             const unlock_button = suffixButton(stored_row, "Unlock", null, gtk.callback(unlockClicked), self);
             gtk.gtk_widget_set_visible(unlock_button, gtk.false_);
             target.add(stored_row);
-            addEntry(self, target, stored_row, remove_button, unlock_button);
+            addEntry(self, target, stored_row, open_button, remove_button, unlock_button);
         }
 
         fn revealToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -1753,8 +1867,9 @@ fn CredentialRows(comptime credential: Credential) type {
             gtk.gtk_button_set_icon_name(gtk.cast(gtk.Button, button), if (shown != 0) "view-conceal-symbolic" else "view-reveal-symbolic");
         }
 
-        fn addEntry(self: *App, target: Card, stored_row: *gtk.Widget, remove_button: *gtk.Widget, unlock_button: *gtk.Widget) void {
+        fn addEntry(self: *App, target: Card, stored_row: *gtk.Widget, open_button: *gtk.Widget, remove_button: *gtk.Widget, unlock_button: *gtk.Widget) void {
             const row = gtk.gtk_list_box_row_new();
+            gtk.gtk_widget_set_visible(row, gtk.false_);
             gtk.gtk_list_box_row_set_activatable(gtk.cast(gtk.ListBoxRow, row), gtk.false_);
             gtk.gtk_widget_set_focusable(row, gtk.false_);
             gtk.gtk_widget_add_css_class(row, "settings-entry-row");
@@ -1793,6 +1908,8 @@ fn CredentialRows(comptime credential: Credential) type {
 
             credential.controls(self).* = .{
                 .entry_row = entry,
+                .entry_box = row,
+                .open_button = open_button,
                 .entry_title = gtk.cast(gtk.Label, title),
                 .reveal_button = reveal,
                 .save_button = save_button,
@@ -1815,53 +1932,62 @@ fn plural(count: u64, comptime singular: []const u8, comptime many: []const u8) 
     return if (count == 1) singular else many;
 }
 
-fn statusText(buffer: []u8, self: *App, status: liborca.ScrobblerStatus) [:0]const u8 {
-    var queue_buffer: [128]u8 = undefined;
-    const queue = queueText(&queue_buffer, self, status);
-    if (status.feedback_pending == 0) return strings.terminated(buffer, queue);
-    return strings.format(buffer, "{s} · {d} {s} waiting to sync", .{
-        queue,
+fn setSubtitle(row: *gtk.Widget, text: [:0]const u8) void {
+    const action_row = gtk.cast(adw.ActionRow, row);
+    if (adw.adw_action_row_get_subtitle(action_row)) |current|
+        if (std.mem.eql(u8, std.mem.span(current), text)) return;
+    adw.adw_action_row_set_subtitle(action_row, text.ptr);
+}
+
+fn pendingSubtitle(buffer: []u8, status: liborca.ScrobblerStatus) [:0]const u8 {
+    const waiting: []const u8 = switch (status.state) {
+        .rate_limited => "Waiting — ListenBrainz asked us to slow down",
+        .backing_off => "Waiting — ListenBrainz could not be reached",
+        .busy => "Waiting — another Orca process is sending",
+        .offline => "Offline",
+        .invalid_token => "Waiting for a working token",
+        else => "Queued while offline",
+    };
+    if (status.feedback_pending == 0) return strings.terminated(buffer, waiting);
+    return strings.format(buffer, "{s} · {d} {s} to sync", .{
+        waiting,
         status.feedback_pending,
         plural(status.feedback_pending, "love or dislike", "loves and dislikes"),
     });
 }
 
-fn queueText(buffer: []u8, self: *App, status: liborca.ScrobblerStatus) [:0]const u8 {
+fn showAccount(self: *App) void {
+    const controls = &self.listening_controls.token;
+    if (!controls.stored) return;
+    const row = controls.stored_row orelse return;
+    const library = self.library orelse return;
+    const status = self.runtime.libraryScrobblerStatus(library) catch return;
+    var buffer: [256]u8 = undefined;
     const user = status.user_name.slice();
-    return switch (status.state) {
-        .invalid_token => "Token rejected",
-        .rate_limited => "Waiting — ListenBrainz asked us to slow down",
-        .backing_off => "Waiting — ListenBrainz could not be reached, trying again later",
-        .busy => "Waiting — another Orca process is sending to ListenBrainz",
-        .offline => "Offline",
-        .needs_token => "Not connected — add your user token",
-        .disabled, .idle, .validating, .submitting => if (user.len != 0)
-            strings.format(buffer, "Connected as {s} · {d} {s} waiting", .{
-                user,
-                status.pending,
-                plural(status.pending, "listen", "listens"),
-            })
-        else if (self.scrobbling)
-            strings.format(buffer, "Submitting listens · {d} {s} waiting", .{
-                status.pending,
-                plural(status.pending, "listen", "listens"),
-            })
-        else
-            "Not connected",
-    };
+    const text: [:0]const u8 = if (status.state == .invalid_token)
+        "Token rejected"
+    else if (user.len != 0) text: {
+        var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+        writer.writeAll("Connected as ") catch {};
+        writeEscaped(&writer, user) catch {};
+        buffer[writer.end] = 0;
+        break :text buffer[0..writer.end :0];
+    } else "Saved in your keyring";
+    setSubtitle(row, text);
 }
 
 fn showListeningStatus(self: *App) void {
-    const row = self.listening_controls.status_row orelse return;
+    showAccount(self);
+    const row = self.listening_controls.pending_row orelse return;
     const library = self.library orelse return;
     const status = self.runtime.libraryScrobblerStatus(library) catch return;
     var buffer: [192]u8 = undefined;
-    const text = statusText(&buffer, self, status);
-    const controls = &self.listening_controls;
-    if (std.mem.eql(u8, text, controls.status_text[0..controls.status_len])) return;
-    @memcpy(controls.status_text[0..text.len], text);
-    controls.status_len = text.len;
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, row), text.ptr);
+    setSubtitle(row, pendingSubtitle(&buffer, status));
+    if (self.listening_controls.pending_value) |label| {
+        var value_buffer: [48]u8 = undefined;
+        const value = strings.format(&value_buffer, "{f} {s}", .{ strings.grouped(status.pending), plural(status.pending, "listen", "listens") });
+        if (!std.mem.eql(u8, std.mem.span(gtk.gtk_label_get_text(label)), value)) gtk.gtk_label_set_text(label, value.ptr);
+    }
 }
 
 pub fn tick(self: *App) void {
@@ -1872,57 +1998,103 @@ pub fn tick(self: *App) void {
     showTransitions(self);
 }
 
-fn listeningTab(self: *App) *gtk.Widget {
-    const listenbrainz = card(
-        "document-send-symbolic",
-        "ListenBrainz",
-        "Orca always records what you play on this computer. Submitting also sends those listens to your ListenBrainz account.",
+const listen_policies = [_]liborca.ListenPolicy{ .half_or_four_minutes, .thirty_seconds, .full_track };
+
+fn recordingSwitched(row: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const enabled = adw.adw_switch_row_get_active(gtk.cast(adw.SwitchRow, row)) != 0;
+    self.runtime.librarySetListenRecording(library, enabled) catch {
+        self.toast("Could not change listening history");
+        adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, row), @intFromBool(!enabled));
+    };
+}
+
+fn policyPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const library = self.library orelse return;
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    if (selected >= listen_policies.len) return;
+    self.runtime.librarySetListenPolicy(library, listen_policies[selected]) catch
+        self.toast("Could not change when a play counts");
+}
+
+fn clearHistory(self: *App) void {
+    const library = self.library orelse return;
+    const cleared = self.runtime.libraryClearListens(library) catch return self.toast("Could not clear the listening history");
+    var buffer: [64]u8 = undefined;
+    self.toast(strings.format(&buffer, "Cleared {f} {s}", .{ strings.grouped(cleared), plural(cleared, "listen", "listens") }));
+    jobs.reloadLibraryViews(self);
+    self.requestTick();
+}
+
+fn clearHistoryClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    confirm(state(data), "Clear listening history?", "Ratings, loves and playlists are kept.", "Clear", clearHistory);
+}
+
+fn historyCard(self: *App) *gtk.Widget {
+    const history = flatCard("orca-clock-symbolic", "Listening History", "Kept locally in Orca's database. Powers plays, last played and smart playlists.");
+    const library = self.library;
+    const recording = if (library) |handle| self.runtime.libraryListenRecording(handle) catch true else true;
+    const keep = switchRow("Keep listening history", "", recording, gtk.callback(recordingSwitched), self);
+    gtk.gtk_widget_set_sensitive(keep, @intFromBool(library != null));
+    history.add(keep);
+    const policy = if (library) |handle| self.runtime.libraryListenPolicy(handle) catch .half_or_four_minutes else .half_or_four_minutes;
+    const count = selectRow(
+        "Count a play after",
+        "",
+        &.{ "50% or 4 minutes", "30 seconds", "The full track", null },
+        @intCast(std.mem.indexOfScalar(liborca.ListenPolicy, &listen_policies, policy) orelse 0),
+        gtk.callback(policyPicked),
+        self,
     );
-    const submit = adw.adw_switch_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, submit), "Submit listens");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, submit), "Only listens that start after you turn this on are sent");
-    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, submit), if (self.scrobbling) gtk.true_ else gtk.false_);
-    gtk.gtk_widget_set_sensitive(submit, if (self.library != null) gtk.true_ else gtk.false_);
-    _ = gtk.signalConnect(submit, "notify::active", gtk.callback(scrobblingSwitched), self);
-    listenbrainz.add(submit);
+    gtk.gtk_widget_set_sensitive(count, @intFromBool(library != null));
+    history.add(count);
+    history.add(valueRow("Keep history for", "", "Forever"));
+    const clear = actionRow("Clear history", "Resets play counts and last played");
+    const clear_button = suffixButton(clear, "Clear…", null, gtk.callback(clearHistoryClicked), self);
+    gtk.gtk_widget_set_sensitive(clear_button, @intFromBool(library != null));
+    history.add(clear);
+    return history.widget;
+}
 
-    const now_playing = adw.adw_switch_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, now_playing), "Show what I'm playing now");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, now_playing), "Sends the current track to ListenBrainz once it has played for 10 seconds");
-    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, now_playing), if (self.announce_now_playing) gtk.true_ else gtk.false_);
-    gtk.gtk_widget_set_sensitive(now_playing, if (self.library != null and self.scrobbling) gtk.true_ else gtk.false_);
-    _ = gtk.signalConnect(now_playing, "notify::active", gtk.callback(nowPlayingSwitched), self);
-    listenbrainz.add(now_playing);
-
+fn listeningTab(self: *App) *gtk.Widget {
+    const listenbrainz = flatCard("orca-wave-symbolic", "ListenBrainz", "Share what you listen to with your ListenBrainz profile.");
     ListenBrainzToken.add(self, listenbrainz);
 
-    const link = actionRow("Get your token", "Copy it from your settings at listenbrainz.org");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, link), 3);
-    const link_button = externalLink(token_settings_url, "listenbrainz.org");
-    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, link), link_button);
-    adw.adw_action_row_set_activatable_widget(gtk.cast(adw.ActionRow, link), link_button);
-    listenbrainz.add(link);
+    const submit = switchRow("Submit listens", "Sent after a play counts", self.scrobbling, gtk.callback(scrobblingSwitched), self);
+    gtk.gtk_widget_set_sensitive(submit, @intFromBool(self.library != null));
+    listenbrainz.add(submit);
 
-    const status = actionRow("Status", "");
-    adw.adw_action_row_set_subtitle_lines(gtk.cast(adw.ActionRow, status), 2);
+    const now_playing = switchRow("Send now playing", "", self.announce_now_playing, gtk.callback(nowPlayingSwitched), self);
+    gtk.gtk_widget_set_sensitive(now_playing, @intFromBool(self.library != null and self.scrobbling));
+    listenbrainz.add(now_playing);
+
+    const pending = actionRow("Pending", "Queued while offline");
+    const pending_value = gtk.gtk_label_new("");
+    gtk.gtk_widget_add_css_class(pending_value, "settings-value");
+    gtk.gtk_widget_add_css_class(pending_value, "numeric");
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, pending), pending_value);
+    listenbrainz.add(pending);
     self.listening_controls.now_playing_row = now_playing;
-    self.listening_controls.status_row = status;
-    listenbrainz.add(status);
+    self.listening_controls.pending_row = pending;
+    self.listening_controls.pending_value = gtk.cast(gtk.Label, pending_value);
     showListeningStatus(self);
 
-    const lyrics_card = card(
-        "media-view-subtitles-symbolic",
+    const lyrics_card = flatCard(
+        "orca-type-symbolic",
         "Lyrics",
         "Lyrics come from .lrc files beside your tracks and from their tags. Orca never writes lyrics to a file.",
     );
-    const fetch = adw.adw_switch_row_new();
-    adw.adw_preferences_row_set_title(gtk.cast(adw.PreferencesRow, fetch), "Fetch lyrics from LRCLIB");
-    adw.adw_action_row_set_subtitle(gtk.cast(adw.ActionRow, fetch), "Looks lyrics up on lrclib.net by title, artist, album and duration when the files have none");
-    adw.adw_switch_row_set_active(gtk.cast(adw.SwitchRow, fetch), if (self.lyrics.fetch) gtk.true_ else gtk.false_);
-    _ = gtk.signalConnect(fetch, "notify::active", gtk.callback(lyricsFetchSwitched), self);
-    lyrics_card.add(fetch);
+    lyrics_card.add(switchRow(
+        "Fetch lyrics from LRCLIB",
+        "Looks lyrics up on lrclib.net by title, artist, album and duration when the files have none",
+        self.lyrics.fetch,
+        gtk.callback(lyricsFetchSwitched),
+        self,
+    ));
 
-    const view = tab(self, .listening, null, &.{listenbrainz.widget}, &.{ lyrics_card.widget, artistInfoCard(self) });
+    const view = tab(self, .listening, null, &.{ listenbrainz.widget, lyrics_card.widget, artistInfoCard(self) }, &.{historyCard(self)});
     _ = gtk.signalConnect(view, "map", gtk.callback(listeningMapped), self);
     return view;
 }
@@ -2083,76 +2255,528 @@ fn copyText(self: *App, text: [*:0]const u8) void {
     self.toast("Copied");
 }
 
-fn copyPathClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+const PendingConfirmation = struct {
+    self: *App,
+    action: *const fn (*App) void,
+};
+
+fn confirm(self: *App, heading: [*:0]const u8, body: [*:0]const u8, label: [*:0]const u8, action: *const fn (*App) void) void {
+    const dialog = adw.adw_alert_dialog_new(heading, body);
+    const alert = gtk.cast(adw.AlertDialog, dialog);
+    adw.adw_alert_dialog_add_response(alert, "cancel", "Cancel");
+    adw.adw_alert_dialog_add_response(alert, "confirm", label);
+    adw.adw_alert_dialog_set_response_appearance(alert, "confirm", adw.RESPONSE_DESTRUCTIVE);
+    adw.adw_alert_dialog_set_default_response(alert, "cancel");
+    adw.adw_alert_dialog_set_close_response(alert, "cancel");
+    const pending = self.allocator.create(PendingConfirmation) catch return;
+    pending.* = .{ .self = self, .action = action };
+    _ = gtk.signalConnect(dialog, "response", gtk.callback(confirmResponse), pending);
+    adw.adw_dialog_present(dialog, if (self.window) |window| gtk.cast(gtk.Widget, window) else null);
+}
+
+fn confirmResponse(_: ?*anyopaque, response: [*:0]const u8, data: ?*anyopaque) callconv(.c) void {
+    const pending: *PendingConfirmation = @ptrCast(@alignCast(data.?));
+    const self = pending.self;
+    const action = pending.action;
+    self.allocator.destroy(pending);
+    if (std.mem.eql(u8, std.mem.span(response), "confirm")) action(self);
+}
+
+fn writeHomePath(writer: *std.Io.Writer, path: []const u8, redact: bool) std.Io.Writer.Error!void {
+    const home = std.mem.trimEnd(u8, if (gtk.g_get_home_dir()) |dir| std.mem.span(dir) else "", "/");
+    if (home.len != 0 and std.mem.startsWith(u8, path, home) and (path.len == home.len or path[home.len] == '/')) {
+        try writer.writeByte('~');
+        return writer.writeAll(path[home.len..]);
+    }
+    if (!redact) return writer.writeAll(path);
+    const trimmed = std.mem.trimEnd(u8, path, "/");
+    const slash = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return writer.writeAll(trimmed);
+    try writer.writeAll("…/");
+    try writer.writeAll(trimmed[slash + 1 ..]);
+}
+
+fn homePath(buffer: []u8, path: []const u8) [:0]const u8 {
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    writeHomePath(&writer, path, false) catch {};
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+fn launchFolder(self: *App, path: [*:0]const u8, missing: [:0]const u8) void {
+    const file = gtk.g_file_new_for_path(path);
+    defer gtk.g_object_unref(file);
+    if (gtk.g_file_query_exists(file, null) == 0) return self.toast(missing);
+    const launcher = gtk.gtk_file_launcher_new(file);
+    gtk.gtk_file_launcher_launch(launcher, self.window, null, folderOpened, self);
+    gtk.g_object_unref(launcher);
+}
+
+fn databaseRevealed(source: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    var err: ?*gtk.GError = null;
+    if (gtk.gtk_file_launcher_open_containing_folder_finish(gtk.cast(gtk.FileLauncher, source), result, &err) != 0) return;
+    gtk.g_clear_error(&err);
+    state(data).toast("Could not open the file manager");
+}
+
+fn revealDatabaseClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const path = self.library_path orelse return;
-    copyText(self, path.ptr);
+    const file = gtk.g_file_new_for_path(path.ptr);
+    defer gtk.g_object_unref(file);
+    const launcher = gtk.gtk_file_launcher_new(file);
+    gtk.gtk_file_launcher_open_containing_folder(launcher, self.window, null, databaseRevealed, self);
+    gtk.g_object_unref(launcher);
+}
+
+fn openLogsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const logs = logging.directory(&buffer) orelse return self.toast("Could not find the logs folder");
+    launchFolder(self, logs.ptr, "Could not find the logs folder");
+}
+
+fn licensesClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    var exe_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = std.process.executableDirPath(self.io, &exe_buffer) catch return self.toast("Could not find the licences");
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrintSentinel(&buffer, "{s}/../share/doc/orca/licenses", .{exe_buffer[0..length]}, 0) catch
+        return self.toast("Could not find the licences");
+    launchFolder(self, path.ptr, "The licences were not installed with this build");
+}
+
+fn cacheText(buffer: []u8, self: *App) [:0]const u8 {
+    const library = self.library orelse return "";
+    const size = self.runtime.libraryCacheSize(library) catch return "";
+    const text = gtk.g_format_size(size.total());
+    defer gtk.g_free(text);
+    return strings.terminated(buffer, std.mem.span(text));
+}
+
+fn showCache(self: *App) void {
+    const label = self.settings_page.cache_value orelse return;
+    var buffer: [64]u8 = undefined;
+    gtk.gtk_label_set_text(label, cacheText(&buffer, self).ptr);
+}
+
+fn clearCache(self: *App) void {
+    const library = self.library orelse return;
+    const cleared = self.runtime.libraryClearCache(library) catch return self.toast("Could not clear the cache");
+    const text = gtk.g_format_size(cleared.total());
+    defer gtk.g_free(text);
+    var buffer: [96]u8 = undefined;
+    self.toast(strings.format(&buffer, "Cleared {s} of cached data", .{std.mem.span(text)}));
+    showCache(self);
+}
+
+fn clearCacheClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    confirm(state(data), "Clear the cache?", "Fetched covers, photos, lyrics and artist info are deleted and fetched again when needed. Embedded and folder art and local lyrics stay.", "Clear Cache", clearCache);
+}
+
+fn historyClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    main_window.goTo(state(data), .changes);
+}
+
+fn logLevelPicked(drop_down: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const selected = gtk.gtk_drop_down_get_selected(gtk.cast(gtk.DropDown, drop_down));
+    const level = std.enums.fromInt(logging.Level, selected) orelse return;
+    if (level == logging.level()) return;
+    logging.setLevel(level);
+    settings.save(self);
+}
+
+fn rebuildClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    confirm(
+        state(data),
+        "Rebuild the library database?",
+        "Every file is read again from scratch. Ratings, loves, playlists and history are kept.",
+        "Rebuild",
+        jobs.rebuildLibrary,
+    );
+}
+
+fn resetSettings(self: *App) void {
+    const reorder = self.general.name_order != (app.General{}).name_order;
+    if (self.general.launch_at_login) _ = autostart.set(false);
+    self.general = .{};
+    self.appearance = .{};
+    self.playback = .{};
+    const replay_gain: liborca.ReplayGainSettings = .{};
+    self.runtime.playerSetReplayGainMode(self.player, replay_gain.mode) catch {};
+    self.runtime.playerSetReplayGainPreamp(self.player, replay_gain.preamp_db) catch {};
+    self.runtime.playerSetReplayGainFallback(self.player, .minus_6_db) catch {};
+    self.runtime.playerSetPeakProtection(self.player, replay_gain.peak_protection) catch {};
+    self.runtime.playerSetCrossfeed(self.player, null) catch {};
+    self.crossfeed_amount = app.crossfeed_amounts[1];
+    if (self.library) |library| {
+        self.runtime.librarySetScrobbling(library, false, false, false) catch {};
+        self.runtime.setGenreFill(library, .{}) catch {};
+        self.runtime.librarySetListenPolicy(library, .half_or_four_minutes) catch {};
+        self.runtime.librarySetListenRecording(library, true) catch {};
+    }
+    self.scrobbling = false;
+    self.announce_now_playing = false;
+    self.fetch_artist_info = true;
+    self.match_threshold_percent = app.default_match_threshold_percent;
+    self.match_fingerprints = true;
+    self.analysis_threads = null;
+    self.watch_folders = true;
+    self.idle_maintenance = false;
+    logging.setLevel(.info);
+    lyrics.setFetch(self, false);
+    parametric.setMode(self, .off, self.equalizer_curve);
+    _ = watching.apply(self);
+    maintenance.apply(self) catch {};
+    matches.invalidate(self);
+    appearance.applyChoices(self);
+    albums.resizeGrid(self);
+    if (reorder) {
+        artists.reload(self);
+        albums.reload(self);
+        browse.reload(self);
+    }
+    settings.save(self);
+    const which = self.settings_page.tab;
+    leave(self);
+    show(self);
+    selectTab(self, which);
+    self.requestTick();
+    self.toast("Settings reset");
+}
+
+fn resetClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    confirm(
+        state(data),
+        "Reset all settings?",
+        "Every preference returns to its default. Your library, ratings, loves, history, playlists and saved equalizer presets are kept.",
+        "Reset",
+        resetSettings,
+    );
+}
+
+fn manageLibrariesClicked(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
+
+fn signalPath(self: *App) ?liborca.SignalPath {
+    return self.runtime.playerSignalPath(self.player) catch null;
+}
+
+fn bufferText(buffer: []u8, path: ?liborca.SignalPath) [:0]const u8 {
+    const frames = (path orelse return "Set by PipeWire").device_quantum_frames orelse return "Set by PipeWire";
+    return strings.format(buffer, "{f} frames · set by PipeWire", .{strings.grouped(frames)});
+}
+
+fn advancedTab(self: *App) *gtk.Widget {
+    const engine = flatCard("orca-engine-symbolic", "Audio Engine", "Changes apply when playback restarts.");
+    engine.add(valueRow("Backend", "", signal_path.audio_backend));
+    var buffer_text: [64]u8 = undefined;
+    engine.add(valueRow("Buffer size", "Larger is safer, smaller responds faster", bufferText(&buffer_text, signalPath(self)).ptr));
+    engine.add(valueRow("Internal format", "", "32-bit float"));
+
+    const libraries = flatCard("orca-folders-symbolic", "Libraries", "Keep separate collections, each with its own database.");
+    libraries.add(valueRow("Active library", "", "Main"));
+    const manage = actionRow("Libraries", "Add, rename or switch libraries");
+    const manage_button = suffixButton(manage, "Manage…", null, gtk.callback(manageLibrariesClicked), self);
+    gtk.gtk_widget_set_sensitive(manage_button, gtk.false_);
+    libraries.add(manage);
+
+    const storage = flatCard("orca-file-symbolic", "Storage & Logs", "");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const database = actionRow("Database", if (self.library_path) |path| homePath(&path_buffer, path).ptr else "No library open");
+    const reveal = suffixButton(database, "Reveal", null, gtk.callback(revealDatabaseClicked), self);
+    gtk.gtk_widget_set_sensitive(reveal, @intFromBool(self.library_path != null));
+    storage.add(database);
+
+    const cache = actionRow("Artwork &amp; analysis cache", "Rebuilt automatically when cleared");
+    var cache_buffer: [64]u8 = undefined;
+    const cache_value = gtk.gtk_label_new(cacheText(&cache_buffer, self).ptr);
+    gtk.gtk_widget_add_css_class(cache_value, "settings-value");
+    gtk.gtk_widget_add_css_class(cache_value, "numeric");
+    adw.adw_action_row_add_suffix(gtk.cast(adw.ActionRow, cache), cache_value);
+    self.settings_page.cache_value = gtk.cast(gtk.Label, cache_value);
+    const clear = suffixButton(cache, "Clear Cache…", null, gtk.callback(clearCacheClicked), self);
+    gtk.gtk_widget_set_sensitive(clear, @intFromBool(self.library != null));
+    storage.add(cache);
+
+    const history = actionRow("Operation history", "Every change Orca made to your files, with undo");
+    _ = suffixButton(history, "View…", null, gtk.callback(historyClicked), self);
+    storage.add(history);
+    storage.add(selectRow("Log level", "", &.{ "Info", "Debug", "Trace", null }, @intFromEnum(logging.level()), gtk.callback(logLevelPicked), self));
+
+    const reset = flatCard("orca-refresh-symbolic", "Reset", "Ratings, loves and history are always kept.");
+    const rebuild = actionRow("Rebuild library database", "Rescans every file from scratch");
+    const rebuild_button = suffixButton(rebuild, "Rebuild…", null, gtk.callback(rebuildClicked), self);
+    gtk.gtk_widget_set_sensitive(rebuild_button, @intFromBool(self.library != null));
+    reset.add(rebuild);
+    const reset_all = actionRow("Reset all settings", "Returns every preference to its default");
+    _ = suffixButton(reset_all, "Reset…", null, gtk.callback(resetClicked), self);
+    reset.add(reset_all);
+
+    return tab(self, .advanced, null, &.{ engine.widget, libraries.widget, sourcesCard(self) }, &.{ storage.widget, reset.widget });
+}
+
+fn osName(buffer: []u8, self: *App) []const u8 {
+    for ([_][]const u8{ "/etc/os-release", "/usr/lib/os-release" }) |path| {
+        const text = std.Io.Dir.cwd().readFile(self.io, path, buffer) catch continue;
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const value = std.mem.cutPrefix(u8, line, "PRETTY_NAME=") orelse continue;
+            const name = std.mem.trim(u8, value, "\"'");
+            if (name.len != 0) return name;
+        }
+    }
+    return "Linux";
+}
+
+fn writeOs(writer: *std.Io.Writer, self: *App) std.Io.Writer.Error!void {
+    var buffer: [4096]u8 = undefined;
+    try writer.print("{s} {t}", .{ osName(&buffer, self), builtin.cpu.arch });
+}
+
+fn writeDevice(writer: *std.Io.Writer, self: *App, path: ?liborca.SignalPath) std.Io.Writer.Error!void {
+    try writer.writeAll(transport.deviceName(self));
+    const output = (path orelse return).output orelse return;
+    try writer.writeAll(" · ");
+    try signal_path.writeBitDepth(writer, output);
+    try writer.writeAll(" · ");
+    try signal_path.writeRate(writer, output.sample_rate);
+}
+
+fn writeDsp(writer: *std.Io.Writer, maybe_path: ?liborca.SignalPath) std.Io.Writer.Error!void {
+    const path = maybe_path orelse return writer.writeAll("unknown");
+    var stages: usize = 0;
+    if (path.replay_gain_db) |decibels| {
+        const sign: []const u8 = if (decibels < 0) signal_path.minus else "+";
+        const source: []const u8 = switch (path.replay_gain_source) {
+            .none => "untagged",
+            .track, .track_fallback => "track",
+            .album => "album",
+        };
+        try writer.print("replaygain({s} {s}{d:.1} dB)", .{ source, sign, @abs(decibels) });
+        stages += 1;
+    }
+    if (path.equalizer != null) {
+        if (stages != 0) try writer.writeAll(", ");
+        try writer.writeAll("eq");
+        stages += 1;
+    }
+    if (path.parametric) |curve| {
+        if (stages != 0) try writer.writeAll(", ");
+        try writer.print("peq({d})", .{curve.count});
+        stages += 1;
+    }
+    if (path.crossfeed != null) {
+        if (stages != 0) try writer.writeAll(", ");
+        try writer.writeAll("crossfeed");
+        stages += 1;
+    }
+    if (stages == 0) try writer.writeAll("none");
 }
 
 fn writeDiagnostics(writer: *std.Io.Writer, self: *App) std.Io.Writer.Error!void {
-    try writer.print("Orca {f}\n", .{liborca.version});
+    const path = signalPath(self);
+    try writer.print("{s: <11}{f} (liborca {f})\n", .{ "orca", liborca.version, liborca.version });
+    try writer.print("{s: <11}", .{"os"});
+    try writeOs(writer, self);
+    try writer.print("\n{s: <11}{s}\n{s: <11}", .{ "backend", signal_path.audio_backend, "device" });
+    try writeDevice(writer, self, path);
+    try writer.print("\n{s: <11}f32 · buffer ", .{"engine"});
+    if (if (path) |value| value.device_quantum_frames else null) |frames| try writer.print("{d}", .{frames}) else try writer.writeAll("unknown");
+    try writer.print(" · resampler off\n{s: <11}", .{"dsp"});
+    try writeDsp(writer, path);
+    try writer.print("\n{s: <11}", .{"library"});
     if (self.library) |library| {
         if (self.runtime.libraryStats(library)) |stats| {
-            try writer.print("Library: {d} artists, {d} releases, {d} tracks, {d} files, {d} bytes, {d} ms\n", .{
-                stats.artists,
-                stats.releases,
-                stats.tracks,
-                stats.files,
-                stats.total_bytes,
-                stats.total_duration_ms,
-            });
-        } else |_| try writer.writeAll("Library: unavailable\n");
-    } else try writer.writeAll("Library: none open\n");
-    try writer.writeAll("\nSignal path\n");
-    var buffer: [1024]u8 = undefined;
-    const path = self.runtime.playerSignalPath(self.player) catch return writer.writeAll("Unavailable\n");
-    try writer.writeAll(signal_path.render(&buffer, path, transport.deviceName(self)));
-    try writer.writeByte('\n');
+            try writer.print("{f} tracks · {f} albums", .{ strings.grouped(stats.tracks), strings.grouped(stats.releases) });
+        } else |_| try writer.writeAll("unavailable");
+    } else try writer.writeAll("none open");
+    try writer.print("\n{s: <11}", .{"database"});
+    if (self.library_path) |database| try writeHomePath(writer, database, true) else try writer.writeAll("none");
+    try writer.print("\n{s: <11}redacted", .{"paths"});
+}
+
+fn diagnosticsText(buffer: []u8, self: *App) [:0]const u8 {
+    var raw: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&raw);
+    writeDiagnostics(&writer, self) catch {};
+    const text = raw[0..writer.end];
+    const user = std.mem.span(gtk.g_get_user_name());
+    var output = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    var rest = text;
+    while (user.len >= 2) {
+        const index = std.mem.indexOf(u8, rest, user) orelse break;
+        output.writeAll(rest[0..index]) catch break;
+        output.writeAll("[user]") catch break;
+        rest = rest[index + user.len ..];
+    }
+    output.writeAll(rest) catch {};
+    buffer[output.end] = 0;
+    return buffer[0..output.end :0];
 }
 
 fn copyDiagnosticsClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
-    writeDiagnostics(&writer, self) catch {};
-    buffer[writer.end] = 0;
-    copyText(self, buffer[0..writer.end :0].ptr);
+    copyText(self, diagnosticsText(&buffer, self).ptr);
 }
 
-fn advancedTab(self: *App) *gtk.Widget {
-    const sources = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 16);
-    gtk.gtk_widget_add_css_class(sources, "settings-sources");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, sources), sourcesCard(self));
-    self.settings_page.sources = gtk.cast(gtk.Box, sources);
+fn aboutButton(label: [*:0]const u8, icon: ?[*:0]const u8, handler: gtk.GCallback, data: ?*anyopaque) *gtk.Widget {
+    const button = if (icon) |name| labelledButton(label, name, handler, data) else button: {
+        const plain = gtk.gtk_button_new_with_label(label);
+        _ = gtk.signalConnect(plain, "clicked", handler, data);
+        break :button plain;
+    };
+    gtk.gtk_widget_add_css_class(button, "about-action");
+    gtk.gtk_widget_set_valign(button, gtk.ALIGN_CENTER);
+    return button;
+}
 
-    const database = card("drive-harddisk-symbolic", "Library Database", "Your library, ratings, playlists and history live in this file.");
-    const path_row = actionRow("Database", if (self.library_path) |path| path.ptr else "No library open");
-    gtk.gtk_widget_add_css_class(path_row, "property");
-    const copy = suffixButton(path_row, null, "edit-copy-symbolic", gtk.callback(copyPathClicked), self);
-    gtk.gtk_widget_set_tooltip_text(copy, "Copy path");
-    gtk.gtk_accessible_update_property(gtk.cast(gtk.Accessible, copy), gtk.ACCESSIBLE_PROPERTY_LABEL, "Copy path", @as(c_int, -1));
-    gtk.gtk_widget_set_sensitive(copy, @intFromBool(self.library_path != null));
-    database.add(path_row);
+fn aboutHeader(self: *App) *gtk.Widget {
+    const header = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 12);
+    gtk.gtk_widget_add_css_class(header, "about-header");
+    const text = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
+    gtk.gtk_widget_set_hexpand(text, gtk.true_);
+    const wordmark = gtk.gtk_label_new("Orca");
+    gtk.gtk_widget_add_css_class(wordmark, "about-wordmark");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, wordmark), 0);
+    var buffer: [128]u8 = undefined;
+    const meta = gtk.gtk_label_new(strings.format(&buffer, "Version {f} · liborca {f} · Linux {t}", .{ liborca.version, liborca.version, builtin.cpu.arch }).ptr);
+    gtk.gtk_widget_add_css_class(meta, "about-meta");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, meta), 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), wordmark);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, text), meta);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), text);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), aboutButton("Open Logs", "orca-file-symbolic", gtk.callback(openLogsClicked), self));
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), aboutButton("Licenses", null, gtk.callback(licensesClicked), self));
+    const copy = aboutButton("Copy Diagnostics", "edit-copy-symbolic", gtk.callback(copyDiagnosticsClicked), self);
+    gtk.gtk_widget_add_css_class(copy, "suggested-action");
+    gtk.gtk_box_append(gtk.cast(gtk.Box, header), copy);
+    return header;
+}
 
-    return tab(self, .advanced, sources, &.{database.widget}, &.{});
+const Facts = struct {
+    section: Card,
+    grid: *gtk.Grid,
+    rows: c_int = 0,
+
+    fn init(icon: [*:0]const u8, title: [*:0]const u8) Facts {
+        const section = flatCard(icon, title, "");
+        gtk.gtk_widget_add_css_class(section.widget, "about-card");
+        const grid = gtk.gtk_grid_new();
+        gtk.gtk_widget_add_css_class(grid, "about-facts");
+        gtk.gtk_grid_set_column_spacing(gtk.cast(gtk.Grid, grid), 24);
+        gtk.gtk_grid_set_row_spacing(gtk.cast(gtk.Grid, grid), 6);
+        gtk.gtk_box_append(gtk.cast(gtk.Box, section.widget), grid);
+        gtk.gtk_widget_set_visible(section.group, gtk.false_);
+        return .{ .section = section, .grid = gtk.cast(gtk.Grid, grid) };
+    }
+
+    fn add(facts: *Facts, key: [*:0]const u8, value: [*:0]const u8) void {
+        const key_label = gtk.gtk_label_new(key);
+        gtk.gtk_widget_add_css_class(key_label, "about-key");
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, key_label), 0);
+        gtk.gtk_widget_set_size_request(key_label, 140, -1);
+        const value_label = gtk.gtk_label_new(value);
+        gtk.gtk_widget_add_css_class(value_label, "about-value");
+        gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, value_label), 0);
+        gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, value_label), gtk.true_);
+        gtk.gtk_label_set_selectable(gtk.cast(gtk.Label, value_label), gtk.true_);
+        gtk.gtk_widget_set_hexpand(value_label, gtk.true_);
+        gtk.gtk_grid_attach(facts.grid, key_label, 0, facts.rows, 1, 1);
+        gtk.gtk_grid_attach(facts.grid, value_label, 1, facts.rows, 1, 1);
+        facts.rows += 1;
+    }
+};
+
+fn deviceFormatsText(buffer: []u8, self: *App) [:0]const u8 {
+    const capabilities = transport.deviceCapabilities(self) orelse return "Not reported by the device";
+    var writer = std.Io.Writer.fixed(buffer[0 .. buffer.len - 1]);
+    writer.writeAll(signal_path.device_supports_source ++ " · ") catch {};
+    const start = writer.end;
+    signal_path.writeDeviceSupports(&writer, capabilities) catch {};
+    if (writer.end == start) return "Not reported by the device";
+    buffer[writer.end] = 0;
+    return buffer[0..writer.end :0];
+}
+
+fn formatsCard() *gtk.Widget {
+    const section = flatCard("", "Supported formats", "");
+    gtk.gtk_widget_add_css_class(section.widget, "about-card");
+    if (gtk.gtk_widget_get_first_child(section.header)) |icon| gtk.gtk_widget_set_visible(icon, gtk.false_);
+    gtk.gtk_widget_set_visible(section.group, gtk.false_);
+    const chips = adw.adw_wrap_box_new();
+    const wrap = gtk.cast(adw.WrapBox, chips);
+    adw.adw_wrap_box_set_child_spacing(wrap, 8);
+    adw.adw_wrap_box_set_line_spacing(wrap, 8);
+    gtk.gtk_widget_add_css_class(chips, "about-formats");
+    for (liborca.supported_formats) |format| {
+        var buffer: [48]u8 = undefined;
+        const text = if (format.planned)
+            strings.format(&buffer, "{s} (planned)", .{format.name})
+        else
+            strings.terminated(&buffer, format.name);
+        const chip = gtk.gtk_label_new(text.ptr);
+        gtk.gtk_widget_add_css_class(chip, "about-chip");
+        adw.adw_wrap_box_append(wrap, chip);
+    }
+    gtk.gtk_box_append(gtk.cast(gtk.Box, section.widget), chips);
+    return section.widget;
+}
+
+fn diagnosticsCard(self: *App) *gtk.Widget {
+    const section = flatCard("", "Diagnostics preview", "");
+    gtk.gtk_widget_add_css_class(section.widget, "about-card");
+    if (gtk.gtk_widget_get_first_child(section.header)) |icon| gtk.gtk_widget_set_visible(icon, gtk.false_);
+    gtk.gtk_widget_set_visible(section.group, gtk.false_);
+    const aside = gtk.gtk_label_new("What Copy Diagnostics includes");
+    gtk.gtk_widget_add_css_class(aside, "about-aside");
+    gtk.gtk_widget_set_valign(aside, gtk.ALIGN_CENTER);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, section.body), aside);
+    var buffer: [4096]u8 = undefined;
+    const preview = gtk.gtk_label_new(diagnosticsText(&buffer, self).ptr);
+    gtk.gtk_widget_add_css_class(preview, "mono");
+    gtk.gtk_widget_add_css_class(preview, "about-diagnostics");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, preview), 0);
+    gtk.gtk_label_set_selectable(gtk.cast(gtk.Label, preview), gtk.true_);
+    gtk.gtk_label_set_wrap(gtk.cast(gtk.Label, preview), gtk.true_);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, section.widget), preview);
+    const footer = gtk.gtk_label_new("File paths and account names are removed before copying.");
+    gtk.gtk_widget_add_css_class(footer, "about-footnote");
+    gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, footer), 0);
+    gtk.gtk_box_append(gtk.cast(gtk.Box, section.widget), footer);
+    return section.widget;
 }
 
 fn aboutTab(self: *App) *gtk.Widget {
-    const about = card("orca-wave-symbolic", "About", "The Orca build in use.");
-    var version_buffer: [64]u8 = undefined;
-    const version = strings.printZ(&version_buffer, "{f}", .{liborca.version}) catch "";
-    const version_row = actionRow("Version", version.ptr);
-    gtk.gtk_widget_add_css_class(version_row, "property");
-    about.add(version_row);
-    const backend_row = actionRow("Audio backend", signal_path.audio_backend);
-    gtk.gtk_widget_add_css_class(backend_row, "property");
-    about.add(backend_row);
+    var text_buffer: [512]u8 = undefined;
 
-    const diagnostics = card("dialog-information-symbolic", "Diagnostics", "For a bug report: the version, the library's totals and the signal path, as text.");
-    const copy_row = actionRow("Copy diagnostics", "Copies them to the clipboard. Nothing is sent anywhere.");
-    _ = suffixButton(copy_row, "Copy", null, gtk.callback(copyDiagnosticsClicked), self);
-    diagnostics.add(copy_row);
-    return tab(self, .about, null, &.{about.widget}, &.{diagnostics.widget});
+    var audio = Facts.init("audio-headphones-symbolic", "Audio");
+    audio.add("Backend", signal_path.audio_backend);
+    audio.add("Output device", transport.deviceName(self).ptr);
+    audio.add("Device formats", deviceFormatsText(&text_buffer, self).ptr);
+    audio.add("Engine", "32-bit float · no resampling");
+
+    var library = Facts.init("orca-folders-symbolic", "Library");
+    library.add("Library", "Main");
+    var count_buffer: [32]u8 = undefined;
+    var scan_buffer: [64]u8 = undefined;
+    const stats = if (self.library) |handle| self.runtime.libraryStats(handle) catch null else null;
+    library.add("Tracks", if (stats) |value| strings.format(&count_buffer, "{f}", .{strings.grouped(value.tracks)}).ptr else "—");
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    library.add("Database", if (self.library_path) |database| homePath(&path_buffer, database).ptr else "No library open");
+    library.add("Last scan", details.recentMomentText(&scan_buffer, if (stats) |value| value.last_scan_finished_at else null).ptr);
+
+    var system = Facts.init("orca-engine-symbolic", "System");
+    var os_buffer: [256]u8 = undefined;
+    var os_writer = std.Io.Writer.fixed(os_buffer[0 .. os_buffer.len - 1]);
+    writeOs(&os_writer, self) catch {};
+    os_buffer[os_writer.end] = 0;
+    system.add("OS", os_buffer[0..os_writer.end :0].ptr);
+    system.add("Desktop portal", "Not used");
+    var logs_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var logs_home: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    system.add("Logs", if (logging.directory(&logs_buffer)) |logs| homePath(&logs_home, logs).ptr else "Unavailable");
+    return tab(self, .about, aboutHeader(self), &.{ audio.section.widget, library.section.widget, system.section.widget }, &.{ formatsCard(), diagnosticsCard(self) });
 }
 
 const Filter = struct {
@@ -2316,7 +2940,8 @@ fn stackEqualizerHeader(self: *App) void {
 pub fn build(self: *App) *gtk.Widget {
     const heading = page_ui.title("Settings");
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, heading.title), "settings-title");
-    gtk.gtk_label_set_text(heading.meta, "Configure Orca to match your music, your way.");
+    gtk.gtk_label_set_text(heading.meta, default_subtitle);
+    self.settings_page.subtitle = heading.meta;
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, heading.meta), "settings-subtitle");
     gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, heading.meta), "numeric");
 
@@ -2384,7 +3009,11 @@ fn syncTabs(self: *App) void {
         gtk.gtk_widget_set_focusable(gtk.cast(gtk.Widget, button), @intFromBool(checked));
     }
     if (page.tabs) |stack| adw.adw_view_stack_set_visible_child_name(stack, tab_info.get(page.tab).name);
+    if (page.subtitle) |subtitle| gtk.gtk_label_set_text(subtitle, if (page.tab == .advanced) advanced_subtitle else default_subtitle);
 }
+
+const default_subtitle = "Configure Orca to match your music, your way.";
+const advanced_subtitle = "Things most people never need. Defaults are safe.";
 
 pub fn selectTab(self: *App, which: app.SettingsTab) void {
     self.settings_page.tab = which;
@@ -2518,7 +3147,7 @@ pub fn leave(self: *App) void {
     if (page.tabs == null) return;
     flushPending(self);
     if (page.host) |host| if (page.body) |body| gtk.gtk_box_remove(host, body);
-    page.* = .{ .host = page.host, .tab = page.tab, .fit = page.fit };
+    page.* = .{ .host = page.host, .subtitle = page.subtitle, .tab = page.tab, .fit = page.fit };
     self.sound_controls = .{};
     self.listening_controls = .{};
     self.acoustid_controls = .{};

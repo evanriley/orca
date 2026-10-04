@@ -1248,7 +1248,8 @@ pub const FolderEstimate = extern struct {
 
 pub const ScanOptions = extern struct {
     batch_size: u32,
-    _reserved: [4]u8 = @splat(0),
+    reprobe_all: u8 = 0,
+    _reserved: [3]u8 = @splat(0),
 };
 
 pub const AnalysisOptions = extern struct {
@@ -5286,6 +5287,7 @@ pub export fn orca_library_start_scan(
     };
     if (options) |value| {
         if (value.batch_size != 0) request.batch_size = value.batch_size;
+        request.reprobe_all = value.reprobe_all != 0;
     }
     const started = box.runtime.startLibraryScan(importLibrary(library), request) catch |err|
         return box.fail(@src(), err);

@@ -1398,12 +1398,18 @@ again at launch.
     ignore_articles|as_written`) sets `name_order` on every `ArtistQuery` and
     `ReleaseQuery` the window makes, and reloads Artists and Albums.
   - Keyboard: Shortcuts expands to the window's shortcuts.
-- Library: Music Folders, a list of roots that scrolls past six, each with a
-  menu of Rescan (a scan of that root), Show in Files and Remove, then Add
-  Folder, Rescan All Folders and Watch folders for changes; Maintenance with
-  loudness measurement, analysis threads, duplicate finding, idle maintenance
-  and Fill missing genres from MusicBrainz (`setGenreFill`, kept in the
-  Library); AcoustID.
+- Library:
+  - Music Folders: a list of roots in Geist Mono that scrolls past six, each
+    with a menu of Rescan (a scan of that root), Show in Files and Remove and
+    a Paused or Unavailable subtitle when it applies, then Add Folder…,
+    Rescan All Folders and Watch folders for changes.
+  - Maintenance: Measure loudness, Analysis threads (a − and + stepper from 1
+    to the available threads, saved as `[library] analysis_threads`), Find duplicates
+    (with when the last search ran) and Idle maintenance.
+  - Identification: MusicBrainz, always on; Match by audio fingerprint; the
+    AcoustID key; Accept confident matches at, a stepper from 50% to 100%
+    saved as `[matching] accept_confidence`.
+  - Writing to Files: Always preview before writing tags, always on.
 - Playback, saved in `[playback]`:
   - Volume Leveling: ReplayGain (`replay_gain=off|track|album|smart`; Smart
     uses album gain while a neighbour in playback order shares the Release,
@@ -1442,7 +1448,12 @@ again at launch.
     High (`crossfeed`, 0.3, 0.5 or 0.7, handed to `playerSetCrossfeed`).
 - Listening: ListenBrainz; Fetch lyrics from LRCLIB, saved as
   `[lyrics] fetch=true|false`; Artist Info, with Fetch artist info
-  (`[library] fetch_artist_info`).
+  (`[library] fetch_artist_info`); Listening History with Keep listening
+  history (`librarySetListenRecording`), Count a play after (50% or 4
+  minutes, 30 seconds or The full track, `librarySetListenPolicy`), Keep
+  history for (Forever) and Clear history, which asks first and calls
+  `libraryClearListens`; ratings, loves and playlists are kept. All are kept
+  in the Library.
 - Appearance: presentation only, saved in `[appearance]`.
   - Color: Artwork influence (`artwork=off|subtle|expressive`) sets how
     strongly the cover tints the backdrop behind album, artist, playlist and
@@ -1465,13 +1476,42 @@ again at launch.
     `inspector_open=true` is read as Remember last state.
   - Motion: Reduce motion (`reduce_animation`) turns off
     `gtk-enable-animations`, which stops sliding panels and transitions.
-- Advanced: a full-width Data sources card, one row per
-  `Runtime.providerSources()` entry (what it supplies, its licence as a link
-  when it has a licence page, and a link to the site); the MusicBrainz genres
-  row shows only while Fill missing genres from MusicBrainz is on, and follows
-  that switch at once. Below it, the library database path with Copy.
-- About: Orca's version and the audio backend, and Copy diagnostics, which
-  copies Orca's version, the library's totals and the signal path as text.
+- Advanced, subtitled "Things most people never need. Defaults are safe.":
+  - Audio Engine: the backend, Buffer size (the device quantum from
+    `playerSignalPath`, or Set by PipeWire) and the 32-bit float internal
+    format.
+  - Libraries: Active library Main; Manage… is insensitive until a frontend
+    can hold more than one library.
+  - Data sources: Fill missing genres from MusicBrainz (`setGenreFill`, kept
+    in the Library), then one row per `Runtime.providerSources()` entry (what
+    it supplies, its licence as a link when it has a licence page, and a link
+    to the site); the MusicBrainz genres row shows only while the switch is
+    on, and follows it at once.
+  - Storage & Logs: the database path with Reveal, which opens its folder;
+    the artwork and analysis cache size from `libraryCacheSize` with Clear
+    Cache…, which asks first and calls `libraryClearCache`; Operation history
+    with View…, which opens Change History; Log level (Info, Debug or Trace,
+    saved as `[advanced] log_level`).
+  - Reset: Rebuild library database asks first, then scans every root with
+    `ScanRequest.reprobe_all`, reading every file again; Reset all settings
+    asks first, then returns every preference to its default and turns
+    scrobbling, genre filling and launch at login off. The output device,
+    volume, view state and saved equalizer presets are kept, and so is
+    everything in the Library.
+- About: the wordmark, version, liborca version and architecture, with Open
+  Logs, Licenses (`share/doc/orca/licenses` beside the binary) and Copy
+  Diagnostics; key and value cards for Audio (backend, output device, the
+  device's formats and the engine), Library (tracks, database and last scan)
+  and System (the `PRETTY_NAME` of `os-release`, the desktop portal, not used,
+  and the logs folder); chips of `supported_formats`; and a preview of what
+  Copy Diagnostics puts on the clipboard: version, OS, backend, device and
+  its format, buffer, DSP stages, library totals and the database path. The
+  home directory is written `~`, any other path only its last component, and
+  the user name `[user]`.
+
+The log is `$XDG_STATE_HOME/orca/logs/orca.log`. Errors, warnings and info
+are always written to it; Debug adds Orca's debug lines and Trace also
+GLib's debug output.
 
 The search field filters Settings while the page is shown: it hides every
 row whose title and subtitle do not contain the text, ignoring case, every
@@ -1563,48 +1603,45 @@ A file with no `equalizer_mode` reads `equalizer_enabled=true` as the graphic
 equalizer; one that predates the `*_enabled` keys and holds `off` leaves the
 effect off with the default curve or amount.
 
-The Library tab's **AcoustID** card holds Match by audio fingerprint, on
-by default, which is `MatchRequest.fingerprints` for Find Matches and Find
-Match and is saved as `[matching] fingerprints=true|false`. Below it, Your
-AcoustID key always shows, reading "Saved in your keyring" with Remove or "No
-key saved"; under it the key field, titled Add key or Replace key, has a
-show-key toggle and Save. A successful save clears the field and turns the
-toggle off, hiding the field again. It has the same Unlock and storage rules as the
-ListenBrainz token below, stored under `acoustid_credential_service` /
-`acoustid_user_key_account`. Its stored
-state is found without unlocking the keyring, so opening Settings never
-prompts; a locked keyring reads "Keyring locked" until Unlock is chosen.
-Get your token links to AcoustID's API key page. The Matches page
+The Library tab's **Identification** card holds Match by audio fingerprint,
+on by default, which is `MatchRequest.fingerprints` for Find Matches and Find
+Match and is saved as `[matching] fingerprints=true|false`. Below it, the
+AcoustID key row reads "Saved in your keyring" with Replace… and Remove, or
+names acoustid.org with Add…; Add… or Replace… shows the key field, titled
+Add key or Replace key, with a show-key toggle and Save. A successful save
+clears the field, turns the toggle off and hides it again. It has the same
+Unlock and storage rules as the ListenBrainz token below, stored under
+`acoustid_credential_service` / `acoustid_user_key_account`. Its stored state
+is found without unlocking the keyring, so opening Settings never prompts; a
+locked keyring reads "Keyring locked" until Unlock is chosen. The Matches page
 finds whether a key is saved the same way at startup, and again after each
 save and remove.
 
-The **Listening** tab holds the ListenBrainz settings, laid out like the
-AcoustID card. Submit listens calls `Runtime.librarySetScrobbling`. User token
-always shows, reading "Saved in your keyring" with Remove or "No token saved";
-under it the token field, titled Add token or Replace token, has a show-token
-toggle and a Save button, enabled while the field has text; Enter in the
-field saves too. Get your token links to https://listenbrainz.org/settings/.
-The token is stored in the Secret Service through libsecret
-(`apps/linux/secret.zig`) and never in `settings.ini` or the Library. Saving
-clears the field, turns the toggle off and calls
-`libraryScrobblerCredentialsChanged`; Remove deletes the token and calls
-`libraryScrobblerCredentialsChanged`. The stored state is found the first time the
-tab is shown after Settings opens, and again after each save and remove, by an asynchronous search
-that reads no secret; it may prompt to unlock the keyring. A keyring that stays
-locked reads "Keyring locked", with an Unlock button that searches again.
-Saving, removing and searching are asynchronous, so a prompt cannot freeze the
-window.
-The status row is rewritten from `libraryScrobblerStatus` on the tick while
-Settings is showing: connected with the user name and the number of listens
-waiting and, when there are any, the loves and dislikes waiting to sync, token
-rejected, waiting after a rate limit or outage, offline, or not connected.
-Listens are always recorded locally; the card says so. Show what I'm playing
-now is the Now Playing argument of `librarySetScrobbling`; it is off by default
-and insensitive while Submit listens is off. `[listening]
-scrobble=true|false` and `now_playing=true|false` are saved and re-applied at
-launch. `ORCA_LISTENBRAINZ_URL` selects another server, for a self-hosted
-instance or a local mock; `ORCA_MUSICBRAINZ_URL` and `ORCA_ACOUSTID_URL` do
-the same for matching and submission.
+The **Listening** tab's ListenBrainz card starts with Account: Connect…
+shows the token field, titled Paste your user token, with a show-token toggle
+and a Save button, enabled while the field has text; Enter in the field saves
+too. The subtitle links to https://listenbrainz.org/settings/. With a token
+saved the row reads "Connected as" the user name, "Token rejected" or "Saved
+in your keyring", with Disconnect. The token is stored in the Secret Service
+through libsecret (`apps/linux/secret.zig`) and never in `settings.ini` or the
+Library. Saving clears the field, turns the toggle off and calls
+`libraryScrobblerCredentialsChanged`; Disconnect deletes the token and calls
+`libraryScrobblerCredentialsChanged`. The stored state is found the first time
+the tab is shown after Settings opens, and again after each save and remove,
+by an asynchronous search that reads no secret; it may prompt to unlock the
+keyring. A keyring that stays locked reads "Keyring locked", with an Unlock
+button that searches again. Saving, removing and searching are asynchronous,
+so a prompt cannot freeze the window.
+Submit listens calls `Runtime.librarySetScrobbling`. Send now playing is its
+Now Playing argument; it is off by default and insensitive while Submit
+listens is off. Pending shows the listens waiting and, from
+`libraryScrobblerStatus` on the tick while Settings is showing, why they wait
+(queued, a rate limit, an outage, offline or a rejected token) and the loves
+and dislikes waiting to sync. Listens are recorded locally whether or not they
+are sent. `[listening] scrobble=true|false` and `now_playing=true|false` are
+saved and re-applied at launch. `ORCA_LISTENBRAINZ_URL` selects another
+server, for a self-hosted instance or a local mock; `ORCA_MUSICBRAINZ_URL` and
+`ORCA_ACOUSTID_URL` do the same for matching and submission.
 
 The **signal path** inspector is titled Signal Path, "How this track gets
 from file to output.", with a × that closes it. A verdict card follows:

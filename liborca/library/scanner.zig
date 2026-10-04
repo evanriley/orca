@@ -178,6 +178,9 @@ pub const Scanner = struct {
     /// depends on it.
     progress: ?*std.atomic.Value(u64) = null,
     batch_size: usize = 256,
+    /// Observes every audio file the walk reaches, not only those whose path
+    /// or identity changed.
+    reprobe: bool = false,
     /// Decoders used to read each changed file's declared audio properties.
     /// Injectable so a test can narrow the set; absent, the builtins are used.
     codecs: ?*const codec.CodecRegistry = null,
@@ -295,7 +298,7 @@ pub const Scanner = struct {
             if (hasImageExtension(entry.basename) and try self.examineImage(path, entry.basename, &result)) {
                 self.allocator.free(path);
             } else {
-                try self.examine(path, codecs, &pending, &result, .skip_unchanged);
+                try self.examine(path, codecs, &pending, &result, if (self.reprobe) .observe_always else .skip_unchanged);
             }
             if (self.pending_images.items.len >= self.batch_size or
                 self.finished_folders.items.len >= self.batch_size)
@@ -747,6 +750,51 @@ test "scanner batches audio and skips unchanged files on restart" {
         database.LibraryDatabase.null_volume,
         mp3_path,
     )).?;
+    const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
+    defer observed.deinit();
+    try std.testing.expectEqualStrings("Observed title", observed.values.title.?);
+}
+
+test "a reprobe scan reads every unchanged file again and keeps its file id" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    var mp3: [256]u8 = @splat(0);
+    @memcpy(mp3[0..3], "ID3");
+    @memcpy(mp3[128..131], "TAG");
+    @memcpy(mp3[131..145], "Observed title");
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "tagged.mp3", .data = &mp3 });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "second.flac", .data = "fLaCgenerated" });
+    const root_path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{temporary.sub_path});
+    defer std.testing.allocator.free(root_path);
+
+    var library = try database.LibraryDatabase.open(
+        std.testing.allocator,
+        std.testing.io,
+        "file:orca-scanner-reprobe-test?mode=memory&cache=shared",
+    );
+    defer library.close();
+    var scanner = Scanner{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .files = &library.files,
+        .locations = &library.locations,
+        .observed_tags = &library.observed_tags,
+        .write_lane = library.write_lane,
+        .database_handle = library.database,
+    };
+    defer scanner.deinit();
+
+    _ = try scanner.scan(root_path);
+    const mp3_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/tagged.mp3", .{root_path});
+    defer std.testing.allocator.free(mp3_path);
+    const file_id = (try library.files.resolveByUri(database.LibraryDatabase.null_volume, mp3_path)).?;
+
+    scanner.reprobe = true;
+    const reprobed = try scanner.scan(root_path);
+    try std.testing.expectEqual(@as(u64, 2), reprobed.changed);
+    try std.testing.expectEqual(@as(u64, 0), reprobed.unchanged);
+    try std.testing.expectEqual(@as(u64, 2), try library.files.count());
+    try std.testing.expectEqual(file_id, (try library.files.resolveByUri(database.LibraryDatabase.null_volume, mp3_path)).?);
     const observed = (try library.observed_tags.get(std.testing.allocator, file_id)).?;
     defer observed.deinit();
     try std.testing.expectEqualStrings("Observed title", observed.values.title.?);

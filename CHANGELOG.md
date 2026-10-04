@@ -36,6 +36,21 @@
   scan. The C ABI adds `orca_library_track_details_v3` with an
   `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
   `ORCA_METADATA_FIELD_COMMENT` (15).
+- **Settings Library, Listening, Advanced and About.** `orca-gtk`'s Library
+  tab holds Music Folders, Maintenance (Analysis threads as a stepper),
+  Identification (the AcoustID key and an Accept confident matches at
+  stepper) and Writing to Files. Listening connects a ListenBrainz account,
+  shows the listens pending and adds Listening History: Keep listening
+  history, Count a play after and Clear history. Advanced shows the audio
+  engine, the database with Reveal, the cache with Clear Cache…, Operation
+  history, Log level (`$XDG_STATE_HOME/orca/logs/orca.log`, Info, Debug or
+  Trace), Rebuild library database and Reset all settings. About shows the
+  version, output device, device formats, library, OS and supported
+  formats, with Open Logs, Licenses and Copy Diagnostics, which writes the
+  home directory as `~` and the user name as `[user]`.
+  `ScanRequest.reprobe_all` (`orca_scan_options.reprobe_all`, `orca-cli scan
+  --reprobe`) reads every file again, and `supported_formats` lists the
+  formats Orca reads (`orca-cli formats`).
 - **Settings Playback and Sound.** `orca-gtk`'s Playback tab holds Volume
   Leveling (ReplayGain Off, Track, Album or Smart; Preamp; Prevent clipping;
   Untagged tracks, now Use −6 dB by default), Transitions (Stop after

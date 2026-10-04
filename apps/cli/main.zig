@@ -167,7 +167,7 @@ const usage_indent = "                 ";
 const commands = [_]Command{
     .{ .name = "--version", .usage = "--version", .min_arguments = 0, .max_arguments = null, .run = printVersion },
     .{ .name = "demo", .usage = "demo", .min_arguments = 0, .max_arguments = null, .run = runDemo, .shares_usage_line = true },
-    .{ .name = "scan", .usage = "scan DATABASE ROOT", .min_arguments = 2, .max_arguments = 2, .run = scanRoot, .shares_usage_line = true },
+    .{ .name = "scan", .usage = "scan DATABASE ROOT [--reprobe]", .min_arguments = 2, .max_arguments = 3, .run = scanRoot, .shares_usage_line = true },
     .{ .name = "estimate", .usage = "estimate PATH", .min_arguments = 1, .max_arguments = 1, .run = estimateFolder, .shares_usage_line = true },
     .{ .name = "reconcile", .usage = "reconcile DATABASE ROOT_ID [DIR...]", .min_arguments = 2, .max_arguments = null, .run = reconcileRoot },
     .{
@@ -218,6 +218,7 @@ const commands = [_]Command{
     .{ .name = "listens", .usage = "listens DATABASE [--policy=half|30s|full] [--record=on|off] [--clear]", .min_arguments = 1, .max_arguments = 4, .run = listenSettings },
     .{ .name = "cache", .usage = "cache DATABASE [--clear]", .min_arguments = 1, .max_arguments = 2, .run = providerCache },
     .{ .name = "sources", .usage = "sources", .min_arguments = 0, .max_arguments = 0, .run = listProviderSources, .shares_usage_line = true },
+    .{ .name = "formats", .usage = "formats", .min_arguments = 0, .max_arguments = 0, .run = listSupportedFormats, .shares_usage_line = true },
     .{ .name = "devices", .usage = "devices", .min_arguments = 0, .max_arguments = 0, .run = listDevices, .shares_usage_line = true },
     .{ .name = "play", .usage = "play AUDIO [DEVICE_ID]", .min_arguments = 1, .max_arguments = 2, .run = playFile, .shares_usage_line = true },
     .{ .name = "peq-check", .usage = "peq-check FILE", .min_arguments = 1, .max_arguments = 1, .run = checkEqualizerApo },
@@ -851,6 +852,8 @@ fn runDemo(context: Context) !void {
 /// step here.
 fn scanRoot(context: Context) !void {
     const stdout = context.stdout;
+    if (context.arguments.len == 3 and !std.mem.eql(u8, context.arguments[2], "--reprobe")) return error.UnknownOption;
+    const reprobe_all = context.arguments.len == 3;
     var runtime = liborca.Runtime.init(context.allocator);
     defer runtime.deinit();
     const library_handle = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
@@ -859,7 +862,7 @@ fn scanRoot(context: Context) !void {
     // volume check and the scan would mark every file under it missing.
     const root_id = try registeredRootId(&runtime, library_handle, context.arguments[1]) orelse
         (try bindRoot(&runtime, library_handle, context)).root_id;
-    const job_handle = try runtime.startLibraryScan(library_handle, .{ .root_id = root_id });
+    const job_handle = try runtime.startLibraryScan(library_handle, .{ .root_id = root_id, .reprobe_all = reprobe_all });
     awaitScan(&runtime, stdout, job_handle) catch |err| {
         if (err == error.JobFailed and (try runtime.jobScanStats(job_handle)).volume_changed)
             return error.RootVolumeChanged;
@@ -1753,6 +1756,11 @@ fn listProviderSources(context: Context) !void {
         if (source.licence_url) |licence_url| try context.stdout.print("\t{s}", .{licence_url});
         try context.stdout.writeAll("\n");
     }
+}
+
+fn listSupportedFormats(context: Context) !void {
+    for (liborca.supported_formats) |format|
+        try context.stdout.print("{s}{s}\n", .{ format.name, if (format.planned) "\tplanned" else "" });
 }
 
 fn printOptionalStat(stdout: *std.Io.Writer, key: []const u8, value: ?i64) !void {

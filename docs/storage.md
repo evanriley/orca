@@ -75,7 +75,10 @@ container declares — the encoding identifier that becomes `files.codec`, plus
 sample rate, channels, sample width and frame count, which becomes
 `files.duration_ms`. Only headers are read, never audio. Probing is on
 the changed path alone: the unchanged skip is what makes a rescan of a large
-library nearly free, and reopening every file would spend that. A file that
+library nearly free, and reopening every file would spend that.
+`ScanRequest.reprobe_all` turns the skip off for one scan, so every file is
+read and probed again; Rebuild library database and `orca-cli scan --reprobe`
+use it. A file that
 sniffs as audio and then refuses to open is recorded with no properties and the
 scan continues, exactly as an unreadable tag is handled — malformed and
 truncated audio is normal in a real library. A transform codec such as MPEG has

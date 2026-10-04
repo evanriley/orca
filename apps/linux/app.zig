@@ -170,12 +170,15 @@ pub const SettingsPage = struct {
     contents: [settings_tab_count]?*gtk.Widget = @splat(null),
     filter_hidden: [settings_filter_capacity]*gtk.Widget = undefined,
     filter_hidden_len: usize = 0,
+    subtitle: ?*gtk.Label = null,
     folder_slot: ?*gtk.Box = null,
     measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
+    threads: Stepper = .{},
+    threshold: Stepper = .{},
+    cache_value: ?*gtk.Label = null,
     device_drop_down: ?*gtk.DropDown = null,
     device_drop_down_names: ?*gtk.StringList = null,
-    sources: ?*gtk.Box = null,
     genre_source_row: ?*gtk.Widget = null,
     tile_save_timer: c_uint = 0,
     tile_scale: ?*gtk.Range = null,
@@ -187,6 +190,12 @@ pub const SettingsPage = struct {
 };
 
 pub const settings_filter_capacity = 512;
+
+pub const Stepper = struct {
+    value: ?*gtk.Label = null,
+    decrease: ?*gtk.Widget = null,
+    increase: ?*gtk.Widget = null,
+};
 
 pub const ArtworkInfluence = enum { off, subtle, expressive };
 pub const Density = enum { comfortable, compact };
@@ -237,6 +246,9 @@ pub const TransportControls = struct {
 
 pub const CredentialControls = struct {
     entry_row: ?*gtk.Widget = null,
+    entry_box: ?*gtk.Widget = null,
+    open_button: ?*gtk.Widget = null,
+    stored: bool = false,
     entry_title: ?*gtk.Label = null,
     reveal_button: ?*gtk.Widget = null,
     save_button: ?*gtk.Widget = null,
@@ -249,10 +261,9 @@ pub const CredentialControls = struct {
 
 pub const ListeningControls = struct {
     now_playing_row: ?*gtk.Widget = null,
-    status_row: ?*gtk.Widget = null,
+    pending_row: ?*gtk.Widget = null,
+    pending_value: ?*gtk.Label = null,
     token: CredentialControls = .{},
-    status_text: [192]u8 = undefined,
-    status_len: usize = 0,
 };
 
 pub const TotalsRequest = union(enum) {
