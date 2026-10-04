@@ -183,10 +183,19 @@ pub fn fitToPage(self: *App) void {
     adw.adw_toolbar_view_set_extend_content_to_top_edge(view, @intFromBool(over));
     const view_widget = gtk.cast(gtk.Widget, view);
     if (over) gtk.gtk_widget_add_css_class(view_widget, "over-page") else gtk.gtk_widget_remove_css_class(view_widget, "over-page");
-    gtk.gtk_widget_set_margin_end(bar, if (over) nowplaying.panelWidth(self) else 0);
+    gtk.gtk_widget_set_margin_end(barRow(bar, view_widget), if (over) nowplaying.panelWidth(self) else 0);
     for ([_]?*gtk.Widget{ self.top_bar.back, self.top_bar.forward }) |button|
         if (button) |history| gtk.gtk_widget_set_visible(history, @intFromBool(!over));
     gtk.gtk_widget_set_visible(bar, @intFromBool(self.current_page != .scan));
+}
+
+// The margin goes on the toolbar view's own child: an ancestor of the bar left full width takes the Now Playing panel's clicks.
+fn barRow(bar: *gtk.Widget, view: *gtk.Widget) *gtk.Widget {
+    var row = bar;
+    while (gtk.gtk_widget_get_parent(row)) |parent| : (row = parent) {
+        if (parent == view) return row;
+    }
+    return bar;
 }
 
 pub fn addTrail(self: *App, page: window.Page, crumbs: *gtk.Widget) void {

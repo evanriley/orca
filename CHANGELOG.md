@@ -1470,6 +1470,12 @@
 
 ### Fixed
 
+- **Now Playing leaves the lyrics view.** In orca-gtk, the Up Next,
+  Lyrics and Info tabs and the Clear button at the top of the Now Playing
+  panel respond to clicks again. The top bar's row spanned the whole
+  window over the panel and took those clicks, so after Show all lyrics
+  the panel stayed on the lyrics and the three-line quote under the cover
+  did not come back.
 - **Headless GUI runs keep their state private.** `scripts/headless-gui.sh`
   sets `XDG_STATE_HOME` to a directory inside its private runtime
   directory, as it already did for `HOME` and the XDG config, data and
