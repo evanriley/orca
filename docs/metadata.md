@@ -563,6 +563,72 @@ awaiting reconciliation keep their backups, and nothing prunes automatically.
 orca-cli prune-backups DATABASE [--older-than=DAYS]
 ```
 
+### Change history
+
+`Runtime.libraryTagWriteGroupPage(library, allocator, limit, offset)` lists
+finished tag writes newest first, at most 512 at a time.
+`Runtime.libraryTagWriteGroup(library, allocator, io, group_id)` shows one
+write file by file. Both only read: they never write or move a media file,
+and never change the journal or a backup.
+
+The history is derived from the journal; nothing is stored for it. A
+`TagWriteGroup` is one `group_id`, the plan id `undoTagWrite` takes:
+
+- A group with a `planned` or `staged` operation is still being written and
+  is left out. `libraryTagWriteGroup` returns `error.UnknownTagWriteGroup`
+  for it, for a group of moves only, and for a group never written.
+- `written_at` is the earliest `created_at` of its operations, in Unix
+  seconds. `file_count` counts its operations.
+- `title` is the Release title every Track of its files shares, through
+  the files' locations; empty when they span several Releases or none.
+- `state` follows from the operations' states, the first row that applies:
+
+| Operations | `state` |
+| --- | --- |
+| Any `needs_reconciliation` | `needs_reconciliation` |
+| Any `failed` | `failed` |
+| Any `undoing` | `undoing` |
+| All `committed` | `applied` |
+| Not all `rolled_back`, or one keeps its write's error | `failed` |
+| One records `recovered` | `rolled_back` |
+| Otherwise, all `rolled_back` | `undone` |
+
+An undo writes no error and recovery writes `recovered`, which is how an
+undo is told from recovery. An undo that was interrupted and then finished
+by recovery, or by the next `undoTagWrite`, records `recovered` too and so
+reads as `rolled_back`.
+
+`can_undo` and `expired` come from `undoAvailability`, the function
+`undoGroup` decides by, so the history offers undo exactly when
+`undoTagWrite` would start one:
+
+- `can_undo`: every operation `committed` with every backup path kept, or an
+  interrupted undo to finish.
+- `expired`: every operation `committed` and a backup was pruned.
+
+Neither reads a file. An undo still checks every file first, so a write
+whose file changed since shows `can_undo` and then returns
+`error.MutationNeedsReconciliation`.
+
+`TagWriteGroupDetail` reads each operation's backup and its file as it is
+now through the tag reader and compares their tags. Each differing field is
+a `TagWriteDiff` row: `restores` is the backup's value, which an undo puts
+back, and `current` is the file's; genres are one row, joined with `; `. A
+file whose backup or current file cannot be read, because the backup was
+pruned or consumed by an undo or the file is gone, is one `unknown` row
+with both values empty.
+
+`diffs` holds whole files only, in action order, at most 512 rows;
+`more_files` counts the changed files left out. `field_count` counts every
+differing field of every file, those left out included, so it is 0 once the
+backups are gone.
+
+```sh
+orca-cli changes DATABASE [--limit N] [--offset N]
+orca-cli changes DATABASE GROUP
+orca-cli changes DATABASE --export=FILE [--force]
+```
+
 ### Relocated roots
 
 A write stays undoable after its root moves. `libraryRelocateRoot` rewrites

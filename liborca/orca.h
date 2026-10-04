@@ -3723,6 +3723,109 @@ orca_status orca_library_prune_tag_write_backups(
     uint64_t *bytes
 );
 
+/* What became of a tag write, as its journal records it. */
+typedef enum orca_tag_write_group_state {
+    /* Every file was written. */
+    ORCA_TAG_WRITE_GROUP_STATE_APPLIED = 0,
+    /* An undo was interrupted; orca_library_undo_tag_write finishes it. */
+    ORCA_TAG_WRITE_GROUP_STATE_UNDOING = 1,
+    /* orca_library_undo_tag_write restored every file. */
+    ORCA_TAG_WRITE_GROUP_STATE_UNDONE = 2,
+    /* The write or its undo was interrupted and recovery restored every
+     * file. */
+    ORCA_TAG_WRITE_GROUP_STATE_ROLLED_BACK = 3,
+    /* A file could not be written; the files already written were restored. */
+    ORCA_TAG_WRITE_GROUP_STATE_FAILED = 4,
+    /* A file or backup changed outside Orca; see orca_library_undo_tag_write. */
+    ORCA_TAG_WRITE_GROUP_STATE_NEEDS_RECONCILIATION = 5,
+} orca_tag_write_group_state;
+
+/* A tag write in the change history. `group_id` is the group
+ * orca_library_undo_tag_write takes; `written_at` is when it was planned to
+ * run, in Unix seconds. `title` is the Release title its files share, empty
+ * when they span several or none. `can_undo` is 1 when
+ * orca_library_undo_tag_write would run it: every file written and every
+ * backup kept, or an undo to finish. It is read from the journal alone, so an
+ * undo of a file changed since can still return NEEDS_RECONCILIATION.
+ * `expired` is 1 when the write's backups were pruned. */
+typedef struct orca_tag_write_group_view {
+    uint64_t group_id;
+    int64_t written_at;
+    uint64_t file_count;
+    uint8_t state; /* orca_tag_write_group_state */
+    uint8_t can_undo;
+    uint8_t expired;
+    uint8_t reserved[5];
+    orca_string_view title;
+} orca_tag_write_group_view;
+
+/* String views are valid only for the duration of this callback. */
+typedef void (*orca_tag_write_group_callback)(
+    void *context,
+    const orca_tag_write_group_view *group
+);
+
+/* The finished tag writes of `library`, newest first; writes still running
+ * are left out. INVALID_ARGUMENT for a `limit` outside 1...512. */
+orca_status orca_library_query_tag_write_groups(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint32_t limit,
+    uint32_t offset,
+    void *context,
+    orca_tag_write_group_callback callback
+);
+
+typedef enum orca_tag_write_diff_subject {
+    /* `field` names the tag. */
+    ORCA_TAG_WRITE_DIFF_SUBJECT_FIELD = 0,
+    ORCA_TAG_WRITE_DIFF_SUBJECT_GENRES = 1,
+    /* The file or its backup could not be read: the backup was pruned or
+     * consumed by an undo, or the file is gone. `restores` and `current` are
+     * empty. */
+    ORCA_TAG_WRITE_DIFF_SUBJECT_UNKNOWN = 2,
+} orca_tag_write_diff_subject;
+
+/* One tag a write changed in `file`. `restores` is the backup's value, which
+ * an undo puts back; `current` is the file's value now. Either is empty when
+ * the tag is absent; genres are joined with "; ". */
+typedef struct orca_tag_write_diff_view {
+    uint8_t subject; /* orca_tag_write_diff_subject */
+    uint8_t field;   /* orca_metadata_field, when `subject` is FIELD */
+    uint8_t reserved[6];
+    orca_string_view file;
+    orca_string_view restores;
+    orca_string_view current;
+} orca_tag_write_diff_view;
+
+/* `diffs` holds at most 512 rows, whole files only, in action order;
+ * `more_files` counts the changed files left out. `field_count` counts every
+ * changed tag of every file, those left out included. */
+typedef struct orca_tag_write_group_detail_view {
+    orca_tag_write_group_view group;
+    const orca_tag_write_diff_view *diffs;
+    size_t diff_count;
+    uint64_t more_files;
+    uint64_t field_count;
+} orca_tag_write_group_detail_view;
+
+/* String views and `diffs` are valid only for the duration of this callback. */
+typedef void (*orca_tag_write_group_detail_callback)(
+    void *context,
+    const orca_tag_write_group_detail_view *detail
+);
+
+/* Reads every file of tag write `group_id` and its backup, on the calling
+ * thread, and compares their tags. Nothing is written. NOT_FOUND for a group
+ * that is not a finished tag write. */
+orca_status orca_library_query_tag_write_group(
+    orca_runtime *runtime,
+    orca_handle library,
+    uint64_t group_id,
+    void *context,
+    orca_tag_write_group_detail_callback callback
+);
+
 /* Registering a root is an explicit user action: it is the one path allowed to
  * persist a volume identifier at a mount root. */
 orca_status orca_library_add_root(

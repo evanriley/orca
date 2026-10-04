@@ -3154,6 +3154,63 @@ static int write_tags(orca_runtime *runtime, orca_handle library,
     return 0;
 }
 
+struct tag_write_group_capture {
+    uint32_t calls;
+    orca_tag_write_group_view group;
+};
+
+static void capture_tag_write_group(void *context, const orca_tag_write_group_view *group) {
+    struct tag_write_group_capture *capture = context;
+    if (capture->calls == 0) capture->group = *group;
+    capture->calls += 1;
+}
+
+static int newest_tag_write_group(orca_runtime *runtime, orca_handle library,
+                                  struct tag_write_group_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_library_query_tag_write_groups(runtime, library, 1, 0, capture,
+                                                    capture_tag_write_group) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->calls == 1);
+    return 0;
+}
+
+struct tag_write_detail_capture {
+    uint32_t calls;
+    orca_tag_write_group_view group;
+    size_t diff_count;
+    uint64_t more_files;
+    uint64_t field_count;
+    uint8_t subject;
+    uint8_t field;
+    char file[512];
+    char restores[128];
+    char current[128];
+};
+
+static void capture_tag_write_detail(void *context, const orca_tag_write_group_detail_view *detail) {
+    struct tag_write_detail_capture *capture = context;
+    capture->calls += 1;
+    capture->group = detail->group;
+    capture->diff_count = detail->diff_count;
+    capture->more_files = detail->more_files;
+    capture->field_count = detail->field_count;
+    if (detail->diff_count == 0) return;
+    capture->subject = detail->diffs[0].subject;
+    capture->field = detail->diffs[0].field;
+    copy_view(capture->file, sizeof capture->file, detail->diffs[0].file);
+    copy_view(capture->restores, sizeof capture->restores, detail->diffs[0].restores);
+    copy_view(capture->current, sizeof capture->current, detail->diffs[0].current);
+}
+
+static int tag_write_detail(orca_runtime *runtime, orca_handle library, uint64_t group_id,
+                            struct tag_write_detail_capture *capture) {
+    memset(capture, 0, sizeof *capture);
+    SMOKE_CHECK(orca_library_query_tag_write_group(runtime, library, group_id, capture,
+                                                   capture_tag_write_detail) == ORCA_STATUS_OK);
+    SMOKE_CHECK(capture->calls == 1 && capture->group.group_id == group_id);
+    return 0;
+}
+
 static int remove_tree(const char *path) {
     struct stat info;
     if (lstat(path, &info) != 0) return errno == ENOENT ? 0 : -1;
@@ -3326,6 +3383,33 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
     SMOKE_CHECK(strcmp(track.title, written_title) == 0);
     track_id = track.id;
 
+    struct tag_write_group_capture group;
+    if (newest_tag_write_group(runtime, *library, &group) != 0) return 1;
+    SMOKE_CHECK(group.group.group_id == plan.plan_id && group.group.file_count == 1);
+    SMOKE_CHECK(group.group.state == ORCA_TAG_WRITE_GROUP_STATE_APPLIED);
+    SMOKE_CHECK(group.group.can_undo == 1 && group.group.expired == 0);
+    SMOKE_CHECK(orca_library_query_tag_write_groups(runtime, *library, 0, 0, &group,
+                                                    capture_tag_write_group) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_tag_write_groups(runtime, *library, 513, 0, &group,
+                                                    capture_tag_write_group) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    SMOKE_CHECK(orca_library_query_tag_write_groups(runtime, *library, 1, 0, &group, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+    struct tag_write_detail_capture detail;
+    if (tag_write_detail(runtime, *library, plan.plan_id, &detail) != 0) return 1;
+    SMOKE_CHECK(detail.diff_count == 1 && detail.field_count == 1 && detail.more_files == 0);
+    SMOKE_CHECK(detail.subject == ORCA_TAG_WRITE_DIFF_SUBJECT_FIELD &&
+                detail.field == ORCA_METADATA_FIELD_TITLE);
+    SMOKE_CHECK(strcmp(detail.file, plan.path) == 0);
+    SMOKE_CHECK(strcmp(detail.restores, original_title) == 0);
+    SMOKE_CHECK(strcmp(detail.current, written_title) == 0);
+    SMOKE_CHECK(orca_library_query_tag_write_group(runtime, *library, plan.plan_id + 1000, &detail,
+                                                   capture_tag_write_detail) ==
+                ORCA_STATUS_NOT_FOUND);
+    SMOKE_CHECK(orca_library_query_tag_write_group(runtime, *library, plan.plan_id, &detail, 0) ==
+                ORCA_STATUS_INVALID_ARGUMENT);
+
     SMOKE_CHECK(orca_library_undo_tag_write(runtime, *library, plan.plan_id) == ORCA_STATUS_OK);
     SMOKE_CHECK(file_is(song, original, original_length) == 1);
     if (tag_track(runtime, *library, &track) != 0) return 1;
@@ -3337,6 +3421,10 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
                 ORCA_STATUS_INVALID_ARGUMENT);
     SMOKE_CHECK(orca_library_undo_tag_write(runtime, *library, plan.plan_id + 1000) ==
                 ORCA_STATUS_NOT_FOUND);
+    if (newest_tag_write_group(runtime, *library, &group) != 0) return 1;
+    SMOKE_CHECK(group.group.group_id == plan.plan_id);
+    SMOKE_CHECK(group.group.state == ORCA_TAG_WRITE_GROUP_STATE_UNDONE);
+    SMOKE_CHECK(group.group.can_undo == 0 && group.group.expired == 0);
 
     struct tag_plan_capture again;
     if (plan_tags(runtime, *library, track_id, &again) != 0) return 1;
@@ -3354,6 +3442,14 @@ static int tag_write_steps(orca_runtime *runtime, const char *root, orca_handle 
                 ORCA_STATUS_OK);
     SMOKE_CHECK(backups == 1 && bytes == original_length);
     SMOKE_CHECK(orca_library_undo_tag_write(runtime, *library, again.plan_id) == ORCA_STATUS_GONE);
+    if (newest_tag_write_group(runtime, *library, &group) != 0) return 1;
+    SMOKE_CHECK(group.group.group_id == again.plan_id);
+    SMOKE_CHECK(group.group.state == ORCA_TAG_WRITE_GROUP_STATE_APPLIED);
+    SMOKE_CHECK(group.group.can_undo == 0 && group.group.expired == 1);
+    if (tag_write_detail(runtime, *library, again.plan_id, &detail) != 0) return 1;
+    SMOKE_CHECK(detail.diff_count == 1 && detail.field_count == 0);
+    SMOKE_CHECK(detail.subject == ORCA_TAG_WRITE_DIFF_SUBJECT_UNKNOWN);
+    SMOKE_CHECK(detail.restores[0] == 0 && detail.current[0] == 0);
     SMOKE_CHECK(file_is(song, original, original_length) == 0);
 
     if (tag_track(runtime, *library, &track) != 0) return 1;

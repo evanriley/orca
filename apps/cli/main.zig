@@ -69,6 +69,7 @@ fn describe(err: anyerror) []const u8 {
         error.InvalidProposalPayload => "that match cannot be read; dismiss it",
         error.InvalidMinimumConfidence => "--min-score must be above 0 and at most 1",
         error.TagWriteBackupPruned => "the backups for this write were pruned, so it cannot be undone",
+        error.UnknownTagWriteGroup => "no finished tag write with that group",
         error.TagTargetUnavailable => "a file an interrupted tag write changed is in a folder that is not there; mount it and try again",
         error.NoBackupDirectory => "this library has no database file, so a tag write has nowhere to keep the originals",
         error.InvalidRating => "a rating must be 1 to 100, or 1 to 5 stars",
@@ -295,6 +296,13 @@ const commands = [_]Command{
     .{ .name = "write-tags", .usage = "write-tags DATABASE IDS [--approve=DIGEST]", .min_arguments = 2, .max_arguments = 3, .run = writeTags },
     .{ .name = "undo-tags", .usage = "undo-tags DATABASE GROUP", .min_arguments = 2, .max_arguments = 2, .run = undoTagWrite },
     .{ .name = "prune-backups", .usage = "prune-backups DATABASE [--older-than=DAYS]", .min_arguments = 1, .max_arguments = 2, .run = pruneBackups },
+    .{
+        .name = "changes",
+        .usage = "changes DATABASE ([--limit N] [--offset N] | GROUP | --export=FILE [--force])",
+        .min_arguments = 1,
+        .max_arguments = 5,
+        .run = showChanges,
+    },
 };
 
 fn findCommand(name: []const u8, argument_count: usize) ?*const Command {
@@ -399,6 +407,19 @@ const help_details =
     \\write whose files all committed, or with --older-than=DAYS only of writes
     \\at least that old, and prints how many it deleted and their size. A
     \\pruned write cannot be undone.
+    \\
+    \\changes lists finished tag writes newest first, 50 at a time: group=,
+    \\written_at= in Unix seconds, files=, state=applied|undoing|undone|
+    \\rolled_back|failed|needs_reconciliation, can_undo=yes when undo-tags
+    \\would run it, expired=yes when its backups were pruned, then title=, the
+    \\Release its files share. It reads only the journal, so undo-tags can
+    \\still refuse a file changed since. changes DATABASE GROUP reads each
+    \\file and its backup and prints the same line with fields=N, every
+    \\changed tag, and more_files=N, the files past the first 512 rows; then
+    \\one FILE FIELD RESTORES CURRENT line per changed tag, RESTORES being
+    \\what undo-tags puts back. FIELD is unknown when the backup was pruned or
+    \\undone. --export=FILE writes every group's line to FILE, refusing an
+    \\existing FILE unless --force is given.
     \\
     \\Browsing. artists lists Artists in sort order, with --album-artists only
     \\those a Release is filed under; releases lists Releases, optionally one
@@ -1864,6 +1885,104 @@ fn pruneBackups(context: Context) !void {
         try std.math.mul(u64, older_than_days, std.time.s_per_day),
     );
     try context.stdout.print("pruned {d} backups ({d} bytes)\n", .{ pruned.backups, pruned.bytes });
+}
+
+fn showChanges(context: Context) !void {
+    var limit: u32 = 50;
+    var offset: u32 = 0;
+    var group_id: ?u64 = null;
+    var export_path: ?[]const u8 = null;
+    var force = false;
+    var paged = false;
+    var index: usize = 1;
+    while (index < context.arguments.len) : (index += 1) {
+        const argument = context.arguments[index];
+        if (std.mem.eql(u8, argument, "--limit") or std.mem.eql(u8, argument, "--offset")) {
+            index += 1;
+            if (index == context.arguments.len) return error.MissingOptionValue;
+            const value = try std.fmt.parseInt(u32, context.arguments[index], 10);
+            if (std.mem.eql(u8, argument, "--limit")) limit = value else offset = value;
+            paged = true;
+        } else if (std.mem.startsWith(u8, argument, "--export=")) {
+            export_path = argument["--export=".len..];
+        } else if (std.mem.eql(u8, argument, "--force")) {
+            force = true;
+        } else if (group_id == null and !std.mem.startsWith(u8, argument, "--")) {
+            group_id = try std.fmt.parseInt(u64, argument, 10);
+        } else return error.UnknownOption;
+    }
+    const forms = @as(u8, @intFromBool(paged)) + @intFromBool(group_id != null) + @intFromBool(export_path != null);
+    if (forms > 1 or (force and export_path == null)) return error.UnknownOption;
+    if (limit == 0 or limit > 512) return error.PageOutOfRange;
+
+    var runtime = liborca.Runtime.init(context.allocator);
+    defer runtime.deinit();
+    const library = try openBrowseLibrary(context.allocator, context.io, &runtime, context.arguments[0]);
+    if (group_id) |id| return printChangeDetail(context, &runtime, library, id);
+    if (export_path) |path| return exportChanges(context, &runtime, library, path, force);
+    const page = try runtime.libraryTagWriteGroupPage(library, context.allocator, limit, offset);
+    defer page.deinit();
+    for (page.items) |*group| {
+        try writeChangeGroup(context.stdout, group, null);
+        try context.stdout.writeByte('\n');
+    }
+}
+
+fn printChangeDetail(context: Context, runtime: *liborca.Runtime, library: liborca.LibraryHandle, group_id: u64) !void {
+    const detail = try runtime.libraryTagWriteGroup(library, context.allocator, context.io, group_id);
+    defer detail.deinit();
+    const stdout = context.stdout;
+    try writeChangeGroup(stdout, &detail.group, detail);
+    try stdout.writeByte('\n');
+    for (detail.diffs) |diff| {
+        try stdout.print("{s}\t", .{diff.file});
+        switch (diff.subject) {
+            .field => |field| try stdout.print("{t}\t{s}\t{s}\n", .{ field, noneIfEmpty(diff.restores), noneIfEmpty(diff.current) }),
+            .genres => try stdout.print("genres\t{s}\t{s}\n", .{ noneIfEmpty(diff.restores), noneIfEmpty(diff.current) }),
+            .unknown => try stdout.writeAll("unknown\t-\t-\n"),
+        }
+    }
+}
+
+fn noneIfEmpty(value: []const u8) []const u8 {
+    return if (value.len == 0) "(none)" else value;
+}
+
+fn writeChangeGroup(writer: *std.Io.Writer, group: *const liborca.TagWriteGroup, detail: ?liborca.TagWriteGroupDetail) !void {
+    try writer.print("group={d} written_at={d} files={d} state={t} can_undo={s} expired={s}", .{
+        group.group_id,
+        group.written_at,
+        group.file_count,
+        group.state,
+        if (group.can_undo) "yes" else "no",
+        if (group.expired) "yes" else "no",
+    });
+    if (detail) |shown| try writer.print(" fields={d} more_files={d}", .{ shown.field_count, shown.more_files });
+    try writer.print(" title={s}", .{group.title.slice()});
+}
+
+fn exportChanges(context: Context, runtime: *liborca.Runtime, library: liborca.LibraryHandle, path: []const u8, force: bool) !void {
+    const io = context.io;
+    var file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = force });
+    defer file.deinit(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = file.file.writer(io, &buffer);
+    const writer = &file_writer.interface;
+    var exported: u64 = 0;
+    while (true) {
+        const page = try runtime.libraryTagWriteGroupPage(library, context.allocator, 512, @intCast(exported));
+        defer page.deinit();
+        for (page.items) |*group| {
+            try writeChangeGroup(writer, group, null);
+            try writer.writeByte('\n');
+        }
+        exported += page.items.len;
+        if (page.items.len < 512) break;
+    }
+    try writer.flush();
+    try file.file.sync(io);
+    if (force) try file.replace(io) else try file.link(io);
+    try context.stdout.print("exported={d}\n", .{exported});
 }
 
 fn listDevices(context: Context) !void {

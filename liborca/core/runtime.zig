@@ -26,6 +26,7 @@ const runtime_listens = @import("runtime_listens.zig");
 const runtime_maintenance = @import("runtime_maintenance.zig");
 const runtime_playlists = @import("runtime_playlists.zig");
 const runtime_zones = @import("runtime_zones.zig");
+const tag_write_history = @import("tag_write_history.zig");
 const runtime_queue = @import("runtime_queue.zig");
 const runtime_roots = @import("runtime_roots.zig");
 const runtime_jobs = @import("runtime_jobs.zig");
@@ -283,6 +284,13 @@ pub const TagWriteSkipReason = enum {
 
 /// What `pruneTagWriteBackups` deleted: how many backups, and their bytes.
 pub const PruneSummary = metadata.executor.PruneSummary;
+
+pub const TagWriteGroupState = tag_write_history.TagWriteGroupState;
+pub const TagWriteGroup = tag_write_history.TagWriteGroup;
+pub const TagWriteGroupPage = tag_write_history.TagWriteGroupPage;
+pub const TagWriteDiffSubject = tag_write_history.TagWriteDiffSubject;
+pub const TagWriteDiff = tag_write_history.TagWriteDiff;
+pub const TagWriteGroupDetail = tag_write_history.TagWriteGroupDetail;
 
 /// Plans held between `planTagWrite` and `startTagWrite`. Few, because a plan
 /// waits on a person.
@@ -2372,6 +2380,26 @@ pub const OrcaRuntime = struct {
     /// interrupted holder left before pruning.
     pub fn pruneTagWriteBackups(self: *OrcaRuntime, library: LibraryHandle, io: std.Io, older_than_s: u64) !PruneSummary {
         return runtime_roots.pruneTagWriteBackups(self, library, io, older_than_s);
+    }
+
+    pub fn libraryTagWriteGroupPage(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !TagWriteGroupPage {
+        return tag_write_history.page(try libraryDatabase(self, library), allocator, limit, offset);
+    }
+
+    pub fn libraryTagWriteGroup(
+        self: *OrcaRuntime,
+        library: LibraryHandle,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        group_id: u64,
+    ) !TagWriteGroupDetail {
+        return tag_write_history.detail(try libraryDatabase(self, library), allocator, io, group_id);
     }
 
     /// Starts a filesystem scan on a registered `work.Registry` worker and

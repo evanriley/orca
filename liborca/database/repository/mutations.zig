@@ -21,6 +21,147 @@ pub const MutationState = enum {
     undoing,
 };
 
+/// Already stored in existing journals, and the history tells a recovered
+/// rollback from an undo by it, so changing it misreports every older group.
+pub const recovered_message = "recovered";
+
+pub const GroupStateCounts = struct {
+    planned: u64 = 0,
+    staged: u64 = 0,
+    committed: u64 = 0,
+    rolled_back: u64 = 0,
+    failed: u64 = 0,
+    needs_reconciliation: u64 = 0,
+    undoing: u64 = 0,
+
+    pub fn add(self: *GroupStateCounts, state_value: MutationState) void {
+        switch (state_value) {
+            inline else => |tag| @field(self, @tagName(tag)) += 1,
+        }
+    }
+
+    pub fn total(self: GroupStateCounts) u64 {
+        return self.planned + self.staged + self.committed + self.rolled_back +
+            self.failed + self.needs_reconciliation + self.undoing;
+    }
+};
+
+pub const UndoAvailability = enum {
+    fresh,
+    interrupted,
+    backups_pruned,
+    already_undone,
+    needs_reconciliation,
+    not_committed,
+};
+
+pub fn undoAvailability(counts: GroupStateCounts, backups_present: bool) UndoAvailability {
+    if (counts.planned + counts.staged + counts.failed > 0) return .not_committed;
+    const operations = counts.total();
+    if (counts.committed == operations) return if (backups_present) .fresh else .backups_pruned;
+    if (counts.undoing > 0) return .interrupted;
+    if (counts.needs_reconciliation > 0) return .needs_reconciliation;
+    if (counts.rolled_back == operations) return .already_undone;
+    return .not_committed;
+}
+
+pub const MutationGroupState = enum {
+    applied,
+    undoing,
+    undone,
+    rolled_back,
+    failed,
+    needs_reconciliation,
+};
+
+pub const MutationGroupSummary = struct {
+    group_id: u64,
+    written_at: i64,
+    operations: u64,
+    counts: GroupStateCounts,
+    backups_present: bool,
+    write_errors: u64,
+    recovered: u64,
+    title: ?[]u8,
+
+    pub fn state(self: MutationGroupSummary) MutationGroupState {
+        const counts = self.counts;
+        if (counts.needs_reconciliation > 0) return .needs_reconciliation;
+        if (counts.failed > 0) return .failed;
+        if (counts.undoing > 0) return .undoing;
+        if (counts.committed == self.operations) return .applied;
+        if (counts.rolled_back != self.operations or self.write_errors > 0) return .failed;
+        if (self.recovered > 0) return .rolled_back;
+        return .undone;
+    }
+
+    pub fn undo(self: MutationGroupSummary) UndoAvailability {
+        return undoAvailability(self.counts, self.backups_present);
+    }
+
+    pub fn deinit(self: MutationGroupSummary, allocator: std.mem.Allocator) void {
+        if (self.title) |title| allocator.free(title);
+    }
+};
+
+pub const MutationGroupSummaryPage = struct {
+    allocator: std.mem.Allocator,
+    items: []MutationGroupSummary,
+
+    pub fn deinit(self: MutationGroupSummaryPage) void {
+        for (self.items) |item| item.deinit(self.allocator);
+        self.allocator.free(self.items);
+    }
+};
+
+fn stateSum(comptime state_value: MutationState) []const u8 {
+    return std.fmt.comptimePrint("sum(operation.state = {d})", .{@intFromEnum(state_value)});
+}
+
+const write_tags_kind = std.fmt.comptimePrint("{d}", .{@intFromEnum(MutationKind.write_tags)});
+
+const group_summary_select =
+    "SELECT operation.group_id, min(operation.created_at), count(*),\n" ++
+    "       " ++ stateSum(.planned) ++ ", " ++ stateSum(.staged) ++ ", " ++ stateSum(.committed) ++ ",\n" ++
+    "       " ++ stateSum(.rolled_back) ++ ", " ++ stateSum(.failed) ++ ",\n" ++
+    "       " ++ stateSum(.needs_reconciliation) ++ ", " ++ stateSum(.undoing) ++ ",\n" ++
+    "       sum(operation.kind = " ++ write_tags_kind ++ " AND operation.backup_path IS NULL),\n" ++
+    "       sum(operation.state = " ++ std.fmt.comptimePrint("{d}", .{@intFromEnum(MutationState.rolled_back)}) ++
+    " AND operation.error IS NOT NULL AND operation.error <> '" ++ recovered_message ++ "'),\n" ++
+    "       sum(operation.error = '" ++ recovered_message ++ "'),\n" ++
+    \\       (SELECT CASE WHEN count(DISTINCT track.release_id) = 1 THEN min(release_row.title) END
+    \\        FROM mutation_operations AS member
+    \\        JOIN locations AS location ON location.uri = member.source_path
+    \\        JOIN files AS file ON file.id = location.file_id
+    \\        JOIN tracks AS track
+    \\          ON track.preferred_file_id = file.id OR track.recording_id = file.recording_id
+    \\        JOIN releases AS release_row ON release_row.id = track.release_id
+    \\        WHERE member.group_id = operation.group_id)
+    \\FROM mutation_operations AS operation
+    \\
+    ;
+
+const group_summary_having =
+    "HAVING sum(operation.kind = " ++ write_tags_kind ++ ") > 0 AND " ++
+    stateSum(.planned) ++ " + " ++ stateSum(.staged) ++ " = 0\n";
+
+fn readGroupSummary(allocator: std.mem.Allocator, statement: sqlite.Statement) !MutationGroupSummary {
+    var counts: GroupStateCounts = .{};
+    inline for (.{ "planned", "staged", "committed", "rolled_back", "failed", "needs_reconciliation", "undoing" }, 3..) |name, column| {
+        @field(counts, name) = @intCast(statement.columnInt64(column));
+    }
+    return .{
+        .group_id = @intCast(statement.columnInt64(0)),
+        .written_at = statement.columnInt64(1),
+        .operations = @intCast(statement.columnInt64(2)),
+        .counts = counts,
+        .backups_present = statement.columnInt64(10) == 0,
+        .write_errors = @intCast(statement.columnInt64(11)),
+        .recovered = @intCast(statement.columnInt64(12)),
+        .title = try duplicateNullableColumn(allocator, statement, 13),
+    };
+}
+
 /// A journal record keeps its paths — a filesystem operation's subject
 /// genuinely is a path, which is not an identity violation — and carries
 /// `file_id` so the journal can restore musical identity after a move.
@@ -440,6 +581,44 @@ pub const MutationJournalRepository = struct {
         if (try statement.step() != .done) return error.SqlFailed;
         if (self.db.changes() != 1) return error.StaleMutationOperation;
     }
+
+    pub fn groupSummaryPage(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+        limit: u32,
+        offset: u32,
+    ) !MutationGroupSummaryPage {
+        var statement = try self.db.prepare(group_summary_select ++
+            "GROUP BY operation.group_id\n" ++ group_summary_having ++
+            "ORDER BY operation.group_id DESC LIMIT ?1 OFFSET ?2;");
+        defer statement.deinit();
+        try statement.bindInt64(1, @min(limit, max_page));
+        try statement.bindInt64(2, offset);
+        var items: std.ArrayList(MutationGroupSummary) = .empty;
+        errdefer {
+            for (items.items) |item| item.deinit(allocator);
+            items.deinit(allocator);
+        }
+        while (try statement.step() == .row) {
+            const summary = try readGroupSummary(allocator, statement);
+            errdefer summary.deinit(allocator);
+            try items.append(allocator, summary);
+        }
+        return .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
+    }
+
+    pub fn groupSummary(
+        self: *const MutationJournalRepository,
+        allocator: std.mem.Allocator,
+        group_id: u64,
+    ) !?MutationGroupSummary {
+        var statement = try self.db.prepare(group_summary_select ++
+            "WHERE operation.group_id = ?1\nGROUP BY operation.group_id\n" ++ group_summary_having ++ ";");
+        defer statement.deinit();
+        try statement.bindInt64(1, std.math.cast(i64, group_id) orelse return null);
+        if (try statement.step() != .row) return null;
+        return try readGroupSummary(allocator, statement);
+    }
 };
 
 fn validMutationTransition(from: MutationState, to: MutationState) bool {
@@ -528,4 +707,139 @@ test "a group's undo intent is recorded for every operation or none" {
     const groups = try fixture.journal.nonterminalGroupIds(std.testing.allocator);
     defer std.testing.allocator.free(groups);
     try std.testing.expectEqualSlices(u64, &.{ 4, 5 }, groups);
+}
+
+fn prepareWrite(fixture: *JournalFixture, group_id: u64, action_index: u32) !i64 {
+    return fixture.journal.prepare(.{
+        .plan_id = group_id,
+        .group_id = group_id,
+        .action_index = action_index,
+        .kind = .write_tags,
+        .source_path = "/music/a.flac",
+        .backup_path = "/backups/a.flac",
+        .expected_size = 1,
+        .expected_modified_ns = 1,
+        .expected_quick_hash = @splat(1),
+    });
+}
+
+fn committedWrite(fixture: *JournalFixture, group_id: u64, action_index: u32) !i64 {
+    const id = try prepareWrite(fixture, group_id, action_index);
+    try fixture.journal.transition(id, .planned, .staged, null);
+    try fixture.journal.commit(id, 2, 2, @splat(2));
+    return id;
+}
+
+fn countsOf(states: []const MutationState) GroupStateCounts {
+    var counts: GroupStateCounts = .{};
+    for (states) |state_value| counts.add(state_value);
+    return counts;
+}
+
+test "a group can be undone when it is fresh with every backup, or when its undo was interrupted" {
+    try std.testing.expectEqual(UndoAvailability.fresh, undoAvailability(countsOf(&.{ .committed, .committed }), true));
+    try std.testing.expectEqual(UndoAvailability.backups_pruned, undoAvailability(countsOf(&.{ .committed, .committed }), false));
+    try std.testing.expectEqual(UndoAvailability.interrupted, undoAvailability(countsOf(&.{ .rolled_back, .undoing, .committed }), false));
+    try std.testing.expectEqual(UndoAvailability.needs_reconciliation, undoAvailability(countsOf(&.{ .rolled_back, .needs_reconciliation }), true));
+    try std.testing.expectEqual(UndoAvailability.already_undone, undoAvailability(countsOf(&.{ .rolled_back, .rolled_back }), true));
+    try std.testing.expectEqual(UndoAvailability.not_committed, undoAvailability(countsOf(&.{ .committed, .staged }), true));
+    try std.testing.expectEqual(UndoAvailability.not_committed, undoAvailability(countsOf(&.{ .committed, .failed, .undoing }), true));
+    try std.testing.expectEqual(UndoAvailability.not_committed, undoAvailability(countsOf(&.{ .committed, .rolled_back }), true));
+}
+
+test "the group history lists finished tag-write groups newest first and leaves out those in flight" {
+    var fixture: JournalFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    for (1..6) |group| {
+        _ = try committedWrite(&fixture, group, 0);
+        _ = try committedWrite(&fixture, group, 1);
+    }
+    _ = try committedWrite(&fixture, 6, 0);
+    _ = try prepareWrite(&fixture, 6, 1);
+    const moved = try fixture.journal.prepare(.{
+        .plan_id = 7,
+        .group_id = 7,
+        .action_index = 0,
+        .kind = .move,
+        .source_path = "/music/a.flac",
+        .destination_path = "/music/b.flac",
+        .expected_size = 1,
+        .expected_modified_ns = 1,
+        .expected_quick_hash = @splat(1),
+    });
+    try fixture.journal.transition(moved, .planned, .staged, null);
+    try fixture.journal.commit(moved, 1, 1, @splat(1));
+
+    const first = try fixture.journal.groupSummaryPage(std.testing.allocator, 2, 0);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 2), first.items.len);
+    try std.testing.expectEqual(@as(u64, 5), first.items[0].group_id);
+    try std.testing.expectEqual(@as(u64, 4), first.items[1].group_id);
+    try std.testing.expectEqual(@as(u64, 2), first.items[0].operations);
+    try std.testing.expectEqual(MutationGroupState.applied, first.items[0].state());
+    try std.testing.expectEqual(UndoAvailability.fresh, first.items[0].undo());
+    try std.testing.expect(first.items[0].written_at > 0);
+    try std.testing.expect(first.items[0].title == null);
+
+    const last = try fixture.journal.groupSummaryPage(std.testing.allocator, 2, 4);
+    defer last.deinit();
+    try std.testing.expectEqual(@as(usize, 1), last.items.len);
+    try std.testing.expectEqual(@as(u64, 1), last.items[0].group_id);
+    const past = try fixture.journal.groupSummaryPage(std.testing.allocator, 2, 5);
+    defer past.deinit();
+    try std.testing.expectEqual(@as(usize, 0), past.items.len);
+
+    try std.testing.expect(try fixture.journal.groupSummary(std.testing.allocator, 6) == null);
+    try std.testing.expect(try fixture.journal.groupSummary(std.testing.allocator, 7) == null);
+    try std.testing.expect(try fixture.journal.groupSummary(std.testing.allocator, 99) == null);
+}
+
+test "a group's history state tells an undo from a failed write and from a recovered one" {
+    var fixture: JournalFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+
+    const undone = try committedWrite(&fixture, 1, 0);
+    try fixture.journal.beginUndo(1);
+    try fixture.journal.transition(undone, .undoing, .rolled_back, null);
+
+    const written = try committedWrite(&fixture, 2, 0);
+    try fixture.journal.transition(written, .committed, .undoing, null);
+    try fixture.journal.transition(written, .undoing, .rolled_back, null);
+    const broken = try prepareWrite(&fixture, 2, 1);
+    try fixture.journal.transition(broken, .planned, .failed, "AccessDenied");
+    try fixture.journal.rollBackFailed(broken);
+
+    const interrupted = try prepareWrite(&fixture, 3, 0);
+    try fixture.journal.transition(interrupted, .planned, .failed, recovered_message);
+    try fixture.journal.transition(interrupted, .failed, .rolled_back, recovered_message);
+
+    const reconciled = try committedWrite(&fixture, 4, 0);
+    try fixture.journal.transition(reconciled, .committed, .needs_reconciliation, "group undo target changed externally");
+
+    const pruned = try committedWrite(&fixture, 5, 0);
+    _ = try committedWrite(&fixture, 5, 1);
+    try fixture.journal.clearBackupPath(pruned);
+
+    const halfway = try committedWrite(&fixture, 6, 0);
+    _ = try committedWrite(&fixture, 6, 1);
+    try fixture.journal.beginUndo(6);
+    try fixture.journal.transition(halfway, .undoing, .rolled_back, null);
+
+    const page = try fixture.journal.groupSummaryPage(std.testing.allocator, max_page, 0);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 6), page.items.len);
+    const expected = [_]struct { MutationGroupState, UndoAvailability }{
+        .{ .undoing, .interrupted },
+        .{ .applied, .backups_pruned },
+        .{ .needs_reconciliation, .needs_reconciliation },
+        .{ .rolled_back, .already_undone },
+        .{ .failed, .already_undone },
+        .{ .undone, .already_undone },
+    };
+    for (page.items, expected) |item, want| {
+        try std.testing.expectEqual(want[0], item.state());
+        try std.testing.expectEqual(want[1], item.undo());
+    }
 }

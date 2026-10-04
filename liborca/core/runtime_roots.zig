@@ -53,7 +53,7 @@ fn validateEdit(field: metadata.Field, value: []const u8) !void {
 }
 
 /// A field's observed value as text, the form a `Change.before` states it in.
-fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field: metadata.Field) !?[]const u8 {
+pub fn observedText(allocator: std.mem.Allocator, tags: metadata.ObservedTags, field: metadata.Field) !?[]const u8 {
     return switch (field) {
         .title => tags.title,
         .artist => tags.artist,

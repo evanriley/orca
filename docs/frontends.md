@@ -218,6 +218,13 @@ The boundary covers the whole engine, not a fragment of it:
   `ORCA_STATUS_GONE`. A Library with no database file has nowhere to keep
   backups and refuses writes with `ORCA_STATUS_INVALID_STATE`. See
   [metadata.md](metadata.md).
+  `orca_library_query_tag_write_groups` pages the change history newest
+  first: each write's `orca_tag_write_group_state`, `can_undo` and
+  `expired`, read from the journal alone. `orca_library_query_tag_write_group`
+  reads one write's files and backups on the calling thread and hands an
+  `orca_tag_write_group_detail_view` of what an undo restores beside each
+  file's value now, at most 512 rows; see
+  [metadata.md](metadata.md#change-history).
 - **Jobs.** `orca_library_start_scan` registers a background worker and returns
   immediately; `orca_job_snapshot_get`, `orca_job_cancel` and
   `orca_library_scan_stats` observe it. Scan progress is a count of files

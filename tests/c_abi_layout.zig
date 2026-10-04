@@ -63,6 +63,9 @@ const struct_pairs = .{
     .{ c_api.TagWritePlanView, c.orca_tag_write_plan_view },
     .{ c_api.TagWriteFailureView, c.orca_tag_write_failure },
     .{ c_api.TagWriteGenresView, c.orca_tag_write_genres_view },
+    .{ c_api.TagWriteGroupView, c.orca_tag_write_group_view },
+    .{ c_api.TagWriteDiffView, c.orca_tag_write_diff_view },
+    .{ c_api.TagWriteGroupDetailView, c.orca_tag_write_group_detail_view },
     .{ c_api.HealthIssueView, c.orca_health_issue_view },
     .{ c_api.HealthItemView, c.orca_health_item_view },
     .{ c_api.HealthKindSummaryView, c.orca_health_kind_summary_view },
@@ -133,6 +136,20 @@ const export_mappings = .{
         pub const Tag = core.runtime.AcoustIdUse;
         pub fn produce(tag: Tag) ?i64 {
             return c_api.exportAcoustIdUse(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TAG_WRITE_GROUP_STATE_";
+        pub const Tag = core.runtime.TagWriteGroupState;
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportTagWriteGroupState(tag);
+        }
+    },
+    struct {
+        pub const prefix = "ORCA_TAG_WRITE_DIFF_SUBJECT_";
+        pub const Tag = std.meta.Tag(core.runtime.TagWriteDiffSubject);
+        pub fn produce(tag: Tag) ?i64 {
+            return c_api.exportTagWriteDiffSubject(tag);
         }
     },
     struct {

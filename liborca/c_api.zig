@@ -748,6 +748,38 @@ pub const TagWritePlanView = extern struct {
 
 pub const TagWritePlanCallback = *const fn (?*anyopaque, *const TagWritePlanView) callconv(.c) void;
 
+pub const TagWriteGroupView = extern struct {
+    group_id: u64,
+    written_at: i64,
+    file_count: u64,
+    state: u8,
+    can_undo: u8,
+    expired: u8,
+    _reserved: [5]u8 = @splat(0),
+    title: StringView,
+};
+
+pub const TagWriteGroupCallback = *const fn (?*anyopaque, *const TagWriteGroupView) callconv(.c) void;
+
+pub const TagWriteDiffView = extern struct {
+    subject: u8,
+    field: u8,
+    _reserved: [6]u8 = @splat(0),
+    file: StringView,
+    restores: StringView,
+    current: StringView,
+};
+
+pub const TagWriteGroupDetailView = extern struct {
+    group: TagWriteGroupView,
+    diffs: [*]const TagWriteDiffView,
+    diff_count: usize,
+    more_files: u64,
+    field_count: u64,
+};
+
+pub const TagWriteGroupDetailCallback = *const fn (?*anyopaque, *const TagWriteGroupDetailView) callconv(.c) void;
+
 pub const PlayStatsView = extern struct {
     play_count: u64,
     last_played_at: i64,
@@ -3883,6 +3915,93 @@ pub export fn orca_library_prune_tag_write_backups(
         return box.fail(@src(), err);
     backup_count.* = pruned.backups;
     byte_count.* = pruned.bytes;
+    return .ok;
+}
+
+pub fn exportTagWriteGroupState(state: core.runtime.TagWriteGroupState) u8 {
+    return switch (state) {
+        .applied => 0,
+        .undoing => 1,
+        .undone => 2,
+        .rolled_back => 3,
+        .failed => 4,
+        .needs_reconciliation => 5,
+    };
+}
+
+pub fn exportTagWriteDiffSubject(subject: std.meta.Tag(core.runtime.TagWriteDiffSubject)) u8 {
+    return switch (subject) {
+        .field => 0,
+        .genres => 1,
+        .unknown => 2,
+    };
+}
+
+fn tagWriteGroupView(group: *const core.runtime.TagWriteGroup) TagWriteGroupView {
+    return .{
+        .group_id = group.group_id,
+        .written_at = group.written_at,
+        .file_count = group.file_count,
+        .state = exportTagWriteGroupState(group.state),
+        .can_undo = @intFromBool(group.can_undo),
+        .expired = @intFromBool(group.expired),
+        .title = stringView(group.title.slice()),
+    };
+}
+
+pub export fn orca_library_query_tag_write_groups(
+    runtime: ?*Runtime,
+    library: Handle,
+    limit: u32,
+    offset: u32,
+    context: ?*anyopaque,
+    callback: ?TagWriteGroupCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    if (limit == 0 or limit > max_page) return box.reject(@src(), .invalid_argument, "limit must be between 1 and 512");
+    const groups = box.runtime.libraryTagWriteGroupPage(importLibrary(library), box.runtime.allocator, limit, offset) catch |err|
+        return box.fail(@src(), err);
+    defer groups.deinit();
+    for (groups.items) |*group| {
+        const view = tagWriteGroupView(group);
+        visit(context, &view);
+    }
+    return .ok;
+}
+
+pub export fn orca_library_query_tag_write_group(
+    runtime: ?*Runtime,
+    library: Handle,
+    group_id: u64,
+    context: ?*anyopaque,
+    callback: ?TagWriteGroupDetailCallback,
+) callconv(.c) Status {
+    const box = enter(runtime) orelse return refusal(runtime);
+    const visit = callback orelse return box.reject(@src(), .invalid_argument, "callback is null");
+    const detail = box.runtime.libraryTagWriteGroup(importLibrary(library), box.runtime.allocator, box.io(), group_id) catch |err|
+        return box.fail(@src(), err);
+    defer detail.deinit();
+    const diffs = box.runtime.allocator.alloc(TagWriteDiffView, detail.diffs.len) catch |err| return box.fail(@src(), err);
+    defer box.runtime.allocator.free(diffs);
+    for (diffs, detail.diffs) |*view, diff| view.* = .{
+        .subject = exportTagWriteDiffSubject(diff.subject),
+        .field = switch (diff.subject) {
+            .field => |field| exportMetadataField(field),
+            .genres, .unknown => 0,
+        },
+        .file = stringView(diff.file),
+        .restores = stringView(diff.restores),
+        .current = stringView(diff.current),
+    };
+    const view: TagWriteGroupDetailView = .{
+        .group = tagWriteGroupView(&detail.group),
+        .diffs = diffs.ptr,
+        .diff_count = diffs.len,
+        .more_files = detail.more_files,
+        .field_count = detail.field_count,
+    };
+    visit(context, &view);
     return .ok;
 }
 
@@ -7407,6 +7526,7 @@ fn mapError(err: anyerror) Status {
         error.MatchingAlreadyRunning, error.AcoustIdBusy, error.JobQueueFull => .busy,
         error.JobNotPausable, error.JobNotRetryable => .invalid_state,
         error.UnknownJobHistory => .not_found,
+        error.UnknownTagWriteGroup => .not_found,
         error.AcoustIdRequired, error.StaleIdentificationProposal, error.StaleCorrectionGroup, error.ProposalInGroup => .invalid_state,
         error.UnknownRelease, error.UnknownIdentificationProposal, error.UnknownCorrectionGroup, error.UnknownArtist => .not_found,
         error.MutationGroupAlreadyUndone => .already_done,

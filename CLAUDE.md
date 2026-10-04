@@ -166,6 +166,9 @@ zig build run -- edit DATABASE IDS [--title=…] [--artist=…] [--genre=A;B] [-
 zig build run -- write-tags DATABASE IDS [--approve=DIGEST]   # preview, then write FLAC/MP3/ADTS
 zig build run -- undo-tags DATABASE GROUP
 zig build run -- prune-backups DATABASE [--older-than=DAYS]   # deletes backups; those writes can no longer be undone
+zig build run -- changes DATABASE [--limit N] [--offset N]   # tag writes newest first: group= written_at= files= state=applied|undoing|undone|rolled_back|failed|needs_reconciliation can_undo=yes|no expired=yes|no title=; reads the journal only
+zig build run -- changes DATABASE GROUP   # the same line with fields= more_files=, then FILE<TAB>FIELD<TAB>RESTORES<TAB>CURRENT per changed tag; unknown when a backup is gone
+zig build run -- changes DATABASE --export=FILE [--force]   # every list line into FILE, atomically; refuses an existing FILE without --force
 
 # ratings and playlists -- kept per recording in the library; no file is written
 zig build run -- rate DATABASE IDS (--stars=1..5 | --rating=1..100 | --clear)

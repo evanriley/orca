@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Change history.** `libraryTagWriteGroupPage` lists finished tag writes
+  newest first with their files, Release title, state (`applied`,
+  `undoing`, `undone`, `rolled_back`, `failed`, `needs_reconciliation`) and
+  whether they can be undone or expired when their backups were pruned,
+  decided by the same check `undoTagWrite` runs. `libraryTagWriteGroup`
+  reads one write's backups against its files and lists each changed tag,
+  what an undo restores beside the value now. Both derive everything from the
+  journal and only read. `orca-cli changes` lists, shows and exports them, and
+  the C ABI adds `orca_library_query_tag_write_groups` and
+  `orca_library_query_tag_write_group`.
 - **Listen policy, history clearing and cache size.** A Library keeps a
   `ListenPolicy` (`half_or_four_minutes`, ListenBrainz's rule and the
   default, `thirty_seconds` or `full_track`) and a recording switch,

@@ -442,16 +442,19 @@ pub const Executor = struct {
             try self.journal.get(self.allocator, id),
         );
 
-        switch (undoStart(operations.items)) {
+        var counts: database.GroupStateCounts = .{};
+        var backups_present = true;
+        for (operations.items) |operation| {
+            counts.add(operation.state);
+            if (operation.kind == .write_tags and operation.backup_path == null) backups_present = false;
+        }
+        switch (database.undoAvailability(counts, backups_present)) {
             .fresh => {},
             .interrupted => return self.finishInterruptedUndo(group_id),
+            .backups_pruned => return error.TagWriteBackupPruned,
             .already_undone => return error.MutationGroupAlreadyUndone,
             .needs_reconciliation => return error.MutationNeedsReconciliation,
             .not_committed => return error.MutationGroupNotCommitted,
-        }
-        for (operations.items) |operation| {
-            if (operation.kind == .write_tags and operation.backup_path == null)
-                return error.TagWriteBackupPruned;
         }
         for (operations.items, 0..) |operation, index| {
             var current_path = switch (operation.kind) {
@@ -709,14 +712,14 @@ pub const Executor = struct {
     ) !void {
         switch (state) {
             .planned => {
-                try self.transition(operation_id, .planned, .failed, "recovered");
-                try self.transition(operation_id, .failed, .rolled_back, "recovered");
+                try self.transition(operation_id, .planned, .failed, database.recovered_message);
+                try self.transition(operation_id, .failed, .rolled_back, database.recovered_message);
             },
             .staged => try self.transition(
                 operation_id,
                 .staged,
                 .rolled_back,
-                "recovered",
+                database.recovered_message,
             ),
             .failed => self.journal.rollBackFailed(operation_id) catch |err| {
                 self.stopIfStale(err);
@@ -726,7 +729,7 @@ pub const Executor = struct {
                 operation_id,
                 .undoing,
                 .rolled_back,
-                "recovered",
+                database.recovered_message,
             ),
             .committed, .rolled_back, .needs_reconciliation => unreachable,
         }
@@ -810,33 +813,6 @@ pub const Executor = struct {
         try deleteDirectoryIfEmpty(self.io, backup_directory);
     }
 };
-
-const UndoStart = enum {
-    fresh,
-    interrupted,
-    already_undone,
-    needs_reconciliation,
-    not_committed,
-};
-
-fn undoStart(operations: []const database.MutationOperation) UndoStart {
-    var committed: usize = 0;
-    var undoing: usize = 0;
-    var rolled_back: usize = 0;
-    var reconciled: usize = 0;
-    for (operations) |operation| switch (operation.state) {
-        .committed => committed += 1,
-        .undoing => undoing += 1,
-        .rolled_back => rolled_back += 1,
-        .needs_reconciliation => reconciled += 1,
-        .planned, .staged, .failed => return .not_committed,
-    };
-    if (committed == operations.len) return .fresh;
-    if (undoing > 0) return .interrupted;
-    if (reconciled > 0) return .needs_reconciliation;
-    if (rolled_back == operations.len) return .already_undone;
-    return .not_committed;
-}
 
 /// The identity a completed operation left behind, as the journal recorded it.
 ///

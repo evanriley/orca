@@ -151,6 +151,12 @@ pub const TagWriteSkip = runtime.TagWriteSkip;
 pub const TagWriteSkipReason = runtime.TagWriteSkipReason;
 pub const TagWriteFailure = runtime.TagWriteFailure;
 pub const TagWriteFailureReason = runtime.TagWriteFailureReason;
+pub const TagWriteGroupState = runtime.TagWriteGroupState;
+pub const TagWriteGroup = runtime.TagWriteGroup;
+pub const TagWriteGroupPage = runtime.TagWriteGroupPage;
+pub const TagWriteDiffSubject = runtime.TagWriteDiffSubject;
+pub const TagWriteDiff = runtime.TagWriteDiff;
+pub const TagWriteGroupDetail = runtime.TagWriteGroupDetail;
 pub const TagWriteDigest = internal.metadata.mutation.Digest;
 pub const PruneSummary = runtime.PruneSummary;
 

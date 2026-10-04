@@ -55,6 +55,7 @@ defer page.deinit();
   `ZoneStats`, ...), jobs (`ScanRequest`, `ReconcileRequest`, `JobSnapshot`,
   `ScanStats`, `QueuedJob`, `JobHistoryEntry`, `JobHistoryFilter`, ...), tag
   write-back (`TagWritePlan`, `TagWriteConflict`, `TagWriteDigest`, ...),
+  change history (`TagWriteGroup`, `TagWriteGroupDetail`, `TagWriteDiff`, ...),
   artwork
   (`ArtworkSubject`, `ArtworkResult`), browse loading (`BrowseRequest`,
   `BrowseResult`, `BrowsePayload`, ...), watching (`WatchOptions`,
@@ -277,6 +278,14 @@ defer page.deinit();
   plan, for the C ABI, which reads them beside the plan's view.
   `isMusicBrainzId` is the check `libraryEditTracks` applies to a
   recording ID, for a client to validate input before saving.
+- `libraryTagWriteGroupPage(library, allocator, limit, offset)` returns a
+  `TagWriteGroupPage` of finished tag writes, newest first: each
+  `TagWriteGroup`'s files, `TagWriteGroupState`, `can_undo` and `expired`.
+  `libraryTagWriteGroup(library, allocator, io, group_id)` returns a
+  `TagWriteGroupDetail`: one `TagWriteDiff` per changed tag of each file,
+  what an undo restores beside the file's value now, at most 512 rows, with
+  `more_files` and `field_count`. Both only read; see
+  [metadata.md](metadata.md#change-history).
 - The queue can be edited in place: `playerQueueJump` plays an entry now,
   `playerQueueInsertNext` queues Tracks after the current one,
   `playerQueueRemove` removes an entry, and `playerQueueMove(player, from,
