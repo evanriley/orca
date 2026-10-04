@@ -1137,31 +1137,51 @@ window controls: Ctrl+Q quits and the compositor closes the window. At its
 end sits only the library search, a 300 px field with a magnifier and a
 Ctrl K hint. Its placeholder names what the page's own search covers
 (`Search albums, artists or genres…`, `Search artists…`,
-`Search tracks, artists, albums…`, `Search playlists…`,
+`Search tracks, artists, albums…`, `Search genres…`, `Search playlists…`,
 `Search settings…`) and reads `Search your library…` everywhere else.
 Below the 900sp breakpoint the
 entry becomes a search button that does the same as Ctrl+K. Ctrl+F focuses
-the current page's own search (Albums, Artists, Playlists), and on any other
-page opens Tracks and focuses its search.
+the field, or opens Search where the header shows a search button. On Albums,
+Artists, Tracks, Genres and Playlists its text filters that page; elsewhere
+typing opens Search with the text. On every page, text starting with `›`, or
+`>` as a typed alias, opens the command palette with the rest. Either way the
+field is cleared and the page stays unfiltered.
 
-**Command palette.** Focusing the library search, or Ctrl+K, opens a
-popover up to 640 × 480 px under it, kept inside the window. Where the header
-shows a search button, or on Tracks and the Playlists overview, the popover
-carries its own entry. Typed
-text goes to `Runtime.librarySearch` (`orca-cli search`) 120 ms after the last
-keystroke, and the hits are shown in groups, Tracks, Albums, Artists,
-Playlists and Genres, in liborca's order within each; the frontend filters
-nothing itself. Text starting with `>` lists only commands; other text also
-lists, under Commands, every command whose words each query word begins: Go
-to each sidebar page, Open Settings › each tab, Scan library, Analyze
-library, Find duplicates, the three inspector toggles, Play/Pause, Next,
-Previous, Shuffle on/off, Repeat mode, Save queue as playlist, Add music
-folder…, Keyboard shortcuts and About Orca, each with its shortcut. Each command calls the handler its button or menu item uses. Empty
-text shows the last five opened results, kept in memory only. The first row
-is selected; Up and Down move, Enter opens (a track plays; an album, artist
-or playlist opens its page; a genre opens on Genres), Shift+Enter or
-Ctrl+Enter plays instead of opening (an artist still opens), and Escape closes. Below
-the header, the sidebar's pages open with a title block: the page name in
+**Search** covers the header and the pages below it, under the sidebar,
+with a frosted view. Its field (`Search your library…`) carries the hint
+`↑↓ to move · ↵ to open · Ctrl ↵ to play`, and a back button and Escape
+close it. Typed text goes to `Runtime.librarySearch` (`orca-cli search`)
+120 ms after the last keystroke, and the frontend filters nothing itself.
+Chips choose All, Artists, Albums, Tracks, Playlists or Genres; All asks for
+five Tracks and liborca's default caps for the rest, a single kind for up to
+50 of it. `SearchResults.top` is the Top result card, an Artist's portrait,
+a cover or a kind icon with `Artist · 3 albums · 41 tracks`, beside the Tracks
+(title, artist · album, length); then Albums as cover tiles
+(`artist · year`), Artists, and Playlists (`Playlist · contains 6 X tracks`,
+a mosaic of its covers) beside Genres (`X's main genre`). The row or tile
+of what is playing is marked. Up and Down move, Enter opens (a track
+plays; an album, artist or playlist opens its page; a genre opens on
+Genres), Ctrl+Enter or Shift+Enter plays instead (an artist still opens).
+
+**Command palette.** Ctrl+K, the compact header's search button or `›` in
+the library search opens a 640 px dialog over a dimmed window, with a `›`
+prefix, a `Type a command` field and an `esc` chip. Commands are listed in
+groups: Commands (Scan library, Scan for duplicates, Show Library Health,
+Measure loudness, Find matches, Verify recording IDs, Submit to AcoustID,
+Add music folder…, Search library, Show each sidebar page, the three
+inspector toggles, Play/Pause, Next, Previous, Shuffle on/off, Repeat mode,
+Save queue as playlist, Keyboard shortcuts and About Orca), Settings (rows
+such as `Scan settings · Settings › Library` and
+`Scrobbling · Settings › Listening`, which open that tab), and Recent: the
+last five results opened from Search, kept in memory only and listed
+whatever the query, as `Play X` or `Show X`. Each row shows its shortcut, and each command calls the handler
+its button or menu item uses. A command matches when each query word
+begins a word of its title, subtitle or keywords. The first row is selected;
+Up and Down move, Enter runs, Ctrl+Enter plays a Recent row, Escape closes,
+and Backspace in an empty field switches to Search. The footer reads
+`↑↓ Move ↵ Run Ctrl ↵ Play` and `Type without › to search your library`.
+
+Below the header, the sidebar's pages open with a title block: the page name in
 Newsreader, its count beneath it, and the page's own actions at the end
 of that row. Album, artist and playlist pages have their own heading instead.
 
@@ -1468,7 +1488,7 @@ read from and signaled from authoritative snapshots.
 `nix build` installs `share/applications/org.orca_music.Orca.desktop`, the
 application icon and the bundled symbolic icons, so the package can be installed like any desktop
 application. At startup `orca-gtk` adds `<exe dir>/../share/icons` to the icon
-theme's search path, so the heart icons resolve when `zig-out/bin/orca-gtk`
+theme's search path, so the bundled icons resolve when `zig-out/bin/orca-gtk`
 runs directly, without `XDG_DATA_DIRS`.
 
 The app has its own look rather than the system's: it forces libadwaita's dark
@@ -1490,14 +1510,14 @@ a window on the desktop. It is how the redesign is compared with
 zig build
 scripts/headless-gui.sh albums /tmp/albums.png
 scripts/headless-gui.sh artists /tmp/artists.png move:800,500 scroll:3
-scripts/headless-gui.sh tracks /tmp/palette.png key:ctrl+k type:jazz wait:500
+scripts/headless-gui.sh albums /tmp/palette.png key:ctrl+k type:scan wait:500
 ```
 
 The first argument is the page: `albums`, `artists`, `tracks`, `genres`,
 `folders`, `loved`, `playlists`, `now-playing`, `queue`, `health`, `matches`
 or `settings`. Albums is the start page and Settings opens with Ctrl+comma;
 every other page is reached through the command palette's `Go to` commands,
-in `show_page`, which follows the palette's command prefix and names. The
+in `show_page`, which opens the palette with Ctrl+K and types `>Show <page>`. The
 steps after the output path run in order:
 
 | Step | Effect |

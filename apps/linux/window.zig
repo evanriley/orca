@@ -177,6 +177,7 @@ fn applyFilter(self: *App, page: Page, text: []const u8) void {
 pub fn searchChanged(entry: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
     const text = std.mem.span(gtk.gtk_editable_get_text(gtk.cast(gtk.Editable, entry)));
+    if (palette.isCommandText(text)) return;
     const target = filterTarget(self);
     if (self.filtered_page) |page| {
         if (page != target) applyFilter(self, page, "");
@@ -200,7 +201,7 @@ pub fn clearSearch(self: *App) void {
 
 pub fn searchActivated(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = state(data);
-    if (filterTarget(self) != .tracks or self.palette.popover != null) return;
+    if (filterTarget(self) != .tracks or palette.active(self)) return;
     var ids = track_table.playableIds(&self.tracks, self.allocator);
     defer ids.deinit(self.allocator);
     if (ids.items.len != 0) transport.playIds(self, ids.items, 0);
@@ -986,7 +987,7 @@ pub fn applyTracksForm(self: *App) void {
 }
 
 pub fn focusSearch(self: *App) void {
-    if (self.header_compact) return palette.summon(self);
+    if (self.header_compact) return palette.summonSearch(self);
     const entry = self.top_bar.entry orelse return;
     _ = gtk.gtk_widget_grab_focus(entry);
 }
@@ -1292,8 +1293,12 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     adw.adw_overlay_split_view_set_enable_show_gesture(inspected_view, gtk.false_);
     const framed = adw.adw_toolbar_view_new();
     adw.adw_toolbar_view_add_top_bar(gtk.cast(adw.ToolbarView, framed), top_bar);
-    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), inspected);
-    const content = adw.adw_navigation_page_new(framed, Page.albums.title());
+    adw.adw_toolbar_view_set_content(gtk.cast(adw.ToolbarView, framed), pages);
+    self.top_bar.view = gtk.cast(adw.ToolbarView, framed);
+    gtk.gtk_widget_set_hexpand(framed, gtk.true_);
+    adw.adw_overlay_split_view_set_content(inspected_view, palette.wrapSearch(self, framed));
+    details.build(self, inspected_view);
+    const content = adw.adw_navigation_page_new(inspected, Page.albums.title());
     self.content_page = content;
     const sidebar = adw.adw_navigation_page_new(buildSidebar(self), "Orca");
 
@@ -1312,7 +1317,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     const overlay = adw.adw_toast_overlay_new();
     self.toasts = gtk.cast(adw.ToastOverlay, overlay);
     adw.adw_toast_overlay_set_child(self.toasts.?, root);
-    adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), overlay);
+    adw.adw_application_window_set_content(gtk.cast(adw.ApplicationWindow, window), palette.wrapWindow(self, overlay));
     overlayInspectorWhenCrowded(self, window);
     compactWhenNarrow(self, window);
     adaptWhenNarrow(self, window, split);

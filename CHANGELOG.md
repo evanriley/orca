@@ -239,6 +239,14 @@
   the source and its offset, such as `Synced · from 01 Dr. Whoever.lrc`
   and `Offset −0.2 s`. A track without a duration shows `–:––` and an
   empty seek bar.
+- **Search overlay and command palette redesign in orca-gtk.** Search is
+  a frosted view over the pages with All, Artists, Albums, Tracks,
+  Playlists and Genres chips, a Top result card beside the Tracks, album
+  tiles, Artists, and Playlists beside Genres; Enter opens and Ctrl+Enter
+  plays. The command palette is a centred dialog over a dimmed window with
+  Commands, Settings and Recent groups, each row's shortcut, and a footer
+  of keys. Text starting with `›`, or `>` as a typed alias, in the library
+  search opens the palette and no longer filters the page underneath.
 - **Queue page redesign in orca-gtk.** Queue follows the redesign in a
   980 px column: the remaining track count, the time left when the whole
   queue is read, and `from` the first entry's album under the title, with

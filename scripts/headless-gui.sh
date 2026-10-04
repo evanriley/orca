@@ -406,6 +406,20 @@ shot() {
     grim -o HEADLESS-1 "$1"
 }
 
+drag() {
+    local x1=$1 y1=$2 x2=$3 y2=$4 step steps=12
+    pointer_command move "$x1" "$y1"
+    sleep 0.2
+    pointer_command press
+    sleep 0.2
+    for step in $(seq 1 "$steps"); do
+        pointer_command move $((x1 + (x2 - x1) * step / steps)) $((y1 + (y2 - y1) * step / steps))
+        sleep 0.05
+    done
+    sleep 0.3
+    pointer_command release
+}
+
 run_step() {
     local step=$1 value
     value=${step#*:}
@@ -418,6 +432,7 @@ run_step() {
         wait:*) sleep "$(awk -v ms="$value" 'BEGIN { print ms / 1000 }')" ;;
         move:*) pointer_command move "${value%,*}" "${value#*,}" ;;
         click:*) pointer_command move "${value%,*}" "${value#*,}" && sleep 0.1 && pointer_command click ;;
+        dclick:*) pointer_command move "${value%,*}" "${value#*,}" && sleep 0.1 && pointer_command dclick ;;
         rclick:*) pointer_command move "${value%,*}" "${value#*,}" && sleep 0.1 && pointer_command rclick ;;
         scroll:*) pointer_command scroll "$value" ;;
         drag:*) drag ${value//,/ } ;;
@@ -426,8 +441,8 @@ run_step() {
 }
 
 # Every page but Albums and Settings is reached through the command palette's
-# "Go to" commands, so a change to the palette's command prefix or names must
-# be mirrored here.
+# "Show <page>" commands, typed after ">" (the palette's alias for "›"), so a
+# change to the palette's command prefix or names must be mirrored here.
 show_page() {
     local title
     case "$1" in

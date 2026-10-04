@@ -87,6 +87,7 @@ fn buildSearch(self: *App) *gtk.Widget {
     gtk.gtk_search_entry_set_placeholder_text(gtk.cast(gtk.SearchEntry, entry), "Search your library…");
     gtk.gtk_search_entry_set_search_delay(gtk.cast(gtk.SearchEntry, entry), app.search_delay_ms);
     if (gtk.gtk_widget_get_first_child(entry)) |icon| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, icon), "orca-search-symbolic");
+    if (gtk.gtk_widget_get_last_child(entry)) |icon| gtk.gtk_image_set_from_icon_name(gtk.cast(gtk.Image, icon), "orca-close-symbolic");
     _ = gtk.signalConnect(entry, "search-changed", gtk.callback(window.searchChanged), self);
     _ = gtk.signalConnect(entry, "activate", gtk.callback(window.searchActivated), self);
     const hint = gtk.gtk_label_new("Ctrl K");
@@ -243,6 +244,12 @@ fn showTrail(self: *App) void {
         page.title();
     if (bar.parent) |button| gtk.gtk_button_set_label(gtk.cast(gtk.Button, button), parent);
     if (bar.current) |label| gtk.gtk_label_set_text(label, adw.adw_navigation_page_get_title(pushed));
+}
+
+fn showEditorActions(self: *App) void {
+    const editing = smart_playlist_editor.isShown(self);
+    if (self.top_bar.editor_actions) |actions| gtk.gtk_widget_set_visible(actions, @intFromBool(editing));
+    if (self.top_bar.search) |search| gtk.gtk_widget_set_visible(gtk.cast(gtk.Widget, search), @intFromBool(!editing));
 }
 
 fn showSearch(self: *App) void {
