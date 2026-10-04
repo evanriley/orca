@@ -8305,3 +8305,242 @@ button.btn-secondary.artwork-review-skip {
   min-height: 36px;
   border-radius: 8px;
 }
+
+.page-title.metadata-issues-title {
+  padding: 12px 32px 0 32px;
+}
+
+.page-title .meta.metadata-issues-summary {
+  margin-top: -2px;
+  font-size: 13.5px;
+  color: @orca_text_2;
+}
+
+.metadata-issues-notice {
+  margin: 14px 32px 0 32px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_smart_card_edge;
+  color: @orca_text_2;
+}
+
+.metadata-issues-notice-text {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.metadata-issues-split {
+  margin: 18px 32px 24px 32px;
+  border-top: 1px solid @orca_border;
+}
+
+.metadata-issues-albums {
+  border-right: 1px solid @orca_border;
+}
+
+.metadata-issues-list {
+  padding: 12px 14px 12px 0;
+}
+
+.metadata-issues-empty {
+  padding: 12px 12px;
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.metadata-issues-section {
+  padding: 0 12px 4px 12px;
+}
+
+.metadata-issues-section-name {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: @orca_text_3;
+}
+
+button.metadata-issues-row {
+  padding: 8px 12px;
+  border-radius: 8px;
+  min-height: 0;
+  font-weight: 400;
+}
+
+button.metadata-issues-row:hover {
+  background-color: @orca_bg_raised_2;
+}
+
+button.metadata-issues-row.selected {
+  background-color: @orca_bg_selected;
+}
+
+.metadata-issues-row-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+.metadata-issues-row-subtitle {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.metadata-issues-detail {
+  padding: 14px 0 0 24px;
+}
+
+.metadata-issues-cover {
+  border-radius: 6px;
+}
+
+.metadata-issues-heading {
+  font-size: 18px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.metadata-issues-subtitle {
+  font-size: 13px;
+  color: @orca_text_2;
+}
+
+.metadata-issues-card {
+  padding: 16px 18px;
+  border-radius: 12px;
+  background-color: @orca_bg_raised;
+  box-shadow: inset 0 0 0 1px @orca_smart_card_edge;
+}
+
+.metadata-issues-card-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.metadata-issues-card-count {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.metadata-issues-card-text {
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+.metadata-issues-option {
+  padding: 10px 12px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+}
+
+.metadata-issues-option.selected {
+  background-color: @orca_dup_keep;
+  box-shadow: inset 0 0 0 1.5px @orca_accent_ring;
+}
+
+checkbutton.metadata-issues-radio {
+  padding: 0;
+  min-height: 0;
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+checkbutton.metadata-issues-radio radio,
+checkbutton.metadata-issues-radio radio:hover {
+  min-width: 12px;
+  min-height: 12px;
+  margin: 0 10px 0 1px;
+  padding: 0;
+  border: 1px solid @orca_text_3;
+  border-radius: 50%;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  -gtk-icon-source: none;
+}
+
+checkbutton.metadata-issues-radio radio:checked,
+checkbutton.metadata-issues-radio radio:checked:hover {
+  border: 1px solid @orca_accent;
+  background-color: @orca_accent;
+  box-shadow: inset 0 0 0 2.5px @orca_dup_keep;
+}
+
+.metadata-issues-support {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.metadata-issues-option.selected .metadata-issues-support {
+  color: @orca_accent_text;
+}
+
+entry.metadata-issues-custom {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+  outline: none;
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+entry.metadata-issues-custom > text > placeholder {
+  color: @orca_text_2;
+}
+
+.metadata-issues-head {
+  padding-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: @orca_text_3;
+}
+
+.metadata-issues-cell {
+  padding: 9px 12px 9px 0;
+  border-top: 1px solid @orca_smart_divider;
+  font-size: 13px;
+  color: @orca_text;
+}
+
+.metadata-issues-current {
+  color: @orca_diff;
+}
+
+.metadata-issues-current.none {
+  color: @orca_text_dim;
+}
+
+box.metadata-issues-cell {
+  padding-right: 0;
+}
+
+checkbutton.metadata-issues-check-box {
+  padding: 0;
+  min-height: 0;
+}
+
+checkbutton.metadata-issues-check-box check {
+  min-width: 14px;
+  min-height: 14px;
+  padding: 0;
+  margin: 0;
+  border-radius: 3px;
+  -gtk-icon-size: 11px;
+}
+
+checkbutton.metadata-issues-check-box check:checked {
+  background-color: @orca_accent;
+  color: @orca_on_accent;
+}
+
+.metadata-issues-note-text {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.metadata-issues-note image {
+  color: @orca_text_3;
+}

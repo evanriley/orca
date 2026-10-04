@@ -45,6 +45,7 @@ const first_run = @import("first_run.zig");
 const changes = @import("changes.zig");
 const audio_problems = @import("audio_problems.zig");
 const artwork_review = @import("artwork_review.zig");
+const metadata_issues = @import("metadata_issues.zig");
 const match_review = @import("match_review.zig");
 const offline = @import("offline.zig");
 
@@ -105,6 +106,7 @@ fn tick(self: *App) void {
         changes.tick(self);
         audio_problems.tick(self);
         artwork_review.tick(self);
+        metadata_issues.tick(self);
         matches.tick(self);
         match_review.tick(self);
     }
@@ -722,6 +724,7 @@ pub fn main(init: std.process.Init) !u8 {
     changes.shutdown(&self);
     audio_problems.shutdown(&self);
     artwork_review.shutdown(&self);
+    metadata_issues.shutdown(&self);
     matches.shutdown(&self);
     match_review.shutdown(&self);
     self.mpris.deinit();

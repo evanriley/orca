@@ -36,6 +36,7 @@ const audio_problems = @import("audio_problems.zig");
 const matches = @import("matches.zig");
 const match_review = @import("match_review.zig");
 const artwork_review = @import("artwork_review.zig");
+const metadata_issues = @import("metadata_issues.zig");
 const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
@@ -280,7 +281,7 @@ pub const TotalsRequest = union(enum) {
 
 pub const Failure = enum { none, unreported, reported };
 
-pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission, backfill };
+pub const Task = enum { scan, analysis, duplicates, tag_write, matching, submission, backfill, consistency };
 
 /// A Job this frontend started or retried, with what its end should report.
 pub const TrackedTask = struct {
@@ -478,6 +479,7 @@ pub const App = struct {
     duplicates: duplicates.State = .{},
     audio_problems: audio_problems.State = .{},
     artwork_review: artwork_review.State = .{},
+    metadata_issues: metadata_issues.State = .{},
     first_run: first_run.State = .{},
 
     matches: matches.State = .{},
@@ -1009,6 +1011,7 @@ pub const App = struct {
         self.matches.deinit();
         self.match_review.deinit(self.allocator);
         self.artwork_review.deinit(self.allocator);
+        self.metadata_issues.deinit(self.allocator);
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }

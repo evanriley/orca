@@ -24,6 +24,18 @@
   `apply-issue [--tracks=IDS]`, `skip-issue` and `jobs --start=consistency`;
   `health --summary` ends with `metadata_issues N`. The C ABI reports the
   Job kind as `ORCA_JOB_KIND_CONSISTENCY`.
+- **Metadata Issues page.** `orca-gtk`'s Library Health opens Metadata
+  Issues from the Mismatched metadata row, which now counts open
+  consistency issues. The page lists the albums by kind with what differs
+  (`Saba · 2018 vs 2018-04-05`, `Noname · gap at track 6`), and shows each
+  album's issues as cards: a choice of values with their support and a
+  custom value, or a table of Track, Current and Proposed with a checkbox
+  per Track. Apply to Orca changes the library only and Skip Album hides
+  the album until its values change; both run off the main thread. When
+  the metadata was never checked, or the library changed since, the page
+  offers Check Metadata, which runs the `consistency` Job in the activity
+  indicator. The Mismatched metadata row no longer counts the missing-tag
+  and track-number health kinds; `orca-cli health` still lists them.
 - **Matches and Match Review.** `orca-gtk`'s Matches page lists albums
   by their best MusicBrainz release in Confident, Needs Review and
   Unmatched tabs with their counts, each row with its candidate, confidence

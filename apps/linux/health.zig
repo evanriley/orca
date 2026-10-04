@@ -2,7 +2,8 @@
 //! rows, each with its count, what it means and the one action that resolves
 //! it. A row opens onto an explanation and, where the findings are per file,
 //! its files in bounded pages, each with the action liborca offers for it.
-//! Audio findings are reviewed on Audio Problems.
+//! Audio findings are reviewed on Audio Problems, and albums whose tracks
+//! disagree on Metadata Issues.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -18,6 +19,7 @@ const details = @import("details.zig");
 const window = @import("window.zig");
 const duplicates = @import("duplicates.zig");
 const audio_problems = @import("audio_problems.zig");
+const metadata_issues = @import("metadata_issues.zig");
 
 const App = app.App;
 
@@ -61,14 +63,14 @@ fn info(row: Row) RowInfo {
         .mismatched => .{
             .title = "Mismatched metadata",
             .subtitle = "Album artist, dates or numbering disagree",
-            .detail = "Mostly album artist and year",
-            .about = "These tracks are missing a title, artist, album or album artist, or their track numbers are missing or collide. Match finds them on MusicBrainz and Edit Tags corrects them by hand; both change the library, not the files.",
+            .detail = "",
+            .about = "The tracks of these albums disagree on album artist, date, track numbers or genre spelling, or the album differs from the MusicBrainz release it was matched to. Review proposes one value for each album; fixes change the library, not the files.",
             .icon = "orca-genres-symbolic",
             .tone = .caution,
             .action = "Review",
-            .tooltip = "Show the tracks, with Match and Edit Tags on each",
-            .unit = "track",
-            .kinds = &.{ .album_artist_anomaly, .missing_metadata, .missing_track_number, .technical_anomaly },
+            .tooltip = "Review the albums in Metadata Issues",
+            .unit = "issue",
+            .kinds = &.{},
         },
         .clipping => .{
             .title = "Possible clipping",
@@ -566,18 +568,12 @@ fn expandToggled(button: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     setExpanded(view, gtk.gtk_toggle_button_get_active(gtk.cast(gtk.ToggleButton, button)) != 0);
 }
 
-fn expand(view: *View) void {
-    const toggle = view.toggle orelse return;
-    gtk.gtk_toggle_button_set_active(gtk.cast(gtk.ToggleButton, toggle), gtk.true_);
-    _ = gtk.gtk_widget_grab_focus(toggle);
-}
-
 fn openDuplicates(self: *App) void {
     window.goTo(self, .duplicates);
 }
 
-fn openMismatched(view: *View) void {
-    expand(view);
+fn openMismatched(self: *App) void {
+    window.goTo(self, .metadata_issues);
 }
 
 fn openClipping(self: *App) void {
@@ -601,7 +597,7 @@ fn rowActionClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     const self = view.app orelse return;
     switch (view.row) {
         .duplicates => openDuplicates(self),
-        .mismatched => openMismatched(view),
+        .mismatched => openMismatched(self),
         .clipping => openClipping(self),
         .loudness => {
             self.health.then_duplicates = false;
@@ -877,9 +873,13 @@ fn showRow(self: *App, row: Row, count: u64, bytes: u64) void {
         defer gtk.g_free(size);
         gtk.gtk_label_set_text(detail, if (count == 0) "" else strings.format(&buffer, "Potentially {s}", .{std.mem.span(size)}).ptr);
     };
+    if (row == .mismatched) if (view.detail) |detail| {
+        gtk.gtk_label_set_text(detail, metadata_issues.mostlyText(self, &buffer).ptr);
+    };
     if (view.action) |action| {
         const busy = row == .loudness and jobs.active(self, .analysis);
-        gtk.gtk_widget_set_sensitive(action, if (count == 0 or busy) gtk.false_ else gtk.true_);
+        const open = count != 0 or (row == .mismatched and metadata_issues.needsCheck(self));
+        gtk.gtk_widget_set_sensitive(action, if (!open or busy) gtk.false_ else gtk.true_);
         if (row == .loudness) gtk.gtk_button_set_label(gtk.cast(gtk.Button, action), if (busy) "Analyzing" else "Analyze");
     }
     const header_row = gtk.gtk_widget_get_parent(view.toggle orelse return) orelse return;
@@ -894,6 +894,8 @@ fn showRow(self: *App, row: Row, count: u64, bytes: u64) void {
 
 pub fn reload(self: *App) void {
     duplicates.invalidate(self);
+    metadata_issues.invalidate(self);
+    metadata_issues.refreshStatus(self);
     if (!self.health.built) return;
     const scroller = self.health.scroller orelse return;
     const library = self.library orelse return;
@@ -918,12 +920,18 @@ pub fn reload(self: *App) void {
     counts.getPtr(.loudness).* += unanalysed;
     counts.set(.unmatched, matches.unmatchedCount(self) orelse 0);
     counts.set(.missing_files, self.runtime.libraryMissingFileCount(library) catch 0);
+    counts.set(.mismatched, metadata_issues.openCount(self));
 
     showOverview(self, library, counts);
     for (std.enums.values(Row)) |row| showRow(self, row, counts.get(row), duplicate_bytes);
 
     if (self.health.restore_scroll == null) _ = gtk.g_idle_add(restoreScroll, self);
     self.health.restore_scroll = scrolled;
+}
+
+pub fn showMismatched(self: *App) void {
+    if (!self.health.built) return;
+    showRow(self, .mismatched, metadata_issues.openCount(self), 0);
 }
 
 fn scrollerDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

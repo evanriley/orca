@@ -26,6 +26,7 @@ const changes = @import("changes.zig");
 const duplicates = @import("duplicates.zig");
 const audio_problems = @import("audio_problems.zig");
 const artwork_review = @import("artwork_review.zig");
+const metadata_issues = @import("metadata_issues.zig");
 const match_review = @import("match_review.zig");
 const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
@@ -325,6 +326,7 @@ pub const Page = enum(c_uint) {
     duplicates,
     audio_problems,
     artwork_review,
+    metadata_issues,
     match_review,
 
     pub fn name(self: Page) [*:0]const u8 {
@@ -347,6 +349,7 @@ pub const Page = enum(c_uint) {
             .duplicates => "duplicates",
             .audio_problems => "audio-problems",
             .artwork_review => "artwork-review",
+            .metadata_issues => "metadata-issues",
             .match_review => "match-review",
         };
     }
@@ -371,6 +374,7 @@ pub const Page = enum(c_uint) {
             .duplicates => "Duplicates",
             .audio_problems => "Audio Problems",
             .artwork_review => "Artwork Review",
+            .metadata_issues => "Metadata Issues",
             .match_review => "Match Review",
         };
     }
@@ -818,7 +822,7 @@ const nav_groups = [_]NavGroup{
 
 pub fn syncSidebarSelection(self: *App) void {
     const current: Page = switch (self.current_page) {
-        .duplicates, .audio_problems, .artwork_review => .health,
+        .duplicates, .audio_problems, .artwork_review, .metadata_issues => .health,
         .match_review => .matches,
         else => self.current_page,
     };
@@ -875,6 +879,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .duplicates) duplicates.shown(self);
     if (page == .audio_problems) audio_problems.shown(self);
     if (page == .artwork_review) artwork_review.shown(self);
+    if (page == .metadata_issues) metadata_issues.shown(self);
     if (page == .match_review) match_review.shown(self);
     offline.showBanner(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
@@ -1337,6 +1342,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, duplicates.build(self), Page.duplicates.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, audio_problems.build(self), Page.audio_problems.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, artwork_review.build(self), Page.artwork_review.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, metadata_issues.build(self), Page.metadata_issues.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, match_review.build(self), Page.match_review.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, first_run.buildScan(self), Page.scan.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());

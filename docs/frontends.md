@@ -1044,9 +1044,9 @@ The window is an `AdwNavigationSplitView`:
   more). Counts come from `libraryHealthSummary` unless noted:
   - Duplicates: `exact_duplicate` and `likely_duplicate`, "Potentially
     SIZE" from their redundant bytes; Review opens Duplicates.
-  - Mismatched metadata: `album_artist_anomaly`, `missing_metadata`,
-    `missing_track_number` and `technical_anomaly`; Review expands the row,
-    whose files offer Match and Edit Tags.
+  - Mismatched metadata: the open issues of the metadata consistency pass
+    (`libraryMetadataIssueStatus`); Review opens Metadata Issues. The row
+    stays open while the pass has never run or is out of date.
   - Possible clipping: `clipping`, each file as `0.0 dBFS · N samples`;
     Review opens Audio Problems at Possible clipping.
   - Missing loudness analysis: `missing_analysis` plus
@@ -1512,6 +1512,38 @@ Artwork runs `libraryUseCoverArtCandidate` for each chosen kind in turn,
 then moves to the next album; Skip moves on without changing anything.
 After either kind of change the album's tiles show the new cover and
 Library Health reloads.
+
+**Metadata Issues** is a page, opened by Review on Library Health's
+Mismatched metadata row or the command palette's Show Metadata Issues, under
+the trail Library Health › Metadata Issues; the sidebar keeps Health
+selected. Under its title, `N inconsistencies across N albums. Fixes apply
+to Orca's database; writing to files is a separate step.` comes from
+`libraryMetadataIssueStatus`. A notice shows while the consistency pass has
+never run or is running, the library changed since it ran, or an apply found
+an album changed since it was checked; its Check Metadata (Check Again once
+a pass has run) button starts the `consistency` Job and reads Checking…
+while it runs. A loader thread reads the status and
+`libraryMetadataIssuePage`, `app.page_size` at a time up to 2,048 issues,
+into a 270 px list grouped under ALBUM ARTIST, DATES, TRACK NUMBERING,
+GENRES & CAPITALIZATION and MUSICBRAINZ DIFFERS. Each row names the album
+(or the genre's spellings) and what differs: `ARTIST · 2 tracks differ`,
+`ARTIST · 1999 vs 2001`, `ARTIST · gap at track 4`, `3 spellings across 12
+tracks`. The selected album shows its cover, title and `ARTIST · YEAR · N
+tracks`, then a card per issue, titled by kind (`Album artist differs within
+the album`, `Dates differ within the album`, `Track numbers repeat or are
+missing`, `Genre spelled more than one way`, `Album title differs from
+MusicBrainz` and others) with `N of M tracks differ` and what the fix does.
+A choice between values lists each option with its support and, except for
+track numbers, a `Custom value…` entry; a missing date, a precision change,
+track numbering and an issue with one proposed value show a table of TRACK,
+CURRENT, PROPOSED and APPLY, whose ticks pick the Tracks it changes. Apply
+to Orca calls `libraryApplyMetadataIssues` on a thread for every card at
+once and toasts `Updated N tracks in Orca`; Skip Album calls
+`librarySkipMetadataIssue` for each of the album's issues, which hides them
+until its values change. A note under the buttons says files stay untouched
+until Write to Files. An issue out of date, an invalid date, a custom genre
+that is not a spelling of the issue's genre, or a custom track number is
+refused with a toast that says which.
 
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title an underlined tab bar switches between eight tabs;

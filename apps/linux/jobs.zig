@@ -18,6 +18,7 @@ const artists = @import("artists.zig");
 const artist_page = @import("artist_page.zig");
 const health = @import("health.zig");
 const matches = @import("matches.zig");
+const metadata_issues = @import("metadata_issues.zig");
 const details = @import("details.zig");
 const tags = @import("tags.zig");
 const playlists = @import("playlists.zig");
@@ -89,6 +90,7 @@ pub fn retry(self: *App, history_id: i64) void {
         .metadata_lookup => .matching,
         .acoustid_submission => .submission,
         .property_backfill => .backfill,
+        .consistency => .consistency,
         else => {
             activity.refresh(self);
             return self.requestTick();
@@ -188,6 +190,14 @@ pub fn startDuplicates(self: *App) void {
     const job = self.runtime.startLibraryDuplicateScan(library, .{}) catch |err|
         return self.toast(queueRefusal(err, "Could not look for duplicates"));
     begin(self, .{ .task = .duplicates, .job = job });
+}
+
+pub fn startConsistency(self: *App) void {
+    const library = self.library orelse return;
+    if (active(self, .consistency)) return;
+    const job = self.runtime.startLibraryConsistencyPass(library, .{}) catch |err|
+        return self.toast(queueRefusal(err, "Could not check the metadata"));
+    begin(self, .{ .task = .consistency, .job = job });
 }
 
 /// Searches MusicBrainz, and AcoustID by fingerprint when that is on, for
@@ -592,6 +602,18 @@ fn backfillFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.S
     if (repaired != 0) reloadLibraryViews(self);
 }
 
+fn consistencyFinished(self: *App, state_value: liborca.JobState, stats: ?liborca.ScanStats) void {
+    metadata_issues.checked(self, state_value == .succeeded);
+    if (state_value == .cancelled) return self.toast("Stopped");
+    if (state_value != .succeeded) return report(self, "Checking metadata failed");
+    var buffer: [96]u8 = undefined;
+    const found = if (stats) |value| value.changed else 0;
+    report(self, if (found == 0)
+        "No metadata issues found"
+    else
+        strings.printZ(&buffer, "Found {d} metadata {s}", .{ found, if (found == 1) "issue" else "issues" }) catch "Found metadata issues");
+}
+
 fn report(self: *App, text: [:0]const u8) void {
     self.toast(text);
     notify.taskEnded(self, text.ptr);
@@ -612,6 +634,7 @@ fn finished(
     if (task == .matching) return matchingFinished(self, tracked, state_value, match_stats, match_release);
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
     if (task == .backfill) return backfillFinished(self, state_value, stats);
+    if (task == .consistency) return consistencyFinished(self, state_value, stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
     if (state_value != .succeeded) return report(self, switch (task) {
@@ -619,7 +642,7 @@ fn finished(
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
         .tag_write => tagWriteFailedText(tag_write_failure),
-        .matching, .submission, .backfill => unreachable,
+        .matching, .submission, .backfill, .consistency => unreachable,
     });
     switch (task) {
         .scan => {
@@ -654,7 +677,7 @@ fn finished(
             _ = gtk.signalConnect(item, "button-clicked", gtk.callback(undoClicked), self);
             adw.adw_toast_overlay_add_toast(overlay, item);
         },
-        .matching, .submission, .backfill => unreachable,
+        .matching, .submission, .backfill, .consistency => unreachable,
     }
 }
 
@@ -733,7 +756,7 @@ fn tickTask(self: *App, index: usize) bool {
     const ended = untrack(self, index);
     finished(self, ended, snapshot.state, stats, match_stats, match_release, submission_stats, tag_write_failure);
     switch (task) {
-        .analysis, .duplicates, .matching, .backfill => health.reload(self),
+        .analysis, .duplicates, .matching, .backfill, .consistency => health.reload(self),
         .scan, .tag_write, .submission => health.updateBanner(self),
     }
     if (task == .analysis) health.analysisEnded(self, snapshot.state);
