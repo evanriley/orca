@@ -41,6 +41,7 @@
 @define-color orca_art_dim alpha(@orca_bg_window, 0.35);
 
 :root {
+  --orca-display-font: Newsreader, serif;
   --orca-elevation: 0 0 0 1px @orca_border_popover, 0 24px 60px @orca_shadow;
   --orca-art-shadow: 0 16px 40px @orca_shadow_soft;
   --orca-art-shadow-large: 0 28px 70px @orca_shadow_soft;
@@ -143,7 +144,7 @@ window {
 .album-title,
 .section-title,
 .section-heading {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-weight: 400;
   color: @orca_text;
 }
@@ -676,7 +677,7 @@ button.search-chip:checked {
 
 .search-top-name {
   margin-top: 16px;
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 34px;
   font-weight: 500;
   color: @orca_text;
@@ -1862,7 +1863,7 @@ button.tile-more {
 }
 
 .cover-initials {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 2.4em;
   font-weight: 500;
   color: @orca_text_3;
@@ -2001,7 +2002,7 @@ menubutton.facet-sort > button:checked {
 }
 
 .section-letter {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 24px;
   font-weight: 500;
   color: @orca_text;
@@ -2069,7 +2070,7 @@ button.section-hover-more {
   padding: 6px 12px;
   border-radius: 8px;
   background-color: @orca_bg_selected;
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 22px;
   color: @orca_text;
   opacity: 0;
@@ -2707,7 +2708,7 @@ button.now-show-lyrics:hover {
 }
 
 .now-empty .title {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 20px;
   font-weight: 400;
 }
@@ -3046,7 +3047,7 @@ button.now-full-album image {
 }
 
 .artist-hero-title {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 64px;
   font-weight: 400;
   letter-spacing: -0.01em;
@@ -3128,7 +3129,7 @@ button.now-full-album image {
 }
 
 .artist-section-title {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 26px;
   font-weight: 400;
   color: @orca_text;
@@ -3750,7 +3751,7 @@ row:selected .row-stars,
 }
 
 .loved-stat-number {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 30px;
   font-weight: 400;
   line-height: 1.2;
@@ -4334,7 +4335,7 @@ entry.smart-name {
   border-radius: 0;
   background-color: transparent;
   box-shadow: inset 0 -1px @orca_border_strong;
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 36px;
   color: @orca_text;
 }
@@ -4455,7 +4456,7 @@ button.smart-icon-button:hover {
 }
 
 .smart-preview-count {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 40px;
   color: @orca_text;
 }
@@ -4913,26 +4914,21 @@ list.boxed-list.match-list > row:hover {
 
 /* Settings */
 
-.settings-page-icon {
-  margin-right: 14px;
-  color: @orca_text_2;
-}
-
 .page-title .settings-title {
-  font-size: 36px;
+  font-size: 42px;
 }
 
 .page-title .meta.settings-subtitle {
-  font-size: 17px;
+  font-size: 14px;
   color: @orca_text_2;
 }
 
 .narrow .page-title .settings-title {
-  font-size: 26px;
+  font-size: 30px;
 }
 
 .narrow .page-title .meta.settings-subtitle {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .settings-body {
@@ -4944,32 +4940,32 @@ list.boxed-list.match-list > row:hover {
 }
 
 .settings-tabs {
-  margin-bottom: 20px;
-  padding: 4px;
-  border-radius: 999px;
-  background-color: @orca_bg_raised_2;
-  box-shadow: inset 0 0 0 1px @orca_border;
+  margin-bottom: 22px;
+  box-shadow: inset 0 -1px @orca_border;
 }
 
 .settings-tabs > button.settings-tab {
-  min-height: 40px;
+  min-height: 0;
   margin: 0;
-  padding: 0 12px;
-  border-radius: 999px;
+  padding: 6px 0 12px;
+  border-radius: 0;
   background: none;
   box-shadow: none;
   color: @orca_text_2;
-  font-weight: 600;
+  font-size: 13.5px;
+  font-weight: 400;
 }
 
 .settings-tabs > button.settings-tab:hover {
-  background-color: @orca_bg_hover;
+  background: none;
   color: @orca_text;
 }
 
 .settings-tabs > button.settings-tab:checked {
-  background-color: color-mix(in srgb, @orca_text 14%, transparent);
+  background: none;
+  box-shadow: inset 0 -2px @orca_accent;
   color: @orca_text;
+  font-weight: 500;
 }
 
 .settings-tab {
@@ -4984,7 +4980,7 @@ list.boxed-list.match-list > row:hover {
 }
 
 .settings-card-icon {
-  color: @orca_accent_text;
+  color: @orca_text_2;
 }
 
 .settings-card-title {
@@ -4994,6 +4990,131 @@ list.boxed-list.match-list > row:hover {
 
 .settings-card .meta {
   font-size: 14px;
+}
+
+.settings-card.settings-flat {
+  padding: 18px 20px 6px;
+}
+
+.settings-flat .settings-card-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.settings-flat .meta {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.settings-card.settings-flat list.boxed-list {
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.settings-card.settings-flat list.boxed-list > row {
+  min-height: 0;
+  padding: 12px 0;
+  border-top: 1px solid @orca_divider;
+  border-bottom: none;
+  border-radius: 0;
+  background: none;
+}
+
+.settings-card.settings-flat list.boxed-list > row:hover,
+.settings-card.settings-flat list.boxed-list > row:active {
+  background: none;
+}
+
+.settings-card.settings-flat list.boxed-list > row > box.header,
+.settings-card.settings-flat row.expander > box > list > row > box.header {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-flat row .title {
+  font-size: 13.5px;
+}
+
+.settings-flat row .subtitle {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.settings-card.settings-flat row.expander > box > list,
+.settings-card.settings-flat row.expander > box > list > row,
+.settings-card.settings-flat row.expander > box > list > row:hover {
+  background: none;
+}
+
+.settings-card.settings-flat row.expander list.nested > row {
+  min-height: 0;
+  padding: 8px 0;
+  border-top: 1px solid @orca_divider;
+  background: none;
+}
+
+.settings-card.settings-flat row.expander list.nested > row > box.header {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-card.settings-flat switch {
+  padding: 3px;
+}
+
+.settings-card.settings-flat switch > slider {
+  min-width: 14px;
+  min-height: 14px;
+}
+
+.settings-segmented {
+  padding: 2px;
+  border-radius: 9px;
+  background-color: @orca_bg_raised_2;
+}
+
+.settings-segmented > button {
+  min-height: 28px;
+  margin: 0;
+  padding: 0 12px;
+  border-radius: 7px;
+  background: none;
+  box-shadow: none;
+  color: @orca_text_2;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.settings-segmented > button:hover {
+  color: @orca_text;
+}
+
+.settings-segmented > button:checked {
+  background-color: @orca_bg_chip_on;
+  color: @orca_text;
+}
+
+dropdown.settings-select > button {
+  min-height: 30px;
+  min-width: 96px;
+  padding: 0 10px;
+  font-weight: 400;
+  border-radius: 8px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 13px;
+}
+
+.settings-key {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background-color: @orca_bg_raised_2;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  font-size: 12px;
+  color: @orca_text_2;
 }
 
 .settings-side-card .settings-card-title {
@@ -5256,12 +5377,51 @@ button.peq-add {
   opacity: 0;
 }
 
+.artwork-expressive .art-backdrop-picture {
+  opacity: 0.75;
+}
+
+.artwork-expressive .album-backdrop .art-backdrop-picture {
+  opacity: 0.375;
+}
+
+.artwork-expressive .playlist-backdrop .art-backdrop-picture {
+  opacity: 0.275;
+}
+
+window.display-interface {
+  --orca-display-font: Geist, sans-serif;
+}
+
+window.proportional-numerals columnview .tnum,
+window.proportional-numerals columnview .numeric,
+window.proportional-numerals listview .tnum,
+window.proportional-numerals listview .numeric {
+  font-variant-numeric: normal;
+  font-feature-settings: normal;
+}
+
 .density-compact .queue-row {
   min-height: 36px;
 }
 
 .density-compact listview.album-list > row {
   min-height: 36px;
+}
+
+.density-compact .album-grid > child {
+  padding: 0 6px 14px 6px;
+}
+
+.density-compact .navigation-sidebar > row > box {
+  min-height: 26px;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.density-compact button.nav-item {
+  padding-top: 4px;
+  padding-bottom: 3px;
 }
 
 /* Tracks page */
@@ -5477,7 +5637,7 @@ list.genre-index-list > row:selected {
 
 .genre-hero-name {
   margin-top: 16px;
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 56px;
   font-weight: 400;
   letter-spacing: -0.01em;
@@ -5524,7 +5684,7 @@ list.genre-artists > row {
 }
 
 .genre-artist-photo .cover-initials {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 14px;
 }
 
@@ -6305,7 +6465,7 @@ button.activity-footer-button:disabled {
 }
 
 .first-run-title {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 52px;
   font-weight: 400;
   line-height: 1.05;
@@ -6513,7 +6673,7 @@ progressbar.scan-bar > trough > progress {
 }
 
 .first-run-number {
-  font-family: Newsreader, serif;
+  font-family: var(--orca-display-font);
   font-size: 34px;
   color: @orca_text;
   font-feature-settings: "tnum";

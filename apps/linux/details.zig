@@ -430,7 +430,15 @@ pub fn selectionChanged(model: ?*anyopaque, _: c_uint, _: c_uint, data: ?*anyopa
         .playlist => |playlist| playlist.selection,
         .ids, .album, .artist, .playing => return,
     };
-    if (@as(?*anyopaque, selection) == model) update(panel);
+    if (@as(?*anyopaque, selection) != model) return;
+    openOnSelection(panel, track_table.firstSelected(selection) != null);
+    update(panel);
+}
+
+fn openOnSelection(panel: *Panel, selected: bool) void {
+    const self = panel.self;
+    if (!selected or self.appearance.inspector != .open_on_selection) return;
+    if (shownMode(self) == .hidden) showSidebar(self, .details);
 }
 
 /// Shows `track_id`, chosen in the page whose Tracks are `ids`, while the
@@ -442,6 +450,7 @@ pub fn choose(self: *App, ids: []const i64, track_id: i64) void {
     panel.chosen = track_id;
     panel.artist_pinned = false;
     if (choicePage(panel)) |page| rememberChoice(panel, page, track_id);
+    openOnSelection(panel, true);
     update(panel);
 }
 

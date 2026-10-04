@@ -603,6 +603,7 @@ fn request(self: *App, offset: u64) liborca.ReleaseQuery {
     return .{
         .text = self.album_search.value,
         .sort = self.album_sort,
+        .name_order = self.general.name_order,
         .added_after = self.album_added.after,
         .album_artist_id = if (scope != .appearances) artist_id else null,
         .appearing_artist_id = if (scope == .appearances) artist_id else null,

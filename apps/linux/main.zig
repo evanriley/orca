@@ -154,6 +154,12 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     health.reload(self);
     matches.invalidate(self);
     if (self.library == null) self.toast("The library could not be opened");
+    window.showPage(self, switch (self.general.start_page) {
+        .albums => .albums,
+        .artists => .artists,
+        .tracks => .tracks,
+        .now_playing => .now_playing,
+    });
     first_run.startIfEmpty(self);
     window.refreshCounts(self);
     window.focusSidebar(self);

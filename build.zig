@@ -311,7 +311,8 @@ pub fn build(b: *std.Build) void {
             "orca-device-tv-symbolic",    "orca-device-bluetooth-symbolic", "orca-refresh-symbolic",
             "orca-gain-symbolic",         "orca-engine-symbolic",           "orca-system-symbolic",
             "orca-info-symbolic",         "orca-undo-symbolic",             "orca-alert-symbolic",
-            "orca-pen-symbolic",
+            "orca-pen-symbolic",          "orca-type-symbolic",             "orca-wave-symbolic",
+            "orca-clock-symbolic",
         }) |icon| {
             b.installFile(
                 b.fmt("apps/linux/data/{s}.svg", .{icon}),

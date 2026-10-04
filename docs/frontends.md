@@ -1335,13 +1335,29 @@ Retry. Its footer has Pause all (or Resume all) and Change history,
 insensitive for now.
 
 **Settings** is a page, opened from the sidebar, the command palette or
-Ctrl+,. Under its title a pill tab bar switches between seven tabs; it is one
-Tab stop, Left and Right move between tabs, and it shows icons only when the
-page is narrower than 1040sp or the window narrower than 900sp. Each tab is a
-scrolling set of cards in two columns, which stack into one when the page is
-narrower than 1260sp or the window narrower than 900sp:
+Ctrl+,. Under its title an underlined tab bar switches between eight tabs;
+it is one Tab stop, Left and Right move between tabs, and it shows icons
+only when the page is narrower than 1040sp or the window narrower than
+900sp. Each tab is a scrolling set of cards in two columns, which stack into
+one when the page is narrower than 1040sp or the window narrower than 900sp.
+Every choice is saved in `$XDG_CONFIG_HOME/orca/settings.ini` and applied
+again at launch.
 
-- General: Artist Info, with Fetch artist info (`[library] fetch_artist_info`).
+- General, saved in `[general]`:
+  - Startup: Open Orca at login (`launch_at_login`) writes
+    `$XDG_CONFIG_HOME/autostart/org.orca_music.Orca.desktop`, or removes it;
+    when the file cannot be changed the switch turns back and a toast says
+    so. Default page (`start_page=albums|artists|tracks|now_playing`) is the
+    page the window opens on.
+  - Notifications, sent through `GNotification`: Track changes
+    (`notify_tracks`, off by default) shows the title and artist when the
+    playing track changes; Library tasks (`notify_tasks`, on by default)
+    repeats the toast a finished scan, analysis, duplicate search, tag write
+    or failed Job shows.
+  - Language & Sorting: Sort artist names (`artist_name_order=
+    ignore_articles|as_written`) sets `name_order` on every `ArtistQuery` and
+    `ReleaseQuery` the window makes, and reloads Artists and Albums.
+  - Keyboard: Shortcuts expands to the window's shortcuts.
 - Library: Music Folders, a list of roots that scrolls past six, each with a
   menu of Rescan (a scan of that root), Show in Files and Remove, then Add
   Folder, Rescan All Folders and Watch folders for changes; Maintenance with
@@ -1355,25 +1371,44 @@ narrower than 1260sp or the window narrower than 900sp:
   Crossfeed and Audio Information. Output Device re-reads the outputs each
   time the tab is shown, as the player bar's picker does when it opens, and
   both lists stay in step.
-- Listening: ListenBrainz, and Fetch lyrics from LRCLIB, saved as
-  `[lyrics] fetch=true|false`.
-- Appearance: presentation only, saved in `[appearance]`. Artwork influence
-  (`artwork=subtle|off`; off hides the cover tint behind album pages), Album
-  grid size (saved as `[view] album_cover_size` with the Albums page's Cover
-  size, 400 ms after either slider stops, on leaving Settings, or on
-  quitting, whichever comes first; the older `[appearance] album_tile` is read
-  when it is absent), Density (`density=comfortable|compact`; compact shortens queue and
-  album list rows), Inspector open by default (`inspector_open`, opens the
-  details panel at launch), Reduce animation (`reduce_animation`, which
-  turns off `gtk-enable-animations`) and Show counts in sidebar
-  (`sidebar_counts`, off by default).
+- Listening: ListenBrainz; Fetch lyrics from LRCLIB, saved as
+  `[lyrics] fetch=true|false`; Artist Info, with Fetch artist info
+  (`[library] fetch_artist_info`).
+- Appearance: presentation only, saved in `[appearance]`.
+  - Color: Artwork influence (`artwork=off|subtle|expressive`) sets how
+    strongly the cover tints the backdrop behind album, artist, playlist and
+    Now Playing pages: none, 60% or 75%.
+  - Type: Display typeface (`display_typeface=newsreader|interface`) sets the
+    font of album, artist, playlist and Now Playing titles, Newsreader or
+    Geist. Tabular numerals in tables (`tabular_numerals`, on by default)
+    turns the `tnum` feature on or off in list and column views.
+  - Layout: Density (`density=comfortable|compact`; compact shortens queue,
+    album list and sidebar rows and narrows the album grid's gaps),
+    Album grid size (saved as `[view] album_cover_size` with the Albums
+    page's Cover size, 400 ms after either slider stops, on leaving Settings,
+    or on quitting, whichever comes first; the older `[appearance]
+    album_tile` is read when it is absent), Show counts in sidebar
+    (`sidebar_counts`, on by default) and Inspector
+    (`inspector=open_on_selection|remember|closed`). Open on selection
+    starts with the inspector closed and opens Details when a track is
+    selected; Remember last state reopens the panel that was open at quit;
+    Always closed starts closed and opens only on Ctrl+I. An older
+    `inspector_open=true` is read as Remember last state.
+  - Motion: Reduce motion (`reduce_animation`) turns off
+    `gtk-enable-animations`, which stops sliding panels and transitions.
 - Advanced: a full-width Data sources card, one row per
   `Runtime.providerSources()` entry (what it supplies, its licence as a link
   when it has a licence page, and a link to the site); the MusicBrainz genres
   row shows only while Fill missing genres from MusicBrainz is on, and follows
-  that switch at once. Below it, the library database path with Copy, About
-  (Orca's version and the audio backend) and Copy diagnostics, which copies
-  Orca's version, the library's totals and the signal path as text.
+  that switch at once. Below it, the library database path with Copy.
+- About: Orca's version and the audio backend, and Copy diagnostics, which
+  copies Orca's version, the library's totals and the signal path as text.
+
+The search field filters Settings while the page is shown: it hides every
+row whose title and subtitle do not contain the text, ignoring case, every
+card left with no row unless its own title matches, and every tab left with
+no card, and moves to the first tab with a match. Clearing the field or
+leaving the page shows them all again.
 
 The tabs are built each time the page is shown and destroyed when it is left;
 the open tab is kept for the session.

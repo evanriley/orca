@@ -56,6 +56,12 @@ pub extern fn adw_preferences_group_set_title(group: *PreferencesGroup, title: [
 pub extern fn adw_preferences_group_set_description(group: *PreferencesGroup, description: ?[*:0]const u8) void;
 pub extern fn adw_preferences_row_set_title(row: *PreferencesRow, title: [*:0]const u8) void;
 pub extern fn adw_preferences_row_set_use_markup(row: *PreferencesRow, use_markup: gtk.gboolean) void;
+pub extern fn adw_preferences_row_get_type() gtk.GType;
+pub extern fn adw_preferences_row_get_title(row: *PreferencesRow) [*:0]const u8;
+pub extern fn adw_action_row_get_type() gtk.GType;
+pub extern fn adw_action_row_get_subtitle(row: *ActionRow) ?[*:0]const u8;
+pub extern fn adw_expander_row_get_type() gtk.GType;
+pub extern fn adw_expander_row_get_subtitle(row: *ExpanderRow) [*:0]const u8;
 pub extern fn adw_action_row_new() *gtk.Widget;
 pub extern fn adw_action_row_add_suffix(row: *ActionRow, widget: *gtk.Widget) void;
 pub extern fn adw_action_row_add_prefix(row: *ActionRow, widget: *gtk.Widget) void;

@@ -11,6 +11,7 @@ const gtk = @import("gtk.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const mpris = @import("mpris.zig");
+const notify = @import("notify.zig");
 const window = @import("window.zig");
 const art = @import("art.zig");
 const nowplaying = @import("nowplaying.zig");
@@ -1172,6 +1173,7 @@ pub fn tick(self: *App) void {
         }
         if (self.now_playing_title) |label| gtk.gtk_label_set_text(label, title.ptr);
         if (self.now_playing_detail) |label| gtk.gtk_label_set_text(label, detail.ptr);
+        if (status.track_id != null) notify.trackChanged(self, title.ptr, detail.ptr);
         refreshCover(self, status.track_id);
         window.markPlaying(self, status.track_id);
         albums.markPlaying(self, status.track_id);

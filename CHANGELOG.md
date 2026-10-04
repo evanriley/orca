@@ -15,9 +15,19 @@
   scan. The C ABI adds `orca_library_track_details_v3` with an
   `orca_track_details_text_view` and `ORCA_METADATA_FIELD_COMPOSER` (14) and
   `ORCA_METADATA_FIELD_COMMENT` (15).
-- **Sort artist names as written.** `ArtistQuery.name_order` sorts Artists
-  by their name as written rather than by the stored sort key that drops a
-  leading "The", "A" or "An", and `orca-cli artists --sort-as-written`
+- **Settings General and Appearance.** `orca-gtk`'s Settings page has eight
+  tabs (General, Library, Playback, Sound, Listening, Appearance, Advanced
+  and About) under an underlined tab bar, and Search settings… filters rows
+  across all of them. General holds Open Orca at login, which writes or
+  removes `org.orca_music.Orca.desktop` in `$XDG_CONFIG_HOME/autostart`;
+  Default page; Track changes and Library tasks notifications sent through
+  `GNotification`; Sort artist names; and the Shortcuts table. Appearance
+  holds Artwork influence (Off, Subtle or Expressive), Display typeface,
+  Tabular numerals in tables, Density, Album grid size, Show counts in
+  sidebar (now on by default), Inspector (Open on selection, Remember last
+  state or Always closed) and Reduce motion. Each is saved in
+  `settings.ini` and applied at launch. `ArtistQuery.name_order` sorts
+  Artists by their name as written, and `orca-cli artists --sort-as-written`
   reaches it.
 - **First Run and Scan pages.** `orca-gtk` opens a four-step First Run on
   a library with no roots: folders with an audio file count each, Watch for

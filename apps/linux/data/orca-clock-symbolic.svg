@@ -1,0 +1,7 @@
+<!-- CC0-1.0: public domain dedication, https://creativecommons.org/publicdomain/zero/1.0/ -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g fill="#000">
+    <path fill-rule="evenodd" d="M 12,2.25 A 9.75,9.75 0 1 1 12,21.75 A 9.75,9.75 0 1 1 12,2.25 Z M 12,3.75 A 8.25,8.25 0 1 0 12,20.25 A 8.25,8.25 0 1 0 12,3.75 Z"/>
+    <path d="M 11.25,7 H 12.75 V 11.69 L 15.53,14.47 L 14.47,15.53 L 11.25,12.31 Z"/>
+  </g>
+</svg>

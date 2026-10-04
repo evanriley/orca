@@ -239,6 +239,7 @@ fn request(self: *App, offset: u32) liborca.ArtistQuery {
         .filter = self.artist_list_filter.value,
         .role = self.artist_info.role,
         .sort = self.artist_sort,
+        .name_order = self.general.name_order,
         .limit = app.page_size,
         .offset = offset,
     };

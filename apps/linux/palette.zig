@@ -238,7 +238,10 @@ const commands = [_]Command{
     .{ .title = "Save queue as playlist", .subtitle = "Playback", .icon = "orca-playlists-symbolic", .run = queue.askSaveName },
     .{ .title = "Keyboard shortcuts", .subtitle = "Help", .shortcut = "Ctrl ?", .icon = "orca-more-symbolic", .run = activateAction("app.shortcuts") },
     .{ .title = "About Orca", .subtitle = "Help", .icon = "orca-more-symbolic", .run = activateAction("app.about") },
-    setting("Artist info", .general, "General", "wikipedia biography photos", "avatar-default-symbolic"),
+    setting("Startup", .general, "General", "login autostart default page", "orca-play-symbolic"),
+    setting("Notifications", .general, "General", "track changes library tasks", "orca-info-symbolic"),
+    setting("Language & Sorting", .general, "General", "sort artist names articles", "orca-genres-symbolic"),
+    setting("Keyboard", .general, "General", "shortcuts keys", "input-keyboard-symbolic"),
     setting("Scan settings", .library, "Library", "music folders watch", "folder-symbolic"),
     setting("Maintenance", .library, "Library", "", "folder-symbolic"),
     setting("AcoustID", .library, "Library", "fingerprints submit", "auth-fingerprint-symbolic"),
@@ -250,12 +253,15 @@ const commands = [_]Command{
     setting("Audio information", .sound, "Sound", "signal path", "orca-signal-symbolic"),
     setting("Scrobbling", .listening, "Listening", "listenbrainz", "audio-headphones-symbolic"),
     setting("Lyrics", .listening, "Listening", "lrclib", "media-view-subtitles-symbolic"),
-    setting("Look", .appearance, "Appearance", "theme", "preferences-desktop-appearance-symbolic"),
-    setting("Behaviour", .appearance, "Appearance", "behavior", "preferences-desktop-appearance-symbolic"),
+    setting("Artist info", .listening, "Listening", "wikipedia biography photos", "avatar-default-symbolic"),
+    setting("Color", .appearance, "Appearance", "artwork influence", "orca-image-symbolic"),
+    setting("Type", .appearance, "Appearance", "typeface font numerals", "orca-type-symbolic"),
+    setting("Layout", .appearance, "Appearance", "density grid counts inspector", "orca-grid-symbolic"),
+    setting("Motion", .appearance, "Appearance", "reduce animation", "orca-pulse-symbolic"),
     setting("Data sources", .advanced, "Advanced", "providers", "emblem-system-symbolic"),
     setting("Library database", .advanced, "Advanced", "", "emblem-system-symbolic"),
-    setting("About", .advanced, "Advanced", "version", "emblem-system-symbolic"),
-    setting("Diagnostics", .advanced, "Advanced", "logs", "emblem-system-symbolic"),
+    setting("About", .about, "About", "version", "emblem-system-symbolic"),
+    setting("Diagnostics", .about, "About", "logs", "emblem-system-symbolic"),
 };
 
 fn state(data: ?*anyopaque) *App {
@@ -329,7 +335,7 @@ pub fn attach(self: *App, entry: *gtk.Widget) void {
 fn barTakesText(self: *App, text: []const u8) bool {
     if (isCommandText(text)) return true;
     if (text.len == 0) return false;
-    return window.filterTarget(self) == null and self.current_page != .settings;
+    return window.filterTarget(self) == null;
 }
 
 fn barTyped(editable: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {

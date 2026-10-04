@@ -40,7 +40,10 @@ pub fn applyChoices(self: *app.App) void {
     if (self.window) |window| {
         const widget = gtk.cast(gtk.Widget, window);
         setClass(widget, "artwork-off", choices.artwork == .off);
+        setClass(widget, "artwork-expressive", choices.artwork == .expressive);
         setClass(widget, "density-compact", choices.density == .compact);
+        setClass(widget, "display-interface", choices.display_typeface == .interface);
+        setClass(widget, "proportional-numerals", !choices.tabular_numerals);
     }
     const settings = gtk.gtk_settings_get_default() orelse return;
     if (choices.reduce_animation)

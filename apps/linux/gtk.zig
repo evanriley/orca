@@ -40,6 +40,7 @@ pub const Widget = opaque {};
 pub const Window = opaque {};
 pub const Application = opaque {};
 pub const GApplication = opaque {};
+pub const GNotification = opaque {};
 pub const GAction = opaque {};
 pub const GSimpleAction = opaque {};
 pub const GActionMap = opaque {};
@@ -433,6 +434,9 @@ pub extern fn gtk_widget_insert_action_group(widget: *Widget, name: [*:0]const u
 pub extern fn g_application_run(application: *GApplication, argc: c_int, argv: ?[*]const ?[*:0]const u8) c_int;
 pub extern fn g_application_quit(application: *GApplication) void;
 pub extern fn g_application_activate(application: *GApplication) void;
+pub extern fn g_application_send_notification(application: *GApplication, id: ?[*:0]const u8, notification: *GNotification) void;
+pub extern fn g_notification_new(title: [*:0]const u8) *GNotification;
+pub extern fn g_notification_set_body(notification: *GNotification, body: ?[*:0]const u8) void;
 
 pub extern fn g_file_get_path(file: *GFile) ?[*:0]u8;
 pub extern fn g_file_new_for_path(path: [*:0]const u8) *GFile;

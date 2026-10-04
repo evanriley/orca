@@ -161,6 +161,7 @@ fn filterTracks(self: *App, text: []const u8) void {
 pub fn filterTarget(self: *App) ?Page {
     return switch (self.current_page) {
         .albums, .artists, .tracks, .genres, .folders, .playlists, .loved => |page| if (pushedPage(self, page) == null) page else null,
+        .settings => .settings,
         else => null,
     };
 }
@@ -174,6 +175,7 @@ fn applyFilter(self: *App, page: Page, text: []const u8) void {
         .folders => folders.setFilter(self, text),
         .playlists => playlists.setFilter(self, text),
         .loved => loved.setFilter(self, text),
+        .settings => preferences.setFilter(self, text),
         else => {},
     }
 }

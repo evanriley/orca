@@ -146,13 +146,13 @@ pub const SoundControls = struct {
     graphic: ?*gtk.Widget = null,
 };
 
-pub const SettingsTab = enum { general, library, playback, sound, listening, appearance, advanced };
+pub const SettingsTab = enum { general, library, playback, sound, listening, appearance, advanced, about };
 
 pub const settings_tab_count = @typeInfo(SettingsTab).@"enum".fields.len;
 
 pub const AudioFact = enum { output_format, sample_rate, bit_depth, channels };
 
-pub const SettingsFit = enum { wide, stacked, icons };
+pub const SettingsFit = enum { wide, icons };
 
 pub const SettingsPage = struct {
     host: ?*gtk.Box = null,
@@ -161,6 +161,9 @@ pub const SettingsPage = struct {
     tab_buttons: [settings_tab_count]?*gtk.ToggleButton = @splat(null),
     tab_labels: [settings_tab_count]?*gtk.Widget = @splat(null),
     columns: [settings_tab_count]?*gtk.Widget = @splat(null),
+    contents: [settings_tab_count]?*gtk.Widget = @splat(null),
+    filter_hidden: [settings_filter_capacity]*gtk.Widget = undefined,
+    filter_hidden_len: usize = 0,
     folder_slot: ?*gtk.Box = null,
     measure_row: ?*gtk.Widget = null,
     measure_button: ?*gtk.Widget = null,
@@ -179,20 +182,36 @@ pub const SettingsPage = struct {
     /// Set while the tab buttons and device lists are brought in line with
     /// state that has already changed, so their signals do not re-enter.
     syncing: bool = false,
-    tab: SettingsTab = .library,
+    tab: SettingsTab = .general,
     fit: SettingsFit = .wide,
 };
 
-pub const ArtworkInfluence = enum { off, subtle };
+pub const settings_filter_capacity = 512;
+
+pub const ArtworkInfluence = enum { off, subtle, expressive };
 pub const Density = enum { comfortable, compact };
+pub const InspectorMode = enum { open_on_selection, remember, closed };
+pub const DisplayTypeface = enum { newsreader, interface };
 
 pub const Appearance = struct {
     artwork: ArtworkInfluence = .subtle,
     album_grid_tile: c_int = default_album_tile_pixels,
     density: Density = .comfortable,
-    inspector_open: bool = false,
+    inspector: InspectorMode = .open_on_selection,
     reduce_animation: bool = false,
-    sidebar_counts: bool = false,
+    sidebar_counts: bool = true,
+    display_typeface: DisplayTypeface = .newsreader,
+    tabular_numerals: bool = true,
+};
+
+pub const StartPage = enum { albums, artists, tracks, now_playing };
+
+pub const General = struct {
+    launch_at_login: bool = false,
+    start_page: StartPage = .albums,
+    notify_tracks: bool = false,
+    notify_tasks: bool = true,
+    name_order: liborca.NameOrder = .ignore_articles,
 };
 
 pub const default_album_tile_pixels: c_int = 132;
@@ -453,6 +472,7 @@ pub const App = struct {
 
     settings_page: SettingsPage = .{},
     appearance: Appearance = .{},
+    general: General = .{},
 
     /// Files Measure Loudness decodes at once; null takes liborca's default.
     analysis_threads: ?u16 = null,
@@ -639,6 +659,7 @@ pub const App = struct {
     pub fn artistRequest(self: *App, offset: u32) liborca.ArtistQuery {
         return .{
             .filter = self.artist_filter.value,
+            .name_order = self.general.name_order,
             .limit = page_size,
             .offset = offset,
         };
@@ -651,6 +672,7 @@ pub const App = struct {
     pub fn releaseRequest(self: *App, offset: u32) liborca.ReleaseQuery {
         return .{
             .album_artist_id = self.browse.artist_id,
+            .name_order = self.general.name_order,
             .limit = page_size,
             .offset = offset,
         };

@@ -258,6 +258,7 @@ pub fn load(self: *App) void {
         if (std.mem.eql(u8, std.mem.span(value), "true")) self.sidebar_page = .signal_path;
     }
     loadAppearance(self, keys);
+    loadGeneral(self, keys);
     if (getString(keys, "view", "album_sort")) |value| {
         defer gtk.g_free(value);
         if (std.meta.stringToEnum(liborca.ReleaseSort, std.mem.span(value))) |sort| self.album_sort = sort;
@@ -341,9 +342,20 @@ fn loadAppearance(self: *App, keys: *gtk.GKeyFile) void {
         defer gtk.g_free(value);
         if (std.meta.stringToEnum(app.Density, std.mem.span(value))) |density| appearance.density = density;
     }
-    if (getString(keys, "appearance", "inspector_open")) |value| {
+    if (getString(keys, "appearance", "inspector")) |value| {
         defer gtk.g_free(value);
-        appearance.inspector_open = std.mem.eql(u8, std.mem.span(value), "true");
+        if (std.meta.stringToEnum(app.InspectorMode, std.mem.span(value))) |mode| appearance.inspector = mode;
+    } else if (getString(keys, "appearance", "inspector_open")) |value| {
+        defer gtk.g_free(value);
+        if (std.mem.eql(u8, std.mem.span(value), "true")) appearance.inspector = .remember;
+    }
+    if (getString(keys, "appearance", "display_typeface")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(app.DisplayTypeface, std.mem.span(value))) |typeface| appearance.display_typeface = typeface;
+    }
+    if (getString(keys, "appearance", "tabular_numerals")) |value| {
+        defer gtk.g_free(value);
+        appearance.tabular_numerals = std.mem.eql(u8, std.mem.span(value), "true");
     }
     if (getString(keys, "appearance", "reduce_animation")) |value| {
         defer gtk.g_free(value);
@@ -353,7 +365,31 @@ fn loadAppearance(self: *App, keys: *gtk.GKeyFile) void {
         defer gtk.g_free(value);
         appearance.sidebar_counts = std.mem.eql(u8, std.mem.span(value), "true");
     }
-    if (appearance.inspector_open and self.sidebar_page == .hidden) self.sidebar_page = .details;
+    if (appearance.inspector != .remember) self.sidebar_page = .hidden;
+}
+
+fn loadGeneral(self: *App, keys: *gtk.GKeyFile) void {
+    const general = &self.general;
+    if (getString(keys, "general", "launch_at_login")) |value| {
+        defer gtk.g_free(value);
+        general.launch_at_login = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "general", "start_page")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(app.StartPage, std.mem.span(value))) |page| general.start_page = page;
+    }
+    if (getString(keys, "general", "notify_tracks")) |value| {
+        defer gtk.g_free(value);
+        general.notify_tracks = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "general", "notify_tasks")) |value| {
+        defer gtk.g_free(value);
+        general.notify_tasks = std.mem.eql(u8, std.mem.span(value), "true");
+    }
+    if (getString(keys, "general", "artist_name_order")) |value| {
+        defer gtk.g_free(value);
+        if (std.meta.stringToEnum(liborca.NameOrder, std.mem.span(value))) |order| general.name_order = order;
+    }
 }
 
 fn parseVolume(text: []const u8) ?f32 {
@@ -415,10 +451,18 @@ pub fn save(self: *App) void {
         var genre_buffer: [24]u8 = undefined;
         gtk.g_key_file_set_string(keys, "view", "genre", strings.format(&genre_buffer, "{d}", .{genre}).ptr);
     }
+    const general = self.general;
+    gtk.g_key_file_set_string(keys, "general", "launch_at_login", if (general.launch_at_login) "true" else "false");
+    gtk.g_key_file_set_string(keys, "general", "start_page", @tagName(general.start_page));
+    gtk.g_key_file_set_string(keys, "general", "notify_tracks", if (general.notify_tracks) "true" else "false");
+    gtk.g_key_file_set_string(keys, "general", "notify_tasks", if (general.notify_tasks) "true" else "false");
+    gtk.g_key_file_set_string(keys, "general", "artist_name_order", @tagName(general.name_order));
     const appearance = self.appearance;
     gtk.g_key_file_set_string(keys, "appearance", "artwork", @tagName(appearance.artwork));
     gtk.g_key_file_set_string(keys, "appearance", "density", @tagName(appearance.density));
-    gtk.g_key_file_set_string(keys, "appearance", "inspector_open", if (appearance.inspector_open) "true" else "false");
+    gtk.g_key_file_set_string(keys, "appearance", "inspector", @tagName(appearance.inspector));
+    gtk.g_key_file_set_string(keys, "appearance", "display_typeface", @tagName(appearance.display_typeface));
+    gtk.g_key_file_set_string(keys, "appearance", "tabular_numerals", if (appearance.tabular_numerals) "true" else "false");
     gtk.g_key_file_set_string(keys, "appearance", "reduce_animation", if (appearance.reduce_animation) "true" else "false");
     gtk.g_key_file_set_string(keys, "appearance", "sidebar_counts", if (appearance.sidebar_counts) "true" else "false");
     var album_columns_buffer: [64]u8 = undefined;

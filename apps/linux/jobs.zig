@@ -9,6 +9,7 @@ const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
 const adw = @import("adw.zig");
 const activity = @import("activity.zig");
+const notify = @import("notify.zig");
 const strings = @import("strings.zig");
 const app = @import("app.zig");
 const browse = @import("browse.zig");
@@ -513,6 +514,11 @@ fn submissionFinished(self: *App, state_value: liborca.JobState, stats: ?liborca
     }) catch "Submitted to AcoustID");
 }
 
+fn report(self: *App, text: [:0]const u8) void {
+    self.toast(text);
+    notify.taskEnded(self, text.ptr);
+}
+
 fn finished(
     self: *App,
     tracked: app.TrackedTask,
@@ -529,7 +535,7 @@ fn finished(
     if (task == .submission) return submissionFinished(self, state_value, submission_stats);
     var buffer: [160]u8 = undefined;
     if (state_value == .cancelled) return self.toast("Stopped");
-    if (state_value != .succeeded) return self.toast(switch (task) {
+    if (state_value != .succeeded) return report(self, switch (task) {
         .scan => "The scan failed",
         .analysis => "Measuring stopped with an error",
         .duplicates => "Looking for duplicates failed",
@@ -540,7 +546,7 @@ fn finished(
         .scan => {
             reloadLibraryViews(self);
             const found = if (stats) |value| value.changed else 0;
-            self.toast(if (found == 0)
+            report(self, if (found == 0)
                 "Your library is up to date"
             else
                 strings.printZ(&buffer, "{d} new or changed files added", .{found}) catch "Scan complete");
@@ -548,11 +554,11 @@ fn finished(
         .analysis => {
             preferences.refreshLibrary(self);
             const measured = if (stats) |value| value.changed + value.unchanged else 0;
-            self.toast(strings.printZ(&buffer, "Analysed {d} {s}", .{ measured, if (measured == 1) "file" else "files" }) catch "Analysed");
+            report(self, strings.printZ(&buffer, "Analysed {d} {s}", .{ measured, if (measured == 1) "file" else "files" }) catch "Analysed");
         },
         .duplicates => {
             const found = if (stats) |value| value.tracks_written + value.releases_written else 0;
-            self.toast(if (found == 0)
+            report(self, if (found == 0)
                 "No duplicates found"
             else
                 strings.printZ(&buffer, "Found {d} duplicate files", .{found}) catch "Found duplicates");
@@ -562,6 +568,7 @@ fn finished(
             const written = if (stats) |value| value.changed else 0;
             const overlay = self.toasts orelse return;
             const text = strings.printZ(&buffer, "Wrote tags to {d} {s}", .{ written, if (written == 1) "file" else "files" }) catch "Wrote tags";
+            notify.taskEnded(self, text.ptr);
             const item = adw.adw_toast_new(text.ptr);
             adw.adw_toast_set_timeout(item, 8);
             adw.adw_toast_set_button_label(item, "Undo");

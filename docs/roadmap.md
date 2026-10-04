@@ -272,7 +272,7 @@ more identification sources.
   MusicBrainz and AcoustID matching, fingerprints and AcoustID submission.
 - `orca-gtk`: a dark libadwaita window with Songs, Albums, Artists, Genres,
   Folders, Playlists, Loved, Queue, Now Playing, Library Health and Matches
-  pages, a Settings page of seven tabs, a command palette, an inspector with
+  pages, a Settings page of eight tabs, a command palette, an inspector with
   track, lyrics and signal path modes, context menus, tag editing with
   write-back and undo (Write Tags to Files on track and album menus), a
   player bar with cover art, format, output menu and volume, job progress, a
