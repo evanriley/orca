@@ -15,6 +15,8 @@
 #   wait:MS      sleeps MS milliseconds
 #   shot:PATH    saves a screenshot to PATH at once, without waiting to settle
 #   tree:PATH    saves sway's window tree, with window titles, to PATH as JSON
+#   log:PATH     copies orca-gtk's output so far to PATH; set ORCA_GTK_DEBUG
+#                (art, frames) to add its debug reports
 #
 # The library is ORCA_LIBRARY, else fixtures/library/design.db, built by
 # scripts/design-fixture.sh when missing; the app gets a copy. Output is
@@ -26,7 +28,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '5,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    sed -n '5,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
     exit 2
 }
 
@@ -54,7 +56,7 @@ case "$page" in
 esac
 for step in "${steps[@]}"; do
     case "$step" in
-        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | rclick:*,* | shot:?*.png | tree:?*) ;;
+        key:?* | type:?* | wait:[0-9]* | scroll:* | move:*,* | click:*,* | rclick:*,* | shot:?*.png | tree:?* | log:?*) ;;
         *) fail "unknown step '$step'; see the usage in $0" ;;
     esac
 done
@@ -346,7 +348,7 @@ ORCA_LIBRARY="$runtime/library/library.db" ORCA_OUTPUT_DEVICE=$device PIPEWIRE_R
     ORCA_LRCLIB_URL=http://127.0.0.1:9 ORCA_WIKIDATA_URL=http://127.0.0.1:9 \
     ORCA_WIKIMEDIA_URL=http://127.0.0.1:9 ORCA_WIKIPEDIA_URL=http://127.0.0.1:9 \
     ORCA_LISTENBRAINZ_LABS_URL=http://127.0.0.1:9 \
-    GSK_RENDERER=cairo GDK_BACKEND=wayland GDK_DEBUG=no-portals GTK_A11Y=none NO_AT_BRIDGE=1 \
+    ORCA_GTK_DEBUG=${ORCA_GTK_DEBUG:-} GSK_RENDERER=cairo GDK_BACKEND=wayland GDK_DEBUG=no-portals GTK_A11Y=none NO_AT_BRIDGE=1 \
     launch orca-gtk "$orca_gtk"
 orca_pid=${started_pids[-1]}
 
@@ -397,6 +399,7 @@ run_step() {
     case "$step" in
         shot:*) shot "$value" ;;
         tree:*) swaymsg -t get_tree >"$value" ;;
+        log:*) cp "$runtime/orca-gtk.log" "$value" ;;
         key:*) press "$value" ;;
         type:*) type_text "$value" ;;
         wait:*) sleep "$(awk -v ms="$value" 'BEGIN { print ms / 1000 }')" ;;

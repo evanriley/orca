@@ -27,7 +27,6 @@ const TrackObject = track_model.TrackObject;
 
 const list_cover_pixels: c_int = 32;
 const hero_pixels: c_int = 260;
-const backdrop_height: c_int = 440;
 const number_column_pixels: c_int = 28;
 const duration_column_pixels: c_int = 44;
 const format_column_pixels: c_int = 96;
@@ -1695,44 +1694,6 @@ pub fn shutdown(self: *App) void {
     info.pending_count = 0;
 }
 
-fn coverPainted(picture: ?*anyopaque, _: ?*anyopaque, image: ?*anyopaque) callconv(.c) void {
-    const paintable = gtk.gtk_image_get_paintable(gtk.cast(gtk.Image, image.?));
-    const backdrop = if (paintable) |texture| art.blurredBackdrop(std.heap.smp_allocator, gtk.cast(gtk.GdkTexture, texture)) else null;
-    defer if (backdrop) |texture| gtk.g_object_unref(texture);
-    gtk.gtk_picture_set_paintable(gtk.cast(gtk.Picture, picture.?), if (backdrop) |texture| gtk.cast(gtk.GdkPaintable, texture) else null);
-}
-
-pub fn newBackdrop(cover: *gtk.Widget) *gtk.Widget {
-    const band = adw.adw_clamp_new();
-    gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, band), gtk.ORIENTATION_VERTICAL);
-    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, band), backdrop_height);
-    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, band), backdrop_height);
-    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, band), newBackdropLayers(cover));
-    gtk.gtk_widget_set_valign(band, gtk.ALIGN_START);
-    gtk.gtk_widget_set_can_target(band, gtk.false_);
-    return band;
-}
-
-pub fn newBackdropLayers(cover: *gtk.Widget) *gtk.Widget {
-    const picture = gtk.gtk_picture_new();
-    gtk.gtk_picture_set_content_fit(gtk.cast(gtk.Picture, picture), gtk.CONTENT_FIT_COVER);
-    gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
-    gtk.gtk_widget_add_css_class(picture, "album-backdrop-art");
-    if (gtk.gtk_stack_get_child_by_name(gtk.cast(gtk.Stack, cover), "art")) |image| {
-        _ = gtk.g_signal_connect_object(image, "notify::paintable", gtk.callback(coverPainted), picture, gtk.CONNECT_SWAPPED);
-        coverPainted(picture, null, image);
-    }
-    const fade = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
-    gtk.gtk_widget_add_css_class(fade, "album-backdrop-fade");
-    const layers = gtk.gtk_overlay_new();
-    gtk.gtk_widget_add_css_class(layers, "album-backdrop");
-    gtk.gtk_widget_set_overflow(layers, gtk.OVERFLOW_HIDDEN);
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), picture);
-    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), fade);
-    gtk.gtk_widget_set_can_target(layers, gtk.false_);
-    return layers;
-}
-
 pub fn pill(label: [*:0]const u8, icon: [*:0]const u8, suggested: bool) *gtk.Widget {
     const button = gtk.gtk_button_new();
     const content = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 8);
@@ -1916,7 +1877,9 @@ fn showAlbum(self: *App, navigation: *adw.NavigationView, release_id: i64, into:
     adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, clamp), 1040);
     adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
     const layers = gtk.gtk_overlay_new();
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), newBackdrop(cover));
+    const backdrop = art.newBackdrop(self, .header);
+    art.showBackdrop(self, backdrop, &.{cover});
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), clamp);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), clamp, gtk.true_);
     const scroller = gtk.gtk_scrolled_window_new();

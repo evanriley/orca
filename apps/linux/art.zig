@@ -14,6 +14,7 @@
 const std = @import("std");
 const liborca = @import("liborca");
 const gtk = @import("gtk.zig");
+const adw = @import("adw.zig");
 const app = @import("app.zig");
 
 const App = app.App;
@@ -35,7 +36,7 @@ pub const Size = enum(u8) {
     }
 };
 
-pub const Kind = enum(u8) { track, release, artist, related };
+pub const Kind = enum(u8) { track, release, artist, related, backdrop };
 
 pub const Key = struct {
     kind: Kind,
@@ -67,42 +68,55 @@ pub const Key = struct {
             .track => .{ .track = self.id },
             .release => .{ .release = self.id },
             .artist => .{ .artist = self.id },
-            .related => null,
+            .related, .backdrop => null,
         };
     }
 };
 
-const backdrop_pixels: usize = 64;
-const backdrop_blur_radius: usize = 2;
+pub const BackdropVariant = enum { header, full };
+
+const backdrop_long_edge: usize = 128;
+const backdrop_blur_radius: usize = 8;
 const backdrop_blur_passes: usize = 3;
-const backdrop_brightness_percent: u32 = 50;
+const backdrop_saturation_percent: i32 = 125;
+const backdrop_header_pixels: c_int = 600;
+const max_backdrop_sources = 4;
 
-/// A small, blurred copy of `texture` to draw scaled up behind a page. Under
-/// the cairo renderer a CSS blur of the full cover costs a third of a core
-/// while scrolling.
-pub fn blurredBackdrop(allocator: std.mem.Allocator, texture: *gtk.GdkTexture) ?*gtk.GdkTexture {
-    const source_width: usize = @intCast(@max(gtk.gdk_texture_get_width(texture), 0));
-    const source_height: usize = @intCast(@max(gtk.gdk_texture_get_height(texture), 0));
-    if (source_width == 0 or source_height == 0) return null;
-    const source = allocator.alloc(u8, source_width * source_height * 4) catch return null;
-    defer allocator.free(source);
-    gtk.gdk_texture_download(texture, source.ptr, source_width * 4);
-
-    const longest = @max(source_width, source_height);
-    const width = @max(1, source_width * backdrop_pixels / longest);
-    const height = @max(1, source_height * backdrop_pixels / longest);
+/// A small, blurred copy of `sources` to draw scaled up behind a page: one
+/// cover, or a two by two mosaic of up to four. Under the cairo renderer a
+/// CSS blur of the full cover costs a third of a core while scrolling, so the
+/// blur is done once, here, on a GTask thread.
+fn blurredBackdrop(allocator: std.mem.Allocator, sources: []const *gtk.GdkTexture) ?*gtk.GdkTexture {
+    if (sources.len == 0) return null;
+    var width = backdrop_long_edge;
+    var height = backdrop_long_edge;
+    if (sources.len == 1) {
+        const source_width: usize = @intCast(@max(gtk.gdk_texture_get_width(sources[0]), 0));
+        const source_height: usize = @intCast(@max(gtk.gdk_texture_get_height(sources[0]), 0));
+        if (source_width == 0 or source_height == 0) return null;
+        const longest = @max(source_width, source_height);
+        width = @max(1, source_width * backdrop_long_edge / longest);
+        height = @max(1, source_height * backdrop_long_edge / longest);
+    }
     const pixels = allocator.alloc([4]u8, width * height) catch return null;
     defer allocator.free(pixels);
+    @memset(pixels, .{ 0, 0, 0, 255 });
     const scratch = allocator.alloc([4]u8, width * height) catch return null;
     defer allocator.free(scratch);
-    downscale(source, source_width, source_height, pixels, width, height);
+    if (sources.len == 1) {
+        downscaleTexture(allocator, sources[0], pixels, width, width, height) catch return null;
+    } else {
+        const half = backdrop_long_edge / 2;
+        for (0..max_backdrop_sources) |cell| {
+            const origin = (cell / 2) * half * width + (cell % 2) * half;
+            downscaleTexture(allocator, sources[cell % sources.len], pixels[origin..], width, half, half) catch return null;
+        }
+    }
     for (0..backdrop_blur_passes) |_| {
         boxBlur(pixels, scratch, width, height, 1, width);
         boxBlur(scratch, pixels, height, width, width, 1);
     }
-    for (pixels) |*pixel| {
-        for (pixel[0..3]) |*channel| channel.* = @intCast(@as(u32, channel.*) * backdrop_brightness_percent / 100);
-    }
+    saturate(pixels);
 
     const bytes = gtk.g_bytes_new(pixels.ptr, pixels.len * 4);
     defer gtk.g_bytes_unref(bytes);
@@ -115,7 +129,17 @@ pub fn blurredBackdrop(allocator: std.mem.Allocator, texture: *gtk.GdkTexture) ?
     );
 }
 
-fn downscale(source: []const u8, source_width: usize, source_height: usize, target: [][4]u8, width: usize, height: usize) void {
+fn downscaleTexture(allocator: std.mem.Allocator, texture: *gtk.GdkTexture, target: [][4]u8, stride: usize, width: usize, height: usize) !void {
+    const source_width: usize = @intCast(@max(gtk.gdk_texture_get_width(texture), 0));
+    const source_height: usize = @intCast(@max(gtk.gdk_texture_get_height(texture), 0));
+    if (source_width == 0 or source_height == 0) return;
+    const source = try allocator.alloc(u8, source_width * source_height * 4);
+    defer allocator.free(source);
+    gtk.gdk_texture_download(texture, source.ptr, source_width * 4);
+    downscale(source, source_width, source_height, target, stride, width, height);
+}
+
+fn downscale(source: []const u8, source_width: usize, source_height: usize, target: [][4]u8, stride: usize, width: usize, height: usize) void {
     for (0..height) |y| {
         const top = y * source_height / height;
         const bottom = @max(top + 1, (y + 1) * source_height / height);
@@ -130,7 +154,7 @@ fn downscale(source: []const u8, source_width: usize, source_height: usize, targ
                 }
             }
             const count: u32 = @intCast((bottom - top) * (right - left));
-            for (&target[y * width + x], sums) |*channel, sum| channel.* = @intCast(sum / count);
+            for (&target[y * stride + x], sums) |*channel, sum| channel.* = @intCast(sum / count);
         }
     }
 }
@@ -146,6 +170,18 @@ fn boxBlur(source: []const [4]u8, target: [][4]u8, length: usize, lines: usize, 
                 for (&sums, source[start + sample * step]) |*sum, channel| sum.* += channel;
             }
             for (&target[start + position * step], sums) |*channel, sum| channel.* = @intCast(sum / window);
+        }
+    }
+}
+
+/// Pixels are premultiplied B, G, R, A.
+fn saturate(pixels: [][4]u8) void {
+    for (pixels) |*pixel| {
+        const luma: i32 = (@as(i32, pixel[2]) * 54 + @as(i32, pixel[1]) * 183 + @as(i32, pixel[0]) * 19) >> 8;
+        const alpha: i32 = pixel[3];
+        for (pixel[0..3]) |*channel| {
+            const boosted = luma + @divTrunc((@as(i32, channel.*) - luma) * backdrop_saturation_percent, 100);
+            channel.* = @intCast(std.math.clamp(boosted, 0, alpha));
         }
     }
 }
@@ -172,6 +208,19 @@ const max_entries = 600;
 /// Decodes in flight at once. Each holds a whole encoded cover in memory.
 const max_decodes = 4;
 
+const Backdrop = struct {
+    stack: *gtk.Stack,
+    sources: [max_backdrop_sources]*gtk.Stack = undefined,
+    source_count: usize = 0,
+};
+
+const Blur = struct {
+    key: Key,
+    sources: [max_backdrop_sources]*gtk.GdkTexture = undefined,
+    source_count: usize,
+    texture: ?*gtk.GdkTexture = null,
+};
+
 const Decode = struct {
     key: Key,
     image: liborca.EmbeddedImage,
@@ -189,6 +238,11 @@ pub const Cache = struct {
     waiting: std.ArrayList(Decode) = .empty,
     decoding: std.AutoHashMapUnmanaged(Key, void) = .empty,
     bindings: std.ArrayList(Binding) = .empty,
+    backdrops: std.ArrayList(Backdrop) = .empty,
+    blurring: std.AutoHashMapUnmanaged(Key, void) = .empty,
+    backdrop_idle: c_uint = 0,
+    blur_count: u64 = 0,
+    debug: bool = false,
     clock: u64 = 0,
 
     pub fn deinit(self: *Cache, allocator: std.mem.Allocator) void {
@@ -202,6 +256,8 @@ pub const Cache = struct {
         self.waiting.deinit(allocator);
         self.decoding.deinit(allocator);
         self.bindings.deinit(allocator);
+        self.backdrops.deinit(allocator);
+        self.blurring.deinit(allocator);
     }
 };
 
@@ -276,7 +332,12 @@ pub fn setInitials(stack_widget: *gtk.Widget, title: []const u8) void {
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, label), @ptrCast(&buffer));
 }
 
-fn paint(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
+fn paint(self: *App, stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
+    paintStack(stack, texture);
+    sourcePainted(self, stack);
+}
+
+fn paintStack(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
     if (gtk.g_object_get_data(stack, picture_key)) |picture| {
         gtk.gtk_picture_set_paintable(gtk.cast(gtk.Picture, picture), if (texture) |present| gtk.cast(gtk.GdkPaintable, present) else null);
         gtk.gtk_stack_set_visible_child_name(stack, if (texture != null) "art" else "placeholder");
@@ -297,7 +358,7 @@ fn paint(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
 pub fn show(self: *App, stack_widget: *gtk.Widget, key: Key) void {
     forget(self, stack_widget);
     const binding: Binding = .{ .stack = gtk.cast(gtk.Stack, stack_widget), .key = key };
-    self.art.bindings.append(self.allocator, binding) catch return paint(binding.stack, null);
+    self.art.bindings.append(self.allocator, binding) catch return paint(self, binding.stack, null);
     paintBinding(self, binding);
 }
 
@@ -323,7 +384,7 @@ pub fn forget(self: *App, stack_widget: *gtk.Widget) void {
 
 pub fn clear(self: *App, stack_widget: *gtk.Widget) void {
     forget(self, stack_widget);
-    paint(gtk.cast(gtk.Stack, stack_widget), null);
+    paint(self, gtk.cast(gtk.Stack, stack_widget), null);
 }
 
 /// Drops a Release's cached covers and asks again for each one a widget
@@ -335,10 +396,20 @@ pub fn refreshRelease(self: *App, release_id: i64) void {
     var keys = self.art.entries.keyIterator();
     while (keys.next()) |key| if (key.kind == .track) tracks.append(self.allocator, key.*) catch break;
     for (tracks.items) |key| refresh(self, key);
+    refreshBackdrops(self);
 }
 
 pub fn refreshArtist(self: *App, artist_id: i64) void {
     inline for (comptime std.enums.values(Size)) |size| refresh(self, Key.artist(artist_id, size));
+    refreshBackdrops(self);
+}
+
+fn refreshBackdrops(self: *App) void {
+    var backdrops: std.ArrayList(Key) = .empty;
+    defer backdrops.deinit(self.allocator);
+    var keys = self.art.entries.keyIterator();
+    while (keys.next()) |key| if (key.kind == .backdrop) backdrops.append(self.allocator, key.*) catch break;
+    for (backdrops.items) |key| refresh(self, key);
 }
 
 fn refresh(self: *App, key: Key) void {
@@ -362,7 +433,7 @@ pub fn showArtist(self: *App, stack_widget: *gtk.Widget, artist_id: i64, photo: 
         .fallback = if (fallback_release) |release_id| Key.release(release_id, size) else null,
         .request_key = photo != .absent,
     };
-    cache.bindings.append(self.allocator, binding) catch return paint(binding.stack, null);
+    cache.bindings.append(self.allocator, binding) catch return paint(self, binding.stack, null);
     paintBinding(self, binding);
 }
 
@@ -370,17 +441,17 @@ fn paintBinding(self: *App, binding: Binding) void {
     const cache = &self.art;
     if (cache.entries.getPtr(binding.key)) |entry| {
         touch(cache, entry);
-        if (entry.texture) |texture| return paint(binding.stack, texture);
+        if (entry.texture) |texture| return paint(self, binding.stack, texture);
     } else if (binding.request_key) {
-        paint(binding.stack, null);
+        paint(self, binding.stack, null);
         return want(self, binding.key);
     }
-    const fallback = binding.fallback orelse return paint(binding.stack, null);
+    const fallback = binding.fallback orelse return paint(self, binding.stack, null);
     if (cache.entries.getPtr(fallback)) |entry| {
         touch(cache, entry);
-        return paint(binding.stack, entry.texture);
+        return paint(self, binding.stack, entry.texture);
     }
-    paint(binding.stack, null);
+    paint(self, binding.stack, null);
     want(self, fallback);
 }
 
@@ -396,6 +467,178 @@ pub fn showRelated(self: *App, stack_widget: *gtk.Widget, mbid: []const u8, size
     return entry.texture != null;
 }
 
+const backdrop_data_key = "orca-backdrop";
+
+pub fn newBackdrop(self: *App, variant: BackdropVariant) *gtk.Widget {
+    const stack = gtk.gtk_stack_new();
+    _ = gtk.signalConnect(stack, "destroy", gtk.callback(backdropDestroyed), self);
+    const picture = gtk.gtk_picture_new();
+    gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
+    gtk.gtk_picture_set_content_fit(gtk.cast(gtk.Picture, picture), gtk.CONTENT_FIT_COVER);
+    gtk.gtk_widget_add_css_class(picture, "art-backdrop-picture");
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0), "placeholder");
+    _ = gtk.gtk_stack_add_named(gtk.cast(gtk.Stack, stack), picture, "art");
+    gtk.gtk_stack_set_transition_type(gtk.cast(gtk.Stack, stack), gtk.STACK_TRANSITION_CROSSFADE);
+    gtk.g_object_set_data(stack, picture_key, picture);
+    self.art.backdrops.append(self.allocator, .{ .stack = gtk.cast(gtk.Stack, stack) }) catch {};
+
+    const shade = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 0);
+    gtk.gtk_widget_add_css_class(shade, "art-backdrop-shade");
+    const layers = gtk.gtk_overlay_new();
+    gtk.gtk_widget_add_css_class(layers, "art-backdrop");
+    gtk.gtk_widget_add_css_class(layers, switch (variant) {
+        .header => "art-backdrop-header",
+        .full => "art-backdrop-full",
+    });
+    gtk.gtk_widget_set_overflow(layers, gtk.OVERFLOW_HIDDEN);
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), stack);
+    gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), shade);
+    gtk.gtk_widget_set_can_target(layers, gtk.false_);
+    if (variant == .full) {
+        gtk.g_object_set_data(layers, backdrop_data_key, stack);
+        return layers;
+    }
+    const band = adw.adw_clamp_new();
+    gtk.gtk_orientable_set_orientation(gtk.cast(gtk.Orientable, band), gtk.ORIENTATION_VERTICAL);
+    adw.adw_clamp_set_maximum_size(gtk.cast(adw.Clamp, band), backdrop_header_pixels);
+    adw.adw_clamp_set_tightening_threshold(gtk.cast(adw.Clamp, band), backdrop_header_pixels);
+    adw.adw_clamp_set_child(gtk.cast(adw.Clamp, band), layers);
+    gtk.gtk_widget_set_valign(band, gtk.ALIGN_START);
+    gtk.gtk_widget_set_can_target(band, gtk.false_);
+    gtk.g_object_set_data(band, backdrop_data_key, stack);
+    return band;
+}
+
+pub fn showBackdrop(self: *App, backdrop: *gtk.Widget, sources: []const *gtk.Widget) void {
+    const stack = gtk.cast(gtk.Stack, gtk.g_object_get_data(backdrop, backdrop_data_key) orelse return);
+    for (self.art.backdrops.items) |*record| {
+        if (record.stack != stack) continue;
+        record.source_count = @min(sources.len, max_backdrop_sources);
+        for (sources[0..record.source_count], record.sources[0..record.source_count]) |source, *slot| slot.* = gtk.cast(gtk.Stack, source);
+        return updateBackdrop(self, record.*);
+    }
+}
+
+fn backdropDestroyed(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const stack = gtk.cast(gtk.Stack, widget);
+    forget(self, gtk.cast(gtk.Widget, stack));
+    for (self.art.backdrops.items, 0..) |record, index| {
+        if (record.stack != stack) continue;
+        _ = self.art.backdrops.swapRemove(index);
+        return;
+    }
+}
+
+/// Paints run inside `remember`'s walk of `bindings`, which `show` can
+/// reallocate, so backdrops are recomposed later, when the main loop is idle.
+fn sourcePainted(self: *App, stack: *gtk.Stack) void {
+    const cache = &self.art;
+    if (cache.backdrop_idle != 0) return;
+    for (cache.backdrops.items) |record| {
+        for (record.sources[0..record.source_count]) |source| {
+            if (source != stack) continue;
+            cache.backdrop_idle = gtk.g_idle_add(updateBackdropsIdle, self);
+            return;
+        }
+    }
+}
+
+fn updateBackdropsIdle(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    self.art.backdrop_idle = 0;
+    var index: usize = 0;
+    while (index < self.art.backdrops.items.len) : (index += 1) updateBackdrop(self, self.art.backdrops.items[index]);
+    return gtk.SOURCE_REMOVE;
+}
+
+const Painted = union(enum) {
+    loading,
+    empty,
+    art: struct { key: Key, texture: *gtk.GdkTexture },
+};
+
+fn paintedArt(cache: *const Cache, stack: *gtk.Stack) Painted {
+    const binding = for (cache.bindings.items) |binding| {
+        if (binding.stack == stack) break binding;
+    } else return .empty;
+    if (cache.entries.get(binding.key)) |entry| {
+        if (entry.texture) |texture| return .{ .art = .{ .key = binding.key, .texture = texture } };
+    } else if (binding.request_key) return .loading;
+    const fallback = binding.fallback orelse return .empty;
+    const entry = cache.entries.get(fallback) orelse return .loading;
+    const texture = entry.texture orelse return .empty;
+    return .{ .art = .{ .key = fallback, .texture = texture } };
+}
+
+fn boundKey(cache: *const Cache, stack: *gtk.Stack) ?Key {
+    for (cache.bindings.items) |binding| if (binding.stack == stack) return binding.key;
+    return null;
+}
+
+fn updateBackdrop(self: *App, record: Backdrop) void {
+    const cache = &self.art;
+    var textures: [max_backdrop_sources]*gtk.GdkTexture = undefined;
+    var count: usize = 0;
+    var hasher: std.hash.Wyhash = .init(0);
+    for (record.sources[0..record.source_count]) |source| {
+        switch (paintedArt(cache, source)) {
+            .loading => return,
+            .empty => {},
+            .art => |found| {
+                std.hash.autoHash(&hasher, found.key);
+                textures[count] = found.texture;
+                count += 1;
+            },
+        }
+    }
+    const widget = gtk.cast(gtk.Widget, record.stack);
+    if (count == 0) return clear(self, widget);
+    const key: Key = .{ .kind = .backdrop, .id = @bitCast(hasher.final()), .size = .large };
+    const known = cache.entries.contains(key) or cache.blurring.contains(key);
+    if (known and std.meta.eql(boundKey(cache, record.stack), key)) return;
+    show(self, widget, key);
+    if (known) {
+        if (cache.debug) std.debug.print("orca-gtk art: backdrop {x} reused, blurs={d}\n", .{ @as(u64, @bitCast(key.id)), cache.blur_count });
+        return;
+    }
+    startBlur(self, key, textures[0..count]);
+}
+
+fn startBlur(self: *App, key: Key, textures: []const *gtk.GdkTexture) void {
+    const job = self.allocator.create(Blur) catch return;
+    job.* = .{ .key = key, .source_count = textures.len };
+    for (textures, job.sources[0..textures.len]) |texture, *source| source.* = gtk.cast(gtk.GdkTexture, gtk.g_object_ref(texture));
+    self.art.blurring.put(self.allocator, key, {}) catch {};
+    const task = gtk.g_task_new(null, null, blurred, self);
+    gtk.g_task_set_task_data(task, job, null);
+    gtk.g_task_run_in_thread(task, blurInThread);
+    gtk.g_object_unref(task);
+}
+
+fn blurInThread(task: *gtk.GTask, _: ?*anyopaque, data: ?*anyopaque, _: ?*gtk.GCancellable) callconv(.c) void {
+    const job: *Blur = @ptrCast(@alignCast(data.?));
+    job.texture = blurredBackdrop(std.heap.smp_allocator, job.sources[0..job.source_count]);
+    gtk.g_task_return_pointer(task, job, null);
+}
+
+fn blurred(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    var err: ?*gtk.GError = null;
+    const pointer = gtk.g_task_propagate_pointer(gtk.cast(gtk.GTask, result), &err) orelse {
+        gtk.g_clear_error(&err);
+        return;
+    };
+    const job: *Blur = @ptrCast(@alignCast(pointer));
+    defer self.allocator.destroy(job);
+    for (job.sources[0..job.source_count]) |source| gtk.g_object_unref(source);
+    const cache = &self.art;
+    _ = cache.blurring.remove(job.key);
+    cache.blur_count += 1;
+    if (cache.debug) std.debug.print("orca-gtk art: backdrop {x} blurred, blurs={d}\n", .{ @as(u64, @bitCast(job.key.id)), cache.blur_count });
+    remember(self, job.key, job.texture);
+}
+
 fn isWanted(cache: *const Cache, key: Key) bool {
     for (cache.bindings.items) |binding| {
         if (std.meta.eql(binding.key, key)) return true;
@@ -409,7 +652,10 @@ fn want(self: *App, key: Key) void {
     if (cache.pending.contains(key) or cache.decoding.contains(key)) return;
     for (cache.backlog.items) |queued| if (std.meta.eql(queued, key)) return;
     const library = self.library orelse return;
-    const subject = key.subject() orelse return wantRelatedPhoto(self, library, key);
+    const subject = key.subject() orelse {
+        if (key.kind == .related) wantRelatedPhoto(self, library, key);
+        return;
+    };
     const request = self.runtime.libraryRequestArtwork(library, self.io, subject) catch {
         cache.backlog.append(self.allocator, key) catch {};
         return;

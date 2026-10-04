@@ -566,8 +566,8 @@ The window is an `AdwNavigationSplitView`:
   shows the description when the job ends. Then come Play, Shuffle, a heart
   in the love colour that loves the album (Love Album, Remove Album Love)
   and a more button with the album menu; the page opens with focus on Play.
-  Behind them the cover is drawn blurred and darkened, fading into the page;
-  an album without a cover has no backdrop. Its tracks follow by disc under
+  Behind the top 600 px of the page the cover's artwork backdrop scrolls
+  with it; an album without a cover has no backdrop. Its tracks follow by disc under
   a # / Title / clock header, one thin-ruled row each: the playing track
   shows a play mark in place of its number and an accent title, and the more
   button with the track menu shows on the hovered, selected and playing row.
@@ -588,8 +588,8 @@ The window is an `AdwNavigationSplitView`:
   scopes the query to that genre (`ArtistQuery.genre_id`) until its × is
   clicked. The grid keeps at least two
   columns and shrinks its tiles to fit a 560 px window. An artist opens a
-  page whose hero lays a 300 by 330 px photo, fading right and down, over a
-  blurred copy of it: the Artist's photo, otherwise their most played
+  page whose hero lays a 300 by 330 px photo, fading right and down, over
+  its artwork backdrop: the Artist's photo, otherwise their most played
   album's cover, otherwise their initials. Beside it sit an Artist overline,
   their name, their top three genres joined by accent dots
   (`libraryArtistGenres`), the first four lines of the stored biography,
@@ -666,6 +666,16 @@ The window is an `AdwNavigationSplitView`:
   Artists and Albums searches query 200 ms after the last keystroke. A
   library with no tracks shows a welcome page with Add Music Folder; a scan
   in progress shows there too.
+- **Artwork backdrops** sit behind the album, artist and playlist page
+  headers and Now Playing, never behind the sidebar, the player bar, tables
+  or Settings. The cover, or for a playlist a two by two blend of its first
+  four covers, is scaled to 128 px on its long edge, blurred by three box
+  passes of radius 8 and saturated by 1.25 on a worker thread, then cached
+  in the artwork cache, so a page opened again reuses it. A picture fills
+  the area at 60% opacity under a gradient to the page colour; Artwork
+  influence Off hides it. `ORCA_GTK_DEBUG=art` prints each blur and reuse,
+  and `ORCA_GTK_DEBUG=frames` each frame's paint time, on stderr; topics
+  combine with commas.
 - **Genres** opens with a large Genres title and a tagline, then a strip of
   165 by 128 px genre tiles, most tracks first, read from
   `libraryGenrePage` 512 at a time as the strip scrolls. Each tile's
@@ -790,8 +800,8 @@ The window is an `AdwNavigationSplitView`:
   `libraryCreateSmartPlaylist` and opens the new playlist; Save on an
   existing one uses `librarySetSmartPlaylistRules`. Opening it on a smart
   playlist reads `librarySmartPlaylistRules` back into the groups.
-- **Now Playing** is the audible track's cover, large, over a blurred and
-  darkened copy of it, with a Now Playing overline, the title in serif, the
+- **Now Playing** is the audible track's cover, large, over its artwork
+  backdrop filling the page under a radial vignette, with a Now Playing overline, the title in serif, the
   artist and the album with its year as links, a heart, a more button with
   the track menu, a seek bar and the transport. Clicking the title opens its
   album. Its transport and seek bar are a second set of the player bar's,

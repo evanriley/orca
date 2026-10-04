@@ -138,6 +138,7 @@ pub const State = struct {
     hero: ?*gtk.Widget = null,
     hero_art: ?*gtk.Stack = null,
     mosaic: ?*gtk.Widget = null,
+    backdrop: ?*gtk.Widget = null,
     smart_tile: ?*gtk.Widget = null,
     eyebrow: ?*gtk.Label = null,
     title: ?*gtk.Label = null,
@@ -646,6 +647,14 @@ fn showMosaic(self: *App, mosaic: *gtk.Widget, covers: []const i64) void {
     gtk.gtk_stack_set_visible_child_name(gtk.cast(gtk.Stack, mosaic), if (tiled) "grid" else "single");
 }
 
+fn showMosaicBackdrop(self: *App, backdrop: *gtk.Widget, mosaic: *gtk.Widget, cover_count: usize) void {
+    if (cover_count == 0) return art.showBackdrop(self, backdrop, &.{});
+    if (cover_count < cell_keys.len) return art.showBackdrop(self, backdrop, &.{part(mosaic, "orca-single") orelse return});
+    var cells: [cell_keys.len]*gtk.Widget = undefined;
+    for (cell_keys, &cells) |key, *cell| cell.* = part(mosaic, key) orelse return;
+    art.showBackdrop(self, backdrop, &cells);
+}
+
 fn label(class: [*:0]const u8) *gtk.Widget {
     const widget = gtk.gtk_label_new(null);
     gtk.gtk_label_set_xalign(gtk.cast(gtk.Label, widget), 0.0);
@@ -986,7 +995,11 @@ fn showHero(self: *App, summary: ?*const liborca.PlaylistSummary, covers: []cons
             if (playlists.smart_tile) |tile| showSmartTile(tile, lookOf(self, playlists.open_id orelse 0));
         }
     }
-    if (playlists.mosaic) |mosaic| showMosaic(self, mosaic, if (smart) &.{} else covers);
+    if (playlists.mosaic) |mosaic| {
+        const shown: []const i64 = if (smart) &.{} else covers;
+        showMosaic(self, mosaic, shown);
+        if (playlists.backdrop) |backdrop| showMosaicBackdrop(self, backdrop, mosaic, shown.len);
+    }
 }
 
 fn showLove(heart: *gtk.Widget, loved: bool) void {
@@ -1626,7 +1639,9 @@ fn buildPlaylistPage(self: *App) *adw.NavigationPage {
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), body);
     const layers = gtk.gtk_overlay_new();
     gtk.gtk_widget_set_vexpand(layers, gtk.true_);
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), albums.newBackdrop(part(mosaic, "orca-single").?));
+    const backdrop = art.newBackdrop(self, .header);
+    self.playlists.backdrop = backdrop;
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
 

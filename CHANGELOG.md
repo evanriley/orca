@@ -447,6 +447,14 @@
   transport. The transport, volume and queue use thin stroke icons, the
   play button is 40 px, the heart follows the title, and the volume
   slider's knob shows only on hover or focus.
+- **Artwork backdrops.** Album, artist and playlist pages show their cover
+  blurred behind the top 600 px, fading into the page, and Now Playing
+  behind the whole page under a vignette; a playlist blends its first four
+  covers. The blur runs off the GTK thread and is cached with the covers,
+  so reopening a page does not blur again. `ORCA_GTK_DEBUG=art` reports
+  blurs and `ORCA_GTK_DEBUG=frames` frame times, and
+  `scripts/headless-gui.sh` passes `ORCA_GTK_DEBUG` through and adds a
+  `log:` step.
 - **One inspector in orca-gtk.** The Details, Lyrics and Signal Path
   panel is one window-wide sidebar, 420 px in every mode, on every page,
   so opening it, changing its mode or changing page never moves the

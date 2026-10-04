@@ -261,6 +261,9 @@ pub const App = struct {
     /// silent sink instead of device 0, which is the system default and therefore
     /// somebody's speakers.
     pinned_output_device: ?u64 = null,
+    debug_frames: bool = false,
+    frame_started_us: i64 = 0,
+    slowest_frame_us: i64 = 0,
     /// Correlates the last `play_track` submission with its completion event, so
     /// a refused play reports why instead of silently doing nothing.
     pending_play_request: u64 = 0,

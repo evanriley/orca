@@ -1272,9 +1272,18 @@ button.tile-more {
 }
 
 
-.album-backdrop-fade {
+.art-backdrop-picture {
+  opacity: 0.6;
+}
+
+.art-backdrop-header .art-backdrop-shade {
   background-image:
-    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 45%, transparent), color-mix(in srgb, @orca_bg_main 70%, transparent) 55%, @orca_bg_main);
+    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 15%, transparent), color-mix(in srgb, @orca_bg_main 60%, transparent) 55%, @orca_bg_main);
+}
+
+.art-backdrop-full .art-backdrop-shade {
+  background-image:
+    radial-gradient(ellipse 80% 70% at 50% 40%, color-mix(in srgb, @orca_bg_main 25%, transparent), color-mix(in srgb, @orca_bg_main 85%, transparent));
 }
 
 .album-kind {
@@ -1530,11 +1539,6 @@ button.album-artist {
 }
 
 /* Now Playing */
-
-.now-playing-page .album-backdrop-fade {
-  background-image:
-    linear-gradient(to bottom, color-mix(in srgb, @orca_bg_main 40%, transparent), color-mix(in srgb, @orca_bg_main 62%, transparent) 60%, @orca_bg_main);
-}
 
 .now-centre {
   margin: 8px 32px 28px 32px;
@@ -3487,7 +3491,7 @@ button.peq-add {
 
 /* Appearance choices */
 
-.artwork-off .album-backdrop-art {
+.artwork-off .art-backdrop-picture {
   opacity: 0;
 }
 

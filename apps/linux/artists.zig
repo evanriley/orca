@@ -1640,7 +1640,9 @@ pub fn openArtist(self: *App, navigation: *adw.NavigationView, artist_id: i64) v
     adw.adw_clamp_set_child(gtk.cast(adw.Clamp, clamp), content);
     gtk.gtk_box_append(gtk.cast(gtk.Box, column), clamp);
     const layers = gtk.gtk_overlay_new();
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), albums.newBackdrop(page.photo.?));
+    const backdrop = art.newBackdrop(self, .header);
+    art.showBackdrop(self, backdrop, &.{page.photo.?});
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), column);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), column, gtk.true_);
     const scroller = gtk.gtk_scrolled_window_new();

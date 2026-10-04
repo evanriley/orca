@@ -153,7 +153,26 @@ fn activate(application: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     window.refreshCounts(self);
     window.focusSidebar(self);
     gtk.gtk_window_present(self.window.?);
+    if (self.debug_frames) watchFrames(self, gtk.cast(gtk.Widget, self.window.?));
     self.requestTick();
+}
+
+fn watchFrames(self: *App, widget: *gtk.Widget) void {
+    const clock = gtk.gtk_widget_get_frame_clock(widget) orelse return;
+    _ = gtk.signalConnect(clock, "before-paint", gtk.callback(frameStarted), self);
+    _ = gtk.signalConnect(clock, "after-paint", gtk.callback(frameFinished), self);
+}
+
+fn frameStarted(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    self.frame_started_us = gtk.g_get_monotonic_time();
+}
+
+fn frameFinished(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const elapsed = gtk.g_get_monotonic_time() - self.frame_started_us;
+    self.slowest_frame_us = @max(self.slowest_frame_us, elapsed);
+    std.debug.print("orca-gtk frames: frame {d} us, slowest {d} us\n", .{ elapsed, self.slowest_frame_us });
 }
 
 fn activatePlayPause(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
@@ -490,6 +509,13 @@ fn resolvePinnedOutput(environ: *std.process.Environ.Map) ?u64 {
     return std.fmt.parseInt(u64, configured, 10) catch null;
 }
 
+fn debugRequested(environ: *std.process.Environ.Map, topic: []const u8) bool {
+    const configured = environ.get("ORCA_GTK_DEBUG") orelse return false;
+    var topics = std.mem.tokenizeAny(u8, configured, ", ");
+    while (topics.next()) |requested| if (std.mem.eql(u8, requested, topic)) return true;
+    return false;
+}
+
 /// A provider server from `variable`, such as a local mock for development.
 /// The copy outlives the runtime, as the runtime requires.
 fn resolveServer(
@@ -533,6 +559,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     self.library_path = resolveLibraryPath(allocator, init.environ_map);
     self.pinned_output_device = resolvePinnedOutput(init.environ_map);
+    self.art.debug = debugRequested(init.environ_map, "art");
+    self.debug_frames = debugRequested(init.environ_map, "frames");
     runtime.setClientIdentity(.{
         .name = "Orca",
         .version = std.fmt.comptimePrint("{f}", .{liborca.version}),

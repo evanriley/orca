@@ -95,7 +95,9 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_stack_set_visible_child_name(page.content.?, "empty");
 
     const layers = gtk.gtk_overlay_new();
-    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), albums.newBackdropLayers(host));
+    const backdrop = art.newBackdrop(self, .full);
+    art.showBackdrop(self, backdrop, &.{host});
+    gtk.gtk_overlay_set_child(gtk.cast(gtk.Overlay, layers), backdrop);
     gtk.gtk_overlay_add_overlay(gtk.cast(gtk.Overlay, layers), content);
     gtk.gtk_overlay_set_measure_overlay(gtk.cast(gtk.Overlay, layers), content, gtk.true_);
 

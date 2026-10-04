@@ -441,6 +441,8 @@ pub extern fn gdk_pixbuf_new_from_stream_at_scale(
 pub extern fn gdk_texture_new_for_pixbuf(pixbuf: *GdkPixbuf) *GdkTexture;
 pub extern fn gdk_texture_get_width(texture: *GdkTexture) c_int;
 pub extern fn gdk_texture_get_height(texture: *GdkTexture) c_int;
+pub const GdkFrameClock = opaque {};
+pub extern fn gtk_widget_get_frame_clock(widget: *Widget) ?*GdkFrameClock;
 pub extern fn gdk_texture_download(texture: *GdkTexture, data: [*]u8, stride: usize) void;
 pub const MEMORY_B8G8R8A8_PREMULTIPLIED: c_int = 0;
 pub extern fn gdk_memory_texture_new(width: c_int, height: c_int, format: c_int, bytes: *GBytes, stride: usize) *GdkTexture;
