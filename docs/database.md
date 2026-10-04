@@ -134,9 +134,15 @@ track number is already held by a *different* performance is re-seated the same
 way and raises `technical_anomaly` — while a file at the same position that is
 the *same* performance (a FLAC and an MP3 of one song, matched by MusicBrainz
 recording id or folded title) shares the position and becomes one Track with two
-files. Positions are never left null: `tracks_position` collapses a null onto
-`-id`, so a null-positioned row has nothing to upsert against and every
-reprojection would duplicate it.
+files. A Release whose files sit in several folders is positioned as one
+group: each folder's projection also reads the files of other folders that
+back Tracks on that Release and still name its album, orders them all by path,
+and applies the same rules, so the result does not depend on which folder
+projects first and no file is left without a Track. When the files at a
+position disagree on their recording, the recording the Track already presents
+is kept, with its ratings and listens. Positions are never left null:
+`tracks_position` collapses a null onto `-id`, so a null-positioned row has
+nothing to upsert against and every reprojection would duplicate it.
 
 Artist and release keys fold case, width and whitespace. That folding is not
 full NFKC plus full Unicode case folding — it covers ASCII, Latin-1, Latin

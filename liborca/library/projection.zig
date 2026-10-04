@@ -274,6 +274,7 @@ const Entry = struct {
     recording_id: ?i64,
     location_present: bool,
     unreadable: bool = false,
+    foreign: bool = false,
     title: []const u8,
     artist: []const u8,
     artist_mbid: ?[]const u8,
@@ -676,17 +677,19 @@ pub const Projection = struct {
 
         var written: std.ArrayList(WrittenPosition) = .empty;
         var vacated: Vacated = .{};
+        var foreign: std.ArrayList(Entry) = .empty;
         var start: usize = 0;
         while (start < projected.len) {
             var end = start + 1;
             while (end < projected.len and
                 std.mem.eql(u8, projected[end].album_key, projected[start].album_key)) end += 1;
-            try self.projectGroup(allocator, folder, projected[start..end], &written, &mover, &vacated, &genres, result);
+            try self.projectGroup(allocator, folder, projected[start..end], entries, &foreign, &written, &mover, &vacated, &genres, result);
             result.groups_projected += 1;
             start = end;
         }
         for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
-        try self.pruneStale(allocator, entries, written.items, &vacated, &genres, result);
+        const backing = try std.mem.concat(allocator, Entry, &.{ entries, foreign.items });
+        try self.pruneStale(allocator, backing, written.items, &vacated, &genres, result);
         try self.settleArtwork(allocator, projected, vacated.releases.items);
         try self.library.database.exec("COMMIT;");
     }
@@ -711,6 +714,47 @@ pub const Projection = struct {
         try statement.bindText(3, try upperBound(allocator, folder.path));
         try statement.bindInt64(4, @intFromEnum(database.HealthIssueKind.unreadable_file));
         return self.readEntries(allocator, statement);
+    }
+
+    fn loadForeign(
+        self: *Projection,
+        allocator: std.mem.Allocator,
+        folder: Folder,
+        release_id: i64,
+        album_key: []const u8,
+        folder_files: []const Entry,
+    ) ![]Entry {
+        var statement = try self.library.database.prepare(entry_select ++
+            \\WHERE l.file_id IN (
+            \\  SELECT f2.id FROM tracks r JOIN files f2 ON f2.recording_id = r.recording_id
+            \\  WHERE r.release_id = ?1
+            \\)
+            \\AND NOT (l.volume_id = ?2 AND rtrim(l.uri, replace(l.uri, '/', '')) = ?3)
+            \\ORDER BY l.file_id, l.state = 'present' DESC, l.uri;
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, release_id);
+        try statement.bindInt64(2, folder.volume_id);
+        try statement.bindText(3, folder.path);
+        try statement.bindInt64(4, @intFromEnum(database.HealthIssueKind.unreadable_file));
+        const candidates = try self.readEntries(allocator, statement);
+
+        var foreign: std.ArrayList(Entry) = .empty;
+        var previous: ?i64 = null;
+        for (candidates) |candidate| {
+            if (previous == candidate.file_id) continue;
+            previous = candidate.file_id;
+            if (candidate.unreadable) continue;
+            if (!std.mem.eql(u8, candidate.album_key, album_key)) continue;
+            const local = for (folder_files) |entry| {
+                if (entry.file_id == candidate.file_id) break true;
+            } else false;
+            if (local) continue;
+            var entry = candidate;
+            entry.foreign = true;
+            try foreign.append(allocator, entry);
+        }
+        return foreign.toOwnedSlice(allocator);
     }
 
     fn readEntries(self: *Projection, allocator: std.mem.Allocator, statement: database.sqlite.Statement) ![]Entry {
@@ -836,14 +880,16 @@ pub const Projection = struct {
         self: *Projection,
         allocator: std.mem.Allocator,
         folder: Folder,
-        entries: []Entry,
+        local: []Entry,
+        folder_files: []const Entry,
+        foreign_files: *std.ArrayList(Entry),
         written: *std.ArrayList(WrittenPosition),
         mover: *TrackMover,
         vacated: *Vacated,
         genres: *database.GenreWriter,
         result: *Result,
     ) !void {
-        const identity = try self.resolveRelease(allocator, folder, entries);
+        const identity = try self.resolveRelease(allocator, folder, local);
         // The album artist is resolved *before* the release, because the
         // release now carries the Artist row it is filed under rather than
         // only the name it was tagged with.
@@ -867,6 +913,13 @@ pub const Projection = struct {
         if (self.found_releases) |found| try found.note(self.allocator, release_id);
         if (identity.is_compilation) result.compilations += 1;
 
+        for (local) |*entry| entry.release_id = release_id;
+        const foreign = try self.loadForeign(allocator, folder, release_id, local[0].album_key, folder_files);
+        const entries = if (foreign.len == 0) local else merged: {
+            const all = try std.mem.concat(allocator, Entry, &.{ local, foreign });
+            std.mem.sort(Entry, all, {}, lessByGroup);
+            break :merged all;
+        };
         try assignPositions(allocator, entries);
         const positions = try groupByPosition(allocator, entries);
 
@@ -877,7 +930,11 @@ pub const Projection = struct {
             const lead = &entries[members[0]];
             const artist_id = try self.ensureArtist(allocator, lead.artist, lead.artist_mbid);
 
-            const recording_id = try self.resolveRecording(allocator, entries, members);
+            const recording_id = try self.resolveRecording(allocator, entries, members, .{
+                .release_id = release_id,
+                .disc = position.disc,
+                .number = position.number,
+            });
             const preferred = &entries[bestEncoding(entries, members)];
             try written.append(allocator, .{
                 .release_id = release_id,
@@ -918,7 +975,7 @@ pub const Projection = struct {
                     health.albumArtistAnomaly(entry.album, entry.album_artist),
                 );
                 if (entry.synthetic) {
-                    result.synthetic_positions += 1;
+                    if (!entry.foreign) result.synthetic_positions += 1;
                     try self.library.health_issues.recordLocked(entry.file_id, .{
                         .kind = .missing_track_number,
                         .severity = .information,
@@ -931,7 +988,7 @@ pub const Projection = struct {
                     );
                 }
                 if (entry.displaced) {
-                    result.displaced_positions += 1;
+                    if (!entry.foreign) result.displaced_positions += 1;
                     const details = try std.fmt.allocPrint(
                         allocator,
                         "track {?d} on disc {d} is claimed by another recording; " ++
@@ -943,6 +1000,10 @@ pub const Projection = struct {
                         .severity = .warning,
                         .details = details,
                     });
+                }
+                if (entry.foreign) {
+                    try foreign_files.append(allocator, entry.*);
+                    continue;
                 }
                 if (entry.title_from_filename) result.filename_titles += 1;
                 result.files_projected += 1;
@@ -1087,10 +1148,13 @@ pub const Projection = struct {
         allocator: std.mem.Allocator,
         entries: []const Entry,
         members: []const usize,
+        position: WrittenPosition,
     ) !i64 {
         _ = allocator;
+        const held = try self.heldRecording(entries, members, position);
         for (members) |index| {
             if (entries[index].recording_id) |existing| {
+                if (held != null and held != existing) continue;
                 try self.library.recordings.updateLocked(existing, .{
                     .title = entries[index].title,
                     .duration_ms = entries[index].duration_ms,
@@ -1103,6 +1167,29 @@ pub const Projection = struct {
             .title = lead.title,
             .duration_ms = lead.duration_ms,
         });
+    }
+
+    /// The recording the Track at `position` already presents, when members
+    /// disagree on their recording and one of them is it, so the ratings and
+    /// listens kept on that recording stay with the Track.
+    fn heldRecording(self: *Projection, entries: []const Entry, members: []const usize, position: WrittenPosition) !?i64 {
+        var first: ?i64 = null;
+        const disagree = for (members) |index| {
+            const recording_id = entries[index].recording_id orelse continue;
+            if (first == null) first = recording_id else if (first != recording_id) break true;
+        } else false;
+        if (!disagree) return null;
+        var statement = try self.library.database.prepare(
+            "SELECT recording_id FROM tracks WHERE release_id = ?1 AND COALESCE(disc_number, 1) = ?2 AND track_number = ?3;",
+        );
+        defer statement.deinit();
+        try statement.bindInt64(1, position.release_id);
+        try statement.bindInt64(2, position.disc);
+        try statement.bindInt64(3, position.number);
+        if (try statement.step() != .row or statement.columnIsNull(0)) return null;
+        const held = statement.columnInt64(0);
+        for (members) |index| if (entries[index].recording_id == held) return held;
+        return null;
     }
 };
 
@@ -1905,6 +1992,131 @@ test "an unreadable file projects no Track until its bytes read, and loses its T
     defer testing.allocator.free(still_unreadable);
     try testing.expectEqual(@as(usize, 2), still_unreadable.len);
     try expectNoForeignKeyViolations(&library);
+}
+
+fn butterflyTags(title: []const u8, track_number: u32) metadata.ObservedTags {
+    return .{
+        .title = title,
+        .artist = "Kendrick Lamar",
+        .album = "To Pimp a Butterfly",
+        .album_artist = "Kendrick Lamar",
+        .track_number = track_number,
+    };
+}
+
+const orphaned_files_sql =
+    "SELECT count(*) FROM files f WHERE NOT EXISTS " ++
+    "(SELECT 1 FROM tracks t WHERE t.recording_id = f.recording_id);";
+
+test "two encodings of one song in different folders of one album share one Track" {
+    var library = try openTestLibrary("file:orca-projection-cross-folder-encodings?mode=memory&cache=shared");
+    defer library.close();
+    _ = try observe(&library, "/m/Music/Kendrick/01 Wesley's Theory.flac", .flac, butterflyTags("Wesley's Theory", 1));
+    const flac = try observe(&library, "/m/Music/Kendrick/07 Alright.flac", .flac, butterflyTags("Alright", 7));
+    const mp3 = try observe(&library, "/m/Downloads/Kendrick/Alright.mp3", .mp3, butterflyTags("Alright", 7));
+
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{flac} });
+    _ = try projection.run(.{ .files = &.{mp3} });
+
+    try testing.expectEqual(@as(u64, 2), try library.tracks.count());
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, orphaned_files_sql));
+    try testing.expectEqual(flac, try scalar(library.database, "SELECT preferred_file_id FROM tracks WHERE track_number = 7;"));
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, try std.fmt.bufPrintSentinel(
+        &buffer,
+        "SELECT count(DISTINCT recording_id) FROM files WHERE id IN ({d}, {d});",
+        .{ flac, mp3 },
+        0,
+    )));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "two songs claiming one track number in different folders of one album both stay in the library" {
+    var library = try openTestLibrary("file:orca-projection-cross-folder-displaced?mode=memory&cache=shared");
+    defer library.close();
+    const first = try observe(&library, "/m/A/Oasis/04 Oasis.flac", .flac, butterflyTags("Oasis", 4));
+    const second = try observe(&library, "/m/B/Oasis/04 Prism.flac", .flac, butterflyTags("Prism", 4));
+
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{first} });
+    _ = try projection.run(.{ .files = &.{second} });
+
+    try testing.expectEqual(@as(u64, 2), try library.tracks.count());
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, orphaned_files_sql));
+    try testing.expectEqual(@as(i64, 4), try positionOf(&library, first));
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, second));
+    const flagged = try filesWithIssue(&library, .technical_anomaly);
+    defer testing.allocator.free(flagged);
+    try testing.expectEqualSlices(i64, &.{second}, flagged);
+
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 4), try positionOf(&library, first));
+    try testing.expectEqual(@as(i64, 1), try positionOf(&library, second));
+    try expectNoForeignKeyViolations(&library);
+}
+
+test "a file left without a Track joins it again and keeps the Track's rating" {
+    var library = try openTestLibrary("file:orca-projection-cross-folder-rating?mode=memory&cache=shared");
+    defer library.close();
+    const flac = try observe(&library, "/m/A/Kendrick/07 Alright.flac", .flac, butterflyTags("Alright", 7));
+    const mp3 = try observe(&library, "/m/B/Kendrick/Alright.mp3", .mp3, butterflyTags("Alright", 7));
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.{ .files = &.{mp3} });
+    const track = try trackOf(&library, mp3);
+    _ = try library.ratings.set(&.{track}, 100);
+    const stranded = try library.recordings.insertLocked(.{ .title = "Alright", .duration_ms = null });
+    try library.files.setRecordingLocked(flac, stranded);
+
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(u64, 1), try library.tracks.count());
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, orphaned_files_sql));
+    try testing.expectEqual(track, try trackOf(&library, flac));
+    try testing.expectEqual(
+        @as(i64, 100),
+        try scalar(library.database, "SELECT rating FROM ratings JOIN tracks USING (recording_id);"),
+    );
+}
+
+fn projectFoldersInOrder(name: [:0]const u8, music_first: bool) ![]u8 {
+    var library = try openTestLibrary(name);
+    defer library.close();
+    const flac = try observeEncoding(&library, "/m/Music/Kendrick/07 Alright.flac", .flac, .{ .bit_depth = 16, .sample_rate = 44100 }, butterflyTags("Alright", 7));
+    const music_other = try observe(&library, "/m/Music/Kendrick/04 Institutionalized.flac", .flac, butterflyTags("Institutionalized", 4));
+    const mp3 = try observeEncoding(&library, "/m/Downloads/Kendrick/Alright.mp3", .mp3, .{ .sample_rate = 44100 }, butterflyTags("Alright", 7));
+    _ = try observe(&library, "/m/Downloads/Kendrick/04 These Walls.mp3", .mp3, butterflyTags("These Walls", 4));
+    _ = music_other;
+
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    const order: [2]i64 = if (music_first) .{ flac, mp3 } else .{ mp3, flac };
+    for (order) |file_id| _ = try projection.run(.{ .files = &.{file_id} });
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, orphaned_files_sql));
+
+    var statement = try library.database.prepare(
+        \\SELECT group_concat(line, ';') FROM (
+        \\  SELECT t.track_number || ' ' || t.title || ' ' || l.uri || ' ' ||
+        \\         (SELECT count(*) FROM files f WHERE f.recording_id = t.recording_id) AS line
+        \\  FROM tracks t JOIN locations l ON l.file_id = t.preferred_file_id
+        \\  ORDER BY t.track_number, t.title
+        \\);
+    );
+    defer statement.deinit();
+    try testing.expectEqual(database.sqlite.Step.row, try statement.step());
+    return testing.allocator.dupe(u8, statement.columnText(0));
+}
+
+test "projecting an album's folders in either order gives the same Tracks and preferred files" {
+    const music_first = try projectFoldersInOrder("file:orca-projection-order-music?mode=memory&cache=shared", true);
+    defer testing.allocator.free(music_first);
+    const downloads_first = try projectFoldersInOrder("file:orca-projection-order-downloads?mode=memory&cache=shared", false);
+    defer testing.allocator.free(downloads_first);
+    try testing.expectEqualStrings(music_first, downloads_first);
+    try testing.expectEqualStrings(
+        "1 Institutionalized /m/Music/Kendrick/04 Institutionalized.flac 1;" ++
+            "4 These Walls /m/Downloads/Kendrick/04 These Walls.mp3 1;" ++
+            "7 Alright /m/Music/Kendrick/07 Alright.flac 2",
+        music_first,
+    );
 }
 
 test "an untitled file is listed under its filename rather than as a blank row" {

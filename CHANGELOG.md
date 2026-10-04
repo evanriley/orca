@@ -1424,6 +1424,16 @@
   and it projects again once a scan reads its new bytes. Property backfill
   reprojects a file it finds unreadable. An existing library converges on
   the next `orca-cli project`.
+- **Copies of one album in two folders no longer strand a file.** Files of
+  one Release in different folders were projected folder by folder, so a file
+  at a position another folder's file already held took the Track over, and
+  the earlier file was left with no Track (`duplicates --group` showed
+  `track=-`). Each folder's projection now positions the Release's files from
+  other folders together with its own, under the rules one folder follows:
+  the same performance shares the Track, its best encoding preferred, and a
+  different one moves to the next free number with a `technical_anomaly`
+  issue, whichever folder projects first. An existing library converges on
+  the next `orca-cli project`, keeping the Track's rating.
 - **orca-cli output redirected to a file follows what is there.** Standard
   output and standard error wrote at offset 0 of a regular file, so
   `{ echo header; orca-cli stats DB; } > out` lost the header and a second
