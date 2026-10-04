@@ -443,7 +443,7 @@ fn undoClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
 }
 
 fn albumAccepted(self: *App, release_id: i64) void {
-    matches.reload(self);
+    matches.invalidate(self);
     health.reload(self);
     albums.releaseChanged(self, release_id);
     artists.reloadKeepingScroll(self);
@@ -455,7 +455,7 @@ fn albumAccepted(self: *App, release_id: i64) void {
 }
 
 fn albumMoved(self: *App, old_id: i64, new_id: i64) void {
-    matches.reload(self);
+    matches.invalidate(self);
     health.reload(self);
     self.shown_playing = .{};
     if (self.now_playing.release_id) |shown| {
@@ -471,7 +471,7 @@ fn albumMoved(self: *App, old_id: i64, new_id: i64) void {
         track_table.refreshRelease(&self.playlists.tracks, release_id);
     }
     albums.markPlaying(self, self.shown_track_id);
-    artists.markPlaying(self, self.shown_track_id);
+    artist_page.markPlaying(self, self.shown_track_id);
     self.genres.stale = true;
     self.folders.stale = true;
 }
@@ -482,7 +482,7 @@ fn albumFinished(self: *App, release_id: i64, moved_to: ?i64, state_value: libor
         art.refreshRelease(self, new_id);
         albumMoved(self, release_id, new_id);
     } else if (stats) |result| {
-        if (result.accepted != 0) albumAccepted(self, release_id) else if (result.matched != 0) matches.reload(self);
+        if (result.accepted != 0) albumAccepted(self, release_id) else if (result.matched != 0) matches.invalidate(self);
     }
     details.invalidate(self);
     self.requestTick();

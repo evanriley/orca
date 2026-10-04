@@ -153,7 +153,6 @@ pub const Panel = struct {
     verify_button: *gtk.Widget,
     metadata_section: *gtk.Widget,
     album_artist_row: Row,
-    album_row: Row,
     date_row: Row,
     genre_row: Row,
     track_row: Row,
@@ -1030,7 +1029,6 @@ fn populate(panel: *Panel, details: liborca.TrackDetails) void {
     populateRecording(panel, details);
 
     _ = setRow(panel.album_artist_row, optionalText(&buffer, details.album_artist));
-    _ = setRow(panel.album_row, optionalText(&buffer, details.album));
     _ = setRow(panel.date_row, if (details.date) |date| optionalText(&buffer, date) else null);
     _ = setRow(panel.genre_row, genresText(&buffer, details.genres));
     var track_buffer: [48]u8 = undefined;
@@ -1604,14 +1602,12 @@ fn destroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.allocator.destroy(panel);
 }
 
-fn newAlbum() Album {
+fn newAlbum(panel: *Panel) Album {
     const title = newLabel("inspector-title");
     const subtitle = newLabel("inspector-subtitle");
+    gtk.gtk_widget_add_css_class(subtitle, "dim");
     gtk.gtk_label_set_text(gtk.cast(gtk.Label, subtitle), "Album");
-    const heading = gtk.gtk_box_new(gtk.ORIENTATION_VERTICAL, 2);
-    gtk.gtk_widget_add_css_class(heading, "inspector-header");
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), title);
-    gtk.gtk_box_append(gtk.cast(gtk.Box, heading), subtitle);
+    const heading = newHeader(panel, &.{ title, subtitle }, null);
 
     const artist_row = newRow("Artist");
     const date_row = newRow("Date");
@@ -1826,7 +1822,6 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         gtk.gtk_box_append(gtk.cast(gtk.Box, actions), button);
 
     const album_artist_row = newRow("Album artist");
-    const album_row = newRow("Album");
     const date_row = newRow("Date");
     const genre_row = newRow("Genre");
     const track_row = newRow("Track");
@@ -1872,7 +1867,6 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
     }, null);
     const metadata_section = newSection("x-office-document-symbolic", "Metadata", &.{
         album_artist_row.root,
-        album_row.root,
         date_row.root,
         genre_row.root,
         track_row.root,
@@ -2029,7 +2023,6 @@ pub fn build(self: *App, split: *adw.OverlaySplitView) void {
         .verify_button = verify_button,
         .metadata_section = metadata_section,
         .album_artist_row = album_artist_row,
-        .album_row = album_row,
         .date_row = date_row,
         .genre_row = genre_row,
         .track_row = track_row,

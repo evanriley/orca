@@ -281,6 +281,12 @@ while True:
         button(0x110)
     elif words[0] == "rclick":
         button(0x111)
+    elif words[0] == "press":
+        pointer.button(now(), 0x110, 1)
+        pointer.frame()
+    elif words[0] == "release":
+        pointer.button(now(), 0x110, 0)
+        pointer.frame()
     elif words[0] == "scroll":
         steps = int(words[1])
         pointer.axis_discrete(now(), 0, steps * 15 * 256, steps)

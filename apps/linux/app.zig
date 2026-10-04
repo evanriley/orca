@@ -88,8 +88,8 @@ pub const Browse = struct {
     direction: liborca.SortDirection = .descending,
 
     /// The order a newly entered scope is listed in. An album is listened to in
-    /// disc-then-track order, an artist's shelf reads album by album, and an
-    /// unscoped library has no natural order to claim, so it pays for none.
+    /// disc-then-track order, an artist's shelf reads album by album, and the
+    /// whole library lists what arrived most recently first.
     pub fn defaultSort(self: Browse) liborca.TrackSort {
         if (self.release_id != null) return .track_number;
         if (self.artist_id != null) return .album;
@@ -371,14 +371,17 @@ pub const App = struct {
     lyrics: lyrics.State = .{},
     seen_recorded_listens: u64 = 0,
 
-    album_store: ?*gtk.ListStore = null,
-    albums_loaded: u32 = 0,
-    albums_exhausted: bool = false,
+    album_model: ?*albums.PagedReleases = null,
+    albums_count: u64 = 0,
+    albums_count_request: TotalsRequest = .idle,
+    albums_failure: Failure = .none,
     albums_meta: ?*gtk.Label = null,
     albums_body: ?*gtk.Stack = null,
     albums_navigation: ?*adw.NavigationView = null,
     album_sort: liborca.ReleaseSort = .recently_added,
     album_shelf: albums.Shelf = .all,
+    album_added: albums.Added = .{},
+    album_sections: albums.Sections = .{},
     album_sort_control: ?*gtk.DropDown = null,
     album_chips: [std.meta.fields(albums.Chip).len]?*gtk.ToggleButton = @splat(null),
     album_filters: album_filters.Filters = .{},
@@ -388,7 +391,7 @@ pub const App = struct {
     album_artist_name: OwnedText = .{},
     album_artist_chip: ?*gtk.Widget = null,
     album_layout: albums.Layout = .grid,
-    album_layout_toggles: [std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(null),
+    album_layout_toggles: [2][std.meta.fields(albums.Layout).len]?*gtk.ToggleButton = @splat(@splat(null)),
     album_grid: ?*gtk.GridView = null,
     album_grid_columns: c_uint = 0,
     album_grid_idle: c_uint = 0,
@@ -938,6 +941,7 @@ pub const App = struct {
         self.track_filters_ui.deinit(self.allocator);
         self.album_filters_ui.deinit(self.allocator);
         self.album_info.deinit(self.allocator);
+        self.album_sections.deinit(self.allocator);
         self.artist_info.deinit(self.allocator);
         self.query.clear(self.allocator);
         self.artist_filter.clear(self.allocator);

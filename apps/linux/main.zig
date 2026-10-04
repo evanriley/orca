@@ -529,6 +529,12 @@ fn resolveServer(
     return allocator.dupe(u8, configured) catch null;
 }
 
+/// glibc gives each cover-decoding thread its own malloc arena, and every
+/// arena keeps the multi-megabyte JPEG buffers it freed: about 70 MB of
+/// resident memory at startup on a large library. One arena reuses them.
+const M_ARENA_MAX = -8;
+extern fn mallopt(param: c_int, value: c_int) c_int;
+
 pub fn main(init: std.process.Init) !u8 {
     _ = mallopt(M_ARENA_MAX, 1);
     const allocator = std.heap.smp_allocator;

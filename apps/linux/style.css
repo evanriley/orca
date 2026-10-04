@@ -1390,6 +1390,214 @@ button.tile-more {
   font-size: 3.2em;
 }
 
+.albums-large .page-title {
+  padding: 14px 52px 0 32px;
+}
+
+.albums-large .page-title .display-page {
+  font-size: 42px;
+}
+
+.albums-large .page-title .meta {
+  margin-top: 0;
+  font-size: 14px;
+  color: @orca_text_3;
+}
+
+.album-facets {
+  padding: 14px 52px 12px 32px;
+}
+
+button.facet-chip,
+menubutton.facet-chip > button {
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px @orca_border_strong;
+  color: @orca_text_2;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+button.facet-chip:hover,
+menubutton.facet-chip > button:hover,
+menubutton.facet-chip > button:checked {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
+button.facet-chip.chip-on,
+button.facet-chip:checked,
+menubutton.facet-chip.chip-on > button {
+  background-color: @orca_bg_chip_on;
+  box-shadow: none;
+  color: @orca_text;
+}
+
+menubutton.facet-chip > button > box {
+  border-spacing: 6px;
+}
+
+menubutton.facet-chip arrow,
+menubutton.facet-sort arrow {
+  -gtk-icon-source: -gtk-icontheme("orca-chevron-down-symbolic");
+  -gtk-icon-size: 12px;
+  min-width: 12px;
+  min-height: 12px;
+  color: @orca_text_3;
+}
+
+.facet-clear {
+  -gtk-icon-size: 12px;
+  color: @orca_text_2;
+}
+
+.facet-match {
+  margin-left: 6px;
+  font-size: 12.5px;
+  color: @orca_text_2;
+}
+
+menubutton.facet-sort > button {
+  min-height: 28px;
+  padding: 0 4px;
+  background-color: transparent;
+  box-shadow: none;
+  color: @orca_text_2;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+menubutton.facet-sort > button:hover,
+menubutton.facet-sort > button:checked {
+  color: @orca_text;
+}
+
+.album-facets .segmented > button {
+  min-width: 28px;
+  min-height: 26px;
+}
+
+.facet-options {
+  padding: 6px;
+}
+
+.facet-heading {
+  margin: 6px 6px 2px 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: @orca_text_3;
+}
+
+.facet-heading:first-child {
+  margin-top: 0;
+}
+
+.album-sections {
+  padding: 4px 52px 16px 32px;
+  background-color: transparent;
+}
+
+.album-sections > row,
+.album-sections > row:hover,
+.album-sections > row:selected {
+  padding: 0;
+  background-color: transparent;
+}
+
+.section-row {
+  padding-bottom: 18px;
+}
+
+.section-header {
+  padding: 10px 0 4px 0;
+}
+
+.section-row .section-header {
+  padding-bottom: 0;
+}
+
+.section-letter {
+  font-family: Newsreader, serif;
+  font-size: 24px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.section-count {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.section-sticky {
+  padding: 10px 52px 4px 32px;
+  background-color: @orca_bg_main;
+}
+
+.section-tile .tile-title {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.section-tile .tile-artist {
+  font-size: 11.5px;
+  color: @orca_text_3;
+}
+
+.section-tile:focus-visible .album-cover-frame {
+  outline-color: @orca_text;
+}
+
+.section-hover-dim {
+  border-radius: var(--orca-radius-art);
+  outline: 2px solid @orca_text;
+  background-color: @orca_art_dim;
+}
+
+button.section-hover-more {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  background-color: @orca_art_overlay;
+  color: @orca_text;
+}
+
+.letter-scrubber {
+  margin: 0 10px 8px 0;
+  min-width: 22px;
+}
+
+.scrub-letter {
+  font-size: 10.5px;
+  color: @orca_text_3;
+}
+
+.scrub-letter.absent {
+  color: @orca_text_dim;
+}
+
+.scrub-letter.current {
+  color: @orca_accent;
+  font-weight: 600;
+}
+
+.scrub-bubble {
+  margin-right: 38px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background-color: @orca_bg_selected;
+  font-family: Newsreader, serif;
+  font-size: 22px;
+  color: @orca_text;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.scrub-bubble.shown {
+  opacity: 1;
+}
+
 .album-page {
   margin: 28px 24px 36px 24px;
 }
@@ -1414,7 +1622,7 @@ button.tile-more {
 
 .art-backdrop-full .art-backdrop-shade {
   background-image:
-    radial-gradient(ellipse 80% 70% at 50% 40%, color-mix(in srgb, @orca_bg_main 25%, transparent), color-mix(in srgb, @orca_bg_main 85%, transparent));
+    radial-gradient(ellipse 80% 70% at 50% 40%, color-mix(in srgb, @orca_bg_main 55%, transparent), color-mix(in srgb, @orca_bg_main 94%, transparent));
 }
 
 .album-kind {
@@ -1530,7 +1738,6 @@ list.album-tracks > row:hover {
 }
 
 .album-tile.now-playing .tile-title,
-.genre-album.now-playing .tile-title,
 .artist-tile.now-playing .artist-tile-name,
 .album-list-row.now-playing .album-list-title,
 .artist-row.now-playing .artist-name,

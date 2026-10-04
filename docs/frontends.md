@@ -549,14 +549,19 @@ The window is an `AdwNavigationSplitView`:
   `1 task waiting`, with the percent and a 3 px bar when the job has a
   total and a pulsing bar when it has none, such as a scan; pressing it
   opens the job's progress and Stop in a popover.
-- **Albums** is a grid of covers with each album's title, artist and year,
-  paged 512 Releases at a time. Its title row shows `N albums`, a Sort by
+- **Albums** is a grid of covers with each album's title, artist and year.
+  The grid and the list are a paged model as long as the count: the
+  browse loader reads `release_count`, then a 512-Release `release_page`
+  as GTK asks for a position, keeping eight pages and cancelling the read
+  of a page it drops. Until its page arrives a position is an empty tile or
+  row that does not respond to input, and until a new count arrives the
+  previous count stays. Its title row shows `N albums`, a Sort by
   menu (Date Added, Title, Artist, Year, Loved or Most Played, saved as
   `[view] album_sort`), a Filters button and a Grid / List switch (saved as
   `[view] albums_layout`).
   A Search albums field under the title sets `ReleaseQuery.text`, so the
-  search combines with the chip and the filters, and the count is
-  `libraryReleaseCountMatching` of the whole query. Chips under it choose All Albums, Recently Added (the newest Releases
+  search combines with the chip and the filters, and the count is the
+  browse loader's `release_count` of the whole query. Chips under it choose All Albums, Recently Added (the newest Releases
   first), Loved, High Resolution (above 48 kHz or 16 bits) or Needs Review
   (a pending match or correction); they are radio buttons and one Tab stop,
   Left and Right moving between them. Beside them a Cover size slider sets
@@ -578,7 +583,25 @@ The window is an `AdwNavigationSplitView`:
   the album menu; a hovered, focused or selected tile's cover is ringed. The list shows 44 px rows of a small cover, title, artist, year,
   track count, minutes, format (`FLAC 16/44.1`, or `Mixed`), a heart that
   loves the album and a more button.
-  Activating an album opens its page: the cover beside an overline naming
+  From 2,000 albums in the library the page takes its large form. The title
+  row's count reads `41,206 · 3,940 artists · 9.8 TB` from
+  `libraryReleaseQueryTotals`, and facet chips replace the shelf chips:
+  Lossless; Added (Any time, Last 7 days, Last 30 days, Last 12 months),
+  which sets `ReleaseQuery.added_after` from a cutoff fixed when the window
+  is chosen; Genre; Decade (the 2020s back to the 1950s, and Before 1950),
+  which sets the year range; and More filters, the Filters popover. A set
+  facet is highlighted and shows its value, Lossless with an × that clears
+  it, and `N match` follows the chips while any filter or search narrows
+  the list. Recently Added is the Added chip's
+  30-day window sorted by Date Added. Sorted by Artist or Title in the grid
+  layout, the albums are a `GtkListView` of letter sections over
+  `libraryReleaseLetterIndex`: a `K · 1,184 albums` header in Newsreader,
+  then rows of 104 px tiles read 512 Releases a page as rows come into
+  view, a few pages kept. An A–Z scrubber on the right, named Jump to letter,
+  scrolls a letter's header to the top on a click or drag, shows the letter
+  in a bubble while dragging and marks the letter at the top. Other sorts
+  and the list layout keep the grid and list above.
+  Activating an album opens its page: a 248 px cover beside an overline naming
   the release type, else COMPILATION for a compilation and ALBUM otherwise,
   the title, the artist as a link and a line of year, its top one or two genres joined by ` / `,
   track count and minutes, then the album's description from
@@ -1046,7 +1069,8 @@ each button once, in setup, and read the row's track when the button is pressed.
 
 Each page's header bar is flat and carries no title. A page pushed onto
 another, such as an album or artist page, shows a breadcrumb at its start
-whose first part returns to the page it was opened from (Albums › ABBA); a
+whose first part returns to the page it was opened from (Albums › ABBA),
+dimmed, and whose last part is the page in the normal text colour; a
 playlist's reads Playlists › its name. The breadcrumb is the only back
 control; Alt+← and the mouse back button also return. The header has no
 window controls: Ctrl+Q quits and the compositor closes the window. At its
@@ -1345,12 +1369,22 @@ Covers go through `apps/linux/art.zig`. A widget asks for a cover while it is
 bound and forgets it when unbound; the frontend asks liborca's artwork loader
 (`Runtime.libraryRequestArtwork`) and collects results on its tick, then
 decodes each on a GTask thread through `gdk_pixbuf_new_from_stream_at_scale` at
-one of three sizes (128, 400 or 960 pixels), so an 11 MiB JPEG never
-materializes at full resolution and never decodes on the main thread. Up to
-600 decoded covers are kept, least recently used first out; a request for a
-widget that scrolled away is cancelled before liborca reads a file. The app
+one of four sizes (128, 256, 400 or 960 pixels), so an 11 MiB JPEG never
+materializes at full resolution and never decodes on the main thread. Album
+grid tiles take the smallest of 128, 256 and 400 that covers the tile in
+device pixels, and ask again when the cover size setting crosses one. Up to
+96 MB of decoded covers are kept, counted as four bytes per pixel, least
+recently used first out; a request for a
+widget that scrolled away is cancelled before liborca reads a file. A bound
+widget holds its cover only while mapped: on a hidden page, a hidden layout
+or a list row bound off screen it keeps its binding and drops the texture,
+and it paints again from the cache when it is mapped. At most
+eight covers are requested, read or decoding at once, and the rest wait
+their turn, because an embedded picture is read whole. The app
 allocates from `std.heap.smp_allocator`: covers are freed as they are
-replaced, which an arena would never do.
+replaced, which an arena would never do. `main` limits glibc to one malloc
+arena: with one per decoding thread, each kept the JPEG buffers it freed,
+about 70 MB at startup on a 41,000-album library.
 
 The frontend owns `org.mpris.MediaPlayer2.orca` on the session bus when one is
 available. MPRIS methods invoke the same Player handle, and `PlaybackStatus` is

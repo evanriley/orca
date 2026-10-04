@@ -177,6 +177,15 @@
   `ORCA_GTK_DEBUG=reveal` logs Show in Folder's path instead of opening a
   file manager. `scripts/headless-gui.sh` takes a `dclick:X,Y` step, and
   saves the last frame instead of failing when the window never settles.
+- **Albums at scale in orca-gtk.** From 2,000 albums, Albums shows the
+  library's count, artists and size, facet chips for Lossless, Added,
+  Genre, Decade and More filters with an `N match` count, and, sorted by
+  Artist or Title, letter sections with an A–Z scrubber, built on
+  `libraryReleaseLetterIndex` and read a 512-Release page at a time.
+  Recently Added is the Added chip's 30-day window. Section tiles are a
+  cover and two labels under one shared hover, at most eight covers load at
+  once, and glibc keeps one malloc arena, so 41,000 albums open in under
+  400 MB.
 - **Release name order indexes.** Schema version 39 adds
   `releases_artist_order` and `releases_title_order`, built from the same
   terms as the artist and title sorts, so a Release page in either order
@@ -613,6 +622,22 @@
   search over a large library no longer stalls the window. Rows whose page
   has not arrived show blank and cannot be played, rated or opened; a new
   search or filter keeps the previous count until its totals arrive.
+- **Albums read their pages off the main thread in orca-gtk.** Outside the
+  letter sections, the Albums grid and list read their count and their
+  pages on the Library's browse loader, keeping eight pages of 512 and
+  cancelling the read of a page they drop. Albums whose page has not
+  arrived show as empty tiles or rows that cannot be opened, played or
+  loved, and a new sort, search or filter keeps the previous count until
+  the new one arrives.
+- **Smaller cover memory in orca-gtk.** orca-gtk keeps 96 MB of decoded
+  covers, counted from each texture's size, instead of 600 covers of any
+  size. Album grid tiles, sectioned or not, take the smallest of 128, 256 and
+  400 px covers that fills the tile, and ask again when the cover size
+  setting crosses one. A cover widget that is not mapped, on a hidden page,
+  a hidden Grid or List layout or a grid row bound off screen, drops its
+  texture and paints again from the cache when shown. On a 41,000-album
+  library the Albums page sorted by Date Added peaks at 293 MB instead of
+  575 MB while scrolling.
 - **Newsreader, Geist and Geist Mono replace Inter and Source Serif 4.**
   `orca-gtk` sets display titles in Newsreader and the interface in Geist,
   and bundles Geist Mono, all under the SIL Open Font License and

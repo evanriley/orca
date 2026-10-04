@@ -7,9 +7,10 @@
 //! thread. The decode thread touches only its own job and GLib, never liborca.
 //!
 //! A cover widget is a `GtkStack` of a "placeholder" child and an "art" child
-//! holding a `GtkImage`. Widgets register the cover they want while they are
-//! bound and forget it when unbound, so a cover that arrives late lands in
-//! whatever is showing it now and a scrolled-past request is cancelled.
+//! holding a `GtkImage`, or a bare `GtkPicture` from `newPictureCover`.
+//! Widgets register the cover they want while they are bound and forget it
+//! when unbound, so a cover that arrives late lands in whatever is showing it
+//! now and a scrolled-past request is cancelled.
 
 const std = @import("std");
 const liborca = @import("liborca");
@@ -22,21 +23,28 @@ const App = app.App;
 pub const Size = enum(u8) {
     /// Queue rows and the player bar.
     thumb,
+    medium,
     /// Album grid tiles and album pages.
     tile,
     /// Now Playing.
     large,
 
-    fn pixels(self: Size) c_int {
+    pub fn pixels(self: Size) c_int {
         return switch (self) {
             .thumb => 128,
+            .medium => 256,
             .tile => 400,
             .large => 960,
         };
     }
+
+    pub fn atLeast(wanted: c_int) Size {
+        for ([_]Size{ .thumb, .medium }) |size| if (wanted <= size.pixels()) return size;
+        return .tile;
+    }
 };
 
-pub const Kind = enum(u8) { track, release, artist, related, backdrop };
+pub const Kind = enum(u8) { track, release, artist, related, release_group, backdrop };
 
 pub const Key = struct {
     kind: Kind,
@@ -63,11 +71,19 @@ pub const Key = struct {
         return key;
     }
 
+    pub fn releaseGroup(mbid: []const u8, size: Size) Key {
+        var key: Key = .{ .kind = .release_group, .id = 0, .size = size };
+        const length = @min(mbid.len, key.mbid.len);
+        @memcpy(key.mbid[0..length], mbid[0..length]);
+        return key;
+    }
+
     fn subject(self: Key) ?liborca.ArtworkSubject {
         return switch (self.kind) {
             .track => .{ .track = self.id },
             .release => .{ .release = self.id },
             .artist => .{ .artist = self.id },
+            .release_group => .{ .release_group = self.mbid },
             .related, .backdrop => null,
         };
     }
@@ -190,6 +206,7 @@ const Entry = struct {
     /// Null when the subject has no readable cover.
     texture: ?*gtk.GdkTexture,
     used: u64,
+    bytes: usize,
 };
 
 const Binding = struct {
@@ -201,12 +218,12 @@ const Binding = struct {
 
 pub const ArtistPhoto = enum { stored, absent, unknown };
 
-/// Covers kept decoded. A grid screen is a few dozen, and a tile texture is
-/// about 640 KB, so this is a few hundred MB at worst and a few screens of
-/// scrolling back.
-const max_entries = 600;
+/// Bytes of decoded covers kept. A grid screen of 400 px tiles is a few dozen
+/// at 640 KB each, so this keeps a few screens of scrolling back.
+const max_bytes = 96 * 1024 * 1024;
 /// Decodes in flight at once. Each holds a whole encoded cover in memory.
 const max_decodes = 4;
+const max_in_flight = 2 * max_decodes;
 
 const Backdrop = struct {
     stack: *gtk.Stack,
@@ -242,6 +259,7 @@ pub const Cache = struct {
     blurring: std.AutoHashMapUnmanaged(Key, void) = .empty,
     backdrop_idle: c_uint = 0,
     blur_count: u64 = 0,
+    bytes: usize = 0,
     debug: bool = false,
     clock: u64 = 0,
 
@@ -265,11 +283,38 @@ fn coverDestroyed(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     forget(@ptrCast(@alignCast(data.?)), gtk.cast(gtk.Widget, widget));
 }
 
+fn watchMapping(self: *App, cover: *gtk.Widget) void {
+    _ = gtk.signalConnect(cover, "map", gtk.callback(coverMapped), self);
+    _ = gtk.signalConnect(cover, "unmap", gtk.callback(coverUnmapped), self);
+}
+
+const unmapped_paint_key = "orca-paint-unmapped";
+
+pub fn paintWhileUnmapped(cover: *gtk.Widget) void {
+    gtk.g_object_set_data(cover, unmapped_paint_key, cover);
+}
+
+fn holdsTexture(stack: *gtk.Stack) bool {
+    return gtk.gtk_widget_get_mapped(gtk.cast(gtk.Widget, stack)) != 0 or gtk.g_object_get_data(stack, unmapped_paint_key) != null;
+}
+
+fn coverMapped(widget: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self: *App = @ptrCast(@alignCast(data.?));
+    const stack = gtk.cast(gtk.Stack, widget);
+    for (self.art.bindings.items) |binding| if (binding.stack == stack) return paintBinding(self, binding);
+}
+
+fn coverUnmapped(widget: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    const stack = gtk.cast(gtk.Stack, widget);
+    if (!holdsTexture(stack)) setPaintable(stack, null);
+}
+
 /// Builds an empty cover widget: `placeholder` shown until `show` finds art.
 /// It unregisters itself when destroyed.
 pub fn newCover(self: *App, placeholder: *gtk.Widget, pixels: c_int) *gtk.Widget {
     const stack = gtk.gtk_stack_new();
     _ = gtk.signalConnect(stack, "destroy", gtk.callback(coverDestroyed), self);
+    watchMapping(self, stack);
     gtk.gtk_widget_add_css_class(stack, "cover");
     gtk.gtk_widget_set_overflow(stack, gtk.OVERFLOW_HIDDEN);
     gtk.gtk_widget_set_size_request(stack, pixels, pixels);
@@ -286,6 +331,7 @@ pub fn newCover(self: *App, placeholder: *gtk.Widget, pixels: c_int) *gtk.Widget
 pub fn newFillingCover(self: *App, placeholder: *gtk.Widget) *gtk.Widget {
     const stack = gtk.gtk_stack_new();
     _ = gtk.signalConnect(stack, "destroy", gtk.callback(coverDestroyed), self);
+    watchMapping(self, stack);
     gtk.gtk_widget_set_overflow(stack, gtk.OVERFLOW_HIDDEN);
     const picture = gtk.gtk_picture_new();
     gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
@@ -297,6 +343,21 @@ pub fn newFillingCover(self: *App, placeholder: *gtk.Widget) *gtk.Widget {
 }
 
 const picture_key = "orca-picture";
+
+/// A cover that is only a picture: no placeholder, so a missing cover shows
+/// the `.cover` surface.
+pub fn newPictureCover(self: *App, pixels: c_int) *gtk.Widget {
+    const picture = gtk.gtk_picture_new();
+    _ = gtk.signalConnect(picture, "destroy", gtk.callback(coverDestroyed), self);
+    watchMapping(self, picture);
+    gtk.gtk_widget_add_css_class(picture, "cover");
+    gtk.gtk_widget_set_overflow(picture, gtk.OVERFLOW_HIDDEN);
+    gtk.gtk_widget_set_size_request(picture, pixels, pixels);
+    gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
+    gtk.gtk_picture_set_content_fit(gtk.cast(gtk.Picture, picture), gtk.CONTENT_FIT_COVER);
+    gtk.g_object_set_data(picture, picture_key, picture);
+    return picture;
+}
 
 /// A placeholder icon for covers of tracks.
 pub fn iconPlaceholder(pixels: c_int) *gtk.Widget {
@@ -338,19 +399,16 @@ fn paint(self: *App, stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
 }
 
 fn paintStack(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
-    if (gtk.g_object_get_data(stack, picture_key)) |picture| {
-        gtk.gtk_picture_set_paintable(gtk.cast(gtk.Picture, picture), if (texture) |present| gtk.cast(gtk.GdkPaintable, present) else null);
-        gtk.gtk_stack_set_visible_child_name(stack, if (texture != null) "art" else "placeholder");
-        return;
-    }
+    setPaintable(stack, if (holdsTexture(stack)) texture else null);
+    const bare = gtk.g_object_get_data(stack, picture_key) == @as(?*anyopaque, @ptrCast(stack));
+    if (!bare) gtk.gtk_stack_set_visible_child_name(stack, if (texture != null) "art" else "placeholder");
+}
+
+fn setPaintable(stack: *gtk.Stack, texture: ?*gtk.GdkTexture) void {
+    const paintable: ?*gtk.GdkPaintable = if (texture) |present| gtk.cast(gtk.GdkPaintable, present) else null;
+    if (gtk.g_object_get_data(stack, picture_key)) |picture| return gtk.gtk_picture_set_paintable(gtk.cast(gtk.Picture, picture), paintable);
     const image = gtk.gtk_stack_get_child_by_name(stack, "art") orelse return;
-    if (texture) |present| {
-        gtk.gtk_image_set_from_paintable(gtk.cast(gtk.Image, image), gtk.cast(gtk.GdkPaintable, present));
-        gtk.gtk_stack_set_visible_child_name(stack, "art");
-    } else {
-        gtk.gtk_image_set_from_paintable(gtk.cast(gtk.Image, image), null);
-        gtk.gtk_stack_set_visible_child_name(stack, "placeholder");
-    }
+    gtk.gtk_image_set_from_paintable(gtk.cast(gtk.Image, image), paintable);
 }
 
 /// Shows `key`'s cover in `stack_widget` now if it is cached, and when it
@@ -360,6 +418,17 @@ pub fn show(self: *App, stack_widget: *gtk.Widget, key: Key) void {
     const binding: Binding = .{ .stack = gtk.cast(gtk.Stack, stack_widget), .key = key };
     self.art.bindings.append(self.allocator, binding) catch return paint(self, binding.stack, null);
     paintBinding(self, binding);
+}
+
+pub fn resize(self: *App, stack_widget: *gtk.Widget, size: Size) void {
+    var key = boundKey(&self.art, gtk.cast(gtk.Stack, stack_widget)) orelse return;
+    if (key.size == size) return;
+    key.size = size;
+    show(self, stack_widget, key);
+}
+
+pub fn cached(self: *const App, key: Key) bool {
+    return self.art.entries.contains(key);
 }
 
 /// The widget no longer shows a cover. A request nobody else is waiting for
@@ -414,9 +483,7 @@ fn refreshBackdrops(self: *App) void {
 
 fn refresh(self: *App, key: Key) void {
     const cache = &self.art;
-    if (cache.entries.fetchRemove(key)) |removed| {
-        if (removed.value.texture) |texture| gtk.g_object_unref(texture);
-    }
+    if (cache.entries.fetchRemove(key)) |removed| drop(cache, removed.value);
     if (cache.pending.fetchRemove(key)) |pending| {
         _ = cache.requests.remove(pending.value);
         if (self.library) |library| self.runtime.libraryCancelArtwork(library, pending.value);
@@ -472,6 +539,7 @@ const backdrop_data_key = "orca-backdrop";
 pub fn newBackdrop(self: *App, variant: BackdropVariant) *gtk.Widget {
     const stack = gtk.gtk_stack_new();
     _ = gtk.signalConnect(stack, "destroy", gtk.callback(backdropDestroyed), self);
+    watchMapping(self, stack);
     const picture = gtk.gtk_picture_new();
     gtk.gtk_picture_set_can_shrink(gtk.cast(gtk.Picture, picture), gtk.true_);
     gtk.gtk_picture_set_content_fit(gtk.cast(gtk.Picture, picture), gtk.CONTENT_FIT_COVER);
@@ -652,6 +720,10 @@ fn want(self: *App, key: Key) void {
     if (cache.pending.contains(key) or cache.decoding.contains(key)) return;
     for (cache.backlog.items) |queued| if (std.meta.eql(queued, key)) return;
     const library = self.library orelse return;
+    if (cache.pending.count() + cache.waiting.items.len + cache.decoding.count() >= max_in_flight) {
+        cache.backlog.append(self.allocator, key) catch {};
+        return;
+    }
     const subject = key.subject() orelse {
         if (key.kind == .related) wantRelatedPhoto(self, library, key);
         return;
@@ -690,12 +762,15 @@ fn abandon(self: *App, key: Key) void {
 
 fn remember(self: *App, key: Key, texture: ?*gtk.GdkTexture) void {
     const cache = &self.art;
-    if (cache.entries.count() >= max_entries) evictOldest(cache);
+    if (cache.entries.fetchRemove(key)) |replaced| drop(cache, replaced.value);
+    const bytes = entryBytes(texture);
+    while (cache.bytes + bytes > max_bytes and cache.entries.count() != 0) evictOldest(cache);
     cache.clock += 1;
-    cache.entries.put(self.allocator, key, .{ .texture = texture, .used = cache.clock }) catch {
+    cache.entries.put(self.allocator, key, .{ .texture = texture, .used = cache.clock, .bytes = bytes }) catch {
         if (texture) |present| gtk.g_object_unref(present);
         return;
     };
+    cache.bytes += bytes;
     for (cache.bindings.items) |binding| {
         const fallback_matches = if (binding.fallback) |fallback| std.meta.eql(fallback, key) else false;
         if (std.meta.eql(binding.key, key) or fallback_matches) paintBinding(self, binding);
@@ -714,7 +789,20 @@ fn evictOldest(cache: *Cache) void {
     }
     const key = oldest orelse return;
     const removed = cache.entries.fetchRemove(key) orelse return;
-    if (removed.value.texture) |texture| gtk.g_object_unref(texture);
+    drop(cache, removed.value);
+}
+
+fn drop(cache: *Cache, entry: Entry) void {
+    cache.bytes -= entry.bytes;
+    if (entry.texture) |texture| gtk.g_object_unref(texture);
+}
+
+fn entryBytes(texture: ?*gtk.GdkTexture) usize {
+    const overhead = @sizeOf(Key) + @sizeOf(Entry);
+    const present = texture orelse return overhead;
+    const width: usize = @intCast(@max(gtk.gdk_texture_get_width(present), 0));
+    const height: usize = @intCast(@max(gtk.gdk_texture_get_height(present), 0));
+    return overhead + width * height * 4;
 }
 
 /// Drains finished requests and retries the backlog. Called on the app tick.
@@ -738,6 +826,11 @@ pub fn tick(self: *App) void {
         };
     }
     startDecodes(self);
+    retryBacklog(self);
+}
+
+fn retryBacklog(self: *App) void {
+    const cache = &self.art;
     var retries = cache.backlog.items.len;
     while (retries != 0 and cache.backlog.items.len != 0) : (retries -= 1) {
         const key = cache.backlog.orderedRemove(0);
@@ -812,4 +905,5 @@ fn decoded(_: ?*gtk.GObject, result: *gtk.GAsyncResult, data: ?*anyopaque) callc
     _ = self.art.decoding.remove(job.key);
     remember(self, job.key, job.texture);
     startDecodes(self);
+    retryBacklog(self);
 }
