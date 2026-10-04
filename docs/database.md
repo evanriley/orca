@@ -106,6 +106,12 @@ names a handful of folders, each is one range scan of `locations(volume_id,
 uri)`, and a scan that changed nothing reprojects nothing. Missing locations are
 projected too, so an unmounted drive greys a Track out rather than deleting it;
 `has_playable_file` and `TrackRepository.playableLocation` answer reachability.
+A file with an `unreadable_file` issue is not projected: it keeps its `files`
+and `locations` rows and its issue, a Track it backed is pruned like any other
+the folder no longer writes, and its `missing_metadata`,
+`album_artist_anomaly`, `missing_track_number` and `artwork_problem` issues are
+retired. The scanner and property backfill reproject a file when they record
+or clear that issue, so it projects again once its new bytes open.
 
 Reprojecting a folder keeps a Track's id when its file moves. A Track is a
 position on a Release; a file whose tags now place it on another Release or

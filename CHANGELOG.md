@@ -1416,6 +1416,14 @@
   resolved to whichever Track the new order put there, and the engine moved
   the cursor onto it. Records now move to their entry's new position, and
   removing an entry forgets its record.
+- **An unreadable file no longer adds an untitled album.** A file with an
+  `unreadable_file` issue was projected like any other, so it appeared as a
+  Track on an untitled Various Artists Release in albums, artists and counts.
+  It now projects no Track: it stays in Folders as unreadable and in Library
+  Health, a Track it backed is pruned with any Release or Artist left empty,
+  and it projects again once a scan reads its new bytes. Property backfill
+  reprojects a file it finds unreadable. An existing library converges on
+  the next `orca-cli project`.
 - **orca-cli output redirected to a file follows what is there.** Standard
   output and standard error wrote at offset 0 of a regular file, so
   `{ echo header; orca-cli stats DB; } > out` lost the header and a second

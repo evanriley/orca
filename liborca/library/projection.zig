@@ -273,6 +273,7 @@ const Entry = struct {
     duration_ms: ?i64,
     recording_id: ?i64,
     location_present: bool,
+    unreadable: bool = false,
     title: []const u8,
     artist: []const u8,
     artist_mbid: ?[]const u8,
@@ -395,6 +396,24 @@ fn statedGenres(entries: []const Entry, members: []const usize, preferred: *cons
 }
 
 /// A resolved Track: one position on a Release, and the files that encode it.
+/// A query built on this must bind the unreadable-file kind to `?4`.
+const entry_select =
+    \\SELECT l.file_id, l.uri, l.state, f.audio_format, f.bit_depth,
+    \\       f.sample_rate, f.duration_ms, f.recording_id,
+    \\       t.title, t.artist, t.album, t.album_artist,
+    \\       t.track_number, t.disc_number, t.date, t.compilation,
+    \\       t.musicbrainz_release_id, t.musicbrainz_recording_id,
+    \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id,
+    \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL,
+    \\       t.track_total, t.disc_total, t.explicit, t.release_type,
+    \\       t.artwork_width, t.artwork_height, t.artwork_hash,
+    \\       EXISTS (SELECT 1 FROM library_health_issues h WHERE h.file_id = l.file_id AND h.kind = ?4)
+    \\FROM locations l
+    \\JOIN files f ON f.id = l.file_id
+    \\LEFT JOIN observed_file_tags t ON t.file_id = l.file_id
+    \\
+;
+
 const Position = struct {
     disc: i64,
     number: i64,
@@ -557,6 +576,11 @@ pub const Projection = struct {
         }
     }
 
+    fn clearProjectionIssues(self: *Projection, file_id: i64) !void {
+        const kinds = [_]database.HealthIssueKind{ .missing_metadata, .album_artist_anomaly, .missing_track_number, .artwork_problem };
+        for (kinds) |kind| try self.library.health_issues.clearLocked(file_id, kind);
+    }
+
     /// Orca values for the fields `metadata.resolve` does not cover, resolved
     /// under the same rule: a locked value wins, the policy decides the rest.
     fn applyExtraOverrides(self: *const Projection, entry: *Entry, extra: ExtraOverrides) void {
@@ -636,6 +660,9 @@ pub const Projection = struct {
         const entries = try self.loadFolder(allocator, folder);
         if (entries.len == 0) return;
         std.mem.sort(Entry, entries, {}, lessByGroup);
+        var readable: std.ArrayList(Entry) = .empty;
+        for (entries) |entry| if (!entry.unreadable) try readable.append(allocator, entry);
+        const projected = readable.items;
 
         self.library.write_lane.acquire();
         defer self.library.write_lane.release();
@@ -650,16 +677,17 @@ pub const Projection = struct {
         var written: std.ArrayList(WrittenPosition) = .empty;
         var vacated: Vacated = .{};
         var start: usize = 0;
-        while (start < entries.len) {
+        while (start < projected.len) {
             var end = start + 1;
-            while (end < entries.len and
-                std.mem.eql(u8, entries[end].album_key, entries[start].album_key)) end += 1;
-            try self.projectGroup(allocator, folder, entries[start..end], &written, &mover, &vacated, &genres, result);
+            while (end < projected.len and
+                std.mem.eql(u8, projected[end].album_key, projected[start].album_key)) end += 1;
+            try self.projectGroup(allocator, folder, projected[start..end], &written, &mover, &vacated, &genres, result);
             result.groups_projected += 1;
             start = end;
         }
+        for (entries) |entry| if (entry.unreadable) try self.clearProjectionIssues(entry.file_id);
         try self.pruneStale(allocator, entries, written.items, &vacated, &genres, result);
-        try self.settleArtwork(allocator, entries, vacated.releases.items);
+        try self.settleArtwork(allocator, projected, vacated.releases.items);
         try self.library.database.exec("COMMIT;");
     }
 
@@ -672,19 +700,7 @@ pub const Projection = struct {
         // The `rtrim` equality is the correctness predicate; the range is what
         // makes `locations(volume_id, uri)` do the work. `/` is 0x2F, so a
         // folder's subtree ends exactly where its trailing slash becomes `0`.
-        var statement = try self.library.database.prepare(
-            \\SELECT l.file_id, l.uri, l.state, f.audio_format, f.bit_depth,
-            \\       f.sample_rate, f.duration_ms, f.recording_id,
-            \\       t.title, t.artist, t.album, t.album_artist,
-            \\       t.track_number, t.disc_number, t.date, t.compilation,
-            \\       t.musicbrainz_release_id, t.musicbrainz_recording_id,
-            \\       t.musicbrainz_artist_id, t.musicbrainz_album_artist_id,
-            \\       COALESCE(t.artwork_byte_size, 0) > 0 AND t.artwork_mime_type IS NOT NULL,
-            \\       t.track_total, t.disc_total, t.explicit, t.release_type,
-            \\       t.artwork_width, t.artwork_height, t.artwork_hash
-            \\FROM locations l
-            \\JOIN files f ON f.id = l.file_id
-            \\LEFT JOIN observed_file_tags t ON t.file_id = l.file_id
+        var statement = try self.library.database.prepare(entry_select ++
             \\WHERE l.volume_id = ?1 AND l.uri >= ?2 AND l.uri < ?3
             \\  AND rtrim(l.uri, replace(l.uri, '/', '')) = ?2
             \\ORDER BY l.uri;
@@ -693,7 +709,11 @@ pub const Projection = struct {
         try statement.bindInt64(1, folder.volume_id);
         try statement.bindText(2, folder.path);
         try statement.bindText(3, try upperBound(allocator, folder.path));
+        try statement.bindInt64(4, @intFromEnum(database.HealthIssueKind.unreadable_file));
+        return self.readEntries(allocator, statement);
+    }
 
+    fn readEntries(self: *Projection, allocator: std.mem.Allocator, statement: database.sqlite.Statement) ![]Entry {
         var overrides = try self.library.database.prepare(
             \\SELECT field, value, provenance, locked
             \\FROM orca_metadata_values WHERE file_id = ?1;
@@ -763,6 +783,7 @@ pub const Projection = struct {
                 .duration_ms = optionalInt64(statement, 6),
                 .recording_id = optionalInt64(statement, 7),
                 .location_present = std.mem.eql(u8, statement.columnText(2), "present"),
+                .unreadable = statement.columnInt64(28) != 0,
                 .title = if (effective.title) |value| value.text else "",
                 .artist = if (effective.artist) |value| value.text else "",
                 .artist_mbid = try dupeNullable(allocator, statement, 18),
@@ -1826,6 +1847,64 @@ test "two songs claiming one track number both stay in the library" {
     const flagged = try filesWithIssue(&library, .technical_anomaly);
     defer testing.allocator.free(flagged);
     try testing.expectEqualSlices(i64, &.{displaced}, flagged);
+}
+
+test "an unreadable file projects no Track until its bytes read, and loses its Track when they stop reading" {
+    var library = try openTestLibrary("file:orca-projection-unreadable?mode=memory&cache=shared");
+    defer library.close();
+    const tags: metadata.ObservedTags = .{
+        .title = "Song",
+        .artist = "Artist",
+        .album = "Album",
+        .album_artist = "Artist",
+        .track_number = 1,
+    };
+    const readable = try observe(&library, "/m/Album/01.flac", .flac, tags);
+    const broken = try observe(&library, "/m/Album/02.flac", .flac, .{});
+    const unreadable: database.HealthIssueInput = .{
+        .kind = .unreadable_file,
+        .severity = .warning,
+        .details = "Not a valid FLAC stream",
+    };
+    try library.health_issues.recordLocked(broken, unreadable);
+
+    var projection: Projection = .{ .allocator = testing.allocator, .library = &library };
+    _ = try projection.run(.all);
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM artists;"));
+    var page = try trackTitles(&library);
+    defer page.deinit();
+    try testing.expectEqualStrings("Song", page.items[0].title);
+    try testing.expectEqualStrings("Album", page.items[0].album);
+    const missing = try filesWithIssue(&library, .missing_metadata);
+    defer testing.allocator.free(missing);
+    try testing.expectEqualSlices(i64, &.{}, missing);
+
+    try library.health_issues.clearLocked(broken, .unreadable_file);
+    var second = tags;
+    second.title = "Other";
+    second.track_number = 2;
+    try library.observed_tags.upsert(.{ .file_id = broken, .values = second });
+    _ = try projection.run(.{ .files = &.{broken} });
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 1), try scalar(library.database, "SELECT count(*) FROM releases;"));
+
+    try library.health_issues.recordLocked(readable, unreadable);
+    try library.health_issues.recordLocked(broken, unreadable);
+    const result = try projection.run(.{ .files = &.{ readable, broken } });
+    try testing.expectEqual(@as(u64, 2), result.tracks_pruned);
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM tracks;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM releases;"));
+    try testing.expectEqual(@as(i64, 0), try scalar(library.database, "SELECT count(*) FROM artists;"));
+    try testing.expectEqual(@as(i64, 2), try scalar(library.database, "SELECT count(*) FROM locations;"));
+    const artwork = try filesWithIssue(&library, .artwork_problem);
+    defer testing.allocator.free(artwork);
+    try testing.expectEqualSlices(i64, &.{}, artwork);
+    const still_unreadable = try filesWithIssue(&library, .unreadable_file);
+    defer testing.allocator.free(still_unreadable);
+    try testing.expectEqual(@as(usize, 2), still_unreadable.len);
+    try expectNoForeignKeyViolations(&library);
 }
 
 test "an untitled file is listed under its filename rather than as a blank row" {

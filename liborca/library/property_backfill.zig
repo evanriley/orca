@@ -238,6 +238,8 @@ pub const PropertyBackfill = struct {
                     .severity = .warning,
                     .details = details,
                 });
+                if (self.projection != null)
+                    try self.projected.append(self.allocator, repair.file_id);
                 result.errors += 1;
             },
             .skipped => result.unsupported += 1,
