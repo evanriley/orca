@@ -226,6 +226,7 @@ const commands = [_]Command{
     .{ .title = "Show Queue", .subtitle = "Go to", .shortcut = "Ctrl L", .icon = "orca-queue-symbolic", .run = goTo(.queue) },
     .{ .title = "Show Matches", .subtitle = "Go to", .icon = "orca-matches-symbolic", .run = goTo(.matches) },
     .{ .title = "Show Activity", .subtitle = "Go to", .keywords = "jobs tasks history background", .icon = "orca-pulse-symbolic", .run = goTo(.activity) },
+    .{ .title = "Show Change History", .subtitle = "Go to", .keywords = "undo tag writes log", .icon = "orca-undo-symbolic", .run = goTo(.changes) },
     .{ .title = "Show Settings", .subtitle = "Go to", .keywords = "preferences", .shortcut = "Ctrl ,", .icon = "orca-settings-symbolic", .run = goTo(.settings) },
     .{ .title = "Toggle Inspector", .subtitle = "View", .keywords = "details", .shortcut = "Ctrl I", .icon = "orca-columns-symbolic", .run = details.toggle },
     .{ .title = "Toggle Lyrics", .subtitle = "View", .shortcut = "Ctrl ⇧ L", .icon = "media-view-subtitles-symbolic", .run = lyrics.toggle },

@@ -22,6 +22,7 @@ const feedback = @import("feedback.zig");
 const ratings = @import("ratings.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
+const changes = @import("changes.zig");
 const first_run = @import("first_run.zig");
 const matches = @import("matches.zig");
 const playlists = @import("playlists.zig");
@@ -314,6 +315,7 @@ pub const Page = enum(c_uint) {
     settings,
     activity,
     scan,
+    changes,
 
     pub fn name(self: Page) [*:0]const u8 {
         return switch (self) {
@@ -331,6 +333,7 @@ pub const Page = enum(c_uint) {
             .settings => "settings",
             .activity => "activity",
             .scan => "scan",
+            .changes => "changes",
         };
     }
 
@@ -350,6 +353,7 @@ pub const Page = enum(c_uint) {
             .settings => "Settings",
             .activity => "Activity",
             .scan => "Scan",
+            .changes => "Change History",
         };
     }
 
@@ -838,6 +842,7 @@ fn switchTo(self: *App, page: Page) void {
     if (page == .folders) folders.shown(self);
     if (page == .settings) preferences.show(self);
     if (page == .activity) activity.shown(self);
+    if (page == .changes) changes.shown(self);
     offline.showBanner(self);
     if (self.split_view) |split| adw.adw_navigation_split_view_set_show_content(split, gtk.true_);
     self.queue_visible = page == .queue;
@@ -1294,6 +1299,7 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     _ = gtk.gtk_stack_add_named(self.pages.?, loved.build(self), Page.loved.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, health.build(self), Page.health.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, activity.build(self), Page.activity.name());
+    _ = gtk.gtk_stack_add_named(self.pages.?, changes.build(self), Page.changes.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, first_run.buildScan(self), Page.scan.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, matches.build(self), Page.matches.name());
     _ = gtk.gtk_stack_add_named(self.pages.?, nowplaying.build(self), Page.now_playing.name());

@@ -1331,8 +1331,8 @@ strongly and their cover lightly.
 
 **Activity** is a page, opened from the activity popover's View all or the
 command palette's Show Activity, of what the Library's Jobs are doing and
-have done. Its header has Change History, insensitive until that page exists,
-and Pause All, which calls `Runtime.pauseAll` or, while
+have done. Its header has Change History, which opens that page, and Pause
+All, which calls `Runtime.pauseAll` or, while
 `libraryJobsPaused`, reads Resume All and calls `resumeAll`. **Now** lists
 `Runtime.jobQueuePage`: the Job holding the slot first, then the waiting Jobs
 in the order they start. A running card shows the Job's kind, its progress
@@ -1355,8 +1355,24 @@ The **activity popover**, opened from the sidebar widget, has Running,
 Waiting and Recently finished sections: the running Job with its bar, time
 left and Pause; the waiting Jobs and what each starts after; and the last
 three history entries with how long ago they finished and their Undo or
-Retry. Its footer has Pause all (or Resume all) and Change history,
-insensitive for now.
+Retry. Its footer has Pause all (or Resume all) and Change history, which
+closes the popover and opens that page.
+
+**Change History** is a page, opened from Activity, the activity popover or
+the command palette's Show Change History, under the trail Activity ›
+Change History. It lists `libraryTagWriteGroupPage`, up to 500 writes newest
+first: each row has the time today, Yesterday or the date, `Wrote tags to N
+files`, the Release title, and the state: Can undo, Expired, Undone, Rolled
+back, Undoing, Failed or Needs attention. Selecting a row shows `Files on
+disk · today 10:41`, the heading, `TITLE · N field changes · operation #N`
+and a table of FILE, FIELD, UNDO RESTORES and CURRENT, the file's base name
+on its first row only, then `and N more files with the same changes`.
+`libraryTagWriteGroup` reads the write's files and backups, so the detail
+loads on a thread of its own and the page shows it when the thread ends; a
+selection made while one runs is loaded after it. Undo This Change… asks for confirmation and calls
+`undoTagWrite`. Export Log opens a save dialog and passes the file to
+`exportTagWriteHistory`, replacing a file the dialog has confirmed. The page
+reloads after every library job.
 
 **Settings** is a page, opened from the sidebar, the command palette or
 Ctrl+,. Under its title an underlined tab bar switches between eight tabs;

@@ -499,7 +499,7 @@ fn buildPopover(self: *App) *gtk.Widget {
     const history = gtk.gtk_button_new_with_label("Change history");
     gtk.gtk_widget_add_css_class(history, "flat");
     gtk.gtk_widget_add_css_class(history, "activity-footer-button");
-    gtk.gtk_widget_set_sensitive(history, gtk.false_);
+    _ = gtk.signalConnect(history, "clicked", gtk.callback(popoverHistoryClicked), self);
     const footer = gtk.gtk_box_new(gtk.ORIENTATION_HORIZONTAL, 0);
     gtk.gtk_widget_add_css_class(footer, "activity-popover-footer");
     append(footer, &.{ pause, spacer, history });
@@ -1127,6 +1127,16 @@ fn filterChips(self: *App) *gtk.Widget {
     return row;
 }
 
+fn changeHistoryClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    window.goTo(state(data), .changes);
+}
+
+fn popoverHistoryClicked(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    if (self.activity.popover) |popover| gtk.gtk_popover_popdown(popover);
+    window.goTo(self, .changes);
+}
+
 pub fn build(self: *App) *gtk.Widget {
     const title = page_ui.title("Activity");
     gtk.gtk_widget_add_css_class(title.widget, "activity-title");
@@ -1134,7 +1144,7 @@ pub fn build(self: *App) *gtk.Widget {
     gtk.gtk_widget_remove_css_class(gtk.cast(gtk.Widget, title.meta), "numeric");
     gtk.gtk_widget_add_css_class(gtk.cast(gtk.Widget, title.meta), "activity-tagline");
     const change_history = textButton("orca-undo-symbolic", 15, "Change History", "activity-button");
-    gtk.gtk_widget_set_sensitive(change_history, gtk.false_);
+    _ = gtk.signalConnect(change_history, "clicked", gtk.callback(changeHistoryClicked), self);
     title.add(change_history);
     const pause = textButton("orca-pause-symbolic", 15, "Pause All", "activity-button");
     const pause_content = gtk.gtk_button_get_child(gtk.cast(gtk.Button, pause)).?;

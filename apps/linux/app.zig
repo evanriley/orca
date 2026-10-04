@@ -30,6 +30,7 @@ const folders = @import("folders.zig");
 const offline = @import("offline.zig");
 const health = @import("health.zig");
 const activity = @import("activity.zig");
+const changes = @import("changes.zig");
 const first_run = @import("first_run.zig");
 const jobs = @import("jobs.zig");
 const lyrics = @import("lyrics.zig");
@@ -456,6 +457,7 @@ pub const App = struct {
 
     health: health.State = .{},
     activity: activity.State = .{},
+    changes: changes.State = .{},
     first_run: first_run.State = .{},
 
     matches_list: ?*gtk.ListBox = null,
@@ -994,6 +996,7 @@ pub const App = struct {
         self.offline.deinit(self.allocator);
         self.palette.deinit(self.allocator);
         self.activity.deinit(self.allocator);
+        self.changes.deinit();
         self.preferred_output.clear(self.allocator);
         if (self.library_path) |path| self.allocator.free(path);
     }

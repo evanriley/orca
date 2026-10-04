@@ -41,6 +41,7 @@ const maintenance = @import("maintenance.zig");
 const playlists = @import("playlists.zig");
 const appearance = @import("appearance.zig");
 const first_run = @import("first_run.zig");
+const changes = @import("changes.zig");
 const offline = @import("offline.zig");
 
 const App = app.App;
@@ -97,6 +98,7 @@ fn tick(self: *App) void {
         lyrics.tick(self);
         albums.tick(self);
         artist_page.tick(self);
+        changes.tick(self);
     }
     armTimeout(self);
 }
@@ -706,6 +708,7 @@ pub fn main(init: std.process.Init) !u8 {
     artist_page.shutdown(&self);
     first_run.shutdown(&self);
     offline.shutdown(&self);
+    changes.shutdown(&self);
     self.mpris.deinit();
     gtk.g_object_unref(application);
     if (self.zone) |zone| runtime.destroyZone(zone) catch {};

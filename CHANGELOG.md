@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Change History page.** `orca-gtk` lists the finished tag writes newest
+  first, with their date, file count, Release title and whether they can
+  still be undone, and shows the selected write's changed tags beside what
+  an undo restores, loaded on a thread of its own. Undo This Change… asks
+  first, then undoes the write; Export Log saves the history. Activity's
+  Change History button, the activity popover's Change history and the
+  command palette's Show Change History open it.
 - **Exporting the change history.** `exportTagWriteHistory` writes every
   tag write's `orca-cli changes` line to a file atomically and refuses an
   existing file unless asked to replace it. `orca-cli changes --export`

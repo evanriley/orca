@@ -6423,6 +6423,201 @@ button.activity-footer-button:disabled {
   color: @orca_text_2;
 }
 
+/* Change History */
+
+.page-title.changes-title {
+  padding: 16px 32px 0 32px;
+}
+
+.page-title .meta.changes-description {
+  margin-top: 4px;
+  font-size: 14px;
+  color: @orca_text_2;
+}
+
+.changes-split {
+  margin: 20px 32px 24px 32px;
+  border-top: 1px solid @orca_border;
+}
+
+.changes-operations {
+  border-right: 1px solid @orca_border;
+}
+
+.changes-list {
+  padding: 12px 16px 12px 0;
+}
+
+.changes-empty {
+  padding: 12px 12px;
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+button.changes-row {
+  padding: 10px 12px;
+  border-radius: 9px;
+  min-height: 0;
+  font-weight: 400;
+}
+
+button.changes-row:hover {
+  background-color: @orca_bg_popover;
+}
+
+button.changes-row.selected {
+  background-color: @orca_bg_selected;
+}
+
+.changes-tile {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 8px;
+  background-color: alpha(@orca_accent, 0.12);
+  color: @orca_accent_text;
+}
+
+.changes-row-title {
+  font-size: 13.5px;
+  color: @orca_text;
+}
+
+button.changes-row.expired .changes-row-title {
+  color: @orca_text_3;
+}
+
+.changes-row-subtitle,
+.changes-row-time {
+  font-size: 12px;
+  color: @orca_text_3;
+}
+
+.changes-row-status {
+  font-size: 11px;
+  color: @orca_text_2;
+}
+
+button.changes-row.expired .changes-row-status {
+  color: @orca_text_dim;
+}
+
+.changes-detail {
+  padding: 16px 0 8px 26px;
+}
+
+.changes-scope {
+  font-size: 12px;
+  color: @orca_text_2;
+}
+
+.changes-heading {
+  font-size: 22px;
+  font-weight: 500;
+  color: @orca_text;
+}
+
+.changes-subtitle {
+  font-size: 13px;
+  color: @orca_text_3;
+}
+
+.changes-column {
+  padding: 0 10px 8px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: @orca_text_3;
+}
+
+.changes-divider {
+  min-height: 1px;
+  background-color: @orca_divider;
+}
+
+.changes-file,
+.changes-field,
+.changes-restores,
+.changes-current {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.changes-table > .changes-column:first-child,
+.changes-file {
+  padding-left: 0;
+}
+
+.changes-file {
+  font-family: "Geist Mono", monospace;
+  font-size: 12px;
+  color: @orca_text_2;
+}
+
+.changes-field,
+.changes-current {
+  color: @orca_text_3;
+}
+
+.changes-restores {
+  color: @orca_text;
+}
+
+.changes-more {
+  font-size: 12.5px;
+  color: @orca_text_3;
+}
+
+.changes-note {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: @orca_bg_popover;
+}
+
+.changes-note-icon {
+  margin-top: 1px;
+  color: @orca_text_3;
+}
+
+.changes-note-text {
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: @orca_text_2;
+}
+
+button.changes-undo {
+  min-height: 36px;
+  padding: 0 18px;
+  border-radius: 9px;
+  background-color: @orca_accent;
+  color: @orca_on_accent;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+button.changes-undo:hover {
+  background-color: @orca_accent_hover;
+}
+
+button.changes-undo:disabled {
+  background-color: @orca_bg_hover;
+  color: @orca_text_3;
+}
+
+button.changes-export {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: @orca_text_2;
+}
+
+button.changes-export:hover {
+  background-color: @orca_bg_hover;
+  color: @orca_text;
+}
+
 /* First Run */
 
 @define-color orca_first_glow #1A1F24;
