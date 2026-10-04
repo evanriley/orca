@@ -1470,6 +1470,15 @@
 
 ### Fixed
 
+- **Shortcuts no longer highlight the sidebar.** In orca-gtk, a shortcut
+  such as Ctrl+K, Ctrl+, or Escape no longer draws focus rings. Before, it
+  outlined the focused sidebar item, the sidebar and the whole window. Every
+  widget around the focused one matched the focus ring's style, which now
+  draws the ring on the focused widget only. GTK also showed the ring whenever
+  a key moved focus, so a shortcut that opened a page, the palette or a
+  dialog revealed it. The window now hides the ring again for any key other
+  than Tab, Shift+Tab, the arrows, Home, End, Page Up and Page Down, and
+  those still show it.
 - **Now Playing leaves the lyrics view.** In orca-gtk, the Up Next,
   Lyrics and Info tabs and the Clear button at the top of the Now Playing
   panel respond to clicks again. The top bar's row spanned the whole

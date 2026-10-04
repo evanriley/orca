@@ -247,17 +247,17 @@ window {
 
 /* Focus */
 
-*:focus-visible:not(text),
+*:focus:focus-visible:not(text),
 entry:focus-within,
 spinbutton:focus-within {
   outline: 2px solid @orca_accent;
   outline-offset: 2px;
 }
 
-row:focus-visible,
-gridview > child:focus-visible,
-flowbox > flowboxchild:focus-visible,
-columnview > listview > row:focus-visible {
+row:focus:focus-visible,
+gridview > child:focus:focus-visible,
+flowbox > flowboxchild:focus:focus-visible,
+columnview > listview > row:focus:focus-visible {
   outline-offset: -2px;
 }
 

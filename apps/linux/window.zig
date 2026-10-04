@@ -304,6 +304,83 @@ fn windowHistoryKeyPressed(
     return gtk.true_;
 }
 
+fn focusRingKeyPressed(
+    _: ?*anyopaque,
+    keyval: c_uint,
+    _: c_uint,
+    modifiers: c_uint,
+    data: ?*anyopaque,
+) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    const window = self.window orelse return gtk.false_;
+    const is_alt = keyval == gtk.KEY_Alt_L or keyval == gtk.KEY_Alt_R;
+    if (isFocusNavigationKey(keyval, modifiers)) {
+        self.shortcut_hides_focus_ring = false;
+    } else if (is_alt or !isModifierKey(keyval)) {
+        self.shortcut_hides_focus_ring = gtk.gtk_window_get_focus_visible(window) == 0;
+    }
+    guardFocusRing(self);
+    return gtk.false_;
+}
+
+fn focusRingKeyReleased(
+    _: ?*anyopaque,
+    _: c_uint,
+    _: c_uint,
+    _: c_uint,
+    data: ?*anyopaque,
+) callconv(.c) void {
+    guardFocusRing(state(data));
+}
+
+fn guardFocusRing(self: *App) void {
+    self.focus_ring_guarded = self.shortcut_hides_focus_ring;
+    if (self.focus_ring_guard_source == 0) self.focus_ring_guard_source = gtk.g_idle_add(releaseFocusRingGuard, self);
+}
+
+fn releaseFocusRingGuard(data: ?*anyopaque) callconv(.c) gtk.gboolean {
+    const self = state(data);
+    self.focus_ring_guarded = false;
+    self.focus_ring_guard_source = 0;
+    return gtk.SOURCE_REMOVE;
+}
+
+fn focusVisibleChanged(_: ?*anyopaque, _: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
+    const self = state(data);
+    const window = self.window orelse return;
+    if (self.focus_ring_guarded and gtk.gtk_window_get_focus_visible(window) != 0)
+        gtk.gtk_window_set_focus_visible(window, gtk.false_);
+}
+
+fn isModifierKey(keyval: c_uint) bool {
+    return (keyval >= gtk.KEY_Shift_L and keyval <= gtk.KEY_Hyper_R) or keyval == gtk.KEY_ISO_Level3_Shift;
+}
+
+fn isFocusNavigationKey(keyval: c_uint, modifiers: c_uint) bool {
+    if (keyval == gtk.KEY_Tab or keyval == gtk.KEY_ISO_Left_Tab or keyval == gtk.KEY_KP_Tab) return true;
+    if (modifiers & (gtk.MODIFIER_CONTROL | gtk.MODIFIER_ALT) != 0) return false;
+    return switch (keyval) {
+        gtk.KEY_Up,
+        gtk.KEY_Down,
+        gtk.KEY_Left,
+        gtk.KEY_Right,
+        gtk.KEY_Home,
+        gtk.KEY_End,
+        gtk.KEY_Page_Up,
+        gtk.KEY_Page_Down,
+        gtk.KEY_KP_Up,
+        gtk.KEY_KP_Down,
+        gtk.KEY_KP_Left,
+        gtk.KEY_KP_Right,
+        gtk.KEY_KP_Home,
+        gtk.KEY_KP_End,
+        gtk.KEY_KP_Page_Up,
+        gtk.KEY_KP_Page_Down,
+        => true,
+        else => false,
+    };
+}
+
 const mouse_back_button: c_uint = 8;
 const mouse_forward_button: c_uint = 9;
 
@@ -1315,6 +1392,8 @@ fn windowDestroyed(_: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
     self.toasts = null;
     if (self.history.pending != 0) _ = gtk.g_source_remove(self.history.pending);
     self.history.pending = 0;
+    if (self.focus_ring_guard_source != 0) _ = gtk.g_source_remove(self.focus_ring_guard_source);
+    self.focus_ring_guard_source = 0;
     preferences.shutdown(self);
     lyrics.shutdown(self);
 }
@@ -1332,6 +1411,12 @@ pub fn build(self: *App, application: *gtk.Application) *gtk.Widget {
     gtk.gtk_event_controller_set_propagation_phase(history_keys, gtk.PHASE_CAPTURE);
     _ = gtk.signalConnect(history_keys, "key-pressed", gtk.callback(windowHistoryKeyPressed), self);
     gtk.gtk_widget_add_controller(window, history_keys);
+    const focus_ring_keys = gtk.gtk_event_controller_key_new();
+    gtk.gtk_event_controller_set_propagation_phase(focus_ring_keys, gtk.PHASE_CAPTURE);
+    _ = gtk.signalConnect(focus_ring_keys, "key-pressed", gtk.callback(focusRingKeyPressed), self);
+    _ = gtk.signalConnect(focus_ring_keys, "key-released", gtk.callback(focusRingKeyReleased), self);
+    gtk.gtk_widget_add_controller(window, focus_ring_keys);
+    _ = gtk.signalConnect(window, "notify::focus-visible", gtk.callback(focusVisibleChanged), self);
     const space_keys = gtk.gtk_event_controller_key_new();
     gtk.gtk_event_controller_set_propagation_phase(space_keys, gtk.PHASE_CAPTURE);
     _ = gtk.signalConnect(space_keys, "key-pressed", gtk.callback(windowSpaceKeyPressed), self);
